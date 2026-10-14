@@ -43,6 +43,7 @@ renumbered).
 
 | # | program | verdict | rule violated | one-line rationale |
 |---|---------|---------|---------------|--------------------|
+| 21 | 21-a7-borrow-in-closure | REJECT | LOAN-ESCAPE | closure captures borrow-handle and escapes the defining frame |
 | 01 | 01-shared-map-across-tasks | REJECT | A1c | plain Go map read+written by spawned tasks — not safe-by-type/move/managed; also a Go runtime fatal |
 | 02 | 02-shared-map-managed | ACCEPT-MANAGED | — (A1c escape route 3) | 01 wrapped in `managed`; checker accepts + managed lint fires; runtime honesty note in file |
 | 03 | 03-pool-shared-struct-unguarded | REJECT | A1c | `&stats` — live borrow of a mutable GC struct shared across tasks, unguarded: a real data race |
