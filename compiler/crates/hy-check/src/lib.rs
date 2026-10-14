@@ -820,6 +820,145 @@ mod tests {
     }
 
     #[test]
+    fn a1c_const_mutable_gc_value_is_not_class4_immutable() {
+        // T22: `const` is the ONLY deep immutability in MVP, and it is pinned
+        // as `[TBD]` for slices/maps ("faking it would create a false safety
+        // claim"). A `const`-bound map has a mutable interior, so the class-4
+        // shortcut must not apply: the value is a named mutable GC value and
+        // the spawn is HYB-E3001 (A1c).
+        let r = check(
+            "const shared = map[string]int{\"k\": 0}\n\
+             fn worker(m map[string]int) {\n\
+               m[\"k\"] = 1\n\
+             }\n\
+             fn main() {\n\
+               task worker(shared)\n\
+               shared[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1c"));
+        assert_eq!(r.diagnostics[0].code, "HYB-E3001");
+    }
+
+    #[test]
+    fn a1c_fn_local_const_map_spawn_rejects() {
+        // Same gap via a fn-local `const` (LocalKind::Const) — the binding
+        // shortcut and the file-level const table must agree.
+        let r = check(
+            "fn worker(m map[string]int) {\n\
+               m[\"k\"] = 1\n\
+             }\n\
+             fn main() {\n\
+               const shared = map[string]int{\"k\": 0}\n\
+               task worker(shared)\n\
+               shared[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1c"));
+    }
+
+    #[test]
+    fn a1c_const_slice_channel_send_rejects() {
+        // The send check-site (HYB-E3002) takes the same class-4 path as the
+        // spawn site: a `const` slice crossing a channel send is not sendable.
+        let r = check(
+            "const xs = []int{0, 0}\n\
+             fn main() {\n\
+               ch := make(chan []int, 1)\n\
+               ch <- xs\n\
+               xs[0] = 2\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E3002");
+    }
+
+    #[test]
+    fn a1c_let_bound_mutable_gc_value_is_not_class4_immutable() {
+        // T22: `let` is shallow — interior mutation through an alias is still
+        // possible, so a `let`-bound map is a named mutable GC value.
+        let r = check(
+            "fn worker(m map[string]int) {\n\
+               m[\"k\"] = 1\n\
+             }\n\
+             fn main() {\n\
+               let shared = map[string]int{\"k\": 0}\n\
+               task worker(shared)\n\
+               shared[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1c"));
+    }
+
+    #[test]
+    fn a1c_let_bound_field_view_is_not_class4_immutable() {
+        // The Field/Index/Slice arm took its own `immutable` shortcut: a view
+        // reached through a `let`/`const` root must be classified by the
+        // view's own shape, not by the root's binding-level immutability.
+        let r = check(
+            "struct holder {\n\
+               data map[string]int\n\
+             }\n\
+             fn worker(m map[string]int) {\n\
+               m[\"k\"] = 1\n\
+             }\n\
+             fn main() {\n\
+               let h = holder{data: map[string]int{\"k\": 0}}\n\
+               task worker(h.data)\n\
+               h.data[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1c"));
+    }
+
+    #[test]
+    fn a1c_immutable_by_type_constants_still_accept() {
+        // Positive control (guard against over-strictness): `const` values
+        // that ARE immutable-by-type must keep crossing boundaries freely —
+        // a string and a primitive (O4 class 4), plus an index READ out of a
+        // const array literal, which is the shape the existing
+        // `atomic_and_const_immutable_spawn_args_accept` test pins.
+        let r = check(
+            "const greeting = \"hello\"\n\
+             const limit = 42\n\
+             const table = [10, 50, 250]\n\
+             fn worker(s string, n int, first int) {\n\
+               fmt.println(s)\n\
+               fmt.println(n)\n\
+               fmt.println(first)\n\
+             }\n\
+             fn main() {\n\
+               task worker(greeting, limit, table[0])\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn a1c_const_array_literal_binding_is_not_sendable() {
+        // A `const` bound to an array literal is inferred as a Slice shape by
+        // today's lightweight inference (`[10, 50]` -> []primitive), and a
+        // slice aliases its backing storage — so the binding is NOT
+        // immutable-by-type and must not cross a boundary. Pinned so the
+        // positive control above cannot be widened silently.
+        let r = check(
+            "const table = [10, 50, 250]\n\
+             fn worker(t []int) {\n\
+               fmt.println(t[0])\n\
+             }\n\
+             fn main() {\n\
+               task worker(table)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1c"));
+    }
+
+    #[test]
     fn a2_define_stored_view_extends_loan() {
         // `u := doc.array(...)` stores an element view: the borrow loan on
         // the handle lives until the view's last use (O7 non-lexical) — a

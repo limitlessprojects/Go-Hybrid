@@ -77,6 +77,35 @@ impl TypeShape {
         matches!(self, TypeShape::OwnHandle(_) | TypeShape::BorrowHandle(_))
     }
 
+    /// Class-4 immutability **by type** (SPEC-LANGUAGE §9.4 O4 class 4, T22).
+    ///
+    /// `let`/`const` grant *binding-level* immutability only — T22 is explicit
+    /// that "interior mutation through an alias is still possible — `let` is
+    /// shallow", and it pins deep `const` slices/maps as `[TBD]` post-MVP
+    /// precisely because "faking it would create a false safety claim".
+    ///
+    /// So the class-4 shortcut may only be taken when the VALUE ITSELF has no
+    /// mutable interior reachable from it:
+    ///   * primitives / strings / atomics / channels — no mutable interior;
+    ///   * `&atomic` — the mediated share route (OQ6);
+    ///   * arrays of immutable-by-type elements — Go arrays are value types,
+    ///     assignment copies the whole array (O4 class 4 names "arrays of
+    ///     sendable classes").
+    ///
+    /// Maps, slices, structs, handles and unresolvable shapes are NOT
+    /// immutable-by-type: a map/slice aliases its backing storage and a
+    /// struct may hold one, so binding-level `let`/`const` says nothing about
+    /// the shared state behind it. Unknown is deliberately absent — unproven
+    /// must stay fail-closed (O4.9), never promoted to a safe class.
+    pub(crate) fn is_immutable_by_type(&self) -> bool {
+        match self {
+            TypeShape::Primitive | TypeShape::Str | TypeShape::Atomic | TypeShape::Chan(_) => true,
+            TypeShape::Array(elem) => elem.is_immutable_by_type(),
+            TypeShape::Pointer(inner) => matches!(**inner, TypeShape::Atomic),
+            _ => false,
+        }
+    }
+
     /// Go reference semantics: assigning `b := a` makes `b` an ALIAS of `a`
     /// (maps and slices are reference types; pointers alias the pointee).
     /// Structs and arrays are copied by value in Go, so they are NOT

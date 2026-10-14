@@ -99,7 +99,14 @@ impl<'a> Checker<'a> {
             }
             Expr::SliceLit { items, .. } => self.classify_composite(st, expr, items.iter()),
             // field/index/slice reads: classify the read's shape, but honor
-            // immutable roots (views of const values stay immutable, OQ5)
+            // immutable roots (views of const values stay immutable, OQ5).
+            //
+            // T22 guard: the class-4 shortcut only applies when the root's
+            // own shape is immutable-BY-TYPE (string / primitive / atomic /
+            // channel). A `let`- or `const`-bound map/slice/struct is only
+            // BINDING-level immutable — interior mutation through an alias
+            // is still possible, so a view reached through it is a live
+            // mutable value, not an immutable one.
             Expr::Field { .. } | Expr::Index { .. } | Expr::Slice { .. } => {
                 if let Some(root) = expr.root_ident() {
                     if let Some(b) = self.lookup_binding(st, root) {
@@ -112,7 +119,7 @@ impl<'a> Checker<'a> {
                                 risky: !b.shape.is_sendable_by_type(),
                             };
                         }
-                        if b.immutable {
+                        if b.immutable && b.shape.is_immutable_by_type() {
                             return Outcome::Ok;
                         }
                     }
@@ -149,8 +156,8 @@ impl<'a> Checker<'a> {
                 risky: !b.shape.is_sendable_by_type(),
             };
         }
-        if b.immutable {
-            return Outcome::Ok; // class 4 (let/const/const-decl)
+        if b.immutable && b.shape.is_immutable_by_type() {
+            return Outcome::Ok; // class 4 (let/const/const-decl) — immutable BY TYPE only (T22)
         }
         if matches!(b.shape, TypeShape::Unknown) {
             // FAIL-CLOSED (O4.9): a binding whose type the checker could
@@ -213,7 +220,7 @@ impl<'a> Checker<'a> {
                 risky: !b.shape.is_sendable_by_type(),
             };
         }
-        if b.immutable {
+        if b.immutable && b.shape.is_immutable_by_type() {
             return Outcome::Ok;
         }
         if matches!(b.shape, TypeShape::Unknown) {
