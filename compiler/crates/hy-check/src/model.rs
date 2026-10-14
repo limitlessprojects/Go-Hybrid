@@ -193,7 +193,7 @@ pub(crate) struct Loan {
 }
 
 /// Per-function mutable state (environment, aliases, live loans).
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct FnState {
     /// The function's BASE scope: receiver, params, and top-level defines.
     pub env: HashMap<String, Binding>,

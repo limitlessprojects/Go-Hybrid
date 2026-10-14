@@ -280,7 +280,8 @@
         "use `option[[]int]` if absence is the meaning"
       ],
       "example": "var s []int = nil   // reject: HYB-E4001 — use []int{} or option[[]int]",
-      "rule": "N"
+      "rule": "N",
+      "tier0_rule_id": "N1"
     },
     {
       "code": "HYB-E4002",

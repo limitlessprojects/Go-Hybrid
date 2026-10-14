@@ -332,5 +332,118 @@ impl<'a> Checker<'a> {
             Diagnostic::error("HYB-E3004", self.path.clone(), span, msg).with_notes(notes),
         );
     }
+
+    /// O5.1 / O5.2 / O13 across loop iterations: when a loop body can repeat,
+    /// any outer binding that was moved or consumed inside the loop and remains
+    /// moved at the end of the body would be used or moved again on the next
+    /// iteration. Walk the loop's statements along the back-edge with those
+    /// loop-carried moves active; local definitions (`chunk := ...`, corpus 15)
+    /// live in inner scopes and are discarded when `scopes` is truncated to
+    /// `outer_depth`.
+    pub(crate) fn check_loop_backedge(
+        &mut self,
+        st: &FnState,
+        outer_depth: usize,
+        loop_stmts: &[(&hy_syntax::Stmt, usize)],
+        loop_body: &hy_syntax::Block,
+        pre_moved: &HashSet<String>,
+        reported_backedge: &mut HashSet<String>,
+    ) {
+        if matches!(
+            loop_body.stmts.last(),
+            Some(hy_syntax::Stmt::Break { .. } | hy_syntax::Stmt::Return { .. })
+        ) {
+            return;
+        }
+
+        let mut call_local_roots: HashSet<String> = HashSet::new();
+        for (stmt, _) in loop_stmts.iter().skip(1) {
+            if let hy_syntax::Stmt::Local(l) = stmt {
+                for (lhs, rhs) in l.names.iter().zip(l.values.iter()) {
+                    let is_inner = st.scopes[outer_depth..]
+                        .iter()
+                        .any(|s| s.contains_key(lhs.as_str()));
+                    if is_inner
+                        && matches!(crate::model::unwrap_parens(rhs), Expr::Call { .. })
+                        && st.aliases.contains_key(lhs.as_str())
+                    {
+                        call_local_roots.insert(resolve_alias(st, lhs));
+                    }
+                }
+            }
+        }
+
+        let mut iter_st = st.clone();
+        iter_st.scopes.truncate(outer_depth);
+        let mut any_loop_carried = false;
+        for (name, b) in iter_st
+            .env
+            .iter_mut()
+            .chain(iter_st.scopes.iter_mut().flat_map(|s| s.iter_mut()))
+        {
+            if b.moved.is_some() {
+                let root = resolve_alias(st, name);
+                if pre_moved.contains(name)
+                    || reported_backedge.contains(&root)
+                    || call_local_roots.contains(&root)
+                {
+                    b.moved = None;
+                } else {
+                    any_loop_carried = true;
+                }
+            }
+        }
+        if !any_loop_carried {
+            return;
+        }
+
+        for (i, (stmt, _)) in loop_stmts.iter().enumerate() {
+            let mut uses = Vec::new();
+            if i == 0 {
+                if let hy_syntax::Stmt::For {
+                    kind: hy_syntax::ForKind::While { cond },
+                    ..
+                } = stmt
+                {
+                    crate::walk::expr_uses(cond, &mut uses);
+                }
+            } else {
+                crate::walk::own_uses(stmt, &mut uses);
+            }
+
+            for u in &uses {
+                let moved = match self.lookup_binding(&iter_st, &u.name) {
+                    Some(b) => b.moved.clone(),
+                    None => continue,
+                };
+                let Some(mv) = moved else { continue };
+                self.emit_use_after_move(&iter_st, u, &mv);
+                let root = resolve_alias(&iter_st, &u.name);
+                reported_backedge.insert(root.clone());
+                let mut clear_names = vec![u.name.clone(), root.clone()];
+                for a in iter_st.aliases.keys() {
+                    if resolve_alias(&iter_st, a) == root {
+                        clear_names.push(a.clone());
+                    }
+                }
+                for k in &clear_names {
+                    if let Some(b) = iter_st.env_lookup_mut(k) {
+                        b.moved = None;
+                    }
+                }
+            }
+
+            if i > 0 {
+                if let hy_syntax::Stmt::Local(l) = stmt {
+                    for name in &l.names {
+                        iter_st.aliases.remove(name);
+                        if let Some(b) = iter_st.env_lookup_mut(name) {
+                            b.moved = None;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 

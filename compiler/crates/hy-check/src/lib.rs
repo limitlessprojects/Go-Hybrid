@@ -239,6 +239,16 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     let flat = walk::flatten(body);
     st.last_use = flat.last_use.clone();
 
+    let mut active_loops: Vec<(
+        usize,
+        usize,
+        usize,
+        &hy_syntax::Block,
+        std::collections::HashSet<String>,
+    )> = Vec::new();
+    let mut reported_backedge: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
     // Pass B: statements in source order.
     for (stmt, idx) in &flat.stmts {
         let stmt: &Stmt = stmt;
@@ -269,6 +279,17 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     }
                 }
             }
+        }
+        if let Stmt::For { body: lbody, .. } = stmt {
+            let outer_depth = st.scopes.len().saturating_sub(1);
+            let pre_moved = st
+                .env
+                .iter()
+                .chain(st.scopes.iter().flat_map(|s| s.iter()))
+                .filter(|(_, b)| b.moved.is_some())
+                .map(|(k, _)| k.clone())
+                .collect();
+            active_loops.push((idx, flat.loop_end_of(idx), outer_depth, lbody, pre_moved));
         }
         if let Stmt::Managed {
             reason,
@@ -498,6 +519,21 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             // covered by the flat walk (init is its own statement entry)
             // and the uses/calls collected above.
             _ => {}
+        }
+
+        while let Some((_, loop_end, _, _, _)) = active_loops.last() {
+            if *loop_end != idx {
+                break;
+            }
+            let (for_idx, loop_end, outer_depth, lbody, pre_moved) = active_loops.pop().unwrap();
+            ck.check_loop_backedge(
+                &st,
+                outer_depth,
+                &flat.stmts[for_idx..=loop_end],
+                lbody,
+                &pre_moved,
+                &mut reported_backedge,
+            );
         }
     }
 
@@ -1932,6 +1968,74 @@ mod tests {
         );
         assert_eq!(r2.verdict, Verdict::Reject, "{:?}", r2.diagnostics);
         assert!(r2.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+    }
+
+    #[test]
+    fn o51_move_inside_loop_of_outer_binding_rejects_e3003() {
+        let r = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               for i in 0..10 { m[\"k\"] = i }\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 2)\n\
+               for i in 0..2 {\n\
+                 task worker(move m, done)\n\
+               }\n\
+               <-done\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        let d = &r.diagnostics[0];
+        assert_eq!(d.code, "HYB-E3003");
+        assert!(d.message.contains("moved again"), "{}", d.message);
+    }
+
+    #[test]
+    fn o52_use_before_move_inside_loop_rejects_on_backedge() {
+        let r = check(
+            "fn worker(m map[string]int, done chan<- bool) { done <- true }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 2)\n\
+               for i in 0..2 {\n\
+                 m[\"k\"] = i\n\
+                 task worker(move m, done)\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+    }
+
+    #[test]
+    fn o51_fresh_binding_inside_loop_and_move_then_break_accept() {
+        let r_fresh = check(
+            "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               for i in 0..2 {\n\
+                 chunk := map[string]int{\"k\": i}\n\
+                 task worker(move chunk)\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r_fresh.verdict, Verdict::Accept, "{:?}", r_fresh.diagnostics);
+
+        let r_break = check(
+            "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               for i in 0..2 {\n\
+                 task worker(move m)\n\
+                 break\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r_break.verdict, Verdict::Accept, "{:?}", r_break.diagnostics);
     }
 
     // -----------------------------------------------------------------------
