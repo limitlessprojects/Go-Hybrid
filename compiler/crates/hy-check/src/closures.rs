@@ -151,30 +151,36 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
             is_move,
             span,
         } => {
-            let desc = if *is_move {
-                format!(
-                    "the move-send `{} <- move {}`",
-                    chan.render(),
-                    value.render()
-                )
-            } else {
-                format!("the send `{} <- {}`", chan.render(), value.render())
-            };
-            let vals: Vec<&Expr> = vec![value];
-            let targets = ck.chan_elem_shape(st, chan);
-            ck.check_site(st, *span, "HYB-E3002", &vals, managed, &desc, *is_move, None, targets.as_deref());
+            // Target classification (#77) first: a non-channel (or
+            // unresolvable) send target is ill-typed — no value cascade.
+            if ck.check_send_target(st, chan, *span) {
+                let desc = if *is_move {
+                    format!(
+                        "the move-send `{} <- move {}`",
+                        chan.render(),
+                        value.render()
+                    )
+                } else {
+                    format!("the send `{} <- {}`", chan.render(), value.render())
+                };
+                let vals: Vec<&Expr> = vec![value];
+                let targets = ck.chan_elem_shape(st, chan);
+                ck.check_site(st, *span, "HYB-E3002", &vals, managed, &desc, *is_move, None, targets.as_deref());
+            }
         }
         Stmt::Select { arms, .. } => {
             for arm in arms {
                 st.scope_push();
                 match &arm.kind {
                     SelectArmKind::Send { chan, value } => {
-                        let desc =
-                            format!("the select-send `{} <- {}`", chan.render(), value.render());
                         let span = chan.span().to(value.span());
-                        let vals: Vec<&Expr> = vec![value];
-                        let targets = ck.chan_elem_shape(st, chan);
-                        ck.check_site(st, span, "HYB-E3002", &vals, managed, &desc, false, None, targets.as_deref());
+                        if ck.check_send_target(st, chan, span) {
+                            let desc =
+                                format!("the select-send `{} <- {}`", chan.render(), value.render());
+                            let vals: Vec<&Expr> = vec![value];
+                            let targets = ck.chan_elem_shape(st, chan);
+                            ck.check_site(st, span, "HYB-E3002", &vals, managed, &desc, false, None, targets.as_deref());
+                        }
                     }
                     SelectArmKind::Recv { names, chan } => {
                         // element shape when the channel resolves; `ok` is a

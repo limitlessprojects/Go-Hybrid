@@ -396,34 +396,38 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             // O4.0 check-site: the sent value (HYB-E3002). The parser flags
             // `ch <- move x` as `is_move: true` with a plain Ident value —
             // `implicit_move` routes it to the class-3 move handling.
+            // Target classification (#77) runs FIRST: a non-channel (or
+            // unresolvable) send target is ill-typed — no value cascade.
             Stmt::Send {
                 chan,
                 value,
                 is_move,
                 span,
             } => {
-                let desc = if *is_move {
-                    format!(
-                        "the move-send `{} <- move {}`",
-                        chan.render(),
-                        value.render()
-                    )
-                } else {
-                    format!("the send `{} <- {}`", chan.render(), value.render())
-                };
-                let vals: Vec<&Expr> = vec![value];
-                let targets = ck.chan_elem_shape(&st, chan);
-                ck.check_site(
-                    &mut st,
-                    *span,
-                    "HYB-E3002",
-                    &vals,
-                    managed,
-                    &desc,
-                    *is_move,
-                    None,
-                    targets.as_deref(),
-                );
+                if ck.check_send_target(&st, chan, *span) {
+                    let desc = if *is_move {
+                        format!(
+                            "the move-send `{} <- move {}`",
+                            chan.render(),
+                            value.render()
+                        )
+                    } else {
+                        format!("the send `{} <- {}`", chan.render(), value.render())
+                    };
+                    let vals: Vec<&Expr> = vec![value];
+                    let targets = ck.chan_elem_shape(&st, chan);
+                    ck.check_site(
+                        &mut st,
+                        *span,
+                        "HYB-E3002",
+                        &vals,
+                        managed,
+                        &desc,
+                        *is_move,
+                        None,
+                        targets.as_deref(),
+                    );
+                }
             }
 
             // Loop variables: fresh bindings per iteration shape.
@@ -465,25 +469,27 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 for arm in arms {
                     match &arm.kind {
                         SelectArmKind::Send { chan, value } => {
-                            let desc = format!(
-                                "the select-send `{} <- {}`",
-                                chan.render(),
-                                value.render()
-                            );
                             let span = chan.span().to(value.span());
-                            let vals: Vec<&Expr> = vec![value];
-                            let targets = ck.chan_elem_shape(&st, chan);
-                            ck.check_site(
-                                &mut st,
-                                span,
-                                "HYB-E3002",
-                                &vals,
-                                managed,
-                                &desc,
-                                false,
-                                None,
-                                targets.as_deref(),
-                            );
+                            if ck.check_send_target(&st, chan, span) {
+                                let desc = format!(
+                                    "the select-send `{} <- {}`",
+                                    chan.render(),
+                                    value.render()
+                                );
+                                let vals: Vec<&Expr> = vec![value];
+                                let targets = ck.chan_elem_shape(&st, chan);
+                                ck.check_site(
+                                    &mut st,
+                                    span,
+                                    "HYB-E3002",
+                                    &vals,
+                                    managed,
+                                    &desc,
+                                    false,
+                                    None,
+                                    targets.as_deref(),
+                                );
+                            }
                         }
                         SelectArmKind::Recv { .. } | SelectArmKind::Default => {}
                     }

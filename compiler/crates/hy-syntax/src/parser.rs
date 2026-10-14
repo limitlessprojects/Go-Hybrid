@@ -114,6 +114,17 @@ impl Parser {
         matches!(self.cur(), Tok::Punct(x) if *x == p)
     }
 
+    /// Newline sensitivity (#77): is the current token on the same source
+    /// line as the end of the previous token? Spans carry line/col
+    /// (hy_diag::Pos), so no lexer change is needed. Used by the
+    /// expression-statement `<-` fusion guard — Hybrid has no Go-style
+    /// automatic semicolon insertion, so statements are newline-
+    /// delimited wherever a continuation would change meaning.
+    fn same_line_as_prev(&self) -> bool {
+        self.pos > 0
+            && self.toks[self.pos].span.start.line == self.toks[self.pos - 1].span.end.line
+    }
+
     fn at_kw(&self, k: &str) -> bool {
         matches!(self.cur(), Tok::Kw(x) if *x == k)
     }
@@ -1130,7 +1141,13 @@ impl Parser {
             });
         }
 
-        if self.at_punct("<-") {
+        // Newline-sensitive send fusion (#77): `<-` continues the statement
+        // as a SEND only when it sits on the SAME line as the end of the
+        // expression list (Go ASI-style). A `<-` on the next line starts a
+        // RECEIVE statement of its own — `noop()` / `<-done` must parse as
+        // two statements, not fuse into `noop() <- done` (which emitted Go
+        // that failed `go build`).
+        if self.at_punct("<-") && self.same_line_as_prev() {
             self.bump();
             if exprs.len() != 1 {
                 return self.err("channel send takes a single channel");
@@ -3596,5 +3613,56 @@ mod tests {
         };
         assert_eq!(callee.span().start.line, 3);
         assert_eq!(callee.span().start.col, 5); // `fmt`
+    }
+
+    #[test]
+    fn newline_before_recv_does_not_fuse_into_send() {
+        // issue #77 repro A: an expression statement followed by a line
+        // that starts with a receive expression must parse as TWO
+        // statements (`noop()`; `<-done`), not fuse into `noop() <- done`
+        // (the fused form emitted Go that failed `go build`).
+        let f = parse_src("fn main() {\n    noop()\n    <-done\n}");
+        let body = f.fns().next().unwrap().body.as_ref().unwrap();
+        assert_eq!(
+            body.stmts.len(),
+            2,
+            "expected two statements, got {:?}",
+            body.stmts
+        );
+        assert!(
+            matches!(&body.stmts[0], Stmt::Expr { expr: Expr::Call { .. }, .. }),
+            "first statement is the call"
+        );
+        assert!(
+            matches!(&body.stmts[1], Stmt::Expr { expr: Expr::Receive { .. }, .. }),
+            "second statement is a receive expression, not part of a send"
+        );
+    }
+
+    #[test]
+    fn same_line_arrow_still_fuses_into_send() {
+        // the one-line send spelling must keep parsing as a Send — the
+        // #77 guard is newline sensitivity, not a ban on fusion.
+        let f = parse_src("fn main() {\n    ch <- 1\n}");
+        let stmt = first_stmt(&f);
+        assert!(
+            matches!(stmt, Stmt::Send { .. }),
+            "same-line `ch <- 1` must stay a send, got {:?}",
+            stmt
+        );
+    }
+
+    #[test]
+    fn send_value_may_continue_onto_the_next_line() {
+        // the fusion guard compares the `<-` token's line to the END of
+        // the expression list — a send whose VALUE wraps stays one Send
+        // (`<-` and the channel are on line 1).
+        let f = parse_src("fn main() {\n    ch <-\n        1\n}");
+        let stmt = first_stmt(&f);
+        assert!(
+            matches!(stmt, Stmt::Send { .. }),
+            "wrapped send value must stay one send, got {:?}",
+            stmt
+        );
     }
 }

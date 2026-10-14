@@ -466,6 +466,53 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Classify a send's TARGET (#77): a send is only well-typed when the
+    /// channel expression resolves to a channel shape. Before this check a
+    /// deliberate `noop() <- 1` (void call as target) and the accidental
+    /// newline fusion `noop()` / `<-done` (parser) both passed with 0
+    /// diagnostics and emitted Go that failed `go build` — breaking the
+    /// accepted-should-emit-buildable-Go contract. A concrete non-channel
+    /// is HYB-E3007; an unresolvable shape is fail-closed HYB-E3005
+    /// (O4.9). Like E3004/E3006, an ill-typed TARGET is not a sendability
+    /// doubt — `managed` does not suppress it. Returns true when the
+    /// target is a channel (callers then run the value check-site as
+    /// usual); false emits the diagnostic and the caller skips the value
+    /// check (the site is ill-typed — no cascade).
+    pub(crate) fn check_send_target(&mut self, st: &FnState, chan: &Expr, span: Span) -> bool {
+        match self.shape_of_expr(st, chan) {
+            TypeShape::Chan(_) => true,
+            TypeShape::Unknown => {
+                let msg = format!(
+                    "cannot prove `{}` is a channel — a send target must resolve to `chan T` (O4.9)",
+                    chan.render()
+                );
+                let notes = vec![
+                    "why: the checker cannot classify the send target's type, and a send to a non-channel is not valid Go (issue #77)".to_string(),
+                    "fix: bind the channel to a local (or parameter) with a visible `chan T` type before sending, so the checker can resolve it".to_string(),
+                ];
+                self.diags.push(
+                    Diagnostic::error("HYB-E3005", self.path.clone(), span, msg).with_notes(notes),
+                );
+                false
+            }
+            other => {
+                let msg = format!(
+                    "cannot send to `{}` ({}) — a send target must be a channel (O4)",
+                    chan.render(),
+                    other.render()
+                );
+                let notes = vec![
+                    "why: `<-` on a non-channel value is not valid Go; the accepted subset only emits buildable Go (issue #77)".to_string(),
+                    "fix: send to a `chan T` binding (`ch := make(chan T, n)` or a `chan T` parameter); note that a statement STARTING with `<-expr` is a RECEIVE — a `<-` on a new line never continues the previous statement".to_string(),
+                ];
+                self.diags.push(
+                    Diagnostic::error("HYB-E3007", self.path.clone(), span, msg).with_notes(notes),
+                );
+                false
+            }
+        }
+    }
+
     /// Emit HYB-E4001: `nil` flowing into a known non-nilable type (rule N1).
     /// `what` names the target in the message ("the assignment target `m`",
     /// "a parameter of the spawn callee", ...). A TYPE contract, not a

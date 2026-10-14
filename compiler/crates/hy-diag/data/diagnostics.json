@@ -208,6 +208,21 @@
       "tier0_rule_id": "IMMUT"
     },
     {
+      "code": "HYB-E3007",
+      "name": "send-target-not-channel",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "the target of a send must be a channel",
+      "summary": "`expr <- value` where `expr` resolves to a non-channel shape is rejected: a send is only well-typed against a `chan T`, and the accepted-subset contract is that every accepted program emits buildable Go (issue #77 — a void call or other non-channel used as a send target used to pass with 0 diagnostics and then fail `go build`). An UNRESOLVABLE target stays fail-closed under HYB-E3005 (O4.9) instead.",
+      "fixits": [
+        "send to a `chan T` binding (`ch := make(chan T, n)` or a `chan T` parameter)",
+        "if the `<-expr` line was meant as a RECEIVE, put the channel expression first: `v := <-ch` — a statement starting with `<-` is a receive, and a `<-` on a new line never continues the previous statement"
+      ],
+      "example": "noop() <- 1   // reject: HYB-E3007 — `noop()` is a void call, not a channel",
+      "rule": "O4",
+      "tier0_rule_id": "A1c"
+    },
+    {
       "code": "HYB-E3101",
       "name": "handle-loan-conflict",
       "category": "ownership-loans",
