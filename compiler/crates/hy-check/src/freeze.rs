@@ -250,10 +250,34 @@ impl<'a> Checker<'a> {
             return;
         }
         let root = resolve_alias(st, name);
-        let origin = b.non_owned_origin.clone().or_else(|| {
+        let mut origin = b.non_owned_origin.clone().or_else(|| {
             self.lookup_binding(st, &root)
                 .and_then(|rb| rb.non_owned_origin.clone())
         });
+        if origin.is_none() {
+            // #75: moving a may-share peer of a non-owned binding (e.g. a shallow
+            // struct or array copy of a parameter) escapes the O5.1 non-owned check
+            // because the caller retains live access to the underlying storage.
+            let mut all_peers = st.share_group(name);
+            if root != name {
+                all_peers.extend(st.share_group(&root));
+            }
+            let mut peers: Vec<String> = all_peers.into_iter().collect();
+            peers.sort();
+            for peer in peers {
+                let peer_root = resolve_alias(st, &peer);
+                origin = self
+                    .lookup_binding(st, &peer)
+                    .and_then(|pb| pb.non_owned_origin.clone())
+                    .or_else(|| {
+                        self.lookup_binding(st, &peer_root)
+                            .and_then(|prb| prb.non_owned_origin.clone())
+                    });
+                if origin.is_some() {
+                    break;
+                }
+            }
+        }
         let Some(origin) = origin else {
             return;
         };

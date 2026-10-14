@@ -1771,6 +1771,68 @@ mod tests {
              }",
         );
         assert_eq!(r_chan.verdict, Verdict::Accept, "{:?}", r_chan.diagnostics);
+
+        // 5. Shallow struct copy of a parameter moved (#75): caller retains `h.m`.
+        let r_struct_peer = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(h holder, done chan<- bool) {\n\
+               h.m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn spawn_peer(h holder, done chan<- bool) {\n\
+               h2 := h\n\
+               task worker(move h2, done)\n\
+             }\n\
+             fn main() {\n\
+               h := holder{m: map[string]int{\"k\": 0}}\n\
+               done := make(chan bool, 1)\n\
+               spawn_peer(h, done)\n\
+               h.m[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_struct_peer.verdict, Verdict::Reject, "{:?}", r_struct_peer.diagnostics);
+        assert_eq!(first_error_rule(&r_struct_peer).as_deref(), Some("A1b"));
+        assert!(r_struct_peer.diagnostics.iter().any(|d| d.code == "HYB-E3004"));
+
+        // 6. Shallow array copy of a parameter moved (#75): caller retains array elements.
+        let r_arr_peer = check(
+            "fn worker(a [2]map[string]int, done chan<- bool) {\n\
+               a[0][\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn spawn_arr(a [2]map[string]int, done chan<- bool) {\n\
+               a2 := a\n\
+               task worker(move a2, done)\n\
+             }\n\
+             fn main() {\n\
+               a := [2]map[string]int{map[string]int{\"k\": 0}, map[string]int{\"k\": 0}}\n\
+               done := make(chan bool, 1)\n\
+               spawn_arr(a, done)\n\
+               a[0][\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_arr_peer.verdict, Verdict::Reject, "{:?}", r_arr_peer.diagnostics);
+        assert_eq!(first_error_rule(&r_arr_peer).as_deref(), Some("A1b"));
+        assert!(r_arr_peer.diagnostics.iter().any(|d| d.code == "HYB-E3004"));
+
+        // 7. Pure-local struct copy moved: legal owned move (#75 positive control).
+        let r_local_peer = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(h holder, done chan<- bool) {\n\
+               h.m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               h := holder{m: map[string]int{\"k\": 0}}\n\
+               done := make(chan bool, 1)\n\
+               h2 := h\n\
+               task worker(move h2, done)\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_local_peer.verdict, Verdict::Accept, "{:?}", r_local_peer.diagnostics);
     }
 
     // -----------------------------------------------------------------------
