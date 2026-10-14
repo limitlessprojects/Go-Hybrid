@@ -62,6 +62,10 @@ def run_checker(bin_path, hy_path, report_managed=False):
     if report_managed:
         cmd.append("--report-managed")
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if proc.returncode not in (0, 1):
+        raise RuntimeError(
+            f"checker unexpected exit {proc.returncode} for {hy_path}: {proc.stderr[:400]}"
+        )
     out = proc.stdout.strip()
     if not out:
         raise RuntimeError(
