@@ -127,6 +127,7 @@ pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
         ("serde_json", "to_string_pretty")
         | ("serde_json", "array")
         | ("serde_json", "get")
+        | ("serde_json", "view")
         | ("serde_json", "int")
         | ("serde_json", "string") => CallMode::Borrow,
         ("serde_json", "set") | ("serde_json", "remove") => CallMode::Mutate,
@@ -162,7 +163,7 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
             TypeShape::OwnHandle("serde_json.value".into())
         }
         ("flate2", "new_writer") => TypeShape::OwnHandle("flate2.writer".into()),
-        ("serde_json", "array" | "get") => TypeShape::BorrowHandle("serde_json.view".into()),
+        ("serde_json", "array" | "get" | "view") => TypeShape::BorrowHandle("serde_json.view".into()),
         ("serde_json", "int") | ("flate2", "write") => TypeShape::Primitive,
         ("flate2", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
         ("serde_json", "to_string_pretty") | ("serde_json", "string") | ("strings", "join") => {
@@ -313,7 +314,7 @@ pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {
     match (recv_type, method) {
         (
             "serde_json.value" | "serde_json.view",
-            "array" | "get" | "int" | "string" | "to_string_pretty",
+            "array" | "get" | "view" | "int" | "string" | "to_string_pretty",
         ) => CallMode::Borrow,
         ("serde_json.value" | "serde_json.view", "set" | "remove") => CallMode::Mutate,
         ("flate2.writer", "write") => CallMode::Mutate,
@@ -325,7 +326,7 @@ pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {
 /// Result shape of a method call on a typed receiver.
 pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
     match (recv_type, method) {
-        ("serde_json.value" | "serde_json.view", "array" | "get") => {
+        ("serde_json.value" | "serde_json.view", "array" | "get" | "view") => {
             // element views: iterating the result yields borrow handles
             TypeShape::BorrowHandle("serde_json.view".into())
         }
