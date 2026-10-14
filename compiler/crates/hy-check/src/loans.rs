@@ -409,7 +409,10 @@ impl<'a> Checker<'a> {
     /// Covers the four reported bypass forms: `h2 := h1` (shallow struct/
     /// array copy), `m2 := (agg)` / `s2 := s1[:]` (parenthesized / re-sliced
     /// RHS), `m2 := h1.m` (field/index projection), and `h := holder{m: agg}`
-    /// (composite literal capturing a live binding).
+    /// (composite literal capturing a live binding) — plus the CALL forms of
+    /// #73: a shallow copy or generic identity that returns argument
+    /// storage through `f(...)` (no interprocedural summary, same argument
+    /// as #38's alias recording).
     fn record_may_share(&self, st: &mut FnState, name: &str, value: &Expr) {
         match unwrap_parens(value) {
             Expr::Ident { name: src, .. } => {
@@ -451,6 +454,53 @@ impl<'a> Checker<'a> {
             Expr::SliceLit { items, .. } => {
                 for it in items {
                     self.record_literal_ref(st, name, it);
+                }
+            }
+            // A call that hands back storage reachable from an argument
+            // (#73): `h2 := alias_holder(h1)` is a shallow struct copy
+            // through a call — the result shape is `Struct`, which is not a
+            // binding-level alias, so `record_alias`'s reference-shape guard
+            // skips it — and `m2 := id(m)` (generic identity) degrades the
+            // result to `Unknown` through the type parameter, so even a map
+            // argument escapes the alias recorder. The checker has no
+            // interprocedural summary to prove the return is fresh (#38's
+            // argument), so edge the result to every may-share argument
+            // binding (and the method receiver, when present) whenever the
+            // result itself could share GC storage: may-share-capable or
+            // unresolvable. A concrete scalar/string result is a copy-out
+            // (no edge); a reference-shaped result is ALSO recorded as a
+            // binding alias by `record_alias` — both mechanisms agree on
+            // the freeze, matching what `m2 := m` records for the lexical
+            // form. `move`-wrapped arguments transfer ownership into the
+            // callee and are skipped.
+            Expr::Call { callee, args, .. } => {
+                let result = self.shape_of_expr(st, unwrap_parens(value));
+                if self.shape_may_share(&result) || matches!(result, TypeShape::Unknown) {
+                    let mut roots: Vec<&str> = Vec::new();
+                    for a in args {
+                        if matches!(unwrap_parens(&a.value), Expr::Move { .. }) {
+                            continue;
+                        }
+                        if let Some(root) = a.value.root_ident() {
+                            roots.push(root);
+                        }
+                    }
+                    // `x := r.method(...)` — the receiver is the callee's
+                    // base, not a call argument; a method that returns an
+                    // interior reference aliases it just like an argument.
+                    if let Expr::Field { base, .. } = unwrap_parens(callee) {
+                        if let Some(root) = base.root_ident() {
+                            roots.push(root);
+                        }
+                    }
+                    for root in roots {
+                        if root == name {
+                            continue;
+                        }
+                        if self.binding_may_share(st, root) {
+                            st.share_edge(name, root);
+                        }
+                    }
                 }
             }
             _ => {}

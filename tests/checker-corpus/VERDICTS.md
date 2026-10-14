@@ -71,8 +71,9 @@ renumbered).
 | 25 | 25-o40-spawn-callee-proof | REJECT | A1c | the O4.0 spawn-callee PROOF: a closure callee (`task gap()`) crosses with its captured environment (A5, E3001) and an undeclared callee (`task mystery(1)`) is fail-closed unproven (E3005/FC) — before the fix the O4.0 site checked only the arguments and both passed silently (adoption-audit finding F1; the ACCEPT/proven side is pinned in hy-check/tests/callee_and_nil.rs) |
 | 26 | 26-call-return-alias-freeze | REJECT | A1b | an alias that comes back through a function call (`alias := same(agg)`, `same` returns its map argument) is still a live alias of `agg` — the checker has no interprocedural summary proving the return is fresh, so `results <- move agg` freezes it too; the write through `alias` is use-after-move (issue #38; before the fix the call return was treated as fresh storage and the program was accepted with 0 diagnostics while `go -race` reported a DATA RACE) |
 | 27 | 27-const-write-reject | REJECT | IMMUT | a file-level `const` slice takes an element write (W1) and a whole-binding rebind (W2) while the emitter lowers the const to a package-level `var` — two spawned tasks reach the same backing array with NOTHING crossing the spawn site, so O4 never fires and `hyb check` reported 0 diagnostics against `go run -race` evidence (issue #37; T22 deep immutability — the write rejection was the missing check; the accept side is pinned in hy-check/tests/const_write.rs) |
+| 28 | 28-generic-call-return-alias-freeze | REJECT | A1b | an alias that comes back through a GENERIC call (`alias := same(agg)` where `same[t any](m t) t` returns its argument) is still a live alias of `agg` — the result shape resolves through the type parameter to Unknown, which is not a reference alias, so 26's alias recording and the may-share recorder (which had no Call arm) both skipped it: before the fix `hyb check` reported 0 diagnostics while `go run` hit `fatal error: concurrent map writes` (issue #73; generic twin of 26 — the struct-result sibling `h2 := alias_holder(h1)` is pinned in the hy-check unit tests, one root cause) |
 
-**Distribution: ACCEPT 8 · ACCEPT-MANAGED 2 · REJECT 16 — 26 programs.**
+**Distribution: ACCEPT 8 · ACCEPT-MANAGED 2 · REJECT 18 — 28 programs.**
 (19 and 20 were added by the lead during integration on 2026-10-12 — still
 BEFORE any checker existed; see the pre-registration statement. 21, 22, 23
 and 24 are post-checker corpus GROWTH from the bounty track, added
@@ -89,7 +90,11 @@ issue-#37 soundness program (2026-10-14): verdict derived from T22's
 deep-immutability text first, then pinned against the HYB-E3006 fix —
 the report came with `hyb check` OK / `go run -race` DATA RACE evidence,
 so the hand-derived REJECT and the reproduction were one step here, in
-that order.
+that order. 28 is the issue-#73 generic-identity program (2026-10-14):
+verdict derived from O5.2's alias entailment first (26's reasoning — the
+type parameter cannot weaken the freeze), then pinned against the
+`record_may_share` Call-arm fix; the report again came with `hyb check`
+OK / `fatal error: concurrent map writes` evidence.
 
 ## Reading-distinguishing power (what Spike 6's corpus could not do)
 
