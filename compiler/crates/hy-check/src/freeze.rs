@@ -250,11 +250,41 @@ impl<'a> Checker<'a> {
             return;
         }
         let root = resolve_alias(st, name);
-        let origin = b.non_owned_origin.clone().or_else(|| {
+        // (a) the binding's own non-owned origin (param / receiver /
+        //     captured / range var), or its alias-chain root's.
+        let own = b.non_owned_origin.clone().or_else(|| {
             self.lookup_binding(st, &root)
                 .and_then(|rb| rb.non_owned_origin.clone())
         });
-        let Some(origin) = origin else {
+        // (b) issue #75: failing (a), any non-owned origin in the binding's
+        //     MAY-SHARE component. `h2 := h` (shallow struct/array copy), a
+        //     re-slice, a projection, or a literal capture records a share
+        //     edge but no define-time origin inheritance (that path is
+        //     reference-alias shapes only), so a local peer of a parameter
+        //     used to pass this check — while the caller still holds a live
+        //     binding to the same storage, exactly the situation moving the
+        //     parameter itself is rejected for. Peers are scanned in sorted
+        //     order for deterministic diagnostics.
+        let mut origin: Option<(String, bool)> = own.map(|o| (o, false));
+        if origin.is_none() {
+            let mut peers: Vec<String> = st.share_group(name).into_iter().collect();
+            peers.sort();
+            for peer in peers {
+                let proot = resolve_alias(st, &peer);
+                let po = self
+                    .lookup_binding(st, &peer)
+                    .and_then(|pb| pb.non_owned_origin.clone())
+                    .or_else(|| {
+                        self.lookup_binding(st, &proot)
+                            .and_then(|rb| rb.non_owned_origin.clone())
+                    });
+                if let Some(po) = po {
+                    origin = Some((po, true));
+                    break;
+                }
+            }
+        }
+        let Some((origin, via_share)) = origin else {
             return;
         };
         let ty_str = b
@@ -262,15 +292,30 @@ impl<'a> Checker<'a> {
             .as_ref()
             .map(|t| t.render())
             .unwrap_or_else(|| b.shape.render());
-        let msg = format!(
-            "cannot move `{}` ({}) — `move` requires an exclusively owned local binding, not {} (O5.1 / O5.4)",
-            name, ty_str, origin
-        );
-        let notes = vec![
+        let msg = if via_share {
+            format!(
+                "cannot move `{}` ({}) — `move` requires an exclusively owned local binding, not a may-share peer of {} (O5.1 / O5.4)",
+                name, ty_str, origin
+            )
+        } else {
+            format!(
+                "cannot move `{}` ({}) — `move` requires an exclusively owned local binding, not {} (O5.1 / O5.4)",
+                name, ty_str, origin
+            )
+        };
+        let why = if via_share {
+            format!(
+                "why: `{}` may share mutable GC storage with {}; the sending frame's freeze of `{}` cannot reach that live alias (O5.2 / O5.4)",
+                name, origin, name
+            )
+        } else {
             format!(
                 "why: {} still aliases the underlying storage outside this move site, so freezing `{}` cannot prevent concurrent access (O5.2 / O5.4)",
                 origin, name
-            ),
+            )
+        };
+        let notes = vec![
+            why,
             format!(
                 "fix: copy `{}` into a fresh local before moving (`fresh := ...; move fresh`), move the caller's owned binding at the spawn/send site directly, or wrap a genuinely synchronized share in `managed(\"reason\", \"category\") {{ ... }}`",
                 name

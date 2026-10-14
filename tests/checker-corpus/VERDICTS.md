@@ -71,8 +71,12 @@ renumbered).
 | 25 | 25-o40-spawn-callee-proof | REJECT | A1c | the O4.0 spawn-callee PROOF: a closure callee (`task gap()`) crosses with its captured environment (A5, E3001) and an undeclared callee (`task mystery(1)`) is fail-closed unproven (E3005/FC) — before the fix the O4.0 site checked only the arguments and both passed silently (adoption-audit finding F1; the ACCEPT/proven side is pinned in hy-check/tests/callee_and_nil.rs) |
 | 26 | 26-call-return-alias-freeze | REJECT | A1b | an alias that comes back through a function call (`alias := same(agg)`, `same` returns its map argument) is still a live alias of `agg` — the checker has no interprocedural summary proving the return is fresh, so `results <- move agg` freezes it too; the write through `alias` is use-after-move (issue #38; before the fix the call return was treated as fresh storage and the program was accepted with 0 diagnostics while `go -race` reported a DATA RACE) |
 | 27 | 27-const-write-reject | REJECT | IMMUT | a file-level `const` slice takes an element write (W1) and a whole-binding rebind (W2) while the emitter lowers the const to a package-level `var` — two spawned tasks reach the same backing array with NOTHING crossing the spawn site, so O4 never fires and `hyb check` reported 0 diagnostics against `go run -race` evidence (issue #37; T22 deep immutability — the write rejection was the missing check; the accept side is pinned in hy-check/tests/const_write.rs) |
+| 29 | 29-struct-param-share-move-reject | REJECT | A1b | a shallow struct copy of a PARAMETER (`h2 := h`, struct carrying a map) is a may-share peer but not a reference alias, so `check_non_owned_move` (which consulted the binding's own origin and its alias-chain root only) accepted `task worker(move h2, done)` with 0 diagnostics while `go run` hit `fatal error: concurrent map writes` (issue #75; the map twin `m2 := m` was already rejected via alias+origin inheritance — identical storage-identity argument; array twin is corpus 30, pure-local accept pinned in hy-check/tests/param_share_move.rs) |
+| 30 | 30-array-param-share-move-reject | REJECT | A1b | ARRAY twin of 29: a shallow fixed-array copy of a parameter (`a2 := a`, `[2]map[string]int`) recurses to a map element shape so it may-shares, but a fixed array is not a reference alias and recorded no origin — same pre-fix OK(0)/`go run` fatal split, same fix (move-time scan of the may-share component for a non-owned origin) |
 
-**Distribution: ACCEPT 8 · ACCEPT-MANAGED 2 · REJECT 16 — 26 programs.**
+**Distribution: ACCEPT 8 · ACCEPT-MANAGED 2 · REJECT 19 — 29 programs.**
+(the pre-growth line undercounted after row 27 landed — 8+2+16 was 26
+while 27 files were registered; this line recomputes from the table)
 (19 and 20 were added by the lead during integration on 2026-10-12 — still
 BEFORE any checker existed; see the pre-registration statement. 21, 22, 23
 and 24 are post-checker corpus GROWTH from the bounty track, added
@@ -89,7 +93,15 @@ issue-#37 soundness program (2026-10-14): verdict derived from T22's
 deep-immutability text first, then pinned against the HYB-E3006 fix —
 the report came with `hyb check` OK / `go run -race` DATA RACE evidence,
 so the hand-derived REJECT and the reproduction were one step here, in
-that order.
+that order.) 29 and 30 are the issue-#75 soundness pair (2026-10-14):
+moving a may-share PEER of a parameter (shallow struct copy / shallow
+fixed-array copy) escaped the O5.1 non-owned check because
+`check_non_owned_move` never consulted the may-share graph — verdict
+derived from O5.1/O5.2 storage-identity first (the map twin was already
+rejected; the struct/array forms share the same argument), then pinned
+against the fix with `hyb check` OK(0) / `go run` `fatal error:
+concurrent map writes` evidence from the report; numbering skips 28 to
+leave the slot for open PR #74's generic-call corpus file.
 
 ## Reading-distinguishing power (what Spike 6's corpus could not do)
 
