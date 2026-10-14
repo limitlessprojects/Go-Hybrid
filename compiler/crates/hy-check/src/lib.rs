@@ -424,8 +424,19 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         // Statement-specific processing.
         match stmt {
             Stmt::Local(l) => {
+                // Direction first (#89): `v := <-ch` on a send-only channel
+                // is invalid Go even before the value's shape is checked.
+                for v in &l.values {
+                    ck.check_recv_expr(&st, v);
+                }
                 ck.process_local(&mut st, l, idx, managed);
                 ck.record_local_borrow_aliases(&mut st, l);
+            }
+            // Statement-level receive expression `<-ch` (#89): enforce the
+            // channel's direction. Other expression statements are handled
+            // by the call/value passes above.
+            Stmt::Expr { expr, .. } => {
+                ck.check_recv_expr(&st, expr);
             }
 
             Stmt::Assign {
@@ -470,9 +481,12 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 is_move,
                 span,
             } => {
-                // Target classification (#77) runs FIRST: a non-channel (or
-                // unresolvable) send target is ill-typed — no value cascade.
-                if ck.check_send_target(&st, chan, *span) {
+                // Direction first (#89): a send to a receive-only channel is
+                // invalid Go — no value check-site cascade on an ill-typed
+                // target. Target classification (#77) then runs: a
+                // non-channel (or unresolvable) send target is likewise
+                // ill-typed — no value cascade.
+                if ck.check_chan_dir(&st, chan, true) && ck.check_send_target(&st, chan, *span) {
                     let desc = if *is_move {
                         format!(
                             "the move-send `{} <- move {}`",
@@ -538,7 +552,12 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     match &arm.kind {
                         SelectArmKind::Send { chan, value } => {
                             let span = chan.span().to(value.span());
-                            if ck.check_send_target(&st, chan, span) {
+                            // Direction (#89) then target classification
+                            // (#77) — both must hold before the value
+                            // check-site runs (no cascade on ill-typed arms).
+                            if ck.check_chan_dir(&st, chan, true)
+                                && ck.check_send_target(&st, chan, span)
+                            {
                                 let desc = format!(
                                     "the select-send `{} <- {}`",
                                     chan.render(),
@@ -559,7 +578,12 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                                 );
                             }
                         }
-                        SelectArmKind::Recv { .. } | SelectArmKind::Default => {}
+                        SelectArmKind::Recv { chan, .. } => {
+                            // Direction first (#89): a select recv arm on a
+                            // send-only channel is invalid Go.
+                            ck.check_chan_dir(&st, chan, false);
+                        }
+                        SelectArmKind::Default => {}
                     }
                 }
             }

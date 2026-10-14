@@ -21,7 +21,7 @@
 
 use crate::model::{as_addr_of, unwrap_parens, Binding, Checker, FnState, MoveKind, TypeShape};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::{Expr, LitKind};
+use hy_syntax::{ChanDir, Expr, LitKind, TypeExpr};
 
 /// The spawn-callee proof (O4.0): what the checker concluded about the
 /// expression a `task` statement spawns.
@@ -673,6 +673,72 @@ impl<'a> Checker<'a> {
                 );
                 false
             }
+        }
+    }
+
+    /// The declared direction of a channel-typed binding, when the
+    /// expression is a bare (paren-wrapped) identifier whose ascribed or
+    /// inferred type is a `TypeExpr::Chan` (#89). Anything else — calls,
+    /// receives, unresolvable names — returns None and the caller falls
+    /// back to the shape/O4.9 paths.
+    pub(crate) fn chan_dir_of_expr(&self, st: &FnState, chan: &Expr) -> Option<ChanDir> {
+        let Expr::Ident { name, .. } = unwrap_parens(chan) else {
+            return None;
+        };
+        let b = self.lookup_binding(st, name)?;
+        match &b.ty {
+            Some(TypeExpr::Chan { dir, .. }) => Some(*dir),
+            _ => None,
+        }
+    }
+
+    /// Enforce channel direction at an operation site (#89): a send's
+    /// target must not be receive-only (`<-chan T`), and a receive's
+    /// channel must not be send-only (`chan<- T`) — both are invalid Go
+    /// that `hyb build --emit-go` faithfully reproduces (the emitter
+    /// keeps the direction in the signature), so accepting them breaks
+    /// the accepted-should-emit-buildable-Go contract. `is_send` selects
+    /// the operation. Returns false and emits HYB-E3008 on a mismatch;
+    /// true otherwise (including when the direction does not resolve —
+    /// the shape/O4.9 paths own that case). Not `managed`-suppressed
+    /// (a type contract, like E3004/E3006).
+    pub(crate) fn check_chan_dir(&mut self, st: &FnState, chan: &Expr, is_send: bool) -> bool {
+        let mismatch = match (self.chan_dir_of_expr(st, chan), is_send) {
+            (Some(ChanDir::Recv), true) => Some("cannot send to a receive-only channel"),
+            (Some(ChanDir::Send), false) => {
+                Some("cannot receive from a send-only channel")
+            }
+            _ => None,
+        };
+        let Some(title) = mismatch else {
+            return true;
+        };
+        let op = if is_send { "send" } else { "receive" };
+        let msg = format!("{} `{}` — {}", op, chan.render(), title);
+        let notes = vec![
+            format!(
+                "why: the binding's declared direction forbids this operation — a `{}` is invalid Go and the emitted program will not build (issue #89)",
+                if is_send { "<-chan T" } else { "chan<- T" }
+            ),
+            format!(
+                "fix: declare this channel as `chan T` (bidirectional) where the {} happens, or use the direction that matches the operation (`{}` to send, `{}` to receive)",
+                op, "chan<- T", "<-chan T"
+            ),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E3008", self.path.clone(), chan.span(), msg).with_notes(notes),
+        );
+        false
+    }
+
+    /// Statement-level receive hook (#89): if `value` (a local initializer
+    /// or an expression statement) IS a receive expression `<-ch`,
+    /// enforce the channel's direction. Receives nested deeper in an
+    /// expression are out of scope for this pass (statement + select-arm
+    /// sites cover the realistic misuse; noted in the issue).
+    pub(crate) fn check_recv_expr(&mut self, st: &FnState, value: &Expr) {
+        if let Expr::Receive { chan, .. } = unwrap_parens(value) {
+            self.check_chan_dir(st, chan, false);
         }
     }
 
