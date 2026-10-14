@@ -390,6 +390,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     false,
                     Some(callee),
                     targets.as_deref(),
+                    None,
                 );
             }
 
@@ -423,6 +424,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     *is_move,
                     None,
                     targets.as_deref(),
+                    Some(chan),
                 );
             }
 
@@ -483,6 +485,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                                 false,
                                 None,
                                 targets.as_deref(),
+                                Some(chan),
                             );
                         }
                         SelectArmKind::Recv { .. } | SelectArmKind::Default => {}

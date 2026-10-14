@@ -248,3 +248,48 @@ fn zero_values_stay_legal() {
     );
     assert_eq!(r.verdict, Verdict::Accept);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #77 — channel send target proof (O4.9 fail-closed)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn send_to_void_call_callee_is_fail_closed_e3005() {
+    // Issue #77: send target must resolve to a channel shape.
+    let r = check("fn noop() {}\n\nfn main() {\n    noop() <- 1\n}\n");
+    let cs = codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E3005"),
+        "expected HYB-E3005 for send to non-channel void call, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn send_to_non_channel_local_is_fail_closed_e3005() {
+    // Issue #77: send target that resolves to non-channel is rejected.
+    let r = check("fn main() {\n    x := 5\n    x <- 1\n}\n");
+    let cs = codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E3005"),
+        "expected HYB-E3005 for send to non-channel local, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn repro_issue_77_two_line_receive_compiles_cleanly() {
+    // Issue #77: an expression statement followed by <-done on the next line
+    // is not fused into noop() <- done; both statements are valid.
+    let r = check(
+        "fn noop() {}\n\nfn main() {\n    done := make(chan bool, 1)\n    noop()\n    <-done\n}\n",
+    );
+    assert!(
+        codes(&r).is_empty(),
+        "expected zero errors, got {:?}",
+        codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}

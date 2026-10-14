@@ -1130,7 +1130,9 @@ impl Parser {
             });
         }
 
-        if self.at_punct("<-") {
+        if self.at_punct("<-")
+            && self.toks[self.pos].span.start.line == self.toks[self.pos - 1].span.end.line
+        {
             self.bump();
             if exprs.len() != 1 {
                 return self.err("channel send takes a single channel");
@@ -2384,6 +2386,34 @@ mod tests {
             }
             s => panic!("send, got {:?}", s),
         }
+    }
+
+    #[test]
+    fn send_does_not_fuse_across_newline() {
+        // Issue #77: an expression statement followed by `<-ch` on the next line
+        // must parse as TWO statements (an Expr statement and a receive statement),
+        // NOT fused into `noop() <- done`.
+        let f = parse_src("fn repro() {\n  noop()\n  <-done\n}");
+        let fn_decl = match &f.decls[0] {
+            Decl::Fn(f) => f,
+            _ => panic!("fn decl"),
+        };
+        let body = fn_decl.body.as_ref().unwrap();
+        assert_eq!(body.stmts.len(), 2);
+        assert!(matches!(
+            &body.stmts[0],
+            Stmt::Expr {
+                expr: Expr::Call { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            &body.stmts[1],
+            Stmt::Expr {
+                expr: Expr::Receive { .. },
+                ..
+            }
+        ));
     }
 
     #[test]

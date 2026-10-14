@@ -533,6 +533,7 @@ impl<'a> Checker<'a> {
         implicit_move: bool,
         spawn_callee: Option<&Expr>,
         target_shapes: Option<&[TypeShape]>,
+        send_chan: Option<&Expr>,
     ) {
         self.total_sites += 1;
 
@@ -553,6 +554,31 @@ impl<'a> Checker<'a> {
                 CalleeVerdict::Unproven(reason) => {
                     unprovens.push(UnprovenInfo {
                         value: callee.render(),
+                        reason,
+                    });
+                }
+            }
+        }
+
+        // The send-channel proof (O4.9 fail-closed): verify that the LHS of
+        // a channel send actually resolves to a channel.
+        if let Some(chan) = send_chan {
+            match self.shape_of_expr(st, chan) {
+                TypeShape::Chan(_) => {}
+                other => {
+                    let reason = if matches!(other, TypeShape::Unknown) {
+                        format!(
+                            "the channel expression `{}` did not resolve to a channel shape — the checker cannot verify the send target",
+                            chan.render()
+                        )
+                    } else {
+                        format!(
+                            "the send target `{}` is not a channel — send requires a channel target",
+                            chan.render()
+                        )
+                    };
+                    unprovens.push(UnprovenInfo {
+                        value: chan.render(),
                         reason,
                     });
                 }

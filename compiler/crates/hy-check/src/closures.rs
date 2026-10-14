@@ -143,6 +143,7 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
                 false,
                 Some(callee),
                 targets.as_deref(),
+                None,
             );
         }
         Stmt::Send {
@@ -162,7 +163,7 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
             };
             let vals: Vec<&Expr> = vec![value];
             let targets = ck.chan_elem_shape(st, chan);
-            ck.check_site(st, *span, "HYB-E3002", &vals, managed, &desc, *is_move, None, targets.as_deref());
+            ck.check_site(st, *span, "HYB-E3002", &vals, managed, &desc, *is_move, None, targets.as_deref(), Some(chan));
         }
         Stmt::Select { arms, .. } => {
             for arm in arms {
@@ -174,7 +175,7 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
                         let span = chan.span().to(value.span());
                         let vals: Vec<&Expr> = vec![value];
                         let targets = ck.chan_elem_shape(st, chan);
-                        ck.check_site(st, span, "HYB-E3002", &vals, managed, &desc, false, None, targets.as_deref());
+                        ck.check_site(st, span, "HYB-E3002", &vals, managed, &desc, false, None, targets.as_deref(), Some(chan));
                     }
                     SelectArmKind::Recv { names, chan } => {
                         // element shape when the channel resolves; `ok` is a
