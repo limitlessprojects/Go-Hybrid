@@ -292,9 +292,15 @@ impl<'a> Checker<'a> {
             // node carrying the TypeExpr in `.ty` (`make(chan bool, n)` →
             // StructLit{ty: Chan}); other spellings degrade to Unknown.
             Expr::StructLit { ty: Some(t), .. } => self.shape_of_type(t),
-            Expr::SliceLit { elem: Some(_), .. } => TypeShape::Slice(Box::new(TypeShape::Unknown)),
-            Expr::MapLit { .. } => {
-                TypeShape::Map(Box::new(TypeShape::Unknown), Box::new(TypeShape::Unknown))
+            Expr::SliceLit { elem: Some(t), .. } => {
+                TypeShape::Slice(Box::new(self.shape_of_type(t)))
+            }
+            Expr::SliceLit { elem: None, .. } => TypeShape::Slice(Box::new(TypeShape::Unknown)),
+            Expr::MapLit { key, value, .. } => {
+                TypeShape::Map(
+                    Box::new(self.shape_of_type(key)),
+                    Box::new(self.shape_of_type(value)),
+                )
             }
             _ => TypeShape::Unknown,
         }

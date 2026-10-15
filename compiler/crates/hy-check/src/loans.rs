@@ -206,6 +206,9 @@ impl<'a> Checker<'a> {
                     // `const` root is frozen exactly like an index write.
                     self.check_delete_const(st, cr, &HashSet::new());
                 }
+                if name == "copy" {
+                    self.process_copy_call(st, cr);
+                }
                 if self.fns.contains_key(&name) {
                     // A3 #111: the callee may insert/delete through the
                     // argument — that event runs inside THIS call site's
@@ -221,6 +224,47 @@ impl<'a> Checker<'a> {
                 }
             }
             Resolved::None => {}
+        }
+    }
+
+    /// Builtin `copy(dst, src)` (#178): if the copied elements can carry
+    /// mutable reference storage, establishing the copy shares those reference
+    /// elements between `dst` and `src`. Record an undirected may-share edge
+    /// so a later `move` of either slice freezes the other (O5.2 / A1b).
+    fn process_copy_call(&mut self, st: &mut FnState, cr: &CallRef) {
+        if cr.args.len() < 2 {
+            return;
+        }
+        let dst_expr = &cr.args[0].value;
+        let src_expr = &cr.args[1].value;
+
+        let dst_shape = self.shape_of_expr(st, dst_expr);
+        let src_shape = self.shape_of_expr(st, src_expr);
+
+        let elem_may_share = match &dst_shape {
+            TypeShape::Slice(elem) | TypeShape::Array(elem) => {
+                self.shape_may_share(elem) || matches!(**elem, TypeShape::Unknown)
+            }
+            TypeShape::Unknown => match &src_shape {
+                TypeShape::Slice(elem) | TypeShape::Array(elem) => {
+                    self.shape_may_share(elem) || matches!(**elem, TypeShape::Unknown)
+                }
+                _ => true,
+            },
+            _ => false,
+        };
+
+        if elem_may_share {
+            let mut dst_roots = Vec::new();
+            collect_ref_roots(dst_expr, &mut dst_roots);
+            let mut src_roots = Vec::new();
+            collect_ref_roots(src_expr, &mut src_roots);
+
+            for d in &dst_roots {
+                for s in &src_roots {
+                    st.share_edge(d, s);
+                }
+            }
         }
     }
 

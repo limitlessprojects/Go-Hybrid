@@ -2837,5 +2837,42 @@ mod tests {
         );
         assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
     }
+
+    /// Builtin `copy(dst, src)` (#178): copying reference elements shares
+    /// them between `dst` and `src`. Moving `dst` across a task boundary freezes
+    /// `src` so concurrent mutation through `src` is rejected.
+    #[test]
+    fn copy_reference_slice_may_share_freezes() {
+        assert_alias_reject(
+            "fn worker(dst []*int) { *dst[0] = 1 }\n\
+             fn main() {\n\
+               src := make([]*int, 1)\n\
+               v := 42\n\
+               src[0] = &v\n\
+               dst := make([]*int, 1)\n\
+               copy(dst, src)\n\
+               task worker(move dst)\n\
+               *src[0] = 99\n\
+             }",
+        );
+    }
+
+    /// Positive control (#178): `copy(dst, src)` on primitive by-value elements
+    /// shares no reference storage; moving `dst` leaves `src` unfrozen and usable.
+    #[test]
+    fn copy_primitive_slice_stays_accepted() {
+        let r = check(
+            "fn worker(dst []int) { dst[0] = 1 }\n\
+             fn main() {\n\
+               src := make([]int, 1)\n\
+               src[0] = 42\n\
+               dst := make([]int, 1)\n\
+               copy(dst, src)\n\
+               task worker(move dst)\n\
+               src[0] = 99\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
 }
 
