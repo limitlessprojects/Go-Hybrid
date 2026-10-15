@@ -2496,6 +2496,79 @@ mod tests {
     }
 
     #[test]
+    fn copy_in_nested_block_preserves_may_share_across_scope_pop() {
+        // Issue #238: copy(dst, src) inside a nested block (e.g. if true { ... })
+        // must retain the may_share relationship for outer bindings when the scope pops.
+        let r = check(
+            "fn worker(dst []map[string]int, done chan bool) {\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               dst := []map[string]int{map[string]int{\"a\": 1}}\n\
+               src := []map[string]int{map[string]int{\"b\": 2}}\n\
+               if true {\n\
+                 copy(dst, src)\n\
+               }\n\
+               done := make(chan bool)\n\
+               task worker(move dst, done)\n\
+               <-done\n\
+               src[0][\"b\"] = 42\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn copy_inside_closure_body_creates_may_share() {
+        // Issue #238: check_stmt_boundaries inside closures must process copy(dst, src).
+        let r = check(
+            "fn worker(dst []map[string]int, done chan bool) {\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               closure := fn() {\n\
+                 dst := []map[string]int{map[string]int{\"a\": 1}}\n\
+                 src := []map[string]int{map[string]int{\"b\": 2}}\n\
+                 copy(dst, src)\n\
+                 done := make(chan bool)\n\
+                 task worker(move dst, done)\n\
+                 <-done\n\
+                 src[0][\"b\"] = 42\n\
+               }\n\
+               closure()\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn copy_with_unknown_dst_resolves_src_element_shape() {
+        // Issue #238: when dst's shape is Slice(Unknown) or Unknown, inspect src's element shape.
+        let r = check(
+            "fn worker(dst []map[string]int, done chan bool) {\n\
+               done <- true\n\
+             }\n\
+             fn helper(dst []map[string]int) {\n\
+               src := []map[string]int{map[string]int{\"b\": 2}}\n\
+               copy(dst, src)\n\
+               done := make(chan bool)\n\
+               task worker(move dst, done)\n\
+               src[0][\"b\"] = 42\n\
+             }\n\
+             fn main() {}\n",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        let cs: Vec<_> = r.diagnostics.iter().map(|d| d.code.as_str()).collect();
+        assert!(
+            cs.iter().any(|&c| c == "HYB-E3004" || c == "HYB-E3003"),
+            "expected HYB-E3004 or HYB-E3003, got {:?}",
+            cs
+        );
+    }
+
+    #[test]
     fn fc_atomic_pointer_and_value_reject_e3005_row_11() {
         let r_ptr = check(
             "import \"sync/atomic\"\n\

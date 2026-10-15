@@ -306,3 +306,45 @@ fn closure_write_to_plain_local_stays_legal() {
     );
     assert_eq!(r.verdict, Verdict::Accept);
 }
+
+#[test]
+fn copy_on_const_slice_is_e3006() {
+    let r = check(
+        "const shared = []int{1, 2, 3}\n\nfn main() {\n    src := []int{9, 9, 9}\n    copy(shared, src)\n}\n",
+    );
+    let cs = codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E3006"),
+        "expected HYB-E3006 for copy() into a const slice, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn copy_on_const_resliced_is_e3006() {
+    let r = check(
+        "const shared = []int{1, 2, 3}\n\nfn main() {\n    src := []int{9, 9, 9}\n    copy(shared[:], src)\n}\n",
+    );
+    let cs = codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E3006"),
+        "expected HYB-E3006 for copy() into a const slice reslice, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn copy_on_const_inside_closure_is_e3006() {
+    let r = check(
+        "const shared = []int{1, 2, 3}\n\nfn main() {\n    f := fn() {\n        src := []int{9, 9, 9}\n        copy(shared, src)\n    }\n    f()\n}\n",
+    );
+    let cs = codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E3006"),
+        "expected HYB-E3006 for copy() into a const slice inside a closure, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}

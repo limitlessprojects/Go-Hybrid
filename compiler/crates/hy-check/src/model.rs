@@ -259,10 +259,29 @@ impl FnState {
         }
         self.scopes.pop();
         if let Some(outer_aliases) = self.alias_scopes.pop() {
-            self.aliases = outer_aliases;
             if let Some(outer_share) = self.share_scopes.pop() {
-                self.may_share = outer_share;
+                let mut merged_share = outer_share;
+                for (k, peers) in &self.may_share {
+                    let k_root = crate::freeze::resolve_alias(self, k);
+                    if self.env_lookup(&k_root).is_some() {
+                        for p in peers {
+                            let p_root = crate::freeze::resolve_alias(self, p);
+                            if k_root != p_root && self.env_lookup(&p_root).is_some() {
+                                merged_share
+                                    .entry(k_root.clone())
+                                    .or_default()
+                                    .insert(p_root.clone());
+                                merged_share
+                                    .entry(p_root.clone())
+                                    .or_default()
+                                    .insert(k_root.clone());
+                            }
+                        }
+                    }
+                }
+                self.may_share = merged_share;
             }
+            self.aliases = outer_aliases;
             for (root, mv) in inner_root_moves {
                 if let Some(br) = self.env_lookup_mut(&root) {
                     if br.moved.is_none() {

@@ -124,6 +124,16 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
     }
     ck.check_uses(st, &uses);
 
+    let mut calls = Vec::new();
+    crate::walk::own_calls(stmt, &mut calls);
+    for cr in &calls {
+        if let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) {
+            if name == "copy" {
+                ck.record_copy_may_share(st, cr);
+            }
+        }
+    }
+
     match stmt {
         Stmt::Local(l) => {
             for v in &l.values {

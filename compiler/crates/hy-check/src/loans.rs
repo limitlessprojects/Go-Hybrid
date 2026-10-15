@@ -205,6 +205,7 @@ impl<'a> Checker<'a> {
                 // share it afterwards — a later `move` of either must freeze
                 // the other (O5.2). Primitive-element slices share nothing.
                 if name == "copy" {
+                    self.check_copy_const(st, cr, &HashSet::new());
                     self.record_copy_may_share(st, cr);
                 }
                 if name == "delete" {
@@ -1080,14 +1081,21 @@ impl<'a> Checker<'a> {
     /// binding must freeze the other (O5.2). A primitive-element slice
     /// (`[]int`) copies by value and shares nothing, so no edge is recorded
     /// and the positive control stays accepted.
-    fn record_copy_may_share(&self, st: &mut FnState, cr: &CallRef) {
+    pub(crate) fn record_copy_may_share(&self, st: &mut FnState, cr: &CallRef) {
         let (Some(dst), Some(src)) = (cr.args.first(), cr.args.get(1)) else {
             return;
         };
         // A slice shape is always a reference (`shape_may_share(Slice)` is
         // unconditional), so consult the ELEMENT shape instead: only a
         // reference-bearing element is copied by reference.
-        let TypeShape::Slice(elem) = self.shape_of_expr(st, unwrap_parens(&dst.value)) else {
+        let elem_shape = match self.shape_of_expr(st, unwrap_parens(&dst.value)) {
+            TypeShape::Slice(elem) if !matches!(*elem, TypeShape::Unknown) => Some(*elem),
+            _ => match self.shape_of_expr(st, unwrap_parens(&src.value)) {
+                TypeShape::Slice(elem) => Some(*elem),
+                _ => None,
+            },
+        };
+        let Some(elem) = elem_shape else {
             return;
         };
         if !self.shape_may_share(&elem) {
@@ -1098,9 +1106,25 @@ impl<'a> Checker<'a> {
         let mut src_roots = Vec::new();
         collect_ref_roots(&src.value, &mut src_roots);
         for d in &dst_roots {
+            let d_root = crate::freeze::resolve_alias(st, d);
             for s in &src_roots {
-                if d != s && self.binding_may_share(st, d) && self.binding_may_share(st, s) {
-                    st.share_edge(d, s);
+                let s_root = crate::freeze::resolve_alias(st, s);
+                if d_root != s_root {
+                    let d_ok = self
+                        .lookup_binding(st, &d_root)
+                        .map(|b| {
+                            self.shape_may_share(&b.shape) || matches!(b.shape, TypeShape::Unknown)
+                        })
+                        .unwrap_or(false);
+                    let s_ok = self
+                        .lookup_binding(st, &s_root)
+                        .map(|b| {
+                            self.shape_may_share(&b.shape) || matches!(b.shape, TypeShape::Unknown)
+                        })
+                        .unwrap_or(false);
+                    if d_ok && s_ok {
+                        st.share_edge(&d_root, &s_root);
+                    }
                 }
             }
         }
@@ -1642,6 +1666,7 @@ impl<'a> Checker<'a> {
             walk::own_calls(stmt, &mut calls);
             for cr in &calls {
                 self.check_delete_const(st, cr, &here);
+                self.check_copy_const(st, cr, &here);
             }
             // nested closures — a NESTED closure's own locals shadow only at
             // its level (flatten does not descend into FnLit bodies, so each
@@ -1663,6 +1688,33 @@ impl<'a> Checker<'a> {
             return;
         };
         if name.as_str() != "delete" {
+            return;
+        }
+        let Some(first) = cr.args.first() else {
+            return;
+        };
+        let Some(root) = first.value.root_ident() else {
+            return;
+        };
+        if declared.contains(root) {
+            return;
+        }
+        let place = Place {
+            kind: PlaceKind::Ident(root.to_string()),
+            span: first.value.span(),
+        };
+        if let Some(hit) = self.const_write_root(st, &place) {
+            self.emit_const_write_error(&hit, first.value.span());
+        }
+    }
+
+    /// HYB-E3006 for `copy(dst, src)`: copy mutates the destination slice,
+    /// so a `const` root is frozen exactly like an index write (T22).
+    fn check_copy_const(&mut self, st: &FnState, cr: &CallRef, declared: &HashSet<String>) {
+        let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) else {
+            return;
+        };
+        if name.as_str() != "copy" {
             return;
         }
         let Some(first) = cr.args.first() else {

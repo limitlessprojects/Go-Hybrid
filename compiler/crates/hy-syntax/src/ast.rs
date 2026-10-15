@@ -747,6 +747,7 @@ impl Expr {
             Expr::Ident { name, .. } => Some(name),
             Expr::Field { base, .. } => base.root_ident(),
             Expr::Index { base, .. } => base.root_ident(),
+            Expr::Slice { base, .. } => base.root_ident(),
             Expr::Paren { inner, .. } => inner.root_ident(),
             Expr::Try { operand, .. } => operand.root_ident(),
             _ => None,
