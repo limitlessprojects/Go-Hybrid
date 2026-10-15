@@ -100,6 +100,10 @@ renumbered).
 
 
 **Distribution: ACCEPT 12 · ACCEPT-MANAGED 2 · REJECT 28 — 42 programs.**
+| 43 | 43-may-share-field-store | REJECT | A1b | a store into a field of a live base (`h.m = m`) hands the value's map header to the base, but the may-share recorder only fired for bare `Ident` rebind targets — the composite-literal twin `h := holder{m: m}` recorded the edge and rejected, the field-store form recorded nothing: before the fix `hyb check` reported OK (0 diagnostics) while `go run` crashed `fatal error: concurrent map writes` (issue #92 sub-bug 1); the fix records may-share from the place's root to the value's ref roots on every field/index store |
+| 44 | 44-may-share-bridge-rebind | REJECT | A1b | rebinding the INTERMEDIATE shallow copy (`h2 := h1; h3 := h2; h2 = fresh`) severed the h1—h3 path: `share_clear` deleted h2's incident edges without clique closure, so `h1.m` and `h3.m` remained the same map header while the graph forgot they were connected — before the fix `hyb check` reported OK (0 diagnostics) while `go run` crashed `fatal error: concurrent map writes` (issue #92 sub-bug 3); the fix closes the component under vertex elimination (former peers link pairwise), and a bridge whose only peer is the moved root creates no closure pair, so a genuine fresh rebind never over-freezes (accept-side guard in hy-check unit suites) |
+
+**Distribution: ACCEPT 12 · ACCEPT-MANAGED 2 · REJECT 30 — 44 programs.**
 
 (19 and 20 were added by the lead during integration on 2026-10-12 — still
 BEFORE any checker existed; see the pre-registration statement. 21, 22, 23

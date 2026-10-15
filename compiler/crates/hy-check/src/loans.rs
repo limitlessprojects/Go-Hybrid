@@ -1394,6 +1394,17 @@ impl<'a> Checker<'a> {
                         // mutation set (or clears it for non-closure values)
                         st.closure_mutates.remove(name);
                         self.record_closure_mutations(st, name, v);
+                    } else {
+                        // #92 sub-bug 1: a store into a field/index of a live
+                        // base (`h.m = m`, `xs[0] = m`, `mm["a"] = m`) hands
+                        // the value's storage to the base composite — may-share
+                        // between the base binding and the value's roots,
+                        // exactly like the composite-literal twin
+                        // `h := holder{m: m}` (already rejected). The store
+                        // used to record no edge, so a later `move m` froze
+                        // nothing and `h` kept writing through the moved map.
+                        let base = t.root().to_string();
+                        self.record_may_share(st, &base, v);
                     }
                 }
             } else if values.len() == 1 && targets.len() > 1 {

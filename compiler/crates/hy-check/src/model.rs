@@ -346,12 +346,24 @@ impl FnState {
     }
 
     /// Drop `name`'s may-share edges: a whole-binding rebind re-owns the
-    /// binding, so it leaves the old sharing component.
+    /// binding, so it leaves the old sharing component. Vertex elimination
+    /// keeps the component closed: the former peers were connected THROUGH
+    /// `name` (it was their shallow-copy bridge), and they still reference
+    /// the same storage after `name` is rebound — so the elimination links
+    /// them pairwise instead of severing the paths (#92 sub-bug 3:
+    /// `h2 := h1; h3 := h2; h2 = fresh` used to orphan `h3` from `h1`
+    /// even though `h1.m` and `h3.m` remain the same map header).
     pub(crate) fn share_clear(&mut self, name: &str) {
         if let Some(peers) = self.may_share.remove(name) {
-            for p in peers {
-                if let Some(set) = self.may_share.get_mut(&p) {
+            let peers: Vec<String> = peers.into_iter().collect();
+            for p in &peers {
+                if let Some(set) = self.may_share.get_mut(p) {
                     set.remove(name);
+                }
+            }
+            for i in 0..peers.len() {
+                for j in (i + 1)..peers.len() {
+                    self.share_edge(&peers[i], &peers[j]);
                 }
             }
         }
