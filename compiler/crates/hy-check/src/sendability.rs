@@ -180,7 +180,7 @@ impl<'a> Checker<'a> {
                                 risky: !b.shape.is_sendable_by_type(),
                             };
                         }
-                        if b.immutable {
+                        if b.immutable && b.shape.is_sendable_by_type() {
                             return Outcome::Ok;
                         }
                     }
@@ -217,8 +217,8 @@ impl<'a> Checker<'a> {
                 risky: !b.shape.is_sendable_by_type(),
             };
         }
-        if b.immutable {
-            return Outcome::Ok; // class 4 (let/const/const-decl)
+        if b.immutable && b.shape.is_sendable_by_type() {
+            return Outcome::Ok; // class 4 (deeply immutable const)
         }
         if matches!(b.shape, TypeShape::Unknown) {
             // FAIL-CLOSED (O4.9): a binding whose type the checker could
@@ -282,9 +282,6 @@ impl<'a> Checker<'a> {
                 desc: self.managed_desc(root, b),
                 risky: !b.shape.is_sendable_by_type(),
             };
-        }
-        if b.immutable {
-            return Outcome::Ok;
         }
         if matches!(b.shape, TypeShape::Unknown) {
             // FAIL-CLOSED (O4.9): a borrow of an unproven value.

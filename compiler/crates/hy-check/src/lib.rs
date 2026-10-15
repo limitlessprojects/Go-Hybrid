@@ -2837,5 +2837,55 @@ mod tests {
         );
         assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
     }
+
+    /// Issue #188: const composites are runtime-mutable in Go runtime and
+    /// cannot be Class 4 sendable across tasks or channels without move.
+    #[test]
+    fn const_composite_map_send_rejects_e3001() {
+        let r = check(
+            "const shared_map = map[string]int{\"k\": 0}\n\
+             fn worker(m map[string]int, done chan<- bool) { done <- true }\n\
+             fn main() {\n\
+               done := make(chan bool, 1)\n\
+               task worker(shared_map, done)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3001"),
+            "expected HYB-E3001, got {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn const_composite_chan_send_rejects_e3002() {
+        let r = check(
+            "const shared_map = map[string]int{\"k\": 0}\n\
+             fn main() {\n\
+               ch := make(chan map[string]int, 1)\n\
+               ch <- shared_map\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3002"),
+            "expected HYB-E3002, got {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn const_primitive_stays_sendable() {
+        let r = check(
+            "const budget = 3\n\
+             fn worker(b int, done chan<- bool) { done <- true }\n\
+             fn main() {\n\
+               done := make(chan bool, 1)\n\
+               task worker(budget, done)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
 }
 
