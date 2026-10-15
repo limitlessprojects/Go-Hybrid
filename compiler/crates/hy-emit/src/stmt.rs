@@ -938,34 +938,18 @@ impl Emitter {
         }
     }
 
-fn stmt_terminates(s: &Stmt) -> bool {
-    match s {
-        Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => true,
-        Stmt::Block { block, .. } => block_terminates(&block.stmts),
-        Stmt::Managed { body, .. } => block_terminates(&body.stmts),
-        Stmt::If { then, otherwise, .. } => {
-            if let Some(other) = otherwise {
-                block_terminates(&then.stmts) && stmt_terminates(other)
-            } else {
-                false
-            }
-        }
-        _ => false,
-    }
-}
-
-fn block_terminates(stmts: &[Stmt]) -> bool {
-    stmts.iter().any(stmt_terminates)
-}
-
     /// Flush store-backs for all active loan frames from innermost to outermost.
     /// Used before `return` statements so updates persist before returning,
     /// preventing unreachable code and missing-return compiler errors (Issue #203).
     fn flush_all_loans(&mut self) {
-        for frame in self.loan_frames.iter().rev() {
-            for (name, place) in frame {
-                self.push(&format!("{} = {}", place, name));
-            }
+        let storebacks: Vec<(String, String)> = self
+            .loan_frames
+            .iter()
+            .rev()
+            .flat_map(|frame| frame.iter().cloned())
+            .collect();
+        for (name, place) in storebacks {
+            self.push(&format!("{} = {}", place, name));
         }
     }
 
@@ -983,10 +967,13 @@ fn block_terminates(stmts: &[Stmt]) -> bool {
         };
         if let Some(depth) = depth {
             if depth <= self.loan_frames.len() {
-                for frame in self.loan_frames[depth..].iter().rev() {
-                    for (name, place) in frame {
-                        self.push(&format!("{} = {}", place, name));
-                    }
+                let storebacks: Vec<(String, String)> = self.loan_frames[depth..]
+                    .iter()
+                    .rev()
+                    .flat_map(|frame| frame.iter().cloned())
+                    .collect();
+                for (name, place) in storebacks {
+                    self.push(&format!("{} = {}", place, name));
                 }
             }
         }
@@ -1428,4 +1415,24 @@ fn block_terminates(stmts: &[Stmt]) -> bool {
         }
         Ok(())
     }
+}
+
+fn stmt_terminates(s: &Stmt) -> bool {
+    match s {
+        Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => true,
+        Stmt::Block { block, .. } => block_terminates(&block.stmts),
+        Stmt::Managed { body, .. } => block_terminates(&body.stmts),
+        Stmt::If { then, otherwise, .. } => {
+            if let Some(other) = otherwise {
+                block_terminates(&then.stmts) && stmt_terminates(other)
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+fn block_terminates(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_terminates)
 }
