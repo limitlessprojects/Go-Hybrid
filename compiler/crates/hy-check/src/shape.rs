@@ -240,6 +240,11 @@ impl<'a> Checker<'a> {
             },
             Expr::Field { base, name, .. } => {
                 let base_shape = self.shape_of_expr(st, base);
+                if name == "val"
+                    && matches!(self.ty_of_expr(st, base), Some(TypeExpr::Option { .. }))
+                {
+                    return base_shape;
+                }
                 self.field_shape(&base_shape, name)
             }
             Expr::Call { callee, args, .. } => self.call_shape(st, callee, args),
@@ -301,7 +306,7 @@ impl<'a> Checker<'a> {
                     // the type argument; defaults Unknown (fail-closed at
                     // boundaries, O4.9). See the TECH DEBT note in foreign.rs.
                     "make" => self.make_shape(args),
-                    "append" => args
+                    "append" | "some" | "unwrap" | "or" => args
                         .first()
                         .map(|a| self.shape_of_expr(st, &a.value))
                         .unwrap_or(TypeShape::Unknown),
@@ -344,6 +349,9 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let recv = self.shape_of_expr(st, base);
+                if matches!(name.as_str(), "unwrap" | "unwrap_or" | "or") {
+                    return recv;
+                }
                 match receiver_type_name(&recv) {
                     Some(t) => foreign::method_result(&t, name),
                     None => TypeShape::Unknown,
@@ -494,6 +502,11 @@ impl<'a> Checker<'a> {
                 }
                 let base_ty = self.ty_of_expr(st, base)?;
                 let resolved = self.resolve_type_alias(&base_ty);
+                if name == "val" {
+                    if let TypeExpr::Option { elem, .. } = resolved {
+                        return Some(*elem);
+                    }
+                }
                 let sname = Self::base_named_type(&resolved)?;
                 self.structs
                     .get(&sname)
@@ -551,6 +564,15 @@ impl<'a> Checker<'a> {
                             span: *span,
                         });
                     }
+                    if matches!(name.as_str(), "unwrap" | "or") {
+                        return args
+                            .first()
+                            .and_then(|a| self.ty_of_expr(st, &a.value))
+                            .map(|t| match self.resolve_type_alias(&t) {
+                                TypeExpr::Option { elem, .. } => *elem,
+                                other => other,
+                            });
+                    }
                     let head = Self::base_named_type_str(name);
                     self.fns
                         .get(name.as_str())
@@ -565,6 +587,13 @@ impl<'a> Checker<'a> {
                             let full = format!("{}.{}", root, head);
                             if let Some(f) = self.fns.get(full.as_str()) {
                                 return f.results.first().map(|r| r.ty.clone());
+                            }
+                        }
+                    }
+                    if matches!(name.as_str(), "unwrap" | "unwrap_or" | "or") {
+                        if let Some(base_ty) = self.ty_of_expr(st, base) {
+                            if let TypeExpr::Option { elem, .. } = self.resolve_type_alias(&base_ty) {
+                                return Some(*elem);
                             }
                         }
                     }

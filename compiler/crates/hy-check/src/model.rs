@@ -280,7 +280,14 @@ impl FnState {
             for (root, mv) in inner_root_moves {
                 if let Some(br) = self.env_lookup_mut(&root) {
                     if br.moved.is_none() {
-                        br.moved = Some(mv);
+                        br.moved = Some(mv.clone());
+                    }
+                }
+                for peer in self.share_group(&root) {
+                    if let Some(bp) = self.env_lookup_mut(&peer) {
+                        if bp.moved.is_none() {
+                            bp.moved = Some(mv.clone());
+                        }
                     }
                 }
             }

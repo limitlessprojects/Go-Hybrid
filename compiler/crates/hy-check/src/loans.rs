@@ -25,11 +25,11 @@ use crate::shape::receiver_type_name;
 use crate::walk::{self, CallRef};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{AssignOp, Block, Expr, FnDecl, LocalDecl, LocalKind, Place, PlaceKind, Stmt};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Read-only call targets that can never mutate a map argument — the A3
 /// callee scan fails closed on everything else (#111).
-const A3_PURE_FNS: &[&str] = &["len", "cap", "print", "println"];
+const A3_PURE_FNS: &[&str] = &["len", "cap", "print", "println", "some", "unwrap", "or"];
 /// Read-only packages (`fmt.println(m)`, `strings.split(...)`) — their
 /// methods receive values without storing to them (#111).
 const A3_PURE_PKGS: &[&str] = &["fmt", "strings", "strconv", "math", "unicode"];
@@ -497,10 +497,34 @@ impl<'a> Checker<'a> {
     }
 
     fn block_mutates_param(&self, block: &Block, param: &str, depth: usize) -> bool {
-        block
-            .stmts
-            .iter()
-            .any(|s| self.stmt_mutates_param(s, param, depth))
+        self.stmts_mutate_param(&block.stmts, param, depth)
+    }
+
+    fn stmts_mutate_param(&self, stmts: &[Stmt], param: &str, depth: usize) -> bool {
+        for (i, s) in stmts.iter().enumerate() {
+            if self.stmt_mutates_param(s, param, depth) {
+                return true;
+            }
+            if let Stmt::Local(l) = s {
+                let mut shadowed = false;
+                for (name, val) in l.names.iter().zip(l.values.iter()) {
+                    let is_alias = walk::expr_path(val)
+                        .map(|p| path_root(&p) == param)
+                        .unwrap_or(false);
+                    if is_alias {
+                        if self.stmts_mutate_param(&stmts[i + 1..], name, depth) {
+                            return true;
+                        }
+                    } else if name == param {
+                        shadowed = true;
+                    }
+                }
+                if shadowed {
+                    return false;
+                }
+            }
+        }
+        false
     }
 
     fn stmt_mutates_param(&self, stmt: &Stmt, param: &str, depth: usize) -> bool {
@@ -563,8 +587,26 @@ impl<'a> Checker<'a> {
                     return true;
                 }
             }
-            Stmt::Match { arms, .. } => {
+            Stmt::Match { subject, arms, .. } => {
+                let subj_is_param = walk::expr_path(subject)
+                    .map(|p| path_root(&p) == param)
+                    .unwrap_or(false);
                 for arm in arms {
+                    if let hy_syntax::MatchPattern::Path {
+                        binding: Some(b), ..
+                    } = &arm.pattern
+                    {
+                        if subj_is_param {
+                            if (b != param && self.block_mutates_param(&arm.body, param, depth))
+                                || self.block_mutates_param(&arm.body, b, depth)
+                            {
+                                return true;
+                            }
+                            continue;
+                        } else if b == param {
+                            continue;
+                        }
+                    }
                     if self.block_mutates_param(&arm.body, param, depth) {
                         return true;
                     }
@@ -675,6 +717,29 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn resolve_closure_root(
+        raw: &str,
+        frames: &[(HashSet<String>, HashMap<String, String>)],
+        bound: &HashSet<String>,
+        outer_aliases: &HashMap<String, String>,
+    ) -> Option<(String, bool)> {
+        for (shadows, aliases) in frames.iter().rev() {
+            if let Some(target) = aliases.get(raw) {
+                return Some((target.clone(), true));
+            }
+            if shadows.contains(raw) {
+                return None;
+            }
+        }
+        if let Some(target) = outer_aliases.get(raw) {
+            return Some((target.clone(), true));
+        }
+        if bound.contains(raw) {
+            return None;
+        }
+        Some((raw.to_string(), false))
+    }
+
     /// Every base path this block may store through or delete: index-assign
     /// targets, `delete` first args, and (via calls) anything a called top
     /// fn mutates of its parameter, or another local closure mutates.
@@ -686,13 +751,73 @@ impl<'a> Checker<'a> {
         bound: &HashSet<String>,
     ) -> HashSet<String> {
         let mut out: HashSet<String> = HashSet::new();
+        let empty_aliases: HashMap<String, String> = HashMap::new();
+        let mut frames: Vec<(HashSet<String>, HashMap<String, String>)> =
+            vec![(HashSet::new(), HashMap::new())];
         let flat = walk::flatten(body);
-        for (stmt, _idx) in &flat.stmts {
+        for (stmt, idx) in &flat.stmts {
+            if let Some(evs) = flat.events.get(idx) {
+                for ev in evs {
+                    match ev {
+                        walk::ScopeEvent::Push => {
+                            frames.push((HashSet::new(), HashMap::new()));
+                        }
+                        walk::ScopeEvent::Pop => {
+                            if frames.len() > 1 {
+                                frames.pop();
+                            }
+                        }
+                        walk::ScopeEvent::MatchBind { name, subject } => {
+                            let resolved = walk::expr_path(subject).and_then(|p| {
+                                Self::resolve_closure_root(
+                                    path_root(&p),
+                                    &frames,
+                                    bound,
+                                    &empty_aliases,
+                                )
+                                .map(|(r, _)| r)
+                            });
+                            if let Some(frame) = frames.last_mut() {
+                                if let Some(r) = resolved {
+                                    frame.0.remove(*name);
+                                    frame.1.insert((*name).to_string(), r);
+                                } else {
+                                    frame.1.remove(*name);
+                                    frame.0.insert((*name).to_string());
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if let Stmt::Local(l) = stmt {
+                for (name, val) in l.names.iter().zip(l.values.iter()) {
+                    let resolved = walk::expr_path(val).and_then(|p| {
+                        Self::resolve_closure_root(path_root(&p), &frames, bound, &empty_aliases)
+                            .map(|(r, _)| r)
+                    });
+                    if let Some(frame) = frames.last_mut() {
+                        if let Some(r) = resolved {
+                            frame.0.remove(name.as_str());
+                            frame.1.insert(name.clone(), r);
+                        } else {
+                            frame.1.remove(name.as_str());
+                            frame.0.insert(name.clone());
+                        }
+                    }
+                }
+            }
             // index-assign targets
             if let Stmt::Assign { targets, .. } = stmt {
                 for t in targets {
-                    if matches!(t.kind, PlaceKind::Index { .. }) && !bound.contains(t.root()) {
-                        out.insert(path_root(&walk::place_path(t).unwrap_or_default()).to_string());
+                    if matches!(t.kind, PlaceKind::Index { .. }) {
+                        let raw = path_root(&walk::place_path(t).unwrap_or_default()).to_string();
+                        if let Some((r, _)) =
+                            Self::resolve_closure_root(&raw, &frames, bound, &empty_aliases)
+                        {
+                            out.insert(r);
+                        }
                     }
                 }
             }
@@ -711,9 +836,14 @@ impl<'a> Checker<'a> {
                     ..
                 } = unwrap_parens(v)
                 {
-                    let mut inner_bound = bound.clone();
-                    inner_bound.extend(fp.iter().map(|p| p.name.clone()));
-                    out.extend(self.collect_mutation_roots(st, fb, &inner_bound));
+                    let inner_bound: HashSet<String> = fp.iter().map(|p| p.name.clone()).collect();
+                    for ir in self.collect_mutation_roots(st, fb, &inner_bound) {
+                        if let Some((r, _)) =
+                            Self::resolve_closure_root(&ir, &frames, bound, &empty_aliases)
+                        {
+                            out.insert(r);
+                        }
+                    }
                 }
             }
             // calls in this statement
@@ -725,8 +855,12 @@ impl<'a> Checker<'a> {
                         if name == "delete" {
                             if let Some(first) = cr.args.first() {
                                 if let Some(p) = walk::expr_path(&first.value) {
-                                    let r = path_root(&p).to_string();
-                                    if !bound.contains(&r) {
+                                    if let Some((r, _)) = Self::resolve_closure_root(
+                                        path_root(&p),
+                                        &frames,
+                                        bound,
+                                        &empty_aliases,
+                                    ) {
                                         out.insert(r);
                                     }
                                 }
@@ -741,10 +875,14 @@ impl<'a> Checker<'a> {
                                 let Some(p) = walk::expr_path(&a.value) else {
                                     continue;
                                 };
-                                let r = path_root(&p).to_string();
-                                if bound.contains(&r) {
+                                let Some((r, _)) = Self::resolve_closure_root(
+                                    path_root(&p),
+                                    &frames,
+                                    bound,
+                                    &empty_aliases,
+                                ) else {
                                     continue;
-                                }
+                                };
                                 let mutates = match decl.params.get(i) {
                                     Some(tp) => self.fn_mutates_param(decl, &tp.name, 0),
                                     None => true, // fail closed
@@ -760,8 +898,12 @@ impl<'a> Checker<'a> {
                             // unknown callee — fail closed on path args
                             for a in cr.args {
                                 if let Some(p) = walk::expr_path(&a.value) {
-                                    let r = path_root(&p).to_string();
-                                    if !bound.contains(&r) {
+                                    if let Some((r, _)) = Self::resolve_closure_root(
+                                        path_root(&p),
+                                        &frames,
+                                        bound,
+                                        &empty_aliases,
+                                    ) {
                                         out.insert(r);
                                     }
                                 }
@@ -776,8 +918,12 @@ impl<'a> Checker<'a> {
                         }
                         for a in cr.args {
                             if let Some(p) = walk::expr_path(&a.value) {
-                                let r = path_root(&p).to_string();
-                                if !bound.contains(&r) {
+                                if let Some((r, _)) = Self::resolve_closure_root(
+                                    path_root(&p),
+                                    &frames,
+                                    bound,
+                                    &empty_aliases,
+                                ) {
                                     out.insert(r);
                                 }
                             }
@@ -786,8 +932,12 @@ impl<'a> Checker<'a> {
                     _ => {
                         for a in cr.args {
                             if let Some(p) = walk::expr_path(&a.value) {
-                                let r = path_root(&p).to_string();
-                                if !bound.contains(&r) {
+                                if let Some((r, _)) = Self::resolve_closure_root(
+                                    path_root(&p),
+                                    &frames,
+                                    bound,
+                                    &empty_aliases,
+                                ) {
                                     out.insert(r);
                                 }
                             }
@@ -1473,6 +1623,102 @@ impl<'a> Checker<'a> {
         );
     }
 
+    pub(crate) fn bind_match_arm(
+        &self,
+        st: &mut FnState,
+        name: &str,
+        subject: &Expr,
+        managed: bool,
+    ) {
+        let shape = self.shape_of_expr(st, subject);
+        let ty = self.ty_of_expr(st, subject).map(|t| match t {
+            hy_syntax::TypeExpr::Option { elem, .. } => *elem,
+            other => other,
+        });
+        let mut subj_roots = Vec::new();
+        collect_ref_roots(subject, &mut subj_roots);
+        let subj_tainted = subj_roots
+            .iter()
+            .any(|r| self.lookup_binding(st, r).is_some_and(|b| b.managed_taint));
+        let subj_moved = subj_roots
+            .iter()
+            .find_map(|r| self.lookup_binding(st, r).and_then(|b| b.moved.clone()));
+        let subj_origin = if self.shape_may_share(&shape) {
+            subj_roots.iter().find_map(|r| {
+                self.non_owned_origin_of(st, r).map(|(o, via_share)| {
+                    if via_share {
+                        format!("a may-share peer of {}", o)
+                    } else {
+                        o
+                    }
+                })
+            })
+        } else {
+            None
+        };
+        let mut subj_share_peers: Vec<String> = Vec::new();
+        if self.shape_may_share(&shape) {
+            for r in &subj_roots {
+                if self.binding_may_share(st, r) {
+                    subj_share_peers.push(r.clone());
+                    subj_share_peers.extend(st.share_group(r));
+                }
+            }
+        }
+        let subj_alias_parent = if shape.is_reference_alias() {
+            subj_roots
+                .iter()
+                .find(|r| {
+                    self.lookup_binding(st, r)
+                        .is_some_and(|b| b.shape.is_reference_alias())
+                })
+                .and_then(|r| {
+                    if r == name {
+                        st.aliases.get(name).cloned()
+                    } else {
+                        Some(r.clone())
+                    }
+                })
+        } else {
+            None
+        };
+
+        let shadowed_const = self.shape_may_share(&shape)
+            && subj_roots.iter().any(|r| {
+                self.const_write_root(
+                    st,
+                    &Place {
+                        kind: PlaceKind::Ident(r.clone()),
+                        span: subject.span(),
+                    },
+                )
+                .is_some()
+            });
+
+        self.define_binding(st, name, shape, ty, shadowed_const, managed);
+        self.record_may_share(st, name, subject);
+        self.record_alias(st, name, subject);
+        for peer in subj_share_peers {
+            st.share_edge(name, &peer);
+        }
+        if let Some(parent) = subj_alias_parent {
+            if parent != name {
+                st.aliases.insert(name.to_string(), parent);
+            }
+        }
+        if let Some(b) = st.env_lookup_mut(name) {
+            if subj_tainted {
+                b.managed_taint = true;
+            }
+            if b.moved.is_none() {
+                b.moved = subj_moved;
+            }
+            if b.non_owned_origin.is_none() {
+                b.non_owned_origin = subj_origin;
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Assignments (A3 inserts, A6 field stores, whole-binding rebinds)
     // -----------------------------------------------------------------------
@@ -1952,6 +2198,9 @@ impl<'a> Checker<'a> {
                                 };
                                 self.define_binding(&mut cst, n, shape, None, false, false);
                             }
+                        }
+                        walk::ScopeEvent::MatchBind { name, subject } => {
+                            self.bind_match_arm(&mut cst, name, subject, false);
                         }
                     }
                 }

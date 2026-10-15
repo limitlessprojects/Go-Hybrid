@@ -277,6 +277,15 @@ impl<'a> Checker<'a> {
                 self.classify_composite(st, expr, parts.into_iter())
             }
             Expr::SliceLit { items, .. } => self.classify_composite(st, expr, items.iter()),
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "some" && self.lookup_binding(st, name).is_none() {
+                        return self.classify_composite(st, expr, args.iter().map(|a| &a.value));
+                    }
+                }
+                let shape = self.shape_of_expr(st, expr);
+                self.outcome_for_shape(&shape, &expr.render())
+            }
             // field/index/slice reads: classify the read's shape, but honor
             // immutable roots when the resulting value is a value copy (views
             // of const values that do not share reference storage stay

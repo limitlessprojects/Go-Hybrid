@@ -35,6 +35,10 @@ pub(crate) enum ScopeEvent<'a> {
         names: &'a [String],
         chan: &'a Expr,
     },
+    MatchBind {
+        name: &'a str,
+        subject: &'a Expr,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -180,9 +184,32 @@ fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt) {
             scoped_block(out, body);
             out.managed_end.insert(idx, out.next.saturating_sub(1));
         }
-        Stmt::Match { arms, .. } => {
+        Stmt::Match { subject, arms, .. } => {
             for arm in arms {
-                scoped_block(out, &arm.body);
+                let first = out.next;
+                let mut ran = false;
+                for s in &arm.body.stmts {
+                    if !ran {
+                        out.mark_event(first, ScopeEvent::Push);
+                        if let hy_syntax::MatchPattern::Path {
+                            binding: Some(b), ..
+                        } = &arm.pattern
+                        {
+                            out.mark_event(
+                                first,
+                                ScopeEvent::MatchBind {
+                                    name: b.as_str(),
+                                    subject,
+                                },
+                            );
+                        }
+                        ran = true;
+                    }
+                    walk_one(out, s);
+                }
+                if ran {
+                    out.mark_event(out.next, ScopeEvent::Pop);
+                }
             }
         }
         Stmt::Block { block, .. } => scoped_block(out, block),
@@ -295,7 +322,15 @@ pub(crate) fn own_uses(stmt: &Stmt, out: &mut Vec<Use>) {
             expr_uses(subject, out);
             for arm in arms {
                 if let Some(g) = &arm.guard {
-                    expr_uses(g, out);
+                    let mut g_uses = Vec::new();
+                    expr_uses(g, &mut g_uses);
+                    if let hy_syntax::MatchPattern::Path {
+                        binding: Some(b), ..
+                    } = &arm.pattern
+                    {
+                        g_uses.retain(|u| u.name != *b);
+                    }
+                    out.extend(g_uses);
                 }
             }
         }
@@ -743,10 +778,27 @@ pub(crate) fn place_path(place: &Place) -> Option<String> {
 pub(crate) fn expr_path(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Ident { name, .. } => Some(name.clone()),
-        Expr::Field { base, name, .. } => Some(format!("{}.{}", expr_path(base)?, name)),
+        Expr::Field { base, name, .. } => {
+            if name == "val" {
+                expr_path(base)
+            } else {
+                Some(format!("{}.{}", expr_path(base)?, name))
+            }
+        }
         Expr::Index { base, .. } => expr_path(base),
         Expr::Paren { inner, .. } => expr_path(inner),
         Expr::Try { operand, .. } => expr_path(operand),
+        Expr::Call { callee, args, .. } => match crate::model::unwrap_parens(callee) {
+            Expr::Ident { name, .. } if matches!(name.as_str(), "some" | "unwrap" | "or") => {
+                args.first().and_then(|a| expr_path(&a.value))
+            }
+            Expr::Field { base, name, .. }
+                if matches!(name.as_str(), "unwrap" | "unwrap_or" | "or") =>
+            {
+                expr_path(base)
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
