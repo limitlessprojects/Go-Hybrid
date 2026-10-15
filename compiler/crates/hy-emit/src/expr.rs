@@ -16,8 +16,8 @@ use super::{
 };
 
 use super::shapes::{
-    lookup_conversion, lookup_member, lookup_rust_crate, lookup_unbound_crate, MemberKind,
-    RustCrateDesc,
+    lookup_conversion, lookup_member, lookup_rust_crate, lookup_spec_primitive,
+    lookup_unbound_crate, MemberKind, RustCrateDesc,
 };
 
 /// Operator precedence (Go tiers; higher binds tighter).
@@ -102,7 +102,7 @@ impl Emitter {
                         "`none` outside a return (MVP-0 lowers `return none` against the declared option result)",
                     ));
                 }
-                if let Some(go_prim) = shapes::lookup_spec_primitive(name) {
+                if let Some(go_prim) = lookup_spec_primitive(name) {
                     return Ok(go_prim.to_string());
                 }
                 Ok(name.clone())
