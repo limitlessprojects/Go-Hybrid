@@ -1,5 +1,10 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — 2026-10-15
+
+- Managed gate now refuses an omitted source list before baseline I/O; empty explicit scans remain valid.
+- Reproduced four false-success CLI cases on `8fb9238`; added regressions and ran all 21 Python tool tests successfully. Rust/compiler suites were not run (Rust is unavailable locally); upstream CI is required before merge.
+
 ## Status
 - Current phase: **MVP COMPLETE — G3 REVIEWED + PASSED 2026-10-13** (review delegated by the human; every claim re-verified via standard suites + repo harnesses in a fresh sandbox; 4 findings found + repaired — see Decision Log; Post-MVP queue opened below)
 - State: MVP done; post-MVP queue open (rows in priority order)

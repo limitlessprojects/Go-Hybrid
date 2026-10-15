@@ -5,6 +5,7 @@ import io
 import json
 import pathlib
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -20,6 +21,55 @@ def block(reason):
 
 
 class ManagedGateTests(unittest.TestCase):
+    def test_missing_source_arguments_fail_without_changing_baseline(self):
+        script = pathlib.Path(__file__).with_name('managed_gate.py')
+        for rebaseline in (False, True):
+            for existing in (False, True):
+                with self.subTest(rebaseline=rebaseline, existing=existing), \
+                        tempfile.TemporaryDirectory() as directory:
+                    baseline = pathlib.Path(directory) / 'baseline.json'
+                    original = b'{"version": 1, "blocks": {"reviewed.hy:1": {"reason": "reviewed", "category": "other"}}}\n'
+                    if existing:
+                        baseline.write_bytes(original)
+                    args = ['--rebaseline'] if rebaseline else []
+                    result = subprocess.run(
+                        [sys.executable, str(script), *args, 'unused-hyb', str(baseline)],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    self.assertNotIn('managed gate: PASS', result.stdout)
+                    self.assertIn('source', result.stderr)
+                    if existing:
+                        self.assertEqual(baseline.read_bytes(), original)
+                    else:
+                        self.assertFalse(baseline.exists())
+
+    def test_explicit_source_without_managed_blocks_can_clear_baseline(self):
+        # A real scan yielding zero blocks must stay legal: this represents
+        # removal of the last hatch, unlike omitting the scan inputs entirely.
+        for rebaseline in (False, True):
+            with self.subTest(rebaseline=rebaseline), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                source = root / 'plain.hy'
+                source.write_text('fn main() {}', encoding='utf-8')
+                baseline = root / 'baseline.json'
+                original = {'version': 1, 'blocks': {'old.hy:1': block('reviewed')}}
+                baseline.write_text(json.dumps(original), encoding='utf-8')
+                args = ['managed_gate.py']
+                if rebaseline:
+                    args.append('--rebaseline')
+                args.extend(['hyb', str(baseline), str(source)])
+                report = subprocess.CompletedProcess(
+                    [], 0, json.dumps({'summary': {'managed': {'blocks': []}}}), '')
+                with patch.object(sys, 'argv', args), \
+                        patch.object(gate.subprocess, 'run', return_value=report) as checker, \
+                        contextlib.redirect_stdout(io.StringIO()) as output:
+                    gate.main()
+                self.assertEqual(checker.call_count, 1)
+                expected = {'version': 1, 'blocks': {}} if rebaseline else original
+                self.assertEqual(json.loads(baseline.read_text()), expected)
+                self.assertIn('rebaseline:' if rebaseline else 'managed gate: PASS', output.getvalue())
+
     def audit(self, source, blocks, returncode=0):
         with tempfile.TemporaryDirectory() as directory:
             prog = pathlib.Path(directory) / 'test.hy'

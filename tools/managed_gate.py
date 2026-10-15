@@ -76,6 +76,16 @@ def main():
     if args and args[0] == "--rebaseline":
         rebaseline = True
         args = args[1:]
+
+    # An empty source list is a missing scan, not evidence that all managed
+    # blocks were removed. Reject it before reading or replacing the baseline.
+    if len(args) < 3:
+        print(
+            "GATE ERROR: supply a checker, a baseline, and at least one source file\n"
+            "usage: managed_gate.py [--rebaseline] <hyb> <baseline.json> <prog.hy> [more.hy ...]",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     hyb, baseline_path, progs = args[0], args[1], args[2:]
 
     try:
