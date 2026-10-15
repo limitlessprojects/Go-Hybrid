@@ -344,6 +344,34 @@
       "rule": "T"
     },
     {
+      "code": "HYB-E5004",
+      "name": "struct-literal-field-mismatch",
+      "category": "struct",
+      "severity": "error",
+      "title": "struct literal names a field the struct does not declare (or gives it twice)",
+      "summary": "A struct literal must name only fields the declared struct has, and each at most once. Go rejects the emitted code with `unknown field ... in struct literal` or `duplicate field ... in struct literal`, so an accepted program can never build.",
+      "fixits": [
+        "use one of the declared field names",
+        "remove the repeated field"
+      ],
+      "example": "struct titik { x int  y int }   titik{x: 1, z: 2}   // reject: HYB-E5004 — no field `z`",
+      "rule": "N"
+    },
+    {
+      "code": "HYB-E5005",
+      "name": "struct-literal-field-value-mismatch",
+      "category": "struct",
+      "severity": "error",
+      "title": "struct literal gives a field a literal of a type it can never hold",
+      "summary": "A struct-literal field value must be assignable to the declared field type. A literal of a different primitive family is always an error; Go rejects the emitted code with `cannot use ... as ... value in struct literal`.",
+      "fixits": [
+        "use a literal of the declared type",
+        "change the declared field type"
+      ],
+      "example": "struct titik { x int }   titik{x: \"bukan int\"}   // reject: HYB-E5005",
+      "rule": "N"
+    },
+    {
       "code": "HYB-E7001",
       "name": "boundary-pointer-field",
       "category": "boundary",

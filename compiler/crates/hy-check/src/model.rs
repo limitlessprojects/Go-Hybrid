@@ -431,7 +431,88 @@ impl<'a> Checker<'a> {
     }
 
     /// The type string for diagnostics: the source type when we have it,
-    /// else the shape fallback.
+    /// else the shape fallback.    /// Issue #152, slice 2: a struct literal's field NAMES against the declared
+    /// struct. Go rejects an unknown field (`unknown field z in struct literal
+    /// of type titik`) and a repeated one (`duplicate field`), so an accepted
+    /// program with either can never build.
+    pub(crate) fn check_struct_lit(&mut self, e: &hy_syntax::Expr) {
+        let hy_syntax::Expr::StructLit { ty, fields, span } = e else {
+            return;
+        };
+        let Some(name) = crate::fields::bare_struct_lit_type(ty) else {
+            return;
+        };
+        let Some(declared) = self.structs.get(name) else {
+            return;
+        };
+        if let Some(crate::fields::ValueError::Mismatch {
+            field,
+            declared: dt,
+            given,
+        }) = crate::fields::check_field_value_literals(declared, fields)
+        {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E5005",
+                    self.path.clone(),
+                    *span,
+                    format!(
+                        "field `{}` of `{}` is declared `{}` but the literal is {} (HYB-E5005)",
+                        field, name, dt, given
+                    ),
+                )
+                .with_notes(vec![
+                    "the emitted Go cannot build: `cannot use ... as ... value in struct literal`"
+                        .to_string(),
+                ]),
+            );
+        }
+
+        match crate::fields::check_struct_lit_fields(declared, fields) {
+            Some(crate::fields::FieldError::Unknown { name: field }) => {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E5004",
+                        self.path.clone(),
+                        *span,
+                        format!(
+                            "struct literal for `{}` names field `{}`, which the struct does not declare (HYB-E5004)",
+                            name, field
+                        ),
+                    )
+                    .with_notes(vec![
+                        format!(
+                            "`{}` declares: {}",
+                            name,
+                            crate::fields::render_field_names(declared)
+                        ),
+                        "the emitted Go cannot build: `unknown field ... in struct literal`"
+                            .to_string(),
+                    ]),
+                );
+            }
+            Some(crate::fields::FieldError::Duplicate { name: field }) => {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E5004",
+                        self.path.clone(),
+                        *span,
+                        format!(
+                            "struct literal for `{}` gives field `{}` more than once (HYB-E5004)",
+                            name, field
+                        ),
+                    )
+                    .with_notes(vec![
+                        "the emitted Go cannot build: `duplicate field ... in struct literal`"
+                            .to_string(),
+                    ]),
+                );
+            }
+            None => {}
+        }
+    }
+
+
     pub(crate) fn binding_ty_str(&self, b: &Binding) -> String {
         b.ty.as_ref()
             .map(|t| t.render())

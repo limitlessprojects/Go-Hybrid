@@ -36,6 +36,7 @@
 //! every rejection teaches (O17 — fix-its come from the hy-diag registry);
 //! diagnostics are returned in source order.
 
+mod fields;
 mod closures;
 mod foreign;
 mod freeze;
@@ -397,6 +398,12 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             }
         } else {
             let mut calls = Vec::new();
+            let mut lits = Vec::new();
+            walk::own_struct_lits(stmt, &mut lits);
+            for l in lits {
+                ck.check_struct_lit(l);
+            }
+
             walk::own_calls(stmt, &mut calls);
             for cr in calls {
                 ck.process_call(&mut st, &cr, idx, None);

@@ -465,6 +465,137 @@ pub(crate) fn own_calls<'a>(stmt: &'a Stmt, out: &mut Vec<CallRef<'a>>) {
     }
 }
 
+/// Collect the struct literals of THIS statement only (issue #152, slice 2).
+///
+/// Mirrors `own_calls`: closure bodies are left to closures.rs so a literal
+/// inside a closure is never visited twice.
+pub(crate) fn own_struct_lits<'a>(stmt: &'a Stmt, out: &mut Vec<&'a Expr>) {
+    match stmt {
+        Stmt::Local(l) => {
+            for v in &l.values {
+                expr_struct_lits(v, out);
+            }
+        }
+        Stmt::Assign { values, .. } => {
+            for v in values {
+                expr_struct_lits(v, out);
+            }
+        }
+        Stmt::Expr { expr, .. } => expr_struct_lits(expr, out),
+        Stmt::Send { chan, value, .. } => {
+            expr_struct_lits(chan, out);
+            expr_struct_lits(value, out);
+        }
+        Stmt::If { cond, .. } => expr_struct_lits(cond, out),
+        Stmt::For { kind, .. } => match kind {
+            ForKind::While { cond } => expr_struct_lits(cond, out),
+            ForKind::Range { lo, hi, .. } => {
+                expr_struct_lits(lo, out);
+                expr_struct_lits(hi, out);
+            }
+            ForKind::Iterate { expr, .. } => expr_struct_lits(expr, out),
+            ForKind::Infinite => {}
+        },
+        Stmt::Return { values, .. } => {
+            for v in values {
+                expr_struct_lits(v, out);
+            }
+        }
+        Stmt::Task { callee, args, .. } => {
+            expr_struct_lits(callee, out);
+            for a in args {
+                expr_struct_lits(&a.value, out);
+            }
+        }
+        Stmt::Managed { .. } => {}
+        Stmt::Match { subject, arms, .. } => {
+            expr_struct_lits(subject, out);
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    expr_struct_lits(g, out);
+                }
+            }
+        }
+        Stmt::Defer { call, .. } => expr_struct_lits(call, out),
+        Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        Stmt::Block { .. } => {}
+        Stmt::Select { arms, .. } => {
+            for arm in arms {
+                match &arm.kind {
+                    SelectArmKind::Send { chan, value } => {
+                        expr_struct_lits(chan, out);
+                        expr_struct_lits(value, out);
+                    }
+                    SelectArmKind::Recv { chan, .. } => expr_struct_lits(chan, out),
+                    SelectArmKind::Default => {}
+                }
+            }
+        }
+    }
+}
+
+/// Every struct literal in an expression, including nested ones.
+pub(crate) fn expr_struct_lits<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
+    match expr {
+        Expr::StructLit { fields, .. } => {
+            out.push(expr);
+            for f in fields {
+                expr_struct_lits(&f.value, out);
+            }
+        }
+        Expr::Ident { .. } | Expr::Lit { .. } => {}
+        Expr::Interp { parts, .. } => {
+            for p in parts {
+                if let InterpPart::Expr(e) = p {
+                    expr_struct_lits(e, out);
+                }
+            }
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            expr_struct_lits(lhs, out);
+            expr_struct_lits(rhs, out);
+        }
+        Expr::Unary { operand, .. } => expr_struct_lits(operand, out),
+        Expr::AddrOf { operand, .. } => expr_struct_lits(operand, out),
+        Expr::Move { operand, .. } => expr_struct_lits(operand, out),
+        Expr::Try { operand, .. } => expr_struct_lits(operand, out),
+        Expr::Receive { chan, .. } => expr_struct_lits(chan, out),
+        Expr::Index { base, index, .. } => {
+            expr_struct_lits(base, out);
+            expr_struct_lits(index, out);
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            expr_struct_lits(base, out);
+            if let Some(lo) = lo {
+                expr_struct_lits(lo, out);
+            }
+            if let Some(hi) = hi {
+                expr_struct_lits(hi, out);
+            }
+        }
+        Expr::Field { base, .. } => expr_struct_lits(base, out),
+        Expr::Call { callee, args, .. } => {
+            expr_struct_lits(callee, out);
+            for a in args {
+                expr_struct_lits(&a.value, out);
+            }
+        }
+        Expr::SliceLit { items, .. } => {
+            for i in items {
+                expr_struct_lits(i, out);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                expr_struct_lits(k, out);
+                expr_struct_lits(v, out);
+            }
+        }
+        Expr::FnLit { .. } => {} // A5: closure bodies live in closures.rs
+        Expr::Paren { inner, .. } => expr_struct_lits(inner, out),
+    }
+}
+
 pub(crate) fn expr_calls<'e>(expr: &'e Expr, out: &mut Vec<CallRef<'e>>) {
     match expr {
         Expr::Call { callee, args, span } => {
