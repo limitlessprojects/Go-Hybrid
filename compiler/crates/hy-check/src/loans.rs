@@ -210,6 +210,12 @@ impl<'a> Checker<'a> {
                 recv,
             } => {
                 self.check_call_const_writes(st, cr, &HashSet::new());
+                if self.lookup_user_method(&recv, &method).is_some() {
+                    // A7 borrow-by-default: a handle passed to a user-defined
+                    // Hybrid method is lent for the call only.
+                    self.lend_handle_args(st, cr, idx, loop_end);
+                    return;
+                }
                 let Some(tname) = receiver_type_name(&recv) else {
                     return;
                 };
@@ -1104,6 +1110,8 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                self.record_may_share(st, &name, &l.values[0]);
+                self.record_alias(st, &name, &l.values[0]);
             }
         } else {
             for (name, value) in l.names.iter().zip(l.values.iter()) {
@@ -1436,13 +1444,19 @@ impl<'a> Checker<'a> {
                 }
             }
             _ => {
+                if let Some(b) = self.lookup_binding(st, name) {
+                    if !matches!(b.shape, TypeShape::Unknown) && !self.shape_may_share(&b.shape) {
+                        return;
+                    }
+                }
                 let inner = unwrap_parens(value);
                 let result = self.shape_of_expr(st, inner);
                 let is_literal = matches!(
                     inner,
                     Expr::StructLit { .. } | Expr::MapLit { .. } | Expr::SliceLit { .. }
                 );
-                let carries = self.shape_may_share(&result)
+                let carries = self.binding_may_share(st, name)
+                    || self.shape_may_share(&result)
                     || matches!(result, TypeShape::Unknown)
                     || inner.root_ident().is_some()
                     || is_literal;
@@ -1682,7 +1696,12 @@ impl<'a> Checker<'a> {
             // ownership into the callee, are skipped by the collector.
             other => {
                 let other_shape = self.shape_of_expr(st, unwrap_parens(other));
+                let target_is_ref = self
+                    .lookup_binding(st, name)
+                    .map(|b| b.shape.is_reference_alias())
+                    .unwrap_or(false);
                 if other_shape.is_reference_alias()
+                    || target_is_ref
                     || matches!(other_shape, TypeShape::OwnHandle(_))
                 {
                     let mut roots = Vec::new();
@@ -2664,6 +2683,8 @@ impl<'a> Checker<'a> {
                         }
                     }
                     self.record_multi_value_share_and_alias(st, name, &shape, &values[0]);
+                    self.record_may_share(st, name, &values[0]);
+                    self.record_alias(st, name, &values[0]);
                     if may_share {
                         for r in &ref_roots {
                             if r != name && self.binding_may_share(st, r) {
@@ -2691,6 +2712,7 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
+                    st.closure_mutates.remove(name);
                 }
             }
         }
