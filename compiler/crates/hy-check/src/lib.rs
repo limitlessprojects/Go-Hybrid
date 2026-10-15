@@ -43,6 +43,7 @@ mod loans;
 mod model;
 mod sendability;
 mod shape;
+mod tryop;
 mod walk;
 
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
@@ -581,6 +582,9 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     // checked here, fail-closed (O4.9), with the completed function env as
     // the capture view. Captures/loans/freeze stay outside (A5, documented).
     closures::check_closure_boundaries(ck, &st, body);
+    // The try-operator rules (E4 / T20 / E3b, issue #155) walk the same body
+    // independently: they need only the AST and the fn table.
+    tryop::check_try_ops_fn(ck, f);
 }
 
 // ---------------------------------------------------------------------------
@@ -1438,12 +1442,12 @@ mod tests {
         // 12-shape: two borrow calls then a mutate — windows non-lexical.
         let r = check(
             "import \"rust/serde_json\"\n\
-             fn count(doc serde_json.value) int {\n\
+             fn count(doc serde_json.value) (int, error) {\n\
                n := 0\n\
                for u in doc.array(\"users\")? {\n\
                  n += u.int(\"logins\")?\n\
                }\n\
-               return n\n\
+               return n, nil\n\
              }\n\
              fn main() {\n\
                doc := serde_json.parse(`{}`)?\n\
@@ -1597,14 +1601,14 @@ mod tests {
         // mutates the returned handle — the transfer made it the caller's.
         let r = check(
             "import \"rust/serde_json\"\n\
-             fn summary(doc serde_json.value) serde_json.value {\n\
+             fn summary(doc serde_json.value) (serde_json.value, error) {\n\
                v := serde_json.new_object()\n\
                for u in doc.array(\"users\")? {\n\
                  if u.int(\"logins\")? > 0 {\n\
                    v.set(\"active\", 1)\n\
                  }\n\
                }\n\
-               return v\n\
+               return v, nil\n\
              }\n\
              fn main() {\n\
                doc := serde_json.parse(`{}`)?\n\
@@ -2601,5 +2605,137 @@ mod tests {
         // the diagnosis for the owned-binding variant of this shape.
         assert_eq!(r.diagnostics[0].code, "HYB-E3004");
     }
-}
 
+    // -----------------------------------------------------------------------
+    // #155 — the try operator `?` was never checked. SPEC-LANGUAGE E4 pins
+    // two type errors (not-an-error-call, option/T20) and E3b pins where a
+    // propagation may land. Before this pass `Expr::Try` was only a
+    // transparent operand-walk in `shape.rs`, so `v := count()?` on an
+    // int-returning call was accepted with 0 diagnostics and the emitted Go
+    // died with `assignment mismatch: 2 variables but count returns 1 value`.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn try_on_non_error_call_rejects_e4003() {
+        let r = check(
+            "fn count() int {\n\
+               return 3\n\
+             }\n\
+             fn main() {\n\
+               v := count()?\n\
+               fmt.println(v)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E4003");
+        assert_eq!(first_error_rule(&r).as_deref(), Some("E4"));
+    }
+
+    #[test]
+    fn try_on_option_call_rejects_e4004() {
+        let r = check(
+            "fn find(k string) option[int] {\n\
+               return some(1)\n\
+             }\n\
+             fn main() {\n\
+               v := find(\"a\")?\n\
+               fmt.println(v)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E4004");
+        assert_eq!(first_error_rule(&r).as_deref(), Some("E4"));
+    }
+
+    #[test]
+    fn try_cannot_propagate_out_of_a_declared_fn_rejects_e4005() {
+        let r = check(
+            "fn read(p string) (string, error) {\n\
+               return \"data\", nil\n\
+             }\n\
+             fn summarize(p string) int {\n\
+               d := read(p)?\n\
+               return len(d)\n\
+             }\n\
+             fn main() {\n\
+               fmt.println(summarize(\"x\"))\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E4005");
+        assert_eq!(first_error_rule(&r).as_deref(), Some("E3b"));
+    }
+
+    #[test]
+    fn try_cannot_propagate_out_of_a_typed_closure_rejects_e4005() {
+        let r = check(
+            "fn read(p string) (string, error) {\n\
+               return \"data\", nil\n\
+             }\n\
+             fn main() {\n\
+               f := fn() int {\n\
+                 d := read(\"x\")?\n\
+                 return len(d)\n\
+               }\n\
+               fmt.println(f())\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E4005");
+    }
+
+    #[test]
+    fn try_on_error_call_in_main_accepts() {
+        // `main` hosts the failure — the wrapper reports it. Positive control:
+        // the rule must not reject the legal shape.
+        let r = check(
+            "fn read(p string) (string, error) {\n\
+               return \"data\", nil\n\
+             }\n\
+             fn main() {\n\
+               d := read(\"x\")?\n\
+               fmt.println(d)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn try_on_error_call_in_a_typed_fn_accepts() {
+        let r = check(
+            "fn read(p string) (string, error) {\n\
+               return \"data\", nil\n\
+             }\n\
+             fn load(p string) (string, error) {\n\
+               d := read(p)?\n\
+               return d, nil\n\
+             }\n\
+             fn main() {\n\
+               fmt.println(load(\"x\"))\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn try_on_unresolvable_callee_carries_no_opinion() {
+        // A foreign or method callee whose results the checker cannot see is
+        // deliberately NOT rejected — otherwise the corpus's own
+        // `doc.array(\"users\")?` / `u.int(\"logins\")?` shapes would break.
+        let r = check(
+            "import \"rust/serde_json\"\n\
+             fn count(doc serde_json.value) (int, error) {\n\
+               n := 0\n\
+               for u in doc.array(\"users\")? {\n\
+                 n += u.int(\"logins\")?\n\
+               }\n\
+               return n, nil\n\
+             }\n\
+             fn main() {\n\
+               doc := serde_json.parse(`{}`)?\n\
+               fmt.println(count(doc))\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+}
