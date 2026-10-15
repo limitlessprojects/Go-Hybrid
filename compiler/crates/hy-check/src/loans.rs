@@ -878,6 +878,8 @@ impl<'a> Checker<'a> {
                 if is_view {
                     self.extend_call_loans_to_view(st, &l.values[0], name, idx);
                 }
+                self.record_may_share(st, name, &l.values[0]);
+                self.record_alias(st, name, &l.values[0]);
             }
         } else {
             for (name, value) in l.names.iter().zip(l.values.iter()) {
@@ -1110,7 +1112,7 @@ impl<'a> Checker<'a> {
     /// Does the binding `name` denote a value that a shallow Go copy
     /// would share mutable GC storage with? Includes file-level `const`
     /// composites (#125), which lower to package-level `var` in Go.
-    fn binding_may_share(&self, st: &FnState, name: &str) -> bool {
+    pub(crate) fn binding_may_share(&self, st: &FnState, name: &str) -> bool {
         self.lookup_binding(st, name)
             .map(|b| self.shape_may_share(&b.shape))
             .unwrap_or(false)
@@ -1171,10 +1173,15 @@ impl<'a> Checker<'a> {
                     inner,
                     Expr::StructLit { .. } | Expr::MapLit { .. } | Expr::SliceLit { .. }
                 );
-                let carries = self.shape_may_share(&result)
-                    || matches!(result, TypeShape::Unknown)
-                    || inner.root_ident().is_some()
-                    || is_literal;
+                let target_may_share = self
+                    .lookup_binding(st, name)
+                    .map(|b| self.shape_may_share(&b.shape) || matches!(b.shape, TypeShape::Unknown))
+                    .unwrap_or(true);
+                let carries = target_may_share
+                    && (self.shape_may_share(&result)
+                        || matches!(result, TypeShape::Unknown)
+                        || inner.root_ident().is_some()
+                        || is_literal);
                 if !carries {
                     return;
                 }
@@ -1289,7 +1296,11 @@ impl<'a> Checker<'a> {
             // single-parent link) and `move`-wrapped operands, which transfer
             // ownership into the callee, are skipped by the collector.
             other => {
-                let other_shape = self.shape_of_expr(st, unwrap_parens(other));
+                let other_shape = self
+                    .lookup_binding(st, name)
+                    .map(|b| b.shape.clone())
+                    .filter(|s| !matches!(s, TypeShape::Unknown))
+                    .unwrap_or_else(|| self.shape_of_expr(st, unwrap_parens(other)));
                 if other_shape.is_reference_alias()
                     || matches!(other_shape, TypeShape::OwnHandle(_))
                 {
@@ -1799,7 +1810,10 @@ impl<'a> Checker<'a> {
         } else if values.len() == 1 && targets.len() > 1 {
             let shapes = self.multi_value_shapes(st, &values[0], targets.len());
             let tys = self.multi_value_tys(st, &values[0], targets.len());
-            for ((t, shape), ty) in targets.iter().zip(shapes).zip(tys) {
+            for (i, ((t, shape), ty)) in targets.iter().zip(shapes).zip(tys).enumerate() {
+                if is_const_write.get(i).copied().unwrap_or(false) {
+                    continue;
+                }
                 if let PlaceKind::Ident(name) = &t.kind {
                     if let Some(b) = st.env_lookup_mut(name) {
                         if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
@@ -1809,8 +1823,12 @@ impl<'a> Checker<'a> {
                             b.ty = ty;
                         }
                         b.moved = None;
+                        b.non_owned_origin = None;
                     }
                     st.aliases.remove(name);
+                    st.share_clear(name);
+                    self.record_may_share(st, name, &values[0]);
+                    self.record_alias(st, name, &values[0]);
                 }
             }
         }

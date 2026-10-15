@@ -636,13 +636,15 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     let shapes = ck.iterate_var_shapes(&st, expr, vars.len());
                     for (name, shape) in vars.iter().zip(shapes) {
                         let is_ref = shape.is_reference_alias();
+                        let may_share = ck.shape_may_share(&shape);
                         ck.define_binding(&mut st, name, shape, None, false, managed);
                         if !is_chan {
-                            if is_ref {
-                                if let Some(root) = expr.root_ident() {
-                                    if ck.lookup_binding(&st, root).is_some() {
-                                        st.aliases.insert(name.clone(), root.to_string());
-                                    }
+                            if let Some(root) = expr.root_ident() {
+                                if is_ref && ck.lookup_binding(&st, root).is_some() {
+                                    st.aliases.insert(name.clone(), root.to_string());
+                                }
+                                if may_share && ck.binding_may_share(&st, root) {
+                                    st.share_edge(name, root);
                                 }
                             }
                             if let Some(b) = st.env_lookup_mut(name) {
@@ -3084,6 +3086,218 @@ mod tests {
              }",
         );
         assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn multival_define_and_assign_record_alias_and_may_share_e3003() {
+        // Multi-return define (`n, m2 := pair(m)`) and multi-return rebind
+        // (`n, m2 = pair(m)`) must record `m2 -> m` in `st.aliases` so moving
+        // `m` freezes `m2` (HYB-E3003).
+        let r_def = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn pair(m map[string]int) (int, map[string]int) {\n\
+               return 1, m\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               n, m2 := pair(m)\n\
+               done := make(chan bool, 1)\n\
+               task worker(move m, done)\n\
+               m2[\"k\"] = n\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_def.verdict, Verdict::Reject, "{:?}", r_def.diagnostics);
+        assert_eq!(first_error_rule(&r_def).as_deref(), Some("A1b"));
+        assert!(r_def.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        let r_ass = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn pair(m map[string]int) (int, map[string]int) {\n\
+               return 1, m\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               var n int\n\
+               var m2 map[string]int\n\
+               n, m2 = pair(m)\n\
+               done := make(chan bool, 1)\n\
+               task worker(move m, done)\n\
+               m2[\"k\"] = n\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_ass.verdict, Verdict::Reject, "{:?}", r_ass.diagnostics);
+        assert_eq!(first_error_rule(&r_ass).as_deref(), Some("A1b"));
+        assert!(r_ass.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // Map comma-ok unpack (`m2, ok := mm["a"]`) must edge `m2` (and NOT `ok`)
+        // to `mm` in `may_share` so moving either freezes the other, while reading
+        // `ok` after `move mm` remains legal.
+        let r_comma_ok = check(
+            "fn worker(mm map[string]map[string]int, done chan<- bool) {\n\
+               mm[\"a\"][\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               inner := map[string]int{\"k\": 0}\n\
+               mm := map[string]map[string]int{\"a\": inner}\n\
+               m2, ok := mm[\"a\"]\n\
+               done := make(chan bool, 1)\n\
+               task worker(move mm, done)\n\
+               if ok {\n\
+                 m2[\"k\"] = 2\n\
+               }\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_comma_ok.verdict, Verdict::Reject, "{:?}", r_comma_ok.diagnostics);
+        assert_eq!(first_error_rule(&r_comma_ok).as_deref(), Some("A1b"));
+        assert!(r_comma_ok.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // Positive control: reading scalar `ok` after `move mm` when `m2` is unused
+        // must accept cleanly.
+        let r_ok_only = check(
+            "fn worker(mm map[string]map[string]int, done chan<- bool) {\n\
+               mm[\"a\"][\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               inner := map[string]int{\"k\": 0}\n\
+               mm := map[string]map[string]int{\"a\": inner}\n\
+               _, ok := mm[\"a\"]\n\
+               done := make(chan bool, 1)\n\
+               task worker(move mm, done)\n\
+               if ok {\n\
+                 <-done\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r_ok_only.verdict, Verdict::Accept, "{:?}", r_ok_only.diagnostics);
+    }
+
+    #[test]
+    fn for_iterate_composite_element_shares_with_collection_e3003() {
+        // Iterating a slice of structs containing maps (`for _, h in hs`) must
+        // record a may-share edge between `h` and `hs` so moving `hs` freezes `h`.
+        let r = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(hs []holder, done chan<- bool) {\n\
+               hs[0].m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               hs := []holder{holder{m: map[string]int{\"k\": 0}}}\n\
+               done := make(chan bool, 1)\n\
+               for _, h in hs {\n\
+                 task worker(move hs, done)\n\
+                 h.m[\"k\"] = 2\n\
+               }\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+    }
+
+    #[test]
+    fn closure_local_alias_and_select_arm_fnlit_reject() {
+        // Copying a captured outer map (`m2 := m` or `var m2 map[string]int = m`
+        // or `m2 = m`) inside a closure must preserve `non_owned_origin` and
+        // reject `task worker(move m2, done)` with HYB-E3004.
+        let r_alias = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 1)\n\
+               f := fn() {\n\
+                 m2 := m\n\
+                 task worker(move m2, done)\n\
+               }\n\
+               f()\n\
+               m[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_alias.verdict, Verdict::Reject, "{:?}", r_alias.diagnostics);
+        assert_eq!(first_error_rule(&r_alias).as_deref(), Some("A1b"));
+        assert!(r_alias.diagnostics.iter().any(|d| d.code == "HYB-E3004"));
+
+        // A closure defined inside a `select` arm body must be collected by
+        // `collect_stmt` and checked by `check_closure_boundaries`.
+        let r_select_fnlit = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 1)\n\
+               ch := make(chan int, 1)\n\
+               ch <- 1\n\
+               select {\n\
+                 <-ch: {\n\
+                   f := fn() {\n\
+                     task worker(m, done)\n\
+                   }\n\
+                   f()\n\
+                 }\n\
+               }\n\
+               m[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_select_fnlit.verdict, Verdict::Reject, "{:?}", r_select_fnlit.diagnostics);
+        assert_eq!(first_error_rule(&r_select_fnlit).as_deref(), Some("A1c"));
+        assert!(r_select_fnlit.diagnostics.iter().any(|d| d.code == "HYB-E3001"));
+
+        // Ascribed local copy (`var m2 map[string]int = m`) and assignment
+        // rebind (`m2 = m`) inside a closure must also preserve `non_owned_origin`
+        // and reject `task worker(move m2, done)` with HYB-E3004.
+        let r_ascribed_and_assign = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 1)\n\
+               f := fn() {\n\
+                 var m2 map[string]int = m\n\
+                 task worker(move m2, done)\n\
+                 var m3 map[string]int = map[string]int{\"k\": 0}\n\
+                 m3 = m\n\
+                 task worker(move m3, done)\n\
+               }\n\
+               f()\n\
+               m[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(
+            r_ascribed_and_assign.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_ascribed_and_assign.diagnostics
+        );
+        assert_eq!(
+            r_ascribed_and_assign
+                .diagnostics
+                .iter()
+                .filter(|d| d.code == "HYB-E3004")
+                .count(),
+            2
+        );
     }
 
     // -----------------------------------------------------------------------
