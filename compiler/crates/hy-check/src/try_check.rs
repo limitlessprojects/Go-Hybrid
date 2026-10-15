@@ -59,6 +59,9 @@ pub(crate) fn call_result_kind(ck: &Checker<'_>, st: &FnState, expr: &Expr) -> C
                     }
                     return CallResultKind::NotError;
                 }
+                if !matches!(b.shape, TypeShape::Unknown) {
+                    return CallResultKind::NotError;
+                }
                 return CallResultKind::Unknown;
             }
 
@@ -177,56 +180,123 @@ fn package_call_result_kind(pkg: &str, method: &str) -> CallResultKind {
         "os" => {
             if matches!(
                 method,
-                "open" | "read_file" | "create" | "write_file" | "remove"
+                "open"
+                    | "create"
+                    | "read_file"
+                    | "write_file"
+                    | "remove"
+                    | "remove_all"
+                    | "mkdir"
+                    | "mkdir_all"
+                    | "stat"
+                    | "lstat"
+                    | "rename"
+                    | "chmod"
+                    | "chown"
+                    | "truncate"
+                    | "readlink"
             ) {
                 CallResultKind::Error
-            } else {
+            } else if matches!(
+                method,
+                "exit"
+                    | "getenv"
+                    | "getpid"
+                    | "getppid"
+                    | "getuid"
+                    | "getgid"
+                    | "getpagesize"
+                    | "temp_dir"
+            ) {
                 CallResultKind::NotError
+            } else {
+                CallResultKind::Unknown
             }
         }
         "io" => {
-            if matches!(method, "read_all" | "read_full" | "copy") {
+            if matches!(
+                method,
+                "read_all"
+                    | "read_full"
+                    | "copy"
+                    | "copy_n"
+                    | "copy_buffer"
+                    | "read_at_least"
+                    | "write_string"
+            ) {
                 CallResultKind::Error
-            } else {
+            } else if matches!(
+                method,
+                "pipe" | "limit_reader" | "multi_reader" | "multi_writer" | "tee_reader"
+            ) {
                 CallResultKind::NotError
+            } else {
+                CallResultKind::Unknown
             }
         }
         "serde_json" => {
             if matches!(method, "parse" | "to_string_pretty") {
                 CallResultKind::Error
-            } else {
+            } else if matches!(method, "new_object" | "new_array") {
                 CallResultKind::NotError
+            } else {
+                CallResultKind::Unknown
             }
         }
         "strconv" => {
-            if matches!(method, "atoi" | "parse_int" | "parse_float") {
+            if matches!(
+                method,
+                "atoi" | "parse_int" | "parse_float" | "parse_bool" | "parse_uint"
+            ) {
                 CallResultKind::Error
-            } else {
+            } else if matches!(
+                method,
+                "itoa"
+                    | "format_int"
+                    | "format_float"
+                    | "format_bool"
+                    | "format_uint"
+            ) {
                 CallResultKind::NotError
+            } else {
+                CallResultKind::Unknown
             }
         }
         "httptest" => {
             if matches!(method, "get" | "post") {
                 CallResultKind::Error
-            } else {
+            } else if matches!(method, "new_server" | "new_recorder") {
                 CallResultKind::NotError
+            } else {
+                CallResultKind::Unknown
             }
         }
         "regex" => {
             if matches!(method, "compile" | "is_match") {
                 CallResultKind::Error
-            } else {
+            } else if matches!(method, "is_valid") {
                 CallResultKind::NotError
+            } else {
+                CallResultKind::Unknown
             }
         }
         "sha3" => {
             if matches!(method, "digest256" | "stream_checksum") {
                 CallResultKind::Error
             } else {
+                CallResultKind::Unknown
+            }
+        }
+        "fmt" | "strings" | "atomic" | "sort" => CallResultKind::NotError,
+        "time" => {
+            if matches!(method, "now" | "since" | "sleep" | "duration") {
+                CallResultKind::NotError
+            } else if matches!(method, "parse_duration" | "parse") {
+                CallResultKind::Error
+            } else {
                 CallResultKind::NotError
             }
         }
-        "fmt" | "strings" | "time" | "atomic" | "sort" => CallResultKind::NotError,
         _ => CallResultKind::Unknown,
     }
 }

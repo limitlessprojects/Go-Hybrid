@@ -225,3 +225,118 @@ fn valid_foreign_os_try_accepts() {
     );
     assert_eq!(r.verdict, Verdict::Accept);
 }
+
+// ---------------------------------------------------------------------------
+// Precision tests: false-positive / false-negative guards
+// ---------------------------------------------------------------------------
+
+const VALID_FOREIGN_OS_MKDIR: &str = "\
+import \"os\"
+
+fn setup() error {
+    os.mkdir(\"testdir\")?
+    return nil
+}
+
+fn main() {
+    setup()?
+}
+";
+
+#[test]
+fn valid_foreign_os_mkdir_accepts() {
+    let r = check(VALID_FOREIGN_OS_MKDIR);
+    let codes = error_codes(&r);
+    assert!(
+        codes.is_empty(),
+        "valid '?' on foreign os.mkdir must accept, got {:?}",
+        codes
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+const INVALID_FMT_PRINTLN_TRY: &str = "\
+fn main() {
+    fmt.println(\"hi\")?
+}
+";
+
+#[test]
+fn invalid_foreign_fmt_println_try_rejects_e2003() {
+    let r = check(INVALID_FMT_PRINTLN_TRY);
+    let codes = error_codes(&r);
+    assert!(
+        codes.iter().any(|c| c == "HYB-E2003"),
+        "expected HYB-E2003 for '?' on fmt.println, got {:?}",
+        codes
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+const INVALID_SHADOWED_NON_FN_TRY: &str = "\
+fn run() error {
+    return nil
+}
+
+fn main() {
+    run := 42
+    run()?
+}
+";
+
+#[test]
+fn invalid_shadowed_non_fn_try_rejects_e2003() {
+    let r = check(INVALID_SHADOWED_NON_FN_TRY);
+    let codes = error_codes(&r);
+    assert!(
+        codes.iter().any(|c| c == "HYB-E2003"),
+        "expected HYB-E2003 for '?' on shadowed non-fn variable, got {:?}",
+        codes
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+const INVALID_SERDE_NEW_OBJECT_TRY: &str = "\
+import \"rust/serde_json\"
+
+fn main() {
+    doc := serde_json.new_object()?
+}
+";
+
+#[test]
+fn invalid_serde_new_object_try_rejects_e2003() {
+    let r = check(INVALID_SERDE_NEW_OBJECT_TRY);
+    let codes = error_codes(&r);
+    assert!(
+        codes.iter().any(|c| c == "HYB-E2003"),
+        "expected HYB-E2003 for '?' on serde_json.new_object, got {:?}",
+        codes
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+const VALID_HTTP_HANDLER_TRY: &str = "\
+import \"net/http\"
+import \"strconv\"
+
+fn main() {
+    mux := http.new_serve_mux()
+    mux.handle(\"/add/\", http.handler(fn(w http.response_writer, r *http.request) {
+        a := strconv.atoi(\"42\")?
+        fmt.println(a)
+    }))
+}
+";
+
+#[test]
+fn valid_http_handler_try_accepts() {
+    let r = check(VALID_HTTP_HANDLER_TRY);
+    let codes = error_codes(&r);
+    assert!(
+        codes.is_empty(),
+        "valid '?' in http.handler (E11) must accept with 0 errors, got {:?}",
+        codes
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
