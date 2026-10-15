@@ -839,7 +839,7 @@ fn slot_loan_storeback_before_loop_break_and_continue() {
     // Issue #203: break/continue inside loop must store back loop-local slot loan
     // before jumping.
     let go = emit(
-        "fn proc(m map[int]int) {\n    for i := 0; i < 10; i = i + 1 {\n        slot := &m[i]\n        if i == 5 {\n            slot = 42\n            break\n        }\n        if i == 2 {\n            slot = 10\n            continue\n        }\n    }\n}\n",
+        "fn proc(m map[int]int) {\n    for i in 0..10 {\n        slot := &m[i]\n        if i == 5 {\n            slot = 42\n            break\n        }\n        if i == 2 {\n            slot = 10\n            continue\n        }\n    }\n}\n",
     );
     assert!(
         go.contains("m[i] = slot\n\t\t\tbreak"),
