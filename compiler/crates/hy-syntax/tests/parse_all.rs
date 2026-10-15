@@ -49,7 +49,7 @@ fn must_parse(path: &PathBuf) {
 #[test]
 fn checker_corpus_all_parse() {
     let files = hy_files_under("tests/checker-corpus");
-    assert_eq!(files.len(), 42, "expected exactly 39 corpus programs",);
+    assert_eq!(files.len(), 44, "expected exactly 44 corpus programs",);
     for f in &files {
         must_parse(f);
     }
