@@ -975,11 +975,9 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             collect_stmt_direct_fnlits(stmt, st, nested);
         }
         Stmt::Defer { call, .. } => {
-            ck.mark_move_in_value(
-                st,
-                call,
-                format!("the deferred call `defer {}`", call.render()),
-            );
+            let mut uses = Vec::new();
+            crate::walk::own_uses(stmt, &mut uses);
+            ck.process_defer_moves(st, call, &uses, managed);
             sync_nested_moves(st, nested);
             collect_stmt_direct_fnlits(stmt, st, nested);
         }
