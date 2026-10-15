@@ -1,6 +1,7 @@
 # Hybrid Language: Development Plan
 
 ## Status
+- Contribution (2026-10-15): make the `build.rs` DEFAULT_PIN check literal, matching the adjacent main.rs checks. A malformed `1x99x0` default previously passed as `1.99.0`. Added malformed/stale-default regression cases; focused suite on WSL Ubuntu: 10/11 before, 11/11 after; shell syntax and no-toolchain version check pass. Full Rust/Go suites and upstream CI remain unverified in this contributor environment.
 - Current phase: **MVP COMPLETE — G3 REVIEWED + PASSED 2026-10-13** (review delegated by the human; every claim re-verified via standard suites + repo harnesses in a fresh sandbox; 4 findings found + repaired — see Decision Log; Post-MVP queue opened below)
 - State: MVP done; post-MVP queue open (rows in priority order)
 - Last session: 2026-10-13, summary: session 8 (G2/G3 review + ratification). Fresh sandbox recovery (clone + toolchain re-pins Go 1.26.9 / Rust 1.99.0, foreground installs). G2 evidence independently reproduced (make bench fast path 3.44 ns ≤ 5 ns, DeepPathCount path-proof). G3 claim-by-claim re-verification: cargo test 194/0, examples 10/10, differential 9/9+11/11, corpus 20/20, go vet/gofmt/clippy. Findings repaired: make bench wired (claimed at Batch J, never landed); Makefile tab regression from Batch I fixed + guards (make check + CI); gofmt over runtime/go + CI hygiene leg; hyrt clippy/unused-import/fmt. Post-MVP queue opened (6 rows). All work committed + pushed.
