@@ -48,6 +48,9 @@ pub(crate) struct FlatInfo<'a> {
     pub managed_end: HashMap<usize, usize>,
     /// binding name -> last statement index referencing it
     pub last_use: HashMap<String, usize>,
+    /// #98: bindings referenced inside a `defer` body — clamped to the
+    /// function-end index after the walk (a deferred call runs at exit).
+    defer_uses: Vec<String>,
     /// Scope events keyed by statement index (issue #14): applied BEFORE
     /// the statement is processed, in order. Multiple events at the same
     /// index (e.g. when a nested construct and its enclosing `if`/`for`
@@ -77,9 +80,18 @@ impl<'a> FlatInfo<'a> {
         self.managed_end.iter().any(|(&k, &v)| k < idx && idx <= v)
     }
 
+    /// The index of the last statement in the whole flattened body (#98).
+    /// Used as the live-until bound for a `defer`'s loans and captured
+    /// uses: a deferred call executes at function exit, so anything it
+    /// references is still live through the end of the body, not through
+    /// the lexical `defer` statement.
+    pub(crate) fn fn_end(&self) -> usize {
+        self.stmts.last().map(|(_, i)| *i).unwrap_or(0)
+    }
+
     /// Is statement `idx` lexically inside a `for`/`loop` body (LX14 label
     /// scope)? `break loop` / `continue loop` outside any loop has no
-    /// target — the checker rejects it (HYB-E3010) instead of letting the
+    /// target — the checker rejects it (HYB-E3110) instead of letting the
     /// emitter lower it to `break hyLoop` against an undefined Go label.
     pub(crate) fn in_loop(&self, idx: usize) -> bool {
         self.loop_end.iter().any(|(&k, &v)| k < idx && idx <= v)
@@ -96,6 +108,22 @@ impl<'a> FlatInfo<'a> {
 pub(crate) fn flatten<'a>(body: &'a Block) -> FlatInfo<'a> {
     let mut out = FlatInfo::default();
     walk_block(&mut out, body);
+    // #98: a `defer` call runs at FUNCTION EXIT, so every binding it
+    // references is still live through the end of the body — not through
+    // the lexical `defer` statement. The clamp must happen AFTER the whole
+    // body is indexed (during the walk, `out.stmts` only holds the prefix,
+    // so `fn_end()` would return the defer's own index). Without the clamp
+    // an A3 map-slot insert (or an A2 handle-borrow mutation) after the
+    // `defer` looked like it was outside the loan window.
+    if !out.defer_uses.is_empty() {
+        let end = out.next.saturating_sub(1);
+        for name in &out.defer_uses {
+            let e = out.last_use.entry(name.clone()).or_insert(end);
+            if *e < end {
+                *e = end;
+            }
+        }
+    }
     out
 }
 
@@ -112,6 +140,16 @@ fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt) {
 
     let mut uses = Vec::new();
     own_uses(stmt, &mut uses);
+    // #98: a `defer` call executes at FUNCTION EXIT — its referenced
+    // bindings stay live through the end of the body, not through the
+    // lexical `defer` statement. Collected here, clamped in `flatten`
+    // after the whole body is indexed (a mid-walk `fn_end` would return
+    // the defer's own index, not the real exit).
+    if matches!(stmt, Stmt::Defer { .. }) {
+        for u in &uses {
+            out.defer_uses.push(u.name.clone());
+        }
+    }
     for u in uses {
         let e = out.last_use.entry(u.name).or_insert(idx);
         if *e < idx {

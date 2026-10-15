@@ -416,8 +416,18 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         } else {
             let mut calls = Vec::new();
             walk::own_calls(stmt, &mut calls);
+            // #98: a `defer` call's loans live until FUNCTION EXIT, not the
+            // lexical `defer` statement. Pass `fn_end` as the loop bound so a
+            // map-slot/handle-borrow loan opened by the deferred call stays
+            // live through the rest of the body (an insert after the `defer`
+            // must still invalidate it, A3).
+            let defer_bound = if matches!(stmt, Stmt::Defer { .. }) {
+                Some(flat.fn_end())
+            } else {
+                None
+            };
             for cr in calls {
-                ck.process_call(&mut st, &cr, idx, None);
+                ck.process_call(&mut st, &cr, idx, defer_bound.or(None));
             }
         }
 
@@ -439,6 +449,23 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             }
 
             Stmt::Return { values, .. } => ck.process_return(&mut st, values),
+
+            // #98: a `move` nested inside a `defer` call or a bare
+            // expression statement still transfers ownership — `defer
+            // cleanup(move m)` and `m2 := id(move m)` (via the assign arm's
+            // value scan) must freeze the source and reject a non-owned
+            // (parameter/receiver/capture/range) binding, exactly like the
+            // define/assign/return forms already did. Without this the
+            // operand was exempted from `check_uses` as a move but never
+            // marked, so the binding stayed writable after it left.
+            Stmt::Defer { call, .. } => {
+                let desc = format!("the move-`defer` `{}`", call.render());
+                ck.mark_move_in_value(&mut st, call, desc);
+            }
+            Stmt::Expr { expr, .. } => {
+                let desc = format!("the move-expression `{}`", expr.render());
+                ck.mark_move_in_value(&mut st, expr, desc);
+            }
 
             // O4.0 check-site: every task argument (HYB-E3001) + the
             // spawn-callee proof: the callee must resolve to a declared
@@ -599,6 +626,26 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     // targets / `delete()` calls through a `const` root with the completed
     // env (file consts + fn-local consts).
     ck.check_closure_const_writes(&st, body);
+
+    // #98: a deferred call executes at FUNCTION EXIT, but its uses were
+    // checked only at the lexical `defer` statement — before any later
+    // `move`/`consume` had frozen the binding. Re-check the deferred uses
+    // against the COMPLETED move state: a binding that left the task after
+    // the `defer` was written is used-after-move at exit (`defer
+    // audit(m)` + `task worker(move m, done)` raced under go -race while
+    // hyb check reported OK(0)). Deferred via_move operands stay exempt
+    // unless the binding already left (same-statement rule).
+    {
+        let mut defer_uses: Vec<walk::Use> = Vec::new();
+        for (s, _) in &flat.stmts {
+            if matches!(s, Stmt::Defer { .. }) {
+                walk::own_uses(s, &mut defer_uses);
+            }
+        }
+        if !defer_uses.is_empty() {
+            ck.check_uses(&st, &defer_uses);
+        }
+    }
 
     // Closure-boundary pass (closures.rs): task/send/select-send STATEMENTS
     // inside closure bodies are concurrency boundaries in the emitted Go —
