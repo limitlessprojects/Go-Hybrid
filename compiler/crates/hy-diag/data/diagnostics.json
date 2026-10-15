@@ -344,6 +344,34 @@
       "rule": "T"
     },
     {
+      "code": "HYB-E5002",
+      "name": "call-arity-mismatch",
+      "category": "call",
+      "severity": "error",
+      "title": "call does not match the function's declared parameters",
+      "summary": "A call must pass exactly as many arguments as the callee declares. Too few and too many are both errors; Go rejects the emitted program either way.",
+      "fixits": [
+        "pass the missing argument(s)",
+        "remove the extra argument(s)"
+      ],
+      "example": "fn tambah(a int, b int) int { ... }  tambah(1)   // reject: HYB-E5002 — 2 declared, 1 given",
+      "rule": "N"
+    },
+    {
+      "code": "HYB-E5003",
+      "name": "return-arity-mismatch",
+      "category": "return",
+      "severity": "error",
+      "title": "return does not match the function's declared results",
+      "summary": "A `return` must produce exactly as many values as the function declares. A bare `return` stays legal where the results are named.",
+      "fixits": [
+        "return the missing value(s)",
+        "remove the extra value(s)"
+      ],
+      "example": "fn dua() (int, int) { return 1 }   // reject: HYB-E5003 — 2 declared, 1 given",
+      "rule": "N"
+    },
+    {
       "code": "HYB-E7001",
       "name": "boundary-pointer-field",
       "category": "boundary",

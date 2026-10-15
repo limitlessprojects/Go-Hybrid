@@ -408,6 +408,107 @@ pub const MANAGED_CATEGORIES: &[&str] = &[
 ];
 
 impl<'a> Checker<'a> {
+
+    // -----------------------------------------------------------------------
+    // Call/return arity (issue #152, slice 1)
+    // -----------------------------------------------------------------------
+
+    /// Report a call whose argument count does not match the callee's
+    /// DECLARED parameter count.
+    ///
+    /// Only a bare-name callee resolving to a file-local function is checked:
+    /// a method, a package call, a closure or anything unknown stays
+    /// permissive, because a false reject would be worse than a missed one.
+    /// A spread argument (`f(xs...)`) is skipped by `arity::check_call_args`.
+    pub(crate) fn check_call_arity(&mut self, cr: &crate::walk::CallRef<'_>, _st: &FnState) {
+        let Some(name) = crate::arity::bare_callee_expr(cr.callee) else {
+            return;
+        };
+        let Some(decl) = self.fns.get(name).copied() else {
+            return;
+        };
+        match crate::arity::check_call_args(decl, cr.args) {
+            Some(crate::arity::ArityError::TooFew { declared, given }) => {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E5002",
+                        self.path.clone(),
+                        cr.span,
+                        format!(
+                            "call to `{}` passes {} argument(s) but the function declares {} (HYB-E5002)",
+                            name, given, declared
+                        ),
+                    )
+                    .with_notes(vec![
+                        format!(
+                            "`{}` is declared as `{}`",
+                            name,
+                            render_signature(decl)
+                        ),
+                        "the emitted Go cannot build: `not enough arguments in call to ...`".to_string(),
+                    ]),
+                );
+            }
+            Some(crate::arity::ArityError::TooMany { declared, given }) => {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E5002",
+                        self.path.clone(),
+                        cr.span,
+                        format!(
+                            "call to `{}` passes {} argument(s) but the function declares {} (HYB-E5002)",
+                            name, given, declared
+                        ),
+                    )
+                    .with_notes(vec![
+                        format!("`{}` is declared as `{}`", name, render_signature(decl)),
+                        "the emitted Go cannot build: `too many arguments in call to ...`".to_string(),
+                    ]),
+                );
+            }
+            None => {}
+        }
+    }
+
+    /// Report a `return` whose value count does not match the declared results.
+    /// A bare `return` in a named-result function is legal Go and is silent.
+    pub(crate) fn check_return_arity(&mut self, f: &hy_syntax::FnDecl, values: &[Expr], is_bare: bool) {
+        match crate::arity::check_return_values(&f.results, values, is_bare) {
+            Some(crate::arity::ReturnError::TooFew { declared, given }) => {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E5003",
+                        self.path.clone(),
+                        f.span,
+                        format!(
+                            "`return` produces {} value(s) but `{}` declares {} result(s) (HYB-E5003)",
+                            given, f.name, declared
+                        ),
+                    )
+                    .with_notes(vec![
+                        "the emitted Go cannot build: `not enough return values`".to_string(),
+                    ]),
+                );
+            }
+            Some(crate::arity::ReturnError::TooMany { declared, given }) => {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E5003",
+                        self.path.clone(),
+                        f.span,
+                        format!(
+                            "`return` produces {} value(s) but `{}` declares {} result(s) (HYB-E5003)",
+                            given, f.name, declared
+                        ),
+                    )
+                    .with_notes(vec![
+                        "the emitted Go cannot build: `too many return values`".to_string(),
+                    ]),
+                );
+            }
+            None => {}
+        }
+    }
     pub(crate) fn new(file: &'a File) -> Self {
         Checker {
             file,
@@ -506,3 +607,12 @@ pub(crate) fn collect_move_operands<'e>(e: &'e Expr, out: &mut Vec<(&'e Expr, Sp
     }
 }
 
+/// One-line rendering of a declaration's parameter list, for diagnostic notes.
+fn render_signature(decl: &hy_syntax::FnDecl) -> String {
+    let params: Vec<String> = decl
+        .params
+        .iter()
+        .map(|p| format!("{} {}", p.name, p.ty.render()))
+        .collect();
+    format!("fn {}({})", decl.name, params.join(", "))
+}

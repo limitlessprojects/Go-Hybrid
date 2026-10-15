@@ -36,6 +36,7 @@
 //! every rejection teaches (O17 — fix-its come from the hy-diag registry);
 //! diagnostics are returned in source order.
 
+mod arity;
 mod closures;
 mod foreign;
 mod freeze;
@@ -399,6 +400,10 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             let mut calls = Vec::new();
             walk::own_calls(stmt, &mut calls);
             for cr in calls {
+                // Issue #152: the argument count against the callee's
+                // DECLARED params. Go rejects a mismatch outright, so an
+                // accepted program with the wrong count can never build.
+                ck.check_call_arity(&cr, &st);
                 ck.process_call(&mut st, &cr, idx, None);
             }
         }
@@ -420,7 +425,12 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 ck.record_assign_borrow_aliases(&mut st, targets, *op, values);
             }
 
-            Stmt::Return { values, .. } => ck.process_return(&mut st, values),
+            Stmt::Return { values, .. } => {
+                // A bare `return` is legal Go where the results are named,
+                // so it is passed through rather than counted.
+                ck.check_return_arity(f, values, values.is_empty());
+                ck.process_return(&mut st, values)
+            }
 
             // O4.0 check-site: every task argument (HYB-E3001) + the
             // spawn-callee proof: the callee must resolve to a declared
