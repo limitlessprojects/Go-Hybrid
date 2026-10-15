@@ -150,6 +150,11 @@ impl<'a> Checker<'a> {
                     // A3: map delete is a map mutation
                     self.check_delete_conflict(st, cr, idx);
                 }
+                // #178: builtin `copy(dst, src)` is a statement call, not a
+                // define/rebind — record may-share when element refs share.
+                if name == "copy" {
+                    self.record_copy_may_share(st, cr);
+                }
                 if self.fns.contains_key(&name) {
                     // A7 borrow-by-default: a handle passed to a Hybrid
                     // function is lent for the call only
@@ -158,6 +163,40 @@ impl<'a> Checker<'a> {
             }
             Resolved::None => {}
         }
+    }
+
+
+    /// #178: builtin `copy(dst, src)` duplicates slice *element* values.
+    /// When the element shape may share mutable GC storage (`[]map[...]`,
+    /// `[][]T`, `[]*T`, or a struct/array carrying one), those element
+    /// references alias after the copy — so a later `move` of either
+    /// argument root must freeze the other (O5.2 / HYB-E3003), the same
+    /// way a define-time `append` of reference elements is modelled.
+    /// By-value elements (`[]int`) share nothing: no edge is recorded.
+    /// `make([]T, n)` currently types as Slice(Unknown); consult either
+    /// argument's element so reference-element copies still edge.
+    fn record_copy_may_share(&self, st: &mut FnState, cr: &CallRef) {
+        if cr.args.len() < 2 {
+            return;
+        }
+        let dst = &cr.args[0].value;
+        let src = &cr.args[1].value;
+        let Some(dst_root) = dst.root_ident() else {
+            return;
+        };
+        let Some(src_root) = src.root_ident() else {
+            return;
+        };
+        let dst_shape = self.shape_of_expr(st, dst);
+        let src_shape = self.shape_of_expr(st, src);
+        let (TypeShape::Slice(dst_elem), TypeShape::Slice(src_elem)) = (dst_shape, src_shape)
+        else {
+            return;
+        };
+        if !(self.shape_may_share(&dst_elem) || self.shape_may_share(&src_elem)) {
+            return;
+        }
+        st.share_edge(dst_root, src_root);
     }
 
     /// HYB-E3101 (A2): a mutating-mode call conflicts with any live
