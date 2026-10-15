@@ -119,11 +119,20 @@ impl<'a> Checker<'a> {
         match cr.callee {
             Expr::Field { base, name, .. } => {
                 if let Expr::Ident { name: b, .. } = &**base {
-                    if self.lookup_binding(st, b).is_none() && self.known_package(b) {
-                        return Resolved::Package {
-                            pkg: b.clone(),
-                            method: name.clone(),
-                        };
+                    if self.lookup_binding(st, b).is_none() {
+                        if self.known_package(b) {
+                            return Resolved::Package {
+                                pkg: b.clone(),
+                                method: name.clone(),
+                            };
+                        }
+                        let base_method = crate::shape::split_generic_name(name)
+                            .map(|(m, _)| m)
+                            .unwrap_or(name.as_str());
+                        let assoc = format!("{b}.{base_method}");
+                        if self.fns.contains_key(&assoc) {
+                            return Resolved::Fn { name: assoc };
+                        }
                     }
                 }
                 if let Some(root) = base.root_ident() {
@@ -279,11 +288,14 @@ impl<'a> Checker<'a> {
                     self.check_delete_const(st, cr, &HashSet::new());
                 }
                 self.check_call_const_writes(st, cr, &HashSet::new());
-                if self.fns.contains_key(&name) {
+                let base_name = crate::shape::split_generic_name(&name)
+                    .map(|(b, _)| b)
+                    .unwrap_or(name.as_str());
+                if self.fns.contains_key(base_name) {
                     // A3 #111: the callee may insert/delete through the
                     // argument — that event runs inside THIS call site's
                     // window when the call is within it.
-                    self.check_a3_call_conflict(st, cr, idx, &name);
+                    self.check_a3_call_conflict(st, cr, idx, base_name);
                     // A7 borrow-by-default: a handle passed to a Hybrid
                     // function is lent for the call only
                     self.lend_handle_args(st, cr, idx, None);
@@ -1473,7 +1485,15 @@ impl<'a> Checker<'a> {
                         if self.shape_may_share(&b.shape)
                             || self.expr_slices_addressable_array(st, value, &root)
                         {
+                            let origin = b.non_owned_origin.clone();
                             st.share_edge(name, &root);
+                            if let Some(origin) = origin {
+                                if let Some(nb) = st.env_lookup_mut(name) {
+                                    if nb.non_owned_origin.is_none() {
+                                        nb.non_owned_origin = Some(origin);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
