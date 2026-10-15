@@ -428,6 +428,11 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 ck.record_local_borrow_aliases(&mut st, l);
             }
 
+            // #94: close(ch) as a statement or defer — enforce direction.
+            // `defer close(rc)` parses as Defer{call: Call{Ident("close")}}.
+            Stmt::Expr { expr, .. } => ck.check_close_expr(&st, expr),
+            Stmt::Defer { call, .. } => ck.check_close_expr(&st, call),
+
             Stmt::Assign {
                 targets,
                 op,
@@ -502,6 +507,12 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             Stmt::For { kind, .. } => match kind {
                 ForKind::Iterate { vars, expr } => {
                     let is_chan = matches!(ck.shape_of_expr(&st, expr), TypeShape::Chan(_));
+                    // #94: ranging over a send-only channel (`chan<- T`) is
+                    // invalid Go — the range operand must have receive
+                    // capability. Type contract, not managed-suppressed.
+                    if is_chan {
+                        ck.check_range_dir(&st, expr);
+                    }
                     let shapes = ck.iterate_var_shapes(&st, expr, vars.len());
                     for (name, shape) in vars.iter().zip(shapes) {
                         let is_ref = shape.is_reference_alias();
