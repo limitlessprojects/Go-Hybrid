@@ -305,6 +305,26 @@ impl Emitter {
                         .unwrap_or_else(|| w.to_string());
                     self.handler_writer = Some(name);
                 }
+                let saved_in_main = self.in_main_closure;
+                let saved_cur_fn_error = self.cur_fn_error_returns.clone();
+                self.in_main_closure = false;
+                let last_is_err = matches!(
+                    results.last(),
+                    Some(r) if matches!(&r.ty, TypeExpr::Named { name, .. } if name == "error")
+                );
+                if last_is_err {
+                    let mut texts = Vec::new();
+                    for (i, r) in results.iter().enumerate() {
+                        if i == results.len() - 1 {
+                            texts.push(String::new());
+                        } else {
+                            texts.push(self.zero_value(&r.ty));
+                        }
+                    }
+                    self.cur_fn_error_returns = Some(texts);
+                } else {
+                    self.cur_fn_error_returns = None;
+                }
                 self.fnlit_depth += 1;
                 let mut out = String::from("func(");
                 out.push_str(&rendered_params);
@@ -336,6 +356,8 @@ impl Emitter {
                 self.body = main_body;
                 self.fnlit_depth -= 1;
                 self.handler_writer = saved_writer;
+                self.in_main_closure = saved_in_main;
+                self.cur_fn_error_returns = saved_cur_fn_error;
                 self.bindings.retain(|k, _| known.contains(k));
                 out.push_str(&closure_body);
                 for _ in 0..self.indent {

@@ -43,6 +43,7 @@ mod loans;
 mod model;
 mod sendability;
 mod shape;
+mod try_check;
 mod walk;
 
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
@@ -550,6 +551,9 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     while !st.scopes.is_empty() {
         st.scope_pop();
     }
+
+    // Try-operator legality pass (try_check.rs): E3, E3b, E4, T20.
+    try_check::check_tries_in_fn(ck, f, &st);
 
     // Closure-boundary pass (closures.rs): task/send/select-send STATEMENTS
     // inside closure bodies are concurrency boundaries in the emitted Go —
@@ -1413,12 +1417,12 @@ mod tests {
         // 12-shape: two borrow calls then a mutate — windows non-lexical.
         let r = check(
             "import \"rust/serde_json\"\n\
-             fn count(doc serde_json.value) int {\n\
+             fn count(doc serde_json.value) (int, error) {\n\
                n := 0\n\
                for u in doc.array(\"users\")? {\n\
                  n += u.int(\"logins\")?\n\
                }\n\
-               return n\n\
+               return n, nil\n\
              }\n\
              fn main() {\n\
                doc := serde_json.parse(`{}`)?\n\
@@ -1572,14 +1576,14 @@ mod tests {
         // mutates the returned handle — the transfer made it the caller's.
         let r = check(
             "import \"rust/serde_json\"\n\
-             fn summary(doc serde_json.value) serde_json.value {\n\
+             fn summary(doc serde_json.value) (serde_json.value, error) {\n\
                v := serde_json.new_object()\n\
                for u in doc.array(\"users\")? {\n\
                  if u.int(\"logins\")? > 0 {\n\
                    v.set(\"active\", 1)\n\
                  }\n\
                }\n\
-               return v\n\
+               return v, nil\n\
              }\n\
              fn main() {\n\
                doc := serde_json.parse(`{}`)?\n\
