@@ -1,6 +1,6 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-35 pseudo-Hybrid (`.hy`) programs written BEFORE the Phase-1 checker exists,
+38 pseudo-Hybrid (`.hy`) programs written BEFORE the Phase-1 checker exists,
 Current registered corpus: **28 programs**. The original pre-checker
 registration described below started with 18 and grew to 20 during the
 2026-10-12 integration. An additive 2026-10-14 registration in VERDICTS.md
@@ -10,6 +10,12 @@ A further additive registration pins case 28, the documented default-arm
 syntax and a nonblocking fallback that prints exactly `idle`.
 Their expected results were recorded before running the new fixtures.
 These four files were initially numbered 21–24 and then 25–28 on the contributor's branch; the 2026-10-15 maintainer integration renumbered them to 32–35 (slots 25–31 were taken by the audit/PR wave) without changing their expected results.
+A further additive 2026-10-15 registration pins cases **36–38**, the wrapper
+tail of the call-result alias family (issue #160): a nested-call alias
+(`alias := same(same(agg))`) as REJECT, its accept-side false-positive guard as
+ACCEPT, and the `append`-within-capacity variant (a literal field holding an
+`append` result that shares the source backing array) as REJECT. Expected
+results were recorded before the fix; none of the three contains `managed`.
 The dated original tripwire baseline below is preserved as historical.
 
 18 pseudo-Hybrid (`.hy`) programs written BEFORE the Phase-1 checker exists,

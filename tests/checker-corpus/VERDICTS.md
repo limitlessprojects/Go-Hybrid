@@ -501,3 +501,33 @@ dated baseline remain unchanged. Verdict-level managed count is 2/28;
 the harness's unchanged historical as-written set {01, 03, 04} reports
 3/28, with the same population qualification noted above. Case 28 adds
 no `managed` block.
+
+## Additive corpus registration — 2026-10-15: wrapper-alias freeze (issue #160)
+
+Rows 36–38 pin the wrapper tail of the call-result alias family (issue #38's
+`alias := same(agg)` → #73's generic form → the shapes reported in #160). The
+one-level call return (26) and the generic form (31) are recorded as binding
+aliases because the call argument is a bare identifier; these rows cover the
+same storage reached through a WRAPPER — where `Expr::root_ident()` returns
+`None` (it stops at a call or a literal base), so neither `record_alias` nor
+`record_may_share` recorded an edge and the O5.2 freeze never reached the
+source binding.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 36 | 36-wrapper-alias-freeze | REJECT | A1b | `HYB-E3003` | `alias := same(same(agg))` is still `agg`'s storage; the write through `alias` after `results <- move agg` is use-after-move |
+| 37 | 37-wrapper-alias-own-move-control | ACCEPT | — | no error | the same wrapper alias held and read BEFORE the owned move, untouched after it — holding an alias is legal; false-positive guard for 36 |
+| 38 | 38-append-literal-alias-freeze | REJECT | A1b | `HYB-E3003` | `append(base, 4)` with `cap(base) == 8` does not reallocate, so `box{items: append(base, 4)}` shares `base`'s backing array; `append` in `define` position already rejects, the wrapped form did not |
+
+Registration basis: pre-fix `hyb check` on `main` @ `f99d6d0b` reported
+`OK (0 diagnostics)` for 36 and 38 while `go run -race` reported a
+write/write `WARNING: DATA RACE` (exit status 66) on the shared map /
+backing-array element; row 37 was accepted both before and after the fix.
+The sibling wrapper forms (`same(agg)[0:2]`, `wrap{items: same(agg)}`,
+`box{items: agg}.items`, `take(box{items: agg})`) share the one root cause
+and are pinned as `hy-check` unit tests rather than separate corpus rows.
+No file in this batch contains a `managed` block, so the verdict-level and
+as-written managed populations are unchanged by these rows.
+
+Current registered corpus on this branch: **38 programs: ACCEPT 10 ·
+ACCEPT-MANAGED 2 · REJECT 26** (the 35-program merged base plus these three).
