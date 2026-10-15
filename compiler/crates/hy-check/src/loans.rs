@@ -128,11 +128,20 @@ impl<'a> Checker<'a> {
         match cr.callee {
             Expr::Field { base, name, .. } => {
                 if let Expr::Ident { name: b, .. } = &**base {
-                    if self.lookup_binding(st, b).is_none() && self.known_package(b) {
-                        return Resolved::Package {
-                            pkg: b.clone(),
-                            method: name.clone(),
-                        };
+                    if self.lookup_binding(st, b).is_none() {
+                        if self.known_package(b) {
+                            return Resolved::Package {
+                                pkg: b.clone(),
+                                method: name.clone(),
+                            };
+                        }
+                        let base_method = crate::shape::split_generic_name(name)
+                            .map(|(m, _)| m)
+                            .unwrap_or(name.as_str());
+                        let assoc = format!("{b}.{base_method}");
+                        if self.fns.contains_key(&assoc) {
+                            return Resolved::Fn { name: assoc };
+                        }
                     }
                 }
                 if let Some(root) = base.root_ident() {
@@ -297,11 +306,14 @@ impl<'a> Checker<'a> {
                 }
                 self.check_call_const_writes(st, cr, &HashSet::new());
                 self.record_callee_param_stores(st, cr);
-                if self.fns.contains_key(&name) {
+                let base_name = crate::shape::split_generic_name(&name)
+                    .map(|(b, _)| b)
+                    .unwrap_or(name.as_str());
+                if self.fns.contains_key(base_name) {
                     // A3 #111: the callee may insert/delete through the
                     // argument — that event runs inside THIS call site's
                     // window when the call is within it.
-                    self.check_a3_call_conflict(st, cr, idx, &name);
+                    self.check_a3_call_conflict(st, cr, idx, base_name);
                     // A7 borrow-by-default: a handle passed to a Hybrid
                     // function is lent for the call only
                     self.lend_handle_args(st, cr, idx, None);
@@ -672,9 +684,17 @@ impl<'a> Checker<'a> {
             return;
         }
         let recv_sname = match recv {
-            TypeShape::Struct(Some(s)) => Some(s.clone()),
+            TypeShape::Struct(Some(s)) => Some(
+                crate::shape::split_generic_name(s)
+                    .map(|(b, _)| b.to_string())
+                    .unwrap_or_else(|| s.clone()),
+            ),
             TypeShape::Pointer(inner) => match &**inner {
-                TypeShape::Struct(Some(s)) => Some(s.clone()),
+                TypeShape::Struct(Some(s)) => Some(
+                    crate::shape::split_generic_name(s)
+                        .map(|(b, _)| b.to_string())
+                        .unwrap_or_else(|| s.clone()),
+                ),
                 _ => None,
             },
             _ => None,
@@ -1968,7 +1988,7 @@ impl<'a> Checker<'a> {
             }
             Expr::Field { base, .. } | Expr::Index { base, .. } => {
                 let sh = self.shape_of_expr(st, e);
-                if field_borrow_kind(&sh).is_some() || matches!(sh, TypeShape::Unknown) {
+                if self.shape_field_borrow_kind(&sh).is_some() || matches!(sh, TypeShape::Unknown) {
                     self.collect_expr_addr_of_roots(st, base, out);
                 }
             }
@@ -2009,12 +2029,13 @@ impl<'a> Checker<'a> {
             if let Some(results) = self.call_result_tys(st, callee) {
                 return results.iter().any(|ty| {
                     let shape = self.shape_of_type(ty);
-                    field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown)
+                    self.shape_field_borrow_kind(&shape).is_some()
+                        || matches!(shape, TypeShape::Unknown)
                 });
             }
         }
         let shape = self.shape_of_expr(st, inner);
-        field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown)
+        self.shape_field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown)
     }
 
     pub(crate) fn expr_carries_borrow(&self, st: &FnState, e: &Expr) -> bool {
@@ -2452,7 +2473,15 @@ impl<'a> Checker<'a> {
                         if self.shape_may_share(&b.shape)
                             || self.expr_slices_addressable_array(st, value, &root)
                         {
+                            let origin = b.non_owned_origin.clone();
                             st.share_edge(name, &root);
+                            if let Some(origin) = origin {
+                                if let Some(nb) = st.env_lookup_mut(name) {
+                                    if nb.non_owned_origin.is_none() {
+                                        nb.non_owned_origin = Some(origin);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -3707,7 +3736,8 @@ impl<'a> Checker<'a> {
             if name == "_" {
                 continue;
             }
-            let borrow_slot = field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown);
+            let borrow_slot =
+                self.shape_field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown);
             if (l.names.len() == l.values.len() || borrow_slot) && self.expr_carries_borrow(st, value) {
                 st.borrow_bindings.insert(name.clone());
             } else {
@@ -3773,8 +3803,8 @@ impl<'a> Checker<'a> {
                     if name == "_" {
                         continue;
                     }
-                    let borrow_slot =
-                        field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown);
+                    let borrow_slot = self.shape_field_borrow_kind(&shape).is_some()
+                        || matches!(shape, TypeShape::Unknown);
                     let inner = unwrap_parens(v);
                     let is_borrow = as_addr_of(inner).is_some()
                         || contains_addr_of_in_literal(inner)
@@ -5352,7 +5382,7 @@ impl<'a> Checker<'a> {
                 if matches!(t.kind, PlaceKind::Field { .. }) {
                     let shape = self.shape_of_expr(st, v);
                     let is_borrow = as_addr_of(v).is_some()
-                        || field_borrow_kind(&shape).is_some();
+                        || self.shape_field_borrow_kind(&shape).is_some();
                     if is_borrow {
                         self.emit_a6_field_borrow_error(t);
                     }
@@ -5362,7 +5392,7 @@ impl<'a> Checker<'a> {
             let shapes = self.multi_value_shapes(st, &values[0], targets.len());
             for (t, shape) in targets.iter().zip(shapes.iter()) {
                 if matches!(t.kind, PlaceKind::Field { .. })
-                    && field_borrow_kind(shape).is_some()
+                    && self.shape_field_borrow_kind(shape).is_some()
                 {
                     self.emit_a6_field_borrow_error(t);
                 }
@@ -6484,9 +6514,17 @@ impl<'a> Checker<'a> {
         } = callee
         {
             let recv_base = match self.shape_of_expr(st, base) {
-                TypeShape::Struct(Some(s)) => Some(s),
+                TypeShape::Struct(Some(s)) => Some(
+                    crate::shape::split_generic_name(&s)
+                        .map(|(b, _)| b.to_string())
+                        .unwrap_or(s),
+                ),
                 TypeShape::Pointer(inner) => match *inner {
-                    TypeShape::Struct(Some(s)) => Some(s),
+                    TypeShape::Struct(Some(s)) => Some(
+                        crate::shape::split_generic_name(&s)
+                            .map(|(b, _)| b.to_string())
+                            .unwrap_or(s),
+                    ),
                     _ => None,
                 },
                 _ => None,
@@ -6610,9 +6648,17 @@ impl<'a> Checker<'a> {
                         (false, true)
                     } else {
                         let recv_base = match self.shape_of_expr(st, base) {
-                            TypeShape::Struct(Some(s)) => Some(s),
+                            TypeShape::Struct(Some(s)) => Some(
+                                crate::shape::split_generic_name(&s)
+                                    .map(|(b, _)| b.to_string())
+                                    .unwrap_or(s),
+                            ),
                             TypeShape::Pointer(inner) => match *inner {
-                                TypeShape::Struct(Some(s)) => Some(s),
+                                TypeShape::Struct(Some(s)) => Some(
+                                    crate::shape::split_generic_name(&s)
+                                        .map(|(b, _)| b.to_string())
+                                        .unwrap_or(s),
+                                ),
                                 _ => None,
                             },
                             _ => None,
@@ -7326,37 +7372,37 @@ impl<'a> Checker<'a> {
                 }
                 PlaceKind::Ident(name) => {
                     let b = self.lookup_binding(st, name)?;
-                    let mut cur = b.ty.as_ref()?;
+                    let mut cur = b.ty.clone()?;
                     steps.reverse();
                     for step in steps {
                         while let hy_syntax::TypeExpr::Pointer { to, .. } = cur {
-                            cur = to.as_ref();
+                            cur = (*to).clone();
                         }
                         match step {
                             Step::Index => match cur {
                                 hy_syntax::TypeExpr::Array { elem, .. }
                                 | hy_syntax::TypeExpr::Slice { elem, .. } => {
-                                    cur = elem.as_ref();
+                                    cur = (*elem).clone();
                                 }
                                 hy_syntax::TypeExpr::Map { value, .. } => {
-                                    cur = value.as_ref();
+                                    cur = (*value).clone();
                                 }
                                 _ => return None,
                             },
-                            Step::Field(field_name) => match cur {
+                            Step::Field(field_name) => match &cur {
                                 hy_syntax::TypeExpr::Named {
                                     name: struct_name, ..
                                 } => {
-                                    let fields = self.structs.get(struct_name)?;
+                                    let fields = self.struct_fields_for_name(struct_name)?;
                                     let (_, field_ty) =
-                                        fields.iter().find(|(f, _)| f == field_name)?;
+                                        fields.into_iter().find(|(f, _)| f == field_name)?;
                                     cur = field_ty;
                                 }
                                 _ => return None,
                             },
                         }
                     }
-                    return Some(cur.clone());
+                    return Some(cur);
                 }
             }
         }
@@ -7776,46 +7822,66 @@ impl<'a> Checker<'a> {
 
         for (sname, fields) in decls {
             for (fname, fty) in fields {
-                let shape = self.shape_of_type(&fty);
-                match field_borrow_kind(&shape) {
-                    Some("borrow-handle") => {
-                        let msg = format!(
-                            "struct field `{}.{}` has borrow-handle type `{}`",
-                            sname,
-                            fname,
-                            fty.render()
-                        );
-                        let notes = vec![
-                            "fields hold owned values, GC values, ids, or own-handles — never borrows (O12): a stored borrow is the shape that would force lifetime annotations".to_string(),
-                            "process the element inside the loop body (the loan dies at each iteration's last use), or store the index or a copy and re-view through the handle later".to_string(),
-                        ];
-                        let span = fty.span();
-                        self.diags.push(
-                            Diagnostic::error("HYB-E3103", self.path.clone(), span, msg)
-                                .with_notes(notes),
-                        );
-                    }
-                    Some("pointer") => {
-                        // O12's own example (`cur &node`): pointer fields are
-                        // borrows — store an id or the value instead.
-                        let msg = format!(
-                            "struct field `{}.{}` has pointer type `{}` — fields never hold borrows",
-                            sname,
-                            fname,
-                            fty.render()
-                        );
-                        let notes = vec![
-                            "a pointer field is a stored borrow (O12): store an id/index and re-borrow at the use site, or store the value".to_string(),
-                        ];
-                        let span = fty.span();
-                        self.diags.push(
-                            Diagnostic::error("HYB-E3103", self.path.clone(), span, msg)
-                                .with_notes(notes),
-                        );
-                    }
-                    _ => {}
+                self.emit_struct_field_borrow_diag(&sname, &fname, &fty, fty.span());
+            }
+        }
+    }
+
+    pub(crate) fn emit_struct_field_borrow_diag(
+        &mut self,
+        sname: &str,
+        fname: &str,
+        fty: &hy_syntax::TypeExpr,
+        span: Span,
+    ) {
+        let shape = self.shape_of_type(fty);
+        match self.shape_field_borrow_kind(&shape) {
+            Some("borrow-handle") => {
+                let msg = format!(
+                    "struct field `{}.{}` has borrow-handle type `{}`",
+                    sname,
+                    fname,
+                    fty.render()
+                );
+                let notes = vec![
+                    "fields hold owned values, GC values, ids, or own-handles — never borrows (O12): a stored borrow is the shape that would force lifetime annotations".to_string(),
+                    "process the element inside the loop body (the loan dies at each iteration's last use), or store the index or a copy and re-view through the handle later".to_string(),
+                ];
+                if !self
+                    .diags
+                    .iter()
+                    .any(|d| d.code == "HYB-E3103" && d.span == span)
+                {
+                    self.diags.push(
+                        Diagnostic::error("HYB-E3103", self.path.clone(), span, msg)
+                            .with_notes(notes),
+                    );
                 }
             }
+            Some("pointer") => {
+                // O12's own example (`cur &node`): pointer fields are
+                // borrows — store an id or the value instead.
+                let msg = format!(
+                    "struct field `{}.{}` has pointer type `{}` — fields never hold borrows",
+                    sname,
+                    fname,
+                    fty.render()
+                );
+                let notes = vec![
+                    "a pointer field is a stored borrow (O12): store an id/index and re-borrow at the use site, or store the value".to_string(),
+                ];
+                if !self
+                    .diags
+                    .iter()
+                    .any(|d| d.code == "HYB-E3103" && d.span == span)
+                {
+                    self.diags.push(
+                        Diagnostic::error("HYB-E3103", self.path.clone(), span, msg)
+                            .with_notes(notes),
+                    );
+                }
+            }
+            _ => {}
         }
     }
 
@@ -7845,6 +7911,34 @@ impl<'a> Checker<'a> {
             moved: None,
             non_owned_origin,
             slot_loan: false,
+        }
+    }
+
+    pub(crate) fn shape_field_borrow_kind(&self, shape: &TypeShape) -> Option<&'static str> {
+        self.shape_field_borrow_kind_at(shape, 0)
+    }
+
+    fn shape_field_borrow_kind_at(&self, shape: &TypeShape, depth: usize) -> Option<&'static str> {
+        if depth > 8 {
+            return None;
+        }
+        if let Some(k) = field_borrow_kind(shape) {
+            return Some(k);
+        }
+        match shape {
+            TypeShape::Slice(elem) | TypeShape::Array(elem) => {
+                self.shape_field_borrow_kind_at(elem, depth + 1)
+            }
+            TypeShape::Map(k, v) => self
+                .shape_field_borrow_kind_at(k, depth + 1)
+                .or_else(|| self.shape_field_borrow_kind_at(v, depth + 1)),
+            TypeShape::Struct(Some(sname)) => {
+                let fields = self.resolved_struct_fields(sname, depth + 1)?;
+                fields
+                    .iter()
+                    .find_map(|(_, fshape)| self.shape_field_borrow_kind_at(fshape, depth + 1))
+            }
+            _ => None,
         }
     }
 }

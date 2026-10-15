@@ -3986,6 +3986,241 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Prelude `set[T]`, generic struct instantiations (`box[T]`), generic and
+    // associated function calls (`lru_cache.new[K, V]`), and `type` aliases.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn set_prelude_shallow_copy_and_unmoved_spawn_reject() {
+        // `set[T]` lowers in hy-emit to `struct { m map[T]struct{} }`, so a
+        // shallow copy `s2 := s1` shares the underlying Go map and must be
+        // frozen when `s1` is moved across a task boundary (A1b / HYB-E3003).
+        let r_alias = check(
+            "fn worker(s set[string], done chan<- bool) {\n\
+               s.insert(\"w\")\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               s1 := set.new[string]()\n\
+               s1.insert(\"init\")\n\
+               s2 := s1\n\
+               done := make(chan bool, 1)\n\
+               task worker(move s1, done)\n\
+               s2.insert(\"m\")\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_alias.verdict, Verdict::Reject, "{:?}", r_alias.diagnostics);
+        assert_eq!(first_error_rule(&r_alias).as_deref(), Some("A1b"));
+        assert!(r_alias.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // Passing `s1` without `move` rejects under A1c (`HYB-E3001`), not
+        // unproven E3005.
+        let r_unmoved = check(
+            "fn worker(s set[string]) { s.insert(\"w\") }\n\
+             fn main() {\n\
+               s1 := set.new[string]()\n\
+               task worker(s1)\n\
+             }",
+        );
+        assert_eq!(
+            r_unmoved.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_unmoved.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_unmoved).as_deref(), Some("A1c"));
+        assert_eq!(r_unmoved.diagnostics[0].code, "HYB-E3001");
+
+        // Positive control: `move s1` with no post-move use of `s1` or an
+        // alias is accepted.
+        let r_ok = check(
+            "fn worker(s set[string], done chan<- bool) {\n\
+               s.insert(\"w\")\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               s1 := set.new[string]()\n\
+               done := make(chan bool, 1)\n\
+               task worker(move s1, done)\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_ok.verdict, Verdict::Accept, "{:?}", r_ok.diagnostics);
+    }
+
+    #[test]
+    fn generic_struct_instantiation_tracks_may_share_and_field_projection() {
+        // 1. `box[map[string]int]` carries a reference-typed field after type
+        // parameter substitution, so `b2 := b1` shares mutable GC storage and
+        // is frozen when `b1` is moved (HYB-E3003).
+        let r_copy = check(
+            "struct box[t any] { v t }\n\
+             fn worker(b box[map[string]int], done chan<- bool) {\n\
+               b.v[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               b1 := box[map[string]int]{v: map[string]int{\"k\": 0}}\n\
+               b2 := b1\n\
+               done := make(chan bool, 1)\n\
+               task worker(move b1, done)\n\
+               b2.v[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_copy.verdict, Verdict::Reject, "{:?}", r_copy.diagnostics);
+        assert_eq!(first_error_rule(&r_copy).as_deref(), Some("A1b"));
+        assert!(r_copy.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // 2. Projecting `m := b1.v` out of `box[map[string]int]` resolves `m`
+        // to `Map(Str, Primitive)`, so `m2 := m` is recorded as a reference
+        // alias and frozen when `m` is moved.
+        let r_proj = check(
+            "struct box[t any] { v t }\n\
+             fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               b1 := box[map[string]int]{v: map[string]int{\"k\": 0}}\n\
+               m := b1.v\n\
+               m2 := m\n\
+               done := make(chan bool, 1)\n\
+               task worker(move m, done)\n\
+               m2[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_proj.verdict, Verdict::Reject, "{:?}", r_proj.diagnostics);
+        assert_eq!(first_error_rule(&r_proj).as_deref(), Some("A1b"));
+        assert!(r_proj.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // 3. Negative control: `box[int]` has only a primitive payload after
+        // substitution, so `b2 := b1` does not share mutable GC storage and
+        // stays usable after `move b1`.
+        let r_prim = check(
+            "struct box[t any] { v t }\n\
+             fn worker(b box[int], done chan<- bool) {\n\
+               fmt.println(b.v)\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               b1 := box[int]{v: 7}\n\
+               b2 := b1\n\
+               done := make(chan bool, 1)\n\
+               task worker(move b1, done)\n\
+               fmt.println(b2.v)\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_prim.verdict, Verdict::Accept, "{:?}", r_prim.diagnostics);
+    }
+
+    #[test]
+    fn generic_and_associated_fn_calls_preserve_return_shape_and_arg_sharing() {
+        // 1. Associated generic constructor `lru_cache.new[string, int](2)`
+        // resolves to `Struct(Some("lru_cache[string, int]"))` whose fields
+        // include `index map[k]int`, so `c2 := c` is frozen by `move c`.
+        let r_assoc = check(
+            "struct entry[k comparable, v any] { key k\n val v }\n\
+             struct lru_cache[k comparable, v any] {\n\
+               cap int\n\
+               entries []entry[k, v]\n\
+               index map[k]int\n\
+             }\n\
+             fn lru_cache.new[k comparable, v any](cap int) lru_cache[k, v] {\n\
+               return lru_cache[k, v]{cap: cap, entries: []entry[k, v]{}, index: map[k]int{}}\n\
+             }\n\
+             fn worker(c lru_cache[string, int], done chan<- bool) {\n\
+               c.index[\"a\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               c := lru_cache.new[string, int](2)\n\
+               c2 := c\n\
+               done := make(chan bool, 1)\n\
+               task worker(move c, done)\n\
+               c2.index[\"b\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(
+            r_assoc.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_assoc.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_assoc).as_deref(), Some("A1b"));
+        assert!(r_assoc.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // 2. A call returning a reference-bearing struct (`box.new[map[string]int](m)`)
+        // links the returned composite to its reference-bearing argument `m`,
+        // so moving `b` freezes `m`.
+        let r_wrap = check(
+            "struct box[t any] { v t }\n\
+             fn box.new[t any](x t) box[t] {\n\
+               return box[t]{v: x}\n\
+             }\n\
+             fn worker(b box[map[string]int], done chan<- bool) {\n\
+               b.v[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               b := box.new[map[string]int](m)\n\
+               done := make(chan bool, 1)\n\
+               task worker(move b, done)\n\
+               m[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_wrap.verdict, Verdict::Reject, "{:?}", r_wrap.diagnostics);
+        assert_eq!(first_error_rule(&r_wrap).as_deref(), Some("A1b"));
+        assert!(r_wrap.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+    }
+
+    #[test]
+    fn type_alias_resolves_underlying_shape_for_aliases_and_boundaries() {
+        // `type shared_map = map[string]int`: a binding of type `shared_map`
+        // resolves to `Map(Str, Primitive)` instead of `Unknown`, so `m2 := m`
+        // is tracked as a reference alias and frozen when `m` is moved.
+        let r_map = check(
+            "type shared_map = map[string]int\n\
+             fn make_shared() shared_map {\n\
+               return map[string]int{\"k\": 0}\n\
+             }\n\
+             fn worker(m shared_map, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := make_shared()\n\
+               m2 := m\n\
+               done := make(chan bool, 1)\n\
+               task worker(move m, done)\n\
+               m2[\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_map.verdict, Verdict::Reject, "{:?}", r_map.diagnostics);
+        assert_eq!(first_error_rule(&r_map).as_deref(), Some("A1b"));
+        assert!(r_map.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // Positive control: a primitive type alias resolves to `Primitive` and
+        // crosses a spawn boundary without needing `managed`.
+        let r_prim = check(
+            "type node_id = int\n\
+             fn take(id node_id) { fmt.println(id) }\n\
+             fn main() {\n\
+               var id node_id = 42\n\
+               task take(id)\n\
+             }",
+        );
+        assert_eq!(r_prim.verdict, Verdict::Accept, "{:?}", r_prim.diagnostics);
+    }
+
+    // -----------------------------------------------------------------------
     // Issue #143: T13/T14/T15 (`HYB-E5001`) match exhaustiveness & `_`
     // placement + N3 (`HYB-E4002`) enum/struct zero-value checks (R1–R6).
     // -----------------------------------------------------------------------
@@ -5175,6 +5410,61 @@ mod tests {
             .filter(|d| d.code == "HYB-E3006")
             .count();
         assert_eq!(e3006_count, 2, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn generic_struct_nil_field_zero_value_a3_loan_and_borrow_escape_reject() {
+        let r = check(
+            "import \"fmt\"\n\
+             struct box[t] {\n\
+               v t\n\
+             }\n\
+             struct node {\n\
+               x int\n\
+             }\n\
+             type pnode = *node\n\
+             enum msg {\n\
+               data(int)\n\
+               quit\n\
+             }\n\
+             fn escape() box[pnode] {\n\
+               n := node{x: 1}\n\
+               b := box[pnode]{v: &n}\n\
+               return b\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"a\": 1}\n\
+               b := box[map[string]int]{v: m}\n\
+               p := &b.v[\"a\"]\n\
+               delete(m, \"a\")\n\
+               fmt.println(p)\n\
+               nil_box := box[map[string]int]{v: nil}\n\
+               var uninit_box box[msg]\n\
+               _ = nil_box\n\
+               _ = uninit_box\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3104"),
+            "expected HYB-E3104 on return box[*node], got: {:?}",
+            r.diagnostics
+        );
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3102"),
+            "expected HYB-E3102 on A3 loan through generic struct field, got: {:?}",
+            r.diagnostics
+        );
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E4001"),
+            "expected HYB-E4001 on nil generic struct field, got: {:?}",
+            r.diagnostics
+        );
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E4002"),
+            "expected HYB-E4002 on uninitialized generic struct with payload-first enum, got: {:?}",
+            r.diagnostics
+        );
     }
 }
 

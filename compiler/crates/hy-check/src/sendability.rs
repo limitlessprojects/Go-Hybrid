@@ -168,12 +168,12 @@ impl<'a> Checker<'a> {
                     return false;
                 }
                 seen.push(sname.clone());
-                let Some(fields) = self.structs.get(sname) else {
+                let Some(fields) = self.resolved_struct_fields(sname, seen.len()) else {
                     return false;
                 };
                 fields
                     .iter()
-                    .any(|(_, ty)| self.shape_holds_closure(&self.shape_of_type(ty), seen))
+                    .any(|(_, fshape)| self.shape_holds_closure(fshape, seen))
             }
             _ => false,
         }
@@ -200,12 +200,12 @@ impl<'a> Checker<'a> {
                     return false;
                 }
                 seen.push(sname.clone());
-                let Some(fields) = self.structs.get(sname) else {
+                let Some(fields) = self.resolved_struct_fields(sname, seen.len()) else {
                     return false;
                 };
                 fields
                     .iter()
-                    .any(|(_, ty)| self.shape_holds_unmovable_leaf(&self.shape_of_type(ty), seen))
+                    .any(|(_, fshape)| self.shape_holds_unmovable_leaf(fshape, seen))
             }
             _ => false,
         }
@@ -227,12 +227,12 @@ impl<'a> Checker<'a> {
                     return false;
                 }
                 seen.push(sname.clone());
-                let Some(fields) = self.structs.get(sname) else {
+                let Some(fields) = self.resolved_struct_fields(sname, seen.len()) else {
                     return false;
                 };
                 fields
                     .iter()
-                    .all(|(_, ty)| self.shape_is_const_sendable(&self.shape_of_type(ty), seen))
+                    .all(|(_, fshape)| self.shape_is_const_sendable(fshape, seen))
             }
             _ => false,
         }
@@ -609,7 +609,10 @@ impl<'a> Checker<'a> {
                         name
                     ));
                 }
-                if self.fns.contains_key(name) {
+                let base_name = crate::shape::split_generic_name(name)
+                    .map(|(b, _)| b)
+                    .unwrap_or(name.as_str());
+                if self.fns.contains_key(base_name) {
                     return CalleeVerdict::Proven;
                 }
                 CalleeVerdict::Unproven(format!(
@@ -638,11 +641,32 @@ impl<'a> Checker<'a> {
                 if self.lookup_binding(st, name).is_some() {
                     return None; // shadowed by a local binding — not a static fn call
                 }
-                let f = self.fns.get(name)?;
+                let (base_name, type_args) = crate::shape::split_generic_name(name)
+                    .map(|(b, args)| (b, Some(args)))
+                    .unwrap_or((name.as_str(), None));
+                let f = self.fns.get(base_name)?;
                 if f.params.len() != argc {
                     return None;
                 }
-                Some(f.params.iter().map(|p| self.shape_of_type(&p.ty)).collect())
+                let mut subst = std::collections::HashMap::new();
+                let mut subst_str = std::collections::HashMap::new();
+                if let Some(args) = type_args {
+                    let empty_shapes = std::collections::HashMap::new();
+                    let empty_strs = std::collections::HashMap::new();
+                    for (tp, arg) in f.type_params.iter().zip(args.iter()) {
+                        subst.insert(
+                            tp.name.clone(),
+                            self.shape_of_type_str(arg, &empty_shapes, &empty_strs, 0),
+                        );
+                        subst_str.insert(tp.name.clone(), arg.clone());
+                    }
+                }
+                Some(
+                    f.params
+                        .iter()
+                        .map(|p| self.shape_of_type_with_subst(&p.ty, &subst, &subst_str, 0))
+                        .collect(),
+                )
             }
             Expr::FnLit { params, .. } => {
                 if params.len() != argc {
@@ -1011,7 +1035,7 @@ impl<'a> Checker<'a> {
                         _ => None,
                     }
                 }) {
-                    if let Some(def) = self.structs.get(&sname).cloned() {
+                    if let Some(def) = self.struct_fields_for_name(&sname) {
                         for f in fields {
                             if let Some((_, fty)) = def.iter().find(|(n, _)| n == &f.name) {
                                 if Checker::is_nil_literal(&f.value) {
@@ -2184,7 +2208,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn parse_generic_type_args(name: &str) -> Option<(&str, Vec<hy_syntax::TypeExpr>)> {
+    pub(crate) fn parse_generic_type_args(name: &str) -> Option<(&str, Vec<hy_syntax::TypeExpr>)> {
         let open = name.find('[')?;
         if !name.ends_with(']') || open == 0 {
             return None;
@@ -2308,14 +2332,10 @@ impl<'a> Checker<'a> {
         cur
     }
 
-    fn struct_fields_for_type(
+    pub(crate) fn struct_fields_for_name(
         &self,
-        ty: &hy_syntax::TypeExpr,
+        name: &str,
     ) -> Option<Vec<(String, hy_syntax::TypeExpr)>> {
-        let peeled = self.peel_pointer_and_alias(ty);
-        let hy_syntax::TypeExpr::Named { name, .. } = &peeled else {
-            return None;
-        };
         let sname = Self::base_named_type_str(name);
         let fields = self.structs.get(sname)?.clone();
         if let Some((_, type_args)) = Self::parse_generic_type_args(name) {
@@ -2338,6 +2358,17 @@ impl<'a> Checker<'a> {
             }
         }
         Some(fields)
+    }
+
+    pub(crate) fn struct_fields_for_type(
+        &self,
+        ty: &hy_syntax::TypeExpr,
+    ) -> Option<Vec<(String, hy_syntax::TypeExpr)>> {
+        let peeled = self.peel_pointer_and_alias(ty);
+        let hy_syntax::TypeExpr::Named { name, .. } = &peeled else {
+            return None;
+        };
+        self.struct_fields_for_name(name)
     }
 
     fn infer_type_param_bindings(

@@ -1141,8 +1141,9 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             if targets.len() == values.len() {
                 for (t, v) in targets.iter().zip(values.iter()) {
                     if matches!(t.kind, hy_syntax::PlaceKind::Field { .. }) {
+                        let shape = ck.shape_of_expr(st, v);
                         let is_borrow = crate::model::as_addr_of(v).is_some()
-                            || matches!(ck.shape_of_expr(st, v), TypeShape::BorrowHandle(_));
+                            || ck.shape_field_borrow_kind(&shape).is_some();
                         if is_borrow {
                             ck.emit_a6_field_borrow_error(t);
                         }
@@ -1152,7 +1153,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 let shapes = ck.multi_value_shapes(st, &values[0], targets.len());
                 for (t, shape) in targets.iter().zip(shapes.iter()) {
                     if matches!(t.kind, hy_syntax::PlaceKind::Field { .. })
-                        && matches!(shape, TypeShape::BorrowHandle(_))
+                        && ck.shape_field_borrow_kind(shape).is_some()
                     {
                         ck.emit_a6_field_borrow_error(t);
                     }

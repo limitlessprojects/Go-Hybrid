@@ -1074,11 +1074,14 @@ impl<'a> Checker<'a> {
                 self.shape_is_proven_pure_value(inner, depth + 1)
             }
             crate::model::TypeShape::Struct(Some(sname)) => {
+                let base = crate::shape::split_generic_name(sname)
+                    .map(|(b, _)| b)
+                    .unwrap_or(sname.as_str());
                 if self.file.decls.iter().any(|d| {
                     matches!(
                         d,
                         hy_syntax::Decl::Struct(s)
-                            if s.name == *sname && !s.type_params.is_empty()
+                            if s.name == base && !s.type_params.is_empty()
                     )
                 }) {
                     return false;

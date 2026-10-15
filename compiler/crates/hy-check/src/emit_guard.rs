@@ -416,7 +416,7 @@ impl<'a> Checker<'a> {
                     {
                         sname = target.clone();
                     }
-                    if let Some(struct_fields) = self.structs.get(&sname).cloned() {
+                    if let Some(struct_fields) = self.struct_fields_for_name(&sname) {
                         for f in fields {
                             if let Some((_, f_ty)) =
                                 struct_fields.iter().find(|(fname, _)| fname == &f.name)
@@ -755,8 +755,8 @@ impl<'a> Checker<'a> {
                     return None; // value cycle — Go rejects the type itself elsewhere
                 }
                 seen.push(name.clone());
-                let fields = self.structs.get(name)?;
-                for (_, ft) in fields {
+                let fields = self.struct_fields_for_name(name)?;
+                for (_, ft) in &fields {
                     let fs = self.shape_of_type(ft);
                     if let Some(n) = self.incomparable_rec(&fs, seen) {
                         return Some(n);
@@ -957,7 +957,21 @@ impl<'a> Checker<'a> {
                     self.check_type_expr_with_state(st, r);
                 }
             }
-            TypeExpr::Named { .. } => {}
+            TypeExpr::Named { name, span } => {
+                if let Some((base, type_args)) = Self::parse_generic_type_args(name) {
+                    for arg in &type_args {
+                        self.check_type_expr_with_state(st, arg);
+                    }
+                    if self.structs.contains_key(base) {
+                        if let Some(fields) = self.struct_fields_for_name(name) {
+                            let sname = base.to_string();
+                            for (fname, fty) in fields {
+                                self.emit_struct_field_borrow_diag(&sname, &fname, &fty, *span);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
