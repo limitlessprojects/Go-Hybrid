@@ -795,6 +795,84 @@ fn assign_slot_loan_copies_and_stores_back() {
 }
 
 #[test]
+fn slot_loan_storeback_before_valued_return() {
+    // Issue #203: store-back must be emitted BEFORE return so value persists
+    // and Go compiler does not reject with missing return.
+    let go = emit(
+        "fn update(m map[string]int, k string) int {\n    slot := &m[k]\n    slot = 42\n    return slot\n}\n",
+    );
+    assert!(go.contains("slot := m[k]"), "copy read:\n{}", go);
+    assert!(
+        go.contains("m[k] = slot\n\treturn slot"),
+        "store-back before return:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("return slot\n\tm[k] = slot"),
+        "no store-back after return:\n{}",
+        go
+    );
+}
+
+#[test]
+fn slot_loan_storeback_before_early_void_return() {
+    // Issue #203: early void return inside if must store back before return,
+    // not after return as dead code.
+    let go = emit(
+        "fn bump(m map[string]int, k string) {\n    if true {\n        slot := &m[k]\n        slot = 42\n        return\n    }\n}\n",
+    );
+    assert!(go.contains("slot := m[k]"), "copy read:\n{}", go);
+    assert!(
+        go.contains("m[k] = slot\n\t\treturn"),
+        "store-back before early return:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("return\n\t\tm[k] = slot"),
+        "no store-back after early return:\n{}",
+        go
+    );
+}
+
+#[test]
+fn slot_loan_storeback_before_loop_break_and_continue() {
+    // Issue #203: break/continue inside loop must store back loop-local slot loan
+    // before jumping.
+    let go = emit(
+        "fn proc(m map[int]int) {\n    for i := 0; i < 10; i = i + 1 {\n        slot := &m[i]\n        if i == 5 {\n            slot = 42\n            break\n        }\n        if i == 2 {\n            slot = 10\n            continue\n        }\n    }\n}\n",
+    );
+    assert!(
+        go.contains("m[i] = slot\n\t\t\tbreak"),
+        "store-back before break:\n{}",
+        go
+    );
+    assert!(
+        go.contains("m[i] = slot\n\t\t\tcontinue"),
+        "store-back before continue:\n{}",
+        go
+    );
+}
+
+#[test]
+fn slot_loan_isolated_in_fnlit_closure() {
+    // Issue #202: slot loans inside FnLit closure must store back inside closure body,
+    // not hoist to outer function.
+    let go = emit(
+        "fn main() {\n    m := map[string]int{\"k\": 0}\n    f := fn() {\n        slot := &m[\"k\"]\n        slot = 42\n    }\n}\n",
+    );
+    assert!(
+        go.contains("slot := m[\"k\"]"),
+        "copy read inside closure:\n{}",
+        go
+    );
+    assert!(
+        go.contains("m[\"k\"] = slot\n\t}"),
+        "store-back before closure closing brace:\n{}",
+        go
+    );
+}
+
+#[test]
 fn single_var_iterate_value_semantics() {
     // Slices: `for w in shard` binds the VALUE (Go's range binds the index).
     let go = emit("fn f(shard []int) {\n    for w in shard {\n        _ = w\n    }\n}\n");

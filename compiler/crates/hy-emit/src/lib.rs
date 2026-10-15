@@ -357,6 +357,9 @@ pub struct Emitter {
     /// (O9's honesty: Go-heap reads are copies). Frames are block-scoped:
     /// a loan flushes at the end of the block that declared it.
     loan_frames: Vec<Vec<(String, String)>>,
+    /// Active loop scopes (start frame depth, optional loop label) for
+    /// flushing loop-local slot loans before `break` or `continue`.
+    loop_scopes: Vec<(usize, Option<String>)>,
     /// E11 handler contract: inside a closure that converts to a
     /// propagation-carrying target (`http.handler`), `?` fires
     /// `http.Error(w, err, 400)` + return instead of the E3 error-return.
@@ -417,6 +420,7 @@ impl Emitter {
             loop_labels: Vec::new(),
             loop_label_n: 0,
             loan_frames: Vec::new(),
+            loop_scopes: Vec::new(),
             handler_writer: None,
             pending_fnlit_conv: None,
             cur_fn_conv_result: None,

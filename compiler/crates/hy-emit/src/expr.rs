@@ -331,14 +331,14 @@ impl Emitter {
                 out.push_str("{\n");
                 // Redirect statement output into a scratch buffer: the
                 // literal renders inline, its body keeps normal indents.
+                let saved_loan_frames = std::mem::take(&mut self.loan_frames);
+                let saved_loop_scopes = std::mem::take(&mut self.loop_scopes);
                 let main_body = std::mem::take(&mut self.body);
-                self.indent += 1;
-                for st in &body.stmts {
-                    self.emit_stmt(st)?;
-                }
-                self.indent -= 1;
+                self.emit_block_body(&body.stmts)?;
                 let closure_body = std::mem::take(&mut self.body);
                 self.body = main_body;
+                self.loan_frames = saved_loan_frames;
+                self.loop_scopes = saved_loop_scopes;
                 self.fnlit_depth -= 1;
                 self.for_depth = saved_for_depth;
                 self.handler_writer = saved_writer;

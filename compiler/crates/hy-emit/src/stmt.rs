@@ -89,6 +89,7 @@ impl Emitter {
                 Ok(())
             }
             Stmt::Break { label, .. } => {
+                self.flush_loop_loans(label.as_deref());
                 // `break loop` → the Go label of the innermost labeled
                 // loop in THIS function (pr-136's per-loop labels), refused
                 // when no enclosing loop exists at all (pr-101: the label
@@ -114,6 +115,7 @@ impl Emitter {
                 Ok(())
             }
             Stmt::Continue { label, .. } => {
+                self.flush_loop_loans(label.as_deref());
                 match label {
                     Some(_) => {
                         if self.for_depth == 0 && self.loop_labels.is_empty() {
@@ -936,20 +938,80 @@ impl Emitter {
         }
     }
 
+fn stmt_terminates(s: &Stmt) -> bool {
+    match s {
+        Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => true,
+        Stmt::Block { block, .. } => block_terminates(&block.stmts),
+        Stmt::Managed { body, .. } => block_terminates(&body.stmts),
+        Stmt::If { then, otherwise, .. } => {
+            if let Some(other) = otherwise {
+                block_terminates(&then.stmts) && stmt_terminates(other)
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+fn block_terminates(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_terminates)
+}
+
+    /// Flush store-backs for all active loan frames from innermost to outermost.
+    /// Used before `return` statements so updates persist before returning,
+    /// preventing unreachable code and missing-return compiler errors (Issue #203).
+    fn flush_all_loans(&mut self) {
+        for frame in self.loan_frames.iter().rev() {
+            for (name, place) in frame {
+                self.push(&format!("{} = {}", place, name));
+            }
+        }
+    }
+
+    /// Flush loop-local store-backs before `break` or `continue`.
+    fn flush_loop_loans(&mut self, label: Option<&str>) {
+        let depth = if let Some(target) = label {
+            self.loop_scopes
+                .iter()
+                .rev()
+                .find(|(_, l)| l.as_deref() == Some(target) || target == "loop")
+                .map(|(d, _)| *d)
+                .or_else(|| self.loop_scopes.last().map(|(d, _)| *d))
+        } else {
+            self.loop_scopes.last().map(|(d, _)| *d)
+        };
+        if let Some(depth) = depth {
+            if depth <= self.loan_frames.len() {
+                for frame in self.loan_frames[depth..].iter().rev() {
+                    for (name, place) in frame {
+                        self.push(&format!("{} = {}", place, name));
+                    }
+                }
+            }
+        }
+    }
+
     /// Every block body goes through this: a loan frame is pushed, the
     /// statements render, and the frame's store-backs flush at the block's
     /// end (before the closing brace). This is what makes the O8 slot-loan
     /// desugar sound: mutations through the loaned copy persist exactly for
     /// the loan's lexical window.
     pub fn emit_block_body(&mut self, stmts: &[Stmt]) -> Result<(), EmitError> {
+        let is_terminating = block_terminates(stmts);
         self.loan_frames.push(Vec::new());
         self.indent += 1;
         for st in stmts {
             self.emit_stmt(st)?;
+            if stmt_terminates(st) {
+                break;
+            }
         }
         let frame = self.loan_frames.pop().unwrap_or_default();
-        for (name, place) in frame {
-            self.push(&format!("{} = {}", place, name));
+        if !is_terminating {
+            for (name, place) in frame {
+                self.push(&format!("{} = {}", place, name));
+            }
         }
         self.indent -= 1;
         Ok(())
@@ -1097,7 +1159,9 @@ impl Emitter {
         };
         self.push(&head);
         self.for_depth += 1;
+        self.loop_scopes.push((self.loan_frames.len(), label.clone()));
         let body_r = self.emit_block_body(&body.stmts);
+        self.loop_scopes.pop();
         self.for_depth -= 1;
         body_r?;
         self.push("}");
@@ -1186,6 +1250,7 @@ impl Emitter {
                     let lit = self.emit_expr(&values[0], 0)?;
                     self.pending_fnlit_conv = None;
                     self.use_package(key.split('.').next().unwrap_or(key));
+                    self.flush_all_loans();
                     self.push(&format!("return {}({})", conv.go, lit));
                     return Ok(());
                 }
@@ -1236,7 +1301,12 @@ impl Emitter {
                 });
             }
         }
-        self.push(&format!("return {}", vs.join(", ")));
+        self.flush_all_loans();
+        if vs.is_empty() {
+            self.push("return");
+        } else {
+            self.push(&format!("return {}", vs.join(", ")));
+        }
         Ok(())
     }
 
