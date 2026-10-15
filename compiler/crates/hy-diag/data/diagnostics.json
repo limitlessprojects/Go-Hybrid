@@ -389,6 +389,21 @@
       "rule": "BUILDABLE"
     },
     {
+      "code": "HYB-E6006",
+      "name": "invalid-const-conversion",
+      "category": "overflow-bounds",
+      "severity": "error",
+      "title": "constant operand invalid for this type conversion",
+      "summary": "A `Type(const)` conversion whose literal-constant operand Go would refuse is rejected: `int8(300)` on a 64-bit target, `int(\"abc\")`, `string(2.5)`, `float32(1e40)`, `int(10^30)`, `string(true)`, `int8(nil)`, `[]int(3)`, a string constant to a non-byte/rune slice, integer constants of 2^512 or more to `string`, and similar forms fail `go build` on the emitted program (issue #228), so an accepted Hybrid program would emit unbuildable Go. Sub-64 integer overflow (`u8(300)`, SPEC X4) is deliberately accepted — the emitter folds the two's-complement result. Only the literal-constant operand case is in scope; a non-constant operand is a run-time conversion.",
+      "fixits": [
+        "use a constant that fits the target type (e.g. `int8(127)`, `uint8(255)`)",
+        "convert between compatible kinds only (number <-> number, string <-> string, `string(65)`, `[]byte(\"abc\")`)",
+        "if truncation or a run-time conversion is intended, bind the operand to a variable first (SPEC X4 runtime truncation)"
+      ],
+      "example": "x := int8(300)   // reject: HYB-E6006 — constant 300 overflows int8 in Go; the emitted module would not build",
+      "rule": "BUILDABLE"
+    },
+    {
       "code": "HYB-E7001",
       "name": "boundary-pointer-field",
       "category": "boundary",

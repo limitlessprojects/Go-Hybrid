@@ -26,16 +26,20 @@
 use hy_syntax::LitKind;
 
 /// `(bits, signed)` for a SPEC fixed-width primitive conversion target.
+/// Go spellings are the same widths (the checker's fixed_width_int_range
+/// treats `int8` == `i8`, `byte` == `u8`, `rune` == `i32`), so they fold
+/// identically — `int8(300)` must truncate like `i8(300)` instead of
+/// passing through and dying as `constant 300 overflows int8` (issue #228).
 pub fn width_of(spec_name: &str) -> Option<(u32, bool)> {
     Some(match spec_name {
-        "u8" => (8, false),
-        "u16" => (16, false),
-        "u32" => (32, false),
-        "u64" => (64, false),
-        "i8" => (8, true),
-        "i16" => (16, true),
-        "i32" => (32, true),
-        "i64" => (64, true),
+        "u8" | "byte" | "uint8" => (8, false),
+        "u16" | "uint16" => (16, false),
+        "u32" | "uint32" => (32, false),
+        "u64" | "uint64" => (64, false),
+        "i8" | "int8" => (8, true),
+        "i16" | "int16" => (16, true),
+        "i32" | "int32" | "rune" => (32, true),
+        "i64" | "int64" => (64, true),
         _ => return None,
     })
 }
@@ -70,14 +74,13 @@ pub fn fold_constant(operand: &hy_syntax::Expr, spec_name: &str) -> Option<i128>
     if bits >= 64 {
         return None;
     }
-    let text = match operand {
-        hy_syntax::Expr::Lit {
-            kind: LitKind::Int(t),
-            ..
-        } => t,
-        _ => return None,
-    };
+    // `-1` and `(-1)` are the same constant as `1` with a sign — Go
+    // rejects `uint8(-1)` exactly like `uint8(300)`, so the sign must
+    // survive to the fold (issue #228: `x := uint8(-1)` used to emit
+    // verbatim and die as `constant -1 overflows uint8`).
+    let (text, neg) = fold_operand_int_text(operand)?;
     let v = parse_int(text)?;
+    let v = if neg { -v } else { v };
 
     let len = 1i128 << bits;
     let masked = v & (len - 1);
@@ -92,6 +95,29 @@ pub fn fold_constant(operand: &hy_syntax::Expr, spec_name: &str) -> Option<i128>
         None
     } else {
         Some(folded)
+    }
+}
+
+/// The integer-literal text of an operand, unwrapping parens and a leading
+/// `-`, with whether the value is negated. `None` for anything that is not
+/// a (possibly negated, possibly parenthesized) integer literal.
+fn fold_operand_int_text(operand: &hy_syntax::Expr) -> Option<(&str, bool)> {
+    use hy_syntax::Expr;
+    match operand {
+        Expr::Lit {
+            kind: LitKind::Int(t),
+            ..
+        } => Some((t, false)),
+        Expr::Paren { inner, .. } => fold_operand_int_text(inner),
+        Expr::Unary {
+            op: hy_syntax::UnOp::Neg,
+            operand,
+            ..
+        } => {
+            let (t, inner_neg) = fold_operand_int_text(operand)?;
+            Some((t, !inner_neg))
+        }
+        _ => None,
     }
 }
 
@@ -150,5 +176,31 @@ mod tests {
     fn float_targets_are_not_width_folded() {
         assert_eq!(width_of("f32"), None);
         assert_eq!(width_of("f64"), None);
+    }
+
+    #[test]
+    fn go_spelling_conversion_folds_like_spec_spelling() {
+        // issue #228 C1: `int8(300)` is the same Hybrid type as `i8(300)`
+        // (the checker's fixed_width_int_range equates them) and must take
+        // the same SPEC X4 fold instead of emitting `int8(300)` verbatim
+        // (go: `constant 300 overflows int8`).
+        let operand = operand_of("fn main() { b := int8(300) }");
+        assert_eq!(fold_constant(&operand, "int8"), Some(44));
+        let operand = operand_of("fn main() { b := byte(300) }");
+        assert_eq!(fold_constant(&operand, "byte"), Some(44));
+        let operand = operand_of("fn main() { b := rune(99999999999) }");
+        assert_eq!(fold_constant(&operand, "rune"), Some(1215752191));
+    }
+
+    #[test]
+    fn negated_and_parenthesized_operands_fold() {
+        // issue #228 C3: Go rejects `uint8(-1)` exactly like `uint8(300)`,
+        // so the sign has to reach the fold — `-1` truncates to 255.
+        let operand = operand_of("fn main() { b := uint8(-1) }");
+        assert_eq!(fold_constant(&operand, "uint8"), Some(255));
+        let operand = operand_of("fn main() { b := i8(-300) }");
+        assert_eq!(fold_constant(&operand, "i8"), Some(-44));
+        let operand = operand_of("fn main() { b := int8((300)) }");
+        assert_eq!(fold_constant(&operand, "int8"), Some(44));
     }
 }
