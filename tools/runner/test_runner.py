@@ -5,8 +5,12 @@ import io
 import json
 import os
 import pathlib
+import shlex
+import signal
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -85,6 +89,115 @@ class RunnerFailureTests(unittest.TestCase):
                                      [step('must-not-run', 'print(2)')])
         self.assertEqual(code, 1)
         self.assertEqual([(s['name'], s['exit']) for s in summary['steps']], [('prior', 0), ('required', 7)])
+
+
+class CommandContractTests(unittest.TestCase):
+    def test_success_merges_output_and_preserves_status(self):
+        code, duration, output = runner.run_cmd(
+            [sys.executable, '-c',
+             'import sys; print("out", flush=True); sys.stderr.write("err\\n"); '
+             'raise SystemExit(7)'], 5)
+        self.assertEqual(code, 7)
+        self.assertEqual(output.splitlines(), ['out', 'err'])
+        self.assertGreaterEqual(duration, 0)
+
+    def test_cwd_environment_and_output_tail_are_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = dict(os.environ, RUNNER_TEST_VALUE='probe')
+            code, _, output = runner.run_cmd(
+                [sys.executable, '-c',
+                 'import os; print(os.getcwd()); print(os.environ["RUNNER_TEST_VALUE"])'],
+                5, cwd=directory, env=env)
+            self.assertEqual(code, 0)
+            self.assertEqual(pathlib.Path(output.splitlines()[0]).resolve(),
+                             pathlib.Path(directory).resolve())
+            self.assertEqual(output.splitlines()[1], 'probe')
+        code, _, output = runner.run_cmd(
+            [sys.executable, '-c', 'print("x" * 5000, end="")'], 5)
+        self.assertEqual(code, 0)
+        self.assertEqual(output, 'x' * 4000)
+
+    def test_missing_executable_stays_runner_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            code, _, output = runner.run_cmd([str(pathlib.Path(directory) / 'missing')], 5)
+        self.assertEqual(code, 125)
+        self.assertIn('runner error', output)
+
+    def test_invalid_utf8_output_is_replaced(self):
+        code, _, output = runner.run_cmd(
+            [sys.executable, '-c', 'import sys; sys.stdout.buffer.write(b"\\xff")'], 5)
+        self.assertEqual(code, 0)
+        self.assertEqual(output, '\ufffd')
+
+
+@unittest.skipUnless(os.name == 'posix', 'process-group cleanup is POSIX-only')
+class PosixCommandTimeoutTests(unittest.TestCase):
+    def assert_descendant_stops(self, wait_for_child):
+        # The child waits for a marker sent only AFTER run_cmd returns. This
+        # makes a surviving child observable without process-state/zombie races.
+        # It also self-exits after five seconds; cleanup targets only this fixture.
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            ready, release, leaked = [root / name for name in ('ready', 'release', 'leaked')]
+            script = root / 'child.py'
+            script.write_text(
+                'import os, pathlib, time\n'
+                f'ready = pathlib.Path({str(ready)!r})\n'
+                f'release = pathlib.Path({str(release)!r})\n'
+                f'leaked = pathlib.Path({str(leaked)!r})\n'
+                'ready.write_text(str(os.getpid()))\n'
+                'deadline = time.monotonic() + 5\n'
+                'while time.monotonic() < deadline:\n'
+                '    if release.exists():\n'
+                '        leaked.write_text("ran after timeout")\n'
+                '        break\n'
+                '    time.sleep(0.01)\n', encoding='utf-8')
+            # Retain the shell in one case, exit it in the other. In the latter
+            # case the child still holds the stdout pipe after the leader exits.
+            command = shlex.join([sys.executable, str(script)]) + ' & '
+            command += 'wait' if wait_for_child else 'exit 0'
+            own_group = os.getpgrp()
+            try:
+                code, _, output = runner.run_cmd(command, 1)
+                self.assertEqual(code, 124, output)
+                self.assertIn('TIMEOUT', output)
+                self.assertTrue(ready.exists(), 'fixture did not start before the timeout')
+                self.assertEqual(os.getpgrp(), own_group, 'caller group must not change')
+                release.touch()
+                deadline = time.monotonic() + 0.5
+                while time.monotonic() < deadline and not leaked.exists():
+                    time.sleep(0.01)
+                self.assertFalse(leaked.exists(), 'child kept working after run_cmd timed out')
+            finally:
+                # On the unfixed source the failure is intentional. Do not leave
+                # its child running, even when an earlier assertion fails.
+                if ready.exists():
+                    try:
+                        os.kill(int(ready.read_text()), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    def test_timeout_stops_child_of_waiting_shell(self):
+        self.assert_descendant_stops(wait_for_child=True)
+
+    def test_timeout_stops_child_after_shell_already_exited(self):
+        self.assert_descendant_stops(wait_for_child=False)
+
+    def test_timeout_does_not_kill_an_unrelated_process(self):
+        with subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as sibling:
+            try:
+                code, _, _ = runner.run_cmd(
+                    [sys.executable, '-c', 'import time; time.sleep(10)'], 0.1)
+                self.assertEqual(code, 124)
+                self.assertIsNone(sibling.poll())
+            finally:
+                sibling.kill()
+                sibling.wait()
+
+    def test_shell_success_is_unchanged(self):
+        code, _, output = runner.run_cmd('printf "shell-ok"', 5)
+        self.assertEqual((code, output), (0, 'shell-ok'))
 
 
 if __name__ == '__main__':

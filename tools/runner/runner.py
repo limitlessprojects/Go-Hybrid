@@ -24,6 +24,9 @@ The job.json schema (version 1):
 Behavior:
   * Always writes summary.json (even on failure) with: job, sha, tier, hardware report,
     toolchain versions, per-command exit codes + durations, wall clock.
+  * On POSIX, a timed-out step kills its process group, including ordinary
+    descendants. Processes that deliberately detach into another session/group
+    are outside this guarantee; non-POSIX retains direct-child termination.
   * Steps run under timeout; failures do not stop later steps (fail-soft) unless
     "hard": true. A hard setup failure skips all commands and still writes a summary.
   * "cwd": "repo" means relative to the cloned repo checkout.
@@ -37,6 +40,7 @@ import json
 import os
 import platform
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -49,13 +53,31 @@ def run_cmd(cmd, timeout, cwd=None, env=None):
     start = time.monotonic()
     out_tail = ""
     try:
-        p = subprocess.run(
+        with subprocess.Popen(
             cmd if isinstance(cmd, list) else ["/bin/sh", "-c", cmd],
             cwd=cwd, env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            timeout=timeout,
-        )
-        code, out = p.returncode, p.stdout.decode("utf-8", "replace")
+            # A step must never share the runner's process group: killing just
+            # /bin/sh leaves its workers alive after the timeout is reported.
+            start_new_session=(os.name == "posix"),
+        ) as p:
+            try:
+                output, _ = p.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                if os.name == "posix":
+                    try:
+                        # Use the original group id even if its leader exited:
+                        # descendants can still be holding the output pipe open.
+                        os.killpg(p.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass  # the whole group has already exited
+                else:
+                    p.kill()
+                p.wait()
+                # Do not drain indefinitely: an explicitly detached descendant
+                # may retain the pipe. The context manager closes our handles.
+                raise
+            code, out = p.returncode, output.decode("utf-8", "replace")
     except subprocess.TimeoutExpired:
         code, out = 124, "<<TIMEOUT after {}s>>".format(timeout)
     except Exception as e:  # noqa: BLE001 — runner must never die
