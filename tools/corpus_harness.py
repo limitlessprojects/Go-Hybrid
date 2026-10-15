@@ -96,7 +96,12 @@ def run_checker(bin_path, hy_path, report_managed=False):
     cmd = [bin_path, "check", hy_path, "--json"]
     if report_managed:
         cmd.append("--report-managed")
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"checker timed out for {hy_path} after {e.timeout} seconds") from e
+    except OSError as e:
+        raise RuntimeError(f"checker could not start for {hy_path}: {e}") from e
     # Exit 0 means accepted and exit 1 means rejected. Any other status
     # indicates a checker failure, even if it already emitted valid JSON.
     if proc.returncode not in (0, 1):
