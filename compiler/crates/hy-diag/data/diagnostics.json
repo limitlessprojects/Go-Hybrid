@@ -223,6 +223,22 @@
       "rule": "O4",
       "tier0_rule_id": "A1c"
     },
+    {
+      "code": "HYB-E3009",
+      "name": "chan-direction-mismatch-op",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "channel direction forbids this operation (close / range)",
+      "summary": "Channel direction is a type contract the emitter preserves in the Go signature: `close()` requires a bidirectional or send-only channel (a `<-chan T` has no send capability), and `for ΓÇª range` requires receive capability (a `chan<- T` cannot be ranged over). Both are invalid Go that `hyb build --emit-go` reproduces faithfully, so accepting them breaks the accepted-should-emit-buildable-Go contract (issue #94, companion to #89/E3008 for send/receive).",
+      "fixits": [
+        "declare the channel as `chan T` (bidirectional) where the operation happens",
+        "for close: pass a `chan<- T` / `chan T` binding ΓÇö receive-only channels are closed by their send-side owner",
+        "for range: use a `chan T` or `<-chan T` binding ΓÇö send-only channels are consumed via receives on the other side"
+      ],
+      "example": "var rc <-chan int = c; close(rc)   // reject: HYB-E3009 ΓÇö cannot close a receive-only channel",
+      "rule": "O4",
+      "tier0_rule_id": "A1c"
+    },
 
     {
       "code": "HYB-E3010",

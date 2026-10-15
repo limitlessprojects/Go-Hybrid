@@ -841,15 +841,24 @@ impl<'a> Checker<'a> {
                 // Ascription fills the gaps (O4.9 escape: "make the type
                 // visible to the checker"): when the initializer's shape
                 // does not resolve, the declared type decides. When inference
-                // DOES resolve it keeps priority — it is more precise than
-                // the ascription for boundary handles (`var v serde_json.view
-                // = doc.array()` must stay a BorrowHandle for the loan
-                // windows); a lying ascription is caught downstream by the
-                // emitted Go build (the emitter carries the declared type).
+                // DOES resolve it keeps priority for the SHAPE — it is more
+                // precise than the ascription for boundary handles (`var v
+                // serde_json.view = doc.array()` must stay a BorrowHandle for
+                // the loan windows); a lying ascription is caught downstream
+                // by the emitted Go build (the emitter carries the declared
+                // type). The TY slot, however, prefers the ascription when
+                // present (#94/#89): the shape stays inference-precise, but a
+                // narrowing ascription (`var sc chan<- int = c`) must remain
+                // visible so the channel-DIRECTION checks can see it — the
+                // ascribed direction is narrower than the initializer's
+                // inferred `chan T` and is what the emitted signature will
+                // carry.
                 let inferred = self.shape_of_expr(st, value);
                 let (shape, ty) = match (&l.ty, inferred) {
                     (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
-                    (_, inferred) => (inferred, self.ty_of_expr(st, value)),
+                    (_, inferred) => {
+                        (inferred, l.ty.clone().or_else(|| self.ty_of_expr(st, value)))
+                    }
                 };
                 // `x := move y` — y is moved; x takes ownership (no alias);
                 // non-ident moves (`x := move s.data`) trigger HYB-E3004 (O5.4).

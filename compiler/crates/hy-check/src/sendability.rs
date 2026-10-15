@@ -21,7 +21,7 @@
 
 use crate::model::{as_addr_of, unwrap_parens, Binding, Checker, FnState, MoveKind, TypeShape};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::{Expr, LitKind};
+use hy_syntax::{ChanDir, Expr, LitKind, TypeExpr};
 
 /// The spawn-callee proof (O4.0): what the checker concluded about the
 /// expression a `task` statement spawns.
@@ -672,6 +672,87 @@ impl<'a> Checker<'a> {
                     Diagnostic::error("HYB-E3007", self.path.clone(), span, msg).with_notes(notes),
                 );
                 false
+            }
+        }
+    }
+
+    /// The declared direction of a channel-typed binding, when the
+    /// expression is a bare (paren-wrapped) identifier whose ascribed or
+    /// inferred type is a `TypeExpr::Chan` (#94). Anything else — calls,
+    /// receives, unresolvable names — returns None and the caller falls
+    /// back to the shape paths.
+    pub(crate) fn chan_dir_of_expr(&self, st: &FnState, chan: &Expr) -> Option<ChanDir> {
+        let Expr::Ident { name, .. } = unwrap_parens(chan) else {
+            return None;
+        };
+        let b = self.lookup_binding(st, name)?;
+        match &b.ty {
+            Some(TypeExpr::Chan { dir, .. }) => Some(*dir),
+            _ => None,
+        }
+    }
+
+    /// Enforce channel direction at a `close()` site (#94): a receive-only
+    /// channel (`<-chan T`) has no send capability, and the Go spec requires
+    /// `close` to operate on a bidirectional or send-only channel — closing
+    /// a `<-chan T` is invalid Go that `hyb build --emit-go` faithfully
+    /// reproduces (the emitter keeps the direction in the signature).
+    /// Returns false and emits HYB-E3009 on a mismatch; true otherwise
+    /// (including when the direction does not resolve). Not `managed`-
+    /// suppressed (a type contract, like E3004/E3006/E3008).
+    pub(crate) fn check_close_dir(&mut self, st: &FnState, chan: &Expr) -> bool {
+        if !matches!(self.chan_dir_of_expr(st, chan), Some(ChanDir::Recv)) {
+            return true;
+        }
+        let msg = format!(
+            "cannot close `{}` — it is a receive-only channel (`<-chan T`)",
+            chan.render()
+        );
+        let notes = vec![
+            "why: the Go spec requires close to operate on a bidirectional or send-only channel — a `<-chan T` has no send capability, so closing it is invalid Go and the emitted program will not build (issue #94)".to_string(),
+            "fix: declare this channel as `chan T` (bidirectional) where the close happens, or pass a `chan<- T` / `chan T` binding to close — receive-only channels are closed by their send-side owner".to_string(),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E3009", self.path.clone(), chan.span(), msg).with_notes(notes),
+        );
+        false
+    }
+
+    /// Enforce channel direction at a `for … range` site (#94): ranging
+    /// over a channel requires receive capability — a send-only channel
+    /// (`chan<- T`) cannot be ranged over. Invalid Go that the emitter
+    /// reproduces faithfully. Returns false and emits HYB-E3009 on a
+    /// mismatch; true otherwise. Not `managed`-suppressed.
+    pub(crate) fn check_range_dir(&mut self, st: &FnState, chan: &Expr) -> bool {
+        if !matches!(self.chan_dir_of_expr(st, chan), Some(ChanDir::Send)) {
+            return true;
+        }
+        let msg = format!(
+            "cannot range over `{}` — it is a send-only channel (`chan<- T`)",
+            chan.render()
+        );
+        let notes = vec![
+            "why: the Go spec requires the range operand to have receive capability — a `chan<- T` can only be sent to, so ranging over it is invalid Go and the emitted program will not build (issue #94)".to_string(),
+            "fix: declare this channel as `chan T` (bidirectional) or `<-chan T` (receive-only) where the range happens — send-only channels are consumed via receives on the other side".to_string(),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E3009", self.path.clone(), chan.span(), msg).with_notes(notes),
+        );
+        false
+    }
+
+    /// Statement/expression-statement hook for `close(ch)` (#94): if the
+    /// expression IS a call to the builtin `close`, enforce the channel's
+    /// direction. Covers `close(ch)` statements and `defer close(ch)`
+    /// (both parse as `Expr::Call{Ident("close")}`). Calls nested deeper
+    /// in an expression are out of scope for this pass (statement +
+    /// defer sites cover the realistic misuse).
+    pub(crate) fn check_close_expr(&mut self, st: &FnState, expr: &Expr) {
+        if let Expr::Call { callee, args, .. } = unwrap_parens(expr) {
+            if matches!(unwrap_parens(callee), Expr::Ident { name, .. } if name == "close") {
+                if let Some(a) = args.first() {
+                    self.check_close_dir(st, &a.value);
+                }
             }
         }
     }
