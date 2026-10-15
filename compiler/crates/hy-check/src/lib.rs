@@ -2843,18 +2843,24 @@ mod tests {
     /// `src` so concurrent mutation through `src` is rejected.
     #[test]
     fn copy_reference_slice_may_share_freezes() {
-        assert_alias_reject(
-            "fn worker(dst []*int) { *dst[0] = 1 }\n\
+        let r = check(
+            "fn worker(d []map[string]int, done chan<- bool) {\n\
+               d[0][\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
              fn main() {\n\
-               src := make([]*int, 1)\n\
-               v := 42\n\
-               src[0] = &v\n\
-               dst := make([]*int, 1)\n\
+               src := []map[string]int{map[string]int{}}\n\
+               dst := make([]map[string]int, 1)\n\
                copy(dst, src)\n\
-               task worker(move dst)\n\
-               *src[0] = 99\n\
+               done := make(chan bool, 1)\n\
+               task worker(move dst, done)\n\
+               src[0][\"k\"] = 2\n\
+               <-done\n\
              }",
         );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert_eq!(r.diagnostics[0].code, "HYB-E3003");
     }
 
     /// Positive control (#178): `copy(dst, src)` on primitive by-value elements
@@ -2862,14 +2868,18 @@ mod tests {
     #[test]
     fn copy_primitive_slice_stays_accepted() {
         let r = check(
-            "fn worker(dst []int) { dst[0] = 1 }\n\
+            "fn worker(d []int, done chan<- bool) {\n\
+               d[0] = 9\n\
+               done <- true\n\
+             }\n\
              fn main() {\n\
-               src := make([]int, 1)\n\
-               src[0] = 42\n\
+               src := []int{1}\n\
                dst := make([]int, 1)\n\
                copy(dst, src)\n\
-               task worker(move dst)\n\
-               src[0] = 99\n\
+               done := make(chan bool, 1)\n\
+               task worker(move dst, done)\n\
+               src[0] = 5\n\
+               <-done\n\
              }",
         );
         assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);

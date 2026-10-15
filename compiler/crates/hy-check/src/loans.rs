@@ -232,36 +232,28 @@ impl<'a> Checker<'a> {
     /// elements between `dst` and `src`. Record an undirected may-share edge
     /// so a later `move` of either slice freezes the other (O5.2 / A1b).
     fn process_copy_call(&mut self, st: &mut FnState, cr: &CallRef) {
-        if cr.args.len() < 2 {
+        let (Some(dst), Some(src)) = (cr.args.first(), cr.args.get(1)) else {
             return;
-        }
-        let dst_expr = &cr.args[0].value;
-        let src_expr = &cr.args[1].value;
-
-        let dst_shape = self.shape_of_expr(st, dst_expr);
-        let src_shape = self.shape_of_expr(st, src_expr);
-
-        let elem_may_share = match &dst_shape {
-            TypeShape::Slice(elem) | TypeShape::Array(elem) => {
-                self.shape_may_share(elem) || matches!(**elem, TypeShape::Unknown)
-            }
-            TypeShape::Unknown => match &src_shape {
-                TypeShape::Slice(elem) | TypeShape::Array(elem) => {
-                    self.shape_may_share(elem) || matches!(**elem, TypeShape::Unknown)
-                }
-                _ => true,
-            },
-            _ => false,
         };
 
-        if elem_may_share {
-            let mut dst_roots = Vec::new();
-            collect_ref_roots(dst_expr, &mut dst_roots);
-            let mut src_roots = Vec::new();
-            collect_ref_roots(src_expr, &mut src_roots);
+        // A slice shape is always a reference (`shape_may_share(Slice)` is
+        // unconditional), so consult the ELEMENT shape instead: only a
+        // reference-bearing element is copied by reference.
+        let TypeShape::Slice(elem) = self.shape_of_expr(st, unwrap_parens(&dst.value)) else {
+            return;
+        };
+        if !self.shape_may_share(&elem) {
+            return;
+        }
 
-            for d in &dst_roots {
-                for s in &src_roots {
+        let mut dst_roots = Vec::new();
+        collect_ref_roots(&dst.value, &mut dst_roots);
+        let mut src_roots = Vec::new();
+        collect_ref_roots(&src.value, &mut src_roots);
+
+        for d in &dst_roots {
+            for s in &src_roots {
+                if d != s && self.binding_may_share(st, d) && self.binding_may_share(st, s) {
                     st.share_edge(d, s);
                 }
             }
