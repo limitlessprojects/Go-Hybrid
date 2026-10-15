@@ -805,17 +805,6 @@ pub(crate) fn collect_ref_roots(e: &Expr, out: &mut Vec<String>) {
             operand,
             ..
         } => collect_ref_roots(operand, out),
-        Expr::FnLit {
-            params,
-            results,
-            body,
-            ..
-        } => {
-            let mut bound: std::collections::HashSet<String> =
-                params.iter().map(|p| p.name.clone()).collect();
-            bound.extend(results.iter().filter_map(|r| r.name.clone()));
-            crate::loans::collect_capture_idents_block(body, &mut bound, out);
-        }
         _ => {}
     }
 }

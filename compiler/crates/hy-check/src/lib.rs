@@ -240,7 +240,8 @@ fn build_tables(ck: &mut Checker<'_>) {
                 // receiver and must not overwrite or impersonate top-level fns).
                 if let Some(r) = &f.receiver {
                     if let Some(base) = Checker::base_named_type(&r.ty) {
-                        ck.method_decls.insert((base, f.name.clone()), f);
+                        let mbase = Checker::base_named_type_str(&f.name).to_string();
+                        ck.method_decls.insert((base, mbase), f);
                     }
                     // Issue #201-C/D: method-set dup + receiver validity.
                     ck.declare_method(f);
@@ -3810,6 +3811,190 @@ mod tests {
              }",
         );
         assert_eq!(r_pkg_ok.verdict, Verdict::Accept, "{:?}", r_pkg_ok.diagnostics);
+    }
+
+    #[test]
+    fn user_method_call_extracting_map_freezes_receiver_on_move_e3003() {
+        let r = check(
+            "struct holder { m map[string]int }\n\
+             fn (h holder) data() map[string]int { return h.m }\n\
+             fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"worker\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               h := holder{m: map[string]int{\"init\": 0}}\n\
+               m := h.data()\n\
+               done := make(chan bool, 1)\n\
+               task worker(move m, done)\n\
+               h.m[\"main\"] = 2\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert_eq!(r.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn user_method_call_rebind_and_ascribed_define_freeze_receiver_e3003() {
+        let r_rebind = check(
+            "struct holder { m map[string]int }\n\
+             fn (h holder) data() map[string]int { return h.m }\n\
+             fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"worker\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               h := holder{m: map[string]int{\"init\": 0}}\n\
+               m := map[string]int{}\n\
+               m = h.data()\n\
+               done := make(chan bool, 1)\n\
+               task worker(move m, done)\n\
+               h.m[\"main\"] = 2\n\
+             }",
+        );
+        assert_eq!(
+            r_rebind.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_rebind.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_rebind).as_deref(), Some("A1b"));
+        assert_eq!(r_rebind.diagnostics[0].code, "HYB-E3003");
+
+        let r_ascribed = check(
+            "struct holder { m map[string]int }\n\
+             fn (h holder) data() map[string]int { return h.m }\n\
+             fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"worker\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               h := holder{m: map[string]int{\"init\": 0}}\n\
+               var m map[string]int = h.data()\n\
+               done := make(chan bool, 1)\n\
+               task worker(move m, done)\n\
+               h.m[\"main\"] = 2\n\
+             }",
+        );
+        assert_eq!(
+            r_ascribed.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_ascribed.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_ascribed).as_deref(), Some("A1b"));
+        assert_eq!(r_ascribed.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn toplevel_fn_extracting_map_from_struct_freezes_arg_on_move_e3003() {
+        let r = check(
+            "struct holder { m map[string]int }\n\
+             fn extract(h holder) map[string]int { return h.m }\n\
+             fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"worker\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               h := holder{m: map[string]int{\"init\": 0}}\n\
+               m := extract(h)\n\
+               done := make(chan bool, 1)\n\
+               task worker(move m, done)\n\
+               h.m[\"main\"] = 2\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert_eq!(r.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn non_owned_receiver_and_param_extractions_reject_move_e3004() {
+        let r_recv = check(
+            "struct holder { m map[string]int }\n\
+             fn (h holder) data() map[string]int { return h.m }\n\
+             fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"worker\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn (h holder) leak(done chan<- bool) {\n\
+               m := h.data()\n\
+               task worker(move m, done)\n\
+             }",
+        );
+        assert_eq!(r_recv.verdict, Verdict::Reject, "{:?}", r_recv.diagnostics);
+        assert_eq!(first_error_rule(&r_recv).as_deref(), Some("A1b"));
+        assert_eq!(r_recv.diagnostics[0].code, "HYB-E3004");
+
+        let r_param = check(
+            "struct holder { m map[string]int }\n\
+             fn extract(h holder) map[string]int { return h.m }\n\
+             fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"worker\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn leak(h holder, done chan<- bool) {\n\
+               m := extract(h)\n\
+               task worker(move m, done)\n\
+             }",
+        );
+        assert_eq!(
+            r_param.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_param.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_param).as_deref(), Some("A1b"));
+        assert_eq!(r_param.diagnostics[0].code, "HYB-E3004");
+    }
+
+    #[test]
+    fn multi_return_and_try_calls_track_sharing_and_freeze_e3003() {
+        let r_multi = check(
+            "struct holder { m map[string]int }\n\
+             fn (h holder) pair() (int, map[string]int) { return 1, h.m }\n\
+             fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"worker\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               h := holder{m: map[string]int{\"init\": 0}}\n\
+               n, m := h.pair()\n\
+               done := make(chan bool, 1)\n\
+               task worker(move m, done)\n\
+               fmt.println(n)\n\
+               h.m[\"main\"] = 2\n\
+             }",
+        );
+        assert_eq!(
+            r_multi.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_multi.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_multi).as_deref(), Some("A1b"));
+        assert_eq!(r_multi.diagnostics[0].code, "HYB-E3003");
+
+        let r_try = check(
+            "struct holder { m map[string]int }\n\
+             fn (h holder) try_data() (map[string]int, error) { return h.m, nil }\n\
+             fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"worker\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn run() error {\n\
+               h := holder{m: map[string]int{\"init\": 0}}\n\
+               m := h.try_data()?\n\
+               done := make(chan bool, 1)\n\
+               task worker(move m, done)\n\
+               h.m[\"main\"] = 2\n\
+               return nil\n\
+             }",
+        );
+        assert_eq!(r_try.verdict, Verdict::Reject, "{:?}", r_try.diagnostics);
+        assert_eq!(first_error_rule(&r_try).as_deref(), Some("A1b"));
+        assert_eq!(r_try.diagnostics[0].code, "HYB-E3003");
     }
 
     // -----------------------------------------------------------------------
