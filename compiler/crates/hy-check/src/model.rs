@@ -558,6 +558,17 @@ pub(crate) fn collect_move_operands<'e>(e: &'e Expr, out: &mut Vec<(&'e Expr, Sp
                 collect_move_operands(item, out);
             }
         }
+        // #98: a `move` that sits inside a call argument (`id(move m)`,
+        // `eat(move m)`, `w.finish(move w)`) still transfers ownership of the
+        // binding — it must freeze the source and (for a non-owned binding)
+        // trigger the O5.1 check. Without this recursion those nested moves
+        // were invisible to `mark_move_in_value` / the freeze machinery and
+        // the binding stayed writable after its storage left.
+        Expr::Call { args, .. } => {
+            for a in args {
+                collect_move_operands(&a.value, out);
+            }
+        }
         _ => {}
     }
 }
