@@ -1127,6 +1127,8 @@ impl Emitter {
                 .collect::<Vec<_>>()
                 .join(".");
             format!("{}.{}", root, joined)
+        } else if let Some(go_prim) = shapes::lookup_spec_primitive(name) {
+            go_prim.to_string()
         } else {
             name.to_string()
         }
@@ -1146,6 +1148,7 @@ impl Emitter {
                 "string" => "\"\"".into(),
                 "byte" | "rune" | "int" | "int8" | "int16" | "int32" | "int64" | "uint"
                 | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr" | "float32" | "float64"
+                | "u8" | "u16" | "u32" | "u64" | "usize" | "i8" | "i16" | "i32" | "i64" | "isize" | "f32" | "f64"
                 | "complex64" | "complex128" => "0".into(),
                 "error" | "any" => "nil".into(),
                 _ => format!("*new({})", name),

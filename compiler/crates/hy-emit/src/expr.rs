@@ -102,6 +102,9 @@ impl Emitter {
                         "`none` outside a return (MVP-0 lowers `return none` against the declared option result)",
                     ));
                 }
+                if let Some(go_prim) = shapes::lookup_spec_primitive(name) {
+                    return Ok(go_prim.to_string());
+                }
                 Ok(name.clone())
             }
 

@@ -1276,3 +1276,13 @@ fn unbound_crate_import_refused_honestly() {
         msg
     );
 }
+
+#[test]
+fn spec_primitive_types_lowering() {
+    let src = "struct Packet {\n    id u64\n    flags u8\n    offset i32\n    ratio f32\n    len usize\n    diff isize\n}\n\nfn compute(x u16, y i8, z i16, w i64, scale f64) (u32, error) {\n    b := u8(255)\n    _ = b\n    return u32(x), nil\n}\n\nfn main() {\n    var p Packet\n    _ = p\n}";
+    let go = emit(src);
+    assert!(go.contains("type Packet struct {\n\tid uint64\n\tflags uint8\n\toffset int32\n\tratio float32\n\tlen uint\n\tdiff int\n}"), ":\n{}", go);
+    assert!(go.contains("func compute(x uint16, y int8, z int16, w int64, scale float64) (uint32, error)"), ":\n{}", go);
+    assert!(go.contains("b := uint8(255)"), ":\n{}", go);
+    assert!(go.contains("return uint32(x), nil"), ":\n{}", go);
+}

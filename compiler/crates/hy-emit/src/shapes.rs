@@ -438,6 +438,27 @@ pub static RUST_TYPES: &[(&str, &str, &str)] = &[
     ("serde_json.value", "jsonbinding", "Value"),
 ];
 
+/// hy type name → Go type name for SPEC-LANGUAGE §2.1 primitives.
+/// The spec spells fixed-width primitives `u8`..`u64`, `i8`..`i64`, `f32`, `f64`.
+/// Go spells them `uint8`..`uint64`, `int8`..`int64`, `float32`, `float64`.
+pub fn lookup_spec_primitive(hy_name: &str) -> Option<&'static str> {
+    match hy_name {
+        "u8" => Some("uint8"),
+        "u16" => Some("uint16"),
+        "u32" => Some("uint32"),
+        "u64" => Some("uint64"),
+        "usize" => Some("uint"),
+        "i8" => Some("int8"),
+        "i16" => Some("int16"),
+        "i32" => Some("int32"),
+        "i64" => Some("int64"),
+        "isize" => Some("int"),
+        "f32" => Some("float32"),
+        "f64" => Some("float64"),
+        _ => None,
+    }
+}
+
 pub fn lookup_rust_type(hy_ty: &str) -> Option<(&'static str, &'static str)> {
     RUST_TYPES
         .iter()
