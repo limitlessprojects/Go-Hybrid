@@ -381,6 +381,8 @@ pub(crate) struct Checker<'a> {
     pub structs: HashMap<String, Vec<(String, TypeExpr)>>,
     /// fn name -> decl (return-type inference for single-value defines).
     pub fns: HashMap<String, &'a FnDecl>,
+    /// (receiver base type name, method name) -> method decl (`fn (h holder) data()`).
+    pub methods: HashMap<(String, String), &'a FnDecl>,
     /// file-level consts (immutable, visible in every fn).
     pub consts: HashMap<String, Binding>,
     /// Known foreign package prefixes (imports ∪ the builtin table).
@@ -414,6 +416,7 @@ impl<'a> Checker<'a> {
             path: file.path.clone(),
             structs: HashMap::new(),
             fns: HashMap::new(),
+            methods: HashMap::new(),
             consts: HashMap::new(),
             packages: HashSet::new(),
             diags: Vec::new(),

@@ -96,6 +96,12 @@ impl<'a> Checker<'a> {
                 }
             }
             Resolved::Method { root, method, recv } => {
+                if self.lookup_user_method(&recv, &method).is_some() {
+                    // A7 borrow-by-default: a handle passed to a user-defined
+                    // Hybrid method is lent for the call only.
+                    self.lend_handle_args(st, cr, idx);
+                    return;
+                }
                 let Some(tname) = receiver_type_name(&recv) else {
                     return;
                 };
@@ -317,6 +323,8 @@ impl<'a> Checker<'a> {
                 if is_view {
                     self.extend_call_loans_to_view(st, &l.values[0], name, idx);
                 }
+                self.record_may_share(st, name, &l.values[0]);
+                self.record_alias(st, name, &l.values[0]);
             }
         } else {
             for (name, value) in l.names.iter().zip(l.values.iter()) {
@@ -399,7 +407,6 @@ impl<'a> Checker<'a> {
         }
     }
 
-
     /// Does the local binding `name` denote a value that a shallow Go copy
     /// would share mutable GC storage with? Locals/params only (`const`
     /// values are file-level immutables, not freeze participants).
@@ -409,36 +416,120 @@ impl<'a> Checker<'a> {
             .unwrap_or(false)
     }
 
+    /// Link `name` and `src` in the may-share graph (`check_non_owned_move`
+    /// walks `st.share_group(name)` to reject moving may-share peers of
+    /// non-owned bindings with HYB-E3004).
+    fn link_share(&self, st: &mut FnState, name: &str, src: &str) {
+        if name == src {
+            return;
+        }
+        st.share_edge(name, src);
+    }
+
+    /// Collect all non-moved source binding roots referenced as a method
+    /// receiver (`recv.method(...)`) or call argument (`f(arg1, arg2)`).
+    fn call_source_roots<'e>(
+        &self,
+        st: &FnState,
+        callee: &'e Expr,
+        args: &'e [hy_syntax::CallArg],
+    ) -> Vec<&'e str> {
+        let mut roots = Vec::new();
+        if let Expr::Field { base, .. } = unwrap_parens_and_try(callee) {
+            let is_pkg = matches!(
+                unwrap_parens_and_try(base),
+                Expr::Ident { name: b, .. }
+                    if self.lookup_binding(st, b).is_none() && self.known_package(b)
+            );
+            if !is_pkg && !matches!(unwrap_parens(base), Expr::Move { .. }) {
+                if let Some(r) = unwrap_parens_and_try(base).root_ident() {
+                    roots.push(r);
+                }
+            }
+        }
+        for a in args {
+            if matches!(unwrap_parens(&a.value), Expr::Move { .. }) {
+                continue;
+            }
+            if let Some(r) = unwrap_parens_and_try(&a.value).root_ident() {
+                roots.push(r);
+            }
+        }
+        roots
+    }
+
+    /// Record may-share edges, alias links, and non-owned origin propagation
+    /// from the receiver and arguments of a call expression (including `?`-
+    /// unwrapped calls and multi-value unpacks) onto `name`.
+    fn record_call_sharing(&self, st: &mut FnState, name: &str, value: &Expr) {
+        let Expr::Call { callee, args, .. } = unwrap_parens_and_try(value) else {
+            return;
+        };
+        let Some(target_shape) = self.lookup_binding(st, name).map(|b| b.shape.clone()) else {
+            return;
+        };
+        if !self.shape_may_share(&target_shape) && !matches!(target_shape, TypeShape::Unknown) {
+            return;
+        }
+        let target_is_ref = target_shape.is_reference_alias();
+        let sources: Vec<String> = self
+            .call_source_roots(st, callee, args)
+            .into_iter()
+            .filter(|&src| src != name && self.binding_may_share(st, src))
+            .map(|s| s.to_string())
+            .collect();
+        let mut first_alias: Option<String> = None;
+        for src in &sources {
+            self.link_share(st, name, src);
+            if first_alias.is_none()
+                && target_is_ref
+                && self
+                    .lookup_binding(st, src)
+                    .map(|b| b.shape.is_reference_alias())
+                    .unwrap_or(false)
+            {
+                first_alias = Some(src.clone());
+            }
+        }
+        if let Some(src) = first_alias {
+            st.aliases.insert(name.to_string(), src);
+        }
+    }
+
     /// Record may-share edges for a define/rebind `name <op> value` (#27).
     /// Covers the four reported bypass forms: `h2 := h1` (shallow struct/
     /// array copy), `m2 := (agg)` / `s2 := s1[:]` (parenthesized / re-sliced
     /// RHS), `m2 := h1.m` (field/index projection), and `h := holder{m: agg}`
-    /// (composite literal capturing a live binding) — plus the CALL forms of
-    /// #73: a shallow copy or generic identity that returns argument
-    /// storage through `f(...)` (no interprocedural summary, same argument
-    /// as #38's alias recording).
+    /// (composite literal capturing a live binding), plus function/method calls
+    /// (#73 / #120) whose receiver or arguments may share mutable GC storage.
     fn record_may_share(&self, st: &mut FnState, name: &str, value: &Expr) {
-        match unwrap_parens(value) {
+        let target_may_share = self
+            .lookup_binding(st, name)
+            .map(|b| self.shape_may_share(&b.shape))
+            .unwrap_or(false);
+        match unwrap_parens_and_try(value) {
             Expr::Ident { name: src, .. } => {
                 if self.binding_may_share(st, src) {
-                    st.share_edge(name, src);
+                    self.link_share(st, name, src);
                 }
             }
             // `s2 := s1[:]` — the result shares s1's backing array
             Expr::Slice { base, .. } => {
-                if let Some(root) = unwrap_parens(base).root_ident() {
+                if let Some(root) = unwrap_parens_and_try(base).root_ident() {
                     if self.binding_may_share(st, root) {
-                        st.share_edge(name, root);
+                        self.link_share(st, name, root);
                     }
                 }
             }
             // `m2 := h1.m` / `m2 := arr[i]` — projecting a reference-bearing
             // value out leaves it aliasing the composite it was read from
             Expr::Field { .. } | Expr::Index { .. } => {
-                if self.shape_may_share(&self.shape_of_expr(st, unwrap_parens(value))) {
-                    if let Some(root) = value.root_ident() {
+                if target_may_share
+                    || self.shape_may_share(&self.shape_of_expr(st, unwrap_parens_and_try(value)))
+                {
+                    if let Some(root) = unwrap_parens_and_try(value).root_ident() {
                         if self.binding_may_share(st, root) {
-                            st.share_edge(name, root);
+                            self.link_share(st, name, root);
                         }
                     }
                 }
@@ -460,52 +551,8 @@ impl<'a> Checker<'a> {
                     self.record_literal_ref(st, name, it);
                 }
             }
-            // A call that hands back storage reachable from an argument
-            // (#73): `h2 := alias_holder(h1)` is a shallow struct copy
-            // through a call — the result shape is `Struct`, which is not a
-            // binding-level alias, so `record_alias`'s reference-shape guard
-            // skips it — and `m2 := id(m)` (generic identity) degrades the
-            // result to `Unknown` through the type parameter, so even a map
-            // argument escapes the alias recorder. The checker has no
-            // interprocedural summary to prove the return is fresh (#38's
-            // argument), so edge the result to every may-share argument
-            // binding (and the method receiver, when present) whenever the
-            // result itself could share GC storage: may-share-capable or
-            // unresolvable. A concrete scalar/string result is a copy-out
-            // (no edge); a reference-shaped result is ALSO recorded as a
-            // binding alias by `record_alias` — both mechanisms agree on
-            // the freeze, matching what `m2 := m` records for the lexical
-            // form. `move`-wrapped arguments transfer ownership into the
-            // callee and are skipped.
-            Expr::Call { callee, args, .. } => {
-                let result = self.shape_of_expr(st, unwrap_parens(value));
-                if self.shape_may_share(&result) || matches!(result, TypeShape::Unknown) {
-                    let mut roots: Vec<&str> = Vec::new();
-                    for a in args {
-                        if matches!(unwrap_parens(&a.value), Expr::Move { .. }) {
-                            continue;
-                        }
-                        if let Some(root) = a.value.root_ident() {
-                            roots.push(root);
-                        }
-                    }
-                    // `x := r.method(...)` — the receiver is the callee's
-                    // base, not a call argument; a method that returns an
-                    // interior reference aliases it just like an argument.
-                    if let Expr::Field { base, .. } = unwrap_parens(callee) {
-                        if let Some(root) = base.root_ident() {
-                            roots.push(root);
-                        }
-                    }
-                    for root in roots {
-                        if root == name {
-                            continue;
-                        }
-                        if self.binding_may_share(st, root) {
-                            st.share_edge(name, root);
-                        }
-                    }
-                }
+            Expr::Call { .. } => {
+                self.record_call_sharing(st, name, value);
             }
             _ => {}
         }
@@ -517,10 +564,10 @@ impl<'a> Checker<'a> {
     /// the root's mutable storage just as much as a bare `h1` — the
     /// recursion must look through Field/Index/Slice to the root ident.
     fn record_literal_ref(&self, st: &mut FnState, name: &str, e: &Expr) {
-        match unwrap_parens(e) {
+        match unwrap_parens_and_try(e) {
             Expr::Ident { name: src, .. } => {
                 if self.binding_may_share(st, src) {
-                    st.share_edge(name, src);
+                    self.link_share(st, name, src);
                 }
             }
             // `holder{m: h1.m}` / `xs{a: s1[:]}` — the embedded projection
@@ -566,16 +613,17 @@ impl<'a> Checker<'a> {
     ///
     /// The original check only saw a bare reference-typed `Ident` copy
     /// (`m2 := agg`). But a CALL that returns a reference-typed value can
-    /// hand back storage owned by one of its arguments — `same(m)`,
-    /// `append(xs, v)`, and every filter/trim/identity helper do it — and
-    /// the checker has no interprocedural summary to rule that out. Record
-    /// the result as an alias of the first reference-typed argument binding,
-    /// so a later `move` of either freezes the other (O5.2). `move`-wrapped
-    /// arguments transfer ownership into the callee and are skipped. The
-    /// new binding also inherits the source's non_owned_origin (O5.1): an
-    /// alias of a parameter/receiver/range variable is itself non-owned.
+    /// hand back storage owned by its receiver or one of its arguments —
+    /// `h.data()`, `extract(h)`, `same(m)`, `append(xs, v)`, and every
+    /// filter/trim/identity helper do it — and the checker has no
+    /// interprocedural summary to rule that out. Record the result as an
+    /// alias of the first reference-bearing source binding, so a later
+    /// `move` of either freezes the other (O5.2). `move`-wrapped arguments
+    /// transfer ownership into the callee and are skipped. The new binding
+    /// also inherits the source's non_owned_origin (O5.1): an alias of a
+    /// parameter/receiver/range variable is itself non-owned.
     fn record_alias(&self, st: &mut FnState, name: &str, value: &Expr) {
-        match unwrap_parens(value) {
+        match unwrap_parens_and_try(value) {
             Expr::Ident { name: src, .. } => {
                 if let Some(b) = self.lookup_binding(st, src) {
                     let src_origin = b.non_owned_origin.clone();
@@ -589,33 +637,8 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expr::Call { args, .. }
-                if self
-                    .shape_of_expr(st, unwrap_parens(value))
-                    .is_reference_alias() =>
-            {
-                for a in args {
-                    if matches!(unwrap_parens(&a.value), Expr::Move { .. }) {
-                        continue;
-                    }
-                    if let Some(src) = a.value.root_ident() {
-                        if src == name {
-                            continue;
-                        }
-                        if let Some(b) = self.lookup_binding(st, src) {
-                            if b.shape.is_reference_alias() {
-                                let origin = b.non_owned_origin.clone();
-                                st.aliases.insert(name.to_string(), src.to_string());
-                                if let Some(origin) = origin {
-                                    if let Some(nb) = st.env_lookup_mut(name) {
-                                        nb.non_owned_origin = Some(origin);
-                                    }
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
+            Expr::Call { .. } => {
+                self.record_call_sharing(st, name, value);
             }
             _ => {}
         }
@@ -905,15 +928,17 @@ impl<'a> Checker<'a> {
                                 b.ty = ty;
                             }
                             b.moved = None;
+                            b.non_owned_origin = None;
                         }
                         st.aliases.remove(name);
+                        st.share_clear(name);
+                        self.record_may_share(st, name, &values[0]);
+                        self.record_alias(st, name, &values[0]);
                     }
                 }
             }
         }
     }
-
-
 
     fn emit_a6_field_borrow_error(&mut self, t: &Place) {
         let msg = format!(
@@ -1007,6 +1032,17 @@ impl<'a> Checker<'a> {
             } else {
                 self.mark_move_in_value(st, v, format!("the move-return `{}`", v.render()));
             }
+        }
+    }
+}
+
+/// Strip enclosing parentheses and `?` (`Expr::Try`) wrappers from an expression.
+fn unwrap_parens_and_try(mut e: &Expr) -> &Expr {
+    loop {
+        match e {
+            Expr::Paren { inner, .. } => e = inner,
+            Expr::Try { operand, .. } => e = operand,
+            _ => return e,
         }
     }
 }

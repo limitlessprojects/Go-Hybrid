@@ -274,12 +274,65 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let recv = self.shape_of_expr(st, base);
+                if let Some(f) = self.lookup_user_method(&recv, name) {
+                    return f
+                        .results
+                        .first()
+                        .map(|r| self.shape_of_type(&r.ty))
+                        .unwrap_or(TypeShape::Unknown);
+                }
                 match receiver_type_name(&recv) {
                     Some(t) => foreign::method_result(&t, name),
                     None => TypeShape::Unknown,
                 }
             }
             _ => TypeShape::Unknown,
+        }
+    }
+
+    /// Look up a user-defined method `(recv_struct, method_name)` in `self.methods`.
+    /// Unwraps pointer receivers (`*S` and `S` share the method set in Go).
+    pub(crate) fn lookup_user_method(
+        &self,
+        recv: &TypeShape,
+        method: &str,
+    ) -> Option<&'a hy_syntax::FnDecl> {
+        let sname = match recv {
+            TypeShape::Struct(Some(name)) => Some(name.as_str()),
+            TypeShape::Pointer(inner) => match &**inner {
+                TypeShape::Struct(Some(name)) => Some(name.as_str()),
+                _ => None,
+            },
+            _ => None,
+        }?;
+        self.methods
+            .get(&(sname.to_string(), method.to_string()))
+            .copied()
+    }
+
+    /// Resolve a direct function or user-defined method call target to its `FnDecl`.
+    pub(crate) fn resolve_call_decl(
+        &self,
+        st: &FnState,
+        callee: &Expr,
+    ) -> Option<&'a hy_syntax::FnDecl> {
+        match crate::model::unwrap_parens(callee) {
+            Expr::Ident { name, .. } => {
+                if self.lookup_binding(st, name).is_some() {
+                    return None;
+                }
+                self.fns.get(name.as_str()).copied()
+            }
+            Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: b, .. } = &**base {
+                    if self.lookup_binding(st, b).is_none() && self.known_package(b) {
+                        return None;
+                    }
+                }
+                let recv = self.shape_of_expr(st, base);
+                self.lookup_user_method(&recv, name)
+            }
+            _ => None,
         }
     }
 
@@ -390,6 +443,17 @@ impl<'a> Checker<'a> {
                         .and_then(|f| f.results.first())
                         .map(|r| r.ty.clone())
                 }
+                Expr::Field { base, name, .. } => {
+                    if let Expr::Ident { name: b, .. } = &**base {
+                        if self.lookup_binding(st, b).is_none() && self.known_package(b) {
+                            return None;
+                        }
+                    }
+                    let recv = self.shape_of_expr(st, base);
+                    self.lookup_user_method(&recv, name)
+                        .and_then(|f| f.results.first())
+                        .map(|r| r.ty.clone())
+                }
                 _ => None,
             },
             _ => None,
@@ -426,23 +490,19 @@ impl<'a> Checker<'a> {
             other => (other, false),
         };
         if let Expr::Call { callee, .. } = call_expr {
-            if let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) {
-                if self.lookup_binding(st, name).is_none() {
-                    if let Some(f) = self.fns.get(name.as_str()) {
-                        let avail = if is_try {
-                            f.results.len().saturating_sub(1)
-                        } else {
-                            f.results.len()
-                        };
-                        if avail == n_names {
-                            return f
-                                .results
-                                .iter()
-                                .take(n_names)
-                                .map(|r| self.shape_of_type(&r.ty))
-                                .collect();
-                        }
-                    }
+            if let Some(f) = self.resolve_call_decl(st, callee) {
+                let avail = if is_try {
+                    f.results.len().saturating_sub(1)
+                } else {
+                    f.results.len()
+                };
+                if avail == n_names {
+                    return f
+                        .results
+                        .iter()
+                        .take(n_names)
+                        .map(|r| self.shape_of_type(&r.ty))
+                        .collect();
                 }
             }
         }
@@ -470,23 +530,19 @@ impl<'a> Checker<'a> {
             other => (other, false),
         };
         if let Expr::Call { callee, .. } = call_expr {
-            if let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) {
-                if self.lookup_binding(st, name).is_none() {
-                    if let Some(f) = self.fns.get(name.as_str()) {
-                        let avail = if is_try {
-                            f.results.len().saturating_sub(1)
-                        } else {
-                            f.results.len()
-                        };
-                        if avail == n_names {
-                            return f
-                                .results
-                                .iter()
-                                .take(n_names)
-                                .map(|r| Some(r.ty.clone()))
-                                .collect();
-                        }
-                    }
+            if let Some(f) = self.resolve_call_decl(st, callee) {
+                let avail = if is_try {
+                    f.results.len().saturating_sub(1)
+                } else {
+                    f.results.len()
+                };
+                if avail == n_names {
+                    return f
+                        .results
+                        .iter()
+                        .take(n_names)
+                        .map(|r| Some(r.ty.clone()))
+                        .collect();
                 }
             }
         }
