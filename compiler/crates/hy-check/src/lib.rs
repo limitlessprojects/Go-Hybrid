@@ -2601,5 +2601,144 @@ mod tests {
         // the diagnosis for the owned-binding variant of this shape.
         assert_eq!(r.diagnostics[0].code, "HYB-E3004");
     }
+
+    /// Generalized alias collector (#160): a reference-typed value that
+    /// reaches a binding through anything other than a bare ident — a nested
+    /// call, a view of a call result, a composite literal holding a call
+    /// result, a field read out of a literal, a call returning a parameter
+    /// field, or a plain assignment — must still be recorded as an alias so
+    /// that a later `move` of either side freezes the other (O5.2 / A1b).
+    /// Every shape below was accepted with 0 diagnostics and raced under
+    /// `go run -race` before `collect_ref_roots` replaced the bare-ident-only
+    /// `Expr::root_ident()` walk.
+    fn assert_alias_reject(src: &str) {
+        let r = check(src);
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3003"),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn nested_call_result_alias_freezes_e3003() {
+        assert_alias_reject(
+            "fn same(s []int) []int { return s }\n\
+             fn worker(s []int) { s[0] = 1 }\n\
+             fn main() {\n\
+               s := []int{1, 2, 3}\n\
+               t := same(same(s))\n\
+               task worker(move t)\n\
+               s[0] = 7\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn view_of_call_result_alias_freezes_e3003() {
+        assert_alias_reject(
+            "fn same(s []int) []int { return s }\n\
+             fn worker(s []int) { s[0] = 1 }\n\
+             fn main() {\n\
+               s := []int{1, 2, 3}\n\
+               t := same(s)[0:2]\n\
+               task worker(move t)\n\
+               s[0] = 7\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn composite_literal_holding_call_result_freezes_e3003() {
+        assert_alias_reject(
+            "struct wrap { items []int }\n\
+             fn same(s []int) []int { return s }\n\
+             fn worker(w wrap) { w.items[0] = 1 }\n\
+             fn main() {\n\
+               s := []int{1, 2, 3}\n\
+               w := wrap{items: same(s)}\n\
+               task worker(move w)\n\
+               s[0] = 7\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn field_of_composite_literal_alias_freezes_e3003() {
+        assert_alias_reject(
+            "struct box { items []int }\n\
+             fn worker(s []int) { s[0] = 1 }\n\
+             fn main() {\n\
+               s := []int{1, 2, 3}\n\
+               t := box{items: s}.items\n\
+               task worker(move t)\n\
+               s[0] = 7\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn call_returning_parameter_field_alias_freezes_e3003() {
+        assert_alias_reject(
+            "struct box { items []int }\n\
+             fn take(b box) []int { return b.items }\n\
+             fn worker(s []int) { s[0] = 1 }\n\
+             fn main() {\n\
+               s := []int{1, 2, 3}\n\
+               t := take(box{items: s})\n\
+               task worker(move t)\n\
+               s[0] = 7\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn assigned_call_result_alias_freezes_e3003() {
+        assert_alias_reject(
+            "fn same(s []int) []int { return s }\n\
+             fn worker(s []int) { s[0] = 1 }\n\
+             fn main() {\n\
+               s := []int{1, 2, 3}\n\
+               var t []int\n\
+               t = same(s)\n\
+               task worker(move t)\n\
+               s[0] = 7\n\
+             }",
+        );
+    }
+
+    /// Positive control: a call with no reference-carrying argument is a
+    /// fresh value and must NOT be edged to anything — the widening must not
+    /// start rejecting fresh results.
+    #[test]
+    fn fresh_call_result_stays_accepted() {
+        let r = check(
+            "fn fresh() []int { return []int{1, 2} }\n\
+             fn worker(s []int) { s[0] = 1 }\n\
+             fn main() {\n\
+               t := fresh()\n\
+               task worker(move t)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    /// Positive control: `len(m)` is a scalar copy-out, not a reference
+    /// alias, so moving the result must not freeze the map argument.
+    #[test]
+    fn scalar_copy_out_is_not_an_alias() {
+        let r = check(
+            "fn worker(n int) { fmt.println(n) }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               n := len(m)\n\
+               task worker(move n)\n\
+               m[\"k\"] = 1\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
 }
 

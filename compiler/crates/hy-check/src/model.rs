@@ -477,6 +477,55 @@ pub(crate) fn move_operand_ident(e: &Expr) -> Option<String> {
     }
 }
 
+/// Collect the root binding of every reference-carrying sub-expression of
+/// `e` — the generalized form of `Expr::root_ident()`.
+///
+/// `root_ident()` stops at anything that is not an ident/field/index chain:
+/// a CALL result (`same(same(m))`), a view of a call result (`same(m)[0:2]`),
+/// a composite literal (`wrap{items: same(m)}`), a field read out of a
+/// literal (`box{items: m}.items`) or a call that returns a parameter field
+/// (`take(box{items: m})`) all yield `None`, so the may-share/alias edge that
+/// keeps O5.2 honest was never recorded for them. This walks the wrappers
+/// instead and reports every binding the value could still share storage
+/// with. `move`-wrapped operands transfer ownership and are skipped.
+pub(crate) fn collect_ref_roots(e: &Expr, out: &mut Vec<String>) {
+    match unwrap_parens(e) {
+        Expr::Move { .. } => {}
+        Expr::Ident { name, .. } => out.push(name.clone()),
+        Expr::Try { operand, .. } => collect_ref_roots(operand, out),
+        Expr::Slice { base, .. } => collect_ref_roots(base, out),
+        Expr::Field { base, .. } => collect_ref_roots(base, out),
+        Expr::Index { base, .. } => collect_ref_roots(base, out),
+        Expr::Call { callee, args, .. } => {
+            for a in args {
+                collect_ref_roots(&a.value, out);
+            }
+            // `x := r.method(...)` — the receiver is the callee's base, not a
+            // call argument, and a method can hand back interior storage.
+            if let Expr::Field { base, .. } = unwrap_parens(callee) {
+                collect_ref_roots(base, out);
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for f in fields {
+                collect_ref_roots(&f.value, out);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                collect_ref_roots(k, out);
+                collect_ref_roots(v, out);
+            }
+        }
+        Expr::SliceLit { items, .. } => {
+            for it in items {
+                collect_ref_roots(it, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Collect every `move <operand>` inside `e` (top-level or nested inside
 /// composite literals / parens) so nested moves freeze their binding and
 /// non-binding GC field moves trigger HYB-E3004 (O5.1 / O5.4).

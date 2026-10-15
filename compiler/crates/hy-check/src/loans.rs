@@ -18,8 +18,8 @@
 
 use crate::foreign::{self, CallMode};
 use crate::model::{
-    as_addr_of, move_operand_ident, unwrap_parens, Binding, Checker, FnState, Loan, LoanTarget,
-    MoveKind, TypeShape,
+    as_addr_of, collect_ref_roots, move_operand_ident, unwrap_parens, Binding, Checker, FnState,
+    Loan, LoanTarget, MoveKind, TypeShape,
 };
 use crate::shape::receiver_type_name;
 use crate::walk::{self, CallRef};
@@ -425,142 +425,54 @@ impl<'a> Checker<'a> {
                 }
             }
             // `s2 := s1[:]` — the result shares s1's backing array
-            Expr::Slice { base, .. } => {
-                if let Some(root) = unwrap_parens(base).root_ident() {
-                    if self.binding_may_share(st, root) {
-                        st.share_edge(name, root);
-                    }
-                }
-            }
             // `m2 := h1.m` / `m2 := arr[i]` — projecting a reference-bearing
             // value out leaves it aliasing the composite it was read from
-            Expr::Field { .. } | Expr::Index { .. } => {
-                if self.shape_may_share(&self.shape_of_expr(st, unwrap_parens(value))) {
-                    if let Some(root) = value.root_ident() {
-                        if self.binding_may_share(st, root) {
-                            st.share_edge(name, root);
-                        }
-                    }
-                }
-            }
             // composite literals that embed live reference bindings
-            Expr::StructLit { fields, .. } => {
-                for f in fields {
-                    self.record_literal_ref(st, name, &f.value);
+            // a call that hands back storage reachable from an argument (#73)
+            //
+            // All of these — plus the WRAPPED forms reported as the "#73
+            // tail": nested calls (`t := same(same(m))`), views of call
+            // results (`t := same(m)[0:2]`), literals holding call results
+            // (`w := wrap{items: same(m)}`), fields read out of a literal
+            // (`t := box{items: m}.items`) and parameter-field returns
+            // (`t := take(box{items: m})`) — are resolved by walking the whole
+            // value with `collect_ref_roots` instead of `Expr::root_ident()`,
+            // which stops at a call or a literal base. The edge is still only
+            // recorded for roots that may share mutable GC storage, so scalar
+            // copy-outs (`n := len(m)`) stay unedged.
+            _ => {
+                let inner = unwrap_parens(value);
+                let result = self.shape_of_expr(st, inner);
+                let is_literal = matches!(
+                    inner,
+                    Expr::StructLit { .. } | Expr::MapLit { .. } | Expr::SliceLit { .. }
+                );
+                let carries = self.shape_may_share(&result)
+                    || matches!(result, TypeShape::Unknown)
+                    || inner.root_ident().is_some()
+                    || is_literal;
+                if !carries {
+                    return;
                 }
-            }
-            Expr::MapLit { entries, .. } => {
-                for (k, v) in entries {
-                    self.record_literal_ref(st, name, k);
-                    self.record_literal_ref(st, name, v);
-                }
-            }
-            Expr::SliceLit { items, .. } => {
-                for it in items {
-                    self.record_literal_ref(st, name, it);
-                }
-            }
-            // A call that hands back storage reachable from an argument
-            // (#73): `h2 := alias_holder(h1)` is a shallow struct copy
-            // through a call — the result shape is `Struct`, which is not a
-            // binding-level alias, so `record_alias`'s reference-shape guard
-            // skips it — and `m2 := id(m)` (generic identity) degrades the
-            // result to `Unknown` through the type parameter, so even a map
-            // argument escapes the alias recorder. The checker has no
-            // interprocedural summary to prove the return is fresh (#38's
-            // argument), so edge the result to every may-share argument
-            // binding (and the method receiver, when present) whenever the
-            // result itself could share GC storage: may-share-capable or
-            // unresolvable. A concrete scalar/string result is a copy-out
-            // (no edge); a reference-shaped result is ALSO recorded as a
-            // binding alias by `record_alias` — both mechanisms agree on
-            // the freeze, matching what `m2 := m` records for the lexical
-            // form. `move`-wrapped arguments transfer ownership into the
-            // callee and are skipped.
-            Expr::Call { callee, args, .. } => {
-                let result = self.shape_of_expr(st, unwrap_parens(value));
-                if self.shape_may_share(&result) || matches!(result, TypeShape::Unknown) {
-                    let mut roots: Vec<&str> = Vec::new();
-                    for a in args {
-                        if matches!(unwrap_parens(&a.value), Expr::Move { .. }) {
-                            continue;
-                        }
-                        if let Some(root) = a.value.root_ident() {
-                            roots.push(root);
-                        }
+                let mut roots = Vec::new();
+                collect_ref_roots(value, &mut roots);
+                for root in roots {
+                    if root == name {
+                        continue;
                     }
-                    // `x := r.method(...)` — the receiver is the callee's
-                    // base, not a call argument; a method that returns an
-                    // interior reference aliases it just like an argument.
-                    if let Expr::Field { base, .. } = unwrap_parens(callee) {
-                        if let Some(root) = base.root_ident() {
-                            roots.push(root);
-                        }
-                    }
-                    for root in roots {
-                        if root == name {
-                            continue;
-                        }
-                        if self.binding_may_share(st, root) {
-                            st.share_edge(name, root);
-                        }
+                    if self.binding_may_share(st, &root) {
+                        st.share_edge(name, &root);
                     }
                 }
             }
-            _ => {}
         }
     }
 
-    /// Recursively collect live reference bindings embedded in a composite
-    /// literal and link them (may-share) to the freshly bound `name`.
-    /// Projections (pr-28's case): a literal field value like `h1.m` shares
-    /// the root's mutable storage just as much as a bare `h1` — the
-    /// recursion must look through Field/Index/Slice to the root ident.
-    fn record_literal_ref(&self, st: &mut FnState, name: &str, e: &Expr) {
-        match unwrap_parens(e) {
-            Expr::Ident { name: src, .. } => {
-                if self.binding_may_share(st, src) {
-                    st.share_edge(name, src);
-                }
-            }
-            // `holder{m: h1.m}` / `xs{a: s1[:]}` — the embedded projection
-            // aliases the root binding's storage (pr-28, still-accepting
-            // repro `h2 := holder{m: h1.m}` after the pr-35 seam).
-            Expr::Slice { base, .. } => {
-                if let Some(root) = unwrap_parens(base).root_ident() {
-                    if self.binding_may_share(st, root) {
-                        st.share_edge(name, root);
-                    }
-                }
-            }
-            Expr::Field { .. } | Expr::Index { .. } => {
-                if self.shape_may_share(&self.shape_of_expr(st, unwrap_parens(e))) {
-                    if let Some(root) = e.root_ident() {
-                        if self.binding_may_share(st, root) {
-                            st.share_edge(name, root);
-                        }
-                    }
-                }
-            }
-            Expr::StructLit { fields, .. } => {
-                for f in fields {
-                    self.record_literal_ref(st, name, &f.value);
-                }
-            }
-            Expr::MapLit { entries, .. } => {
-                for (k, v) in entries {
-                    self.record_literal_ref(st, name, k);
-                    self.record_literal_ref(st, name, v);
-                }
-            }
-            Expr::SliceLit { items, .. } => {
-                for it in items {
-                    self.record_literal_ref(st, name, it);
-                }
-            }
-            _ => {}
-        }
-    }
+    // `record_literal_ref` (pr-28's composite-literal recursion) is gone:
+    // `record_may_share` now walks literals, calls and views with
+    // `collect_ref_roots`, so a literal field that embeds a live binding —
+    // bare (`holder{m: agg}`), projected (`holder{m: h1.m}`) or produced by
+    // a call (`wrap{items: same(agg)}`) — is covered by one collector.
 
     /// Record a binding-level alias created by `name := value` (#38).
     ///
@@ -589,31 +501,39 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expr::Call { args, .. }
+            // A reference-shaped result that is not a bare binding: the call
+            // forms of #38 (`t := same(m)`) and the wrapper tail — nested
+            // calls (`t := same(same(m))`), views of call results
+            // (`t := same(m)[0:2]`), literals holding call results
+            // (`w := wrap{items: same(m)}`), fields read out of a literal
+            // (`t := box{items: m}.items`) and parameter-field returns
+            // (`t := take(box{items: m})`). `collect_ref_roots` walks the
+            // whole value, so every root binding the result could alias is
+            // considered; the first reference-typed one wins (the freeze is a
+            // single-parent link) and `move`-wrapped operands, which transfer
+            // ownership into the callee, are skipped by the collector.
+            other
                 if self
-                    .shape_of_expr(st, unwrap_parens(value))
+                    .shape_of_expr(st, unwrap_parens(other))
                     .is_reference_alias() =>
             {
-                for a in args {
-                    if matches!(unwrap_parens(&a.value), Expr::Move { .. }) {
+                let mut roots = Vec::new();
+                collect_ref_roots(value, &mut roots);
+                for src in roots {
+                    if src == name {
                         continue;
                     }
-                    if let Some(src) = a.value.root_ident() {
-                        if src == name {
-                            continue;
-                        }
-                        if let Some(b) = self.lookup_binding(st, src) {
-                            if b.shape.is_reference_alias() {
-                                let origin = b.non_owned_origin.clone();
-                                st.aliases.insert(name.to_string(), src.to_string());
-                                if let Some(origin) = origin {
-                                    if let Some(nb) = st.env_lookup_mut(name) {
-                                        nb.non_owned_origin = Some(origin);
-                                    }
-                                }
-                                break;
+                    let matched = self
+                        .lookup_binding(st, &src)
+                        .map(|b| (b.shape.is_reference_alias(), b.non_owned_origin.clone()));
+                    if let Some((true, origin)) = matched {
+                        st.aliases.insert(name.to_string(), src.clone());
+                        if let Some(origin) = origin {
+                            if let Some(nb) = st.env_lookup_mut(name) {
+                                nb.non_owned_origin = Some(origin);
                             }
                         }
+                        break;
                     }
                 }
             }
