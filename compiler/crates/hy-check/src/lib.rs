@@ -378,6 +378,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     // Pass A: indices, structural extents, last-use map.
     let flat = walk::flatten_with_results(body, &st.named_results);
     st.last_use = flat.last_use.clone();
+    let fn_end = flat.stmts.last().map(|(_, i)| *i).unwrap_or(0);
 
     let mut active_loops: Vec<(
         usize,
@@ -545,7 +546,8 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
 
         // Calls (A2 loan windows, A7 consumes + arg lending). A for-loop
         // ITERATE expression's borrow calls get loop-extent loans: the
-        // element views live across the whole loop body (O7).
+        // element views live across the whole loop body (O7). A `defer`
+        // statement's borrow/lending calls live until function exit (`fn_end`).
         let mut stmt_consumes = Vec::new();
         if let Stmt::For {
             kind: ForKind::Iterate { expr, .. },
@@ -557,6 +559,12 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             walk::expr_calls(expr, &mut calls);
             for cr in calls {
                 ck.process_call(&mut st, &cr, idx, Some(loop_end), &mut stmt_consumes);
+            }
+        } else if matches!(stmt, Stmt::Defer { .. }) {
+            let mut calls = Vec::new();
+            walk::own_calls(stmt, &mut calls);
+            for cr in calls {
+                ck.process_call(&mut st, &cr, idx, Some(fn_end), &mut stmt_consumes);
             }
         } else {
             let mut calls = Vec::new();
@@ -595,6 +603,27 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             }
 
             Stmt::Return { values, span } => ck.process_return(&mut st, values, *span),
+
+            Stmt::Defer { call, .. } => {
+                ck.process_defer_moves(&mut st, call, &uses, managed);
+            }
+
+            Stmt::Expr { expr, .. } => {
+                let mut move_ops = Vec::new();
+                model::collect_move_operands(expr, &mut move_ops);
+                for (op, mspan) in move_ops {
+                    if let Expr::Ident { name, .. } = op {
+                        if !managed {
+                            ck.check_non_owned_move(&st, name, mspan);
+                        }
+                    }
+                }
+                ck.mark_move_in_value(
+                    &mut st,
+                    expr,
+                    format!("the expression `{}`", expr.render()),
+                );
+            }
 
             // O4.0 check-site: every task argument (HYB-E3001) + the
             // spawn-callee proof: the callee must resolve to a declared
@@ -795,22 +824,8 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 );
             }
 
-            Stmt::Expr { expr, .. } => {
-                ck.mark_move_in_value(
-                    &mut st,
-                    expr,
-                    format!("the expression `{}`", expr.render()),
-                );
-            }
-
-            Stmt::Defer { call, .. } => {
-                ck.mark_move_in_value(
-                    &mut st,
-                    call,
-                    format!("the deferred call `defer {}`", call.render()),
-                );
-            }
-
+            // If-init Locals, exprs, blocks: already covered by the flat walk
+            // (init is its own statement entry) and the uses/calls collected above.
             _ => {}
         }
 
@@ -3311,6 +3326,228 @@ mod tests {
              }",
         );
         assert_eq!(r8.verdict, Verdict::Accept, "{:?}", r8.diagnostics);
+    }
+
+    #[test]
+    fn defer_use_before_move_rejects_a1b_e3003() {
+        let r = check(
+            "fn audit(m map[string]int) { m[\"defer\"] = 2 }\n\
+             fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"worker\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"init\": 0}\n\
+               done := make(chan bool, 1)\n\
+               defer audit(m)\n\
+               task worker(move m, done)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert_eq!(r.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn defer_alias_use_before_move_rejects_a1b_e3003() {
+        let r1 = check(
+            "fn audit(m map[string]int) { m[\"defer\"] = 2 }\n\
+             fn worker(m map[string]int) { m[\"worker\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"init\": 0}\n\
+               m2 := m\n\
+               defer audit(m2)\n\
+               task worker(move m)\n\
+             }",
+        );
+        assert_eq!(r1.verdict, Verdict::Reject, "{:?}", r1.diagnostics);
+        assert_eq!(first_error_rule(&r1).as_deref(), Some("A1b"));
+        assert_eq!(r1.diagnostics[0].code, "HYB-E3003");
+
+        let r2 = check(
+            "fn audit(m map[string]int) { m[\"defer\"] = 2 }\n\
+             fn worker(m map[string]int) { m[\"worker\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"init\": 0}\n\
+               defer audit(m)\n\
+               m2 := m\n\
+               task worker(move m2)\n\
+             }",
+        );
+        assert_eq!(r2.verdict, Verdict::Reject, "{:?}", r2.diagnostics);
+        assert_eq!(first_error_rule(&r2).as_deref(), Some("A1b"));
+        assert_eq!(r2.diagnostics[0].code, "HYB-E3003");
+
+        // Pre-defer alias (`alias := m; defer audit(m); m = fresh; task worker(move alias)`)
+        // and post-defer alias (`defer audit(m); alias := m; m = fresh; task worker(move alias)`)
+        // still race with the deferred read/write of `m`'s original map storage.
+        let r3 = check(
+            "fn audit(m map[string]int) { m[\"defer\"] = 2 }\n\
+             fn worker(m map[string]int) { m[\"worker\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"init\": 0}\n\
+               alias := m\n\
+               defer audit(m)\n\
+               m = map[string]int{\"fresh\": 1}\n\
+               task worker(move alias)\n\
+             }",
+        );
+        assert_eq!(r3.verdict, Verdict::Reject, "{:?}", r3.diagnostics);
+        assert_eq!(first_error_rule(&r3).as_deref(), Some("A1b"));
+        assert_eq!(r3.diagnostics[0].code, "HYB-E3003");
+
+        let r4 = check(
+            "fn audit(m map[string]int) { m[\"defer\"] = 2 }\n\
+             fn worker(m map[string]int) { m[\"worker\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"init\": 0}\n\
+               defer audit(m)\n\
+               alias := m\n\
+               m = map[string]int{\"fresh\": 1}\n\
+               task worker(move alias)\n\
+             }",
+        );
+        assert_eq!(r4.verdict, Verdict::Reject, "{:?}", r4.diagnostics);
+        assert_eq!(first_error_rule(&r4).as_deref(), Some("A1b"));
+        assert_eq!(r4.diagnostics[0].code, "HYB-E3003");
+
+        // Positive control: rebinding `m` to a genuinely fresh map after
+        // `defer audit(m)` re-owns `m` so `task worker(move m)` moves the new
+        // map while `defer audit(m)` holds the old map snapshot.
+        let r_ok_rebind = check(
+            "fn audit(m map[string]int) { m[\"defer\"] = 2 }\n\
+             fn worker(m map[string]int) { m[\"worker\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"init\": 0}\n\
+               defer audit(m)\n\
+               m = map[string]int{\"fresh\": 1}\n\
+               task worker(move m)\n\
+             }",
+        );
+        assert_eq!(
+            r_ok_rebind.verdict,
+            Verdict::Accept,
+            "{:?}",
+            r_ok_rebind.diagnostics
+        );
+    }
+
+    #[test]
+    fn defer_use_before_consume_rejects_a7_e3003() {
+        let r = check(
+            "import \"rust/flate2\"\n\
+             fn main() {\n\
+               w := flate2.new_writer(1, 6)\n\
+               defer w.write(\"late\")\n\
+               w.finish()\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A7"));
+        assert_eq!(r.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn defer_move_freezes_binding_and_validates_non_owned() {
+        let r_freeze = check(
+            "fn cleanup(m map[string]int) { m[\"clean\"] = 0 }\n\
+             fn main() {\n\
+               m := map[string]int{\"init\": 0}\n\
+               defer cleanup(move m)\n\
+               m[\"after\"] = 1\n\
+             }",
+        );
+        assert_eq!(
+            r_freeze.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_freeze.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_freeze).as_deref(), Some("A1b"));
+        assert_eq!(r_freeze.diagnostics[0].code, "HYB-E3003");
+
+        let r_non_owned = check(
+            "fn cleanup(m map[string]int) { m[\"clean\"] = 0 }\n\
+             fn run(p map[string]int) {\n\
+               defer cleanup(move p)\n\
+             }",
+        );
+        assert_eq!(
+            r_non_owned.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_non_owned.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_non_owned).as_deref(), Some("A1b"));
+        assert_eq!(r_non_owned.diagnostics[0].code, "HYB-E3004");
+    }
+
+    #[test]
+    fn defer_extends_map_slot_and_handle_borrow_loans_to_fn_exit() {
+        let r_a3 = check(
+            "struct svc { count int }\n\
+             fn bump(s *svc) { s.count = s.count + 1 }\n\
+             fn main() {\n\
+               m := map[string]svc{\"a\": svc{count: 1}}\n\
+               s := &m[\"a\"]\n\
+               defer bump(s)\n\
+               m[\"b\"] = svc{count: 2}\n\
+             }",
+        );
+        assert_eq!(r_a3.verdict, Verdict::Reject, "{:?}", r_a3.diagnostics);
+        assert_eq!(first_error_rule(&r_a3).as_deref(), Some("A3"));
+        assert_eq!(r_a3.diagnostics[0].code, "HYB-E3102");
+
+        let r_a2 = check(
+            "import \"rust/serde_json\"\n\
+             fn main() {\n\
+               doc := serde_json.parse(\"[1, 2]\")\n\
+               defer serde_json.to_string_pretty(doc)\n\
+               doc.set(\"k\", 1)\n\
+             }",
+        );
+        assert_eq!(r_a2.verdict, Verdict::Reject, "{:?}", r_a2.diagnostics);
+        assert_eq!(first_error_rule(&r_a2).as_deref(), Some("A2"));
+        assert_eq!(r_a2.diagnostics[0].code, "HYB-E3101");
+    }
+
+    #[test]
+    fn call_arg_move_freezes_binding_and_propagates_non_owned() {
+        let r_call_define = check(
+            "fn id(m map[string]int) map[string]int { return m }\n\
+             fn worker(m map[string]int) { m[\"worker\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"init\": 0}\n\
+               m2 := id(move m)\n\
+               task worker(move m2)\n\
+               m[\"main\"] = 2\n\
+             }",
+        );
+        assert_eq!(
+            r_call_define.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_call_define.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_call_define).as_deref(), Some("A1b"));
+        assert_eq!(r_call_define.diagnostics[0].code, "HYB-E3003");
+
+        let r_expr_stmt = check(
+            "fn eat(m map[string]int) { m[\"eat\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"init\": 0}\n\
+               eat(move m)\n\
+               m[\"main\"] = 2\n\
+             }",
+        );
+        assert_eq!(
+            r_expr_stmt.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_expr_stmt.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_expr_stmt).as_deref(), Some("A1b"));
+        assert_eq!(r_expr_stmt.diagnostics[0].code, "HYB-E3003");
     }
 
     // -----------------------------------------------------------------------
