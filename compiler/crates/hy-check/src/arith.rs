@@ -134,7 +134,7 @@ impl<'a> Checker<'a> {
             Stmt::Select { arms, .. } => {
                 for arm in arms {
                     match &arm.kind {
-                        SelectArmKind::Send { chan, value } => {
+                        SelectArmKind::Send { chan, value, .. } => {
                             self.check_expr_const_zero_divisor(chan);
                             self.check_expr_const_zero_divisor(value);
                         }

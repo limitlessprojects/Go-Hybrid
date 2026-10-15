@@ -707,8 +707,20 @@ pub struct SelectArm {
 
 #[derive(Debug, Clone)]
 pub enum SelectArmKind {
-    Send { chan: Expr, value: Expr },
-    Recv { names: Vec<String>, chan: Expr },
+    /// C5: a select send clause (`ch <- v:`) is a sendability check-site
+    /// exactly like a statement send. `is_move` carries the parser's
+    /// `ch <- move v` marker for the very same reason `Stmt::Send` carries
+    /// it: the owned-move route (O4 class 3) must be available here, and the
+    /// freeze (O5.2) must be recorded for the moved binding.
+    Send {
+        chan: Expr,
+        value: Expr,
+        is_move: bool,
+    },
+    Recv {
+        names: Vec<String>,
+        chan: Expr,
+    },
     Default,
 }
 

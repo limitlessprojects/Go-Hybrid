@@ -206,7 +206,7 @@ fn stmt_kata(s: &Stmt, out: &mut HashSet<String>) {
                         }
                         expr_kata(chan, out);
                     }
-                    SelectArmKind::Send { chan, value } => {
+                    SelectArmKind::Send { chan, value, .. } => {
                         expr_kata(chan, out);
                         expr_kata(value, out);
                     }

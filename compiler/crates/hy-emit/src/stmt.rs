@@ -169,7 +169,7 @@ impl Emitter {
                             };
                             self.push(&head);
                         }
-                        SelectArmKind::Send { chan, value } => {
+                        SelectArmKind::Send { chan, value, .. } => {
                             let c = self.emit_expr(chan, 0)?;
                             let v = self.emit_expr(value, 0)?;
                             self.push(&format!("case {} <- {}:", c, v));

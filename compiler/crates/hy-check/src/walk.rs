@@ -272,7 +272,7 @@ pub(crate) fn own_uses(stmt: &Stmt, out: &mut Vec<Use>) {
         Stmt::Select { arms, .. } => {
             for arm in arms {
                 match &arm.kind {
-                    SelectArmKind::Send { chan, value } => {
+                    SelectArmKind::Send { chan, value, .. } => {
                         expr_uses(chan, out);
                         expr_uses(value, out);
                     }
@@ -453,7 +453,7 @@ pub(crate) fn own_calls<'a>(stmt: &'a Stmt, out: &mut Vec<CallRef<'a>>) {
         Stmt::Select { arms, .. } => {
             for arm in arms {
                 match &arm.kind {
-                    SelectArmKind::Send { chan, value } => {
+                    SelectArmKind::Send { chan, value, .. } => {
                         expr_calls(chan, out);
                         expr_calls(value, out);
                     }
@@ -520,7 +520,7 @@ pub(crate) fn own_fnlits<'a>(stmt: &'a Stmt, out: &mut Vec<&'a Expr>) {
         Stmt::Select { arms, .. } => {
             for arm in arms {
                 match &arm.kind {
-                    SelectArmKind::Send { chan, value } => {
+                    SelectArmKind::Send { chan, value, .. } => {
                         expr_fnlits(chan, out);
                         expr_fnlits(value, out);
                     }
