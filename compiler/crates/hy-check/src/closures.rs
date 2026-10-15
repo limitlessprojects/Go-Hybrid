@@ -126,17 +126,22 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
 
     match stmt {
         Stmt::Local(l) => {
+            // Direction first (#89): `v := <-ch` on a send-only channel is
+            // invalid Go even before the value's shape is handled.
+            for v in &l.values {
+                ck.check_recv_expr(st, v);
+            }
             for v in &l.values {
                 ck.mark_move_in_value(st, v, format!("the move-define `{}`", v.render()));
             }
             if l.names.len() == 1 && l.values.len() == 1 {
-             if let Expr::Ident { name: rhs_name, .. } = crate::model::unwrap_parens(&l.values[0]) {
-                 if st.env.contains_key(rhs_name) || st.scopes.iter().any(|s| s.contains_key(rhs_name)) {
-                     let resolved_root = crate::freeze::resolve_alias(st, rhs_name);
-                     st.aliases.insert(l.names[0].clone(), resolved_root);
-                 }
-             }
-         }
+                if let Expr::Ident { name: rhs_name, .. } = crate::model::unwrap_parens(&l.values[0]) {
+                    if st.env.contains_key(rhs_name) || st.scopes.iter().any(|s| s.contains_key(rhs_name)) {
+                        let resolved_root = crate::freeze::resolve_alias(st, rhs_name);
+                        st.aliases.insert(l.names[0].clone(), resolved_root);
+                    }
+                }
+            }
             // T22 (issue #12 parity with the flat pass): only `const` is
             // DEEPLY immutable; `let` is a SHALLOW immutable binding, so it
             // must NOT take the class-4 sendability shortcut.
@@ -214,9 +219,11 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
             is_move,
             span,
         } => {
-            // Target classification (#77) first: a non-channel (or
-            // unresolvable) send target is ill-typed — no value cascade.
-            if ck.check_send_target(st, chan, *span) {
+            // Direction first (#89): a send to a receive-only channel is
+            // invalid Go — no value cascade on an ill-typed target. Target
+            // classification (#77) then runs: a non-channel (or unresolvable)
+            // send target is likewise ill-typed — no value cascade.
+            if ck.check_chan_dir(st, chan, true) && ck.check_send_target(st, chan, *span) {
                 let desc = if *is_move {
                     format!(
                         "the move-send `{} <- move {}`",
@@ -237,7 +244,12 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
                 match &arm.kind {
                     SelectArmKind::Send { chan, value } => {
                         let span = chan.span().to(value.span());
-                        if ck.check_send_target(st, chan, span) {
+                        // Direction (#89) then target classification (#77) —
+                        // both must hold before the value check-site runs
+                        // (no cascade on ill-typed arms).
+                        if ck.check_chan_dir(st, chan, true)
+                            && ck.check_send_target(st, chan, span)
+                        {
                             let desc =
                                 format!("the select-send `{} <- {}`", chan.render(), value.render());
                             let vals: Vec<&Expr> = vec![value];
@@ -246,6 +258,9 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
                         }
                     }
                     SelectArmKind::Recv { names, chan } => {
+                        // Direction first (#89): a select recv arm on a
+                        // send-only channel is invalid Go.
+                        ck.check_chan_dir(st, chan, false);
                         // element shape when the channel resolves; `ok` is a
                         // bool; unresolvable stays Unknown (fail-closed, O4.9)
                         let elem = match ck.shape_of_expr(st, chan) {
@@ -351,6 +366,12 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
             for v in values {
                 ck.mark_move_in_value(st, v, format!("the move-return `{}`", v.render()));
             }
+        }
+        // Statement-level receive expression `<-ch` inside a closure body
+        // (#89): enforce the channel's direction. Other expression
+        // statements are walked by the use/call collectors above.
+        Stmt::Expr { expr, .. } => {
+            ck.check_recv_expr(st, expr);
         }
         _ => {}
     }
