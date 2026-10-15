@@ -42,7 +42,16 @@ run_example() {
 
     case "$name" in
     01-hello|03-worker-pool|04-pipeline-backpressure|05-json-transform|06-http-server|07-lru-generics|08-graph-ownership)
-        if "$bin" >"$WORK/$name.out" 2>&1 && diff -u "$dir/expected.txt" "$WORK/$name.out" >"$WORK/$name.diff"; then
+        local rc
+        "$bin" >"$WORK/$name.out" 2>&1
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            note "FAIL $name (run exit $rc)"
+            sed 's/^/    /' "$WORK/$name.out"
+            FAIL=1
+            return
+        fi
+        if diff -u "$dir/expected.txt" "$WORK/$name.out" >"$WORK/$name.diff"; then
             note "PASS $name (stdout == expected.txt)"
             PASS="$PASS $name"
         else
@@ -91,8 +100,16 @@ run_example() {
         fi
         printf 'module example.com/app\n\ngo 1.26\n' >"$ws/go.mod"
         cp "$dir/main.go.txt" "$ws/main.go"
-        if (cd "$ws" && go run . >"$WORK/$name.out" 2>&1) && \
-           diff -u "$dir/expected.txt" "$WORK/$name.out" >"$WORK/$name.diff"; then
+        local rc
+        (cd "$ws" && go run . >"$WORK/$name.out" 2>&1)
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            note "FAIL $name (run exit $rc)"
+            sed 's/^/    /' "$WORK/$name.out"
+            FAIL=1
+            return
+        fi
+        if diff -u "$dir/expected.txt" "$WORK/$name.out" >"$WORK/$name.diff"; then
             note "PASS $name (Go consumer imports the Hybrid package; rust/regex through the boundary)"
             PASS="$PASS $name"
         else
