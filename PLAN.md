@@ -1,5 +1,6 @@
 # Hybrid Language: Development Plan
 
+- Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Status
 - Current phase: **MVP COMPLETE — G3 REVIEWED + PASSED 2026-10-13** (review delegated by the human; every claim re-verified via standard suites + repo harnesses in a fresh sandbox; 4 findings found + repaired — see Decision Log; Post-MVP queue opened below)
 - State: MVP done; post-MVP queue open (rows in priority order)

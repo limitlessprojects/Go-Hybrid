@@ -143,7 +143,9 @@ def main():
 
     # sanity: verify we are at the pinned SHA when a repo checkout exists
     sha_ok = True
-    if os.path.isdir(os.path.join(repo_dir, ".git")):
+    # Linked worktrees and submodules use a .git file, not a directory.
+    # Even a broken metadata link must enter the fail-closed SHA check.
+    if os.path.lexists(os.path.join(repo_dir, ".git")):
         code, _, out = run_cmd(["git", "rev-parse", "HEAD"], 10, cwd=repo_dir)
         at = out.strip()
         want = job.get("sha")

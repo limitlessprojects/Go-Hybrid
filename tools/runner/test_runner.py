@@ -5,6 +5,7 @@ import io
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -85,6 +86,67 @@ class RunnerFailureTests(unittest.TestCase):
                                      [step('must-not-run', 'print(2)')])
         self.assertEqual(code, 1)
         self.assertEqual([(s['name'], s['exit']) for s in summary['steps']], [('prior', 0), ('required', 7)])
+
+
+class WorktreeShaTests(unittest.TestCase):
+    def run_worktree_job(self, pin, broken=False):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            repo, worktree = root / 'repo', root / 'worktree'
+            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+            subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Fixture',
+                            '-c', 'user.email=fixture@example.invalid',
+                            '-c', 'commit.gpgsign=false', 'commit', '-q',
+                            '--allow-empty', '-m', 'fixture'], check=True)
+            subprocess.run(['git', '-C', str(repo), 'worktree', 'add',
+                            '--quiet', '--detach', str(worktree), 'HEAD'], check=True)
+            at = subprocess.check_output(['git', '-C', str(worktree),
+                                          'rev-parse', 'HEAD'], text=True).strip()
+            self.assertTrue((worktree / '.git').is_file())
+            if broken:
+                (worktree / '.git').write_text('gitdir: missing-metadata\n', encoding='utf-8')
+            setup_marker, command_marker = root / 'setup.ran', root / 'command.ran'
+            job_path, results = root / 'job.json', root / 'results'
+            job_path.write_text(json.dumps({
+                'job': 'worktree-pin', 'sha': at if pin == 'exact' else pin,
+                'setup': [step('setup', f'from pathlib import Path; Path({str(setup_marker)!r}).touch()')],
+                'commands': [step('command', f'from pathlib import Path; Path({str(command_marker)!r}).touch()')],
+            }), encoding='utf-8')
+            argv = ['runner.py', str(job_path), '--results-dir', str(results),
+                    '--repo-dir', str(worktree)]
+            with patch.object(sys, 'argv', argv), patch.dict(os.environ), \
+                    patch.object(runner, 'env_report', return_value={'test': True}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as stopped:
+                    runner.main()
+            summary = json.loads((results / 'summary.json').read_text(encoding='utf-8'))
+            return stopped.exception.code, summary, setup_marker.exists(), command_marker.exists()
+
+    def test_wrong_worktree_sha_skips_setup_and_commands(self):
+        code, summary, setup_ran, command_ran = self.run_worktree_job('0' * 40)
+        self.assertEqual(code, 1)
+        self.assertFalse(summary['ok'])
+        self.assertFalse(setup_ran)
+        self.assertFalse(command_ran)
+        self.assertEqual([(s['name'], s['exit']) for s in summary['steps']], [('sha-check', 1)])
+
+    def test_matching_worktree_sha_and_head_run_both_phases(self):
+        for pin in ('exact', 'HEAD'):
+            with self.subTest(pin=pin):
+                code, summary, setup_ran, command_ran = self.run_worktree_job(pin)
+                self.assertEqual(code, 0)
+                self.assertTrue(summary['ok'])
+                self.assertTrue(setup_ran)
+                self.assertTrue(command_ran)
+                self.assertEqual([s['name'] for s in summary['steps']], ['sha-check', 'setup', 'command'])
+
+    def test_broken_git_file_fails_closed(self):
+        code, summary, setup_ran, command_ran = self.run_worktree_job('HEAD', broken=True)
+        self.assertEqual(code, 1)
+        self.assertFalse(summary['ok'])
+        self.assertFalse(setup_ran)
+        self.assertFalse(command_ran)
+        self.assertIn('failed to resolve HEAD', summary['steps'][0]['out_tail'])
 
 
 if __name__ == '__main__':
