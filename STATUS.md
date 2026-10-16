@@ -1,6 +1,6 @@
 # STATUS (for the human — 15 lines max)
 
-- Contributor follow-up (2026-10-15): literal build.rs version check + 2 regressions; focused 11/11 (one failed before), Rust 442/442, corpus 45/45, differential 14+31, examples 10/10 pass on pinned toolchains. Upstream CI/review pending.
+- Contributor follow-up (2026-10-15): literal build.rs version check + 2 regressions; focused 11/11 (one failed before), Rust 442/442, corpus 45/45, differential 14+31, examples 10/10 pass on pinned toolchains. Oct16 follow-up: 32/32 Linux Go runtime tests and Windows/Darwin bridge cross-build/vet guards pass. Native Windows/macOS execution and upstream CI/review pending.
 
 - Phase: **MVP DONE + v0.1.0 released + community OPEN** — the conveyor ran hot again: **14 PRs processed this session (11 merged, 3 duplicate-credited closes) + 2 zombie closes + wave-wide triage comments on all 40+ open PRs**, and the **CI-down P0 was found and fixed**
 - **P0 fixed — repo CI had been dead since 96f0bc4**: a mangled conflict resolution left an unindented duplicate py_compile line (ci.yml unparseable — every Actions run died with 0 jobs) and a Makefile recipe TAB loss; PR #172's deletion merged (8b9e1d6), #199's Makefile half integrated (cb53ead), push-run GREEN on our side; the corrupted `branches: ain]` push filter is a **known issue** (CI empirically fails open and runs; byte-level fix attempts keep losing to an environment quirk — fix scripts staged in /scripts, do it via the GitHub Contents API next session)
