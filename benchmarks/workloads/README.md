@@ -17,14 +17,16 @@ the matched shape the default instead of a manual follow-up.
 | `hy/load.hy` | Hybrid | `hyb check` + `hyb build` (the checker runs) |
 | `hy/alloc.hy` | Hybrid | `hyb check` + `hyb build` (the checker runs) |
 
+The generator also owns `rust/Cargo.toml`, including its release profile.
+
 Every twin gets the SAME constants (100 windows, 2000 load items, 32
 batches × 128 items × 960 appended bytes) and the SAME loop structure, so a
 "gap" measured between twins is a property of the runtimes, not of a
 hand-edited harness. Edit shapes ONLY in `shape.py`, then regenerate:
 
 ```bash
-python3 shape.py        # regenerate the four programs
-python3 shape.py --check  # CI/verifier mode: exit 1 on drift
+python3 shape.py        # regenerate the four programs and Rust manifest
+python3 shape.py --check  # read-only: exit 1 on changed or missing outputs
 ```
 
 ## Timer honesty (the row's other half)

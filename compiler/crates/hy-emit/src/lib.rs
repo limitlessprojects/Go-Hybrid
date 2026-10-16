@@ -373,6 +373,10 @@ pub struct Emitter {
     /// E3 expression-form hoists (Batch G): Try span start → the hoisted
     /// temp. emit_expr's Try branch substitutes the temp; cleared per fn.
     try_temps: BTreeMap<(u32, u32), String>,
+    /// Hoisted expression temps (keyed by AST node address) for short-circuit
+    /// `&&`/`||` containing `?` and preceding operands whose evaluation order
+    /// must be preserved before a hoisted `?`.
+    expr_temps: BTreeMap<usize, String>,
     /// Package mode (example 09): the emitted `package` clause, the prefix
     /// binding-package imports use, and whether `pub fn` exports.
     package_name: String,
@@ -421,6 +425,7 @@ impl Emitter {
             pending_fnlit_conv: None,
             cur_fn_conv_result: None,
             try_temps: BTreeMap::new(),
+            expr_temps: BTreeMap::new(),
             package_name: "main".to_string(),
             binding_prefix: "hybrid.program".to_string(),
             export_pub: false,
@@ -689,6 +694,7 @@ impl Emitter {
         self.try_temps.clear();
         self.loop_labels.clear();
         self.loop_label_n = 0;
+        self.expr_temps.clear();
 
         // Associated functions (`lru_cache.new`) mangle to
         // `lru_cache_new` — Go has no dotted identifiers. Call sites mangle
@@ -1072,6 +1078,10 @@ impl Emitter {
             Expr::MapLit { entries, .. } => entries
                 .iter()
                 .any(|(k, v)| self.expr_has_try(k) || self.expr_has_try(v)),
+            Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                InterpPart::Expr(x) => self.expr_has_try(x),
+                InterpPart::Lit(_) => false,
+            }),
             Expr::FnLit { body, .. } => self.block_has_try(body),
             Expr::Paren { inner, .. } => self.expr_has_try(inner),
             _ => false,

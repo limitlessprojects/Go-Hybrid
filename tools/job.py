@@ -87,7 +87,7 @@ def kaggle_submit(jobdir):
         src = f.read()
     if INJECT_MARKER not in src:
         sys.exit("worker/script.py missing inject marker")
-    injected = src.replace(INJECT_MARKER, "JOB_JSON = r'''" + payload + "'''")
+    injected = src.replace(INJECT_MARKER, "JOB_JSON = " + repr(payload))
     with open(script, "w") as f:
         f.write(injected)
     with open(os.path.join(WORKER_DIR, "job.json"), "w") as f:  # per SPEC §2 protocol

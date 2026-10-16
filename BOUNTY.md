@@ -25,7 +25,7 @@ announced in the release notes and listed in the Hall of Fame below.
 
 ## What qualifies
 
-Two tracks, ranked together:
+Two tracks ranked together, plus a third that stands apart:
 
 1. **Soundness bugs (the main track).** A program Hybrid **accepts** but
    that is **unsound**: a data race on shared mutable state crossing a task

@@ -40,6 +40,9 @@ impl Emitter {
     /// The full expression emitter. `min_prec` = the precedence the CALLER
     /// requires; lower-precedence children parenthesize themselves.
     pub fn emit_expr(&mut self, e: &Expr, min_prec: u8) -> Result<String, EmitError> {
+        if let Some(t) = self.expr_temps.get(&Self::expr_key(e)) {
+            return Ok(t.clone());
+        }
         let text = self.emit_expr_inner(e)?;
         let my = self.top_prec(e);
         if my < min_prec {
@@ -352,6 +355,9 @@ impl Emitter {
             }
 
             Expr::Paren { inner, .. } => {
+                if let Some(t) = self.expr_temps.get(&Self::expr_key(inner)) {
+                    return Ok(t.clone());
+                }
                 let i = self.emit_expr(inner, 0)?;
                 Ok(format!("({})", i))
             }

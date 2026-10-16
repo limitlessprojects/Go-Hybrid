@@ -351,13 +351,6 @@ def render(tpl: str) -> str:
     return out
 
 
-FILES = {
-    "go/main.go": render(GO_TEMPLATE),
-    "rust/src/main.rs": render(RUST_TEMPLATE),
-    "hy/load.hy": render(HY_LOAD_TEMPLATE),
-    "hy/alloc.hy": render(HY_ALLOC_TEMPLATE),
-}
-
 RUST_TOML = """[package]
 name = "workloads"
 version = "0.1.0"
@@ -367,6 +360,14 @@ edition = "2021"
 opt-level = 3
 """
 
+FILES = {
+    "go/main.go": render(GO_TEMPLATE),
+    "rust/src/main.rs": render(RUST_TEMPLATE),
+    "hy/load.hy": render(HY_LOAD_TEMPLATE),
+    "hy/alloc.hy": render(HY_ALLOC_TEMPLATE),
+    "rust/Cargo.toml": RUST_TOML,
+}
+
 
 def main() -> int:
     check = "--check" in sys.argv
@@ -374,12 +375,11 @@ def main() -> int:
     for rel, content in FILES.items():
         p = ROOT / rel
         if check:
-            if p.read_text() != content:
+            if not p.is_file() or p.read_text() != content:
                 drift.append(rel)
         else:
             p.write_text(content)
             print(f"wrote {rel}")
-    (ROOT / "rust/Cargo.toml").write_text(RUST_TOML)
     if check:
         if drift:
             print("DRIFTED (rerun `python3 shape.py` and commit):", ", ".join(drift))

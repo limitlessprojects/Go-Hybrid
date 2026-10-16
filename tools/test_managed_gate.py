@@ -24,7 +24,8 @@ class ManagedGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             prog = pathlib.Path(directory) / 'test.hy'
             prog.write_text(source, encoding='utf-8')
-            report = {'summary': {'managed': {'blocks': blocks}}}
+            report = {'summary': {'managed': {
+                'managed_blocks': len(blocks), 'blocks': blocks}}}
             result = subprocess.CompletedProcess([], returncode, json.dumps(report), '')
             with patch.object(gate.subprocess, 'run', return_value=result):
                 return gate.audit('hyb', str(prog))
@@ -117,6 +118,74 @@ class ManagedGateTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as error:
             self.audit('fn main( {}', [], returncode=1)
         self.assertEqual(error.exception.code, 2)
+
+    def test_malformed_report_cannot_pass_or_replace_baseline(self):
+        payloads = [
+            {}, {'summary': None}, {'summary': {}},
+            {'summary': {'managed': None}},
+            {'summary': {'managed': {}}},
+            {'summary': {'managed': {'blocks': {}}}},
+            {'summary': {'managed': {'blocks': ''}}},
+            [], None, {'summary': []}, {'summary': {'managed': []}},
+            {'summary': {'managed': {'blocks': None}}},
+            {'summary': {'managed': {'blocks': [None]}}},
+            {'summary': {'managed': {'blocks': [{'category': []}]}}},
+            {'summary': {'managed': {'managed_blocks': 1}}},
+            {'summary': {'managed': {'managed_blocks': True}}},
+            {'summary': {'managed': {'managed_blocks': 0, 'blocks': {}}}},
+            {'summary': {'managed': {'managed_blocks': 0, 'blocks': ''}}},
+            {'summary': {'managed': {'managed_blocks': 1, 'blocks': [None]}}},
+            {'summary': {'managed': {'managed_blocks': 1,
+                                      'blocks': [{'category': []}]}}},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            prog = pathlib.Path(directory) / 'test.hy'
+            prog.write_text('fn main() {}', encoding='utf-8')
+            baseline = pathlib.Path(directory) / 'baseline.json'
+            original = json.dumps({'version': 1, 'blocks': {
+                f'{prog}:1': block('previously reviewed')}}).encode()
+            for payload in payloads:
+                for rebaseline in (False, True):
+                    with self.subTest(payload=payload, rebaseline=rebaseline):
+                        baseline.write_bytes(original)
+                        argv = ['managed_gate.py'] + (['--rebaseline'] if rebaseline else [])
+                        argv += ['hyb', str(baseline), str(prog)]
+                        result = subprocess.CompletedProcess([], 0, json.dumps(payload), '')
+                        output = io.StringIO()
+                        with patch.object(gate.sys, 'argv', argv), \
+                             patch.object(gate.subprocess, 'run', return_value=result), \
+                             contextlib.redirect_stdout(output):
+                            with self.assertRaises(SystemExit) as error:
+                                gate.main()
+                        self.assertEqual(error.exception.code, 2)
+                        self.assertIn('GATE ERROR', output.getvalue())
+                        self.assertNotIn('managed gate: PASS', output.getvalue())
+                        self.assertEqual(baseline.read_bytes(), original)
+
+    def test_explicit_empty_report_can_remove_last_reviewed_block(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prog = pathlib.Path(directory) / 'test.hy'
+            prog.write_text('fn main() {}', encoding='utf-8')
+            baseline = pathlib.Path(directory) / 'baseline.json'
+            original = json.dumps({'version': 1, 'blocks': {
+                f'{prog}:1': block('previously reviewed')}}).encode()
+            # Rust omits blocks for an empty Vec; the counter proves this is
+            # an actual empty report rather than absent audit data.
+            report = {'summary': {'managed': {'managed_blocks': 0}}}
+            result = subprocess.CompletedProcess([], 0, json.dumps(report), '')
+            for rebaseline in (False, True):
+                with self.subTest(rebaseline=rebaseline):
+                    baseline.write_bytes(original)
+                    argv = ['managed_gate.py'] + (['--rebaseline'] if rebaseline else [])
+                    argv += ['hyb', str(baseline), str(prog)]
+                    with patch.object(gate.sys, 'argv', argv), \
+                         patch.object(gate.subprocess, 'run', return_value=result), \
+                         contextlib.redirect_stdout(io.StringIO()):
+                        gate.main()
+                    if rebaseline:
+                        self.assertEqual(json.loads(baseline.read_bytes())['blocks'], {})
+                    else:
+                        self.assertEqual(baseline.read_bytes(), original)
 
 
 if __name__ == '__main__':

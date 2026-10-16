@@ -223,6 +223,7 @@
       "rule": "O4",
       "tier0_rule_id": "A1c"
     },
+
     {
       "code": "HYB-E3010",
       "name": "loop-label-out-of-scope",
@@ -238,6 +239,21 @@
       "example": "fn main() { break loop }   // reject: HYB-E3010 — no enclosing loop",
       "rule": "LX14",
       "tier0_rule_id": "LABEL"
+    },
+    {
+      "code": "HYB-E3011",
+      "name": "channel-element-type-mismatch",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "value does not match the channel's element type",
+      "summary": "A send `ch <- v` or a typed receive into a binding (`var n T = <-ch`) where the channel's element type and the value/target have CERTAIN, incompatible TypeShape classes (primitive vs string vs named struct vs chan vs map vs slice...) is rejected: the accepted-subset contract is that every accepted program emits buildable Go, and these used to die in `go build` with `cannot use ... as ... value in send` / assignment (issue #146). Channel DIRECTION is checked elsewhere (HYB-E3007 and friends); this rule covers the ELEMENT TYPE. Only certain mismatches are reported — Unknown, opaque/foreign, or unnamed struct shapes stay permissive (a false reject is worse than a missed one). A value already rejected as non-sendable (HYB-E3002) keeps that diagnostic alone — no cascade.",
+      "fixits": [
+        "send a value of the declared element type (`ch <- job{cost: 1}` into `chan job`, or declare `chan int` when sending `7`)",
+        "on receive, ascribe the channel's element type (`var n job = <-ch`) or let inference pick it up (`n := <-ch`)"
+      ],
+      "example": "struct job { cost int }\nch := make(chan job, 1)\nch <- 7   // reject: HYB-E3011 — `7` is not a `job`",
+      "rule": "O4",
+      "tier0_rule_id": "A1c"
     },
     {
       "code": "HYB-E3101",

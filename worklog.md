@@ -470,3 +470,28 @@ Stage Summary:
 - Wildcard Track fully operational: rules, ledger, intake template, labels, announcement, solicitation prompts.
 - Key artifacts: BOUNTY.md Track 3, MOONSHOT.md, wildcard.yml, Discussion #165, seven corpus renumberings with maintainer-integration notes, four logged semantic-conflict decisions.
 - Next session: the triaged 16-PR queue (#91+#96 pair next), first community wildcard entries, release republish.
+
+---
+Task ID: session-10
+Agent: Super Z (main)
+Task: Continue PR conveyor + wildcard announcement/ledger wording review; keep CI honest.
+
+Work Log:
+- Fresh sandbox again: Go 1.26.9 + Rust 1.99.0 reinstalled (background nohup died silently; synchronous dl.google.com worked); symlinks /home/z/.rustup + /home/z/.cargo → /home/z/tools/*. Baseline cargo green.
+- Found + fixed the CI-down P0: since 96f0bc4 (pr-22 maintainer integration), ci.yml had an unindented DUPLICATE py_compile line (every Actions run died 0-jobs) and Makefile lost a recipe TAB. Merged pr-172 (deletion — the line was a duplicate), maintainer-integrated pr-199's Makefile hunk (8b9e1d6 + cb53ead). Push-run GREEN. #172/#199 closed with credit. NOTE: merged-on-local-evidence documented in the merge message (CI was the thing being repaired).
+- Keyword auto-close repair: #67 REOPENED (closed by `fixes #67-adjacent` in pr-68's merge message), #121 acknowledged (closed by `fixes #121` typo in pr-122's merge; author had opened successor #197). Conveyor rule recorded: closing keywords are for ISSUES only.
+- BOUNTY.md wording fix: "What qualifies" said "Two tracks, ranked together" while listing the wildcard as a third separate track → "Two tracks ranked together, plus a third that stands apart". Verified wildcard wording consistent across BOUNTY/MOONSHOT/CONTRIBUTING/README/Discussion #165 ($500, $250+$250 M1/M2, 48h triage, monthly window, 5 solicitation prompts all agree). No wildcard proposals yet.
+- Wave recon (42 new PRs #164-#229 + 15 old): triage comments with family assignments + queue order posted on ALL open PRs; 30 action_required fork runs approved; zombies #76 (zero unique commits) + #162 (integrated as 110bcf0, corpus byte-identical) closed; #124 corrected (script half landed, test_package_release.py never did — kept open, tests wanted).
+- Landings (each with local verification + suite boundary):
+  - Batch A tools: #181 (payload repr-quoting), #209 (shape --check read-only), #211 (EXPECTED-VERDICT fail-closed), #168 (hazard exit-contract: exit 2/SIGABRT), #221 (managed-report envelope fail-closed), #177 (contradictory JSON counts) — STATUS/PLAN conflict chunks resolved both-sides.
+  - Copy family: #180 merged (record_copy_may_share + shape.rs element resolution + corpus 43/44; fixes #178); #179/#182 closed as same-fix with credit. Racing repro rejects E3003, []int control accepts.
+  - Corpus: #176 maintainer-integrated as #45 (slots 32-44 were taken; payload/verdict unchanged, verified REJECT A1c/E3001; VERDICTS row + distribution 45 programs).
+  - #171 merged (channel element types E3011, fixes #146) + seam fix: E3011 registry entry landed before E3010 → swapped (hy-diag ascending invariant); parse_all count bumped 44→45 for corpus 45.
+  - #170 merged (short-circuit + eval order + if-init for expression `?`, fixes #158; pre-merge main emitted the RHS of `false && touched()?` UNCONDITIONALLY); #169 closed as same-fix with credit. Resolved #170's ci/Makefile hunks to HEAD.
+- Shared-target poisoning incident: after building PR worktrees into the shared CARGO_TARGET_DIR, 6 corpus cases + many checker tests "failed" (accepted everything). Fresh-target rebuild: ALL GREEN (442/0, corpus 45/45, differential FULL, examples 10/10). RULE: PR-branch builds use their own CARGO_TARGET_DIR (/tmp/prtarget-N); shared target only for the main tree.
+- Known issue: ci.yml push filter still `branches: ain]` (mangled '[main]'). Multiple fix attempts (python literal, sed, atomic script, Contents API) all lost to what looks like non-ASCII lookalike gremlins in tool input round-trips; CI empirically FAILS OPEN and runs on main pushes (proven all session). Fix scripts staged at /home/z/my-project/scripts/fix_branch_filter.py + fix_filter_atomic.py + fix_filter_via_api.py — next session: fetch bytes via API, replace by line-index, PUT.
+
+Stage Summary:
+- 14 PRs processed (11 merged + 3 dup-credited) + 2 zombies closed + 1 reopened + ~40 triaged. corpus 45, cargo 442/0, differential FULL, examples 10/10, tools python 104/OK.
+- Pushed: cb53ead → aedfa2d (Batch A) → 57ab16c (#180) → 93aea3d (corpus 45) → 8d05fd7/8389056 (#171 seam) → 194715b (#170) → bfefd10 (BOUNTY wording). CI green on every push.
+- Next session queue: slot-loan stack #214→#218 + #222; const-composite #190/#192; match #173/#210; fail-closed trio #185/#224/#227; closure family #207/#213/#220/#226/#229; defer pair #223/#99; #197; #191; #198; #106 design note; old queue rebase assists; ci.yml filter via API.

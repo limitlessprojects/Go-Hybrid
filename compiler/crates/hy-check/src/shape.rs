@@ -292,7 +292,13 @@ impl<'a> Checker<'a> {
             // node carrying the TypeExpr in `.ty` (`make(chan bool, n)` →
             // StructLit{ty: Chan}); other spellings degrade to Unknown.
             Expr::StructLit { ty: Some(t), .. } => self.shape_of_type(t),
-            Expr::SliceLit { elem: Some(_), .. } => TypeShape::Slice(Box::new(TypeShape::Unknown)),
+            // `make([]T, n)` — keep the ELEMENT shape (not Unknown): the
+            // element type decides whether a later `copy(dst, src)` shares
+            // references (#178). A primitive element (`[]int`) shares
+            // nothing; a reference element (`[]map[...]`) does.
+            Expr::SliceLit { elem: Some(t), .. } => {
+                TypeShape::Slice(Box::new(self.shape_of_type(t)))
+            }
             Expr::MapLit { .. } => {
                 TypeShape::Map(Box::new(TypeShape::Unknown), Box::new(TypeShape::Unknown))
             }

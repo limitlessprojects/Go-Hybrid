@@ -1488,5 +1488,58 @@ fn closure_with_own_loop_labeled_break_emits() {
     );
     assert!(go.contains("hyLoop:"), "label missing:\n{}", go);
     assert!(go.contains("break hyLoop"), ":\n{}", go);
+}
 
+#[test]
+fn e3_short_circuit_and_or_with_try_guards_rhs_evaluation() {
+    let go = emit(
+        "fn touched() (bool, error) {\n    return true, nil\n}\n\nfn main() {\n    a := false && touched()?\n    b := true || touched()?\n    fmt.println(a, b)\n}\n",
+    );
+    assert!(
+        go.contains("hyT0 := false\n\t\tif hyT0 {\n\t\t\thyT1, hyErr2 := touched()"),
+        "&& must guard RHS try evaluation under `if hyT0`:\n{}",
+        go
+    );
+    assert!(
+        go.contains("hyT3 := true\n\t\tif !hyT3 {\n\t\t\thyT4, hyErr5 := touched()"),
+        "|| must guard RHS try evaluation under `if !hyT3`:\n{}",
+        go
+    );
+    assert!(go.contains("a := hyT0"), "a binds hoisted short-circuit temp:\n{}", go);
+    assert!(go.contains("b := hyT3"), "b binds hoisted short-circuit temp:\n{}", go);
+}
+
+#[test]
+fn e3_if_init_with_try_in_cond_preserves_initializer_scope() {
+    let go = emit(
+        "fn check(x bool) (bool, error) {\n    return x, nil\n}\n\nfn main() {\n    if ok := false; ok && check(ok)? {\n        fmt.println(ok)\n    }\n}\n",
+    );
+    let init_at = go.find("ok := false").expect("init emitted");
+    let cond_at = go.find("hyT0 := ok").expect("short-circuit temp uses ok");
+    assert!(
+        init_at < cond_at,
+        "if-init binding must precede hoisted condition:\n{}",
+        go
+    );
+}
+
+#[test]
+fn e3_hoist_preserves_preceding_operand_evaluation_order() {
+    let go = emit(
+        "fn first() int {\n    return 1\n}\n\nfn second() (int, error) {\n    return 2, nil\n}\n\nfn main() {\n    total := first() + second()?\n    fmt.println(total)\n}\n",
+    );
+    let first_at = go.find("hyT0 := first()").expect("first() hoisted first");
+    let second_at = go
+        .find("hyT1, hyErr2 := second()")
+        .expect("second() hoisted after first()");
+    assert!(
+        first_at < second_at,
+        "preceding side-effecting operand must evaluate before hoisted try:\n{}",
+        go
+    );
+    assert!(
+        go.contains("total := hyT0 + hyT1"),
+        "substituted in order:\n{}",
+        go
+    );
 }

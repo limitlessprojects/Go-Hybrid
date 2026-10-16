@@ -3,15 +3,21 @@
 These exercise harness decisions, not Hybrid compiler correctness.
 Run: python3 -m unittest discover -s tools -p test_differential_loop.py -v
 """
+import importlib.util
 import os
 import pathlib
+import signal
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 HARNESS = pathlib.Path(__file__).with_name("differential_loop.py")
+HARNESS_SPEC = importlib.util.spec_from_file_location("differential_harness", HARNESS)
+HARNESS_MOD = importlib.util.module_from_spec(HARNESS_SPEC)
+HARNESS_SPEC.loader.exec_module(HARNESS_MOD)
 
 
 class RuntimeHazardTests(unittest.TestCase):
@@ -73,9 +79,38 @@ class RuntimeHazardTests(unittest.TestCase):
     def test_successful_program_is_allowed(self):
         self.assert_result(self.run_case(exit_code=0), 0)
 
+    @unittest.skipUnless(os.name == "posix", "requires POSIX abort status")
+    def test_registered_fatal_abort_mode_remains_allowed(self):
+        build = subprocess.CompletedProcess([], 0, "", "")
+        run = subprocess.CompletedProcess(
+            [], -signal.SIGABRT, "", "fatal error: concurrent map writes\n")
+        with patch.object(HARNESS_MOD.subprocess, "run", side_effect=[build, run]), \
+             patch.object(HARNESS_MOD.os.path, "exists", return_value=True):
+            ok, detail = HARNESS_MOD.build_and_run(
+                "hyb", "case.hy", ".", ["concurrent map writes"])
+        self.assertTrue(ok, detail)
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_matching_fatal_with_exit_one_is_not_agreement(self):
+        build = subprocess.CompletedProcess([], 0, "", "")
+        run = subprocess.CompletedProcess(
+            [], 1, "", "fatal error: concurrent map writes\n")
+        with patch.object(HARNESS_MOD.subprocess, "run", side_effect=[build, run]), \
+             patch.object(HARNESS_MOD.os.path, "exists", return_value=True):
+            ok, detail = HARNESS_MOD.build_and_run(
+                "hyb", "case.hy", ".", ["concurrent map writes"])
+        self.assertFalse(ok, detail)
+        self.assertIn("run exit 1", detail)
+
+    def test_matching_fatal_with_exit_137_is_not_agreement(self):
+        build = subprocess.CompletedProcess([], 0, "", "")
+        run = subprocess.CompletedProcess(
+            [], 137, "", "fatal error: concurrent map writes\n")
+        with patch.object(HARNESS_MOD.subprocess, "run", side_effect=[build, run]), \
+             patch.object(HARNESS_MOD.os.path, "exists", return_value=True):
+            ok, detail = HARNESS_MOD.build_and_run(
+                "hyb", "case.hy", ".", ["concurrent map writes"])
+        self.assertFalse(ok, detail)
+        self.assertIn("run exit 137", detail)
 
 
 class RelativeCorpusPathTests(unittest.TestCase):
@@ -135,3 +170,7 @@ class RelativeCorpusPathTests(unittest.TestCase):
         result = self._run(relative_corpus=True, relative_bin=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("FULL AGREEMENT", result.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -2442,6 +2442,59 @@ mod tests {
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
     }
 
+    // -----------------------------------------------------------------------
+    // Builtin `copy(dst, src)` shares reference element storage (#178). For a
+    // slice whose element carries mutable GC storage, `copy` duplicates the
+    // element *references*, so `dst` and `src` become may-share peers and a
+    // later `move` of one must freeze the other (O5.2 / A1b). Regression for
+    // the accepted-but-unsound shape where the source stayed live after
+    // `copy` + `move dst`, racing under `go run -race` with 0 diagnostics.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn copy_reference_element_alias_rejects() {
+        let r = check(
+            "fn worker(d []map[string]int, done chan<- bool) {\n\
+               d[0][\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               src := []map[string]int{map[string]int{}}\n\
+               dst := make([]map[string]int, 1)\n\
+               copy(dst, src)\n\
+               done := make(chan bool, 1)\n\
+               task worker(move dst, done)\n\
+               src[0][\"k\"] = 2\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert_eq!(r.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn copy_primitive_element_accepts() {
+        // A `[]int` copy duplicates values, not references — no shared GC
+        // storage — so moving `dst` must NOT freeze `src` (no false positive).
+        let r = check(
+            "fn worker(d []int, done chan<- bool) {\n\
+               d[0] = 9\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               src := []int{1}\n\
+               dst := make([]int, 1)\n\
+               copy(dst, src)\n\
+               done := make(chan bool, 1)\n\
+               task worker(move dst, done)\n\
+               src[0] = 5\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
     #[test]
     fn fc_atomic_pointer_and_value_reject_e3005_row_11() {
         let r_ptr = check(

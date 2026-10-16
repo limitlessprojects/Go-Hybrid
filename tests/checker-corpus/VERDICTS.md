@@ -101,6 +101,26 @@ renumbered).
 
 **Distribution: ACCEPT 12 · ACCEPT-MANAGED 2 · REJECT 28 — 42 programs.**
 
+## Additive corpus registration — 2026-10-15: builtin `copy` ref-element alias (issue #178)
+
+These two cases were hand-derived from SPEC O5.2 (freeze covers every live
+alias) and Go's element-copy semantics for the builtin `copy` before being
+run against the checker. For a slice whose element carries mutable GC
+storage, `copy(dst, src)` duplicates the element *references*, so `dst` and
+`src` become may-share peers; the checker recorded no edge (there is no
+`copy` arm anywhere in `hy-check`) and accepted the REJECT case with 0
+diagnostics while `go run -race` reported `WARNING: DATA RACE` and `fatal
+error: concurrent map writes`. The control guards the false-positive
+direction: a primitive-element slice copies by value and shares nothing.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 43 | 43-copy-ref-element-alias-freeze | REJECT | A1b | `copy(dst, src)` on a `[]map[...]` makes `dst[i]` and `src[i]` the same map; `task worker(move dst, done)` did not freeze `src`, so the later write through `src` was use-after-move (issue #178; the root cause is a missing `copy` arm in `process_call`, plus `make([]T, n)` dropping its element shape) |
+| 44 | 44-copy-primitive-element-control | ACCEPT | — | the FALSE-POSITIVE GUARD for 43: `copy(dst, src)` on `[]int` copies by value and shares no GC storage, so no may-share edge may be recorded |
+| 45 | 45-composite-literal-embeds-shared-map | REJECT | A1c | O4.6 deep sendability: a fresh `[]T{shared}` composite literal embedding a live shared map at a spawn is not laundered by the wrap (PR #176, maintainer-integrated as #45) |
+
+**Distribution: ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 30 — 45 programs.**
+
 (19 and 20 were added by the lead during integration on 2026-10-12 — still
 BEFORE any checker existed; see the pre-registration statement. 21, 22, 23
 and 24 are post-checker corpus GROWTH from the bounty track, added

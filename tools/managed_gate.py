@@ -104,11 +104,25 @@ def audit(hyb, prog):
     except json.JSONDecodeError:
         print(f"GATE ERROR: {prog}: hyb check did not emit JSON\n{r.stdout}\n{r.stderr}")
         sys.exit(2)
-    rep = (out.get("summary") or {}).get("managed") or {}
+    # Missing audit data is not evidence of an empty inventory. In particular,
+    # do not let a stale/wrapped checker returning {} clear a reviewed baseline.
+    summary = out.get("summary") if isinstance(out, dict) else None
+    rep = summary.get("managed") if isinstance(summary, dict) else None
+    if not isinstance(rep, dict):
+        print(f"GATE ERROR: {prog}: missing or malformed summary.managed report")
+        sys.exit(2)
+    # The Rust serializer omits an empty blocks Vec, but always emits its count.
+    reported = rep.get("blocks", [])
+    count = rep.get("managed_blocks")
+    if (type(count) is not int or count < 0 or not isinstance(reported, list)
+            or count != len(reported)):
+        print(f"GATE ERROR: {prog}: malformed managed block list or inconsistent count")
+        sys.exit(2)
     blocks = []
-    for b in rep.get("blocks", []):
-        if b.get("category") not in VALID:
-            print(f"GATE ERROR: {prog}: category {b.get('category')!r} outside the closed set")
+    for b in reported:
+        category = b.get("category") if isinstance(b, dict) else None
+        if not isinstance(category, str) or category not in VALID:
+            print(f"GATE ERROR: {prog}: category {category!r} outside the closed set")
             sys.exit(2)
         blocks.append(b)
     # line numbers: lexically scan the source for `managed (` tokens outside

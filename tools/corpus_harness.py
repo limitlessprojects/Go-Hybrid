@@ -113,7 +113,25 @@ def run_checker(bin_path, hy_path, report_managed=False):
         payload = json.loads(out)
     except json.JSONDecodeError as e:
         raise RuntimeError(f"checker JSON invalid for {hy_path}: {e}: {out[:400]}")
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"checker JSON envelope invalid for {hy_path}: expected an object")
     summary = payload.get("summary", {})
+    diags = payload.get("diagnostics", [])
+    if not isinstance(summary, dict) or not isinstance(diags, list) or any(
+        not isinstance(d, dict) for d in diags
+    ):
+        raise RuntimeError(f"checker JSON envelope invalid for {hy_path}: summary/diagnostics")
+    # Older fixtures may omit counts. When supplied, they must be integer
+    # counts of the actual diagnostics, not contradictory evidence of a pass.
+    for field, severity in (("errors", "error"), ("warnings", "warning")):
+        if field in summary:
+            count = summary[field]
+            actual = sum(d.get("severity") == severity for d in diags)
+            if type(count) is not int or count < 0 or count != actual:
+                raise RuntimeError(
+                    f"checker summary inconsistent for {hy_path}: "
+                    f"{field}={count!r}, diagnostics={actual}"
+                )
     verdict = summary.get("verdict")
     expected_exit = {"accept": 0, "reject": 1}.get(verdict)
     if expected_exit is not None and proc.returncode != expected_exit:
@@ -121,7 +139,7 @@ def run_checker(bin_path, hy_path, report_managed=False):
             f"checker exit/verdict mismatch for {hy_path}: "
             f"exit {proc.returncode}, verdict {verdict}"
         )
-    return summary, payload.get("diagnostics", [])
+    return summary, diags
 
 
 def classify_got(summary, diags):

@@ -508,6 +508,118 @@ impl<'a> Checker<'a> {
         Some(f.params.iter().map(|p| self.shape_of_type(&p.ty)).collect())
     }
 
+    /// Could a value of shape `got` legitimately occupy a slot of shape
+    /// `want` (channel element on send, or typed target on receive)?
+    /// Compares COARSE TypeShape classes only. `Unknown` / unnamed struct /
+    /// foreign-opaque never reject — a false reject is worse than a miss
+    /// (issue #146).
+    pub(crate) fn shape_may_be_elem(got: &TypeShape, want: &TypeShape) -> bool {
+        use TypeShape::*;
+        match (got, want) {
+            (Unknown, _) | (_, Unknown) => true,
+            (Struct(None), _) | (_, Struct(None)) => true,
+            (ForeignOpaque(_), _) | (_, ForeignOpaque(_)) => true,
+            (Primitive, Primitive) | (Str, Str) | (Atomic, Atomic) => true,
+            (Struct(Some(a)), Struct(Some(b))) => a == b,
+            (Map(_, _), Map(_, _)) => true,
+            (Slice(_), Slice(_)) | (Array(_), Array(_)) => true,
+            // Go converts between slice and array of the same element class
+            // only in limited cases; keep coarse-class permissive here.
+            (Slice(_), Array(_)) | (Array(_), Slice(_)) => true,
+            (Pointer(_), Pointer(_)) => true,
+            (Chan(a), Chan(b)) => Self::shape_may_be_elem(a, b),
+            (Closure, Closure) => true,
+            (OwnHandle(a), OwnHandle(b)) | (BorrowHandle(a), BorrowHandle(b)) => a == b,
+            _ => false,
+        }
+    }
+
+    /// Human label for an element/target shape in HYB-E3011 messages.
+    pub(crate) fn elem_type_label(t: &TypeShape) -> String {
+        match t {
+            TypeShape::Struct(Some(name)) => format!("`{name}`"),
+            TypeShape::ForeignOpaque(name)
+            | TypeShape::OwnHandle(name)
+            | TypeShape::BorrowHandle(name) => format!("`{name}`"),
+            other => format!("`{}`", other.render()),
+        }
+    }
+
+    /// Emit HYB-E3011 for a send whose value shape cannot be the channel
+    /// element. A TYPE contract — `managed` does not suppress it.
+    pub(crate) fn emit_chan_elem_mismatch_send(
+        &mut self,
+        value_shape: &TypeShape,
+        elem_shape: &TypeShape,
+        span: Span,
+        value_desc: &str,
+    ) {
+        let msg = format!(
+            "{} has type {} but the channel element type is {} (HYB-E3011)",
+            value_desc,
+            Self::elem_type_label(value_shape),
+            Self::elem_type_label(elem_shape)
+        );
+        self.push_chan_elem_mismatch(span, msg);
+    }
+
+    /// Emit HYB-E3011 for a typed receive whose target cannot hold the
+    /// channel element.
+    pub(crate) fn emit_chan_elem_mismatch_recv(
+        &mut self,
+        target_shape: &TypeShape,
+        elem_shape: &TypeShape,
+        span: Span,
+        target_desc: &str,
+    ) {
+        let msg = format!(
+            "{} expects type {} but the channel element type is {} (HYB-E3011)",
+            target_desc,
+            Self::elem_type_label(target_shape),
+            Self::elem_type_label(elem_shape)
+        );
+        self.push_chan_elem_mismatch(span, msg);
+    }
+
+    fn push_chan_elem_mismatch(&mut self, span: Span, msg: String) {
+        let notes = vec![
+            "why: the accepted subset only emits buildable Go; a mismatched channel element fails `go build` with `cannot use ... as ... value in send` / assignment (issue #146)".to_string(),
+            "fix: send/receive a value of the declared element type, or change the channel's element type to match".to_string(),
+            "note: channel DIRECTION is checked separately (HYB-E3007); this is the ELEMENT TYPE".to_string(),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E3011", self.path.clone(), span, msg).with_notes(notes),
+        );
+    }
+
+    /// Receive site: when RHS is `<-ch` (or a paren-wrapped receive) and the
+    /// target shape is known, reject a certain element/target class mismatch.
+    pub(crate) fn check_recv_elem_against_target(
+        &mut self,
+        st: &FnState,
+        value: &Expr,
+        target: &TypeShape,
+        span: Span,
+        what: &str,
+    ) {
+        if matches!(target, TypeShape::Unknown) {
+            return;
+        }
+        let recv = crate::model::unwrap_parens(value);
+        let Expr::Receive { chan, .. } = recv else {
+            return;
+        };
+        let TypeShape::Chan(elem) = self.shape_of_expr(st, chan) else {
+            return;
+        };
+        if matches!(*elem, TypeShape::Unknown) {
+            return;
+        }
+        if !Self::shape_may_be_elem(&elem, target) {
+            self.emit_chan_elem_mismatch_recv(target, &elem, span, what);
+        }
+    }
+
     /// The element shape of a channel expression, when it resolves (drives
     /// the N1 nil checks on sent values).
     pub(crate) fn chan_elem_shape(&self, st: &FnState, chan: &Expr) -> Option<Vec<TypeShape>> {
@@ -825,8 +937,40 @@ impl<'a> Checker<'a> {
                 }
             }
 
+            // Issue #146: once sendability accepts the value, still reject a
+            // CERTAIN channel-element type mismatch (send only — spawn has
+            // no element type). Reported only on Outcome::Ok so a value
+            // already rejected as non-sendable (HYB-E3002) keeps a single
+            // diagnostic (no cascade).
+            let send_elem_mismatch = if code == "HYB-E3002" {
+                target_shapes
+                    .and_then(|ts| ts.get(vi))
+                    .cloned()
+                    .and_then(|want| {
+                        let got = self.shape_of_expr(st, v);
+                        if matches!(got, TypeShape::Unknown) {
+                            None
+                        } else if Self::shape_may_be_elem(&got, &want) {
+                            None
+                        } else {
+                            Some((got, want))
+                        }
+                    })
+            } else {
+                None
+            };
+
             match self.classify_value(st, v) {
-                Outcome::Ok => {}
+                Outcome::Ok => {
+                    if let Some((got, want)) = send_elem_mismatch {
+                        self.emit_chan_elem_mismatch_send(
+                            &got,
+                            &want,
+                            v.span(),
+                            &format!("`{}`", v.render()),
+                        );
+                    }
+                }
                 Outcome::Managed { desc, risky } => {
                     // only values not safe-by-type are the trust surface
                     if risky {

@@ -37,6 +37,12 @@ impl Emitter {
             Stmt::Send { chan, value, .. } => {
                 // `move` markers drop here: ownership transfer is a CHECKER
                 // concept; Go sends the value either way.
+                if Self::expr_has_hoistable_try(value) {
+                    self.hoist_order_before_try(chan)?;
+                } else {
+                    self.hoist_tries_expr(chan)?;
+                }
+                self.hoist_tries_expr(value)?;
                 let ch = self.emit_expr(chan, 0)?;
                 let v = self.emit_expr(value, 0)?;
                 self.push(&format!("{} <- {}", ch, v));
@@ -190,10 +196,12 @@ impl Emitter {
                 match (&ty, l.values.first()) {
                     (Some(t), None) => self.push(&format!("var {} {}", l.names.join(", "), t)),
                     (Some(t), Some(v)) => {
+                        self.hoist_tries_expr(v)?;
                         let e = self.emit_expr(v, 0)?;
                         self.push(&format!("var {} {} = {}", l.names.join(", "), t, e));
                     }
                     (None, Some(v)) => {
+                        self.hoist_tries_expr(v)?;
                         let e = self.emit_expr(v, 0)?;
                         self.push(&format!("var {} = {}", l.names.join(", "), e));
                     }
@@ -276,8 +284,15 @@ impl Emitter {
 
         // E3 expression form (Batch G): `?` nested anywhere else in the
         // values hoists to temp bindings + propagation, then substitutes.
-        for v in &l.values {
-            self.hoist_tries_expr(v)?;
+        for (idx, v) in l.values.iter().enumerate() {
+            let later_has_try = l.values[idx + 1..]
+                .iter()
+                .any(Self::expr_has_hoistable_try);
+            if later_has_try {
+                self.hoist_order_before_try(v)?;
+            } else {
+                self.hoist_tries_expr(v)?;
+            }
         }
 
         let values = l
@@ -303,6 +318,150 @@ impl Emitter {
             }
         }
         self.hint_from_values(&l.names, &l.values);
+        Ok(())
+    }
+
+    pub(crate) fn expr_key(e: &Expr) -> usize {
+        e as *const Expr as usize
+    }
+
+    fn peel_parens(mut e: &Expr) -> &Expr {
+        while let Expr::Paren { inner, .. } = e {
+            e = inner;
+        }
+        e
+    }
+
+    /// True if `e` contains a `?` in the current lexical scope (does not
+    /// descend into `Expr::FnLit`, which hoists its own tries).
+    pub(crate) fn expr_has_hoistable_try(e: &Expr) -> bool {
+        match e {
+            Expr::Try { .. } => true,
+            Expr::Binary { lhs, rhs, .. } => {
+                Self::expr_has_hoistable_try(lhs) || Self::expr_has_hoistable_try(rhs)
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Paren { inner: operand, .. }
+            | Expr::Field { base: operand, .. }
+            | Expr::Receive { chan: operand, .. } => Self::expr_has_hoistable_try(operand),
+            Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                InterpPart::Expr(x) => Self::expr_has_hoistable_try(x),
+                InterpPart::Lit(_) => false,
+            }),
+            Expr::Call { callee, args, .. } => {
+                Self::expr_has_hoistable_try(callee)
+                    || args.iter().any(|a| Self::expr_has_hoistable_try(&a.value))
+            }
+            Expr::Index { base, index, .. } => {
+                Self::expr_has_hoistable_try(base) || Self::expr_has_hoistable_try(index)
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                Self::expr_has_hoistable_try(base)
+                    || lo
+                        .as_deref()
+                        .map(Self::expr_has_hoistable_try)
+                        .unwrap_or(false)
+                    || hi
+                        .as_deref()
+                        .map(Self::expr_has_hoistable_try)
+                        .unwrap_or(false)
+            }
+            Expr::StructLit { fields, .. } => {
+                fields.iter().any(|f| Self::expr_has_hoistable_try(&f.value))
+            }
+            Expr::SliceLit { items, .. } => items.iter().any(Self::expr_has_hoistable_try),
+            Expr::MapLit { entries, .. } => entries
+                .iter()
+                .any(|(k, v)| Self::expr_has_hoistable_try(k) || Self::expr_has_hoistable_try(v)),
+            Expr::FnLit { .. } | Expr::Lit { .. } | Expr::Ident { .. } => false,
+        }
+    }
+
+    pub(crate) fn stmt_has_hoistable_try(s: &Stmt) -> bool {
+        match s {
+            Stmt::Local(l) => l.values.iter().any(Self::expr_has_hoistable_try),
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                targets.iter().any(Self::place_has_hoistable_try)
+                    || values.iter().any(Self::expr_has_hoistable_try)
+            }
+            Stmt::Expr { expr, .. } => Self::expr_has_hoistable_try(expr),
+            _ => false,
+        }
+    }
+
+    fn place_has_hoistable_try(p: &Place) -> bool {
+        match &p.kind {
+            PlaceKind::Ident(_) => false,
+            PlaceKind::Index { base, index } => {
+                Self::place_has_hoistable_try(base) || Self::expr_has_hoistable_try(index)
+            }
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                Self::place_has_hoistable_try(base)
+            }
+        }
+    }
+
+    fn expr_has_call_or_recv(e: &Expr) -> bool {
+        match e {
+            Expr::Call { .. } | Expr::Receive { .. } | Expr::Try { .. } => true,
+            Expr::Binary { lhs, rhs, .. } => {
+                Self::expr_has_call_or_recv(lhs) || Self::expr_has_call_or_recv(rhs)
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Paren { inner: operand, .. }
+            | Expr::Field { base: operand, .. } => Self::expr_has_call_or_recv(operand),
+            Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                InterpPart::Expr(x) => Self::expr_has_call_or_recv(x),
+                InterpPart::Lit(_) => false,
+            }),
+            Expr::Index { base, index, .. } => {
+                Self::expr_has_call_or_recv(base) || Self::expr_has_call_or_recv(index)
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                Self::expr_has_call_or_recv(base)
+                    || lo
+                        .as_deref()
+                        .map(Self::expr_has_call_or_recv)
+                        .unwrap_or(false)
+                    || hi
+                        .as_deref()
+                        .map(Self::expr_has_call_or_recv)
+                        .unwrap_or(false)
+            }
+            Expr::StructLit { fields, .. } => {
+                fields.iter().any(|f| Self::expr_has_call_or_recv(&f.value))
+            }
+            Expr::SliceLit { items, .. } => items.iter().any(Self::expr_has_call_or_recv),
+            Expr::MapLit { entries, .. } => entries
+                .iter()
+                .any(|(k, v)| Self::expr_has_call_or_recv(k) || Self::expr_has_call_or_recv(v)),
+            Expr::FnLit { .. } | Expr::Lit { .. } | Expr::Ident { .. } => false,
+        }
+    }
+
+    /// Preserve left-to-right operand evaluation order when a later sibling
+    /// operand contains a hoisted `?`.
+    fn hoist_order_before_try(&mut self, e: &Expr) -> Result<(), EmitError> {
+        self.hoist_tries_expr(e)?;
+        let inner = Self::peel_parens(e);
+        if matches!(inner, Expr::Try { .. })
+            || self.expr_temps.contains_key(&Self::expr_key(e))
+            || self.expr_temps.contains_key(&Self::expr_key(inner))
+        {
+            return Ok(());
+        }
+        if Self::expr_has_call_or_recv(inner) {
+            let text = self.emit_expr(e, 0)?;
+            let temp = self.next_temp("hyT");
+            self.push(&format!("{} := {}", temp, text));
+            self.expr_temps.insert(Self::expr_key(e), temp);
+        }
         Ok(())
     }
 
@@ -334,36 +493,103 @@ impl Emitter {
                 self.hoist_tries_expr(operand)?;
                 self.hoist_one_try(operand, (span.start.line, span.start.col))?;
             }
-            Expr::Binary { lhs, rhs, .. } => {
-                self.hoist_tries_expr(lhs)?;
-                self.hoist_tries_expr(rhs)?;
+            Expr::Binary { op, lhs, rhs, .. } => {
+                if matches!(op, BinOp::And | BinOp::Or) && Self::expr_has_hoistable_try(rhs) {
+                    self.hoist_tries_expr(lhs)?;
+                    let lhs_text = self.emit_expr(lhs, 0)?;
+                    let temp = self.next_temp("hyT");
+                    self.push(&format!("{} := {}", temp, lhs_text));
+                    let cond_head = match op {
+                        BinOp::And => format!("if {} {{", temp),
+                        BinOp::Or => format!("if !{} {{", temp),
+                        _ => unreachable!(),
+                    };
+                    self.push(&cond_head);
+                    self.indent += 1;
+                    self.hoist_tries_expr(rhs)?;
+                    let rhs_text = self.emit_expr(rhs, 0)?;
+                    self.push(&format!("{} = {}", temp, rhs_text));
+                    self.indent -= 1;
+                    self.push("}");
+                    self.expr_temps.insert(Self::expr_key(e), temp);
+                } else {
+                    if Self::expr_has_hoistable_try(rhs) {
+                        self.hoist_order_before_try(lhs)?;
+                    } else {
+                        self.hoist_tries_expr(lhs)?;
+                    }
+                    self.hoist_tries_expr(rhs)?;
+                }
             }
             Expr::Unary { operand, .. }
             | Expr::AddrOf { operand, .. }
             | Expr::Move { operand, .. }
             | Expr::Paren { inner: operand, .. } => self.hoist_tries_expr(operand)?,
             Expr::Interp { parts, .. } => {
-                for p in parts {
+                for (idx, p) in parts.iter().enumerate() {
                     if let InterpPart::Expr(x) = p {
-                        self.hoist_tries_expr(x)?;
+                        let later_has_try = parts[idx + 1..].iter().any(|rest| {
+                            matches!(rest, InterpPart::Expr(rx) if Self::expr_has_hoistable_try(rx))
+                        });
+                        if later_has_try {
+                            self.hoist_order_before_try(x)?;
+                        } else {
+                            self.hoist_tries_expr(x)?;
+                        }
                     }
                 }
             }
             Expr::Call { callee, args, .. } => {
-                self.hoist_tries_expr(callee)?;
-                for a in args {
-                    self.hoist_tries_expr(&a.value)?;
+                let any_arg_has_try = args.iter().any(|a| Self::expr_has_hoistable_try(&a.value));
+                if any_arg_has_try {
+                    match callee.as_ref() {
+                        Expr::Field { base, .. } => self.hoist_order_before_try(base)?,
+                        Expr::Call { .. } => self.hoist_order_before_try(callee)?,
+                        _ => self.hoist_tries_expr(callee)?,
+                    }
+                } else {
+                    self.hoist_tries_expr(callee)?;
+                }
+                for (idx, a) in args.iter().enumerate() {
+                    let later_has_try = args[idx + 1..]
+                        .iter()
+                        .any(|rest| Self::expr_has_hoistable_try(&rest.value));
+                    if later_has_try {
+                        self.hoist_order_before_try(&a.value)?;
+                    } else {
+                        self.hoist_tries_expr(&a.value)?;
+                    }
                 }
             }
             Expr::Field { base, .. } => self.hoist_tries_expr(base)?,
             Expr::Index { base, index, .. } => {
-                self.hoist_tries_expr(base)?;
+                if Self::expr_has_hoistable_try(index) {
+                    self.hoist_order_before_try(base)?;
+                } else {
+                    self.hoist_tries_expr(base)?;
+                }
                 self.hoist_tries_expr(index)?;
             }
             Expr::Slice { base, lo, hi, .. } => {
-                self.hoist_tries_expr(base)?;
+                let lo_try = lo
+                    .as_deref()
+                    .map(Self::expr_has_hoistable_try)
+                    .unwrap_or(false);
+                let hi_try = hi
+                    .as_deref()
+                    .map(Self::expr_has_hoistable_try)
+                    .unwrap_or(false);
+                if lo_try || hi_try {
+                    self.hoist_order_before_try(base)?;
+                } else {
+                    self.hoist_tries_expr(base)?;
+                }
                 if let Some(l) = lo {
-                    self.hoist_tries_expr(l)?;
+                    if hi_try {
+                        self.hoist_order_before_try(l)?;
+                    } else {
+                        self.hoist_tries_expr(l)?;
+                    }
                 }
                 if let Some(h) = hi {
                     self.hoist_tries_expr(h)?;
@@ -371,19 +597,42 @@ impl Emitter {
             }
             Expr::Receive { chan, .. } => self.hoist_tries_expr(chan)?,
             Expr::StructLit { fields, .. } => {
-                for f in fields {
-                    self.hoist_tries_expr(&f.value)?;
+                for (idx, f) in fields.iter().enumerate() {
+                    let later_has_try = fields[idx + 1..]
+                        .iter()
+                        .any(|rest| Self::expr_has_hoistable_try(&rest.value));
+                    if later_has_try {
+                        self.hoist_order_before_try(&f.value)?;
+                    } else {
+                        self.hoist_tries_expr(&f.value)?;
+                    }
                 }
             }
             Expr::SliceLit { items, .. } => {
-                for i in items {
-                    self.hoist_tries_expr(i)?;
+                for (idx, i) in items.iter().enumerate() {
+                    let later_has_try = items[idx + 1..].iter().any(Self::expr_has_hoistable_try);
+                    if later_has_try {
+                        self.hoist_order_before_try(i)?;
+                    } else {
+                        self.hoist_tries_expr(i)?;
+                    }
                 }
             }
             Expr::MapLit { entries, .. } => {
-                for (k, v) in entries {
-                    self.hoist_tries_expr(k)?;
-                    self.hoist_tries_expr(v)?;
+                for (idx, (k, v)) in entries.iter().enumerate() {
+                    let later_entry_try = entries[idx + 1..].iter().any(|(rk, rv)| {
+                        Self::expr_has_hoistable_try(rk) || Self::expr_has_hoistable_try(rv)
+                    });
+                    if Self::expr_has_hoistable_try(v) || later_entry_try {
+                        self.hoist_order_before_try(k)?;
+                    } else {
+                        self.hoist_tries_expr(k)?;
+                    }
+                    if later_entry_try {
+                        self.hoist_order_before_try(v)?;
+                    } else {
+                        self.hoist_tries_expr(v)?;
+                    }
                 }
             }
             // A closure body hoists its OWN tries (its emission runs its
@@ -547,6 +796,7 @@ impl Emitter {
         //     declared propagation (http.Error on the writer) is the
         //     contract instead. ---
         if let Some(w) = self.handler_writer.clone() {
+            self.hoist_tries_expr(call)?;
             let temp = self.next_temp("hyErr");
             let call_text = self.emit_expr(call, 0)?;
             let mut names = l.names.clone();
@@ -571,6 +821,7 @@ impl Emitter {
                 "`?` outside main (functions-with-error-results land after the walking skeleton)",
             ));
         }
+        self.hoist_tries_expr(call)?;
         let temp = self.next_temp("hyErr");
         let call_text = self.emit_expr(call, 0)?;
         let mut names = l.names.clone();
@@ -716,6 +967,25 @@ impl Emitter {
     // Assignment
     // -----------------------------------------------------------------------
 
+    fn hoist_tries_place(&mut self, p: &Place, later_has_try: bool) -> Result<(), EmitError> {
+        match &p.kind {
+            PlaceKind::Ident(_) => Ok(()),
+            PlaceKind::Index { base, index } => {
+                let idx_try = Self::expr_has_hoistable_try(index);
+                self.hoist_tries_place(base, idx_try || later_has_try)?;
+                if later_has_try {
+                    self.hoist_order_before_try(index)?;
+                } else {
+                    self.hoist_tries_expr(index)?;
+                }
+                Ok(())
+            }
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                self.hoist_tries_place(base, later_has_try)
+            }
+        }
+    }
+
     fn emit_assign(
         &mut self,
         targets: &[Place],
@@ -742,6 +1012,11 @@ impl Emitter {
             }
         }
 
+        let any_val_try = values.iter().any(Self::expr_has_hoistable_try);
+        for (idx, t) in targets.iter().enumerate() {
+            let later_target_try = targets[idx + 1..].iter().any(Self::place_has_hoistable_try);
+            self.hoist_tries_place(t, later_target_try || any_val_try)?;
+        }
         let op_text = match op {
             AssignOp::Assign => "=",
             AssignOp::AddAssign => "+=",
@@ -766,8 +1041,13 @@ impl Emitter {
             }
         };
         // E3 expression form: hoist nested `?` before emitting (Batch G).
-        for v in values {
-            self.hoist_tries_expr(v)?;
+        for (idx, v) in values.iter().enumerate() {
+            let later_has_try = values[idx + 1..].iter().any(Self::expr_has_hoistable_try);
+            if later_has_try {
+                self.hoist_order_before_try(v)?;
+            } else {
+                self.hoist_tries_expr(v)?;
+            }
         }
         let ts = targets
             .iter()
@@ -846,9 +1126,29 @@ impl Emitter {
         then: &Block,
         otherwise: Option<&Stmt>,
     ) -> Result<(), EmitError> {
+        // When `if <init>; <cond>` has a `?` in either `<init>` or `<cond>`,
+        // lower to a scoped block `{ <init>; <hoist(cond)>; if <cond> { … } }`
+        // so bindings introduced by `<init>` are in scope for `<cond>`'s
+        // hoisted statements and remain scoped to the if/else construct.
+        if let Some(i) = init {
+            if Self::stmt_has_hoistable_try(i) || Self::expr_has_hoistable_try(cond) {
+                self.push("{");
+                self.loan_frames.push(Vec::new());
+                self.indent += 1;
+                self.emit_stmt(i)?;
+                self.hoist_tries_expr(cond)?;
+                self.emit_if_at(None, cond, then, otherwise, true)?;
+                let frame = self.loan_frames.pop().unwrap_or_default();
+                for (name, place) in frame {
+                    self.push(&format!("{} = {}", place, name));
+                }
+                self.indent -= 1;
+                self.push("}");
+                return Ok(());
+            }
+        }
         // E3 expression form: a `?` in the condition hoists BEFORE the if
-        // (Batch G). Only on the line-start path — an else-if cond with a
-        // `?` would hoist mid-line; that shape errors cleanly below.
+        // (Batch G).
         self.hoist_tries_expr(cond)?;
         self.emit_if_at(init, cond, then, otherwise, true)
     }
@@ -893,8 +1193,21 @@ impl Emitter {
                 otherwise,
                 ..
             }) => {
-                self.push_raw("} else ");
-                self.emit_if_at(init.as_deref(), cond, then, otherwise.as_deref(), false)?;
+                if init
+                    .as_deref()
+                    .map(Self::stmt_has_hoistable_try)
+                    .unwrap_or(false)
+                    || Self::expr_has_hoistable_try(cond)
+                {
+                    self.push("} else {");
+                    self.indent += 1;
+                    self.emit_if(init.as_deref(), cond, then, otherwise.as_deref())?;
+                    self.indent -= 1;
+                    self.push("}");
+                } else {
+                    self.push_raw("} else ");
+                    self.emit_if_at(init.as_deref(), cond, then, otherwise.as_deref(), false)?;
+                }
             }
             Some(Stmt::Block { block, .. }) => {
                 // `else { … }` — emit the block's statements directly (a
@@ -987,6 +1300,30 @@ impl Emitter {
         if let Some(l) = &label {
             self.push(&format!("{}:", l));
         }
+        if let ForKind::While { cond } = kind {
+            if Self::expr_has_hoistable_try(cond) {
+                self.push("for {");
+                self.loan_frames.push(Vec::new());
+                self.indent += 1;
+                self.hoist_tries_expr(cond)?;
+                let c = self.emit_expr(cond, ATOM)?;
+                self.push(&format!("if !{} {{", c));
+                self.indent += 1;
+                self.push("break");
+                self.indent -= 1;
+                self.push("}");
+                for st in &body.stmts {
+                    self.emit_stmt(st)?;
+                }
+                let frame = self.loan_frames.pop().unwrap_or_default();
+                for (name, place) in frame {
+                    self.push(&format!("{} = {}", place, name));
+                }
+                self.indent -= 1;
+                self.push("}");
+                return Ok(());
+            }
+        }
         let head = match kind {
             ForKind::Infinite => "for {".to_string(),
             ForKind::While { cond } => {
@@ -998,6 +1335,12 @@ impl Emitter {
                 hi,
                 inclusive,
             } => {
+                if Self::expr_has_hoistable_try(hi) {
+                    self.hoist_order_before_try(lo)?;
+                } else {
+                    self.hoist_tries_expr(lo)?;
+                }
+                self.hoist_tries_expr(hi)?;
                 let lo_t = self.emit_expr(lo, 0)?;
                 let hi_t = self.emit_expr(hi, 0)?;
                 let op = if *inclusive { "<=" } else { "<" };
@@ -1153,6 +1496,14 @@ impl Emitter {
     // -----------------------------------------------------------------------
 
     fn emit_return(&mut self, values: &[Expr]) -> Result<(), EmitError> {
+        for (idx, v) in values.iter().enumerate() {
+            let later_has_try = values[idx + 1..].iter().any(Self::expr_has_hoistable_try);
+            if later_has_try {
+                self.hoist_order_before_try(v)?;
+            } else {
+                self.hoist_tries_expr(v)?;
+            }
+        }
         // Inside a function literal the closure owns the return — plain.
         if self.fnlit_depth > 0 {
             let vs = values
@@ -1298,6 +1649,7 @@ impl Emitter {
             ));
         }
 
+        self.hoist_tries_expr(subject)?;
         let temp = self.next_temp("hyMatch");
         let s = self.emit_expr(subject, 0)?;
         self.push(&format!("{} := {}", temp, s));
@@ -1326,6 +1678,7 @@ impl Emitter {
                 self.indent += 1;
                 self.push(&format!("{} := {}.val", binding, temp));
                 if let Some(g) = &arm.guard {
+                    self.hoist_tries_expr(g)?;
                     let gt = self.emit_expr(g, 0)?;
                     self.push(&format!("if {} {{", gt));
                     self.indent += 1;
