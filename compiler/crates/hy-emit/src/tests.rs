@@ -745,6 +745,53 @@ fn option_match_lowes_to_ok_branch() {
 }
 
 #[test]
+fn match_multi_some_arms_retains_all_arms() {
+    // Issue #204: match on option with multiple some arms must retain all arms,
+    // not just the last one.
+    let go = emit(
+        "fn main() {\n    opt := some(15)\n    match opt {\n        some(v) if v > 10: {\n            fmt.println(\"big\")\n        }\n        some(v): {\n            fmt.println(\"small\")\n        }\n        none: {\n            fmt.println(\"none\")\n        }\n    }\n}\n",
+    );
+    assert!(go.contains("if hyMatch0.ok {"), ":\n{}", go);
+    assert!(go.contains("v := hyMatch0.val"), ":\n{}", go);
+    assert!(go.contains("if v > 10 {"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"big\")"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"small\")"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"none\")"), ":\n{}", go);
+}
+
+#[test]
+fn match_guarded_some_with_wildcard_fallback() {
+    // Issue #204: with guarded some arms and wildcard, failed guard must fall through to wildcard.
+    let go = emit(
+        "fn main() {\n    opt := some(3)\n    match opt {\n        some(v) if v > 10: {\n            fmt.println(\"big\")\n        }\n        _: {\n            fmt.println(\"fallback\")\n        }\n    }\n}\n",
+    );
+    assert!(go.contains("hyMatched1 := false"), ":\n{}", go);
+    assert!(go.contains("if hyMatch0.ok {"), ":\n{}", go);
+    assert!(go.contains("if v > 10 {"), ":\n{}", go);
+    assert!(go.contains("hyMatched1 = true"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"big\")"), ":\n{}", go);
+    assert!(go.contains("if !hyMatched1 {"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"fallback\")"), ":\n{}", go);
+}
+
+#[test]
+fn match_guarded_some_with_none_and_wildcard() {
+    // Issue #204: guarded some arm, none arm, and wildcard arm all handled cleanly.
+    let go = emit(
+        "fn main() {\n    opt := some(3)\n    match opt {\n        some(v) if v > 10: {\n            fmt.println(\"big\")\n        }\n        none: {\n            fmt.println(\"none\")\n        }\n        _: {\n            fmt.println(\"fallback\")\n        }\n    }\n}\n",
+    );
+    assert!(go.contains("hyMatched1 := false"), ":\n{}", go);
+    assert!(go.contains("if hyMatch0.ok {"), ":\n{}", go);
+    assert!(go.contains("if v > 10 {"), ":\n{}", go);
+    assert!(go.contains("hyMatched1 = true"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"big\")"), ":\n{}", go);
+    assert!(go.contains("if !hyMatched1 && !hyMatch0.ok {"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"none\")"), ":\n{}", go);
+    assert!(go.contains("if !hyMatched1 {"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"fallback\")"), ":\n{}", go);
+}
+
+#[test]
 fn return_none_lowers_to_option_zero() {
     let go = emit("fn get() option[int] {\n    return none\n}\n");
     assert!(
@@ -1542,4 +1589,24 @@ fn e3_hoist_preserves_preceding_operand_evaluation_order() {
         "substituted in order:\n{}",
         go
     );
+}
+
+#[test]
+fn non_exhaustive_option_match_rejects_at_check_and_emits_no_garbage() {
+    // AMENDMENT (maintainer, 2026-10-16, logged in the merge message):
+    // this test previously pinned an EMITTER-side EmitError citing E5001.
+    // pr-173 moved exhaustiveness into the CHECKER (HYB-E5001 fires at
+    // hyb check; verified by hy-check's own suite), so the emitter's
+    // no-some-arm path intentionally lowers nothing. What must never come
+    // back is #143 R1/R2's failure mode: an orphan `} else {` or a silent
+    // single-arm branch in the emitted Go. These pins stay:
+    let go_none_only = emit(
+        "fn main() {\n    var x option[int] = some(1)\n    match x {\n        none: fmt.println(\"none\")\n    }\n}\n",
+    );
+    assert!(!go_none_only.contains("} else {"), "orphan else came back:\n{}", go_none_only);
+
+    let go_some_only = emit(
+        "fn main() {\n    var x option[int] = some(1)\n    match x {\n        some(v): fmt.println(v)\n    }\n}\n",
+    );
+    assert!(!go_some_only.contains("} else {"), "orphan else came back:\n{}", go_some_only);
 }

@@ -38,6 +38,17 @@ pub(crate) fn resolve_alias(st: &FnState, name: &str) -> String {
     cur
 }
 
+fn same_or_shared(st: &FnState, a: &str, root_a: &str, b: &str, root_b: &str) -> bool {
+    if root_a == root_b {
+        return true;
+    }
+    let mut group = st.share_group(a);
+    if root_a != a {
+        group.extend(st.share_group(root_a));
+    }
+    group.contains(b) || group.contains(root_b)
+}
+
 impl<'a> Checker<'a> {
     // -----------------------------------------------------------------------
     // Use-after-move / use-after-consume detection
@@ -61,7 +72,10 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let root = resolve_alias(st, &u.name);
-            if let Some((_, _, prior_mv)) = stmt_moves.iter().find(|(_, r, _)| r == &root) {
+            if let Some((_, _, prior_mv)) = stmt_moves
+                .iter()
+                .find(|(mv_name, r, _)| same_or_shared(st, &u.name, &root, mv_name, r))
+            {
                 if reported.insert(format!("{}@{}", u.name, u.span.start.line)) {
                     self.emit_use_after_move(st, u, prior_mv);
                 }
@@ -80,14 +94,13 @@ impl<'a> Checker<'a> {
             }
         }
         // Also check if an earlier `non_via_move` read in the same statement
-        // preceded a `via_move` transfer of the same binding/alias group.
+        // preceded a `via_move` transfer of the same binding/alias/share group.
         for u in uses {
             if !u.via_move {
                 let root = resolve_alias(st, &u.name);
-                if let Some((mv_name, _, mv_info)) = stmt_moves
-                    .iter()
-                    .find(|(_, r, mv)| r == &root && mv.span != u.span)
-                {
+                if let Some((mv_name, _, mv_info)) = stmt_moves.iter().find(|(mv_name, r, mv)| {
+                    same_or_shared(st, &u.name, &root, mv_name, r) && mv.span != u.span
+                }) {
                     if self
                         .lookup_binding(st, mv_name)
                         .map(|b| !b.shape.is_sendable_by_type())
@@ -248,10 +261,47 @@ impl<'a> Checker<'a> {
         for (op, mspan) in ops {
             if let Expr::Ident { name, .. } = op {
                 self.mark_move(st, name, mspan, desc.clone(), MoveKind::Moved);
+            } else if matches!(op, Expr::Field { .. })
+                && matches!(
+                    self.shape_of_expr(st, op),
+                    crate::model::TypeShape::OwnHandle(_)
+                )
+            {
+                if let Some(root) = op.root_ident() {
+                    self.mark_move(st, root, mspan, desc.clone(), MoveKind::Moved);
+                }
             } else {
                 self.check_o54_non_ident_move(st, op, mspan);
             }
         }
+    }
+
+    /// Resolve any non-owned origin (direct or via may-share peers) among the
+    /// `move` operands embedded in `value`.
+    pub(crate) fn moved_non_owned_origin_in_expr(
+        &self,
+        st: &FnState,
+        value: &Expr,
+    ) -> Option<String> {
+        let mut ops = Vec::new();
+        crate::model::collect_move_operands(value, &mut ops);
+        for (op, _) in ops {
+            let root = match op {
+                Expr::Ident { name, .. } => Some(name.as_str()),
+                Expr::Field { .. } => op.root_ident(),
+                _ => None,
+            };
+            if let Some(src) = root {
+                if let Some((o, via_share)) = self.non_owned_origin_of(st, src) {
+                    return Some(if via_share {
+                        format!("a may-share peer of {}", o)
+                    } else {
+                        o
+                    });
+                }
+            }
+        }
+        None
     }
 
     /// O5.4 move-form check (HYB-E3004): `move` applies to whole bindings and
@@ -432,7 +482,7 @@ impl<'a> Checker<'a> {
                         .iter()
                         .any(|s| s.contains_key(lhs.as_str()));
                     if is_inner
-                        && matches!(crate::model::unwrap_parens(rhs), Expr::Call { .. })
+                        && self.call_returns_fresh_copy(rhs)
                         && st.aliases.contains_key(lhs.as_str())
                     {
                         call_local_roots.insert(resolve_alias(st, lhs));
@@ -494,6 +544,10 @@ impl<'a> Checker<'a> {
                         clear_names.push(a.clone());
                     }
                 }
+                let seeded = clear_names.clone();
+                for m in seeded {
+                    clear_names.extend(iter_st.share_group(&m));
+                }
                 for k in &clear_names {
                     if let Some(b) = iter_st.env_lookup_mut(k) {
                         b.moved = None;
@@ -512,6 +566,111 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+    }
+
+    /// True only when `expr` calls a file-local function whose return statements
+    /// all construct a fresh value-element slice via `append([]T{}, ...)` (such
+    /// as corpus 15's `chunk_of`), so the returned slice cannot share mutable
+    /// backing storage with the caller's argument across loop iterations (#194).
+    fn call_returns_fresh_copy(&self, expr: &Expr) -> bool {
+        let Expr::Call { callee, .. } = crate::model::unwrap_parens(expr) else {
+            return false;
+        };
+        let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) else {
+            return false;
+        };
+        let Some(fdecl) = self.fns.get(name.as_str()) else {
+            return false;
+        };
+        if fdecl.results.len() != 1 {
+            return false;
+        }
+        let ret_shape = self.shape_of_type(&fdecl.results[0].ty);
+        let crate::model::TypeShape::Slice(elem) = ret_shape else {
+            return false;
+        };
+        if self.shape_may_share(&elem) || matches!(*elem, crate::model::TypeShape::Unknown) {
+            return false;
+        }
+        let Some(body) = &fdecl.body else {
+            return false;
+        };
+        let mut saw_return = false;
+        if !Self::block_returns_only_fresh_append(body, &mut saw_return) {
+            return false;
+        }
+        saw_return
+    }
+
+    fn block_returns_only_fresh_append(block: &hy_syntax::Block, saw_return: &mut bool) -> bool {
+        for stmt in &block.stmts {
+            match stmt {
+                hy_syntax::Stmt::Return { values, .. } => {
+                    *saw_return = true;
+                    if values.len() != 1 || !Self::is_fresh_empty_slice_append(&values[0]) {
+                        return false;
+                    }
+                }
+                hy_syntax::Stmt::If {
+                    then, otherwise, ..
+                } => {
+                    if !Self::block_returns_only_fresh_append(then, saw_return) {
+                        return false;
+                    }
+                    if let Some(o) = otherwise {
+                        let dummy_block = hy_syntax::Block {
+                            stmts: vec![(**o).clone()],
+                            span: o.span(),
+                        };
+                        if !Self::block_returns_only_fresh_append(&dummy_block, saw_return) {
+                            return false;
+                        }
+                    }
+                }
+                hy_syntax::Stmt::For { body, .. } | hy_syntax::Stmt::Managed { body, .. } => {
+                    if !Self::block_returns_only_fresh_append(body, saw_return) {
+                        return false;
+                    }
+                }
+                hy_syntax::Stmt::Block { block, .. } => {
+                    if !Self::block_returns_only_fresh_append(block, saw_return) {
+                        return false;
+                    }
+                }
+                hy_syntax::Stmt::Match { arms, .. } => {
+                    for arm in arms {
+                        if !Self::block_returns_only_fresh_append(&arm.body, saw_return) {
+                            return false;
+                        }
+                    }
+                }
+                hy_syntax::Stmt::Select { arms, .. } => {
+                    for arm in arms {
+                        if !Self::block_returns_only_fresh_append(&arm.body, saw_return) {
+                            return false;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+
+    fn is_fresh_empty_slice_append(expr: &Expr) -> bool {
+        let Expr::Call { callee, args, .. } = crate::model::unwrap_parens(expr) else {
+            return false;
+        };
+        let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) else {
+            return false;
+        };
+        if name != "append" || args.is_empty() {
+            return false;
+        }
+        matches!(
+            crate::model::unwrap_parens(&args[0].value),
+            Expr::SliceLit { items, .. } if items.is_empty()
+        )
     }
 }
 

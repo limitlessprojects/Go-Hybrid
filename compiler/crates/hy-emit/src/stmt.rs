@@ -108,6 +108,7 @@ impl Emitter {
                                  — the loop label would have no target (LX14)",
                             ));
                         }
+                        self.flush_loans_for_loop(true);
                         let name = self
                             .loop_labels
                             .last()
@@ -115,7 +116,10 @@ impl Emitter {
                             .unwrap_or_else(|| "hyLoop".to_string());
                         self.push(&format!("break {}", name));
                     }
-                    None => self.push("break"),
+                    None => {
+                        self.flush_loans_for_loop(false);
+                        self.push("break");
+                    }
                 }
                 Ok(())
             }
@@ -128,6 +132,7 @@ impl Emitter {
                                  closure — the loop label would have no target (LX14)",
                             ));
                         }
+                        self.flush_loans_for_loop(true);
                         let name = self
                             .loop_labels
                             .last()
@@ -135,7 +140,10 @@ impl Emitter {
                             .unwrap_or_else(|| "hyLoop".to_string());
                         self.push(&format!("continue {}", name));
                     }
-                    None => self.push("continue"),
+                    None => {
+                        self.flush_loans_for_loop(false);
+                        self.push("continue");
+                    }
                 }
                 Ok(())
             }
@@ -1251,7 +1259,9 @@ impl Emitter {
 
     /// Every block body goes through this: a loan frame is pushed, the
     /// statements render, and the frame's store-backs flush at the block's
-    /// end (before the closing brace). This is what makes the O8 slot-loan
+    /// end (before the closing brace) unless the block already terminated via
+    /// `return`, `break`, or `continue` (which flush active loans before the
+    /// control-flow transfer, #203). This is what makes the O8 slot-loan
     /// desugar sound: mutations through the loaned copy persist exactly for
     /// the loan's lexical window.
     pub fn emit_block_body(&mut self, stmts: &[Stmt]) -> Result<(), EmitError> {
@@ -1261,11 +1271,73 @@ impl Emitter {
             self.emit_stmt(st)?;
         }
         let frame = self.loan_frames.pop().unwrap_or_default();
-        for (name, place) in frame {
-            self.push(&format!("{} = {}", place, name));
+        if !stmts.iter().any(Self::stmt_terminates) {
+            for (name, place) in frame {
+                if !name.is_empty() {
+                    self.push(&format!("{} = {}", place, name));
+                }
+            }
         }
         self.indent -= 1;
         Ok(())
+    }
+
+    fn block_terminates(b: &Block) -> bool {
+        b.stmts.iter().any(Self::stmt_terminates)
+    }
+
+    fn stmt_terminates(s: &Stmt) -> bool {
+        match s {
+            Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => true,
+            Stmt::Block { block, .. } | Stmt::Managed { body: block, .. } => {
+                Self::block_terminates(block)
+            }
+            Stmt::If {
+                then,
+                otherwise: Some(else_stmt),
+                ..
+            } => Self::block_terminates(then) && Self::stmt_terminates(else_stmt),
+            Stmt::Match { arms, .. } => {
+                !arms.is_empty()
+                    && arms
+                        .iter()
+                        .all(|a| a.guard.is_none() && Self::block_terminates(&a.body))
+            }
+            _ => false,
+        }
+    }
+
+    fn flush_loans_for_return(&mut self) {
+        let mut stores: Vec<(String, String)> = Vec::new();
+        for frame in self.loan_frames.iter().rev() {
+            if frame.first().map(|(n, _)| n.is_empty()).unwrap_or(false) {
+                continue;
+            }
+            for (name, place) in frame {
+                stores.push((name.clone(), place.clone()));
+            }
+        }
+        for (name, place) in stores {
+            self.push(&format!("{} = {}", place, name));
+        }
+    }
+
+    fn flush_loans_for_loop(&mut self, labeled: bool) {
+        let mut stores: Vec<(String, String)> = Vec::new();
+        for frame in self.loan_frames.iter().rev() {
+            if frame.first().map(|(n, _)| n.is_empty()).unwrap_or(false) {
+                if !labeled || !frame[0].1.is_empty() {
+                    break;
+                }
+                continue;
+            }
+            for (name, place) in frame {
+                stores.push((name.clone(), place.clone()));
+            }
+        }
+        for (name, place) in stores {
+            self.push(&format!("{} = {}", place, name));
+        }
     }
 
     fn emit_for(&mut self, kind: &ForKind, body: &Block) -> Result<(), EmitError> {
@@ -1440,7 +1512,10 @@ impl Emitter {
         };
         self.push(&head);
         self.for_depth += 1;
+        let sentinel_label = label.clone().unwrap_or_default();
+        self.loan_frames.push(vec![(String::new(), sentinel_label)]);
         let body_r = self.emit_block_body(&body.stmts);
+        self.loan_frames.pop();
         self.for_depth -= 1;
         body_r?;
         self.push("}");
@@ -1496,6 +1571,7 @@ impl Emitter {
     // -----------------------------------------------------------------------
 
     fn emit_return(&mut self, values: &[Expr]) -> Result<(), EmitError> {
+        self.flush_loans_for_return();
         for (idx, v) in values.iter().enumerate() {
             let later_has_try = values[idx + 1..].iter().any(Self::expr_has_hoistable_try);
             if later_has_try {
@@ -1649,63 +1725,147 @@ impl Emitter {
             ));
         }
 
-        self.hoist_tries_expr(subject)?;
         let temp = self.next_temp("hyMatch");
         let s = self.emit_expr(subject, 0)?;
         self.push(&format!("{} := {}", temp, s));
 
-        let mut some_arm: Option<(&ArmKind, &MatchArm)> = None;
-        let mut else_arm: Option<&MatchArm> = None;
+        let mut some_arms: Vec<(&String, &MatchArm)> = Vec::new();
+        let mut none_arm: Option<&MatchArm> = None;
+        let mut wildcard_arm: Option<&MatchArm> = None;
         for (kind, arm) in &classified {
             match kind {
-                ArmKind::Some(_) => some_arm = Some((kind, arm)),
-                ArmKind::NoneArm | ArmKind::Wildcard => else_arm = Some(arm),
+                ArmKind::Some(binding) => some_arms.push((binding, *arm)),
+                ArmKind::NoneArm => none_arm = Some(*arm),
+                ArmKind::Wildcard => wildcard_arm = Some(*arm),
             }
         }
 
-        match some_arm {
-            Some((ArmKind::Some(binding), arm)) => {
-                let head = match &arm.guard {
-                    Some(g) => {
-                        // The binding is not yet in scope for the guard —
-                        // lower the guard INSIDE the ok-branch.
-                        let _ = g;
-                        format!("if {}.ok {{", temp)
-                    }
-                    None => format!("if {}.ok {{", temp),
-                };
-                self.push(&head);
+        if some_arms.is_empty() {
+            // No some-arm: the checker's exhaustiveness (E5001) rejects
+            // this before emission; nothing to lower.
+            return Ok(());
+        }
+
+        let has_unguarded_some = some_arms.iter().any(|(_, arm)| arm.guard.is_none());
+
+        if has_unguarded_some {
+            let else_arm = none_arm.or(wildcard_arm);
+            if some_arms.len() == 1 {
+                let (binding, arm) = some_arms[0];
+                self.push(&format!("if {}.ok {{", temp));
                 self.indent += 1;
                 self.push(&format!("{} := {}.val", binding, temp));
-                if let Some(g) = &arm.guard {
-                    self.hoist_tries_expr(g)?;
-                    let gt = self.emit_expr(g, 0)?;
+                for st in &arm.body.stmts {
+                    self.emit_stmt(st)?;
+                }
+                self.indent -= 1;
+            } else {
+                self.push(&format!("if {}.ok {{", temp));
+                self.indent += 1;
+                let primary_binding = some_arms[0].0;
+                self.push(&format!("{} := {}.val", primary_binding, temp));
+                for (i, (binding, arm)) in some_arms.iter().enumerate() {
+                    match &arm.guard {
+                        Some(g) => {
+                            let gt = self.emit_expr(g, 0)?;
+                            if i == 0 {
+                                self.push(&format!("if {} {{", gt));
+                            } else {
+                                self.push(&format!("}} else if {} {{", gt));
+                            }
+                            self.indent += 1;
+                            if binding.as_str() != primary_binding.as_str() {
+                                self.push(&format!("{} := {}", binding, primary_binding));
+                            }
+                            for st in &arm.body.stmts {
+                                self.emit_stmt(st)?;
+                            }
+                            self.indent -= 1;
+                        }
+                        None => {
+                            self.push("} else {");
+                            self.indent += 1;
+                            if binding.as_str() != primary_binding.as_str() {
+                                self.push(&format!("{} := {}", binding, primary_binding));
+                            }
+                            for st in &arm.body.stmts {
+                                self.emit_stmt(st)?;
+                            }
+                            self.indent -= 1;
+                            self.push("}");
+                            break;
+                        }
+                    }
+                }
+                self.indent -= 1;
+            }
+            match else_arm {
+                Some(arm) => {
+                    self.push("} else {");
+                    self.emit_block_body(&arm.body.stmts)?;
+                    self.push("}");
+                }
+                None => {
+                    self.push("}");
+                }
+            }
+        } else {
+            let matched_temp = self.next_temp("hyMatched");
+            self.push(&format!("{} := false", matched_temp));
+            self.push(&format!("if {}.ok {{", temp));
+            self.indent += 1;
+            let primary_binding = some_arms[0].0;
+            self.push(&format!("{} := {}.val", primary_binding, temp));
+            for (i, (binding, arm)) in some_arms.iter().enumerate() {
+                self.hoist_tries_expr(arm.guard.as_ref().unwrap())?;
+                let gt = self.emit_expr(arm.guard.as_ref().unwrap(), 0)?;
+                if i == 0 {
                     self.push(&format!("if {} {{", gt));
+                } else {
+                    self.push(&format!("}} else if {} {{", gt));
+                }
+                self.indent += 1;
+                self.push(&format!("{} = true", matched_temp));
+                if binding.as_str() != primary_binding.as_str() {
+                    self.push(&format!("{} := {}", binding, primary_binding));
+                }
+                for st in &arm.body.stmts {
+                    self.emit_stmt(st)?;
+                }
+                self.indent -= 1;
+            }
+            self.push("}");
+            self.indent -= 1;
+            self.push("}");
+
+            if let Some(arm) = none_arm {
+                if wildcard_arm.is_some() {
+                    self.push(&format!("if !{} && !{}.ok {{", matched_temp, temp));
                     self.indent += 1;
+                    self.push(&format!("{} = true", matched_temp));
                     for st in &arm.body.stmts {
                         self.emit_stmt(st)?;
                     }
                     self.indent -= 1;
                     self.push("}");
                 } else {
+                    self.push(&format!("if !{} && !{}.ok {{", matched_temp, temp));
+                    self.indent += 1;
                     for st in &arm.body.stmts {
                         self.emit_stmt(st)?;
                     }
+                    self.indent -= 1;
+                    self.push("}");
+                }
+            }
+
+            if let Some(arm) = wildcard_arm {
+                self.push(&format!("if !{} {{", matched_temp));
+                self.indent += 1;
+                for st in &arm.body.stmts {
+                    self.emit_stmt(st)?;
                 }
                 self.indent -= 1;
-            }
-            _ => {
-                // No some-arm: the checker's exhaustiveness (E5001) rejects
-                // this before emission; nothing to lower.
-            }
-        }
-        match else_arm {
-            Some(arm) => {
-                self.push("} else {");
-                self.emit_block_body(&arm.body.stmts)?;
-                self.push("}");
-            }
-            None => {
                 self.push("}");
             }
         }

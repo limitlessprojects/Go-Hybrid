@@ -335,11 +335,9 @@ impl Emitter {
                 // Redirect statement output into a scratch buffer: the
                 // literal renders inline, its body keeps normal indents.
                 let main_body = std::mem::take(&mut self.body);
-                self.indent += 1;
-                for st in &body.stmts {
-                    self.emit_stmt(st)?;
-                }
-                self.indent -= 1;
+                let saved_loans = std::mem::take(&mut self.loan_frames);
+                self.emit_block_body(&body.stmts)?;
+                self.loan_frames = saved_loans;
                 let closure_body = std::mem::take(&mut self.body);
                 self.body = main_body;
                 self.fnlit_depth -= 1;

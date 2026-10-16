@@ -247,14 +247,23 @@ impl FnState {
 
     /// Exit the innermost block scope (walk.rs's Pop events).
     pub(crate) fn scope_pop(&mut self) {
-        // Capture any moves on inner aliases before the inner scope and alias
-        // map are popped (handles the case where an inner alias `m2 := m` was
-        // moved while the outer root `m` was shadowed inside the block).
+        // Capture any moves on inner aliases or may-share peers before the
+        // inner scope and alias/share maps are popped (handles the case where
+        // an inner alias/holder was moved while an outer peer was shadowed).
         let mut inner_root_moves: Vec<(String, MoveInfo)> = Vec::new();
         for (a, target) in &self.aliases {
             let root = crate::freeze::resolve_alias(self, target);
             if let Some(mv) = self.env_lookup(a).and_then(|b| b.moved.clone()) {
                 inner_root_moves.push((root, mv));
+            }
+        }
+        for a in self.may_share.keys() {
+            if let Some(mv) = self.env_lookup(a).and_then(|b| b.moved.clone()) {
+                for peer in self.share_group(a) {
+                    let root = crate::freeze::resolve_alias(self, &peer);
+                    inner_root_moves.push((peer, mv.clone()));
+                    inner_root_moves.push((root, mv.clone()));
+                }
             }
         }
         self.scopes.pop();
@@ -289,6 +298,40 @@ impl FnState {
                     if let Some(br) = self.env_lookup_mut(&root) {
                         if br.moved.is_none() {
                             br.moved = Some(mv);
+                        }
+                    }
+                }
+            }
+            // Issue #195: also propagate freeze across the restored outer
+            // `may_share` connected components (and their alias chains) so a
+            // shadowed struct-embedded map or slice peer cannot escape the
+            // move of its holder once the inner shadow scope exits.
+            let share_keys: Vec<String> = self.may_share.keys().cloned().collect();
+            for k in share_keys {
+                let root = crate::freeze::resolve_alias(self, &k);
+                let moved = self
+                    .env_lookup(&k)
+                    .and_then(|b| b.moved.clone())
+                    .or_else(|| self.env_lookup(&root).and_then(|b| b.moved.clone()));
+                if let Some(mv) = moved {
+                    let mut group: Vec<String> = self.share_group(&k).into_iter().collect();
+                    group.push(k.clone());
+                    group.push(root);
+                    let seeded = group.clone();
+                    for member in &seeded {
+                        let mroot = crate::freeze::resolve_alias(self, member);
+                        group.push(mroot.clone());
+                        for a in self.aliases.keys() {
+                            if crate::freeze::resolve_alias(self, a) == mroot {
+                                group.push(a.clone());
+                            }
+                        }
+                    }
+                    for peer in group {
+                        if let Some(bp) = self.env_lookup_mut(&peer) {
+                            if bp.moved.is_none() {
+                                bp.moved = Some(mv.clone());
+                            }
                         }
                     }
                 }
@@ -346,12 +389,19 @@ impl FnState {
     }
 
     /// Drop `name`'s may-share edges: a whole-binding rebind re-owns the
-    /// binding, so it leaves the old sharing component.
+    /// binding, so it leaves the old sharing component while preserving
+    /// transitive sharing links among its remaining peers.
     pub(crate) fn share_clear(&mut self, name: &str) {
         if let Some(peers) = self.may_share.remove(name) {
-            for p in peers {
-                if let Some(set) = self.may_share.get_mut(&p) {
+            let peer_list: Vec<String> = peers.into_iter().collect();
+            for p in &peer_list {
+                if let Some(set) = self.may_share.get_mut(p) {
                     set.remove(name);
+                }
+            }
+            for i in 0..peer_list.len() {
+                for j in (i + 1)..peer_list.len() {
+                    self.share_edge(&peer_list[i], &peer_list[j]);
                 }
             }
         }
@@ -386,12 +436,28 @@ pub(crate) struct Checker<'a> {
     pub path: String,
     /// struct name -> (field name, field type) — file-level struct decls.
     pub structs: HashMap<String, Vec<(String, TypeExpr)>>,
+    /// enum name -> declared variant names in source order (T13/T14 HYB-E5001).
+    pub enums: HashMap<String, Vec<String>>,
+    /// enum name -> whether the first variant is payload-free (N3 HYB-E4002).
+    pub enum_has_zero_value: HashMap<String, bool>,
+    /// type alias name -> target TypeExpr.
+    pub type_aliases: HashMap<String, TypeExpr>,
     /// fn name -> decl (return-type inference for single-value defines).
     pub fns: HashMap<String, &'a FnDecl>,
+    /// (receiver base type name, method name) -> decl (method return-type inference).
+    pub method_decls: HashMap<(String, String), &'a FnDecl>,
     /// file-level consts (immutable, visible in every fn).
     pub consts: HashMap<String, Binding>,
     /// Known foreign package prefixes (imports ∪ the builtin table).
     pub packages: HashSet<String>,
+    /// Package-scope names (issue #201-C): top-level fns / consts / structs
+    /// share one namespace in Go — a second declaration of the same name is
+    /// `X redeclared in this block`. Keyed by name, value = declaring kind.
+    pub pkg_names: HashMap<String, &'static str>,
+    /// Declared methods (issue #201-C): (receiver base type, method name) —
+    /// methods live in the receiver's method set, not package scope, so
+    /// `box.get` twice is an error while `fn get` + `box.get` is legal.
+    pub methods: HashSet<(String, String)>,
     /// Emitted diagnostics (unsorted; check_file sorts by span).
     pub diags: Vec<Diagnostic>,
     // --report-managed counters (O6.3)
@@ -420,9 +486,15 @@ impl<'a> Checker<'a> {
             file,
             path: file.path.clone(),
             structs: HashMap::new(),
+            enums: HashMap::new(),
+            enum_has_zero_value: HashMap::new(),
+            type_aliases: HashMap::new(),
             fns: HashMap::new(),
+            method_decls: HashMap::new(),
             consts: HashMap::new(),
             packages: HashSet::new(),
+            pkg_names: HashMap::new(),
+            methods: HashSet::new(),
             diags: Vec::new(),
             managed_blocks: 0,
             sites_via_managed: 0,
