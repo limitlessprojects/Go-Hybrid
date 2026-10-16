@@ -591,9 +591,47 @@ fn inclusive_range_and_labeled_break() {
         go
     );
     assert!(go.contains("break hyLoop"), ":\n{}", go);
+    // Inclusive ranges use a continue-safe stop flag (#322), not
+    // `i <= 8; i++` (that form wraps at a type maximum). Bounds are
+    // hoisted so the stop check is `i != hyHiN`.
     assert!(
-        go.contains("for i := 1; i <= 8; i++ {"),
-        "inclusive range:\n{}",
+        go.contains("<= ") && go.contains("8"),
+        "inclusive empty-range guard:\n{}",
+        go
+    );
+    assert!(
+        go.contains("i != "),
+        "inclusive last-value stop check:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("for i := 1; i <= 8; i++ {"),
+        "must not emit the wrapping post-increment form:\n{}",
+        go
+    );
+}
+
+#[test]
+fn inclusive_range_at_type_maximum_uses_stop_flag() {
+    // Issue #322: int8 127..=127 must not lower to `value <= high; value++`
+    // (increment wraps to -128 and the loop never ends).
+    let go = emit(
+        "fn main() {\n    var high int8 = 127\n    for value in high..=high {\n        fmt.println(value)\n    }\n}\n",
+    );
+    assert!(
+        !go.contains("value <= high; value++")
+            && !go.contains("for value := high; value <= high; value++"),
+        "wrapping inclusive form must not be emitted:\n{}",
+        go
+    );
+    assert!(
+        go.contains("value !="),
+        "continue-safe stop check present:\n{}",
+        go
+    );
+    assert!(
+        go.contains("<= "),
+        "empty-range guard still present:\n{}",
         go
     );
 }
