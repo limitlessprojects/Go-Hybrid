@@ -132,7 +132,7 @@ spike-4:
 	bash spikes/spike4-scheduling/work/run.sh
 
 actions-watch:
-	$(PY) tools/job.py watch actions
+	$(PY) tools/job.py actions watch
 
 clean:
 	@command -v cargo >/dev/null && cargo clean 2>/dev/null || true

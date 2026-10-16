@@ -34,6 +34,8 @@ jobs:
           python3 -m unittest discover -s tools -p test_check_versions.py -v
           python3 -m unittest discover -s tools -p test_differential_reject_rule.py -v
           python3 -m unittest discover -s tools -p test_corpus_harness.py -v
+          python3 -m unittest discover -s tools -p test_job_cli.py -v
+          python3 -m unittest discover -s tools -p test_job_payload.py -v
           # runner self-test: execute a trivial inline job end-to-end
           mkdir -p /tmp/selftest && cd /tmp/selftest
           cat > job.json <<'EOF'
