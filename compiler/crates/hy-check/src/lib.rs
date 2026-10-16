@@ -689,6 +689,35 @@ mod tests {
     }
 
     #[test]
+    fn shadow_scope_does_not_wipe_outer_may_share_peer_e3003() {
+        // #195 — the struct-EMBEDDED sibling of the test above. `h := holder{m: m}`
+        // links `h` and `m` through `may_share`, not through `aliases` (an
+        // embedded reference is not a reference alias), and the inner `m := 42`
+        // shadows the outer map binding. Moving `h` inside the block must still
+        // freeze the restored outer `m`: `scope_pop` has to sweep the may-share
+        // keys as well as the alias keys, and forward the freeze to the whole
+        // share component of the moved binding (HYB-E3003).
+        let r = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(h holder, done chan<- bool) { h.m[\"k\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               h := holder{m: m}\n\
+               done := make(chan bool, 1)\n\
+               if true {\n\
+                 m := 42\n\
+                 fmt.println(m)\n\
+                 task worker(move h, done)\n\
+               }\n\
+               m[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+    }
+
+    #[test]
     fn mutual_alias_rebind_cycle_still_freezes_on_move_e3003() {
         // `m2 := m; m = m2` used to create a 2-cycle `m <-> m2` where 16
         // hops of `resolve_alias` resolved `"m"` to `"m"` and `"m2"` to `"m2"`,

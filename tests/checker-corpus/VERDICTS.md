@@ -557,3 +557,34 @@ dated baseline remain unchanged. Verdict-level managed count is 2/28;
 the harness's unchanged historical as-written set {01, 03, 04} reports
 3/28, with the same population qualification noted above. Case 28 adds
 no `managed` block.
+
+## Additive corpus registration — 2026-10-16: may-share freeze across a block shadow (issue #195)
+
+Case 46 was registered from issue #195 before running the fixture against the
+fixed checker, and its verdict line was closed after the fix reproduced the
+reject. It pins the **may-share half** of the block-shadow freeze rule that
+cases 25–27/#14 and #31 fixed for `aliases` only.
+
+A struct that embeds a reference (`h := holder{m: m}`) links `h` and `m`
+through `may_share`, not through `aliases`: the embedded reference is not a
+reference alias. With the outer map binding shadowed inside the block
+(`if true { m := 42 … }`), the move of `h` had nowhere to land on the outer
+`m` — `mark_move` froze the binding the name resolved to at that depth (the
+inner primitive), and `scope_pop` propagated the restore over `self.aliases`
+only, so the restored outer `m` never inherited the freeze. On `c09e9928` the
+program passed `hyb check` with `OK (0 diagnostics)`; the reporter's
+`--emit-go` + `go run -race` run on the same program reported a data race
+between the main goroutine and `main.worker` on the same map (issue #195
+evidence, darwin-arm64), then `fatal error: concurrent map writes`, exit 2.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 46 | 46-shadow-may-share-freeze | REJECT | A1b | `HYB-E3003` | moving a holder must freeze every storage peer of the holder — including the outer map its embedded field aliases (GUARANTEES #3/#6, SPEC §9.3 O4.6/O5) |
+
+`scope_pop` now sweeps the may-share keys in both of its passes (the
+inner-move capture and the restored-outer propagation) and forwards the
+freeze to the whole share component of the moved binding and of its alias
+root; the shadow dies at the pop, so the lookup then reaches the OUTER map
+binding. The accept side is unchanged: corpus 41 and 44 (ordinary controls)
+still accept, and no existing verdict moved. Verdict-level managed count
+stays 2; this case adds no `managed` block.

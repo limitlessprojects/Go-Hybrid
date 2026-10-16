@@ -251,10 +251,29 @@ impl FnState {
         // map are popped (handles the case where an inner alias `m2 := m` was
         // moved while the outer root `m` was shadowed inside the block).
         let mut inner_root_moves: Vec<(String, MoveInfo)> = Vec::new();
-        for (a, target) in &self.aliases {
-            let root = crate::freeze::resolve_alias(self, target);
+        // #195: sweep the may-share keys as well as the alias keys. A struct
+        // that EMBEDS a reference (`h := holder{m: m}`) links `h` and `m`
+        // through `may_share`, not through `aliases` (an embedded reference is
+        // not a reference alias), so an alias-only sweep left the embedded
+        // peer unfrozen when the holder was moved inside a shadowing block.
+        let mut inner_keys: Vec<String> = self.aliases.keys().cloned().collect();
+        inner_keys.extend(self.may_share.keys().cloned());
+        inner_keys.sort();
+        inner_keys.dedup();
+        for a in &inner_keys {
+            let root = crate::freeze::resolve_alias(self, a);
             if let Some(mv) = self.env_lookup(a).and_then(|b| b.moved.clone()) {
-                inner_root_moves.push((root, mv));
+                inner_root_moves.push((root.clone(), mv.clone()));
+                // ... and carry the same freeze to every may-share peer of the
+                // moved binding and of its alias root, so the restored outer
+                // bindings (unreachable at the move site because the shadow
+                // took the name) inherit it as soon as the inner scope dies.
+                for p in self.share_group(a) {
+                    inner_root_moves.push((p, mv.clone()));
+                }
+                for p in self.share_group(&root) {
+                    inner_root_moves.push((p, mv.clone()));
+                }
             }
         }
         self.scopes.pop();
@@ -270,10 +289,16 @@ impl FnState {
                     }
                 }
             }
-            // If an outer binding was moved while one of its outer aliases
-            // was shadowed inside the block, propagate the freeze across the
-            // restored outer alias group now that the shadow has died.
-            let keys: Vec<String> = self.aliases.keys().cloned().collect();
+            // If an outer binding was moved while one of its outer aliases or
+            // may-share peers was shadowed inside the block, propagate the
+            // freeze across the restored outer alias group AND the restored
+            // may-share component now that the shadow has died (#195: an
+            // embedded reference lives in `may_share`, so the alias-only sweep
+            // left `h`'s embedded map writable after `move h`).
+            let mut keys: Vec<String> = self.aliases.keys().cloned().collect();
+            keys.extend(self.may_share.keys().cloned());
+            keys.sort();
+            keys.dedup();
             for a in keys {
                 let root = crate::freeze::resolve_alias(self, &a);
                 let moved = self
@@ -281,14 +306,14 @@ impl FnState {
                     .and_then(|b| b.moved.clone())
                     .or_else(|| self.env_lookup(&a).and_then(|b| b.moved.clone()));
                 if let Some(mv) = moved {
-                    if let Some(ba) = self.env_lookup_mut(&a) {
-                        if ba.moved.is_none() {
-                            ba.moved = Some(mv.clone());
-                        }
-                    }
-                    if let Some(br) = self.env_lookup_mut(&root) {
-                        if br.moved.is_none() {
-                            br.moved = Some(mv);
+                    let mut targets = vec![a.clone(), root.clone()];
+                    targets.extend(self.share_group(&a));
+                    targets.extend(self.share_group(&root));
+                    for t in targets {
+                        if let Some(bt) = self.env_lookup_mut(&t) {
+                            if bt.moved.is_none() {
+                                bt.moved = Some(mv.clone());
+                            }
                         }
                     }
                 }
