@@ -1654,30 +1654,68 @@ impl Emitter {
         let s = self.emit_expr(subject, 0)?;
         self.push(&format!("{} := {}", temp, s));
 
-        let mut some_arm: Option<(&ArmKind, &MatchArm)> = None;
+        // Issue #204: keep EVERY `some` arm in lexical order and honour guard
+        // fallthrough. The previous lowering kept only the last `some` arm in a
+        // single `Option` (each earlier arm was silently deleted from the
+        // output), and a failed guard fell out of the `if ok` block so the
+        // `none`/`_` arm was never reached. SPEC §1.2/§1.4: arms are evaluated
+        // in lexical order, the guard is tested first, and a failing guard
+        // continues with the next arm.
+        let mut some_arms: Vec<(&str, &MatchArm)> = Vec::new();
+        // The `!ok` branch: the FIRST `none`/`_` arm in lexical order (both
+        // match an absent payload; the earlier one wins).
         let mut else_arm: Option<&MatchArm> = None;
+        // A `_` arm also catches a failed guard on the last `some` arm.
+        let mut wildcard_arm: Option<&MatchArm> = None;
         for (kind, arm) in &classified {
             match kind {
-                ArmKind::Some(_) => some_arm = Some((kind, arm)),
-                ArmKind::NoneArm | ArmKind::Wildcard => else_arm = Some(arm),
+                ArmKind::Some(b) => some_arms.push((b.as_str(), arm)),
+                ArmKind::NoneArm => {
+                    if else_arm.is_none() {
+                        else_arm = Some(arm);
+                    }
+                }
+                ArmKind::Wildcard => {
+                    if wildcard_arm.is_none() {
+                        wildcard_arm = Some(arm);
+                    }
+                    if else_arm.is_none() {
+                        else_arm = Some(arm);
+                    }
+                }
             }
         }
+        if some_arms.is_empty() {
+            // No some-arm: the checker's exhaustiveness (E5001) rejects this
+            // before emission; nothing to lower.
+            return Ok(());
+        }
+        // An unguarded `some(v)` matches every present payload, so it ends the
+        // chain: later `some` arms are unreachable.
+        let chain_len = some_arms
+            .iter()
+            .position(|(_, a)| a.guard.is_none())
+            .map(|i| i + 1)
+            .unwrap_or(some_arms.len());
+        let chain = &some_arms[..chain_len];
+        // Terminal fallthrough body when the LAST chain arm is guarded and its
+        // guard fails: the `_` arm, if any (an unguarded last arm is emitted
+        // inline as the terminal case instead).
+        let guard_fallthrough: Option<&MatchArm> = if chain[chain_len - 1].1.guard.is_some() {
+            wildcard_arm
+        } else {
+            None
+        };
 
-        match some_arm {
-            Some((ArmKind::Some(binding), arm)) => {
-                let head = match &arm.guard {
-                    Some(g) => {
-                        // The binding is not yet in scope for the guard —
-                        // lower the guard INSIDE the ok-branch.
-                        let _ = g;
-                        format!("if {}.ok {{", temp)
-                    }
-                    None => format!("if {}.ok {{", temp),
-                };
-                self.push(&head);
-                self.indent += 1;
-                self.push(&format!("{} := {}.val", binding, temp));
-                if let Some(g) = &arm.guard {
+        self.push(&format!("if {}.ok {{", temp));
+        self.indent += 1;
+
+        let mut guard_depth = 0usize;
+        for (idx, (binding, arm)) in chain.iter().enumerate() {
+            self.push(&format!("{} := {}.val", binding, temp));
+            let is_last = idx + 1 == chain_len;
+            match &arm.guard {
+                Some(g) => {
                     self.hoist_tries_expr(g)?;
                     let gt = self.emit_expr(g, 0)?;
                     self.push(&format!("if {} {{", gt));
@@ -1686,19 +1724,40 @@ impl Emitter {
                         self.emit_stmt(st)?;
                     }
                     self.indent -= 1;
-                    self.push("}");
-                } else {
+                    if is_last {
+                        match guard_fallthrough {
+                            Some(fall) => {
+                                self.push("} else {");
+                                self.indent += 1;
+                                for st in &fall.body.stmts {
+                                    self.emit_stmt(st)?;
+                                }
+                                self.indent -= 1;
+                                self.push("}");
+                            }
+                            None => self.push("}"),
+                        }
+                        break;
+                    }
+                    self.push("} else {");
+                    self.indent += 1;
+                    guard_depth += 1;
+                }
+                None => {
                     for st in &arm.body.stmts {
                         self.emit_stmt(st)?;
                     }
+                    break;
                 }
-                self.indent -= 1;
-            }
-            _ => {
-                // No some-arm: the checker's exhaustiveness (E5001) rejects
-                // this before emission; nothing to lower.
             }
         }
+        // Close the guard-fallthrough chain (one `}` per opened `} else {`).
+        for _ in 0..guard_depth {
+            self.indent -= 1;
+            self.push("}");
+        }
+
+        self.indent -= 1;
         match else_arm {
             Some(arm) => {
                 self.push("} else {");

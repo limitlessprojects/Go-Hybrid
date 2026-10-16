@@ -745,6 +745,119 @@ fn option_match_lowes_to_ok_branch() {
 }
 
 #[test]
+fn match_keeps_every_some_arm_in_lexical_order() {
+    // Issue #204: `emit_match` stored the arms in a single `Option`, so every
+    // `some` arm except the last was silently deleted from the output — the
+    // guarded `some(v) if v > 10` arm vanished and `some(15)` printed
+    // "small: 15". SPEC §1.2/§1.4: lexical order, guard tested first.
+    let go = emit(
+        "fn classify(opt option[int]) {\n\
+           match opt {\n\
+             some(v) if v > 10: { fmt.println(\"big: {v}\") }\n\
+             some(v): { fmt.println(\"small: {v}\") }\n\
+             none: { fmt.println(\"none\") }\n\
+           }\n\
+         }\n\
+         fn main() {\n\
+           classify(some(15))\n\
+           classify(some(5))\n\
+         }\n",
+    );
+    let m = go.find("hyMatch0 := opt").expect("match temp");
+    let body = &go[m..];
+    assert!(
+        body.contains("fmt.Println(fmt.Sprintf(\"big: %v\", v))"),
+        "the guarded some arm was dropped:\n{}",
+        go
+    );
+    assert!(
+        body.contains("fmt.Println(fmt.Sprintf(\"small: %v\", v))"),
+        "the unguarded some arm was dropped:\n{}",
+        go
+    );
+    assert!(
+        body.contains("fmt.Println(\"none\")"),
+        "the none arm was dropped:\n{}",
+        go
+    );
+    // The guarded arm must be tested BEFORE the unguarded one (lexical order).
+    let big = body.find("big: %v").expect("big arm");
+    let small = body.find("small: %v").expect("small arm");
+    assert!(big < small, "arms out of lexical order:\n{}", go);
+}
+
+#[test]
+fn match_guard_fallthrough_does_not_run_the_none_arm() {
+    // Issue #204's second defect is about guard fallthrough. For `_` that is
+    // unambiguous — it matches anything (see the wildcard test below). For
+    // `none` it is NOT: `none` matches only an ABSENT payload, so when the
+    // payload is present (`some(5)`) and the only guard fails, no arm matches
+    // and nothing may run. The report's phrasing ("the none/wildcard arm is
+    // never reached") covers both arms; putting the `none` body into the
+    // guard's else would print "none" for `some(5)`, i.e. trade one wrong
+    // output for another. SPEC-LANGUAGE.md has no guard production at all
+    // (the guard is a parser-level extension, `hy-syntax/src/ast.rs:685`), so
+    // this test pins the strict pattern reading; the PR flags the fork.
+    let go = emit(
+        "fn classify(opt option[int]) {\n\
+           match opt {\n\
+             some(v) if v > 10: { fmt.println(\"big: {v}\") }\n\
+             none: { fmt.println(\"none\") }\n\
+           }\n\
+         }\n\
+         fn main() {\n\
+           classify(some(15))\n\
+           classify(some(5))\n\
+         }\n",
+    );
+    let m = go.find("hyMatch0 := opt").expect("match temp");
+    let body = &go[m..];
+    assert!(
+        body.contains("if v > 10 {"),
+        "the guard was not emitted:\n{}",
+        go
+    );
+    assert!(
+        body.contains("} else {"),
+        "the match lost its absent-payload branch:\n{}",
+        go
+    );
+    assert_eq!(
+        body.matches("fmt.Println(\"none\")").count(),
+        1,
+        "the `none` arm matches only an ABSENT payload: it must be emitted once, \
+         on the `!ok` path — not duplicated into the failed-guard path:\n{}",
+        go
+    );
+}
+
+#[test]
+fn match_guard_fallthrough_reaches_wildcard_arm() {
+    // A `_` arm catches both an absent payload and a failed guard.
+    let go = emit(
+        "fn classify(opt option[int]) {\n\
+           match opt {\n\
+             some(v) if v > 10: { fmt.println(\"big: {v}\") }\n\
+             _: { fmt.println(\"other\") }\n\
+           }\n\
+         }\n\
+         fn main() {\n\
+           classify(some(15))\n\
+           classify(some(5))\n\
+         }\n",
+    );
+    let m = go.find("hyMatch0 := opt").expect("match temp");
+    let body = &go[m..];
+    assert_eq!(
+        body.matches("fmt.Println(\"other\")").count(),
+        2,
+        "the wildcard arm must be reachable from both the absent-payload and \
+         the failed-guard path:\n{}",
+        go
+    );
+}
+
+#[test]
 fn return_none_lowers_to_option_zero() {
     let go = emit("fn get() option[int] {\n    return none\n}\n");
     assert!(
