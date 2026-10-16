@@ -56,7 +56,11 @@ impl Emitter {
                 ..
             } => self.emit_if(init.as_deref(), cond, then, otherwise.as_deref()),
             Stmt::For { kind, body, .. } => self.emit_for(kind, body),
-            Stmt::Return { values, .. } => self.emit_return(values),
+            Stmt::Return { values, .. } => {
+                // Issue #203: the store-backs belong BEFORE the `return`.
+                self.flush_loan_frames(0);
+                self.emit_return(values)
+            }
             Stmt::Task { callee, args, .. } => {
                 // task → go (spawn sites were checked by Tier-0; emission is
                 // a plain goroutine).
@@ -100,6 +104,16 @@ impl Emitter {
                 // when no enclosing loop exists at all (pr-101: the label
                 // would have no target — the checker rejects fn bodies with
                 // HYB-E3010; this guards closure bodies).
+                // Issue #203: the jump exits the blocks inside its target loop,
+                // so their loans store back BEFORE it. A labeled jump targets
+                // the innermost LABELED loop, an unlabeled one the innermost
+                // loop.
+                let upto = if label.is_some() {
+                    self.labeled_loan_bases.last().copied().unwrap_or(0)
+                } else {
+                    self.loop_loan_bases.last().copied().unwrap_or(0)
+                };
+                self.flush_loan_frames(upto);
                 match label {
                     Some(_) => {
                         if self.for_depth == 0 && self.loop_labels.is_empty() {
@@ -120,6 +134,14 @@ impl Emitter {
                 Ok(())
             }
             Stmt::Continue { label, .. } => {
+                // Issue #203: same as `break` — an early jump stores the loans
+                // declared inside its target loop back before it moves.
+                let upto = if label.is_some() {
+                    self.labeled_loan_bases.last().copied().unwrap_or(0)
+                } else {
+                    self.loop_loan_bases.last().copied().unwrap_or(0)
+                };
+                self.flush_loan_frames(upto);
                 match label {
                     Some(_) => {
                         if self.for_depth == 0 && self.loop_labels.is_empty() {
@@ -1254,6 +1276,33 @@ impl Emitter {
     /// end (before the closing brace). This is what makes the O8 slot-loan
     /// desugar sound: mutations through the loaned copy persist exactly for
     /// the loan's lexical window.
+    /// Issue #203: an early exit (`return`/`break`/`continue`) must store the
+    /// pending O8/O9 loans back BEFORE it leaves the declaring block. Emitting
+    /// them after the terminator — which is what the block-end flush does when
+    /// the block contains a terminator — makes a valued `return` unbuildable
+    /// (`missing return`), and after a void `return`/`break`/`continue` the
+    /// write is unreachable, i.e. the loan's write is silently lost at run
+    /// time.
+    ///
+    /// Frames are DRAINED, never popped: every enclosing `emit_block_body`
+    /// still owns its frame and pops the (now empty) frame on the way out, so
+    /// the block-scoped bookkeeping stays intact. `upto` is the lowest frame
+    /// index to flush (inclusive) — 0 for a `return` (the whole function is
+    /// exiting), the target loop's base for `break`/`continue` (a jump only
+    /// exits the blocks inside that loop).
+    fn flush_loan_frames(&mut self, upto: usize) {
+        if self.loan_frames.len() <= upto {
+            return;
+        }
+        let mut stores: Vec<(String, String)> = Vec::new();
+        for frame in self.loan_frames[upto..].iter_mut().rev() {
+            stores.append(frame);
+        }
+        for (name, place) in stores {
+            self.push(&format!("{} = {}", place, name));
+        }
+    }
+
     pub fn emit_block_body(&mut self, stmts: &[Stmt]) -> Result<(), EmitError> {
         self.loan_frames.push(Vec::new());
         self.indent += 1;
@@ -1291,6 +1340,9 @@ impl Emitter {
                 format!("hyLoop{}", n)
             };
             self.loop_labels.push(name.clone());
+            // Issue #203: a labeled jump stores the loans of THIS loop's blocks
+            // back before it moves, so remember where this loop's frame sits.
+            self.labeled_loan_bases.push(self.loan_frames.len());
             Some(name)
         } else {
             None
@@ -1303,6 +1355,8 @@ impl Emitter {
         if let ForKind::While { cond } = kind {
             if Self::expr_has_hoistable_try(cond) {
                 self.push("for {");
+                // Issue #203: where this loop's own loan frame will sit.
+                self.loop_loan_bases.push(self.loan_frames.len());
                 self.loan_frames.push(Vec::new());
                 self.indent += 1;
                 self.hoist_tries_expr(cond)?;
@@ -1319,6 +1373,7 @@ impl Emitter {
                 for (name, place) in frame {
                     self.push(&format!("{} = {}", place, name));
                 }
+                self.loop_loan_bases.pop();
                 self.indent -= 1;
                 self.push("}");
                 return Ok(());
@@ -1440,12 +1495,17 @@ impl Emitter {
         };
         self.push(&head);
         self.for_depth += 1;
+        // Issue #203: where this loop's own loan frame will sit — the body's
+        // `emit_block_body` pushes it at this depth.
+        self.loop_loan_bases.push(self.loan_frames.len());
         let body_r = self.emit_block_body(&body.stmts);
+        self.loop_loan_bases.pop();
         self.for_depth -= 1;
         body_r?;
         self.push("}");
         if label.is_some() {
             self.loop_labels.pop();
+            self.labeled_loan_bases.pop();
         }
         Ok(())
     }

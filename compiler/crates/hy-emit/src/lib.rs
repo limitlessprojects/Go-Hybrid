@@ -357,6 +357,14 @@ pub struct Emitter {
     /// (O9's honesty: Go-heap reads are copies). Frames are block-scoped:
     /// a loan flushes at the end of the block that declared it.
     loan_frames: Vec<Vec<(String, String)>>,
+    /// Issue #203: the `loan_frames` depth at the entry of each enclosing loop
+    /// body. A `break`/`continue` only exits the blocks INSIDE its loop, so it
+    /// stores those loans back and leaves the outer frames pending.
+    loop_loan_bases: Vec<usize>,
+    /// Issue #203: the same depth for each LABELED loop (`loop_labels`'s
+    /// parallel stack) — a `break loop` / `continue loop` targets the innermost
+    /// labeled loop, which need not be the innermost loop.
+    labeled_loan_bases: Vec<usize>,
     /// E11 handler contract: inside a closure that converts to a
     /// propagation-carrying target (`http.handler`), `?` fires
     /// `http.Error(w, err, 400)` + return instead of the E3 error-return.
@@ -421,6 +429,8 @@ impl Emitter {
             loop_labels: Vec::new(),
             loop_label_n: 0,
             loan_frames: Vec::new(),
+            loop_loan_bases: Vec::new(),
+            labeled_loan_bases: Vec::new(),
             handler_writer: None,
             pending_fnlit_conv: None,
             cur_fn_conv_result: None,

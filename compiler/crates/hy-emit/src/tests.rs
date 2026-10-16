@@ -745,6 +745,100 @@ fn option_match_lowes_to_ok_branch() {
 }
 
 #[test]
+#[test]
+fn loan_store_back_precedes_a_valued_return() {
+    // Issue #203: the O8/O9 store-back was appended after the block's
+    // statements, so `return slot` was followed by `m[k] = slot` — a
+    // non-terminating statement after `return`, which `cmd/compile` rejects
+    // with `missing return`.
+    let go = emit(
+        "fn update(m map[string]int, k string) int {\n\
+           slot := &m[k]\n\
+           slot = 42\n\
+           return slot\n\
+         }\n\
+         fn main() {\n\
+           m := map[string]int{\"k\": 0}\n\
+           v := update(m, \"k\")\n\
+           fmt.println(\"val: {v}\")\n\
+         }\n",
+    );
+    let store = go.find("m[k] = slot").expect("store-back");
+    let ret = go.find("return slot").expect("return");
+    assert!(
+        store < ret,
+        "the store-back must precede the return:\n{}",
+        go
+    );
+}
+
+#[test]
+fn loan_store_back_precedes_an_early_void_return() {
+    // The other half of #203: after a void `return` the store-back was
+    // unreachable, so the write through the loan was silently dropped —
+    // the program printed `val: 0` where `42` is correct.
+    let go = emit(
+        "fn bump(m map[string]int, k string) {\n\
+           if true {\n\
+             slot := &m[k]\n\
+             slot = 42\n\
+             return\n\
+           }\n\
+         }\n\
+         fn main() {\n\
+           m := map[string]int{\"k\": 0}\n\
+           bump(m, \"k\")\n\
+         }\n",
+    );
+    let store = go.find("m[k] = slot").expect("store-back");
+    let ret = go.find("return").expect("return");
+    assert!(
+        store < ret,
+        "the store-back must precede the early return:\n{}",
+        go
+    );
+}
+
+#[test]
+fn loan_store_back_precedes_break() {
+    // A jump out of the loop must still store the loan back before it moves.
+    let go = emit(
+        "fn f(m map[string]int) {\n\
+           for i in 0..2 {\n\
+             slot := &m[\"k\"]\n\
+             slot = i\n\
+             break\n\
+           }\n\
+         }\n\
+         fn main() {\n\
+           m := map[string]int{\"k\": 0}\n\
+           f(m)\n\
+         }\n",
+    );
+    let store = go.find("m[\"k\"] = slot").expect("store-back");
+    let brk = go.find("break").expect("break");
+    assert!(store < brk, "the store-back must precede the break:\n{}", go);
+}
+
+#[test]
+fn loan_store_back_at_block_end_is_unchanged() {
+    // Control: without a terminator the loan flushes at the declaring block's
+    // end exactly as before.
+    let go = emit(
+        "fn f(m map[string]int) {\n\
+           slot := &m[\"k\"]\n\
+           slot = 42\n\
+         }\n\
+         fn main() {\n\
+           m := map[string]int{\"k\": 0}\n\
+           f(m)\n\
+         }\n",
+    );
+    assert!(go.contains("m[\"k\"] = slot"), ":\n{}", go);
+}
+
+#[test]
+#[test]
 fn return_none_lowers_to_option_zero() {
     let go = emit("fn get() option[int] {\n    return none\n}\n");
     assert!(
