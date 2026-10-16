@@ -139,6 +139,7 @@ def main():
 
     failures = []
     clean_rejects = ok_accepts = 0
+    cases_run = 0
     with tempfile.TemporaryDirectory(prefix="hyfuzz-") as workdir:
         for i in range(args.cases):
             kind = i % 3
@@ -149,6 +150,7 @@ def main():
             else:
                 src = gen_nest(rng)
             bad, accepted = check_one(args.hyb, src, workdir, args.timeout)
+            cases_run += 1
             if bad:
                 failures.append((i, kind, bad, src[:200]))
                 if len(failures) >= 10:
@@ -158,8 +160,10 @@ def main():
             else:
                 clean_rejects += 1
 
-    print(f"hyfuzz: {args.cases} cases, seed={args.seed}, "
+    print(f"hyfuzz: {cases_run} cases, seed={args.seed}, "
           f"clean-rejects={clean_rejects}, clean-accepts={ok_accepts}")
+    if cases_run < args.cases:
+        print(f"hyfuzz: stopped early; {args.cases - cases_run} requested cases not executed")
     if failures:
         print(f"hyfuzz: {len(failures)} INVARIANT VIOLATIONS:")
         for i, kind, bad, head in failures:
