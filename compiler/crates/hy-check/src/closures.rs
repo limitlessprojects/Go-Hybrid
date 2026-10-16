@@ -130,13 +130,17 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
                 ck.mark_move_in_value(st, v, format!("the move-define `{}`", v.render()));
             }
             if l.names.len() == 1 && l.values.len() == 1 {
-             if let Expr::Ident { name: rhs_name, .. } = crate::model::unwrap_parens(&l.values[0]) {
-                 if st.env.contains_key(rhs_name) || st.scopes.iter().any(|s| s.contains_key(rhs_name)) {
-                     let resolved_root = crate::freeze::resolve_alias(st, rhs_name);
-                     st.aliases.insert(l.names[0].clone(), resolved_root);
-                 }
-             }
-         }
+                if let Expr::Ident { name: rhs_name, .. } =
+                    crate::model::unwrap_parens(&l.values[0])
+                {
+                    if st.env.contains_key(rhs_name)
+                        || st.scopes.iter().any(|s| s.contains_key(rhs_name))
+                    {
+                        let resolved_root = crate::freeze::resolve_alias(st, rhs_name);
+                        st.aliases.insert(l.names[0].clone(), resolved_root);
+                    }
+                }
+            }
             // T22 (issue #12 parity with the flat pass): only `const` is
             // DEEPLY immutable; `let` is a SHALLOW immutable binding, so it
             // must NOT take the class-4 sendability shortcut.
@@ -228,7 +232,17 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
                 };
                 let vals: Vec<&Expr> = vec![value];
                 let targets = ck.chan_elem_shape(st, chan);
-                ck.check_site(st, *span, "HYB-E3002", &vals, managed, &desc, *is_move, None, targets.as_deref());
+                ck.check_site(
+                    st,
+                    *span,
+                    "HYB-E3002",
+                    &vals,
+                    managed,
+                    &desc,
+                    *is_move,
+                    None,
+                    targets.as_deref(),
+                );
             }
         }
         Stmt::Select { arms, .. } => {
@@ -238,11 +252,24 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
                     SelectArmKind::Send { chan, value } => {
                         let span = chan.span().to(value.span());
                         if ck.check_send_target(st, chan, span) {
-                            let desc =
-                                format!("the select-send `{} <- {}`", chan.render(), value.render());
+                            let desc = format!(
+                                "the select-send `{} <- {}`",
+                                chan.render(),
+                                value.render()
+                            );
                             let vals: Vec<&Expr> = vec![value];
                             let targets = ck.chan_elem_shape(st, chan);
-                            ck.check_site(st, span, "HYB-E3002", &vals, managed, &desc, false, None, targets.as_deref());
+                            ck.check_site(
+                                st,
+                                span,
+                                "HYB-E3002",
+                                &vals,
+                                managed,
+                                &desc,
+                                false,
+                                None,
+                                targets.as_deref(),
+                            );
                         }
                     }
                     SelectArmKind::Recv { names, chan } => {
@@ -342,9 +369,51 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
             check_body_boundaries(ck, st, block, managed);
             st.scope_pop();
         }
-        Stmt::Assign { values, .. } => {
+        Stmt::Assign {
+            targets,
+            op,
+            values,
+            ..
+        } => {
             for v in values {
                 ck.mark_move_in_value(st, v, format!("the move-assign `{}`", v.render()));
+            }
+            if *op == hy_syntax::AssignOp::Assign && targets.len() == values.len() {
+                for (t, v) in targets.iter().zip(values.iter()) {
+                    if let hy_syntax::PlaceKind::Ident(name) = &t.kind {
+                        let non_owned = match crate::model::unwrap_parens(v) {
+                            Expr::Ident { name: src, .. } => {
+                                ck.non_owned_origin_of(st, src).map(|(o, _)| o)
+                            }
+                            other => crate::model::move_operand_ident(other)
+                                .and_then(|src| ck.non_owned_origin_of(st, &src).map(|(o, _)| o)),
+                        };
+                        let shape = ck.shape_of_expr(st, v);
+                        let ty = ck.ty_of_expr(st, v);
+                        if let Some(b) = st.env_lookup_mut(name) {
+                            if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
+                                b.shape = shape;
+                            }
+                            if ty.is_some() || b.ty.is_none() {
+                                b.ty = ty;
+                            }
+                            b.moved = None;
+                            b.non_owned_origin = non_owned;
+                        }
+                        st.aliases.remove(name);
+                        st.share_clear(name);
+                        ck.record_may_share(st, name, v);
+                        ck.record_alias(st, name, v);
+                        if let Expr::Ident { name: rhs_name, .. } = crate::model::unwrap_parens(v) {
+                            if st.env.contains_key(rhs_name)
+                                || st.scopes.iter().any(|s| s.contains_key(rhs_name))
+                            {
+                                let resolved_root = crate::freeze::resolve_alias(st, rhs_name);
+                                st.aliases.insert(name.clone(), resolved_root);
+                            }
+                        }
+                    }
+                }
             }
         }
         Stmt::Return { values, .. } => {

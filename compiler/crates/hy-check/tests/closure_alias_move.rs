@@ -93,3 +93,50 @@ fn main() {
         cs
     );
 }
+
+const CLOSURE_REASSIGN_ALIAS_REPRO: &str = "\
+fn worker(m map[string]int, done chan bool) {
+    for i in 0..1000 {
+        m[\"k\"] = i
+    }
+    done <- true
+}
+
+fn main() {
+    m := map[string]int{\"k\": 0}
+    done := make(chan bool, 2)
+
+    spawn_it := fn() {
+        alias := map[string]int{\"k\": 1}
+        alias = m
+        task worker(move alias, done)
+    }
+
+    spawn_it()
+    spawn_it()
+    <-done
+    <-done
+}
+";
+
+#[test]
+fn closure_reassign_captured_alias_move_is_rejected_e3004() {
+    let r = check(CLOSURE_REASSIGN_ALIAS_REPRO);
+    let cs = codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E3004"),
+        "expected HYB-E3004 for moving a closure-local binding reassigned to captured binding, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+    let e3004 = r
+        .diagnostics
+        .iter()
+        .find(|d| d.code == "HYB-E3004")
+        .expect("HYB-E3004 must be present");
+    assert_eq!(
+        e3004.tier0_rule.as_deref(),
+        Some("A1b"),
+        "non-owned move rejects under Tier-0 rule A1b"
+    );
+}
