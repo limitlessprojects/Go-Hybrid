@@ -741,7 +741,10 @@ tagged open D3.
 | chan | the **zero channel**: receive and send block forever, `close` panics (Go's nil-channel semantics exactly) |
 
 ```hy
-struct greeting { name string; count int }   // count starts at 0 — example 01
+struct greeting {
+    name  string
+    count int        // count starts at 0 — example 01
+}
 g := greeting{name: "Hybrid"}
 fmt.println(g.count)         // expect: 0
 ```
