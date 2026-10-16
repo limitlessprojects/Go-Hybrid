@@ -25,6 +25,7 @@ Strategies (deterministic seed → reproducible job):
 Stdlib only (runner discipline). Exit 0 iff all invariants held for all cases.
 """
 import argparse
+import math
 import os
 import random
 import subprocess
@@ -111,6 +112,8 @@ def check_one(hyb, src, workdir, timeout):
         )
     except subprocess.TimeoutExpired:
         return "HANG", False
+    except OSError as err:
+        return f"EXEC_ERROR: {err}", False
     if r.returncode not in (0, 1):
         return f"UNEXPECTED exit={r.returncode}", False
     blob = (r.stdout + r.stderr).lower()
@@ -133,6 +136,14 @@ def main():
     # dir), so a relative --hyb path would resolve THERE (the 0.1s fleet
     # failure of 2026-10-14 — FileNotFoundError, exit 1 before case 1)
     args.hyb = os.path.abspath(args.hyb)
+    if not os.path.isfile(args.hyb):
+        raise SystemExit(f"hyfuzz: --hyb binary not found: {args.hyb}")
+    if not os.path.isdir(args.corpus):
+        raise SystemExit(f"hyfuzz: --corpus directory not found: {args.corpus}")
+    if args.cases <= 0:
+        raise SystemExit("hyfuzz: --cases must be positive")
+    if not (math.isfinite(args.timeout) and args.timeout > 0):
+        raise SystemExit("hyfuzz: --timeout must be positive")
     corpus = load_corpus(args.corpus)
     if not corpus:
         raise SystemExit("fuzz: no corpus programs found")
