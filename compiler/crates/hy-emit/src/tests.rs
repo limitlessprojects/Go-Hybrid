@@ -838,6 +838,124 @@ fn loan_store_back_at_block_end_is_unchanged() {
 }
 
 #[test]
+fn closure_loan_is_stored_back_inside_the_closure() {
+    // Issue #202: `Expr::FnLit` switched the statement buffer to the closure
+    // body but never pushed a loan frame, so a loan opened inside the closure
+    // registered in the ENCLOSING function's frame and its store-back was
+    // appended at the end of that function — outside the closure, where
+    // `slot` is undefined (`go build`: undefined: slot).
+    let go = emit(
+        "fn main() {\n\
+           m := map[string]int{\"k\": 0}\n\
+           f := fn() {\n\
+             slot := &m[\"k\"]\n\
+             slot = 42\n\
+           }\n\
+           f()\n\
+           v := m[\"k\"]\n\
+           fmt.println(\"val: {v}\")\n\
+         }\n",
+    );
+    let store = go.find("m[\"k\"] = slot").expect("store-back");
+    let call = go.find("f()").expect("the closure call");
+    assert!(
+        store < call,
+        "the store-back must stay inside the closure, before the call:\n{}",
+        go
+    );
+    assert_eq!(
+        go.matches("m[\"k\"] = slot").count(),
+        1,
+        "exactly one store-back:\n{}",
+        go
+    );
+}
+
+#[test]
+fn closure_loan_does_not_bind_to_an_outer_name() {
+    // The silent-corruption half of #202: when the enclosing function has its
+    // own `slot`, the hoisted store-back resolved against THAT variable, so the
+    // map slot took a value the source never wrote there.
+    let go = emit(
+        "fn main() {\n\
+           m := map[string]int{\"k\": 0}\n\
+           slot := 999\n\
+           f := fn() {\n\
+             slot := &m[\"k\"]\n\
+             slot = 42\n\
+           }\n\
+           f()\n\
+           v := m[\"k\"]\n\
+           fmt.println(\"val: {v}\")\n\
+         }\n",
+    );
+    assert_eq!(
+        go.matches("m[\"k\"] = slot").count(),
+        1,
+        "the enclosing function must NOT gain a second store-back resolved \
+         against its own unrelated `slot`:\n{}",
+        go
+    );
+    let store = go.find("m[\"k\"] = slot").expect("store-back");
+    let call = go.find("f()").expect("the closure call");
+    assert!(store < call, "the store-back stays in the closure:\n{}", go);
+}
+
+#[test]
+fn enclosing_loan_still_flushes_at_function_end_across_a_closure() {
+    // Control: a loan of the enclosing function is unaffected by a closure in
+    // the same body — it still stores back at the function's end.
+    let go = emit(
+        "fn main() {\n\
+           m := map[string]int{\"k\": 0}\n\
+           slot := &m[\"k\"]\n\
+           slot = 7\n\
+           f := fn() {\n\
+             fmt.println(\"x\")\n\
+           }\n\
+           f()\n\
+         }\n",
+    );
+    let store = go.find("m[\"k\"] = slot").expect("store-back");
+    let call = go.find("f()").expect("the closure call");
+    assert!(
+        store > call,
+        "the outer loan flushes at the end of the function, as before:\n{}",
+        go
+    );
+}
+
+#[test]
+fn closure_return_does_not_flush_the_enclosing_loans() {
+    // The boundary the two fixes share: a `return` inside a closure exits the
+    // closure only, so it must not store the enclosing function's loan back
+    // early (which would also drain the frame and lose the later write).
+    let go = emit(
+        "fn main() {\n\
+           m := map[string]int{\"k\": 0}\n\
+           slot := &m[\"k\"]\n\
+           f := fn() {\n\
+             return\n\
+           }\n\
+           f()\n\
+           slot = 7\n\
+         }\n",
+    );
+    assert_eq!(
+        go.matches("m[\"k\"] = slot").count(),
+        1,
+        "the closure's return must not store the outer loan back:\n{}",
+        go
+    );
+    let store = go.find("m[\"k\"] = slot").expect("store-back");
+    let call = go.find("f()").expect("the closure call");
+    assert!(
+        store > call,
+        "the outer loan still flushes at the function's end:\n{}",
+        go
+    );
+}
+
 #[test]
 fn return_none_lowers_to_option_zero() {
     let go = emit("fn get() option[int] {\n    return none\n}\n");

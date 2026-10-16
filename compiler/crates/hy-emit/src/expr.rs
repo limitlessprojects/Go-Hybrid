@@ -335,10 +335,25 @@ impl Emitter {
                 // Redirect statement output into a scratch buffer: the
                 // literal renders inline, its body keeps normal indents.
                 let main_body = std::mem::take(&mut self.body);
+                // Issue #202: a closure body is its own loan-frame boundary.
+                // Without this, a loan opened inside the closure registered in
+                // the ENCLOSING function's frame, so its store-back was emitted
+                // at the end of that function — outside the closure — where the
+                // loaned name is either out of scope (unbuildable: `undefined:
+                // slot`) or binds to an unrelated variable (silent corruption:
+                // the map slot took the outer `slot`'s value).
+                self.fn_body_bases.push(self.loan_frames.len());
+                self.loan_frames.push(Vec::new());
                 self.indent += 1;
                 for st in &body.stmts {
                     self.emit_stmt(st)?;
                 }
+                // The closure's own loans store back INSIDE the closure.
+                let closure_loans = self.loan_frames.pop().unwrap_or_default();
+                for (name, place) in closure_loans {
+                    self.push(&format!("{} = {}", place, name));
+                }
+                self.fn_body_bases.pop();
                 self.indent -= 1;
                 let closure_body = std::mem::take(&mut self.body);
                 self.body = main_body;

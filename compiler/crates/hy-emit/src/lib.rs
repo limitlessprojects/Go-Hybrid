@@ -365,6 +365,11 @@ pub struct Emitter {
     /// parallel stack) — a `break loop` / `continue loop` targets the innermost
     /// labeled loop, which need not be the innermost loop.
     labeled_loan_bases: Vec<usize>,
+    /// Issue #202: the `loan_frames` depth at each function / closure body
+    /// entry. A `return` exits only the innermost one, so it must not store the
+    /// ENCLOSING function's loans back — a closure's `return` is not a return
+    /// from the function that contains it.
+    fn_body_bases: Vec<usize>,
     /// E11 handler contract: inside a closure that converts to a
     /// propagation-carrying target (`http.handler`), `?` fires
     /// `http.Error(w, err, 400)` + return instead of the E3 error-return.
@@ -431,6 +436,7 @@ impl Emitter {
             loan_frames: Vec::new(),
             loop_loan_bases: Vec::new(),
             labeled_loan_bases: Vec::new(),
+            fn_body_bases: Vec::new(),
             handler_writer: None,
             pending_fnlit_conv: None,
             cur_fn_conv_result: None,
@@ -807,7 +813,11 @@ impl Emitter {
                 // emit_block_body adds its own, so drop one first or every
                 // wrapper body line renders one tab deeper than gofmt.
                 self.indent -= 1;
+                // Issue #202: a `return` inside this wrapper exits only the
+                // wrapper, so the body's loan frame is a function boundary.
+                self.fn_body_bases.push(self.loan_frames.len());
                 self.emit_block_body(&body.stmts)?;
+                self.fn_body_bases.pop();
                 self.indent += 1;
             }
             // Terminal bare `return`: the wrapper closure's named result
@@ -878,7 +888,10 @@ impl Emitter {
         // hints write no lines; no bump is needed anywhere here.
         self.emit_hints_from_params(&f.params);
         if let Some(body) = &f.body {
+            // Issue #202: the function body is a loan-frame boundary.
+            self.fn_body_bases.push(self.loan_frames.len());
             self.emit_block_body(&body.stmts)?;
+            self.fn_body_bases.pop();
         }
         self.push("}");
         Ok(())

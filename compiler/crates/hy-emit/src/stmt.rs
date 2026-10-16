@@ -58,7 +58,11 @@ impl Emitter {
             Stmt::For { kind, body, .. } => self.emit_for(kind, body),
             Stmt::Return { values, .. } => {
                 // Issue #203: the store-backs belong BEFORE the `return`.
-                self.flush_loan_frames(0);
+                // Issue #202: and only for the blocks inside the innermost
+                // function/closure body — a closure's `return` must not store
+                // the enclosing function's loans back.
+                let upto = self.fn_body_bases.last().copied().unwrap_or(0);
+                self.flush_loan_frames(upto);
                 self.emit_return(values)
             }
             Stmt::Task { callee, args, .. } => {
