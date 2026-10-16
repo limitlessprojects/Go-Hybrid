@@ -449,6 +449,21 @@
       "rule": "BUILDABLE"
     },
     {
+      "code": "HYB-E6003",
+      "name": "const-init-not-constant",
+      "category": "overflow-bounds",
+      "severity": "error",
+      "title": "`const` initializer is not a constant expression",
+      "summary": "A local or file-level `const` whose initializer is not a compile-time constant expression is rejected: the emitter keeps the Go `const` keyword for every initializer that is not a composite literal (`SliceLit`/`MapLit`/`StructLit` render as `var`, issue #188), and Go refuses `const c = f()` (`… is not constant`), so an accepted Hybrid program would emit unbuildable Go (issue #205). Accepted initializers are literals, unary and binary operations over constants, and the names of `const` bindings in scope; calls, index/field reads and anything else the checker cannot evaluate are not constants.",
+      "fixits": [
+        "bind it with `let`/`:=` — a runtime binding, not a compile-time constant",
+        "use a literal, or an expression over literals and other `const`s"
+      ],
+      "example": "const c = get_val()   // reject: HYB-E6003 — a call is not a constant expression; Go cannot build the emitted module",
+      "rule": "BUILDABLE",
+      "tier0_rule_id": "BUILDABLE"
+    },
+    {
       "code": "HYB-E6004",
       "name": "invalid-array-length",
       "category": "overflow-bounds",

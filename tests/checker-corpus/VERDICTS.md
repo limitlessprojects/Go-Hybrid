@@ -591,3 +591,36 @@ it as a Go import, so it cannot fail `go build`); unused `var` /
 composite-`const` locals, select-receive names and match bindings stay
 outside this registration (the same Go error family, tracked separately);
 unread `for ... in` bindings are handled at emission (issue #139).
+
+## Additive corpus registration — 2026-10-16: a `const` initializer must be a constant expression (issue #205)
+
+Case 51 was registered from issue #205 before running the fixture against the
+fixed checker, and its verdict line was closed after the fix reproduced the
+reject. It pins the "the RHS is not a constant expression at all" half of the
+`const` contract: #148 pinned constants that OVERFLOW a declared type
+(HYB-E6002) and #37 pinned writes THROUGH a `const` root (HYB-E3006); neither
+asked whether the initializer can be a Go constant in the first place.
+
+`hy-emit` keeps the Go `const` keyword for every initializer that is not a
+composite literal (`SliceLit` / `MapLit` / `StructLit` render as `var` — issue
+#188), so `const c = get_val()` emitted literally `const c = get_val()` and
+`cmd/compile` refused it: `get_val() (value of type int) is not constant`.
+`hy-check` performed no constant evaluation at all, so the program was
+accepted on `c09e9928` (issue #205 evidence, darwin-arm64).
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 48 | 51-const-init-not-constant | REJECT | BUILDABLE | `HYB-E6003` | a `const` is a compile-time constant (SPEC §1.1/§2.4); a call is not one, so an accepted program would emit unbuildable Go |
+
+The new diagnostic `HYB-E6003` (`const-init-not-constant`, rule `BUILDABLE`)
+is registered in `hy-diag/data/diagnostics.json` next to `HYB-E6002` and is
+emitted at both `const` declaration sites (file-level `Decl::Const` and the
+statement-level `LocalKind::Const`). Accepted initializers are literals,
+unary/binary operations over constants, and the names of `const` bindings in
+scope; the composite forms stay out of the rule because the emitter renders
+them as `var`. No existing verdict moved and the accept-side controls
+(corpus 15, 41, 44) still accept. Verdict-level managed count stays 2; this
+case adds no `managed` block.
+
+*Numbering:* main has landed corpus rows through slot 50; this row was rebased
+onto that and takes slot 51.

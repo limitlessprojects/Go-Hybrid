@@ -13,7 +13,7 @@
 //! conversion (SPEC-LANGUAGE X4), and the conversion form `int8(x)` is
 //! unaffected.
 
-use crate::model::{unwrap_parens, Checker};
+use crate::model::{unwrap_parens, Checker, FnState};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{BinOp, Expr, LitKind, TypeExpr, UnOp};
 
@@ -121,6 +121,68 @@ impl<'a> Checker<'a> {
             self.diags.push(
                 Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
             );
+        }
+    }
+
+    /// Issue #205: a `const` initializer that the emitter renders as a Go
+    /// `const` must be a compile-time constant expression. `hy-emit` keeps the
+    /// `const` keyword for every initializer that is not a composite literal
+    /// (`SliceLit` / `MapLit` / `StructLit` render as `var`, issue #188), so
+    /// `const c = get_val()` passed the checker and then failed `cmd/compile`
+    /// with `get_val() … is not constant`. Emits HYB-E6003. `st` supplies the
+    /// local `const` bindings when the declaration is a statement.
+    pub(crate) fn check_const_init_is_constant(
+        &mut self,
+        name: &str,
+        value: &Expr,
+        st: Option<&FnState>,
+    ) {
+        let value = unwrap_parens(value);
+        // Mirror the emitter's `composite` test: those render as `var`, so a
+        // runtime expression there is fine and stays out of this rule.
+        if matches!(
+            value,
+            Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
+        ) {
+            return;
+        }
+        if self.is_constant_expr(st, value) {
+            return;
+        }
+        let span = value.span();
+        let msg = format!(
+            "`const {}` initializer is not a constant expression (HYB-E6003)",
+            name
+        );
+        let notes = vec![
+            "why: the emitter keeps the Go `const` keyword for a non-composite `const` initializer, and Go refuses `const c = f()` (`… is not constant`), so an accepted program would emit unbuildable Go (issue #205)".to_string(),
+            "fix: bind it with `let`/`:=` (a runtime binding), or use a literal — or an expression over literals and other `const`s".to_string(),
+            format!("note: the initializer is `{}`", value.render()),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E6003", self.path.clone(), span, msg).with_notes(notes),
+        );
+    }
+
+    /// Is `e` a compile-time constant expression? Literals, unary/binary
+    /// operations over constants, and the names of `const` bindings in scope
+    /// (`Binding::immutable` is set iff the binding is a `const`). Deliberately
+    /// conservative: calls, index/field reads and anything else the checker
+    /// cannot evaluate are not constants.
+    fn is_constant_expr(&self, st: Option<&FnState>, e: &Expr) -> bool {
+        match unwrap_parens(e) {
+            Expr::Lit { kind, .. } => !matches!(kind, LitKind::Nil),
+            Expr::Ident { name, .. } => {
+                self.consts.contains_key(name)
+                    || st.and_then(|s| s.env_lookup(name))
+                        .map(|b| b.immutable)
+                        .unwrap_or(false)
+            }
+            Expr::Unary { operand, .. } => self.is_constant_expr(st, operand),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.is_constant_expr(st, lhs) && self.is_constant_expr(st, rhs)
+            }
+            _ => false,
         }
     }
 }

@@ -811,6 +811,11 @@ impl<'a> Checker<'a> {
                 if let Some(t) = &l.ty {
                     self.check_const_overflow_init(name, t, value);
                 }
+                // Issue #205: a `const` initializer the emitter renders as a Go
+                // `const` must be a compile-time constant expression.
+                if matches!(l.kind, LocalKind::Const) {
+                    self.check_const_init_is_constant(name, value, Some(&*st));
+                }
                 // N1: a bare `nil` initializer under a non-nilable
                 // ascription is a compile error (HYB-E4001) — the SPEC's own
                 // example is `var s []int = nil`.

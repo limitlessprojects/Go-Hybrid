@@ -166,6 +166,10 @@ fn build_tables(ck: &mut Checker<'_>) {
                     ck.check_const_overflow_init(&c.name, ty, &c.value);
                 }
                 ck.declare_pkg_name(&c.name, "const", c.span);
+                // Issue #205: the initializer must be a compile-time constant
+                // expression — a file-level `const` has no local scope to
+                // consult, so only the file-level consts table is in play.
+                ck.check_const_init_is_constant(&c.name, &c.value, None);
                 let b = ck.const_binding(c);
                 ck.consts.insert(c.name.clone(), b);
             }
