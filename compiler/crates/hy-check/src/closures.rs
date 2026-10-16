@@ -273,7 +273,24 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
 
     match stmt {
         Stmt::Local(l) => {
+            if let Some(t) = &l.ty {
+                let shape = ck.shape_of_type(t);
+                for (name, value) in l.names.iter().zip(l.values.iter()) {
+                    if Checker::is_nil_literal(value)
+                        && !matches!(shape, TypeShape::Unknown)
+                        && !Checker::is_nilable_shape(&shape)
+                    {
+                        ck.emit_nil_type_error_text(
+                            &shape,
+                            t.render(),
+                            value.span(),
+                            &format!("the declared type of `{}`", name),
+                        );
+                    }
+                }
+            }
             for v in &l.values {
+                ck.check_composite_nils(st, v);
                 ck.mark_move_in_value(st, v, format!("the move-define `{}`", v.render()));
             }
             // T22 (issue #12 parity with the flat pass): only `const` is
@@ -318,6 +335,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                                 b.non_owned_origin = Some(origin);
                             }
                         }
+                        ck.record_move_const_and_a3_loans(st, name, value, 0);
                         continue;
                     }
                     let reads_self = ck.value_reads_storage_of(st, value, name);
@@ -412,8 +430,9 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     // so local aliases of non-owned captured bindings inherit origin
                     // and cannot bypass O5.1 / O5.4 move restrictions.
                     ck.record_may_share(st, name, value);
+                    ck.record_move_const_and_a3_loans(st, name, value, 0);
                     ck.record_alias(st, name, value);
-                    if let Some(origin) = shadowed_origin {
+                    if let Some(origin) = shadowed_origin.or(moved_non_owned) {
                         if let Some(b) = st.env_lookup_mut(name) {
                             if b.non_owned_origin.is_none() {
                                 b.non_owned_origin = Some(origin);
@@ -424,6 +443,10 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 ck.record_local_borrow_aliases(st, l);
             } else {
                 // multi-name define from one value (`v, ok := m[k]`, `a, b := f()`)
+                let moved_non_owned = l
+                    .values
+                    .first()
+                    .and_then(|v| ck.moved_non_owned_origin_in_expr(st, v));
                 let (shapes, tys) = match l.values.first() {
                     Some(v) => (
                         ck.multi_value_shapes(st, v, l.names.len()),
@@ -435,7 +458,18 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     ),
                 };
                 for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
+                    let carries = ck.shape_may_share(&shape);
                     ck.define_binding(st, name, shape, ty, immutable, managed);
+                    if carries {
+                        if let Some(origin) = &moved_non_owned {
+                            if let Some(b) = st.env_lookup_mut(name) {
+                                b.non_owned_origin = Some(origin.clone());
+                            }
+                        }
+                        if let Some(v) = l.values.first() {
+                            ck.record_move_const_and_a3_loans(st, name, v, 0);
+                        }
+                    }
                 }
             }
         }
@@ -534,8 +568,14 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 st.scope_pop();
             }
         }
-        Stmt::Managed { body, .. } => {
-            ck.managed_blocks += 1; // O6.3 parity with the flat walk
+        Stmt::Managed {
+            reason,
+            category,
+            tickets,
+            body,
+            span,
+        } => {
+            ck.audit_managed_block(reason, category, tickets, *span);
             st.scope_push();
             check_body_boundaries(ck, st, body, true, nested);
             st.scope_pop();
@@ -708,11 +748,44 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             ..
         } => {
             ck.process_closure_assign(st, targets, *op, values);
+            if targets.len() == values.len() {
+                for (t, v) in targets.iter().zip(values.iter()) {
+                    if matches!(t.kind, hy_syntax::PlaceKind::Field { .. }) {
+                        let is_borrow = crate::model::as_addr_of(v).is_some()
+                            || matches!(ck.shape_of_expr(st, v), TypeShape::BorrowHandle(_));
+                        if is_borrow {
+                            ck.emit_a6_field_borrow_error(t);
+                        }
+                    }
+                }
+            } else if values.len() == 1 && targets.len() > 1 {
+                let shapes = ck.multi_value_shapes(st, &values[0], targets.len());
+                for (t, shape) in targets.iter().zip(shapes.iter()) {
+                    if matches!(t.kind, hy_syntax::PlaceKind::Field { .. })
+                        && matches!(shape, TypeShape::BorrowHandle(_))
+                    {
+                        ck.emit_a6_field_borrow_error(t);
+                    }
+                }
+            }
+            for (t, v) in targets.iter().zip(values.iter()) {
+                if Checker::is_nil_literal(v) {
+                    if let Some(shape) = ck.place_shape(st, t) {
+                        if !matches!(shape, TypeShape::Unknown)
+                            && !Checker::is_nilable_shape(&shape)
+                        {
+                            ck.emit_nil_type_error(
+                                &shape,
+                                v.span(),
+                                &format!("the assignment target `{}`", t.render()),
+                            );
+                        }
+                    }
+                }
+                ck.check_composite_nils(st, v);
+            }
         }
         Stmt::Return { values, span } => {
-            for v in values {
-                ck.mark_move_in_value(st, v, format!("the move-return `{}`", v.render()));
-            }
             ck.process_return(st, values, *span);
         }
         Stmt::Expr { expr, .. } => {
