@@ -12,8 +12,10 @@ No tokens, no secrets, no pushing — worker output is data.
 """
 import json
 import os
+import shlex
 import subprocess
 import sys
+import tempfile
 import time
 
 # --- injected by tools/job.py at submit time (single data line, runner logic untouched) ---
@@ -64,12 +66,22 @@ def main():
     # 2. clone the public repo at the pinned SHA
     repo = job.get("repo", "https://github.com/limitlessprojects/Go-Hybrid.git")
     sha = job.get("sha", "HEAD")
-    rc, _ = sh("git clone --quiet {} repo 2>&1 | tail -2".format(repo), 300)
+    # sh() already bounds displayed output. A pipe to tail would replace
+    # Git's exit status with tail's success and hide preparation failures.
+    rc, _ = sh("git clone --quiet {} repo".format(shlex.quote(repo)), 300)
     if rc == 0:
-        sh("cd repo && git checkout --quiet {} 2>&1 | tail -2".format(sha), 60)
+        rc, _ = sh("git checkout --quiet {}".format(shlex.quote(sha)), 60,
+                   cwd=os.path.join(WORK, "repo"))
     else:
-        # fall back to codeload tarball (sometimes git is restricted but https works)
-        sh("rm -rf repo && mkdir repo && curl -sL --max-time 240 https://codeload.github.com/limitlessprojects/Go-Hybrid/tar.gz/{} | tar xz --strip-components=1 -C repo".format(sha), 300)
+        # Keep the existing public-repo fallback, but preserve BOTH the
+        # download and extraction exit statuses instead of piping them.
+        with tempfile.TemporaryDirectory(prefix="hybrid-source-", dir=WORK) as temp:
+            archive = shlex.quote(os.path.join(temp, "source.tar.gz"))
+            url = shlex.quote("https://codeload.github.com/limitlessprojects/Go-Hybrid/tar.gz/{}".format(sha))
+            rc, _ = sh("rm -rf repo && mkdir repo && curl -fsSL --max-time 240 {} -o {} && tar xzf {} --strip-components=1 -C repo".format(url, archive, archive), 300)
+    if rc != 0:
+        print("FATAL: repository preparation failed (exit {}); job runner not started".format(rc), flush=True)
+        sys.exit(rc)
 
     # 3. run the repo's runner
     rc, _ = sh("python3 repo/tools/runner/runner.py {} --results-dir {}/results --repo-dir repo".format(job_path, WORK), 7200)
