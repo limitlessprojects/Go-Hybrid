@@ -557,3 +557,38 @@ dated baseline remain unchanged. Verdict-level managed count is 2/28;
 the harness's unchanged historical as-written set {01, 03, 04} reports
 3/28, with the same population qualification noted above. Case 28 adds
 no `managed` block.
+
+## Additive corpus registration — 2026-10-16: loop-carried move through a call-local alias (issue #194)
+
+Case 47 was registered from issue #194 before running the fixture against the
+fixed checker, and its verdict line was closed after the fix reproduced the
+reject. It pins the **loop-backedge** half of the call-local exemption that
+#23's fix introduced.
+
+`check_loop_backedge` exempts a loop-local initialized by a CALL from the
+loop-carried reset, because the checker has no interprocedural summary and
+must not reject the fresh-copy control (corpus 15's `chunk_of` returns
+`append([]string{}, …)`). The exemption keyed on `resolve_alias(st, lhs)` —
+the OUTER name — so for `m := same(agg)` it exempted `agg` itself and erased
+its loop-carried move: every iteration could move the same map again. On
+`c09e9928` the program passed `hyb check` with `OK (0 diagnostics)`; the
+reporter's `--emit-go` + `go run -race` run reported a data race between two
+`main.worker` goroutines on the same map (issue #194 evidence, darwin-arm64),
+then `fatal error: concurrent map writes`, exit 2.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 47 | 47-loop-call-local-backedge | REJECT | A1b | `HYB-E3003` | across the back edge `agg` is moved (through the alias `m`) and read again by the next iteration's `m := same(agg)` |
+
+The exemption now assumes a FRESH result only when the callee is **not** known
+to return one of its own parameters (a same-file summary,
+`Checker::callee_returns_own_param`). `same` returns its parameter, so `agg`
+stays loop-carried-moved and the second iteration's read is rejected; corpus
+15's `chunk_of` returns a fresh `append`, so its exemption is unchanged. No
+existing verdict moved and the accept-side controls (corpus 15, 41, 44) still
+accept. Verdict-level managed count stays 2; this case adds no `managed`
+block.
+
+*Numbering:* #195's fix (PR #271) registers a row 46; this row is 47 so both
+can land without a collision. Renumber freely if they are taken in the other
+order.

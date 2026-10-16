@@ -2166,6 +2166,56 @@ mod tests {
         assert_eq!(r_break.verdict, Verdict::Accept, "{:?}", r_break.diagnostics);
     }
 
+    #[test]
+    fn o52_loop_carried_move_through_call_local_alias_rejects_e3003() {
+        // #194: `check_loop_backedge` exempts a loop-local initialized by a
+        // CALL from the loop-carried reset, on the assumption that the call
+        // hands back a FRESH value. The exemption keyed on the resolved root,
+        // so for `m := same(agg)` it exempted the OUTER `agg` and erased its
+        // loop-carried move: every iteration could move the same map again and
+        // the emitted Go raced (two `main.worker` goroutines, one map).
+        let r_alias = check(
+            "fn same(m map[string]int) map[string]int {\n\
+               return m\n\
+             }\n\
+             fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n done <- true\n\
+             }\n\
+             fn main() {\n\
+               agg := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 2)\n\
+               for i in 0..2 {\n\
+                 m := same(agg)\n\
+                 task worker(move m, done)\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r_alias.verdict, Verdict::Reject, "{:?}", r_alias.diagnostics);
+        assert_eq!(first_error_rule(&r_alias).as_deref(), Some("A1b"));
+        assert!(r_alias.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // Control: the same shape with a callee that hands back a FRESH map
+        // (the corpus-15 `chunk_of` case) must stay accepted — the exemption
+        // may not be removed wholesale, only narrowed to real param returns.
+        let r_fresh = check(
+            "fn fresh_copy(m map[string]int) map[string]int {\n\
+               return map[string]int{\"k\": len(m)}\n\
+             }\n\
+             fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n done <- true\n\
+             }\n\
+             fn main() {\n\
+               agg := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 2)\n\
+               for i in 0..2 {\n\
+                 m := fresh_copy(agg)\n\
+                 task worker(move m, done)\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r_fresh.verdict, Verdict::Accept, "{:?}", r_fresh.diagnostics);
+    }
+
     // -----------------------------------------------------------------------
     // Scope-aware bindings (issue #14, LubuSeb's soundness report): an
     // inner-block define must shadow, never overwrite. The flat env let

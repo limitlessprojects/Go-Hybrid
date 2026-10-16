@@ -401,6 +401,39 @@ impl<'a> Checker<'a> {
         origin
     }
 
+    /// #194: true when `callee` is declared in this file and at least one of
+    /// its `return` statements hands back one of its own parameters. The
+    /// loop-backedge exemption below may only assume a FRESH result for
+    /// callees that are not of this shape: `fn same(m map[string]int) ... {
+    /// return m }` really does hand the caller's storage back, so a move
+    /// through a local initialized by that call is loop-carried and must not
+    /// be erased. The fresh-copy control (corpus 15's `chunk_of`, which
+    /// returns `append([]string{}, …)`) keeps its exemption.
+    fn callee_returns_own_param(&self, callee: &hy_syntax::Expr) -> bool {
+        let Some(name) = crate::walk::expr_path(callee) else {
+            return false;
+        };
+        let Some(f) = self.file.fns().find(|f| f.name == name) else {
+            return false;
+        };
+        let Some(body) = &f.body else {
+            return false;
+        };
+        let params: HashSet<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
+        crate::walk::flatten(body)
+            .stmts
+            .iter()
+            .any(|(stmt, _)| match stmt {
+                hy_syntax::Stmt::Return { values, .. } => values.iter().any(|v| {
+                    matches!(
+                        crate::model::unwrap_parens(v),
+                        hy_syntax::Expr::Ident { name, .. } if params.contains(name.as_str())
+                    )
+                }),
+                _ => false,
+            })
+    }
+
     /// O5.1 / O5.2 / O13 across loop iterations: when a loop body can repeat,
     /// any outer binding that was moved or consumed inside the loop and remains
     /// moved at the end of the body would be used or moved again on the next
@@ -431,9 +464,19 @@ impl<'a> Checker<'a> {
                     let is_inner = st.scopes[outer_depth..]
                         .iter()
                         .any(|s| s.contains_key(lhs.as_str()));
+                    // #194: the exemption may only assume a FRESH call result.
+                    // When the callee is declared in this file and returns one
+                    // of its own parameters (`same(m) { return m }`), the alias
+                    // the collector recorded is REAL, so the move through this
+                    // local is loop-carried and must survive the reset below.
+                    let returns_own_param = match crate::model::unwrap_parens(rhs) {
+                        Expr::Call { callee, .. } => self.callee_returns_own_param(callee),
+                        _ => false,
+                    };
                     if is_inner
                         && matches!(crate::model::unwrap_parens(rhs), Expr::Call { .. })
                         && st.aliases.contains_key(lhs.as_str())
+                        && !returns_own_param
                     {
                         call_local_roots.insert(resolve_alias(st, lhs));
                     }
