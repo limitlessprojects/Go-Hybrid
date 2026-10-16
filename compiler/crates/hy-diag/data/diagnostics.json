@@ -201,7 +201,7 @@
         "route updates through a channel instead of sharing the value",
         "copy the data the task needs and send the copy",
         "transfer ownership: `task worker(move counter)` — the binding (and every alias) must be unused afterward",
-        "wrap the shared state in a `managed` block (unchecked: Go DRF-SC applies; audited by --report-managed)"
+        "wrap the shared state in `managed(\"why this bypass is safe\", \"category\") { ... }` (unchecked: Go DRF-SC applies; audited by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)"
       ],
       "example": "task worker(counter)   // reject: HYB-E3001 — `counter` is a mutable map",
       "rule": "O4",
@@ -217,7 +217,7 @@
       "fixits": [
         "send a copy or a fresh literal instead of a live shared value",
         "send ownership with `move` if this task is done with the value (aliases freeze, O5)",
-        "share via channel discipline or `managed` instead"
+        "share via channel discipline or wrap the site in `managed(\"why this bypass is safe\", \"category\") { ... }` (audited by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)"
       ],
       "example": "jobs <- job{input: v, data: shared_map}   // reject: HYB-E3002 — `shared_map` is a live mutable map",
       "rule": "O4.6",
