@@ -202,6 +202,11 @@ pub(crate) struct Loan {
 pub(crate) struct FnState {
     /// The function's BASE scope: receiver, params, and top-level defines.
     pub env: HashMap<String, Binding>,
+    /// Bindings a live `defer` in this body still reads at function exit
+    /// (#415). A deferred call runs AFTER every statement, so a `move` of one
+    /// of these at a boundary happens before a use the statement walk would
+    /// otherwise never see.
+    pub deferred_refs: HashSet<String>,
     /// Saved alias maps for outer scopes when entering block scopes so an
     /// inner shadowing define (`if true { m2 := 1 }`) cannot wipe outer
     /// alias links (`m2 -> m`).

@@ -237,6 +237,26 @@ impl<'a> Checker<'a> {
     /// alias in its alias group (both directions: an alias of the moved
     /// binding, and the original when an alias is the one moved — they
     /// denote the same reference-typed value).
+    /// Issue #415: the deferred binding that still reads `name`'s storage at
+    /// function exit, if any. Covers the name itself, its alias root, and its
+    /// may-share component — so `defer report(alias)` also guards
+    /// `move origin` when the two name the same map.
+    pub(crate) fn deferred_conflict(&self, st: &FnState, name: &str) -> Option<String> {
+        let root = resolve_alias(st, name);
+        let mut group: std::collections::HashSet<String> = st.share_group(name);
+        group.insert(name.to_string());
+        group.insert(root.clone());
+        for a in st.aliases.keys() {
+            if resolve_alias(st, a) == root {
+                group.insert(a.clone());
+            }
+        }
+        st.deferred_refs
+            .iter()
+            .find(|d| group.contains(*d) || resolve_alias(st, d) == root)
+            .cloned()
+    }
+
     pub(crate) fn mark_move(
         &self,
         st: &mut FnState,

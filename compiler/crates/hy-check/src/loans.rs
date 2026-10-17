@@ -2316,6 +2316,28 @@ impl<'a> Checker<'a> {
                     // and preserve clique connectivity among `name`'s former
                     // neighbors so they remain linked to each other.
                     if !info.reads_self {
+                        // #438: a live `defer` captured this binding's VALUE,
+                        // not its name. Rebinding the name must not lose the
+                        // capture — hand it to the bindings that still hold
+                        // the same storage, so a later `move` of one of them
+                        // is still seen as racing the deferred read.
+                        if st.deferred_refs.contains(name) {
+                            let holders: Vec<String> = st.share_group(name).into_iter().collect();
+                            for holder in holders {
+                                if &holder != name {
+                                    st.deferred_refs.insert(holder);
+                                }
+                            }
+                            let children: Vec<String> = st
+                                .aliases
+                                .iter()
+                                .filter(|(k, v)| *v == name && *k != name)
+                                .map(|(k, _)| k.clone())
+                                .collect();
+                            for child in children {
+                                st.deferred_refs.insert(child);
+                            }
+                        }
                         self.transfer_non_owned_origin_to_peers_and_aliases(st, name);
                         let neighbors: Vec<String> = st
                             .may_share

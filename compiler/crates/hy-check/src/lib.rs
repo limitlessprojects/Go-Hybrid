@@ -594,6 +594,17 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 ck.mark_slot_loans_assign(&mut st, targets, *op, values);
             }
 
+            // #415: a deferred call runs at function EXIT, so every binding
+            // its arguments name is read after any later `move` in this body.
+            // Remember those roots; the spawn/send arms check them.
+            Stmt::Defer { call, .. } => {
+                let mut roots = Vec::new();
+                crate::model::collect_ref_roots(call, &mut roots);
+                for r in roots {
+                    st.deferred_refs.insert(r);
+                }
+            }
+
             Stmt::Return { values, span } => ck.process_return(&mut st, values, *span),
 
             // O4.0 check-site: every task argument (HYB-E3001) + the
@@ -615,6 +626,32 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     Some(callee),
                     targets.as_deref(),
                 );
+
+                // #415: a live `defer` in this body still reads its argument
+                // at function exit — after this transfer — so moving one of
+                // those bindings here races the deferred call.
+                for a in args {
+                    if let Some(n) = crate::model::move_operand_ident(&a.value) {
+                        if let Some(deferred) = ck.deferred_conflict(&st, &n) {
+                            ck.diags.push(
+                                Diagnostic::error(
+                                    "HYB-E3003",
+                                    ck.path.clone(),
+                                    *span,
+                                    format!(
+                                        "`{}` is moved into a task while a live `defer` still reads `{}`",
+                                        n, deferred
+                                    ),
+                                )
+                                .with_rule("A1b")
+                                .with_notes(vec![
+                                    "the deferred call runs at function exit, after ownership left this task (O5.2)".to_string(),
+                                    "compute what the deferred call needs BEFORE the move, or drop the `defer`".to_string(),
+                                ]),
+                            );
+                        }
+                    }
+                }
             }
 
             // O4.0 check-site: the sent value (HYB-E3002). The parser flags
@@ -651,6 +688,36 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         None,
                         targets.as_deref(),
                     );
+                }
+
+                // #415: a live `defer` in this body still reads its argument
+                // at function exit — after this send — so transferring one of
+                // those bindings here races the deferred call.
+                if *is_move {
+                    let moved = crate::model::move_operand_ident(value).or_else(|| match value {
+                        Expr::Ident { name, .. } => Some(name.clone()),
+                        _ => None,
+                    });
+                    if let Some(n) = moved {
+                        if let Some(deferred) = ck.deferred_conflict(&st, &n) {
+                            ck.diags.push(
+                                Diagnostic::error(
+                                    "HYB-E3003",
+                                    ck.path.clone(),
+                                    *span,
+                                    format!(
+                                        "`{}` is moved into a channel while a live `defer` still reads `{}`",
+                                        n, deferred
+                                    ),
+                                )
+                                .with_rule("A1b")
+                                .with_notes(vec![
+                                    "the deferred call runs at function exit, after ownership left this task (O5.2)".to_string(),
+                                    "compute what the deferred call needs BEFORE the move, or drop the `defer`".to_string(),
+                                ]),
+                            );
+                        }
+                    }
                 }
             }
 
