@@ -566,7 +566,8 @@ impl<'a> Checker<'a> {
         if matches!(
             loop_body.stmts.last(),
             Some(hy_syntax::Stmt::Break { .. } | hy_syntax::Stmt::Return { .. })
-        ) {
+        ) && !block_has_continue_for_loop(loop_body)
+        {
             return;
         }
 
@@ -588,7 +589,10 @@ impl<'a> Checker<'a> {
         }
 
         let mut iter_st = st.clone();
-        iter_st.scopes.truncate(outer_depth);
+        while iter_st.scopes.len() > outer_depth {
+            iter_st.scope_pop();
+        }
+        let popped_st = iter_st.clone();
         let mut any_loop_carried = false;
         for (name, b) in iter_st
             .env
@@ -596,7 +600,7 @@ impl<'a> Checker<'a> {
             .chain(iter_st.scopes.iter_mut().flat_map(|s| s.iter_mut()))
         {
             if b.moved.is_some() {
-                let root = resolve_alias(st, name);
+                let root = resolve_alias(&popped_st, name);
                 if pre_moved.contains(name)
                     || reported_backedge.contains(&root)
                     || call_local_roots.contains(&root)
@@ -679,9 +683,16 @@ impl<'a> Checker<'a> {
                         crate::walk::expr_uses(cond, &mut uses);
                     }
                     hy_syntax::Stmt::For {
-                        kind: hy_syntax::ForKind::Range { hi, .. },
+                        kind: hy_syntax::ForKind::Iterate { expr, .. },
                         ..
                     } => {
+                        crate::walk::expr_uses(expr, &mut uses);
+                    }
+                    hy_syntax::Stmt::For {
+                        kind: hy_syntax::ForKind::Range { lo, hi, .. },
+                        ..
+                    } => {
+                        crate::walk::expr_uses(lo, &mut uses);
                         crate::walk::expr_uses(hi, &mut uses);
                     }
                     _ => {}
@@ -836,4 +847,192 @@ impl<'a> Checker<'a> {
         )
     }
 }
+
+/// Does `block` contain any `continue` statement targeting the loop whose body
+/// is `block` (i.e. not enclosed in an inner `for` loop)?
+fn block_has_continue_for_loop(block: &hy_syntax::Block) -> bool {
+    block.stmts.iter().any(stmt_has_continue_for_loop)
+}
+
+fn stmt_has_continue_for_loop(stmt: &hy_syntax::Stmt) -> bool {
+    match stmt {
+        hy_syntax::Stmt::Continue { .. } => true,
+        hy_syntax::Stmt::If {
+            then, otherwise, ..
+        } => {
+            block_has_continue_for_loop(then)
+                || otherwise
+                    .as_deref()
+                    .map(stmt_has_continue_for_loop)
+                    .unwrap_or(false)
+        }
+        hy_syntax::Stmt::Match { arms, .. } => {
+            arms.iter().any(|a| block_has_continue_for_loop(&a.body))
+        }
+        hy_syntax::Stmt::Select { arms, .. } => {
+            arms.iter().any(|a| block_has_continue_for_loop(&a.body))
+        }
+        hy_syntax::Stmt::Block { block, .. } | hy_syntax::Stmt::Managed { body: block, .. } => {
+            block_has_continue_for_loop(block)
+        }
+        // A `continue` (or `continue loop`, LX14) inside an inner `for` targets
+        // that inner loop, not the outer loop.
+        hy_syntax::Stmt::For { .. } => false,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{check_file, Verdict};
+    use hy_syntax::parse_file;
+
+    fn check(src: &str) -> crate::CheckResult {
+        let ast = parse_file("freeze_test.hy", src).expect("snippet parses");
+        check_file(&ast)
+    }
+
+    #[test]
+    fn loop_backedge_pops_trailing_block_scopes_for_shadowed_root_and_alias() {
+        // Gap 1a: inner alias moved while outer root `m` is shadowed in a
+        // trailing block at `loop_end` (before `ScopeEvent::Pop` at `loop_end + 1`).
+        let r_shadow_root = check(
+            "fn worker(m map[string]int, done chan<- bool) { m[\"worker\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               m := map[string]int{\"init\": 0}\n\
+               done := make(chan bool, 2)\n\
+               for i in 0..2 {\n\
+                 m[\"main\"] = i\n\
+                 if true {\n\
+                   m2 := m\n\
+                   m := 1\n\
+                   _ = m\n\
+                   task worker(move m2, done)\n\
+                 }\n\
+               }\n\
+               <-done\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(
+            r_shadow_root.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_shadow_root.diagnostics
+        );
+        assert!(r_shadow_root
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3003"));
+
+        // Gap 1b: outer root `m` moved while outer alias `m2` is shadowed in a
+        // trailing block at `loop_end`.
+        let r_shadow_alias = check(
+            "fn worker(m map[string]int, done chan<- bool) { m[\"worker\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               m := map[string]int{\"init\": 0}\n\
+               m2 := m\n\
+               done := make(chan bool, 1)\n\
+               for i in 0..2 {\n\
+                 m2[\"main\"] = i\n\
+                 if i == 0 {\n\
+                   m2 := 1\n\
+                   _ = m2\n\
+                   task worker(move m, done)\n\
+                 }\n\
+               }\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(
+            r_shadow_alias.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_shadow_alias.diagnostics
+        );
+        assert!(r_shadow_alias
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3003"));
+    }
+
+    #[test]
+    fn loop_backedge_checks_continue_before_trailing_break_or_return() {
+        // Gap 2: a trailing `break` or `return` does not make the loop single-
+        // iteration when a preceding branch can `continue` to the back-edge.
+        let r_break = check(
+            "fn worker(m map[string]int, done chan<- bool) { m[\"worker\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               m := map[string]int{\"init\": 0}\n\
+               done := make(chan bool, 2)\n\
+               for i in 0..2 {\n\
+                 m[\"main\"] = i\n\
+                 task worker(move m, done)\n\
+                 if i == 0 {\n\
+                   continue\n\
+                 }\n\
+                 break\n\
+               }\n\
+               <-done\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(
+            r_break.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_break.diagnostics
+        );
+        assert!(r_break.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        let r_return = check(
+            "fn worker(m map[string]int, done chan<- bool) { m[\"worker\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               m := map[string]int{\"init\": 0}\n\
+               done := make(chan bool, 2)\n\
+               for i in 0..2 {\n\
+                 task worker(move m, done)\n\
+                 if i == 0 {\n\
+                   continue\n\
+                 }\n\
+                 return\n\
+               }\n\
+             }",
+        );
+        assert_eq!(
+            r_return.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_return.diagnostics
+        );
+        assert!(r_return.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+    }
+
+    #[test]
+    fn loop_backedge_checks_for_iterate_collection_after_move() {
+        // Gap 3: moving the collection `m` inside `for k, v in m` races the
+        // ongoing runtime range iterator against the spawned task on the next
+        // iteration step.
+        let r_iter = check(
+            "fn worker(m map[string]int, done chan<- bool) { m[\"worker\"] = 1\n done <- true }\n\
+             fn main() {\n\
+               m := map[string]int{\"a\": 1, \"b\": 2}\n\
+               done := make(chan bool, 1)\n\
+               first := true\n\
+               for k, v in m {\n\
+                 _ = k\n\
+                 _ = v\n\
+                 if first {\n\
+                   first = false\n\
+                   task worker(move m, done)\n\
+                 }\n\
+               }\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_iter.verdict, Verdict::Reject, "{:?}", r_iter.diagnostics);
+        assert!(r_iter.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+    }
+}
+
 
