@@ -123,6 +123,112 @@ impl<'a> Checker<'a> {
             );
         }
     }
+
+    /// When `ty` is a fixed-width integer and `value` assigned to `target`
+    /// is an integer constant outside that type's range, or a float constant, emit HYB-E6002.
+    pub(crate) fn check_const_overflow_assign(
+        &mut self,
+        target: &str,
+        ty: &TypeExpr,
+        value: &Expr,
+    ) {
+        let TypeExpr::Named {
+            name: ty_name,
+            span: ty_span,
+        } = ty
+        else {
+            return;
+        };
+        let Some((lo, hi)) = fixed_width_int_range(ty_name) else {
+            return;
+        };
+        match const_int_fold(value) {
+            ConstFold::NotConst => {}
+            ConstFold::TooBig => {
+                let span = value.span();
+                let msg = format!(
+                    "constant expression `{}` overflows declared type `{}` of `{}` (HYB-E6002)",
+                    value.render(),
+                    ty_name,
+                    target
+                );
+                let notes = vec![
+                    format!(
+                        "why: Go folds the constant expression before the range check and rejects a value outside `{}` (`cannot use … as {} value (overflows)`), so an accepted Hybrid program would emit unbuildable Go (issue #300)",
+                        ty_name, ty_name
+                    ),
+                    format!(
+                        "fix: use a constant in [{}, {}] or widen the declared type",
+                        lo, hi
+                    ),
+                    format!(
+                        "note: the declared type was written here ({})",
+                        span_hint(*ty_span)
+                    ),
+                ];
+                self.diags.push(
+                    Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
+                );
+                return;
+            }
+            ConstFold::Val(v) => {
+                if v >= lo && v <= hi {
+                    return;
+                }
+                let span = value.span();
+                let msg = format!(
+                    "constant `{}` overflows declared type `{}` of `{}` (HYB-E6002)",
+                    value.render(),
+                    ty_name,
+                    target
+                );
+                let notes = vec![
+                    format!(
+                        "why: Go rejects a constant assignment outside `{}`'s range (`cannot use … as {} value (overflows)`), so an accepted Hybrid program would emit unbuildable Go (issue #300)",
+                        ty_name, ty_name
+                    ),
+                    format!(
+                        "fix: use a constant in [{}, {}], widen the declared type, or convert from a variable if truncation is intentional (`x := {}; {} = {}(x)`)",
+                        lo, hi, value.render(), target, ty_name
+                    ),
+                    format!(
+                        "note: the declared type was written here ({})",
+                        span_hint(*ty_span)
+                    ),
+                ];
+                self.diags.push(
+                    Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
+                );
+                return;
+            }
+        }
+        if const_float_value(value).is_some() {
+            let span = value.span();
+            let msg = format!(
+                "float constant `{}` assigned to integer type `{}` of `{}` (HYB-E6002)",
+                value.render(),
+                ty_name,
+                target
+            );
+            let notes = vec![
+                format!(
+                    "why: Go rejects a float constant as an `{}` value (`cannot use … as {} value (truncated)`), so an accepted Hybrid program would emit unbuildable Go (issue #300)",
+                    ty_name, ty_name
+                ),
+                format!(
+                    "fix: convert explicitly at runtime if truncation is intentional (`x := {}; {} = {}(x)`)",
+                    value.render(), target, ty_name
+                ),
+                format!(
+                    "note: the declared type was written here ({})",
+                    span_hint(*ty_span)
+                ),
+            ];
+            self.diags.push(
+                Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
+            );
+        }
+    }
 }
 
 fn span_hint(span: Span) -> String {

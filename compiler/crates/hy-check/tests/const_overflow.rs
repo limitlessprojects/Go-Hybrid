@@ -194,3 +194,212 @@ fn variable_conversion_truncation_still_accepts() {
     );
     assert_eq!(r.verdict, Verdict::Accept);
 }
+
+#[test]
+fn assign_overflow_int8_is_rejected() {
+    let src = "\
+fn main() {
+    var n int8 = 0
+    n = 300
+    fmt.println(\"{n}\")
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for n = 300, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn compound_assign_overflow_int8_is_rejected() {
+    let src = "\
+fn main() {
+    var n int8 = 0
+    n += 300
+    fmt.println(\"{n}\")
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for n += 300, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn array_index_assign_overflow_is_rejected() {
+    let src = "\
+fn main() {
+    var a [2]int8
+    a[0] = 300
+    fmt.println(\"{a}\")
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for a[0] = 300, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn slice_index_assign_overflow_is_rejected() {
+    let src = "\
+fn main() {
+    var s []int8
+    s[0] = 300
+    fmt.println(\"{s}\")
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for s[0] = 300, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn map_value_assign_overflow_is_rejected() {
+    let src = "\
+fn main() {
+    var m map[string]int8
+    m[\"k\"] = 300
+    fmt.println(\"{m}\")
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for m[\"k\"] = 300, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn assign_within_range_int8_is_accepted() {
+    let src = "\
+fn main() {
+    var n int8 = 0
+    n = 127
+    n = -128
+    fmt.println(\"{n}\")
+}
+";
+    let r = check(src);
+    assert!(
+        error_codes(&r).is_empty(),
+        "valid assignment to int8 must be accepted, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+#[test]
+fn folded_binop_assign_overflow_is_rejected() {
+    let src = "\
+fn main() {
+    var n int8 = 0
+    n = 100 + 200
+    fmt.println(\"{n}\")
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for n = 100 + 200, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn const_toobig_assign_overflow_is_rejected() {
+    let src = "\
+fn main() {
+    var n int64 = 0
+    n = 1 << 200
+    fmt.println(\"{n}\")
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for n = 1 << 200, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn float_const_assign_to_int_is_rejected() {
+    let src = "\
+fn main() {
+    var n int8 = 0
+    n = 3.14
+    fmt.println(\"{n}\")
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for n = 3.14, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn unsigned_assign_underflow_is_rejected() {
+    let src = "\
+fn main() {
+    var u uint8 = 0
+    u = -1
+    fmt.println(\"{u}\")
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for u = -1, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn nested_array_index_assign_overflow_is_rejected() {
+    let src = "\
+fn main() {
+    var grid [2][2]int8
+    grid[0][1] = 300
+    fmt.println(\"{grid}\")
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for grid[0][1] = 300, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
