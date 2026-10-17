@@ -28,6 +28,8 @@ Behavior:
     "hard": true. A hard setup failure skips all commands and still writes a summary.
   * "cwd": "repo" means relative to the cloned repo checkout.
   * Output files land in the results dir (default: $RESULTS_DIR or ./results).
+  * Declared expected_results must be files. A results/ prefix refers to the
+    selected results dir, including when --results-dir overrides the default.
   * Never panics; all errors become entries in summary.json.
 Stdlib only — must run on a bare Kaggle/Actions image with just python3.
 """
@@ -179,11 +181,31 @@ def main():
         if code != 0 and step.get("hard"):
             break
 
+    path = os.path.join(results_dir, "summary.json")
+    expected_results = job.get("expected_results", [])
+    if not isinstance(expected_results, list):
+        record("expected-result", "check", 1, 0.0,
+               "expected_results must be a list of file paths")
+        expected_results = []
+    for expected in expected_results:
+        if not isinstance(expected, str) or not expected:
+            record("expected-result", "check", 1, 0.0,
+                   "expected result must be a non-empty file path")
+            continue
+        # Job specs use results/... independent of the worker's output root.
+        target = (os.path.join(results_dir, expected[len("results/"):])
+                  if expected.startswith("results/") else expected)
+        # This file is generated below, after the final verdict is known.
+        if os.path.abspath(target) == os.path.abspath(path):
+            continue
+        if not os.path.isfile(target):
+            record("expected-result", "check", 1, 0.0,
+                   "missing expected result file: {}".format(expected))
+
     summary["wall_clock_s"] = round(time.monotonic() - t0, 2)
     summary["ok"] = all(s["exit"] == 0 for s in summary["steps"])
     summary["finished"] = UTC()
 
-    path = os.path.join(results_dir, "summary.json")
     with open(path, "w") as f:
         json.dump(summary, f, indent=2)
     print("\n=== summary.json written to {} (ok={}) ===".format(path, summary["ok"]), flush=True)

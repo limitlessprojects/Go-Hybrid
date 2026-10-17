@@ -23,13 +23,14 @@ def step(name, code, hard=False, timeout=10):
 
 
 class RunnerFailureTests(unittest.TestCase):
-    def run_job(self, setup, commands):
+    def run_job(self, setup, commands, expected_results=None):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             job_path = root / 'job.json'
             results = root / 'results'
             job_path.write_text(json.dumps({'job': 'test', 'setup': setup,
-                                          'commands': commands}), encoding='utf-8')
+                                          'commands': commands,
+                                          'expected_results': [] if expected_results is None else expected_results}), encoding='utf-8')
             argv = ['runner.py', str(job_path), '--results-dir', str(results),
                     '--repo-dir', str(root / 'no-checkout')]
             # Keep tests isolated: no hardware probes, tokens or persistent env edits.
@@ -85,6 +86,42 @@ class RunnerFailureTests(unittest.TestCase):
                                      [step('must-not-run', 'print(2)')])
         self.assertEqual(code, 1)
         self.assertEqual([(s['name'], s['exit']) for s in summary['steps']], [('prior', 0), ('required', 7)])
+
+    def test_successful_command_cannot_hide_missing_result(self):
+        code, summary = self.run_job([], [step('noop', 'pass')],
+                                     ['results/measurement.json', 'results/summary.json'])
+        self.assertEqual(code, 1)
+        self.assertFalse(summary['ok'])
+        self.assertEqual(summary['steps'][-1]['name'], 'expected-result')
+        self.assertIn('results/measurement.json', summary['steps'][-1]['out_tail'])
+
+    def test_results_prefix_uses_selected_output_directory(self):
+        code, summary = self.run_job([], [step('write',
+            "import os,pathlib; p=pathlib.Path(os.environ['RESULTS_DIR'])/'nested'; "
+            "p.mkdir(); (p/'measurement.json').write_text('{}')")],
+            ['results/nested/measurement.json', 'results/summary.json'])
+        self.assertEqual(code, 0)
+        self.assertTrue(summary['ok'])
+
+    def test_directory_does_not_satisfy_expected_file(self):
+        code, summary = self.run_job([], [step('mkdir',
+            "import os,pathlib; (pathlib.Path(os.environ['RESULTS_DIR'])/'measurement').mkdir()")],
+            ['results/measurement'])
+        self.assertEqual(code, 1)
+        self.assertFalse(summary['ok'])
+
+    def test_generated_summary_is_a_valid_expected_result(self):
+        code, summary = self.run_job([], [step('noop', 'pass')], ['results/summary.json'])
+        self.assertEqual(code, 0)
+        self.assertTrue(summary['ok'])
+
+    def test_invalid_output_declaration_records_failure_in_summary(self):
+        for expected in ('results/missing.json', [None], ['']):
+            with self.subTest(expected=expected):
+                code, summary = self.run_job([], [step('noop', 'pass')], expected)
+                self.assertEqual(code, 1)
+                self.assertFalse(summary['ok'])
+                self.assertEqual(summary['steps'][-1]['name'], 'expected-result')
 
 
 if __name__ == '__main__':
