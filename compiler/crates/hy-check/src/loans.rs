@@ -1445,7 +1445,18 @@ impl<'a> Checker<'a> {
                 let carries = self.shape_may_share(&result)
                     || matches!(result, TypeShape::Unknown)
                     || inner.root_ident().is_some()
-                    || is_literal;
+                    || is_literal
+                    // A call whose result is a CLOSURE hands back a value that
+                    // may hold live references to every may-share argument
+                    // (the callee captured them in its body — the inter-
+                    // procedural form of the #109 rule). `shape_may_share`
+                    // says `false` for `TypeShape::Closure` and `root_ident`
+                    // of a call is `None`, so `f := make_fn(m)` previously
+                    // recorded no edge: `task w(move m)` left `f()` unfrozen
+                    // and the emitted Go raced (concurrent map writes).
+                    // `collect_ref_roots` already walks call arguments, so the
+                    // edge falls out of the existing loop below.
+                    || matches!(result, TypeShape::Closure);
                 if !carries {
                     return;
                 }

@@ -644,3 +644,26 @@ so `move h` froze `h` but not `shared` and the emitted Go raced.
 | 58 | 58-defer-live-reference-via-alias | REJECT | A1b | `HYB-E3003` | the deferred call names the ALIAS, the move transfers the ORIGIN |
 | 59 | 59-rebind-forgets-defer-capture | REJECT | A1b | `HYB-E3003` | rebinding the name must not forget the captured storage |
 | 60 | 60-rebind-without-defer-control | ACCEPT | — | — | the over-rejection guard: a rebind with no defer and no boundary |
+## Additive corpus registration — 2026-10-17: closure-return capture (interprocedural #109 tail)
+
+A call whose RESULT is a closure (`f := make_fn(m)` where the callee returns
+`fn() { m["k"] = 1 }`) recorded no may-share edge to the argument: the #109
+fix only inspected inline `Expr::FnLit` defines, while a closure-typed call
+result is not `shape_may_share` and a call has no root ident, so the carries
+gate in `record_may_share` returned early. `task worker(move m)` left `f()`
+unfrozen and the emitted Go died with `fatal error: concurrent map writes`
+(5/5 on the unfixed build). The fix adds closure-typed call results to the
+carries gate; `collect_ref_roots` (which already walks call arguments and
+method receivers) then links the closure binding to every may-share
+argument — the same O5.2 freeze the inline literal gets.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 61 | 61-closure-return-capture-at-spawn | REJECT | A1b | `HYB-E3003` | `f := make_fn(m)` then `task worker(move m)` then `f()` — the returned closure is a live alias of the argument |
+| 62 | 62-closure-return-capture-control | ACCEPT | — | — | the over-rejection guard: no boundary for the captured map (A5), and a PRIMITIVE captured argument creates no may-share root |
+
+With this addition the registered corpus is **62 programs** (harness
+recompute: 62/62 verdict agreement; differential loop: reject-side 44/44,
+accept-side 16/18 — the two failures are the cgo/Rust-bridge programs 12/13
+needing a C compiler that is absent from this reporting machine, unrelated to
+the change). Unit pins: `compiler/crates/hy-check/tests/closure_return_capture.rs`.
