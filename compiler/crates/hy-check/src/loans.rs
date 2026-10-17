@@ -953,7 +953,9 @@ impl<'a> Checker<'a> {
                 );
                 // `x := move y` — y is moved; x takes ownership (no alias);
                 // non-ident moves (`x := move s.data`) trigger HYB-E3004 (O5.4).
-                let moved_non_owned = self.moved_non_owned_origin_in_expr(st, value);
+                let moved_non_owned = self
+                    .moved_non_owned_origin_in_expr(st, value)
+                    .or_else(|| self.moved_non_owned_origin(st, value));
                 if move_operand_ident(value).is_some()
                     || matches!(unwrap_parens(value), Expr::Move { .. })
                 {
@@ -999,11 +1001,14 @@ impl<'a> Checker<'a> {
                     Vec::new()
                 };
                 let is_view = matches!(shape, TypeShape::BorrowHandle(_));
+                let may_share = self.shape_may_share(&shape);
                 self.define_binding(st, name, shape, ty, immutable, managed);
-                if let Some(origin) = &moved_non_owned {
-                    if let Some(b) = st.env_lookup_mut(name) {
-                        if b.non_owned_origin.is_none() {
-                            b.non_owned_origin = Some(origin.clone());
+                if may_share {
+                    if let Some(origin) = &moved_non_owned {
+                        if let Some(b) = st.env_lookup_mut(name) {
+                            if b.non_owned_origin.is_none() {
+                                b.non_owned_origin = Some(origin.clone());
+                            }
                         }
                     }
                 }
@@ -1107,6 +1112,19 @@ impl<'a> Checker<'a> {
     }
 
 
+    /// Find the first `non_owned_origin` among any bindings moved inside
+    /// `expr` (covering direct `move x` and composite literals such as
+    /// `holder{m: move m}` or `[move m]`).
+    fn moved_non_owned_origin(&self, st: &FnState, expr: &Expr) -> Option<String> {
+        let mut move_ops = Vec::new();
+        crate::model::collect_move_operands(expr, &mut move_ops);
+        move_ops.into_iter().find_map(|(op, _)| {
+            op.root_ident()
+                .and_then(|src| self.lookup_binding(st, src))
+                .and_then(|b| b.non_owned_origin.clone())
+        })
+    }
+
     /// Does the binding `name` denote a value that a shallow Go copy
     /// would share mutable GC storage with? Includes file-level `const`
     /// composites (#125), which lower to package-level `var` in Go.
@@ -1130,6 +1148,9 @@ impl<'a> Checker<'a> {
                 if self.binding_may_share(st, src) {
                     st.share_edge(name, src);
                 }
+            }
+            Expr::Move { operand, .. } => {
+                self.record_may_share(st, name, operand);
             }
             // `s2 := s1[:]` — the result shares s1's backing array
             // `m2 := h1.m` / `m2 := arr[i]` — projecting a reference-bearing
@@ -1268,10 +1289,16 @@ impl<'a> Checker<'a> {
                 if let Some(b) = self.lookup_binding(st, src) {
                     let src_origin = b.non_owned_origin.clone();
                     if b.shape.is_reference_alias() || b.shape.is_handle() {
-                        st.aliases.insert(name.to_string(), src.clone());
+                        let src_name = src.clone();
+                        st.share_edge(name, &src_name);
+                        if !st.aliases.contains_key(name) {
+                            st.aliases.insert(name.to_string(), src_name);
+                        }
                         if let Some(origin) = src_origin {
                             if let Some(nb) = st.env_lookup_mut(name) {
-                                nb.non_owned_origin = Some(origin);
+                                if nb.non_owned_origin.is_none() {
+                                    nb.non_owned_origin = Some(origin);
+                                }
                             }
                         }
                     }
@@ -1308,10 +1335,15 @@ impl<'a> Checker<'a> {
                             (ok, b.non_owned_origin.clone())
                         });
                         if let Some((true, origin)) = matched {
-                            st.aliases.insert(name.to_string(), src.clone());
+                            st.share_edge(name, &src);
+                            if !st.aliases.contains_key(name) {
+                                st.aliases.insert(name.to_string(), src.clone());
+                            }
                             if let Some(origin) = origin {
                                 if let Some(nb) = st.env_lookup_mut(name) {
-                                    nb.non_owned_origin = Some(origin);
+                                    if nb.non_owned_origin.is_none() {
+                                        nb.non_owned_origin = Some(origin);
+                                    }
                                 }
                             }
                             break;
@@ -1664,7 +1696,8 @@ impl<'a> Checker<'a> {
                         other => move_operand_ident(other)
                             .and_then(|src| self.lookup_binding(st, &src))
                             .and_then(|b| b.non_owned_origin.clone())
-                            .or_else(|| self.moved_non_owned_origin_in_expr(st, other)),
+                            .or_else(|| self.moved_non_owned_origin_in_expr(st, other))
+                            .or_else(|| self.moved_non_owned_origin(st, other)),
                     };
                     let (reads_self, shadowed_origin, prior_alias, prior_shares) = match &t.kind {
                         PlaceKind::Ident(name) => {
@@ -1719,12 +1752,14 @@ impl<'a> Checker<'a> {
                     continue;
                 }
                 if let PlaceKind::Ident(name) = &t.kind {
+                    let is_local_scope = st.defined_in_current_scope(name);
+                    let keep_non_owned = self.shape_may_share(&info.shape);
                     // Before clearing `name`'s non-owned origin and may-share
                     // edges on a non-self rebind (`h2 := h; h = fresh`), transfer
                     // `name`'s non-owned origin to any existing may-share peers
                     // and preserve clique connectivity among `name`'s former
                     // neighbors so they remain linked to each other.
-                    if !info.reads_self {
+                    if is_local_scope && !info.reads_self {
                         if let Some((orig, _)) = self.non_owned_origin_of(st, name) {
                             let peer_origin = if orig.starts_with("a may-share peer of ") {
                                 orig
@@ -1762,21 +1797,31 @@ impl<'a> Checker<'a> {
                         if info.ty.is_some() || b.ty.is_none() {
                             b.ty = info.ty;
                         }
-                        b.moved = None; // a fresh value re-owns the binding
-                        b.non_owned_origin = info.non_owned;
-                    }
-                    // a rebind re-owns the binding: drop the old alias and
-                    // may-share edges, then re-record from the new value (#27)
-                    st.aliases.remove(name);
-                    st.share_clear(name);
-                    if info.reads_self {
-                        if let Some(pa) = info.prior_alias {
-                            if &pa != name {
-                                st.aliases.insert(name.clone(), pa);
-                            }
+                        if is_local_scope {
+                            b.moved = None; // a fresh value re-owns the binding
+                            b.non_owned_origin =
+                                if keep_non_owned { info.non_owned } else { None };
+                        } else if keep_non_owned && b.non_owned_origin.is_none() {
+                            b.non_owned_origin = info.non_owned;
                         }
-                        for peer in info.prior_shares {
-                            st.share_edge(name, &peer);
+                    }
+                    // An unconditional rebind in the defining scope re-owns
+                    // the binding and drops old alias/may-share edges (#27).
+                    // Inside a nested branch/loop scope, an assignment to an
+                    // outer binding is conditional and must join with (rather
+                    // than erase) existing outer alias/may-share edges.
+                    if is_local_scope {
+                        st.aliases.remove(name);
+                        st.share_clear(name);
+                        if info.reads_self {
+                            if let Some(pa) = info.prior_alias {
+                                if &pa != name {
+                                    st.aliases.insert(name.clone(), pa);
+                                }
+                            }
+                            for peer in info.prior_shares {
+                                st.share_edge(name, &peer);
+                            }
                         }
                     }
                     self.record_may_share(st, name, v);
@@ -1792,7 +1837,9 @@ impl<'a> Checker<'a> {
                     }
                     // #111: a closure rebind replaces the old body's
                     // mutation set (or clears it for non-closure values)
-                    st.closure_mutates.remove(name);
+                    if is_local_scope {
+                        st.closure_mutates.remove(name);
+                    }
                     self.record_closure_mutations(st, name, v);
                 }
             }
@@ -1801,6 +1848,7 @@ impl<'a> Checker<'a> {
             let tys = self.multi_value_tys(st, &values[0], targets.len());
             for ((t, shape), ty) in targets.iter().zip(shapes).zip(tys) {
                 if let PlaceKind::Ident(name) = &t.kind {
+                    let is_local_scope = st.defined_in_current_scope(name);
                     if let Some(b) = st.env_lookup_mut(name) {
                         if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
                             b.shape = shape;
@@ -1808,9 +1856,14 @@ impl<'a> Checker<'a> {
                         if ty.is_some() || b.ty.is_none() {
                             b.ty = ty;
                         }
-                        b.moved = None;
+                        if is_local_scope {
+                            b.moved = None;
+                        }
                     }
-                    st.aliases.remove(name);
+                    if is_local_scope {
+                        st.aliases.remove(name);
+                        st.share_clear(name);
+                    }
                 }
             }
         }
@@ -3282,6 +3335,97 @@ mod tests {
         );
         assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn conditional_rebind_of_alias_preserves_outer_freeze() {
+        // Untaken branch rebind (`if false { m2 = ... }`) must not sever
+        // `m2`'s outer alias/may-share link to `m`.
+        let r_untaken = check(
+            "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               m2 := m\n\
+               if false {\n\
+                 m2 = map[string]int{\"k\": 1}\n\
+               }\n\
+               task worker(move m)\n\
+               m2[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r_untaken.verdict, Verdict::Reject, "{:?}", r_untaken.diagnostics);
+        assert_eq!(r_untaken.diagnostics[0].code, "HYB-E3003");
+
+        // Taken `then` branch creates alias (`m2 = m`) while untaken `else`
+        // branch rebinds `m2` to a fresh map: `else` must not wipe the `then`
+        // branch's alias/may-share edge.
+        let r_branch_join = check(
+            "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               m2 := map[string]int{\"k\": 1}\n\
+               if true {\n\
+                 m2 = m\n\
+               } else {\n\
+                 m2 = map[string]int{\"k\": 2}\n\
+               }\n\
+               task worker(move m)\n\
+               m2[\"k\"] = 3\n\
+             }",
+        );
+        assert_eq!(
+            r_branch_join.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_branch_join.diagnostics
+        );
+        assert_eq!(r_branch_join.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn conditional_rebind_of_non_owned_param_preserves_origin() {
+        // Untaken branch rebind (`if false { m = ... }`) must not erase
+        // parameter `m`'s `non_owned_origin`.
+        let r = check(
+            "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn spawn_it(m map[string]int) {\n\
+               if false {\n\
+                 m = map[string]int{\"k\": 1}\n\
+               }\n\
+               task worker(move m)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E3004");
+    }
+
+    #[test]
+    fn composite_literal_move_of_non_owned_param_preserves_origin() {
+        // `h := holder{m: move m}` and `h = holder{m: move m}` inside a callee
+        // where `m` is a non-owned parameter must propagate `non_owned_origin`
+        // (and may-share edges) to `h` so `task worker(move h)` is rejected.
+        let r_define = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(h holder) { h.m[\"k\"] = 1 }\n\
+             fn spawn_it(m map[string]int) {\n\
+               h := holder{m: move m}\n\
+               task worker(move h)\n\
+             }",
+        );
+        assert_eq!(r_define.verdict, Verdict::Reject, "{:?}", r_define.diagnostics);
+        assert_eq!(r_define.diagnostics[0].code, "HYB-E3004");
+
+        let r_assign = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(h holder) { h.m[\"k\"] = 1 }\n\
+             fn spawn_it(m map[string]int) {\n\
+               h := holder{m: map[string]int{}}\n\
+               h = holder{m: move m}\n\
+               task worker(move h)\n\
+             }",
+        );
+        assert_eq!(r_assign.verdict, Verdict::Reject, "{:?}", r_assign.diagnostics);
+        assert_eq!(r_assign.diagnostics[0].code, "HYB-E3004");
     }
 }
 
