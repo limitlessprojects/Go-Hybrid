@@ -145,6 +145,8 @@ def kaggle_wait(minutes, slug=None):
             state = out.split('"')[-2].split(".")[-1].upper()  # '"KernelWorkerStatus.RUNNING"'
         except IndexError:
             state = "?"  # CLI error text: keep polling, do not trust
+        if rc != 0:
+            state = "?"  # Failed status commands provide no trustworthy state.
         print("[poll {}] {}".format(polls, state), flush=True)
         if state in ACTIVE_STATES:
             saw_active = True
