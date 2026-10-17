@@ -9,3 +9,4 @@
 - Wave-2 landing queue continues: **#251 (named results)** leads, then #244, #240/#245, #247, #296, #311/#302, #234, const family, emit-lowering batch; new arrivals #366–#377 (tools/fuzz batch), #373, #364; 9 PRs pending CI approval in the queue's per-landing flow
 - Standing work: old-queue rebase assists (#67/#88/#93/#106/#197/#198/#99/#223), tools/kaggle batch, CI registration checks (#325/#330/#333)
 - Last review gate: G3 PASSED 2026-10-13; community review is a standing input to the queue
+- Local tooling fix: UTF-8 checker-output decoding + portable CLI fixtures; 25 focused Python tests pass on Windows, four encoding cases fail on base. Full compiler suites and upstream CI remain unverified.
