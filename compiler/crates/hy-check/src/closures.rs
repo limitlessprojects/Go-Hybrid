@@ -472,7 +472,13 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             st.scope_pop();
             if let Some(o) = otherwise {
                 check_stmt_boundaries(ck, st, o, managed, nested);
-                if !matches!(o.as_ref(), Stmt::Block { .. } | Stmt::If { .. }) {
+                // An else-if chain link is a statement FIELD, not a block
+                // stmt, so no body's collection loop ever reaches it: collect
+                // its own direct closures here (own_fnlits(If) yields the
+                // cond only — its init is collected inside the recursive
+                // walk above, its bodies by check_body_boundaries). A plain
+                // `else { }` block is still collected by its body loop.
+                if !matches!(o.as_ref(), Stmt::Block { .. }) {
                     collect_stmt_direct_fnlits(o, st, nested);
                 }
             }
