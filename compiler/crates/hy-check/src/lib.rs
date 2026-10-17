@@ -52,6 +52,7 @@ mod foreign;
 mod freeze;
 mod loans;
 mod model;
+mod resolve;
 mod sendability;
 mod shape;
 mod tuple;
@@ -99,6 +100,12 @@ pub fn check_file(file: &File) -> CheckResult {
 
     build_tables(&mut ck);
     ck.check_struct_decls(); // A6: borrow-handle / pointer struct fields
+
+    // Issue #228 family A: value-position names nothing declares must be
+    // HYB-E1001 here, not `undefined: X` at go build. Const initializers and
+    // declaration-signature expressions (array lengths) at file level; each
+    // function body inside check_fn below.
+    ck.check_file_undefined_names();
 
     let fns: Vec<&FnDecl> = file.fns().collect();
     for f in fns {
@@ -298,6 +305,11 @@ fn build_tables(ck: &mut Checker<'_>) {
 
 fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     let Some(body) = &f.body else { return };
+
+    // Issue #228 family A: `undefined_fn()`, reads/assigns of names nothing
+    // declares — HYB-E1001 before emit ever runs. Dotted package-prefix
+    // first segments stay exempt (resolve.rs Field arm).
+    ck.check_fn_undefined_names(f);
 
     // environment seed: receiver + params
     let mut st = FnState::default();
@@ -1310,10 +1322,16 @@ mod tests {
         );
         assert_eq!(r_borrow.verdict, Verdict::Reject);
 
+        // Fixture note (issue #228 family A): the unproven value is a
+        // DEFINED binding of Unknown shape (recv from an unresolvable-elem
+        // channel — the same idiom as fc_select_recv_unknown_element above),
+        // not an undefined factory call: HYB-E1001 owns names nothing
+        // declares, so it would (correctly) become the first error here.
         let r_unknown = check(
             "fn send_val(v any) {}\n\
              fn main() {\n\
-               u := mystery_factory()\n\
+               ch := make(chan mystery, 1)\n\
+               u := <-ch\n\
                task send_val(move u)\n\
              }",
         );
@@ -1965,12 +1983,19 @@ mod tests {
     #[test]
     fn fc_unproven_name_via_managed_escapes() {
         // the SAME unproven value inside a managed block escapes through the
-        // explicit hatch: warning only, counted — never a silent pass
+        // explicit hatch: warning only, counted — never a silent pass.
+        // Fixture note (issue #228 family A): the unproven value is now a
+        // DEFINED binding of Unknown shape (`v := <-ch` with an unresolvable
+        // element type) instead of the old undefined-name placeholder —
+        // HYB-E1001 rejects a name nothing declares, which is a different
+        // (and also correct) claim than the managed-hatch claim under test.
         let r = check(
             "fn handle(x int) { fmt.println(x) }\n\
              fn main() {\n\
                managed(\"test-only handler; name shape pinned by the fixture\", \"other\") {\n\
-                 task handle(nosuch)\n\
+                 ch := make(chan mystery, 1)\n\
+                 v := <-ch\n\
+                 task handle(v)\n\
                }\n\
              }",
         );
