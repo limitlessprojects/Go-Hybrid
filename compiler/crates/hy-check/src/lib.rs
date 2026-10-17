@@ -442,61 +442,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             ..
         } = stmt
         {
-            ck.managed_blocks += 1; // O6.3: one per `managed` statement
-            // Row 14 (discussion #4): the payload is AUDITED here — the
-            // parser enforces the literal-list SHAPE, the checker enforces
-            // the policy (fail-closed: a bare block cannot pass silently).
-            if reason.trim().is_empty() {
-                ck.diags.push(
-                    Diagnostic::error(
-                        "HYB-E0003",
-                        ck.path.clone(),
-                        *span,
-                        "managed block has no reason — the escape hatch must say what it bypasses and why (HYB-E0003)",
-                    )
-                    .with_notes(vec![
-                        "a bare `managed { ... }` is a reject, not a lint — the hatch must be review-visible (discussion #4)"
-                            .to_string(),
-                    ]),
-                );
-            }
-            if category.is_empty() {
-                ck.diags.push(
-                    Diagnostic::error(
-                        "HYB-E0003",
-                        ck.path.clone(),
-                        *span,
-                        "managed block has no category — name the invariant being bypassed (HYB-E0003)",
-                    )
-                    .with_notes(vec![
-                        "the category tells reviewers WHICH invariant the block bypasses and feeds `--report-managed`; without it the hatch cannot be audited".to_string(),
-                        format!(
-                            "fix: pass a category as the second argument, e.g. `managed(\"why this is safe\", \"mutex\") {{ ... }}`; valid categories: {}",
-                            MANAGED_CATEGORIES.join(", ")
-                        ),
-                    ]),
-                );
-            } else if !MANAGED_CATEGORIES.contains(&category.as_str()) {
-                ck.diags.push(
-                    Diagnostic::error(
-                        "HYB-E0004",
-                        ck.path.clone(),
-                        *span,
-                        format!("unknown managed category `\"{}\"` — use one of the listed categories, or `\"other\"` with the specifics in the reason (HYB-E0004)", category),
-                    )
-                    .with_notes(vec![
-                        format!(
-                            "valid categories: {} — the category tells reviewers WHICH invariant the block bypasses; `other` requires the reason to carry the specifics",
-                            MANAGED_CATEGORIES.join(", ")
-                        ),
-                    ]),
-                );
-            }
-            ck.managed_audit.push(ManagedBlockAudit {
-                reason: reason.clone(),
-                category: category.clone(),
-                tickets: tickets.clone(),
-            });
+            ck.audit_managed_block(reason, category, tickets, *span);
         }
 
         // LX14: `break loop` / `continue loop` bind to the nearest enclosing
@@ -811,6 +757,8 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 );
             }
 
+            // If-init Locals and blocks: already covered by the flat walk
+            // (init is its own statement entry) and the uses/calls collected above.
             _ => {}
         }
 
@@ -850,6 +798,74 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     // checked here, fail-closed (O4.9), with the completed function env as
     // the capture view. Captures/loans/freeze stay outside (A5, documented).
     closures::check_closure_boundaries(ck, &st, body);
+}
+
+impl<'a> Checker<'a> {
+    /// Row 14 (discussion #4): audit a `managed` block's reason/category/tickets
+    /// and record it in `managed_audit` (shared between Pass B and closures.rs).
+    pub(crate) fn audit_managed_block(
+        &mut self,
+        reason: &str,
+        category: &str,
+        tickets: &[String],
+        span: hy_diag::Span,
+    ) {
+        self.managed_blocks += 1; // O6.3: one per `managed` statement
+        if reason.trim().is_empty() {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E0003",
+                    self.path.clone(),
+                    span,
+                    "managed block has no reason — the escape hatch must say what it bypasses and why (HYB-E0003)",
+                )
+                .with_notes(vec![
+                    "a bare `managed { ... }` is a reject, not a lint — the hatch must be review-visible (discussion #4)"
+                        .to_string(),
+                ]),
+            );
+        }
+        if category.is_empty() {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E0003",
+                    self.path.clone(),
+                    span,
+                    "managed block has no category — name the invariant being bypassed (HYB-E0003)",
+                )
+                .with_notes(vec![
+                    "the category tells reviewers WHICH invariant the block bypasses and feeds `--report-managed`; without it the hatch cannot be audited".to_string(),
+                    format!(
+                        "fix: pass a category as the second argument, e.g. `managed(\"why this is safe\", \"mutex\") {{ ... }}`; valid categories: {}",
+                        MANAGED_CATEGORIES.join(", ")
+                    ),
+                ]),
+            );
+        } else if !MANAGED_CATEGORIES.contains(&category) {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E0004",
+                    self.path.clone(),
+                    span,
+                    format!(
+                        "unknown managed category `\"{}\"` — use one of the listed categories, or `\"other\"` with the specifics in the reason (HYB-E0004)",
+                        category
+                    ),
+                )
+                .with_notes(vec![
+                    format!(
+                        "valid categories: {} — the category tells reviewers WHICH invariant the block bypasses; `other` requires the reason to carry the specifics",
+                        MANAGED_CATEGORIES.join(", ")
+                    ),
+                ]),
+            );
+        }
+        self.managed_audit.push(ManagedBlockAudit {
+            reason: reason.to_string(),
+            category: category.to_string(),
+            tickets: tickets.to_vec(),
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2188,14 +2204,14 @@ mod tests {
     #[test]
     fn fc_closure_boundary_send_inside_managed_escapes() {
         // the hatch works inside closures (managed_blocks parity: the
-        // closure pass counts its managed blocks for --report-managed)
+        // closure pass counts and audits its managed blocks for --report-managed)
         let r = check(
             "fn main() {\n\
                counts := map[string]int{}\n\
                ch := make(chan int, 1)\n\
                mux := http.new_serve_mux()\n\
                mux.handle(\"/x\", http.handler(fn(w http.response_writer) {\n\
-                 managed { ch <- counts }\n\
+                 managed(\"handler serializes access\", \"mutex\") { ch <- counts }\n\
                }))\n\
              }",
         );
@@ -2203,6 +2219,8 @@ mod tests {
         assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E8001"));
         assert_eq!(r.managed.managed_blocks, 1);
         assert_eq!(r.managed.sites_via_managed, 1);
+        assert_eq!(r.managed.categories.get("mutex"), Some(&1));
+        assert_eq!(r.managed.blocks.len(), 1);
     }
 
     #[test]
@@ -4349,4 +4367,502 @@ mod tests {
                 >= 2
         );
     }
+
+    #[test]
+    fn closure_managed_bare_and_missing_category_reject_e0003() {
+        let bare = check(
+            "fn main() {\n\
+               ch := make(chan map[string]int, 1)\n\
+               m := map[string]int{\"k\": 1}\n\
+               f := fn() {\n\
+                 managed {\n\
+                   ch <- m\n\
+                 }\n\
+               }\n\
+               f()\n\
+             }",
+        );
+        assert_eq!(bare.verdict, Verdict::Reject, "{:?}", bare.diagnostics);
+        let e0003_count = bare
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "HYB-E0003")
+            .count();
+        assert_eq!(e0003_count, 2, "{:?}", bare.diagnostics);
+
+        let no_cat = check(
+            "fn main() {\n\
+               ch := make(chan map[string]int, 1)\n\
+               m := map[string]int{\"k\": 1}\n\
+               f := fn() {\n\
+                 managed(\"mutex guards map\") {\n\
+                   ch <- m\n\
+                 }\n\
+               }\n\
+               f()\n\
+             }",
+        );
+        assert_eq!(no_cat.verdict, Verdict::Reject, "{:?}", no_cat.diagnostics);
+        assert!(
+            no_cat.diagnostics.iter().any(|d| d.code == "HYB-E0003"),
+            "{:?}",
+            no_cat.diagnostics
+        );
+    }
+
+    #[test]
+    fn closure_managed_unknown_category_rejects_e0004_and_valid_records_audit() {
+        let bad = check(
+            "fn main() {\n\
+               ch := make(chan map[string]int, 1)\n\
+               m := map[string]int{\"k\": 1}\n\
+               f := fn() {\n\
+                 managed(\"mutex guards map\", \"not-a-category\") {\n\
+                   ch <- m\n\
+                 }\n\
+               }\n\
+               f()\n\
+             }",
+        );
+        assert_eq!(bad.verdict, Verdict::Reject, "{:?}", bad.diagnostics);
+        assert!(
+            bad.diagnostics.iter().any(|d| d.code == "HYB-E0004"),
+            "{:?}",
+            bad.diagnostics
+        );
+
+        let ok = check(
+            "fn main() {\n\
+               ch := make(chan map[string]int, 1)\n\
+               m := map[string]int{\"k\": 1}\n\
+               f := fn() {\n\
+                 managed(\"mutex guards map\", \"mutex\", \"PROJ-9\") {\n\
+                   ch <- m\n\
+                 }\n\
+               }\n\
+               f()\n\
+             }",
+        );
+        assert_eq!(ok.verdict, Verdict::Accept, "{:?}", ok.diagnostics);
+        assert_eq!(ok.managed.managed_blocks, 1);
+        assert_eq!(ok.managed.blocks.len(), 1);
+        assert_eq!(ok.managed.blocks[0].category, "mutex");
+        assert_eq!(ok.managed.blocks[0].tickets, vec!["PROJ-9".to_string()]);
+        assert_eq!(ok.managed.categories.get("mutex"), Some(&1));
+    }
+
+    #[test]
+    fn closure_loan_escape_return_addr_of_and_literal_rejects_e3104() {
+        let direct = check(
+            "fn main() {\n\
+               f := fn() *int {\n\
+                 x := 1\n\
+                 return &x\n\
+               }\n\
+               _ = f\n\
+             }",
+        );
+        assert_eq!(direct.verdict, Verdict::Reject, "{:?}", direct.diagnostics);
+        assert_eq!(direct.diagnostics[0].code, "HYB-E3104");
+
+        let lit = check(
+            "fn main() {\n\
+               f := fn() []*int {\n\
+                 x := 1\n\
+                 return []*int{&x}\n\
+               }\n\
+               _ = f\n\
+             }",
+        );
+        assert_eq!(lit.verdict, Verdict::Reject, "{:?}", lit.diagnostics);
+        assert_eq!(lit.diagnostics[0].code, "HYB-E3104");
+    }
+
+    #[test]
+    fn closure_a6_field_borrow_store_rejects_e3103() {
+        let addr = check(
+            "struct holder { p int }\n\
+             fn main() {\n\
+               h := holder{p: 0}\n\
+               f := fn() {\n\
+                 x := 1\n\
+                 h.p = &x\n\
+               }\n\
+               f()\n\
+             }",
+        );
+        assert_eq!(addr.verdict, Verdict::Reject, "{:?}", addr.diagnostics);
+        assert!(
+            addr.diagnostics.iter().any(|d| d.code == "HYB-E3103"),
+            "{:?}",
+            addr.diagnostics
+        );
+
+        let view = check(
+            "import \"serde_json\"\n\
+             struct holder { v serde_json.value }\n\
+             fn main() {\n\
+               doc := serde_json.parse(\"[1, 2]\")\n\
+               h := holder{v: serde_json.parse(\"[]\")}\n\
+               f := fn() {\n\
+                 h.v = doc.array()\n\
+               }\n\
+               f()\n\
+             }",
+        );
+        assert_eq!(view.verdict, Verdict::Reject, "{:?}", view.diagnostics);
+        assert!(
+            view.diagnostics.iter().any(|d| d.code == "HYB-E3103"),
+            "{:?}",
+            view.diagnostics
+        );
+    }
+
+    #[test]
+    fn closure_n1_local_assign_return_and_composite_nil_reject_e4001() {
+        let r = check(
+            "struct job { m map[string]int }\n\
+             fn main() {\n\
+               f := fn() []int {\n\
+                 var s []int = nil\n\
+                 s = nil\n\
+                 j := job{m: nil}\n\
+                 _ = j\n\
+                 return nil\n\
+               }\n\
+               _ = f\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        let e4001_count = r
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "HYB-E4001")
+            .count();
+        assert_eq!(e4001_count, 4, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn closure_n1_nilable_option_result_and_value_return_accept() {
+        let r = check(
+            "fn main() {\n\
+               f := fn() (int, error) {\n\
+                 return 0, nil\n\
+               }\n\
+               g := fn() int {\n\
+                 x := 7\n\
+                 return x\n\
+               }\n\
+               _ = f\n\
+               _ = g\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn move_of_const_and_const_alias_preserve_t22_e3006() {
+        let direct = check(
+            "const k_slice = []int{1, 2}\n\
+             fn main() {\n\
+               c := move k_slice\n\
+               c[0] = 99\n\
+             }",
+        );
+        assert_eq!(direct.verdict, Verdict::Reject, "{:?}", direct.diagnostics);
+        assert!(
+            direct.diagnostics.iter().any(|d| d.code == "HYB-E3006"),
+            "expected HYB-E3006 after move-define of const, got {:?}",
+            direct.diagnostics
+        );
+
+        let rebind_and_delete = check(
+            "const k_map = map[string]int{\"a\": 1}\n\
+             fn main() {\n\
+               alias := k_map\n\
+               var c map[string]int\n\
+               c = move alias\n\
+               delete(c, \"a\")\n\
+             }",
+        );
+        assert_eq!(
+            rebind_and_delete.verdict,
+            Verdict::Reject,
+            "{:?}",
+            rebind_and_delete.diagnostics
+        );
+        assert!(
+            rebind_and_delete
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "HYB-E3006"),
+            "expected HYB-E3006 for delete through move-rebound const alias, got {:?}",
+            rebind_and_delete.diagnostics
+        );
+
+        let lit = check(
+            "struct holder { s []int }\n\
+             const k_slice = []int{1, 2}\n\
+             fn main() {\n\
+               h := holder{s: move k_slice}\n\
+               h.s[0] = 99\n\
+             }",
+        );
+        assert_eq!(lit.verdict, Verdict::Reject, "{:?}", lit.diagnostics);
+        assert!(
+            lit.diagnostics.iter().any(|d| d.code == "HYB-E3006"),
+            "expected HYB-E3006 for write through struct literal move of const, got {:?}",
+            lit.diagnostics
+        );
+    }
+
+    #[test]
+    fn move_of_map_during_live_slot_loan_preserves_a3_e3102() {
+        let define = check(
+            "import \"fmt\"\n\
+             struct item { n int }\n\
+             fn main() {\n\
+               m := map[string]item{\"a\": item{n: 1}}\n\
+               slot := &m[\"a\"]\n\
+               m2 := move m\n\
+               m2[\"b\"] = item{n: 2}\n\
+               fmt.println(slot.n)\n\
+             }",
+        );
+        assert_eq!(define.verdict, Verdict::Reject, "{:?}", define.diagnostics);
+        assert!(
+            define.diagnostics.iter().any(|d| d.code == "HYB-E3102"),
+            "expected HYB-E3102 on insert through moved map during live slot loan, got {:?}",
+            define.diagnostics
+        );
+
+        let rebind_delete = check(
+            "import \"fmt\"\n\
+             struct item { n int }\n\
+             fn main() {\n\
+               m := map[string]item{\"a\": item{n: 1}}\n\
+               slot := &m[\"a\"]\n\
+               var m2 map[string]item\n\
+               m2 = move m\n\
+               delete(m2, \"a\")\n\
+               fmt.println(slot.n)\n\
+             }",
+        );
+        assert_eq!(
+            rebind_delete.verdict,
+            Verdict::Reject,
+            "{:?}",
+            rebind_delete.diagnostics
+        );
+        assert!(
+            rebind_delete
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "HYB-E3102"),
+            "expected HYB-E3102 on delete through move-rebound map during live slot loan, got {:?}",
+            rebind_delete.diagnostics
+        );
+    }
+
+    #[test]
+    fn move_of_map_after_slot_loan_last_use_accepts() {
+        let r = check(
+            "import \"fmt\"\n\
+             struct item { n int }\n\
+             fn main() {\n\
+               m := map[string]item{\"a\": item{n: 1}}\n\
+               slot := &m[\"a\"]\n\
+               fmt.println(slot.n)\n\
+               m2 := move m\n\
+               m2[\"b\"] = item{n: 2}\n\
+               fmt.println(m2[\"b\"].n)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn wrapped_move_of_local_freezes_source_on_field_index_slice_and_call() {
+        // 1. `t := box{m: move m}.m` then boundary-cross then original write -> HYB-E3003
+        let field_proj = check(
+            "struct box { m map[string]int }\n\
+             fn worker(x map[string]int) { x[\"w\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"init\": 0}\n\
+               t := box{m: move m}.m\n\
+               task worker(move t)\n\
+               m[\"main\"] = 2\n\
+             }",
+        );
+        assert_eq!(field_proj.verdict, Verdict::Reject, "{:?}", field_proj.diagnostics);
+        assert_eq!(field_proj.diagnostics[0].code, "HYB-E3003");
+        assert_eq!(first_error_rule(&field_proj).as_deref(), Some("A1b"));
+
+        // 2. `t := []map[string]int{move m}[0]` then boundary-cross then original write -> HYB-E3003
+        let index_proj = check(
+            "fn worker(x map[string]int) { x[\"w\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"init\": 0}\n\
+               t := []map[string]int{move m}[0]\n\
+               task worker(move t)\n\
+               m[\"main\"] = 2\n\
+             }",
+        );
+        assert_eq!(index_proj.verdict, Verdict::Reject, "{:?}", index_proj.diagnostics);
+        assert_eq!(index_proj.diagnostics[0].code, "HYB-E3003");
+        assert_eq!(first_error_rule(&index_proj).as_deref(), Some("A1b"));
+
+        // 3. `t := (move s)[0:2]` then boundary-cross then original write -> HYB-E3003
+        let slice_proj = check(
+            "fn worker(x []int) { x[0] = 1 }\n\
+             fn main() {\n\
+               s := []int{1, 2, 3}\n\
+               t := (move s)[0:2]\n\
+               task worker(move t)\n\
+               s[0] = 9\n\
+             }",
+        );
+        assert_eq!(slice_proj.verdict, Verdict::Reject, "{:?}", slice_proj.diagnostics);
+        assert_eq!(slice_proj.diagnostics[0].code, "HYB-E3003");
+        assert_eq!(first_error_rule(&slice_proj).as_deref(), Some("A1b"));
+
+        // 4. `t := same(move m)` then boundary-cross then original write -> HYB-E3003
+        let call_wrap = check(
+            "fn same(x map[string]int) map[string]int { return x }\n\
+             fn worker(x map[string]int) { x[\"w\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"init\": 0}\n\
+               t := same(move m)\n\
+               task worker(move t)\n\
+               m[\"main\"] = 2\n\
+             }",
+        );
+        assert_eq!(call_wrap.verdict, Verdict::Reject, "{:?}", call_wrap.diagnostics);
+        assert_eq!(call_wrap.diagnostics[0].code, "HYB-E3003");
+        assert_eq!(first_error_rule(&call_wrap).as_deref(), Some("A1b"));
+
+        // Positive control: wrapped move with no post-move use of `m` accepts.
+        let clean = check(
+            "struct box { m map[string]int }\n\
+             fn worker(x map[string]int) { x[\"w\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"init\": 0}\n\
+               t := box{m: move m}.m\n\
+               task worker(move t)\n\
+             }",
+        );
+        assert_eq!(clean.verdict, Verdict::Accept, "{:?}", clean.diagnostics);
+    }
+
+    #[test]
+    fn wrapped_move_of_non_owned_param_preserves_origin_e3004() {
+        // 1. `t := box{m: move m}.m` on parameter `m` -> HYB-E3004
+        let field_proj = check(
+            "struct box { m map[string]int }\n\
+             fn worker(x map[string]int) { x[\"w\"] = 1 }\n\
+             fn bad(m map[string]int) {\n\
+               t := box{m: move m}.m\n\
+               task worker(move t)\n\
+             }",
+        );
+        assert_eq!(field_proj.verdict, Verdict::Reject, "{:?}", field_proj.diagnostics);
+        assert!(
+            field_proj.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+            "{:?}",
+            field_proj.diagnostics
+        );
+
+        // 2. `t := []map[string]int{move m}[0]` on parameter `m` -> HYB-E3004
+        let index_proj = check(
+            "fn worker(x map[string]int) { x[\"w\"] = 1 }\n\
+             fn bad(m map[string]int) {\n\
+               t := []map[string]int{move m}[0]\n\
+               task worker(move t)\n\
+             }",
+        );
+        assert_eq!(index_proj.verdict, Verdict::Reject, "{:?}", index_proj.diagnostics);
+        assert!(
+            index_proj.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+            "{:?}",
+            index_proj.diagnostics
+        );
+
+        // 3. `t := (move s)[0:2]` on parameter `s` -> HYB-E3004
+        let slice_proj = check(
+            "fn worker(x []int) { x[0] = 1 }\n\
+             fn bad(s []int) {\n\
+               t := (move s)[0:2]\n\
+               task worker(move t)\n\
+             }",
+        );
+        assert_eq!(slice_proj.verdict, Verdict::Reject, "{:?}", slice_proj.diagnostics);
+        assert!(
+            slice_proj.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+            "{:?}",
+            slice_proj.diagnostics
+        );
+
+        // 4. `t := same(move m)` on parameter `m` -> HYB-E3004
+        let call_wrap = check(
+            "fn same(x map[string]int) map[string]int { return x }\n\
+             fn worker(x map[string]int) { x[\"w\"] = 1 }\n\
+             fn bad(m map[string]int) {\n\
+               t := same(move m)\n\
+               task worker(move t)\n\
+             }",
+        );
+        assert_eq!(call_wrap.verdict, Verdict::Reject, "{:?}", call_wrap.diagnostics);
+        assert!(
+            call_wrap.diagnostics.iter().any(|d| d.code == "HYB-E3004"),
+            "{:?}",
+            call_wrap.diagnostics
+        );
+
+        // 5. Rebind `t = box{m: move m}.m` and self-rebind `m = same(move m)` on parameter `m` -> HYB-E3004
+        let rebind_wrap = check(
+            "struct box { m map[string]int }\n\
+             fn same(x map[string]int) map[string]int { return x }\n\
+             fn worker(x map[string]int) { x[\"w\"] = 1 }\n\
+             fn bad(m map[string]int) {\n\
+               var t map[string]int\n\
+               t = box{m: move m}.m\n\
+               task worker(move t)\n\
+             }\n\
+             fn bad_self(m map[string]int) {\n\
+               m = same(move m)\n\
+               task worker(move m)\n\
+             }",
+        );
+        assert_eq!(rebind_wrap.verdict, Verdict::Reject, "{:?}", rebind_wrap.diagnostics);
+        let e3004_count = rebind_wrap
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "HYB-E3004")
+            .count();
+        assert_eq!(e3004_count, 2, "{:?}", rebind_wrap.diagnostics);
+    }
+
+    #[test]
+    fn wrapped_move_of_const_composite_in_call_and_delete_rejects_e3006() {
+        let r = check(
+            "struct box { m map[string]int }\n\
+             const shared_m = map[string]int{\"k\": 1}\n\
+             fn mut_via_move(p map[string]int) {\n\
+               t := move p\n\
+               t[\"k\"] = 2\n\
+             }\n\
+             fn main() {\n\
+               delete(move shared_m, \"k\")\n\
+               mut_via_move(box{m: move shared_m}.m)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        let e3006_count = r
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "HYB-E3006")
+            .count();
+        assert_eq!(e3006_count, 2, "{:?}", r.diagnostics);
+    }
 }
+
