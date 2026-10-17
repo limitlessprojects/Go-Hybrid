@@ -191,6 +191,36 @@
       "rule": "BUILDABLE"
     },
     {
+      "code": "HYB-E2008",
+      "name": "non-iterable-range",
+      "category": "type",
+      "severity": "error",
+      "title": "cannot range over a non-iterable value",
+      "summary": "Go rejects ranging over non-iterable types (`cannot range over X`). SPEC-LANGUAGE LX13 defines iterable expressions for `for x in e`: slices, arrays, strings, maps, channels, and borrow handles. Iterating a primitive (int, bool, float), struct, or other non-iterable fails `go build`, violating the accepted-should-emit-buildable-Go contract (issue #411). For integer loop counting, use `for i in 0..n` (ForKind::Range).",
+      "fixits": [
+        "range over a slice, array, string, map, or channel",
+        "for integer counting, use an integer range: `for i in 0..n`",
+        "for structs, range over a slice/map field of the struct"
+      ],
+      "example": "x := 5; for v in x {}  // reject: HYB-E2008 — cannot range over int",
+      "rule": "LX13"
+    },
+    {
+      "code": "HYB-E2009",
+      "name": "invalid-operand-type",
+      "category": "type",
+      "severity": "error",
+      "title": "operand type does not support operation",
+      "summary": "Go requires operands to match their operator/statement contracts: conditions in if/for must be boolean, indexing requires slice/array/string/map, slicing requires slice/array/string, and calls require function types (issue #425). Hybrid enforces these at check time so accepted programs emit buildable Go.",
+      "fixits": [
+        "for if/for conditions, use a boolean comparison expression (e.g. `x != 0`, `len(s) > 0`)",
+        "for indexing and slicing, index a slice, array, string, or map",
+        "for calls, call a declared function or closure binding"
+      ],
+      "example": "x := 5; if x {}  // reject: HYB-E2009 — non-boolean condition in if statement",
+      "rule": "BUILDABLE"
+    },
+    {
       "code": "HYB-E3001",
       "name": "not-sendable-spawn",
       "category": "ownership-sendability",
