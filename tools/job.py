@@ -162,6 +162,9 @@ def kaggle_fetch(jobdir, slug=None):
     os.makedirs(raw, exist_ok=True)
     rc, out = sh("{} kernels output {} -p {}".format(KAGGLE_CLI, slug, raw), timeout=180)
     print(out)
+    # Do not promote cached or partial output after a failed download.
+    if rc != 0:
+        sys.exit("kaggle kernels output failed (exit {})".format(rc))
     # find summary.json anywhere under raw
     found = []
     for root, _, files in os.walk(raw):
