@@ -10,3 +10,4 @@
 - Wave-2 landing queue continues: #230 (nested closures), #251 (named results), #244, #240/#245, #247, #296, #311/#302, #234, then the const family and emit-lowering batch; new arrivals #366–#377 (sarkermy1125-ship-it tools/fuzz batch), #373 (loop fresh-copy), #364 (docs)
 - Standing work: old-queue rebase assists (#67/#88/#93/#106/#197/#198/#99/#223), tools/kaggle batch, CI registration checks (#325/#330/#333)
 - Last review gate: G3 PASSED 2026-10-13; community review is a standing input to the queue
+- Pending contribution: validate fetched summary job/revision before promotion; 15 local job tests pass; upstream review/CI pending.
