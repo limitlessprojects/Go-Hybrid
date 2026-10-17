@@ -474,23 +474,6 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        let mut call_local_roots: HashSet<String> = HashSet::new();
-        for (stmt, _) in loop_stmts.iter().skip(1) {
-            if let hy_syntax::Stmt::Local(l) = stmt {
-                for (lhs, rhs) in l.names.iter().zip(l.values.iter()) {
-                    let is_inner = st.scopes[outer_depth..]
-                        .iter()
-                        .any(|s| s.contains_key(lhs.as_str()));
-                    if is_inner
-                        && self.call_returns_fresh_copy(rhs)
-                        && st.aliases.contains_key(lhs.as_str())
-                    {
-                        call_local_roots.insert(resolve_alias(st, lhs));
-                    }
-                }
-            }
-        }
-
         let mut iter_st = st.clone();
         iter_st.scopes.truncate(outer_depth);
         let mut any_loop_carried = false;
@@ -501,10 +484,7 @@ impl<'a> Checker<'a> {
         {
             if b.moved.is_some() {
                 let root = resolve_alias(st, name);
-                if pre_moved.contains(name)
-                    || reported_backedge.contains(&root)
-                    || call_local_roots.contains(&root)
-                {
+                if pre_moved.contains(name) || reported_backedge.contains(&root) {
                     b.moved = None;
                 } else {
                     any_loop_carried = true;
@@ -572,16 +552,31 @@ impl<'a> Checker<'a> {
     /// all construct a fresh value-element slice via `append([]T{}, ...)` (such
     /// as corpus 15's `chunk_of`), so the returned slice cannot share mutable
     /// backing storage with the caller's argument across loop iterations (#194).
-    fn call_returns_fresh_copy(&self, expr: &Expr) -> bool {
+    pub(crate) fn call_returns_fresh_copy(&self, st: &FnState, expr: &Expr) -> bool {
+        if self.fns.contains_key("append") || self.consts.contains_key("append") {
+            return false;
+        }
         let Expr::Call { callee, .. } = crate::model::unwrap_parens(expr) else {
             return false;
         };
         let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) else {
             return false;
         };
+        if self.lookup_binding(st, name).is_some() || self.consts.contains_key(name.as_str()) {
+            return false;
+        }
         let Some(fdecl) = self.fns.get(name.as_str()) else {
             return false;
         };
+        if fdecl.params.iter().any(|p| p.name == "append")
+            || fdecl
+                .receiver
+                .as_ref()
+                .map(|r| r.name == "append")
+                .unwrap_or(false)
+        {
+            return false;
+        }
         if fdecl.results.len() != 1 {
             return false;
         }
@@ -605,6 +600,11 @@ impl<'a> Checker<'a> {
     fn block_returns_only_fresh_append(block: &hy_syntax::Block, saw_return: &mut bool) -> bool {
         for stmt in &block.stmts {
             match stmt {
+                hy_syntax::Stmt::Local(l) => {
+                    if l.names.iter().any(|n| n == "append") {
+                        return false;
+                    }
+                }
                 hy_syntax::Stmt::Return { values, .. } => {
                     *saw_return = true;
                     if values.len() != 1 || !Self::is_fresh_empty_slice_append(&values[0]) {
@@ -612,8 +612,18 @@ impl<'a> Checker<'a> {
                     }
                 }
                 hy_syntax::Stmt::If {
-                    then, otherwise, ..
+                    init,
+                    then,
+                    otherwise,
+                    ..
                 } => {
+                    if let Some(init_stmt) = init {
+                        if let hy_syntax::Stmt::Local(l) = init_stmt.as_ref() {
+                            if l.names.iter().any(|n| n == "append") {
+                                return false;
+                            }
+                        }
+                    }
                     if !Self::block_returns_only_fresh_append(then, saw_return) {
                         return false;
                     }
