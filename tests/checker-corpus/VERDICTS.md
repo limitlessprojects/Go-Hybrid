@@ -19,6 +19,13 @@ Each `.hy` file carries one machine-readable line
 (`// EXPECTED-VERDICT: ACCEPT | ACCEPT-MANAGED | REJECT <rule-id>`);
 this file is the human-normative record.
 
+**Current registered corpus: 55 programs** — ACCEPT 14 · ACCEPT-MANAGED 2 ·
+REJECT 39. Recomputed from the fixtures' `// EXPECTED-VERDICT:` headers.
+The `Distribution` captions further down are *dated snapshots*, each
+recording the census as it stood when that batch was integrated; this line
+is the current one, and `tools/check_verdict_table.py` fails closed if it
+stops agreeing with the fixtures.
+
 ## Rule key (IDs cited below)
 
 | ID | rule (strict reading applied) | diagnostic code (SPEC §9.6) |
@@ -79,10 +86,10 @@ renumbered).
 | 29 | 29-struct-param-share-move-reject | REJECT | A1b | a shallow struct copy of a PARAMETER (`h2 := h`, struct carrying a map) is a may-share peer but not a reference alias, so `check_non_owned_move` (which consulted the binding's own origin and its alias-chain root only) accepted `task worker(move h2, done)` with 0 diagnostics while `go run` hit `fatal error: concurrent map writes` (issue #75; the map twin `m2 := m` was already rejected via alias+origin inheritance — identical storage-identity argument; array twin is corpus 30, pure-local accept pinned in hy-check/tests/param_share_move.rs) |
 | 30 | 30-array-param-share-move-reject | REJECT | A1b | ARRAY twin of 29: a shallow fixed-array copy of a parameter (`a2 := a`, `[2]map[string]int`) recurses to a map element shape so it may-shares, but a fixed array is not a reference alias and recorded no origin — same pre-fix OK(0)/`go run` fatal split, same fix (move-time scan of the may-share component for a non-owned origin) |
 | 31 | 31-generic-call-return-alias-freeze | REJECT | A1b | an alias that comes back through a GENERIC call (`alias := same(agg)` where `same[t any](m t) t` returns its argument) is still a live alias of `agg` — the result shape resolves through the type parameter to Unknown, which is not a reference alias, so 26's alias recording and the may-share recorder (which had no Call arm) both skipped it: before the fix `hyb check` reported 0 diagnostics while `go run` hit `fatal error: concurrent map writes` (issue #73; generic twin of 26 — the struct-result sibling `h2 := alias_holder(h1)` is pinned in the hy-check unit tests, one root cause) |
-| 32 | 32-a3-assign-map-slot-invalidated | REJECT | A3 | re-assignment `x = &m[k]` opens a map-slot loan window just like define `x := &m[k]` — before the fix only LocalDecl registered MapSlot loans, leaving assignments untracked so map inserts during active assignment loans passed with 0 diagnostics (issue #138) |
+| 42 | 42-a3-assign-map-slot-invalidated | REJECT | A3 | re-assignment `x = &m[k]` opens a map-slot loan window just like define `x := &m[k]` — before the fix only LocalDecl registered MapSlot loans, leaving assignments untracked so map inserts during active assignment loans passed with 0 diagnostics (issue #138) |
 
 
-| 32 | 32-closure-local-alias-move-reject | REJECT | A1b | a local rebind inside a closure (`alias := m`, where `m` is a captured outer map) is an alias of non-owned state, but `check_closure_boundaries` called `define_binding` without `record_alias` or `record_may_share`, wiping origin and alias links — before the fix `task worker(move alias, done)` was accepted with 0 diagnostics while `go run -race` produced concurrent map writes (issue #137) |
+| 39 | 39-closure-local-alias-move-reject | REJECT | A1b | a local rebind inside a closure (`alias := m`, where `m` is a captured outer map) is an alias of non-owned state, but `check_closure_boundaries` called `define_binding` without `record_alias` or `record_may_share`, wiping origin and alias links — before the fix `task worker(move alias, done)` was accepted with 0 diagnostics while `go run -race` produced concurrent map writes (issue #137) |
 
 
 **Distribution: ACCEPT 10 · ACCEPT-MANAGED 2 · REJECT 24 — 36 programs.**
@@ -92,14 +99,14 @@ renumbered).
 **Distribution: ACCEPT 10 · ACCEPT-MANAGED 2 · REJECT 26 — 38 programs.**
 
 
-**Distribution: ACCEPT 8 · ACCEPT-MANAGED 2 · REJECT 27 — 39 programs.**
+**Distribution: ACCEPT 10 · ACCEPT-MANAGED 2 · REJECT 27 — 39 programs.**
 | 40 | 40-wrapper-alias-freeze | REJECT | A1b | the WRAPPER tail of the same family: `alias := same(same(agg))` — and the sibling forms `same(agg)[0:2]`, `wrap{items: same(agg)}`, `box{items: agg}.items`, `take(box{items: agg})` — is still a live alias of `agg`, but `Expr::root_ident()` stops at a call or a literal base, so neither `record_alias` nor `record_may_share` recorded an edge: before the fix `hyb check` reported 0 diagnostics while `go run -race` reported `WARNING: DATA RACE` on the shared map write (issue #160; nested twin of 26/31, fixed by generalizing the alias collector) |
 | 41 | 41-wrapper-alias-own-move-control | ACCEPT | — | the FALSE-POSITIVE GUARD for 32: the same wrapper alias is held and read BEFORE the owned move, and neither `agg` nor `alias` is used after it — holding an alias is legal, only a use after the freeze violates O5.2, so a widened alias collector must keep this program accepted (accept-side control; pairs with 32 the way 23 pairs with 22) |
 
-**Distribution: ACCEPT 11 · ACCEPT-MANAGED 2 · REJECT 27 — 41 programs.**
+**Distribution: ACCEPT 11 · ACCEPT-MANAGED 2 · REJECT 28 — 41 programs.**
 
 
-**Distribution: ACCEPT 12 · ACCEPT-MANAGED 2 · REJECT 28 — 42 programs.**
+**Distribution: ACCEPT 11 · ACCEPT-MANAGED 2 · REJECT 29 — 42 programs.**
 
 ## Additive corpus registration — 2026-10-15: builtin `copy` ref-element alias (issue #178)
 
@@ -120,7 +127,7 @@ direction: a primitive-element slice copies by value and shares nothing.
 | 45 | 45-composite-literal-embeds-shared-map | REJECT | A1c | O4.6 deep sendability: a fresh `[]T{shared}` composite literal embedding a live shared map at a spawn is not laundered by the wrap (PR #176, maintainer-integrated as #45) |
 | 53 | 53-array-slice-backing-freeze | REJECT | A1b | slicing an addressable array (`s := a[:]` on `[4]int`, also `b.data[:]`, `append(a[0:1], x)`, overlapping windows) shares the array's backing storage even when the element is a primitive; `shape_may_share` only recurses into reference elements, so `move s` froze `s` and not `a`, `hyb check` reported 0 diagnostics, and `go run -race` reported `WARNING: DATA RACE` on `s[0]` vs `a[0]`. A value copy (`b := a`) and `clone(a)[:]` stay unlinked |
 
-**Distribution: ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 34 — 49 programs.**
+**Distribution: ACCEPT 12 · ACCEPT-MANAGED 2 · REJECT 35 — 49 programs.**
 
 (19 and 20 were added by the lead during integration on 2026-10-12 — still
 BEFORE any checker existed; see the pre-registration statement. 21, 22, 23
@@ -448,6 +455,45 @@ artifact that is wrong, with the decision recorded.
   hand-derived from T22 first; the report's `go run -race` evidence is
   the reproduction, not the source of the verdict.
 
+- **2026-10-17 — RECORD REPAIR, four defects in this file (no verdict
+  changed).** The corpus grew past 52 programs and the table did not follow
+  it. Four defects remain, all in the table's bookkeeping rather than in any
+  expected result:
+  1. **Row renumber.** Two rows still carried the number `32`
+     (`32-a3-assign-map-slot-invalidated` and
+     `32-closure-local-alias-move-reject`), so `32` appeared three times in
+     the table and no row existed for the fixtures actually numbered `39`
+     and `42`. The two drifted rows are renumbered to match their files; the
+     legitimate `32-select-send-shared-map` row is untouched.
+  2. **Running-total repair.** Four `Distribution` captions disagreed with
+     the fixtures they describe: the `39 programs` caption said
+     `ACCEPT 8 · ACCEPT-MANAGED 2 · REJECT 27` (which does not add up to 39
+     at all; the fixtures say `ACCEPT 10`), the `41 programs` caption said
+     `REJECT 27` (fixtures: `REJECT 28`), the `42 programs` caption said
+     `ACCEPT 12 · REJECT 28` (fixtures: `ACCEPT 11 · REJECT 29`), and the
+     `49 programs` caption said `ACCEPT 13 · REJECT 34` (fixtures:
+     `ACCEPT 12 · REJECT 35`).
+  3. **Missing row.** Fixture `50-move-closure-container-reject` had no row:
+     it was registered in its own fix commit without one, and the section
+     that follows referred to that registration as if it existed. The row
+     and its section are restored here.
+  4. **Stale present-tense total.** The 2026-10-14 default-fallback section
+     claimed the *current* registered corpus was 28 programs, which was that
+     registration's total and has been false since; it also contradicted the
+     dated captions further down the same file. It is reworded to name 28 as
+     *that registration's* total, and the file now carries one explicit
+     present-tense total near the top that `tools/check_verdict_table.py`
+     fails closed against.
+
+  The committed conflict block this file carried out of `cbe3f4f` was
+  resolved separately by `ea6c62b` (which kept both the #353 and #326
+  registrations); this entry records only the repairs above, and no verdict,
+  rule, diagnostic, or rationale is changed. Guard:
+  `tools/check_verdict_table.py` fails closed if a row names a fixture
+  numbered differently, if a number repeats, if any fixture has no row, if a
+  caption does not add up or disagrees with the fixtures `01-N`, or if the
+  current-total header stops agreeing with the corpus. Author: @airdropia.
+
 ## Open questions (flagged for SPEC-LANGUAGE.md — NOT silently decided)
 
 These could not be settled from the ruling + spike-6 text; each corpus
@@ -552,12 +598,13 @@ keyword; cases 25–27 stand alone without defaults.
 Historical registration on the earlier base produced **24 programs:
 ACCEPT 9 · ACCEPT-MANAGED 2 · REJECT 13**. That registration and its local
 verification are retained as dated evidence; they are not the merged
-corpus total. Current registered corpus: **28 programs: ACCEPT 10 ·
-ACCEPT-MANAGED 2 · REJECT 16**. The original and upstream table entries and
-dated baseline remain unchanged. Verdict-level managed count is 2/28;
-the harness's unchanged historical as-written set {01, 03, 04} reports
-3/28, with the same population qualification noted above. Case 28 adds
-no `managed` block.
+corpus total. At that registration the merged corpus totaled **28 programs:
+ACCEPT 10 · ACCEPT-MANAGED 2 · REJECT 16**; the corpus has grown since, by
+the registrations below. The original and upstream table entries and
+dated baseline remain unchanged. Verdict-level managed count was 2/28 at
+that point; the harness's unchanged historical as-written set
+{01, 03, 04} reported 3/28, with the same population qualification noted
+above. Case 28 adds no `managed` block.
 
 ## Additive corpus registration — 2026-10-15: buildability declarations (#134)
 
@@ -593,6 +640,29 @@ composite-`const` locals, select-receive names and match bindings stay
 outside this registration (the same Go error family, tracked separately);
 unread `for ... in` bindings are handled at emission (issue #139).
 
+## Additive corpus registration — 2026-10-15: closure-container move (issue #225)
+
+Case 50 was derived from the O4 sendability text and the O5 move/freeze
+rules before it was run against the checker. A slice, map, or struct that
+holds a closure carries captured state; moving such a container across a
+`task` boundary moves the captured storage too, so the move is a
+sendability act and must be rejected when the captured storage is shared.
+A bare closure binding is already rejected (A5 perimeter), but the walk
+stopped at the container shape, so the checker accepted `task worker(move
+fs, done)` with 0 diagnostics and `go run -race` reported two data races.
+The program is a registered REJECT (`A1c`) and the fix walks the moved
+container's element and field shapes and rejects when any of them is a
+closure.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 50 | 50-move-closure-container-reject | REJECT | A1c | `HYB-E3001` | a slice/map/struct literal holding a closure moves its captured storage across a `task` boundary; that storage is not safe-by-type, so the move must be rejected |
+
+Registration note: the fixture landed with its fix commit without a row
+here, so between that commit and this one the normative record described 49
+programs while the corpus held 50. The row and this section restore the
+one-to-one naming that `tools/check_verdict_table.py` enforces.
+
 ## Additive corpus registration — 2026-10-17: 3-argument slice `make` (#353)
 
 One case added WITH its fix: `make([]T, len, cap)` is valid Go, was
@@ -609,8 +679,8 @@ remaining rejection.
 
 With this addition the corpus on disk stood at **51 programs:
 ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 36** (recomputed from the files'
-`EXPECTED-VERDICT` markers; #50 carries its registration with its own fix
-PR; the registration below raises the total to 52).
+`EXPECTED-VERDICT` markers; #50's row is in the section directly above; the
+registration below raises the total to 52).
 
 ## Additive corpus registration — 2026-10-17: shadowed predeclared types (#326)
 
