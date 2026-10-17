@@ -33,12 +33,14 @@ def main(binpath):
         if cur is None:
             continue
         nm = re.search(r"DW_AT_name\s*:\s*(.+?)\s*$", line)
-        off = re.search(r"DW_AT_data_member_location\s*:\s*(\d+)", line)
-        sz = re.search(r"DW_AT_byte_size\s*:\s*(\d+)", line)
+        # Recent readelf builds annotate numeric forms, e.g. (data1) 16.
+        off = re.search(r"DW_AT_data_member_location\s*:\s*(?:\([^)]*\)\s*)*(\d+)\s*$", line)
+        sz = re.search(r"DW_AT_byte_size\s*:\s*(?:\([^)]*\)\s*)*(\d+)\s*$", line)
         if nm is not None:
             # readelf may prefix DWARF string references with their encoding,
-            # e.g. "(indirect string, offset: 0x12): runtime.g".
-            cur["name"] = re.sub(r"^\([^)]*\):\s*", "", nm.group(1))
+            # e.g. "(indirect string, offset: 0x12): runtime.g", or
+            # "(strp) (offset: 0x12): runtime.g" in newer readelf output.
+            cur["name"] = re.sub(r"^(?:\([^)]*\)\s*)+:\s*", "", nm.group(1))
         if off is not None:
             cur["off"] = int(off.group(1))
         if sz is not None:
