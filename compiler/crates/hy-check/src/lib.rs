@@ -356,6 +356,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     // Pass A: indices, structural extents, last-use map.
     let flat = walk::flatten(body);
     st.last_use = flat.last_use.clone();
+    st.loop_end = flat.loop_end.clone();
 
     let mut active_loops: Vec<(
         usize,
@@ -708,6 +709,15 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             // covered by the flat walk (init is its own statement entry)
             // and the uses/calls collected above.
             _ => {}
+        }
+
+        if let Some(top_fnlits) = st.fnlit_scopes.last_mut() {
+            let mut fnlits = Vec::new();
+            walk::own_fnlits(stmt, &mut fnlits);
+            for flit in fnlits {
+                let s = flit.span().start;
+                top_fnlits.push((s.line, s.col));
+            }
         }
 
         while let Some((_, loop_end, _, _, _)) = active_loops.last() {

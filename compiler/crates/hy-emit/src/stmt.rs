@@ -8,6 +8,25 @@ use super::expr::ATOM;
 use super::shapes::lookup_conversion;
 
 impl Emitter {
+    fn as_addr_of_unwrapped(mut e: &Expr) -> Option<&Expr> {
+        while let Expr::Paren { inner, .. } = e {
+            e = inner;
+        }
+        let mut op = match e {
+            Expr::AddrOf { operand, .. } => operand.as_ref(),
+            Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                ..
+            } => operand.as_ref(),
+            _ => return None,
+        };
+        while let Expr::Paren { inner, .. } = op {
+            op = inner;
+        }
+        Some(op)
+    }
+
     pub fn emit_stmt(&mut self, s: &Stmt) -> Result<(), EmitError> {
         match s {
             Stmt::Local(l) => self.emit_local(l),
@@ -267,8 +286,8 @@ impl Emitter {
         // declaring block's end. A plain `&x` (local var address) is legal
         // Go and stays verbatim.
         if l.values.len() == 1 {
-            if let Expr::AddrOf { operand, .. } = &l.values[0] {
-                if matches!(operand.as_ref(), Expr::Index { .. } | Expr::Field { .. }) {
+            if let Some(operand) = Self::as_addr_of_unwrapped(&l.values[0]) {
+                if matches!(operand, Expr::Index { .. } | Expr::Field { .. }) {
                     let place = self.emit_expr(operand, 0)?;
                     let names = l.names.join(", ");
                     self.push(&format!("{} := {}", names, place));
@@ -1006,8 +1025,8 @@ impl Emitter {
         // declaring block's end. A plain `&x` (local var address) is legal
         // Go and stays verbatim.
         if targets.len() == 1 && values.len() == 1 && op == AssignOp::Assign {
-            if let Expr::AddrOf { operand, .. } = &values[0] {
-                if matches!(operand.as_ref(), Expr::Index { .. } | Expr::Field { .. }) {
+            if let Some(operand) = Self::as_addr_of_unwrapped(&values[0]) {
+                if matches!(operand, Expr::Index { .. } | Expr::Field { .. }) {
                     if let PlaceKind::Ident(name) = &targets[0].kind {
                         let place = self.emit_expr(operand, 0)?;
                         self.push(&format!("{} = {}", name, place));
