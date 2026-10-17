@@ -35,7 +35,7 @@ DEFAULT_CORPUS = os.path.join(REPO_ROOT, "tests", "checker-corpus")
 DEFAULT_BIN = os.path.join(os.environ.get("CARGO_TARGET_DIR", "/home/z/go-hybrid-target"), "debug", "hyb")
 
 VERDICT_RE = re.compile(
-    r"^//\s*EXPECTED-VERDICT:\s*(ACCEPT-MANAGED|ACCEPT|REJECT)\b\s*(\S*)", re.M
+    r"^[ 	]*//[ \t]*EXPECTED-VERDICT:[ \t]*([^\r\n]*)", re.M
 )
 DIAGNOSTIC_HEADER_RE = re.compile(
     r"^[ \t]*//[ \t]*EXPECTED-DIAGNOSTIC\b[^\n]*$", re.M
@@ -53,12 +53,18 @@ def read_expected(path):
     """Return (verdict, rule_id) or None if no EXPECTED-VERDICT line."""
     with open(path, encoding="utf-8") as f:
         src = f.read()
-    m = VERDICT_RE.search(src)
-    if not m:
+    markers = VERDICT_RE.findall(src)
+    if not markers:
         return None
-    verdict, rule = m.group(1), m.group(2)
+    if len(markers) != 1:
+        raise ValueError(f"corpus error: {path} has multiple EXPECTED-VERDICT markers")
+    fields = markers[0].split()
+    if not fields or fields[0] not in ("ACCEPT", "ACCEPT-MANAGED", "REJECT"):
+        raise ValueError(f"corpus error: {path} has invalid EXPECTED-VERDICT: {markers[0]!r}")
+    verdict = fields[0]
+    rule = fields[1] if verdict == "REJECT" and len(fields) > 1 else None
     if verdict == "REJECT" and not rule:
-        raise SystemExit(f"corpus error: {path} has REJECT without a rule id")
+        raise ValueError(f"corpus error: {path} has REJECT without a rule id")
     return verdict, (rule or None)
 
 
@@ -203,8 +209,8 @@ def main():
 
     for fname in files:
         path = os.path.join(args.corpus, fname)
-        expected = read_expected(path)
         try:
+            expected = read_expected(path)
             expected_code = read_expected_diagnostic(path, expected)
         except ValueError as e:
             print(str(e), file=sys.stderr)

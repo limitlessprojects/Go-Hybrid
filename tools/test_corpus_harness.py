@@ -157,5 +157,110 @@ class CheckerEnvelopeCliTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
 
 
+class VerdictMetadataCliTests(unittest.TestCase):
+    def run_corpus(self, source, case_payload=None, case_status=0):
+        """Run the real CLI beside a passing control, using an offline checker."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = root / "corpus"
+            corpus.mkdir()
+            (corpus / "01-control.hy").write_text(
+                "// EXPECTED-VERDICT: ACCEPT\nfn main() {}\n", encoding="utf-8"
+            )
+            (corpus / "02-case.hy").write_text(source, encoding="utf-8")
+            accepted = {"summary": {"verdict": "accept"}, "diagnostics": []}
+            checker = root / "hyb"
+            checker.write_text(
+                f"#!{sys.executable}\nfrom pathlib import Path\nimport json, sys\n"
+                "is_case = Path(sys.argv[2]).name == '02-case.hy'\n"
+                f"payload = {case_payload if case_payload is not None else accepted!r} if is_case else {accepted!r}\n"
+                "print(json.dumps(payload))\n"
+                f"raise SystemExit({case_status} if is_case else 0)\n",
+                encoding="utf-8",
+            )
+            checker.chmod(0o700)
+            return subprocess.run(
+                [sys.executable, str(HARNESS), "--bin", str(checker), "--corpus", str(corpus)],
+                capture_output=True, text=True, timeout=10,
+            )
+
+    def assert_bad_metadata(self, source, message):
+        run = self.run_corpus(source)
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn(message, run.stderr)
+        self.assertIn("02-case.hy", run.stderr)
+        self.assertNotIn("verdict agreement:", run.stdout)
+        self.assertNotIn("Traceback", run.stderr)
+
+    def test_indented_malformed_marker_is_not_silently_skipped(self):
+        self.assert_bad_metadata(
+            "    // EXPECTED-VERDICT: REJET A1\nfn main() {}\n",
+            "invalid EXPECTED-VERDICT",
+        )
+
+    def test_unknown_verdict_is_not_silently_skipped(self):
+        self.assert_bad_metadata(
+            "// EXPECTED-VERDICT: REJET A1\nfn main() {}\n", "invalid EXPECTED-VERDICT"
+        )
+
+    def test_empty_verdict_is_not_silently_skipped(self):
+        self.assert_bad_metadata(
+            "// EXPECTED-VERDICT: \nfn main() {}\n", "invalid EXPECTED-VERDICT"
+        )
+
+    def test_suffixed_verdict_is_not_accepted_by_prefix(self):
+        self.assert_bad_metadata(
+            "// EXPECTED-VERDICT: ACCEPT-BROKEN\nfn main() {}\n", "invalid EXPECTED-VERDICT"
+        )
+
+    def test_conflicting_verdicts_are_not_reduced_to_first_match(self):
+        self.assert_bad_metadata(
+            "// EXPECTED-VERDICT: ACCEPT\n// EXPECTED-VERDICT: REJECT A1\nfn main() {}\n",
+            "multiple EXPECTED-VERDICT",
+        )
+
+    def test_duplicate_verdicts_are_rejected_even_if_identical(self):
+        self.assert_bad_metadata(
+            "// EXPECTED-VERDICT: ACCEPT\n// EXPECTED-VERDICT: ACCEPT\nfn main() {}\n",
+            "multiple EXPECTED-VERDICT",
+        )
+
+    def test_reject_rule_cannot_come_from_the_next_line(self):
+        self.assert_bad_metadata(
+            "// EXPECTED-VERDICT: REJECT\nfn main() {}\n", "REJECT without a rule id"
+        )
+
+    def test_valid_accept_and_unregistered_helpers_keep_their_contract(self):
+        for source, agreement in (
+            ("// EXPECTED-VERDICT: ACCEPT\nfn main() {}\n", "2/2"),
+            ("// unregistered helper\nfn helper() {}\n", "1/1"),
+        ):
+            with self.subTest(source=source):
+                run = self.run_corpus(source)
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn(f"verdict agreement: {agreement}", run.stdout)
+
+    def test_reject_rule_and_inline_explanation_with_tabs_and_crlf(self):
+        payload = {"summary": {"verdict": "reject"},
+                   "diagnostics": [{"severity": "error", "tier0_rule": "A1b"}]}
+        run = self.run_corpus(
+            "//\tEXPECTED-VERDICT:\tREJECT\tA1b (move rule)\r\nfn main() {}\r\n",
+            payload, 1,
+        )
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("verdict agreement: 2/2", run.stdout)
+
+    def test_valid_managed_verdict_keeps_its_lint_requirement(self):
+        source = "// EXPECTED-VERDICT: ACCEPT-MANAGED\nfn main() {}\n"
+        payload = {"summary": {"verdict": "accept"},
+                   "diagnostics": [{"severity": "warning", "code": "HYB-E8001"}]}
+        run = self.run_corpus(source, payload)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("verdict agreement: 2/2", run.stdout)
+        run = self.run_corpus(source)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("expected accept + managed lint", run.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
