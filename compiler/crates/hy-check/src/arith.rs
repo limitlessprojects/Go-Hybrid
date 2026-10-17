@@ -19,6 +19,7 @@ impl<'a> Checker<'a> {
     /// Nested block bodies are NOT recursed here — `walk::flatten` already
     /// lists those statements, and a second walk would duplicate diagnostics.
     pub(crate) fn check_stmt_const_zero_divisor(&mut self, stmt: &Stmt) {
+        self.check_file_close_and_range_directions(stmt);
         self.check_stmt_const_zero_divisor_inner(stmt, /*deep=*/ false);
     }
 
