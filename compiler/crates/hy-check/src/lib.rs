@@ -52,6 +52,7 @@ mod emit_guard;
 mod foreign;
 mod freeze;
 mod loans;
+mod const_init;
 mod model;
 mod sendability;
 mod shape;
@@ -172,6 +173,10 @@ fn build_tables(ck: &mut Checker<'_>) {
                 ck.declare_pkg_name(&c.name, "const", c.span);
                 let b = ck.const_binding(c);
                 ck.consts.insert(c.name.clone(), b);
+                // Issue #205: file-level `const c = get_val()` must not pass check then fail go build.
+                // Placed after insert so this hook sits below main's E6002 overflow check and
+                // 3-way-merges cleanly (same pattern as PR #191 relocated hooks).
+                ck.check_const_init_is_constant(&c.name, &c.value, None);
             }
             Decl::Struct(s) => {
                 // Issue #201-C: package-scope names are unique across

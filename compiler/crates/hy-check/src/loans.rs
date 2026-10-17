@@ -965,6 +965,12 @@ impl<'a> Checker<'a> {
         // immutability shortcut in sendability.rs. Primitives, strings,
         // atomics and channels stay sendable via `is_sendable_by_type`.
         let immutable = matches!(l.kind, LocalKind::Const);
+        // Issue #205: reject non-constant `const` initializers (emitter keeps Go `const`).
+        if matches!(l.kind, LocalKind::Const) {
+            for (name, value) in l.names.iter().zip(l.values.iter()) {
+                self.check_const_init_is_constant(name, value, Some(st));
+            }
+        }
         if l.values.is_empty() {
             // `var hits atomic.int64` / `var got []int` — shape from the
             // ascription (there is no initializer to infer from).
