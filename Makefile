@@ -23,7 +23,7 @@ help:
 	@echo "make test-quick       — sandbox unit tests (grows with the compiler)"
 	@echo "make ci               — what CI runs on push"
 	@echo "make examples         — the ten target programs, byte-exact acceptance"
-	@echo "make corpus           — Tier-0 corpus verdicts (35/35)"
+	@echo "make corpus           — Tier-0 corpus verdicts (55/55)"
 	@echo "make differential     — the differential corpus loop (accept + reject)"
 	@echo "make bench            — G2 call-overhead bench on the live bridge (hyb bench-overhead)"
 	@echo "make spike0-kaggle    — submit Spike 0 part A to the Kaggle worker"
