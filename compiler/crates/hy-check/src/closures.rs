@@ -435,7 +435,62 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     ),
                 };
                 for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
-                    ck.define_binding(st, name, shape, ty, immutable, managed);
+                    let reads_self = l.values.first().is_some_and(|v| {
+                        ck.shape_may_share(&shape) && ck.value_reads_storage_of(st, v, name)
+                    });
+                    let shadowed_origin = if reads_self {
+                        ck.non_owned_origin_of(st, name).map(|(o, via_share)| {
+                            if via_share && !o.starts_with("a may-share peer of ") {
+                                format!("a may-share peer of {}", o)
+                            } else {
+                                o
+                            }
+                        })
+                    } else {
+                        None
+                    };
+                    let prior_alias = if reads_self {
+                        st.aliases
+                            .get(name)
+                            .cloned()
+                            .or_else(|| ck.binding_const_root(st, name))
+                    } else {
+                        None
+                    };
+                    let prior_shares: Vec<String> = if reads_self {
+                        let mut ps: Vec<String> = st
+                            .may_share
+                            .get(name)
+                            .map(|s| s.iter().cloned().collect())
+                            .unwrap_or_default();
+                        if ck.binding_may_share(st, name) {
+                            ps.push(name.clone());
+                        }
+                        ps
+                    } else {
+                        Vec::new()
+                    };
+                    ck.define_binding(st, name, shape.clone(), ty, immutable, managed);
+                    if reads_self {
+                        if let Some(pa) = prior_alias {
+                            st.aliases.insert(name.clone(), pa);
+                        }
+                        for peer in prior_shares {
+                            if &peer != name {
+                                st.share_edge(name, &peer);
+                            }
+                        }
+                    }
+                    if let Some(val) = l.values.first() {
+                        ck.record_multi_value_share_and_alias(st, name, &shape, val);
+                    }
+                    if let Some(origin) = shadowed_origin {
+                        if let Some(b) = st.env_lookup_mut(name) {
+                            if b.non_owned_origin.is_none() {
+                                b.non_owned_origin = Some(origin);
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -48,12 +48,22 @@ nested value is DEEP regardless of the caller's input shape.**
 | `FnArrayLen` | SMALL | Vec len read |
 | `FnPushString` | SMALL | Vec push + heap copy of the string |
 
-### regexbinding — ALL DEFAULT (deliberate)
+### regexbinding — ALL DEEP
+
+Both `hy_regex_is_match` and `hy_regex_is_valid` compile the pattern via
+`regex::Regex::new(pat)` on every call. Disassembly of `libhyrt.a` shows:
+(1) `regex_automata::meta::strategy::new` unconditionally allocates a **7,648 B**
+single frame (with an acyclic compilation call chain up to **22,976 B** through
+`RegexBuilder::build` → `meta::regex::Builder::build` → `meta::strategy::new` →
+`Choice::new` → `Teddy::new` → `aho_corasick::nfa::noncontiguous::Builder::build`
+→ `driftsort_main`), exceeding the 4,096 B `DEFAULT` guard even for a 1-byte
+pattern; and (2) dropping the parsed `regex_syntax::ast::Ast` / `ClassSet`
+recurses on bracket nesting depth (`drop_in_place::<Ast>` ↔ `ClassSet::drop`).
 
 | fn | class | justification |
 |----|-------|---------------|
-| `FnIsMatch` | DEFAULT | regex-automata's search is iterative with heap arenas (argued bounded), but UNMEASURED — DEFAULT until a fleet measurement justifies SMALL |
-| `FnIsValid` | DEFAULT | compile is iterative on the heap; same unmeasured status |
+| `FnIsMatch` | **DEEP** | `Regex::new` per call: 7,648 B `meta::strategy::new` frame (22,976 B acyclic compile chain) + recursive `Ast`/`ClassSet` drop on nested character classes ≫ 4096 B |
+| `FnIsValid` | **DEEP** | `Regex::new` per call: same 7,648 B `meta::strategy::new` frame (22,752 B acyclic compile chain) + recursive `Ast`/`ClassSet` drop ≫ 4096 B |
 
 ### hyrt internals
 
@@ -66,6 +76,10 @@ nested value is DEEP regardless of the caller's input shape.**
 - `TestDeepNestingOnConstrainedStack` (jsonbinding): 128-deep JSON through
   parse/get_array/array_get/set/to_string_pretty/release on a
   stack-constrained goroutine — the DEEP-class routes are the fix's proof.
+- `TestDeepClassAndConstrainedStack` (regexbinding): `DeepCrossCount` proof that
+  `IsMatch` and `IsValid` always route through `CrossDeep*`, plus 200-deep nested
+  character-class compilation at `SPHeadroom` in `(4150, 5200)` on a
+  stack-constrained goroutine.
 - `TestSmallClassFastPathOnShallowStack` (hybridge): a controlled-headroom
   goroutine in the (1024, 4096) window takes the fast path through `Cross*S`
   while the default class takes the deep path — DeepPathCount is the oracle.
