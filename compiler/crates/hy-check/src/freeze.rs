@@ -174,7 +174,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn emit_use_after_move(&mut self, st: &FnState, u: &Use, mv: &MoveInfo) {
+    pub(crate) fn emit_use_after_move(&mut self, st: &FnState, u: &Use, mv: &MoveInfo) {
         // A may-share peer (#27) is an alias in every way that matters here,
         // even when the single-parent `aliases` chain does not name it (e.g.
         // a projection or composite-literal capture).

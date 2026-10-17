@@ -814,7 +814,7 @@ pub(crate) fn collect_ref_roots(e: &Expr, out: &mut Vec<String>) {
             let mut bound: std::collections::HashSet<String> =
                 params.iter().map(|p| p.name.clone()).collect();
             bound.extend(results.iter().filter_map(|r| r.name.clone()));
-            crate::loans::collect_capture_idents_block(body, &mut bound, out);
+            crate::loans::collect_capture_idents_block(body, &bound, out);
         }
         _ => {}
     }
