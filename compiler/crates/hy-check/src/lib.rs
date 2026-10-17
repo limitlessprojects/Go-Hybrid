@@ -652,8 +652,9 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             }
 
             // Loop variables: fresh bindings per iteration shape.
-            Stmt::For { kind, .. } => match kind {
+            Stmt::For { kind, span, .. } => match kind {
                 ForKind::Iterate { vars, expr } => {
+                    ck.check_range_iterable(&st, expr, *span);
                     let is_chan = matches!(ck.shape_of_expr(&st, expr), TypeShape::Chan(_));
                     let shapes = ck.iterate_var_shapes(&st, expr, vars.len());
                     for (name, shape) in vars.iter().zip(shapes) {

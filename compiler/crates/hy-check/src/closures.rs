@@ -478,7 +478,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             }
             st.scope_pop();
         }
-        Stmt::For { kind, body, .. } => {
+        Stmt::For { kind, body, span } => {
             let outer_depth = st.scopes.len();
             let pre_moved: std::collections::HashSet<String> = st
                 .env
@@ -490,6 +490,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             st.scope_push(); // the loop vars' scope
             match kind {
                 Iterate { vars, expr } => {
+                    ck.check_range_iterable(st, expr, *span);
                     let is_chan = matches!(ck.shape_of_expr(st, expr), TypeShape::Chan(_));
                     let shapes = ck.iterate_var_shapes(st, expr, vars.len());
                     for (name, shape) in vars.iter().zip(shapes) {

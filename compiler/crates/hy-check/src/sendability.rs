@@ -798,6 +798,37 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Issue #411: classify the operand of `for x in e` (LX13). Slices,
+    /// arrays (and `*[N]T`), strings, maps and channels are iterable; a
+    /// concrete non-iterable shape (`int`, `bool`, a struct, an atomic, a
+    /// non-array pointer) emits `range e` that Go rejects with `cannot
+    /// range over`, so it is HYB-E2009 (BUILDABLE). Unresolved shapes and
+    /// foreign/handle/closure values are left alone: they may be iterable
+    /// on the Go side (range-over-func, foreign slices) and other passes
+    /// own their boundaries.
+    pub(crate) fn check_range_iterable(&mut self, st: &FnState, expr: &Expr, span: Span) {
+        let shape = self.shape_of_expr(st, expr);
+        let bad = match &shape {
+            TypeShape::Primitive | TypeShape::Atomic | TypeShape::Struct(_) => true,
+            TypeShape::Pointer(inner) => !matches!(inner.as_ref(), TypeShape::Array(_)),
+            _ => false,
+        };
+        if !bad {
+            return;
+        }
+        let msg = format!(
+            "cannot iterate `{}` ({}) — `for x in e` ranges over slices, arrays, strings, maps, and channels (LX13)",
+            expr.render(),
+            shape.render()
+        );
+        let notes = vec![
+            "why: the loop lowers to Go `range`, and Go rejects ranging over this type (`cannot range over`); the accepted subset only emits buildable Go (issue #411)".to_string(),
+            "fix: iterate a collection, or count with an integer range `for i in 0..n`".to_string(),
+        ];
+        self.diags
+            .push(Diagnostic::error("HYB-E2009", self.path.clone(), span, msg).with_notes(notes));
+    }
+
     /// Emit HYB-E4001: `nil` flowing into a known non-nilable type (rule N1).
     /// `what` names the target in the message ("the assignment target `m`",
     /// "a parameter of the spawn callee", ...). A TYPE contract, not a
