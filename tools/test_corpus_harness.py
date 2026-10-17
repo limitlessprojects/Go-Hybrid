@@ -76,6 +76,33 @@ class ExactDiagnosticCliTests(unittest.TestCase):
         self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
         self.assertIn("without REJECT", run.stderr)
 
+    def test_duplicate_verdict_headers_do_not_silently_pass(self):
+        # The checker agrees with the first header. The second makes the
+        # fixture ambiguous and must not be silently ignored by the harness.
+        run = self.run_harness("// EXPECTED-VERDICT: ACCEPT")
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("multiple EXPECTED-VERDICT", run.stderr)
+
+    def test_malformed_second_verdict_header_does_not_silently_pass(self):
+        run = self.run_harness("// EXPECTED-VERDICT: ACCEPT-MANGLED")
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("multiple EXPECTED-VERDICT", run.stderr)
+
+    def test_malformed_only_verdict_header_is_not_treated_as_accept(self):
+        run = self.run_harness("", verdict="ACCEPT-MANGLED")
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("malformed EXPECTED-VERDICT", run.stderr)
+
+    def test_accept_header_with_unexpected_rule_fails_closed(self):
+        run = self.run_harness("", verdict="ACCEPT A1c")
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("unexpected rule after ACCEPT", run.stderr)
+
+    def test_reject_header_requires_rule_id(self):
+        run = self.run_harness("", verdict="REJECT")
+        self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+        self.assertIn("REJECT without a rule id", run.stderr)
+
 
 class CheckerEnvelopeCliTests(unittest.TestCase):
     def run_payload(self, payload, expected="ACCEPT", status=0):

@@ -35,7 +35,11 @@ DEFAULT_CORPUS = os.path.join(REPO_ROOT, "tests", "checker-corpus")
 DEFAULT_BIN = os.path.join(os.environ.get("CARGO_TARGET_DIR", "/home/z/go-hybrid-target"), "debug", "hyb")
 
 VERDICT_RE = re.compile(
-    r"^//\s*EXPECTED-VERDICT:\s*(ACCEPT-MANAGED|ACCEPT|REJECT)\b\s*(\S*)", re.M
+    r"^//[ \t]*EXPECTED-VERDICT:[ \t]*(ACCEPT-MANAGED|ACCEPT|REJECT)"
+    r"(?![-\w])(?:[ \t]+([^\s()]+))?(?:[ \t]+\([^)]*\))?[ \t]*$", re.M
+)
+VERDICT_HEADER_RE = re.compile(
+    r"^[ \t]*//[ \t]*EXPECTED-VERDICT\b[^\n]*$", re.M
 )
 DIAGNOSTIC_HEADER_RE = re.compile(
     r"^[ \t]*//[ \t]*EXPECTED-DIAGNOSTIC\b[^\n]*$", re.M
@@ -53,12 +57,19 @@ def read_expected(path):
     """Return (verdict, rule_id) or None if no EXPECTED-VERDICT line."""
     with open(path, encoding="utf-8") as f:
         src = f.read()
-    m = VERDICT_RE.search(src)
-    if not m:
+    headers = VERDICT_HEADER_RE.findall(src)
+    if not headers:
         return None
+    if len(headers) != 1:
+        raise ValueError(f"corpus error: {path} has multiple EXPECTED-VERDICT headers")
+    m = VERDICT_RE.search(headers[0].strip())
+    if m is None:
+        raise ValueError(f"corpus error: {path} has malformed EXPECTED-VERDICT header")
     verdict, rule = m.group(1), m.group(2)
     if verdict == "REJECT" and not rule:
-        raise SystemExit(f"corpus error: {path} has REJECT without a rule id")
+        raise ValueError(f"corpus error: {path} has REJECT without a rule id")
+    if verdict != "REJECT" and rule:
+        raise ValueError(f"corpus error: {path} has unexpected rule after {verdict}")
     return verdict, (rule or None)
 
 
@@ -203,8 +214,8 @@ def main():
 
     for fname in files:
         path = os.path.join(args.corpus, fname)
-        expected = read_expected(path)
         try:
+            expected = read_expected(path)
             expected_code = read_expected_diagnostic(path, expected)
         except ValueError as e:
             print(str(e), file=sys.stderr)
