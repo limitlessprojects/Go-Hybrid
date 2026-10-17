@@ -1007,6 +1007,9 @@ impl<'a> Checker<'a> {
                 .iter()
                 .any(|it| self.value_reads_storage_of(st, it, name)),
             Expr::Call { callee, args, .. } => {
+                if self.call_returns_fresh_copy(st, value) {
+                    return false;
+                }
                 let result = self.shape_of_expr(st, unwrap_parens(value));
                 if !(self.shape_may_share(&result) || matches!(result, TypeShape::Unknown)) {
                     return false;
@@ -1086,6 +1089,9 @@ impl<'a> Checker<'a> {
                 }
             }
             _ => {
+                if self.call_returns_fresh_copy(st, value) {
+                    return;
+                }
                 let inner = unwrap_parens(value);
                 let result = self.shape_of_expr(st, inner);
                 let is_literal = matches!(
@@ -1210,6 +1216,9 @@ impl<'a> Checker<'a> {
             // single-parent link) and `move`-wrapped operands, which transfer
             // ownership into the callee, are skipped by the collector.
             other => {
+                if self.call_returns_fresh_copy(st, value) {
+                    return;
+                }
                 let other_shape = self.shape_of_expr(st, unwrap_parens(other));
                 if other_shape.is_reference_alias()
                     || matches!(other_shape, TypeShape::OwnHandle(_))
