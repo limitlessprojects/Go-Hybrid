@@ -3080,6 +3080,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn const_read_followed_by_blank_assign_does_not_false_reject_e3006() {
+        // Issue #460 minimal reproducer
+        let r = check(
+            "const shared = map[string]int{\"k\": 1}\n\
+             fn main() {\n\
+               _ = shared[\"k\"]\n\
+               xs := [1, 2]\n\
+               _ = xs[0]\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+
+        // Issue #460 original parenthesized composite reproducer
+        let r2 = check(
+            "const shared_paren = (map[string]int{\"k\": 1})\n\
+             fn main() {\n\
+               const local_paren = ([1, 2])\n\
+               _ = shared_paren[\"k\"]\n\
+               _ = local_paren[0]\n\
+             }",
+        );
+        assert_eq!(r2.verdict, Verdict::Accept, "{:?}", r2.diagnostics);
+    }
+
     /// Positive control: a call with no reference-carrying argument is a
     /// fresh value and must NOT be edged to anything — the widening must not
     /// start rejecting fresh results.
