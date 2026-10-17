@@ -286,7 +286,7 @@ impl Emitter {
                     .ok_or_else(|| EmitError::unsupported("`const` without an initializer"))?;
                 let value = self.emit_expr(first, 0)?;
                 let composite = matches!(
-                    first,
+                    Self::peel_parens(first),
                     Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
                 );
                 let kw = if composite { "var" } else { "const" };
@@ -393,7 +393,7 @@ impl Emitter {
         e as *const Expr as usize
     }
 
-    fn peel_parens(mut e: &Expr) -> &Expr {
+    pub(crate) fn peel_parens(mut e: &Expr) -> &Expr {
         while let Expr::Paren { inner, .. } = e {
             e = inner;
         }

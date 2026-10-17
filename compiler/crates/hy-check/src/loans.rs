@@ -25,7 +25,7 @@ use crate::shape::receiver_type_name;
 use crate::walk::{self, CallRef};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{AssignOp, Block, Expr, FnDecl, LocalDecl, LocalKind, Place, PlaceKind, Stmt};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Read-only call targets that can never mutate a map argument — the A3
 /// callee scan fails closed on everything else (#111).
@@ -1090,7 +1090,7 @@ impl<'a> Checker<'a> {
                     (name.clone(), shape, ty, shadowed)
                 })
                 .collect();
-            for (name, shape, ty, shadowed_origin) in resolved {
+            for (slot, (name, shape, ty, shadowed_origin)) in resolved.into_iter().enumerate() {
                 let is_view = matches!(shape, TypeShape::BorrowHandle(_));
                 self.define_binding(st, &name, shape.clone(), ty, immutable, managed);
                 if is_view {
@@ -1104,6 +1104,14 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                self.record_multi_value_links(
+                    st,
+                    &name,
+                    &shape,
+                    &l.values[0],
+                    slot,
+                    l.names.len(),
+                );
             }
         } else {
             for (name, value) in l.names.iter().zip(l.values.iter()) {
@@ -1189,6 +1197,7 @@ impl<'a> Checker<'a> {
                             b.non_owned_origin = Some(origin);
                         }
                     }
+                    self.link_returned_const_root(st, name, value, None);
                     continue;
                 }
                 // Self-shadowing define (`m := m`, `h := h`, `m := same(m)`
@@ -1301,6 +1310,7 @@ impl<'a> Checker<'a> {
                 // friendlier "frozen alias" diagnostic) — and call results
                 // that hand back argument storage (#38).
                 self.record_alias(st, name, value);
+                self.link_returned_const_root(st, name, value, None);
 
                 // #111 form 4: record the base paths a closure value's body
                 // mutates, so a call inside a live slot-loan window counts
@@ -1350,6 +1360,19 @@ impl<'a> Checker<'a> {
             Expr::SliceLit { items, .. } => items
                 .iter()
                 .any(|it| self.value_reads_storage_of(st, it, name)),
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => {
+                let mut bound: std::collections::HashSet<String> =
+                    params.iter().map(|p| p.name.clone()).collect();
+                bound.extend(results.iter().filter_map(|r| r.name.clone()));
+                let mut idents = Vec::new();
+                collect_capture_idents_block(body, &mut bound, &mut idents);
+                idents.iter().any(|id| id == name)
+            }
             Expr::Call { callee, args, .. } => {
                 let result = self.shape_of_expr(st, unwrap_parens(value));
                 if !(self.shape_may_share(&result) || matches!(result, TypeShape::Unknown)) {
@@ -1359,13 +1382,8 @@ impl<'a> Checker<'a> {
                     !matches!(unwrap_parens(&a.value), Expr::Move { .. })
                         && (root_is(&a.value) || self.value_reads_storage_of(st, &a.value, name))
                 });
-                let via_recv = match unwrap_parens(callee) {
-                    Expr::Field { base, .. } => {
-                        root_is(base) || self.value_reads_storage_of(st, base, name)
-                    }
-                    _ => false,
-                };
-                via_arg || via_recv
+                let via_callee = root_is(callee) || self.value_reads_storage_of(st, callee, name);
+                via_arg || via_callee
             }
             _ => false,
         }
@@ -1711,6 +1729,865 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+        }
+    }
+
+    /// Issue #429: when an expression returns reference-bearing storage backed by
+    /// a `const` composite (via a top-level function, method, or closure return,
+    /// or a projection/wrapper around such a call), link `name` to that const
+    /// root so:
+    /// 1. Direct or aliased mutations (`m := get_shared(); m["k"] = 1`) are
+    ///    rejected by `HYB-E3006` (`const_write_root`).
+    /// 2. Moving at a task/send boundary (`task worker(move m, done)`) is
+    ///    rejected by `HYB-E3004` (`non_owned_origin`) and freezes sibling
+    ///    aliases via `share_edge` (`HYB-E3003`).
+    pub(crate) fn link_returned_const_root(
+        &self,
+        st: &mut FnState,
+        name: &str,
+        value: &Expr,
+        slot: Option<usize>,
+    ) {
+        let Some(b_shape) = self.lookup_binding(st, name).map(|b| b.shape.clone()) else {
+            return;
+        };
+        if matches!(b_shape, TypeShape::Closure)
+            || (!self.shape_may_share(&b_shape) && !matches!(b_shape, TypeShape::Unknown))
+        {
+            if !matches!(b_shape, TypeShape::Primitive) {
+                if let Some((const_name, file_const)) =
+                    self.expr_returned_const_root(st, value, &HashSet::new(), slot)
+                {
+                    st.closure_returns_const
+                        .insert(name.to_string(), (const_name, file_const));
+                }
+            }
+            return;
+        }
+        if let Some((const_name, file_const)) =
+            self.expr_returned_const_root(st, value, &HashSet::new(), slot)
+        {
+            let origin_str = if file_const.is_some() {
+                format!("file-level `const {}`", const_name)
+            } else {
+                format!("`const {}`", const_name)
+            };
+            if let Some(fc) = &file_const {
+                if self
+                    .lookup_binding(st, fc)
+                    .is_some_and(|cb| cb.immutable && self.consts.contains_key(fc))
+                {
+                    st.share_edge(name, fc);
+                    if b_shape.is_reference_alias() {
+                        st.aliases.entry(name.to_string()).or_insert_with(|| fc.clone());
+                    }
+                    if let Some(moved_site) = st.env.get(fc).and_then(|cb| cb.moved.clone()) {
+                        if let Some(b) = st.env_lookup_mut(name) {
+                            if b.moved.is_none() {
+                                b.moved = Some(moved_site);
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(b) = st.env_lookup_mut(name) {
+                if b.non_owned_origin.is_none()
+                    || !b
+                        .non_owned_origin
+                        .as_deref()
+                        .unwrap_or("")
+                        .contains("`const ")
+                {
+                    b.non_owned_origin = Some(origin_str);
+                }
+            }
+        }
+    }
+
+    /// Issue #429: record may-share edges, aliases, non-owned origins, and
+    /// returned const roots for `1-to-N` multi-value defines and assignments
+    /// (`inner, ok := outer["a"]`, `n, m := get_pair()`).
+    pub(crate) fn record_multi_value_links(
+        &self,
+        st: &mut FnState,
+        name: &str,
+        shape: &TypeShape,
+        value: &Expr,
+        slot: usize,
+        total_names: usize,
+    ) {
+        if name == "_" {
+            return;
+        }
+        let inner = unwrap_parens(value);
+        if matches!(inner, Expr::Index { .. }) && total_names == 2 && slot == 1 {
+            // In `v, ok := m[k]`, `ok` is always a primitive bool copy.
+            return;
+        }
+        if matches!(shape, TypeShape::Closure)
+            || (!self.shape_may_share(shape) && !matches!(shape, TypeShape::Unknown))
+        {
+            self.link_returned_const_root(st, name, value, Some(slot));
+            return;
+        }
+        let mut roots = Vec::new();
+        collect_ref_roots(value, &mut roots);
+        for root in &roots {
+            if root == name {
+                continue;
+            }
+            if let Some(b) = self.lookup_binding(st, root) {
+                if b.shape.is_handle()
+                    && !self.shape_carries_handle(shape)
+                    && !matches!(shape, TypeShape::Unknown)
+                {
+                    continue;
+                }
+                if self.shape_may_share(&b.shape) {
+                    st.share_edge(name, root);
+                }
+            }
+        }
+        if shape.is_reference_alias() || matches!(shape, TypeShape::OwnHandle(_)) {
+            for src in &roots {
+                if src == name {
+                    continue;
+                }
+                let matched = self.lookup_binding(st, src).map(|b| {
+                    let ok = if matches!(shape, TypeShape::OwnHandle(_)) {
+                        self.shape_carries_handle(&b.shape)
+                    } else {
+                        b.shape.is_reference_alias() || self.shape_may_share(&b.shape)
+                    };
+                    (ok, b.non_owned_origin.clone())
+                });
+                if let Some((true, origin)) = matched {
+                    st.aliases.insert(name.to_string(), src.clone());
+                    if let Some(origin) = origin {
+                        if let Some(nb) = st.env_lookup_mut(name) {
+                            nb.non_owned_origin = Some(origin);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        if let Some(origin) = self.moved_non_owned_origin_in_expr(st, value) {
+            if let Some(nb) = st.env_lookup_mut(name) {
+                if nb.non_owned_origin.is_none() {
+                    nb.non_owned_origin = Some(origin);
+                }
+            }
+        }
+        self.link_returned_const_root(st, name, value, Some(slot));
+    }
+
+    fn seed_const_map(&self, st: &FnState) -> HashMap<String, (String, Option<String>)> {
+        let mut const_map: HashMap<String, (String, Option<String>)> = self
+            .consts
+            .keys()
+            .map(|k| (k.clone(), (k.clone(), Some(k.clone()))))
+            .collect();
+        for (k, b) in &st.env {
+            if let Some(c) = self.binding_const_root(st, k) {
+                let fc = if self.consts.contains_key(&c) {
+                    Some(c.clone())
+                } else {
+                    None
+                };
+                const_map.insert(k.clone(), (c, fc));
+            } else if b.immutable {
+                const_map.insert(k.clone(), (k.clone(), None));
+            }
+        }
+        for scope in &st.scopes {
+            for (k, b) in scope {
+                if let Some(c) = self.binding_const_root(st, k) {
+                    let fc = if self.consts.contains_key(&c) {
+                        Some(c.clone())
+                    } else {
+                        None
+                    };
+                    const_map.insert(k.clone(), (c, fc));
+                } else if b.immutable {
+                    const_map.insert(k.clone(), (k.clone(), None));
+                } else {
+                    const_map.remove(k);
+                }
+            }
+        }
+        for (k, v) in &st.closure_returns_const {
+            const_map.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        const_map
+    }
+
+    /// Resolve whether `expr` (or result slot `slot` of a multi-return call)
+    /// evaluates to reference-bearing storage backed by a `const` composite
+    /// `(const_name, file_const_root)`.
+    pub(crate) fn expr_returned_const_root(
+        &self,
+        st: &FnState,
+        expr: &Expr,
+        declared: &HashSet<String>,
+        slot: Option<usize>,
+    ) -> Option<(String, Option<String>)> {
+        let inner = unwrap_parens(expr);
+        if slot.is_none() {
+            let sh = self.shape_of_expr(st, inner);
+            if matches!(sh, TypeShape::Primitive) {
+                return None;
+            }
+        }
+        match inner {
+            Expr::Ident { name, .. } => {
+                if declared.contains(name) {
+                    return None;
+                }
+                if let Some(hit) = st.closure_returns_const.get(name) {
+                    return Some(hit.clone());
+                }
+                let place = Place {
+                    kind: PlaceKind::Ident(name.clone()),
+                    span: inner.span(),
+                };
+                if let Some(c) = self.const_write_root(st, &place) {
+                    let fc = if self.consts.contains_key(&c)
+                        && self
+                            .lookup_binding(st, &c)
+                            .is_some_and(|b| b.immutable)
+                    {
+                        Some(c.clone())
+                    } else {
+                        None
+                    };
+                    return Some((c, fc));
+                }
+                None
+            }
+            Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Unary { operand, .. } => {
+                self.expr_returned_const_root(st, operand, declared, slot)
+            }
+            Expr::Field { base, .. } | Expr::Index { base, .. } | Expr::Slice { base, .. } => {
+                if let Some( idx_slot ) = slot {
+                    if matches!(inner, Expr::Index { .. }) && idx_slot == 1 {
+                        return None;
+                    }
+                }
+                self.expr_returned_const_root(st, base, declared, None)
+            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .find_map(|f| self.expr_returned_const_root(st, &f.value, declared, None)),
+            Expr::MapLit { entries, .. } => entries.iter().find_map(|(k, v)| {
+                self.expr_returned_const_root(st, k, declared, None)
+                    .or_else(|| self.expr_returned_const_root(st, v, declared, None))
+            }),
+            Expr::SliceLit { items, .. } => items
+                .iter()
+                .find_map(|it| self.expr_returned_const_root(st, it, declared, None)),
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => {
+                let mut const_map = self.seed_const_map(st);
+                for p in params {
+                    const_map.remove(&p.name);
+                }
+                let named_results: Vec<String> =
+                    results.iter().filter_map(|r| r.name.clone()).collect();
+                for nr in &named_results {
+                    const_map.remove(nr);
+                }
+                self.block_returned_const_root(body, &mut const_map, &named_results, slot, 0)
+            }
+            Expr::Call { callee, args, .. } => {
+                let callee_inner = unwrap_parens(callee);
+                match callee_inner {
+                    Expr::Ident { name, .. } => {
+                        if A3_PURE_FNS.contains(&name.as_str()) {
+                            return None;
+                        }
+                        if !declared.contains(name) {
+                            if let Some(hit) = st.closure_returns_const.get(name) {
+                                return Some(hit.clone());
+                            }
+                        }
+                        if let Some(decl) = self.fns.get(name) {
+                            let mut arg_consts = HashMap::new();
+                            for (i, a) in args.iter().enumerate() {
+                                if let Some(p) = decl.params.get(i) {
+                                    if let Some(hit) =
+                                        self.expr_returned_const_root(st, &a.value, declared, None)
+                                    {
+                                        arg_consts.insert(p.name.clone(), hit);
+                                    }
+                                }
+                            }
+                            if let Some(hit) =
+                                self.fn_returned_const_root(decl, &arg_consts, slot, 0)
+                            {
+                                return Some(hit);
+                            }
+                        }
+                    }
+                    Expr::Field {
+                        base,
+                        name: method_name,
+                        ..
+                    } => {
+                        if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                            if A3_PURE_PKGS.contains(&pkg.as_str()) {
+                                return None;
+                            }
+                        }
+                        let matching: Vec<&FnDecl> = self
+                            .method_decls
+                            .iter()
+                            .filter(|((_, m), _)| m == method_name)
+                            .map(|(_, d)| *d)
+                            .collect();
+                        for d in matching {
+                            let mut arg_consts = HashMap::new();
+                            if let Some(recv) = &d.receiver {
+                                if let Some(hit) =
+                                    self.expr_returned_const_root(st, base, declared, None)
+                                {
+                                    arg_consts.insert(recv.name.clone(), hit);
+                                }
+                            }
+                            for (i, a) in args.iter().enumerate() {
+                                if let Some(p) = d.params.get(i) {
+                                    if let Some(hit) =
+                                        self.expr_returned_const_root(st, &a.value, declared, None)
+                                    {
+                                        arg_consts.insert(p.name.clone(), hit);
+                                    }
+                                }
+                            }
+                            if let Some(hit) =
+                                self.fn_returned_const_root(d, &arg_consts, slot, 0)
+                            {
+                                return Some(hit);
+                            }
+                        }
+                        if let Some(hit) = self.expr_returned_const_root(st, base, declared, None) {
+                            return Some(hit);
+                        }
+                    }
+                    Expr::FnLit {
+                        params,
+                        results,
+                        body,
+                        ..
+                    } => {
+                        let mut const_map = self.seed_const_map(st);
+                        for (i, p) in params.iter().enumerate() {
+                            if let Some(a) = args.get(i) {
+                                if let Some(hit) =
+                                    self.expr_returned_const_root(st, &a.value, declared, None)
+                                {
+                                    const_map.insert(p.name.clone(), hit);
+                                } else {
+                                    const_map.remove(&p.name);
+                                }
+                            } else {
+                                const_map.remove(&p.name);
+                            }
+                        }
+                        let named_results: Vec<String> =
+                            results.iter().filter_map(|r| r.name.clone()).collect();
+                        for nr in &named_results {
+                            const_map.remove(nr);
+                        }
+                        if let Some(hit) = self.block_returned_const_root(
+                            body,
+                            &mut const_map,
+                            &named_results,
+                            slot,
+                            0,
+                        ) {
+                            return Some(hit);
+                        }
+                    }
+                    _ => {
+                        if let Some(hit) =
+                            self.expr_returned_const_root(st, callee_inner, declared, None)
+                        {
+                            return Some(hit);
+                        }
+                    }
+                }
+                for a in args {
+                    if let Some(hit) = self.expr_returned_const_root(st, &a.value, declared, None) {
+                        return Some(hit);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn fn_returned_const_root(
+        &self,
+        decl: &FnDecl,
+        arg_consts: &HashMap<String, (String, Option<String>)>,
+        slot: Option<usize>,
+        depth: usize,
+    ) -> Option<(String, Option<String>)> {
+        if depth > 4 {
+            return None;
+        }
+        let body = decl.body.as_ref()?;
+        if let Some(idx) = slot {
+            if let Some(r) = decl.results.get(idx) {
+                let r_shape = self.shape_of_type(&r.ty);
+                if matches!(r_shape, TypeShape::Primitive) {
+                    return None;
+                }
+            }
+        } else if decl.results.len() == 1 {
+            let r_shape = self.shape_of_type(&decl.results[0].ty);
+            if matches!(r_shape, TypeShape::Primitive) {
+                return None;
+            }
+        }
+        let mut const_map: HashMap<String, (String, Option<String>)> = self
+            .consts
+            .keys()
+            .map(|k| (k.clone(), (k.clone(), Some(k.clone()))))
+            .collect();
+        if let Some(recv) = &decl.receiver {
+            if let Some(hit) = arg_consts.get(&recv.name) {
+                const_map.insert(recv.name.clone(), hit.clone());
+            } else {
+                const_map.remove(&recv.name);
+            }
+        }
+        for p in &decl.params {
+            if let Some(hit) = arg_consts.get(&p.name) {
+                const_map.insert(p.name.clone(), hit.clone());
+            } else {
+                const_map.remove(&p.name);
+            }
+        }
+        let named_results: Vec<String> =
+            decl.results.iter().filter_map(|r| r.name.clone()).collect();
+        for nr in &named_results {
+            const_map.remove(nr);
+        }
+        self.block_returned_const_root(body, &mut const_map, &named_results, slot, depth)
+    }
+
+    fn block_returned_const_root(
+        &self,
+        block: &Block,
+        const_map: &mut HashMap<String, (String, Option<String>)>,
+        named_results: &[String],
+        slot: Option<usize>,
+        depth: usize,
+    ) -> Option<(String, Option<String>)> {
+        for s in &block.stmts {
+            if let Some(hit) =
+                self.stmt_returned_const_root(s, const_map, named_results, slot, depth)
+            {
+                return Some(hit);
+            }
+        }
+        None
+    }
+
+    fn expr_reaches_const_map(
+        &self,
+        expr: &Expr,
+        const_map: &HashMap<String, (String, Option<String>)>,
+        slot: Option<usize>,
+        depth: usize,
+    ) -> Option<(String, Option<String>)> {
+        let inner = unwrap_parens(expr);
+        match inner {
+            Expr::Ident { name, .. } => const_map.get(name).cloned(),
+            Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Unary { operand, .. } => {
+                self.expr_reaches_const_map(operand, const_map, slot, depth)
+            }
+            Expr::Field { base, .. } | Expr::Index { base, .. } | Expr::Slice { base, .. } => {
+                if let Some(idx_slot) = slot {
+                    if matches!(inner, Expr::Index { .. }) && idx_slot == 1 {
+                        return None;
+                    }
+                }
+                self.expr_reaches_const_map(base, const_map, None, depth)
+            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .find_map(|f| self.expr_reaches_const_map(&f.value, const_map, None, depth)),
+            Expr::MapLit { entries, .. } => entries.iter().find_map(|(k, v)| {
+                self.expr_reaches_const_map(k, const_map, None, depth)
+                    .or_else(|| self.expr_reaches_const_map(v, const_map, None, depth))
+            }),
+            Expr::SliceLit { items, .. } => items
+                .iter()
+                .find_map(|it| self.expr_reaches_const_map(it, const_map, None, depth)),
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => {
+                let mut inner_map = const_map.clone();
+                for p in params {
+                    inner_map.remove(&p.name);
+                }
+                let nr: Vec<String> = results.iter().filter_map(|r| r.name.clone()).collect();
+                for n in &nr {
+                    inner_map.remove(n);
+                }
+                self.block_returned_const_root(body, &mut inner_map, &nr, slot, depth + 1)
+            }
+            Expr::Call { callee, args, .. } => {
+                let callee_inner = unwrap_parens(callee);
+                match callee_inner {
+                    Expr::Ident { name, .. } => {
+                        if A3_PURE_FNS.contains(&name.as_str()) {
+                            return None;
+                        }
+                        if let Some(hit) = const_map.get(name) {
+                            return Some(hit.clone());
+                        }
+                        if let Some(decl) = self.fns.get(name) {
+                            let mut arg_consts = HashMap::new();
+                            for (i, a) in args.iter().enumerate() {
+                                if let Some(p) = decl.params.get(i) {
+                                    if let Some(hit) = self.expr_reaches_const_map(
+                                        &a.value,
+                                        const_map,
+                                        None,
+                                        depth + 1,
+                                    ) {
+                                        arg_consts.insert(p.name.clone(), hit);
+                                    }
+                                }
+                            }
+                            if let Some(hit) =
+                                self.fn_returned_const_root(decl, &arg_consts, slot, depth + 1)
+                            {
+                                return Some(hit);
+                            }
+                        }
+                    }
+                    Expr::Field {
+                        base,
+                        name: method_name,
+                        ..
+                    } => {
+                        if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                            if A3_PURE_PKGS.contains(&pkg.as_str()) {
+                                return None;
+                            }
+                        }
+                        let matching: Vec<&FnDecl> = self
+                            .method_decls
+                            .iter()
+                            .filter(|((_, m), _)| m == method_name)
+                            .map(|(_, d)| *d)
+                            .collect();
+                        for d in matching {
+                            let mut arg_consts = HashMap::new();
+                            if let Some(recv) = &d.receiver {
+                                if let Some(hit) =
+                                    self.expr_reaches_const_map(base, const_map, None, depth + 1)
+                                {
+                                    arg_consts.insert(recv.name.clone(), hit);
+                                }
+                            }
+                            for (i, a) in args.iter().enumerate() {
+                                if let Some(p) = d.params.get(i) {
+                                    if let Some(hit) = self.expr_reaches_const_map(
+                                        &a.value,
+                                        const_map,
+                                        None,
+                                        depth + 1,
+                                    ) {
+                                        arg_consts.insert(p.name.clone(), hit);
+                                    }
+                                }
+                            }
+                            if let Some(hit) =
+                                self.fn_returned_const_root(d, &arg_consts, slot, depth + 1)
+                            {
+                                return Some(hit);
+                            }
+                        }
+                        if let Some(hit) =
+                            self.expr_reaches_const_map(base, const_map, None, depth + 1)
+                        {
+                            return Some(hit);
+                        }
+                    }
+                    _ => {
+                        if let Some(hit) =
+                            self.expr_reaches_const_map(callee_inner, const_map, slot, depth + 1)
+                        {
+                            return Some(hit);
+                        }
+                    }
+                }
+                for a in args {
+                    if let Some(hit) =
+                        self.expr_reaches_const_map(&a.value, const_map, None, depth + 1)
+                    {
+                        return Some(hit);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn stmt_returned_const_root(
+        &self,
+        stmt: &Stmt,
+        const_map: &mut HashMap<String, (String, Option<String>)>,
+        named_results: &[String],
+        slot: Option<usize>,
+        depth: usize,
+    ) -> Option<(String, Option<String>)> {
+        match stmt {
+            Stmt::Local(l) => {
+                if l.kind == LocalKind::Const {
+                    for (name, v) in l.names.iter().zip(l.values.iter()) {
+                        let sh = l
+                            .ty
+                            .as_ref()
+                            .map(|t| self.shape_of_type(t))
+                            .unwrap_or_else(|| self.shape_of_expr(&FnState::default(), v));
+                        if self.shape_may_share(&sh) || matches!(sh, TypeShape::Unknown) {
+                            let hit = self
+                                .expr_reaches_const_map(v, const_map, None, depth)
+                                .unwrap_or_else(|| (name.clone(), None));
+                            const_map.insert(name.clone(), hit);
+                        } else {
+                            const_map.remove(name);
+                        }
+                    }
+                } else if l.values.is_empty() {
+                    for name in &l.names {
+                        const_map.remove(name);
+                    }
+                } else if l.names.len() == l.values.len() {
+                    for (name, v) in l.names.iter().zip(l.values.iter()) {
+                        if let Some(hit) = self.expr_reaches_const_map(v, const_map, None, depth) {
+                            const_map.insert(name.clone(), hit);
+                        } else {
+                            const_map.remove(name);
+                        }
+                    }
+                } else if l.values.len() == 1 && l.names.len() > 1 {
+                    for (i, name) in l.names.iter().enumerate() {
+                        if let Some(hit) =
+                            self.expr_reaches_const_map(&l.values[0], const_map, Some(i), depth)
+                        {
+                            const_map.insert(name.clone(), hit);
+                        } else {
+                            const_map.remove(name);
+                        }
+                    }
+                }
+                None
+            }
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                if targets.len() == values.len() {
+                    for (t, v) in targets.iter().zip(values.iter()) {
+                        if let PlaceKind::Ident(name) = &t.kind {
+                            if let Some(hit) =
+                                self.expr_reaches_const_map(v, const_map, None, depth)
+                            {
+                                const_map.insert(name.clone(), hit);
+                            } else {
+                                const_map.remove(name);
+                            }
+                        }
+                    }
+                } else if values.len() == 1 && targets.len() > 1 {
+                    for (i, t) in targets.iter().enumerate() {
+                        if let PlaceKind::Ident(name) = &t.kind {
+                            if let Some(hit) =
+                                self.expr_reaches_const_map(&values[0], const_map, Some(i), depth)
+                            {
+                                const_map.insert(name.clone(), hit);
+                            } else {
+                                const_map.remove(name);
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Stmt::Return { values, .. } => {
+                if values.is_empty() {
+                    if let Some(idx) = slot {
+                        if let Some(nr) = named_results.get(idx) {
+                            return const_map.get(nr).cloned();
+                        }
+                    }
+                    for nr in named_results {
+                        if let Some(hit) = const_map.get(nr) {
+                            return Some(hit.clone());
+                        }
+                    }
+                    return None;
+                }
+                if let Some(idx) = slot {
+                    if values.len() > 1 {
+                        if let Some(v) = values.get(idx) {
+                            return self.expr_reaches_const_map(v, const_map, None, depth);
+                        }
+                        return None;
+                    } else if values.len() == 1 {
+                        return self.expr_reaches_const_map(&values[0], const_map, Some(idx), depth);
+                    }
+                }
+                for v in values {
+                    if let Some(hit) = self.expr_reaches_const_map(v, const_map, None, depth) {
+                        return Some(hit);
+                    }
+                }
+                None
+            }
+            Stmt::If {
+                init,
+                then,
+                otherwise,
+                ..
+            } => {
+                let mut base_map = const_map.clone();
+                if let Some(i) = init {
+                    if let Some(hit) =
+                        self.stmt_returned_const_root(i, &mut base_map, named_results, slot, depth)
+                    {
+                        return Some(hit);
+                    }
+                }
+                let mut then_map = base_map.clone();
+                if let Some(hit) = self.block_returned_const_root(
+                    then,
+                    &mut then_map,
+                    named_results,
+                    slot,
+                    depth,
+                ) {
+                    return Some(hit);
+                }
+                for (k, v) in then_map {
+                    const_map.entry(k).or_insert(v);
+                }
+                if let Some(o) = otherwise {
+                    let mut else_map = base_map;
+                    if let Some(hit) = self.stmt_returned_const_root(
+                        o,
+                        &mut else_map,
+                        named_results,
+                        slot,
+                        depth,
+                    ) {
+                        return Some(hit);
+                    }
+                    for (k, v) in else_map {
+                        const_map.entry(k).or_insert(v);
+                    }
+                }
+                None
+            }
+            Stmt::For { kind, body, .. } => {
+                let mut body_map = const_map.clone();
+                if let hy_syntax::ForKind::Iterate { vars, expr } = kind {
+                    if let Some(hit) = self.expr_reaches_const_map(expr, &body_map, None, depth) {
+                        for v in vars {
+                            if v != "_" {
+                                body_map.insert(v.clone(), hit.clone());
+                            }
+                        }
+                    } else {
+                        for v in vars {
+                            body_map.remove(v);
+                        }
+                    }
+                }
+                let res = self.block_returned_const_root(
+                    body,
+                    &mut body_map,
+                    named_results,
+                    slot,
+                    depth,
+                );
+                for (k, v) in body_map {
+                    const_map.entry(k).or_insert(v);
+                }
+                res
+            }
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+                let mut body_map = const_map.clone();
+                let res = self.block_returned_const_root(
+                    body,
+                    &mut body_map,
+                    named_results,
+                    slot,
+                    depth,
+                );
+                for (k, v) in body_map {
+                    const_map.entry(k).or_insert(v);
+                }
+                res
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    let mut arm_map = const_map.clone();
+                    if let Some(hit) = self.block_returned_const_root(
+                        &arm.body,
+                        &mut arm_map,
+                        named_results,
+                        slot,
+                        depth,
+                    ) {
+                        return Some(hit);
+                    }
+                    for (k, v) in arm_map {
+                        const_map.entry(k).or_insert(v);
+                    }
+                }
+                None
+            }
+            Stmt::Select { arms, .. } => {
+                for arm in arms {
+                    let mut arm_map = const_map.clone();
+                    if let Some(hit) = self.block_returned_const_root(
+                        &arm.body,
+                        &mut arm_map,
+                        named_results,
+                        slot,
+                        depth,
+                    ) {
+                        return Some(hit);
+                    }
+                    for (k, v) in arm_map {
+                        const_map.entry(k).or_insert(v);
+                    }
+                }
+                None
+            }
+            _ => None,
         }
     }
 
@@ -2552,6 +3429,8 @@ impl<'a> Checker<'a> {
                     // rebind may create a fresh alias — ident copies AND
                     // call results that hand back argument storage (#38)
                     self.record_alias(st, name, v);
+                    st.closure_returns_const.remove(name);
+                    self.link_returned_const_root(st, name, v, None);
                     if let Some(origin) = info.shadowed_origin {
                         if let Some(b) = st.env_lookup_mut(name) {
                             if b.non_owned_origin.is_none() {
@@ -2575,8 +3454,8 @@ impl<'a> Checker<'a> {
             let tys = self.multi_value_tys(st, &values[0], targets.len());
             let mut ref_roots = Vec::new();
             collect_ref_roots(&values[0], &mut ref_roots);
-            for (i, ((t, shape), ty)) in targets.iter().zip(shapes).zip(tys).enumerate() {
-                if is_const_write.get(i).copied().unwrap_or(false) {
+            for (slot, ((t, shape), ty)) in targets.iter().zip(shapes).zip(tys).enumerate() {
+                if is_const_write.get(slot).copied().unwrap_or(false) {
                     continue;
                 }
                 if let PlaceKind::Ident(name) = &t.kind {
@@ -2691,6 +3570,15 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
+                    st.closure_returns_const.remove(name);
+                    self.record_multi_value_links(
+                        st,
+                        name,
+                        &shape,
+                        &values[0],
+                        slot,
+                        targets.len(),
+                    );
                 }
             }
         }
@@ -2947,14 +3835,49 @@ impl<'a> Checker<'a> {
                                     if ty.is_some() || b.ty.is_none() {
                                         b.ty = ty;
                                     }
+                                    b.non_owned_origin = None;
                                 }
                                 cst.aliases.remove(name);
                                 cst.share_clear(name);
+                                cst.closure_returns_const.remove(name);
                                 self.record_may_share(&mut cst, name, v);
                                 self.record_alias(&mut cst, name, v);
+                                self.link_returned_const_root(&mut cst, name, v, None);
                             }
                         }
                         self.record_assign_borrow_aliases(&mut cst, targets, *op, values);
+                    } else if *op == AssignOp::Assign && values.len() == 1 && targets.len() > 1 {
+                        let shapes = self.multi_value_shapes(&cst, &values[0], targets.len());
+                        let tys = self.multi_value_tys(&cst, &values[0], targets.len());
+                        for (slot, ((t, shape), ty)) in
+                            targets.iter().zip(shapes).zip(tys).enumerate()
+                        {
+                            if is_const_write[slot] {
+                                continue;
+                            }
+                            if let PlaceKind::Ident(name) = &t.kind {
+                                if let Some(b) = cst.env_lookup_mut(name) {
+                                    if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
+                                        b.shape = shape.clone();
+                                    }
+                                    if ty.is_some() || b.ty.is_none() {
+                                        b.ty = ty;
+                                    }
+                                    b.non_owned_origin = None;
+                                }
+                                cst.aliases.remove(name);
+                                cst.share_clear(name);
+                                cst.closure_returns_const.remove(name);
+                                self.record_multi_value_links(
+                                    &mut cst,
+                                    name,
+                                    &shape,
+                                    &values[0],
+                                    slot,
+                                    targets.len(),
+                                );
+                            }
+                        }
                     }
                 }
                 Stmt::For { kind, .. } => match kind {
@@ -2962,6 +3885,8 @@ impl<'a> Checker<'a> {
                         let is_chan =
                             matches!(self.shape_of_expr(&cst, expr), TypeShape::Chan(_));
                         let shapes = self.iterate_var_shapes(&cst, expr, vars.len());
+                        let const_origin =
+                            self.const_arg_root(&cst, expr, &HashSet::new());
                         for (name, shape) in vars.iter().zip(shapes) {
                             let is_ref = shape.is_reference_alias() || shape.is_handle();
                             let carries = self.shape_may_share(&shape);
@@ -2976,6 +3901,13 @@ impl<'a> Checker<'a> {
                                         }
                                         if carries && self.binding_may_share(&cst, &root) {
                                             cst.share_edge(name, &root);
+                                        }
+                                    }
+                                }
+                                if carries {
+                                    if let Some(c) = &const_origin {
+                                        if let Some(b) = cst.env_lookup_mut(name) {
+                                            b.non_owned_origin = Some(format!("`const {}`", c));
                                         }
                                     }
                                 }
@@ -3009,6 +3941,14 @@ impl<'a> Checker<'a> {
                                 merged.share_edge(k, p);
                             }
                         }
+                    }
+                }
+                for (k, v) in &st.closure_returns_const {
+                    if !merged.scopes.iter().any(|s| s.contains_key(k)) {
+                        merged
+                            .closure_returns_const
+                            .entry(k.clone())
+                            .or_insert_with(|| v.clone());
                     }
                 }
                 self.scan_closure_body(&mut merged, flit, &HashSet::new());
@@ -3056,13 +3996,35 @@ impl<'a> Checker<'a> {
     /// initializer reads the storage of a `const` root is itself frozen
     /// (E3006 surface) — the same-stmt share-move form of a const write.
     fn process_closure_const_local(&self, st: &mut FnState, l: &LocalDecl) {
+        let immutable = l.kind == LocalKind::Const;
+        if l.values.len() == 1 && l.names.len() > 1 {
+            let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
+            let tys = self.multi_value_tys(st, &l.values[0], l.names.len());
+            for (slot, ((name, shape), ty)) in
+                l.names.iter().zip(shapes).zip(tys).enumerate()
+            {
+                let (shape, ty) = match (&l.ty, shape) {
+                    (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
+                    (_, s) => (s, ty.or_else(|| l.ty.clone())),
+                };
+                self.define_binding(st, name, shape.clone(), ty, immutable, false);
+                self.record_multi_value_links(
+                    st,
+                    name,
+                    &shape,
+                    &l.values[0],
+                    slot,
+                    l.names.len(),
+                );
+            }
+            return;
+        }
         for (name, value) in l.names.iter().zip(l.values.iter()) {
             let inferred = self.shape_of_expr(st, value);
             let (shape, ty) = match (&l.ty, inferred) {
                 (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
                 (_, inferred) => (inferred, self.ty_of_expr(st, value).or_else(|| l.ty.clone())),
             };
-            let immutable = l.kind == LocalKind::Const;
             let shadowed_const = self.shape_may_share(&shape)
                 && self.value_reads_storage_of(st, value, name)
                 && self
@@ -3079,6 +4041,7 @@ impl<'a> Checker<'a> {
                 self.record_may_share(st, name, value);
                 self.record_alias(st, name, value);
             }
+            self.link_returned_const_root(st, name, value, None);
         }
     }
 
@@ -3100,7 +4063,7 @@ impl<'a> Checker<'a> {
     /// Resolve a call argument expression to a `const` root when the argument
     /// passes mutable reference storage (map, slice, pointer, `&const_val`, or
     /// a struct/array carrying reference fields) backed by that `const` (#188).
-    fn const_arg_root(
+    pub(crate) fn const_arg_root(
         &self,
         st: &FnState,
         expr: &Expr,
@@ -3153,7 +4116,8 @@ impl<'a> Checker<'a> {
                 return Some(hit);
             }
         }
-        None
+        self.expr_returned_const_root(st, inner, declared, None)
+            .map(|(c, _)| c)
     }
 
     /// Issue #188: interprocedural T22 enforcement (`HYB-E3006`). When a
@@ -3313,9 +4277,22 @@ impl<'a> Checker<'a> {
         aliases: &mut HashSet<String>,
         depth: usize,
     ) -> bool {
+        let before_len = aliases.len();
         for s in &block.stmts {
             if self.stmt_mutates_const_param(s, aliases, depth) {
                 return true;
+            }
+        }
+        if aliases.len() > before_len {
+            // Re-check any closures defined before a post-closure rebind (`f := fn() { m2["k"] = 2 }; m2 = m; f()`).
+            for s in &block.stmts {
+                let mut fnlits = Vec::new();
+                walk::own_fnlits(s, &mut fnlits);
+                for flit in fnlits {
+                    if self.expr_fnlit_mutates_const_param(flit, aliases, depth) {
+                        return true;
+                    }
+                }
             }
         }
         false
@@ -3335,7 +4312,27 @@ impl<'a> Checker<'a> {
                 return true;
             }
         }
+        let mut move_ops = Vec::new();
+        crate::model::collect_move_operands(inner, &mut move_ops);
+        for (op, _) in move_ops {
+            if let Some(r) = op.root_ident() {
+                if aliases.contains(r) {
+                    return true;
+                }
+            }
+        }
         let mut roots = Vec::new();
+        if let Expr::FnLit {
+            params,
+            results,
+            body,
+            ..
+        } = inner
+        {
+            let mut bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+            bound.extend(results.iter().filter_map(|r| r.name.clone()));
+            collect_capture_idents_block(body, &mut bound, &mut roots);
+        }
         collect_ref_roots(inner, &mut roots);
         roots.iter().any(|r| aliases.contains(r))
     }
@@ -3372,6 +4369,18 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
+                } else if values.len() == 1 && targets.len() > 1 {
+                    let reaches = Self::expr_reaches_const_aliases(&values[0], aliases);
+                    let is_index = matches!(unwrap_parens(&values[0]), Expr::Index { .. });
+                    for (slot, t) in targets.iter().enumerate() {
+                        if let PlaceKind::Ident(name) = &t.kind {
+                            if reaches && !(is_index && targets.len() == 2 && slot == 1) {
+                                aliases.insert(name.clone());
+                            } else {
+                                aliases.remove(name);
+                            }
+                        }
+                    }
                 }
             }
             Stmt::Local(l) => {
@@ -3387,6 +4396,16 @@ impl<'a> Checker<'a> {
                 } else if l.names.len() == l.values.len() {
                     for (name, v) in l.names.iter().zip(l.values.iter()) {
                         if Self::expr_reaches_const_aliases(v, aliases) {
+                            aliases.insert(name.clone());
+                        } else {
+                            aliases.remove(name);
+                        }
+                    }
+                } else if l.values.len() == 1 && l.names.len() > 1 {
+                    let reaches = Self::expr_reaches_const_aliases(&l.values[0], aliases);
+                    let is_index = matches!(unwrap_parens(&l.values[0]), Expr::Index { .. });
+                    for (slot, name) in l.names.iter().enumerate() {
+                        if reaches && !(is_index && l.names.len() == 2 && slot == 1) {
                             aliases.insert(name.clone());
                         } else {
                             aliases.remove(name);
@@ -3441,20 +4460,48 @@ impl<'a> Checker<'a> {
                 if self.block_mutates_const_param(then, &mut then_aliases, depth) {
                     return true;
                 }
+                aliases.extend(then_aliases);
                 if let Some(o) = otherwise {
                     let mut else_aliases = branch_aliases;
                     if self.stmt_mutates_const_param(o, &mut else_aliases, depth) {
                         return true;
                     }
+                    aliases.extend(else_aliases);
                 }
             }
-            Stmt::For { body, .. }
-            | Stmt::Managed { body, .. }
-            | Stmt::Block { block: body, .. } => {
+            Stmt::For { kind, body, .. } => {
+                let mut body_aliases = aliases.clone();
+                if let hy_syntax::ForKind::Iterate { vars, expr } = kind {
+                    if Self::expr_reaches_const_aliases(expr, &body_aliases) {
+                        for v in vars {
+                            if v != "_" {
+                                body_aliases.insert(v.clone());
+                            }
+                        }
+                    } else {
+                        for v in vars {
+                            body_aliases.remove(v);
+                        }
+                    }
+                }
+                if self.block_mutates_const_param(body, &mut body_aliases, depth) {
+                    return true;
+                }
+                if let hy_syntax::ForKind::Iterate { vars, .. } = kind {
+                    for v in vars {
+                        if !aliases.contains(v) {
+                            body_aliases.remove(v);
+                        }
+                    }
+                }
+                aliases.extend(body_aliases);
+            }
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
                 let mut body_aliases = aliases.clone();
                 if self.block_mutates_const_param(body, &mut body_aliases, depth) {
                     return true;
                 }
+                aliases.extend(body_aliases);
             }
             Stmt::Match { arms, .. } => {
                 for arm in arms {
@@ -3462,6 +4509,7 @@ impl<'a> Checker<'a> {
                     if self.block_mutates_const_param(&arm.body, &mut arm_aliases, depth) {
                         return true;
                     }
+                    aliases.extend(arm_aliases);
                 }
             }
             Stmt::Select { arms, .. } => {
@@ -3475,6 +4523,7 @@ impl<'a> Checker<'a> {
                     if self.block_mutates_const_param(&arm.body, &mut arm_aliases, depth) {
                         return true;
                     }
+                    aliases.extend(arm_aliases);
                 }
             }
             _ => {}
@@ -3739,7 +4788,7 @@ fn contains_addr_of_in_literal(e: &Expr) -> bool {
 /// Locals defined inside the body are deliberately NOT excluded: a name
 /// that also exists outside resolves to the outer binding on other paths,
 /// and an extra may-share edge is conservative in the safe direction.
-fn collect_capture_idents_block(
+pub(crate) fn collect_capture_idents_block(
     block: &hy_syntax::Block,
     bound: &mut std::collections::HashSet<String>,
     out: &mut Vec<String>,

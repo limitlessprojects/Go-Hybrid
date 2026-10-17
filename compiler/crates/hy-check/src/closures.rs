@@ -413,6 +413,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     // and cannot bypass O5.1 / O5.4 move restrictions.
                     ck.record_may_share(st, name, value);
                     ck.record_alias(st, name, value);
+                    ck.link_returned_const_root(st, name, value, None);
                     if let Some(origin) = shadowed_origin {
                         if let Some(b) = st.env_lookup_mut(name) {
                             if b.non_owned_origin.is_none() {
@@ -434,8 +435,20 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         vec![None; l.names.len()],
                     ),
                 };
-                for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
-                    ck.define_binding(st, name, shape, ty, immutable, managed);
+                for (slot, ((name, shape), ty)) in
+                    l.names.iter().zip(shapes).zip(tys).enumerate()
+                {
+                    ck.define_binding(st, name, shape.clone(), ty, immutable, managed);
+                    if let Some(v) = l.values.first() {
+                        ck.record_multi_value_links(
+                            st,
+                            name,
+                            &shape,
+                            v,
+                            slot,
+                            l.names.len(),
+                        );
+                    }
                 }
             }
         }
@@ -590,23 +603,46 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     );
                     let is_chan = matches!(ck.shape_of_expr(st, expr), TypeShape::Chan(_));
                     let shapes = ck.iterate_var_shapes(st, expr, vars.len());
+                    let const_origin =
+                        ck.const_arg_root(st, expr, &std::collections::HashSet::new());
                     for (name, shape) in vars.iter().zip(shapes) {
                         let is_ref = shape.is_reference_alias();
+                        let carries = ck.shape_may_share(&shape);
                         ck.define_binding(st, name, shape, None, false, managed);
                         if !is_chan {
-                            if is_ref {
-                                if let Some(root) = expr.root_ident() {
-                                    if ck.lookup_binding(st, root).is_some() {
-                                        st.aliases.insert(name.clone(), root.to_string());
+                            let mut roots = Vec::new();
+                            crate::model::collect_ref_roots(expr, &mut roots);
+                            if roots.is_empty() {
+                                if let Some(r) = expr.root_ident() {
+                                    roots.push(r.to_string());
+                                }
+                            }
+                            for root in roots {
+                                if let Some(rb) = ck.lookup_binding(st, &root) {
+                                    let rb_shares = ck.shape_may_share(&rb.shape);
+                                    if is_ref {
+                                        st.aliases.insert(name.clone(), root.clone());
+                                    }
+                                    if carries && rb_shares {
+                                        st.share_edge(name, &root);
                                     }
                                 }
                             }
                             if let Some(b) = st.env_lookup_mut(name) {
-                                b.non_owned_origin = Some(format!(
-                                    "range variable `{}` iterating `{}` (the collection still holds the element)",
-                                    name,
-                                    expr.render()
-                                ));
+                                if let Some(c) = &const_origin {
+                                    b.non_owned_origin = Some(format!(
+                                        "range variable `{}` iterating `{}` (backed by `const {}`)",
+                                        name,
+                                        expr.render(),
+                                        c
+                                    ));
+                                } else {
+                                    b.non_owned_origin = Some(format!(
+                                        "range variable `{}` iterating `{}` (the collection still holds the element)",
+                                        name,
+                                        expr.render()
+                                    ));
+                                }
                             }
                         }
                     }

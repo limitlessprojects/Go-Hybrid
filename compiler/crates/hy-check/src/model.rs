@@ -243,6 +243,9 @@ pub(crate) struct FnState {
     /// rebind time; consumed at the CALL site so an insert inside the body
     /// counts as an A3 event when the call sits in a live slot-loan window.
     pub closure_mutates: HashMap<String, HashSet<String>>,
+    /// Local closure binding -> `(const_name, file_const_ident_if_file_level)`
+    /// when the closure body returns storage backed by a `const` composite.
+    pub closure_returns_const: HashMap<String, (String, Option<String>)>,
     /// Declared result shapes of the function being checked (rule N1's
     /// return-site nil checks). Empty for closure bodies (fn literals
     /// carry no result types on the AST surface yet).
@@ -687,13 +690,28 @@ pub(crate) fn collect_ref_roots(e: &Expr, out: &mut Vec<String>) {
         Expr::Field { base, .. } => collect_ref_roots(base, out),
         Expr::Index { base, .. } => collect_ref_roots(base, out),
         Expr::Call { callee, args, .. } => {
+            if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                if name == "len" || name == "cap" {
+                    return;
+                }
+            }
             for a in args {
                 collect_ref_roots(&a.value, out);
             }
-            // `x := r.method(...)` — the receiver is the callee's base, not a
-            // call argument, and a method can hand back interior storage.
-            if let Expr::Field { base, .. } = unwrap_parens(callee) {
-                collect_ref_roots(base, out);
+            // `x := r.method(...)` or `x := closure_var(...)` or `x := (fn() ... { return m })()` —
+            // the receiver or closure callee can hand back captured/interior storage.
+            if let Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } = unwrap_parens(callee)
+            {
+                let mut bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+                bound.extend(results.iter().filter_map(|r| r.name.clone()));
+                crate::loans::collect_capture_idents_block(body, &mut bound, out);
+            } else {
+                collect_ref_roots(callee, out);
             }
         }
         Expr::StructLit { fields, .. } => {
