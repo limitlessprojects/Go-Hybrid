@@ -511,3 +511,89 @@ fn distinct_define_names_accept() {
     );
     assert_eq!(r.verdict, Verdict::Accept);
 }
+
+// ---------------------------------------------------------------------------
+// Form 4 — const initializer is not a constant expression (issue #205)
+// ---------------------------------------------------------------------------
+
+const CONST_CALL_LOCAL: &str = "\
+fn get_val() int {
+    return 42
+}
+
+fn main() {
+    const c = get_val()
+    fmt.println(c)
+}
+";
+
+const CONST_CALL_FILE: &str = "\
+fn get_val() int {
+    return 42
+}
+
+const c = get_val()
+
+fn main() {
+    fmt.println(c)
+}
+";
+
+const CONST_FROM_VAR: &str = "\
+fn main() {
+    x := 42
+    const c = x
+    fmt.println(c)
+}
+";
+
+const CONST_EXPR_OK: &str = "\
+const a = 10
+const b = a + 5
+
+fn main() {
+    const c = 42
+    const d = c * 2
+    fmt.println(b)
+    fmt.println(d)
+}
+";
+
+#[test]
+fn const_call_local_is_rejected() {
+    let r = check(CONST_CALL_LOCAL);
+    assert_rejects_e1002(&r, "const c = get_val() (local)");
+    let d = r
+        .diagnostics
+        .iter()
+        .find(|d| d.code == "HYB-E1002")
+        .unwrap();
+    assert!(
+        d.message.contains("not constant") || d.message.contains("not a constant expression"),
+        "message names the constant requirement: {}",
+        d.message
+    );
+}
+
+#[test]
+fn const_call_file_is_rejected() {
+    let r = check(CONST_CALL_FILE);
+    assert_rejects_e1002(&r, "const c = get_val() (file-level)");
+}
+
+#[test]
+fn const_from_var_is_rejected() {
+    let r = check(CONST_FROM_VAR);
+    assert_rejects_e1002(&r, "const c = x where x is a variable");
+}
+
+#[test]
+fn const_constant_expression_accepts() {
+    let r = check(CONST_EXPR_OK);
+    assert!(
+        error_codes(&r).is_empty(),
+        "const expressions are valid, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}

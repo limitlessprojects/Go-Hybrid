@@ -9,9 +9,12 @@
 //!   2. an unused import — the emitter carries every declared Go import
 //!      into the header, and Go rejects `imported and not used`;
 //!   3. a repeated name on the left of one `:=` — `x, x := 1, 2` is
-//!      `x repeated on left side of :=`.
+//!      `x repeated on left side of :=`;
+//!   4. a `const` whose initializer is not a constant expression —
+//!      `const c = get_val()` emits Go `const c = get_val()`, which
+//!      fails Go compilation (`get_val() is not constant`, issue #205).
 //!
-//! All three reject fail-closed as HYB-E1002 (registry rule `BUILDABLE`):
+//! All four reject fail-closed as HYB-E1002 (registry rule `BUILDABLE`):
 //! what the checker accepts must survive `go build`.
 //!
 //! The read-set is deliberately Go-faithful, not conservative-in-the-wrong-
@@ -50,6 +53,8 @@ struct Collector {
     /// define; `None` = a name that shadows (params, receivers, `var`,
     /// `for`/select/match bindings) but is outside the issue's scope.
     scopes: Vec<HashMap<String, Option<usize>>>,
+    /// Set of known constant names (both file-level and fn-local).
+    consts: HashSet<String>,
     defines: Vec<Define>,
     /// Every identifier mentioned in the file plus every dotted type root —
     /// the import-usage set (the emitter's declared-import header needs it).
@@ -70,6 +75,8 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
         match d {
             Decl::Import { .. } => {}
             Decl::Const(cd) => {
+                c.check_const_init(&cd.name, &cd.value, cd.span);
+                c.consts.insert(cd.name.clone());
                 c.ty_opt(&cd.ty);
                 c.expr(&cd.value);
             }
@@ -159,6 +166,11 @@ impl Collector {
     }
 
     fn local(&mut self, l: &LocalDecl) {
+        if l.kind == LocalKind::Const {
+            for (name, val) in l.names.iter().zip(&l.values) {
+                self.check_const_init(name, val, l.span);
+            }
+        }
         let checked = matches!(l.kind, LocalKind::Define | LocalKind::Let);
         if checked {
             // Form 3: `x, x := 1, 2` — `x repeated on left side of :=`.
@@ -219,6 +231,13 @@ impl Collector {
             self.expr(v);
         }
         for name in &l.names {
+            if l.kind == LocalKind::Const {
+                self.consts.insert(name.clone());
+                if let Some(top) = self.scopes.last_mut() {
+                    top.insert(name.clone(), None);
+                }
+                continue;
+            }
             if !checked {
                 self.exempt(name);
                 continue;
@@ -600,5 +619,77 @@ impl Collector {
                 );
             }
         }
+    }
+
+    /// Form 4 (issue #205): `const` initializers that emit Go `const` must be
+    /// valid constant expressions. Composite literals (slices/maps/structs) lower
+    /// to `var` in Go, so they remain valid. Non-composite initializers that are
+    /// function calls or non-constant identifiers cause `go build` to reject the
+    /// emitted code (e.g. `get_val() is not constant`).
+    fn check_const_init(&mut self, name: &str, value: &Expr, span: Span) {
+        let is_composite = matches!(
+            value,
+            Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
+        );
+        if is_composite {
+            return;
+        }
+
+        if !is_const_expr(value, &self.scopes, &self.consts) {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E1002",
+                    self.path.clone(),
+                    span,
+                    format!(
+                        "initializer for `const {} = {}` is not constant — Go refuses `const {} = {}` (is not constant) (HYB-E1002)",
+                        name,
+                        value.render(),
+                        name,
+                        value.render()
+                    ),
+                )
+                .with_notes(vec![
+                    "why: Go's `const` requires a compile-time constant expression; function calls and variable references are not constant".to_string(),
+                    format!("fix: declare with `:=` (`{} := {}`) or `let` instead of `const`", name, value.render()),
+                ]),
+            );
+        }
+    }
+}
+
+/// Recursively check whether an expression is a valid compile-time constant expression.
+fn is_const_expr(
+    e: &Expr,
+    scopes: &[HashMap<String, Option<usize>>],
+    consts: &HashSet<String>,
+) -> bool {
+    match e {
+        Expr::Lit { .. } => true,
+        Expr::Interp { parts, .. } => parts.iter().all(|p| match p {
+            InterpPart::Lit(_) => true,
+            InterpPart::Expr(x) => is_const_expr(x, scopes, consts),
+        }),
+        Expr::Binary { lhs, rhs, .. } => {
+            is_const_expr(lhs, scopes, consts) && is_const_expr(rhs, scopes, consts)
+        }
+        Expr::Unary { operand, .. } => is_const_expr(operand, scopes, consts),
+        Expr::Paren { inner, .. } => is_const_expr(inner, scopes, consts),
+        Expr::Ident { name, .. } => {
+            if consts.contains(name.as_str()) {
+                return true;
+            }
+            // A variable reference in scope is NOT a compile-time constant.
+            // If the identifier is tracked in a local scope, it is a variable/parameter.
+            for layer in scopes.iter().rev() {
+                if layer.contains_key(name.as_str()) {
+                    return false;
+                }
+            }
+            // File-level identifiers could be file-level consts (fail-open for const references).
+            true
+        }
+        // Calls, receives, moves, tries, indexing, slicing, field access are not compile-time constants.
+        _ => false,
     }
 }
