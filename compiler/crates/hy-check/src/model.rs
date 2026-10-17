@@ -611,7 +611,11 @@ pub(crate) fn move_operand_ident(e: &Expr) -> Option<String> {
 pub(crate) fn collect_ref_roots(e: &Expr, out: &mut Vec<String>) {
     match unwrap_parens(e) {
         Expr::Move { .. } => {}
-        Expr::Ident { name, .. } => out.push(name.clone()),
+        Expr::Ident { name, .. } => {
+            if name != "_" {
+                out.push(name.clone());
+            }
+        }
         Expr::Try { operand, .. } => collect_ref_roots(operand, out),
         Expr::Slice { base, .. } => collect_ref_roots(base, out),
         Expr::Field { base, .. } => collect_ref_roots(base, out),
@@ -659,7 +663,9 @@ pub(crate) fn collect_addr_of_roots(e: &Expr, out: &mut Vec<String>) {
     match unwrap_parens(e) {
         Expr::AddrOf { operand, .. } => {
             if let Some(id) = operand.root_ident() {
-                out.push(id.to_string());
+                if id != "_" {
+                    out.push(id.to_string());
+                }
             }
             collect_addr_of_roots(operand, out);
         }
@@ -669,7 +675,9 @@ pub(crate) fn collect_addr_of_roots(e: &Expr, out: &mut Vec<String>) {
             ..
         } => {
             if let Some(id) = operand.root_ident() {
-                out.push(id.to_string());
+                if id != "_" {
+                    out.push(id.to_string());
+                }
             }
             collect_addr_of_roots(operand, out);
         }
