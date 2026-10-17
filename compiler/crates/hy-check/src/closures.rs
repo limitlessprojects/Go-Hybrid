@@ -588,6 +588,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         expr,
                         format!("the loop header `{}`", expr.render()),
                     );
+                    ck.check_range_iterable(st, expr);
                     let is_chan = matches!(ck.shape_of_expr(st, expr), TypeShape::Chan(_));
                     let shapes = ck.iterate_var_shapes(st, expr, vars.len());
                     for (name, shape) in vars.iter().zip(shapes) {
