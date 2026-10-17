@@ -12,6 +12,9 @@
 Environment: KAGGLE_CLI (default /home/z/.venv/bin/kaggle), GITHUB_TOKEN read from
 the git remote URL of this repo (never printed, never written to files).
 Kaggle kernel slug: from worker/kernel-metadata.json (id field).
+
+Exit codes: 0 = success, 1 = the fetch retrieved nothing (failed download,
+no artifacts, or no summary.json), 2 = usage error.
 """
 import json
 import os
@@ -162,6 +165,11 @@ def kaggle_fetch(jobdir, slug=None):
     os.makedirs(raw, exist_ok=True)
     rc, out = sh("{} kernels output {} -p {}".format(KAGGLE_CLI, slug, raw), timeout=180)
     print(out)
+    # A failed download must not read as a successful fetch: an empty result
+    # dir is indistinguishable from "the kernel produced nothing".
+    if rc != 0:
+        print("kaggle fetch: kernels output exited {} (download failed)".format(rc), file=sys.stderr)
+        return 1
     # find summary.json anywhere under raw
     found = []
     for root, _, files in os.walk(raw):
@@ -175,8 +183,11 @@ def kaggle_fetch(jobdir, slug=None):
         print("summary.json -> " + dst)
         with open(dst) as f:
             print(json.dumps(json.load(f), indent=2)[:3000])
-    else:
-        print("WARNING: no summary.json in output")
+        return 0
+    # No summary.json is a hard failure for a fetch: nothing was retrieved to
+    # inspect. Exit non-zero so a caller (and CI) cannot treat it as success.
+    print("kaggle fetch: no summary.json under {} (nothing retrieved)".format(raw), file=sys.stderr)
+    return 1
 
 
 # --------------------------------------------------------------- actions tier
@@ -198,7 +209,21 @@ def actions_watch(run_id=None):
 
 
 def actions_fetch(run_id, jobdir):
-    arts = gh_api("/repos/limitlessprojects/Go-Hybrid/actions/runs/{}/artifacts".format(run_id))["artifacts"]
+    payload = gh_api("/repos/limitlessprojects/Go-Hybrid/actions/runs/{}/artifacts".format(run_id))
+    # An error payload (rate limit, missing run, bad token) carries no
+    # "artifacts" key; treat that the same as "nothing to download".
+    if "artifacts" not in payload:
+        print(
+            "actions fetch: run {} artifact list unavailable: {}".format(
+                run_id, payload.get("message") or payload.get("status") or "no artifacts key"
+            ),
+            file=sys.stderr,
+        )
+        return 1
+    arts = payload["artifacts"]
+    if not arts:
+        print("actions fetch: run {} has no artifacts to download".format(run_id), file=sys.stderr)
+        return 1
     os.makedirs(os.path.join(jobdir, "result"), exist_ok=True)
     tok = gh_token()
     for a in arts:
@@ -209,6 +234,7 @@ def actions_fetch(run_id, jobdir):
         with urllib.request.urlopen(req, timeout=120) as r, open(dest, "wb") as f:
             f.write(r.read())
         print("artifact {} ({} bytes) -> {}".format(a["name"], a["size_in_bytes"], dest))
+    return 0
 
 
 def main():
@@ -224,7 +250,7 @@ def main():
         minutes = float(sys.argv[3])
         sys.exit(kaggle_wait(minutes, sys.argv[4] if len(sys.argv) > 4 else None))
     elif tier == "kaggle" and action == "fetch" and len(sys.argv) == 4:
-        kaggle_fetch(os.path.abspath(sys.argv[3]))
+        sys.exit(kaggle_fetch(os.path.abspath(sys.argv[3])))
     elif tier == "actions" and action == "dispatch" and len(sys.argv) == 8:
         try:
             shards, maxparallel = int(sys.argv[6]), int(sys.argv[7])
@@ -238,7 +264,7 @@ def main():
     elif tier == "actions" and action == "watch":
         actions_watch(int(sys.argv[4]) if len(sys.argv) > 4 else None)
     elif tier == "actions" and action == "fetch" and len(sys.argv) == 5:
-        actions_fetch(int(sys.argv[3]), os.path.abspath(sys.argv[4]))
+        sys.exit(actions_fetch(int(sys.argv[3]), os.path.abspath(sys.argv[4])))
     else:
         print(__doc__)
         sys.exit(2)
