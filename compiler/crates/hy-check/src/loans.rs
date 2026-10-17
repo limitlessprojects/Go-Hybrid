@@ -1794,12 +1794,29 @@ impl<'a> Checker<'a> {
                     // mutation set (or clears it for non-closure values)
                     st.closure_mutates.remove(name);
                     self.record_closure_mutations(st, name, v);
+                } else if let Some(root) = Self::place_root_ident(t) {
+                    // A field or index store (`h.m = m`, `xs[0] = m`,
+                    // `mm["a"] = m`) embeds `v`'s storage into `root`
+                    // without clearing `root`'s existing sharing edges.
+                    if self.shape_may_share(&info.shape) {
+                        if let Some(origin) = info.non_owned {
+                            if let Some(b) = st.env_lookup_mut(root) {
+                                if b.non_owned_origin.is_none() {
+                                    b.non_owned_origin = Some(origin);
+                                }
+                            }
+                        }
+                    }
+                    self.record_may_share(st, root, v);
                 }
             }
         } else if values.len() == 1 && targets.len() > 1 {
             let shapes = self.multi_value_shapes(st, &values[0], targets.len());
             let tys = self.multi_value_tys(st, &values[0], targets.len());
-            for ((t, shape), ty) in targets.iter().zip(shapes).zip(tys) {
+            for (i, ((t, shape), ty)) in targets.iter().zip(shapes).zip(tys).enumerate() {
+                if is_const_write.get(i).copied().unwrap_or(false) {
+                    continue;
+                }
                 if let PlaceKind::Ident(name) = &t.kind {
                     if let Some(b) = st.env_lookup_mut(name) {
                         if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
@@ -1811,8 +1828,21 @@ impl<'a> Checker<'a> {
                         b.moved = None;
                     }
                     st.aliases.remove(name);
+                } else if let Some(root) = Self::place_root_ident(t) {
+                    if self.shape_may_share(&shape) {
+                        self.record_may_share(st, root, &values[0]);
+                    }
                 }
             }
+        }
+    }
+
+    fn place_root_ident(p: &Place) -> Option<&str> {
+        match &p.kind {
+            PlaceKind::Ident(name) => Some(name.as_str()),
+            PlaceKind::Field { base, .. }
+            | PlaceKind::Index { base, .. }
+            | PlaceKind::AddrOf { base } => Self::place_root_ident(base),
         }
     }
 
@@ -3282,6 +3312,122 @@ mod tests {
         );
         assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
         assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn field_and_index_assign_records_may_share_and_freezes_on_move() {
+        let r_field = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               h := holder{m: map[string]int{\"init\": 0}}\n\
+               h.m = m\n\
+               task worker(move m)\n\
+               h.m[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(
+            r_field.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_field.diagnostics
+        );
+        assert_eq!(r_field.diagnostics[0].code, "HYB-E3003");
+
+        let r_index = check(
+            "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               xs := []map[string]int{map[string]int{\"init\": 0}}\n\
+               xs[0] = m\n\
+               task worker(move m)\n\
+               xs[0][\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(
+            r_index.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_index.diagnostics
+        );
+        assert_eq!(r_index.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn composite_literal_with_projection_slice_or_call_records_may_share() {
+        let r_proj = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(h holder) { h.m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               h1 := holder{m: map[string]int{\"k\": 0}}\n\
+               h2 := holder{m: h1.m}\n\
+               task worker(move h1)\n\
+               h2.m[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r_proj.verdict, Verdict::Reject, "{:?}", r_proj.diagnostics);
+        assert_eq!(r_proj.diagnostics[0].code, "HYB-E3003");
+
+        let r_call = check(
+            "struct holder { m map[string]int }\n\
+             fn same(m map[string]int) map[string]int { return m }\n\
+             fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               h := holder{m: same(m)}\n\
+               task worker(move m)\n\
+               h.m[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r_call.verdict, Verdict::Reject, "{:?}", r_call.diagnostics);
+        assert_eq!(r_call.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn rebind_and_shadow_preserve_transitive_may_share_component() {
+        let r_rebind = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(h holder) { h.m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               h1 := holder{m: map[string]int{\"k\": 0}}\n\
+               h2 := h1\n\
+               h3 := h2\n\
+               h2 = holder{m: map[string]int{\"fresh\": 0}}\n\
+               task worker(move h1)\n\
+               h3.m[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(
+            r_rebind.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_rebind.diagnostics
+        );
+        assert_eq!(r_rebind.diagnostics[0].code, "HYB-E3003");
+
+        let r_shadow = check(
+            "import \"fmt\"\n\
+             struct holder { m map[string]int }\n\
+             fn worker(h holder) { h.m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               h1 := holder{m: map[string]int{\"k\": 0}}\n\
+               h2 := h1\n\
+               if true {\n\
+                 h2 := 1\n\
+                 fmt.println(h2)\n\
+               }\n\
+               task worker(move h1)\n\
+               h2.m[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(
+            r_shadow.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_shadow.diagnostics
+        );
+        assert_eq!(r_shadow.diagnostics[0].code, "HYB-E3003");
     }
 }
 

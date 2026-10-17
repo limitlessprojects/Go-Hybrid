@@ -271,11 +271,23 @@ impl FnState {
                 }
             }
         }
-        self.scopes.pop();
+        let popped = self.scopes.pop().unwrap_or_default();
+        let inner_share = self.may_share.clone();
         if let Some(outer_aliases) = self.alias_scopes.pop() {
             self.aliases = outer_aliases;
             if let Some(outer_share) = self.share_scopes.pop() {
                 self.may_share = outer_share;
+                // Preserve any may-share edges created inside the block between
+                // outer bindings that were not shadowed by `popped`.
+                for (a, peers) in &inner_share {
+                    if !popped.contains_key(a) && self.env_lookup(a).is_some() {
+                        for b in peers {
+                            if !popped.contains_key(b) && self.env_lookup(b).is_some() {
+                                self.share_edge(a, b);
+                            }
+                        }
+                    }
+                }
             }
             for (root, mv) in inner_root_moves {
                 if let Some(br) = self.env_lookup_mut(&root) {
@@ -394,8 +406,10 @@ impl FnState {
     }
 
     /// Drop `name`'s may-share edges: a whole-binding rebind re-owns the
-    /// binding, so it leaves the old sharing component while preserving
-    /// transitive sharing links among its remaining peers.
+    /// binding, so it leaves the old sharing component, while its former
+    /// peers remain connected to one another (clique closure on vertex
+    /// elimination so rebinding an intermediate copy `h2` in `h1 <-> h2 <-> h3`
+    /// does not sever the transitive sharing path between `h1` and `h3`).
     pub(crate) fn share_clear(&mut self, name: &str) {
         if let Some(peers) = self.may_share.remove(name) {
             let peer_list: Vec<String> = peers.into_iter().collect();
