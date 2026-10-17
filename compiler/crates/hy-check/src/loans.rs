@@ -1408,6 +1408,9 @@ impl<'a> Checker<'a> {
     /// storage through `f(...)` (no interprocedural summary, same argument
     /// as #38's alias recording).
     pub(crate) fn record_may_share(&self, st: &mut FnState, name: &str, value: &Expr) {
+        if name == "_" {
+            return;
+        }
         match unwrap_parens(value) {
             Expr::Ident { name: src, .. } => {
                 if self.binding_may_share(st, src) {
@@ -1673,6 +1676,9 @@ impl<'a> Checker<'a> {
     /// new binding also inherits the source's non_owned_origin (O5.1): an
     /// alias of a parameter/receiver/range variable is itself non-owned.
     pub(crate) fn record_alias(&self, st: &mut FnState, name: &str, value: &Expr) {
+        if name == "_" {
+            return;
+        }
         match unwrap_parens(value) {
             Expr::Ident { name: src, .. } => {
                 if let Some(b) = self.lookup_binding(st, src) {
@@ -1748,6 +1754,9 @@ impl<'a> Checker<'a> {
         value: &Expr,
         slot: Option<usize>,
     ) {
+        if name == "_" {
+            return;
+        }
         let Some(b_shape) = self.lookup_binding(st, name).map(|b| b.shape.clone()) else {
             return;
         };
@@ -2599,6 +2608,9 @@ impl<'a> Checker<'a> {
     pub(crate) fn record_local_borrow_aliases(&self, st: &mut FnState, l: &LocalDecl) {
         if l.names.len() == l.values.len() {
             for (name, value) in l.names.iter().zip(l.values.iter()) {
+                if name == "_" {
+                    continue;
+                }
                 let inner = unwrap_parens(value);
                 let is_borrow = as_addr_of(inner).is_some()
                     || contains_addr_of_in_literal(inner)
@@ -2643,6 +2655,9 @@ impl<'a> Checker<'a> {
         if op == AssignOp::Assign && values.len() == targets.len() {
             for (t, v) in targets.iter().zip(values.iter()) {
                 if let PlaceKind::Ident(name) = &t.kind {
+                    if name == "_" {
+                        continue;
+                    }
                     let inner = unwrap_parens(v);
                     let is_borrow = as_addr_of(inner).is_some()
                         || contains_addr_of_in_literal(inner)
@@ -2756,6 +2771,9 @@ impl<'a> Checker<'a> {
         shape: &TypeShape,
         value: &Expr,
     ) {
+        if name == "_" {
+            return;
+        }
         if !self.shape_may_share(shape) && !matches!(shape, TypeShape::Unknown) {
             return;
         }
@@ -3627,6 +3645,9 @@ impl<'a> Checker<'a> {
     fn const_write_root(&self, st: &FnState, p: &Place) -> Option<String> {
         match &p.kind {
             PlaceKind::Ident(name) => {
+                if name == "_" {
+                    return None;
+                }
                 if let Some(hit) = self.binding_const_root(st, name) {
                     return Some(hit);
                 }

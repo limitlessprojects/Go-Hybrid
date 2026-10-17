@@ -807,11 +807,15 @@ fn const_return_functions_methods_closures_and_interproc_loops_reject_issue_429(
              }\n\
              return total\n\
          }\n\n\
-         const shared_list = [map[string]int{\"k\": 1}]\n\n\
+         const shared_list = [map[string]int{\"k\": 1}]\n\
+         const shared_paren = (map[string]int{\"k\": 1})\n\n\
          fn main() {\n\
+             const local_paren = ([1, 2])\n\
              m := get_shared()\n\
              n := len(m) + read_via_loop(shared_list)\n\
              _ = n\n\
+             _ = shared_paren[\"k\"]\n\
+             _ = local_paren[0]\n\
          }\n",
     );
     assert_eq!(
