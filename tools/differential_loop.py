@@ -201,7 +201,11 @@ def main():
     print("----")
     print(f"differential accept-side (build+run): {rate}")
     print(f"differential reject-side (checker):   {reject_pass}/{reject_total}")
-    if accept_total and accept_pass == accept_total and reject_pass == reject_total:
+    if accept_total + reject_total == 0:
+        print("differential: no registered EXPECTED-VERDICT cases in corpus",
+              file=sys.stderr)
+        return 2
+    if accept_pass == accept_total and reject_pass == reject_total:
         print("differential: FULL AGREEMENT")
         return 0
     print(f"differential: {len(failures)} disagreement(s)")
