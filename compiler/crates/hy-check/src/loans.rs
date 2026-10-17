@@ -1155,7 +1155,10 @@ impl<'a> Checker<'a> {
                 let inferred = self.shape_of_expr(st, value);
                 let (shape, ty) = match (&l.ty, inferred) {
                     (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
-                    (_, inferred) => (inferred, self.ty_of_expr(st, value)),
+                    (_, inferred) => (
+                        inferred,
+                        l.ty.clone().or_else(|| self.ty_of_expr(st, value)),
+                    ),
                 };
                 let shadowed_const = self.shape_may_share(&shape)
                     && self.value_reads_storage_of(st, value, name)
@@ -2185,6 +2188,12 @@ impl<'a> Checker<'a> {
             // with nested nils (`j = jobT{m: nil}`) carries its own type
             // context (HYB-E4001).
             self.check_composite_nils(st, v);
+            // Constant overflow on assignment: `n = 300`, `arr[0] = 300`, `n += 300`
+            if !matches!(op, AssignOp::ShlAssign | AssignOp::ShrAssign) {
+                if let Some(target_ty) = self.place_target_ty(st, t) {
+                    self.check_const_overflow_assign(&t.render(), &target_ty, v);
+                }
+            }
             // Issue #146: `n = <-ch` where `n` has a known type and `ch` is
             // `chan T` with incompatible T.
             if let Some(want) = self.place_shape(st, t) {
@@ -2807,7 +2816,10 @@ impl<'a> Checker<'a> {
             let inferred = self.shape_of_expr(st, value);
             let (shape, ty) = match (&l.ty, inferred) {
                 (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
-                (_, inferred) => (inferred, self.ty_of_expr(st, value).or_else(|| l.ty.clone())),
+                (_, inferred) => (
+                    inferred,
+                    l.ty.clone().or_else(|| self.ty_of_expr(st, value)),
+                ),
             };
             let immutable = l.kind == LocalKind::Const;
             let shadowed_const = self.shape_may_share(&shape)
@@ -3368,6 +3380,41 @@ impl<'a> Checker<'a> {
                 _ => None,
             },
             _ => None,
+        }
+    }
+
+    /// The declared type of an assignment place, when it resolves (drives
+    /// HYB-E6002 constant overflow checks on assignment targets).
+    // ponytail: resolves direct ident and index targets; field type resolution requires whole-program struct definitions.
+    fn place_target_ty(&self, st: &FnState, p: &Place) -> Option<hy_syntax::TypeExpr> {
+        let b = self.place_root_binding(st, p)?;
+        let mut cur = b.ty.as_ref()?;
+        let mut path_len = 0;
+        let mut walker = p;
+        while let PlaceKind::Index { base, .. } = &walker.kind {
+            path_len += 1;
+            walker = base;
+        }
+        for _ in 0..path_len {
+            match cur {
+                hy_syntax::TypeExpr::Array { elem, .. }
+                | hy_syntax::TypeExpr::Slice { elem, .. } => cur = elem.as_ref(),
+                hy_syntax::TypeExpr::Map { value, .. } => cur = value.as_ref(),
+                _ => return None,
+            }
+        }
+        Some(cur.clone())
+    }
+
+    fn place_root_binding<'b>(&'b self, st: &'b FnState, p: &Place) -> Option<&'b Binding> {
+        let mut cur = p;
+        while let PlaceKind::Index { base, .. } = &cur.kind {
+            cur = base;
+        }
+        if let PlaceKind::Ident(name) = &cur.kind {
+            self.lookup_binding(st, name)
+        } else {
+            None
         }
     }
 
