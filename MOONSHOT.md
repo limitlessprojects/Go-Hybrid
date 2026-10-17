@@ -71,6 +71,7 @@ received → triaged (≤48h) → scheduled → in-review → M1 accepted ($250)
 | W-016 | A5 Go-escape as check-site with no Go API database: capture-write at a foreign-call boundary takes `managed` | airdropia | #327 | **triaged: accepted** | 2026-11-01 · slot 16 (reference implementation: PR #464 (pedromineo) — un-endorsed, self-landed ledger edits rejected) | M1 2026-11-01 · M2 learning | — | — |
 | W-017 | Operational take-and-detach move lowering (runtime-enforced ownership); bridge-deletion half carries a scope note | sonson0910 | #200 | **triaged: accepted** | 2026-11-01 · slot 17 (+ spike PR #370 (sonson0910)) | M1 2026-11-01 · M2 learning | — | — |
 | W-018 | Compile closed fixed-rate task networks away: certified periodic Go kernels with explicit ring-buffer budgets (SDF schedule certificates; bounded FIFO storage, no channel-token deadlock in the admitted subset) | untalsix | #378 | **awaiting triage** | 2026-11-01 · slot 18 (proposed; packaged spike PR #384 (Anekenonso), prototype credit untalsix) | M1 2026-11-01 · M2 learning | — | — |
+| W-019 | Serializable shared-state regions instead of exclusive ownership: opt-in transactional (STM-style) cells over fixed scalar records; effect-restricted transactions, private write sets, read-version validation, atomic publish of an immutable state root (existing STM research applied to Hybrid; not implemented or measured) | proposer per issue | #417 | **awaiting triage** | 2026-11-01 · slot 19 (proposed) | M1 2026-11-01 · M2 learning | — | — |
 
 *First-window harvest (triaged 2026-10-17, all within the 48-hour acknowledgment
 commitment): 19 submissions → 17 ledger entries + 2 duplicate-credits (#175 →
@@ -84,7 +85,7 @@ thread links every slot; M1 verdicts land there with written reasons.*
 
 | Window | Entries | Thread | Outcome |
 |--------|---------|--------|---------|
-| 2026-11-01 (opens 00:00 UTC) | W-001 … W-018, spike PRs #336 #370 #379 #381 #384 #405 #412 #452 (+ #446/#464/#474 as auxiliary inputs) | [#365 — slots assigned, authors invited to pre-answer](https://github.com/limitlessprojects/Go-Hybrid/discussions/365) | pending |
+| 2026-11-01 (opens 00:00 UTC) | W-001 … W-019, spike PRs #336 #370 #379 #381 #384 #405 #412 #452 (+ #446/#464/#474 as auxiliary inputs) | [#365 — slots assigned, authors invited to pre-answer](https://github.com/limitlessprojects/Go-Hybrid/discussions/365) | pending |
 
 ---
 
