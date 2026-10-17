@@ -1,11 +1,11 @@
-//! shape.rs — the lightweight TypeShape inference (NOT a type system).
+//! shape.rs 窶・the lightweight TypeShape inference (NOT a type system).
 //!
 //! Resolves a `TypeShape` from a declared `TypeExpr` (params, `var`/`let`
 //! ascriptions) or from an initializer expression (defines, loop variables),
 //! consulting the file-level struct/fn/const tables and the builtin foreign
 //! tables in foreign.rs. Everything unresolvable degrades to `Unknown`,
 //! which is FAIL-CLOSED at spawn/send boundaries (O4.9): an unproven shape
-//! may not silently cross (HYB-E3005) — but remains legal inside a function,
+//! may not silently cross (HYB-E3005) 窶・but remains legal inside a function,
 //! where no boundary is involved. Fewer unknowns is still the goal: the
 //! inference below deliberately widens coverage (closures, option, chan
 //! elements) so honest programs classify without ceremony.
@@ -26,35 +26,303 @@ impl<'a> Checker<'a> {
     }
 
     fn shape_of_type_depth(&self, ty: &TypeExpr, depth: usize) -> TypeShape {
+        let empty = std::collections::HashMap::new();
+        self.shape_of_type_with_params(ty, &empty, depth)
+    }
+
+    fn shape_of_type_with_params(
+        &self,
+        ty: &TypeExpr,
+        type_params: &std::collections::HashMap<String, TypeShape>,
+        depth: usize,
+    ) -> TypeShape {
         if depth > Self::MAX_TYPE_RESOLUTION_DEPTH {
             return TypeShape::Unknown;
         }
         match ty {
-            TypeExpr::Named { name, .. } => self.named_shape_depth(name, depth),
-            TypeExpr::Pointer { to, .. } => {
-                TypeShape::Pointer(Box::new(self.shape_of_type_depth(to, depth + 1)))
+            TypeExpr::Named { name, .. } => {
+                if let Some(bound) = type_params.get(name.as_str()) {
+                    return bound.clone();
+                }
+                self.named_shape_depth(name, depth)
             }
-            TypeExpr::Slice { elem, .. } => {
-                TypeShape::Slice(Box::new(self.shape_of_type_depth(elem, depth + 1)))
-            }
-            TypeExpr::Array { elem, .. } => {
-                TypeShape::Array(Box::new(self.shape_of_type_depth(elem, depth + 1)))
-            }
+            TypeExpr::Pointer { to, .. } => TypeShape::Pointer(Box::new(
+                self.shape_of_type_with_params(to, type_params, depth + 1),
+            )),
+            TypeExpr::Slice { elem, .. } => TypeShape::Slice(Box::new(
+                self.shape_of_type_with_params(elem, type_params, depth + 1),
+            )),
+            TypeExpr::Array { elem, .. } => TypeShape::Array(Box::new(
+                self.shape_of_type_with_params(elem, type_params, depth + 1),
+            )),
             TypeExpr::Map { key, value, .. } => TypeShape::Map(
-                Box::new(self.shape_of_type_depth(key, depth + 1)),
-                Box::new(self.shape_of_type_depth(value, depth + 1)),
+                Box::new(self.shape_of_type_with_params(key, type_params, depth + 1)),
+                Box::new(self.shape_of_type_with_params(value, type_params, depth + 1)),
             ),
-            TypeExpr::Chan { elem, .. } => {
-                TypeShape::Chan(Box::new(self.shape_of_type_depth(elem, depth + 1)))
-            }
-            // option[T] carries T by value in a struct { v T; ok bool } — its
+            TypeExpr::Chan { elem, .. } => TypeShape::Chan(Box::new(
+                self.shape_of_type_with_params(elem, type_params, depth + 1),
+            )),
+            // option[T] carries T by value in a struct { v T; ok bool } 窶・its
             // sendability IS the payload's sendability (option[int] crosses,
-            // option[map] does not — the aliased map inside decides).
-            TypeExpr::Option { elem, .. } => self.shape_of_type_depth(elem, depth + 1),
+            // option[map] does not 窶・the aliased map inside decides).
+            TypeExpr::Option { elem, .. } => {
+                self.shape_of_type_with_params(elem, type_params, depth + 1)
+            }
             // fn-typed values are closures: captures make them unsendable at
-            // boundaries (Tier 0 — the A5 perimeter).
+            // boundaries (Tier 0 窶・the A5 perimeter).
             TypeExpr::Fn { .. } => TypeShape::Closure,
         }
+    }
+
+    fn split_top_level_type_args(raw: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        let mut depth = 0usize;
+        let mut start = 0usize;
+        for (i, ch) in raw.char_indices() {
+            match ch {
+                '[' | '(' => depth += 1,
+                ']' | ')' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    out.push(raw[start..i].trim());
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        let tail = raw[start..].trim();
+        if !tail.is_empty() {
+            out.push(tail);
+        }
+        out
+    }
+
+    fn parse_explicit_type_arg(raw: &str) -> Option<TypeExpr> {
+        let snippet = format!("fn _tp(_x {}) {{}}", raw.trim());
+        let file = hy_syntax::parse_file("_tp.hy", &snippet).ok()?;
+        let hy_syntax::Decl::Fn(f) = file.decls.into_iter().next()? else {
+            return None;
+        };
+        f.params.into_iter().next().map(|p| p.ty)
+    }
+
+    fn match_param_shape(
+        pattern: &TypeExpr,
+        actual: &TypeShape,
+        tp_set: &std::collections::HashSet<&str>,
+        out: &mut std::collections::HashMap<String, TypeShape>,
+    ) {
+        match (pattern, actual) {
+            (TypeExpr::Named { name, .. }, _) if tp_set.contains(name.as_str()) => {
+                if !matches!(actual, TypeShape::Unknown) {
+                    out.entry(name.clone()).or_insert_with(|| actual.clone());
+                }
+            }
+            (TypeExpr::Pointer { to, .. }, TypeShape::Pointer(inner))
+            | (TypeExpr::Slice { elem: to, .. }, TypeShape::Slice(inner))
+            | (TypeExpr::Array { elem: to, .. }, TypeShape::Array(inner))
+            | (TypeExpr::Chan { elem: to, .. }, TypeShape::Chan(inner)) => {
+                Self::match_param_shape(to, inner, tp_set, out);
+            }
+            (TypeExpr::Option { elem, .. }, other) => {
+                Self::match_param_shape(elem, other, tp_set, out);
+            }
+            (TypeExpr::Map { key, value, .. }, TypeShape::Map(k, v)) => {
+                Self::match_param_shape(key, k, tp_set, out);
+                Self::match_param_shape(value, v, tp_set, out);
+            }
+            _ => {}
+        }
+    }
+
+    fn match_param_ty(
+        pattern: &TypeExpr,
+        actual: &TypeExpr,
+        tp_set: &std::collections::HashSet<&str>,
+        out: &mut std::collections::HashMap<String, TypeExpr>,
+    ) {
+        match (pattern, actual) {
+            (TypeExpr::Named { name, .. }, _) if tp_set.contains(name.as_str()) => {
+                out.entry(name.clone()).or_insert_with(|| actual.clone());
+            }
+            (TypeExpr::Pointer { to: p, .. }, TypeExpr::Pointer { to: a, .. })
+            | (TypeExpr::Slice { elem: p, .. }, TypeExpr::Slice { elem: a, .. })
+            | (TypeExpr::Array { elem: p, .. }, TypeExpr::Array { elem: a, .. })
+            | (TypeExpr::Chan { elem: p, .. }, TypeExpr::Chan { elem: a, .. })
+            | (TypeExpr::Option { elem: p, .. }, TypeExpr::Option { elem: a, .. }) => {
+                Self::match_param_ty(p, a, tp_set, out);
+            }
+            (
+                TypeExpr::Map {
+                    key: pk, value: pv, ..
+                },
+                TypeExpr::Map {
+                    key: ak, value: av, ..
+                },
+            ) => {
+                Self::match_param_ty(pk, ak, tp_set, out);
+                Self::match_param_ty(pv, av, tp_set, out);
+            }
+            _ => {}
+        }
+    }
+
+    fn substitute_type_params(
+        ty: &TypeExpr,
+        ty_map: &std::collections::HashMap<String, TypeExpr>,
+        tp_set: &std::collections::HashSet<&str>,
+        depth: usize,
+    ) -> Option<TypeExpr> {
+        if depth > Self::MAX_TYPE_RESOLUTION_DEPTH {
+            return None;
+        }
+        match ty {
+            TypeExpr::Named { name, span } => {
+                if let Some(bound) = ty_map.get(name.as_str()) {
+                    Some(bound.clone())
+                } else if tp_set.contains(name.as_str()) {
+                    None
+                } else {
+                    Some(TypeExpr::Named {
+                        name: name.clone(),
+                        span: *span,
+                    })
+                }
+            }
+            TypeExpr::Pointer { to, span } => Some(TypeExpr::Pointer {
+                to: Box::new(Self::substitute_type_params(to, ty_map, tp_set, depth + 1)?),
+                span: *span,
+            }),
+            TypeExpr::Slice { elem, span } => Some(TypeExpr::Slice {
+                elem: Box::new(Self::substitute_type_params(
+                    elem,
+                    ty_map,
+                    tp_set,
+                    depth + 1,
+                )?),
+                span: *span,
+            }),
+            TypeExpr::Array { len, elem, span } => Some(TypeExpr::Array {
+                len: len.clone(),
+                elem: Box::new(Self::substitute_type_params(
+                    elem,
+                    ty_map,
+                    tp_set,
+                    depth + 1,
+                )?),
+                span: *span,
+            }),
+            TypeExpr::Map { key, value, span } => Some(TypeExpr::Map {
+                key: Box::new(Self::substitute_type_params(
+                    key,
+                    ty_map,
+                    tp_set,
+                    depth + 1,
+                )?),
+                value: Box::new(Self::substitute_type_params(
+                    value,
+                    ty_map,
+                    tp_set,
+                    depth + 1,
+                )?),
+                span: *span,
+            }),
+            TypeExpr::Chan { dir, elem, span } => Some(TypeExpr::Chan {
+                dir: *dir,
+                elem: Box::new(Self::substitute_type_params(
+                    elem,
+                    ty_map,
+                    tp_set,
+                    depth + 1,
+                )?),
+                span: *span,
+            }),
+            TypeExpr::Option { elem, span } => Some(TypeExpr::Option {
+                elem: Box::new(Self::substitute_type_params(
+                    elem,
+                    ty_map,
+                    tp_set,
+                    depth + 1,
+                )?),
+                span: *span,
+            }),
+            TypeExpr::Fn {
+                params,
+                results,
+                span,
+            } => {
+                let mut new_params = Vec::with_capacity(params.len());
+                for p in params {
+                    new_params.push(hy_syntax::Param {
+                        name: p.name.clone(),
+                        ty: Self::substitute_type_params(&p.ty, ty_map, tp_set, depth + 1)?,
+                        span: p.span,
+                    });
+                }
+                let mut new_results = Vec::with_capacity(results.len());
+                for r in results {
+                    new_results.push(Self::substitute_type_params(r, ty_map, tp_set, depth + 1)?);
+                }
+                Some(TypeExpr::Fn {
+                    params: new_params,
+                    results: new_results,
+                    span: *span,
+                })
+            }
+        }
+    }
+
+    fn infer_fn_type_params(
+        &self,
+        st: &FnState,
+        callee_name: &str,
+        f: &hy_syntax::FnDecl,
+        args: &[CallArg],
+    ) -> (
+        std::collections::HashMap<String, TypeShape>,
+        std::collections::HashMap<String, TypeExpr>,
+    ) {
+        let mut shape_map = std::collections::HashMap::new();
+        let mut ty_map = std::collections::HashMap::new();
+        if f.type_params.is_empty() {
+            return (shape_map, ty_map);
+        }
+        let tp_set: std::collections::HashSet<&str> =
+            f.type_params.iter().map(|tp| tp.name.as_str()).collect();
+        if let Some(open) = callee_name.find('[') {
+            if callee_name.ends_with(']') && open + 1 < callee_name.len() {
+                let raw_inner = &callee_name[open + 1..callee_name.len() - 1];
+                for (tp, raw_arg) in f
+                    .type_params
+                    .iter()
+                    .zip(Self::split_top_level_type_args(raw_inner))
+                {
+                    if let Some(parsed_ty) = Self::parse_explicit_type_arg(raw_arg) {
+                        let sh = self.shape_of_type(&parsed_ty);
+                        if !matches!(sh, TypeShape::Unknown) {
+                            shape_map.insert(tp.name.clone(), sh);
+                        }
+                        ty_map.insert(tp.name.clone(), parsed_ty);
+                    }
+                }
+            }
+        }
+        for (param, arg) in f.params.iter().zip(args.iter()) {
+            let arg_shape = self.shape_of_expr(st, &arg.value);
+            Self::match_param_shape(&param.ty, &arg_shape, &tp_set, &mut shape_map);
+            if let Some(arg_ty) = self.ty_of_expr(st, &arg.value) {
+                let resolved_arg_ty = self.resolve_type_alias(&arg_ty);
+                Self::match_param_ty(&param.ty, &resolved_arg_ty, &tp_set, &mut ty_map);
+            }
+        }
+        for (tp_name, bound_ty) in &ty_map {
+            if !shape_map.contains_key(tp_name) {
+                let sh = self.shape_of_type(bound_ty);
+                if !matches!(sh, TypeShape::Unknown) {
+                    shape_map.insert(tp_name.clone(), sh);
+                }
+            }
+        }
+        (shape_map, ty_map)
     }
 
     #[allow(dead_code)]
@@ -91,8 +359,8 @@ impl<'a> Checker<'a> {
     }
 
     /// May a value of this shape share mutable GC storage with a shallow Go
-    /// copy of it? True for reference types (map/slice/pointer), and — the
-    /// #27 gap — transitively true for a struct or array that CARRIES a
+    /// copy of it? True for reference types (map/slice/pointer), and 窶・the
+    /// #27 gap 窶・transitively true for a struct or array that CARRIES a
     /// reference-typed field/element: Go copies such a value by value, but
     /// the reference interior is shared. Used by the freeze rule's alias
     /// tracking so `h2 := h1; task f(move h1)` freezes `h2` too.
@@ -259,7 +527,7 @@ impl<'a> Checker<'a> {
                     .unwrap_or(TypeShape::Unknown),
             })),
             // closures are unsendable values in Tier 0 (the A5 perimeter);
-            // classify_value rejects FnLit literals before shape lookup —
+            // classify_value rejects FnLit literals before shape lookup 窶・
             // this arm covers fn-typed bindings and fn-typed fields
             Expr::FnLit { .. } => TypeShape::Closure,
         }
@@ -297,7 +565,7 @@ impl<'a> Checker<'a> {
                     return TypeShape::Unknown;
                 }
                 match name.as_str() {
-                    // `make(chan T, n)` — defensive against parser spellings of
+                    // `make(chan T, n)` 窶・defensive against parser spellings of
                     // the type argument; defaults Unknown (fail-closed at
                     // boundaries, O4.9). See the TECH DEBT note in foreign.rs.
                     "make" => self.make_shape(args),
@@ -306,8 +574,8 @@ impl<'a> Checker<'a> {
                         .map(|a| self.shape_of_expr(st, &a.value))
                         .unwrap_or(TypeShape::Unknown),
                     "len" | "cap" | "min" | "max" => TypeShape::Primitive,
-                    // `new(T)` is Go's `new`: it returns `*T` — a POINTER to
-                    // zeroed, mutable storage — never a primitive copy. Typing
+                    // `new(T)` is Go's `new`: it returns `*T` 窶・a POINTER to
+                    // zeroed, mutable storage 窶・never a primitive copy. Typing
                     // it Primitive made it sendable-by-type (class 1), so
                     // `p := new(S); task w(p)` shared a `*S` across tasks with no
                     // diagnostic and raced (O4 class table: `*T` is a named
@@ -315,10 +583,10 @@ impl<'a> Checker<'a> {
                     // shapes fail closed). Type it as a pointer so it is
                     // classified as shared mutable state and rejected at every
                     // check-site. The pointee is inferred when the type argument
-                    // resolves; otherwise Unknown — still a non-sendable pointer.
+                    // resolves; otherwise Unknown 窶・still a non-sendable pointer.
                     "new" => {
                         let pointee = match args.first().map(|a| &a.value) {
-                            // `new(pool_stats)` — the argument is a type name,
+                            // `new(pool_stats)` 窶・the argument is a type name,
                             // not a value; name a declared struct precisely.
                             Some(Expr::Ident { name, .. }) if self.structs.contains_key(name) => {
                                 TypeShape::Struct(Some(name.clone()))
@@ -328,12 +596,17 @@ impl<'a> Checker<'a> {
                         };
                         TypeShape::Pointer(Box::new(pointee))
                     }
-                    _ => self
-                        .fns
-                        .get(name.as_str())
-                        .and_then(|f| f.results.first())
-                        .map(|r| self.shape_of_type(&r.ty))
-                        .unwrap_or(TypeShape::Unknown),
+                    _ => {
+                        let head = Self::base_named_type_str(name);
+                        if let Some(f) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head))
+                        {
+                            if let Some(r) = f.results.first() {
+                                let (shape_map, _) = self.infer_fn_type_params(st, name, f, args);
+                                return self.shape_of_type_with_params(&r.ty, &shape_map, 0);
+                            }
+                        }
+                        TypeShape::Unknown
+                    }
                 }
             }
             Expr::Field { base, name, .. } => {
@@ -359,17 +632,17 @@ impl<'a> Checker<'a> {
         };
         match &first.value {
             // The parser renders a type in expression position as a literal
-            // node carrying the TypeExpr in `.ty` (`make(chan bool, n)` →
+            // node carrying the TypeExpr in `.ty` (`make(chan bool, n)` 竊・
             // StructLit{ty: Chan}); other spellings degrade to Unknown.
             Expr::StructLit { ty: Some(t), .. } => self.shape_of_type(t),
-            // `make([]T, n)` — keep the ELEMENT shape (not Unknown): the
+            // `make([]T, n)` 窶・keep the ELEMENT shape (not Unknown): the
             // element type decides whether a later `copy(dst, src)` shares
             // references (#178). A primitive element (`[]int`) shares
             // nothing; a reference element (`[]map[...]`) does.
             Expr::SliceLit { elem: Some(t), .. } => {
                 TypeShape::Slice(Box::new(self.shape_of_type(t)))
             }
-            // `make(map[K]V{})` — shape key AND value: an erasure to
+            // `make(map[K]V{})` 窶・shape key AND value: an erasure to
             // Map(Unknown, Unknown) let containers holding closures (or
             // handles) slip past the closure-container move guard (#354,
             // regression-tested in const_write.rs).
@@ -555,8 +828,16 @@ impl<'a> Checker<'a> {
                     self.fns
                         .get(name.as_str())
                         .or_else(|| self.fns.get(head))
-                        .and_then(|f| f.results.first())
-                        .map(|r| r.ty.clone())
+                        .and_then(|f| {
+                            let r = f.results.first()?;
+                            if f.type_params.is_empty() {
+                                return Some(r.ty.clone());
+                            }
+                            let tp_set: std::collections::HashSet<&str> =
+                                f.type_params.iter().map(|tp| tp.name.as_str()).collect();
+                            let (_, ty_map) = self.infer_fn_type_params(st, name, f, args);
+                            Self::substitute_type_params(&r.ty, &ty_map, &tp_set, 0)
+                        })
                 }
                 Expr::Field { base, name, .. } => {
                     let head = Self::base_named_type_str(name);
@@ -634,7 +915,7 @@ impl<'a> Checker<'a> {
         if let Some(reason) = self.no_zero_value_reason(ty, 0) {
             let names = l.names.join(", ");
             let msg = format!(
-                "`{}` has no zero value — initialize `{}` explicitly (HYB-E4002)",
+                "`{}` has no zero value 窶・initialize `{}` explicitly (HYB-E4002)",
                 ty.render(),
                 names
             );
@@ -687,7 +968,7 @@ impl<'a> Checker<'a> {
                             "HYB-E5001",
                             self.path.clone(),
                             span,
-                            "`_` must be the last match arm — arms after `_` are unreachable (HYB-E5001)",
+                            "`_` must be the last match arm 窶・arms after `_` are unreachable (HYB-E5001)",
                         )
                         .with_notes(vec![
                             "why: `_` matches every remaining variant; placing it before specific arms leaves the following arms dead (T15)".to_string(),
@@ -702,7 +983,7 @@ impl<'a> Checker<'a> {
                             "HYB-E5001",
                             self.path.clone(),
                             span,
-                            "`_` cannot be the first or only match arm — match at least one variant before `_` (HYB-E5001)",
+                            "`_` cannot be the first or only match arm 窶・match at least one variant before `_` (HYB-E5001)",
                         )
                         .with_notes(vec![
                             "why: `_` is a catch-all for remaining variants at the end of a `match` (T15)".to_string(),
@@ -892,7 +1173,7 @@ impl<'a> Checker<'a> {
                     return vec![*val, TypeShape::Primitive]; // v, ok := m[k]
                 }
             }
-            // `v, ok := <-ch` — the value is the channel's element; `ok` is
+            // `v, ok := <-ch` 窶・the value is the channel's element; `ok` is
             // the receive-ok flag (a bool)
             if let Expr::Receive { chan, .. } = v {
                 let elem = match self.shape_of_expr(st, chan) {
@@ -906,21 +1187,23 @@ impl<'a> Checker<'a> {
             Expr::Try { operand, .. } => (crate::model::unwrap_parens(operand), true),
             other => (other, false),
         };
-        if let Expr::Call { callee, .. } = call_expr {
+        if let Expr::Call { callee, args, .. } = call_expr {
             if let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) {
                 if self.lookup_binding(st, name).is_none() {
-                    if let Some(f) = self.fns.get(name.as_str()) {
+                    let head = Self::base_named_type_str(name);
+                    if let Some(f) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
                         let avail = if is_try {
                             f.results.len().saturating_sub(1)
                         } else {
                             f.results.len()
                         };
                         if avail == n_names {
+                            let (shape_map, _) = self.infer_fn_type_params(st, name, f, args);
                             return f
                                 .results
                                 .iter()
                                 .take(n_names)
-                                .map(|r| self.shape_of_type(&r.ty))
+                                .map(|r| self.shape_of_type_with_params(&r.ty, &shape_map, 0))
                                 .collect();
                         }
                     }
@@ -950,21 +1233,33 @@ impl<'a> Checker<'a> {
             Expr::Try { operand, .. } => (crate::model::unwrap_parens(operand), true),
             other => (other, false),
         };
-        if let Expr::Call { callee, .. } = call_expr {
+        if let Expr::Call { callee, args, .. } = call_expr {
             if let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) {
                 if self.lookup_binding(st, name).is_none() {
-                    if let Some(f) = self.fns.get(name.as_str()) {
+                    let head = Self::base_named_type_str(name);
+                    if let Some(f) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
                         let avail = if is_try {
                             f.results.len().saturating_sub(1)
                         } else {
                             f.results.len()
                         };
                         if avail == n_names {
+                            if f.type_params.is_empty() {
+                                return f
+                                    .results
+                                    .iter()
+                                    .take(n_names)
+                                    .map(|r| Some(r.ty.clone()))
+                                    .collect();
+                            }
+                            let tp_set: std::collections::HashSet<&str> =
+                                f.type_params.iter().map(|tp| tp.name.as_str()).collect();
+                            let (_, ty_map) = self.infer_fn_type_params(st, name, f, args);
                             return f
                                 .results
                                 .iter()
                                 .take(n_names)
-                                .map(|r| Some(r.ty.clone()))
+                                .map(|r| Self::substitute_type_params(&r.ty, &ty_map, &tp_set, 0))
                                 .collect();
                         }
                     }
@@ -1079,7 +1374,7 @@ mod tests {
     #[test]
     fn pointer_receiver_move_rejects_as_non_owned_even_without_post_use() {
         // Updated to the non-owned-move doctrine (pr-61): a receiver aliases
-        // caller-owned storage, so `move s` is rejected outright — no
+        // caller-owned storage, so `move s` is rejected outright 窶・no
         // post-move use required. The diagnostic still names the pointee
         // `*stats`, pinning the pointer-receiver shape fix this PR added.
         let r = check(
@@ -1227,5 +1522,126 @@ mod tests {
         );
         assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
         assert_eq!(r.diagnostics[0].code, "HYB-E5001");
+    }
+
+    #[test]
+    fn generic_identity_map_and_transitive_copy_freeze_on_move_issue_73() {
+        let r = check(
+            "fn id[t any](x t) t {\n\
+               return x\n\
+             }\n\
+             fn worker(m map[string]int) {\n\
+               m[\"k\"] = 1\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               m2 := id(m)\n\
+               m3 := m2\n\
+               task worker(move m)\n\
+               m3[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3003"),
+            "expected HYB-E3003 for write through transitive copy of generic call result, got: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn generic_identity_struct_projection_freezes_on_move_issue_73() {
+        let r = check(
+            "struct holder {\n\
+               m map[string]int\n\
+             }\n\
+             fn id[t any](x t) t {\n\
+               return x\n\
+             }\n\
+             fn worker(h holder) {\n\
+               h.m[\"k\"] = 1\n\
+             }\n\
+             fn main() {\n\
+               h1 := holder{m: map[string]int{\"k\": 0}}\n\
+               h2 := id(h1)\n\
+               inner := h2.m\n\
+               task worker(move h1)\n\
+               inner[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3003"),
+            "expected HYB-E3003 for write through field projected from generic call result, got: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn generic_slice_helper_preserves_elem_shape_for_copy_issue_73() {
+        let r = check(
+            "fn id_slice[t any](s []t) []t {\n\
+               return s\n\
+             }\n\
+             fn worker(s []map[string]int) {\n\
+               s[0][\"k\"] = 1\n\
+             }\n\
+             fn main() {\n\
+               src := []map[string]int{map[string]int{\"k\": 0}}\n\
+               dst := id_slice([]map[string]int{map[string]int{\"k\": 0}})\n\
+               copy(dst, src)\n\
+               task worker(move src)\n\
+               dst[0][\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3003"),
+            "expected HYB-E3003 for write through slice copied into generic slice result, got: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn generic_slice_helper_preserves_closure_elem_shape_at_spawn_issue_73() {
+        let r = check(
+            "fn wrap_slice[t any](x t) []t {\n\
+               return []t{x}\n\
+             }\n\
+             fn run_all(fs []fn()) {}\n\
+             fn main() {\n\
+               shared := map[string]int{\"k\": 0}\n\
+               f := fn() {\n\
+                 shared[\"k\"] = 1\n\
+               }\n\
+               fs := wrap_slice(f)\n\
+               task run_all(move fs)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3001"
+                && d.notes.iter().any(|n| n.contains("holds closures"))),
+            "expected HYB-E3001 for moving closure-carrying slice returned by generic fn, got: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn generic_identity_owned_move_chain_accepts_issue_73() {
+        let r = check(
+            "fn id[t any](x t) t {\n\
+               return x\n\
+             }\n\
+             fn worker(m map[string]int) {\n\
+               m[\"k\"] = 1\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               m2 := id(move m)\n\
+               task worker(move m2)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
     }
 }
