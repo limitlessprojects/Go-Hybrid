@@ -1,5 +1,6 @@
 # STATUS (for the human — 15 lines max)
 
+- CLI contribution (2026-10-17): `check` rejects extra operands/unknown flags before I/O; `--` supports literal paths. Local pinned-toolchain checks: 8 new CLI regressions, workspace 603/0, corpus 52/52, differential 15+37; upstream CI/review pending.
 - Phase: **MVP DONE + v0.1.0 released + community OPEN** — session-14: queue pull (**#230 landed**, **#251 landed**) + **second wildcard spike (W-005, PR #412) race-verified**
 - **#230 landed** (lienhoatienphung-svg, fixes #229 P0): nested closures now check against their ENCLOSING closure's env, not the top-level FnState — outer-closure maps/moves no longer launder past E3001/E3003/E3004; merge resolution grafted main's #306 if-init eval order + #374 non_owned_origin materialization into the PR's restructured walk; race demo: pre-merge main's emitted Go races under -race, post-merge the repros reject
 - **W-005 spike (PR #412, spike/w005-message-isolation)**: no-compiler artifact per the issue's own first-milestone directive — memoized deep clone keyed on the REFERENCED object (cycles/internal aliases/pointer-keys survive inside the copy; chan identity preserved; FAIL-CLOSED on funcs/uintptr/unexported fields); 7/7 pins green under go test -race; demo r1 = the #229 repro under isolation, zero race reports

@@ -91,12 +91,49 @@ fn cmd_explain(args: &[String]) -> ExitCode {
 }
 
 fn cmd_check(args: &[String]) -> ExitCode {
-    let file = args.iter().find(|a| !a.starts_with('-')).cloned();
-    let json = args.iter().any(|a| a == "--json");
-    let report_managed = args.iter().any(|a| a == "--report-managed");
-    let deny_managed = args.iter().any(|a| a == "--deny-managed");
+    const USAGE: &str =
+        "usage: hyb check [--json] [--report-managed] [--deny-managed] [--] <file.hy>";
+    let mut file = None;
+    let mut json = false;
+    let mut report_managed = false;
+    let mut deny_managed = false;
+    let mut end_of_options = false;
+    // Validate the entire invocation before reading or checking any source.
+    // Otherwise a second file or a mistyped option can silently go unchecked.
+    for arg in args {
+        if !end_of_options {
+            match arg.as_str() {
+                "--" => {
+                    end_of_options = true;
+                    continue;
+                }
+                "--json" => {
+                    json = true;
+                    continue;
+                }
+                "--report-managed" => {
+                    report_managed = true;
+                    continue;
+                }
+                "--deny-managed" => {
+                    deny_managed = true;
+                    continue;
+                }
+                value if value.starts_with('-') => {
+                    eprintln!("unknown option: {value}\n{USAGE}");
+                    return ExitCode::from(2);
+                }
+                _ => {}
+            }
+        }
+        if file.is_some() {
+            eprintln!("check expects exactly one input file; unexpected argument: {arg}\n{USAGE}");
+            return ExitCode::from(2);
+        }
+        file = Some(arg.clone());
+    }
     let Some(file) = file else {
-        eprintln!("usage: hyb check <file.hy> [--json] [--report-managed] [--deny-managed]");
+        eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
 

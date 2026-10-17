@@ -45,6 +45,7 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 | 6 ownership usability | 10 programs, annotation count | **PASS**: 0 annotations / 0 managed / 0 outside-model (strictest reading; hand-trace); A1–A8 ambiguities + corpus gap recorded | Tier-0 real for MVP corpus; Polonius-style engine + rustc CI oracle |
 
 ## Task List
+- [x] Validate complete `hyb check` invocations | Reject extra operands and unknown options before file I/O; preserve flag order and support `--` for literal paths. Eight CLI regressions pass (two original misuse tests fail on base `c53978b`); workspace 603/0, corpus 52/52, differential 15/15 accept + 37/37 reject on pinned Go/Rust, Windows x64. Upstream CI/review pending (2026-10-17).
 - [x] Installer checksum download must fail closed | Missing checksum fetch previously installed and executed an unverified archive; now aborts before extraction or replacement. Six offline installer tests added to quick CI; two regression tests fail on base `34525ee`, all six pass locally on Windows/Git Bash. Upstream CI/reward review pending (2026-10-15).
 - [x] Session 1 scaffold | done = files exist, pushed | lead | done
 - [x] Environment detect + pin toolchains | done = this file records versions | lead | done
