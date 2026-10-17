@@ -28,7 +28,7 @@ this file is the human-normative record.
 | A2 | handle-loan rule (spike-added): mutating-mode calls on a boundary handle conflict with live borrow-mode loans on the same handle | `HYB-E3101` |
 | A3 | map-slot borrows `&m[k]`: legal, non-lexical (creation → last use), invalidated by any map insert/delete inside the live window | `HYB-E3102` |
 | A4 | Go-heap reads are copies, not loans (positive rule; exercised by 09 / 15 / 17) | — (enabling rule) |
-| A5 | Go-API escape perimeter: values escaping into foreign Go code are outside the checked subset under the scoped-claim ruling | — (scope rule; opt-in lint TBD) |
+| A5 | Go-API escape perimeter (D5, issue #327): a closure body that writes a captured mutable binding where that closure crosses into foreign Go code is a check-site; the write must be proven immutable-by-type or taken through `managed`, otherwise HYB-E3005 (rule FC). No Go API database is consulted — the triple is visible in the `.hy` file. | HYB-E3005 / FC |
 | A6 | struct fields never hold borrow-handles (owned / GC / ids / own-handles only) | `HYB-E3103` |
 | A7 | handles passed to functions are borrow-by-default; own-transfer happens only at `return` and at consuming APIs | `HYB-E3003` (use-after-consume) |
 | A8 | top-level `?` exit contract — NOT exercised by this corpus (noted so nobody mistakes absence for coverage) | — |
@@ -53,7 +53,7 @@ renumbered).
 | 07 | 07-a2-mutate-during-handle-loan | REJECT | A2 | `doc.set(...)` (mutating-mode) while element-view borrow loans on `doc` are live |
 | 08 | 08-a3-map-slot-invalidated | REJECT | A3 | map INSERT inside the live `&m[k]` slot-loan window (rehash invalidation) |
 | 09 | 09-a3-map-slot-valid | ACCEPT | — | 08 with the insert moved after the loan's last use: A3's non-lexical window respected; A4 in passing |
-| 10 | 10-a5-http-handler-capture | ACCEPT (contested) | — (A5 scoped claim) | mutable value captured by a closure escaping into net/http — no Hybrid check site exists; **contested — see OQ1** |
+| 10 | 10-a5-http-handler-capture | REJECT | FC | mutable value `hits` captured by a `net/http` handler closure escaping into foreign Go code; the capture-write at the foreign-call boundary is neither immutable-by-type nor `managed` → HYB-E3005 (rule FC). Flipped from ACCEPT when D5 landed (issue #327); OQ1 resolved here — see amendment below |
 | 11 | 11-a6-borrow-in-struct-field | REJECT | A6 | borrow-handle (`serde_json.view`) stored in a struct field — the #1 annotation-forcing shape, forbidden by rule |
 | 12 | 12-a7-borrow-by-default | ACCEPT | — | handle passed to two read calls and mutated afterwards: pins A7 borrow-by-default + A2 non-lexical windows |
 | 13 | 13-a7-own-transfer-at-return | ACCEPT | — | own handle returned out of a function; caller mutates the returned handle: the A7 return-transfer route |
@@ -454,12 +454,7 @@ These could not be settled from the ruling + spike-6 text; each corpus
 program that depends on one says so in its header. None was decided by
 fiat here.
 
-- **OQ1 (A5, fourth check-site class).** Values captured by closures
-  passed to concurrent Go APIs (net/http handlers) escape all Tier-0 check
-  sites. Decided HERE only as the scoped-claim default (10 = ACCEPT,
-  contested); if SPEC-LANGUAGE adds a "concurrent-flagged Go API" check
-  site, 10 flips to REJECT. This is the corpus's most user-visible open
-  decision: request-counter middleware is everywhere.
+- **OQ1 (A5, fourth check-site class).** **RESOLVED by issue #327 / D5 (2026-10-17).** Values captured by closures passed to concurrent Go APIs (net/http handlers) escape all Tier-0 check sites unless the closure body writes a captured mutable binding at the foreign-call boundary — that triple is now a check-site (rule FC, HYB-E3005) unless the write is immutable-by-type or taken through `managed`. No Go API database is consulted. Program 10 flips to REJECT (above). Request-counter middleware is the canonical shape.
 - **OQ2 (A1c amendment: lock-mediated sharing).** 04 is race-free idiomatic
   Go rejected under (c). An "externally synchronized" clause
   (checker-verified exclusive access behind sync.mutex) is the strongest

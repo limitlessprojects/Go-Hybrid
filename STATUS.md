@@ -8,4 +8,5 @@
 - NEEDS-INTEGRATION (recipes in worklog): #288/#300/#297/#291/#232 (const ports), #242 (loans/closures rebase); closes pending: #413/#414/#426/#427 (credit-noted); #402 NOT READY (foreign-syntax fixture — author should rewrite)
 - Old-queue recon banked (2-e): 34 REVIVE-EXTRACT with graft points, 3 rebase-assists (#262/#267/#270 — #270's base IS current main), 2 docs-trivial (#275/#314)
 - Wildcard spike PRs #405/#381/#384/#370/#416/#336 await recon + ledger attach; M1 verdicts land 2026-11-01 in #365 (artifacts: #379 W-015, #412 W-005 CONDITIONAL)
+- **Wildcard #327 / D5 landed (W-016):** the A5 Go-escape is now a check-site with no Go API database — a capture-write at a foreign-call boundary takes `managed` (or is proven immutable-by-type, else HYB-E3005/rule FC); corpus 10 flips ACCEPT→REJECT FC; corpus 55/55, tripwire not fired.
 - Standing: old-queue rebase assists, tools/kaggle batch, CI approvals stay per-landing (1 approve per landing, 8 this session); last review gate G3 PASSED 2026-10-13

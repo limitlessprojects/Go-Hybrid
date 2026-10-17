@@ -2128,10 +2128,13 @@ mod tests {
     }
 
     #[test]
-    fn fc_closure_without_boundary_stays_outside_perimeter() {
-        // corpus 10 shape unchanged: a capture used INSIDE a closure without
-        // any task/send statement is still the A5 perimeter (Q1, OQ1) — the
-        // closure pass owns boundary statements, nothing more
+    fn fc_foreign_capture_write_rejects_e3005() {
+        // Issue #327 (D5): a capture-write at a foreign-call boundary — the
+        // closure body writes captured mutable `hits` and the closure is handed
+        // to foreign Go code (mux.handle -> http.handler -> the FnLit). No Go
+        // API database is consulted; the triple is visible in the .hy file.
+        // Immutable-by-type would skip; the `managed` hatch would bypass.
+        // Neither applies here, so HYB-E3005 (rule FC) fires.
         let r = check(
             "fn main() {\n\
                hits := 0\n\
@@ -2141,23 +2144,45 @@ mod tests {
                }))\n\
              }",
         );
-        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
-        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        let d = r
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "HYB-E3005")
+            .expect("captured mutable write at a foreign-call boundary is HYB-E3005");
+        assert_eq!(d.tier0_rule.as_deref(), Some("FC"));
+        assert!(d.message.contains("hits"), "{}", d.message);
+        assert!(!d.fixits.is_empty(), "fixits must teach the fix: {:?}", d.fixits);
     }
 
     #[test]
-    fn closure_capture_is_outside_perimeter() {
-        // 10-shape: FnLit bodies are never analyzed (A5 scoped claim).
+    fn fc_foreign_capture_write_managed_escapes() {
+        // The same capture-write, but inside the auditable `managed` hatch:
+        // accepted, counted by --report-managed (HYB-E8001), never an error.
         let r = check(
             "fn main() {\n\
                hits := 0\n\
                mux := http.new_serve_mux()\n\
                mux.handle(\"/ping\", http.handler(fn(w http.response_writer) {\n\
-                 hits++\n\
+                 managed(\"handler state is request-local\", \"actor\", \"PROJ-42\") {\n\
+                   hits++\n\
+                 }\n\
                }))\n\
              }",
         );
         assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E8001"),
+            "managed capture-write must surface HYB-E8001: {:?}",
+            r.diagnostics
+        );
+        assert!(
+            r.diagnostics.iter().all(|d| d.severity != Severity::Error),
+            "managed hatch must not produce errors: {:?}",
+            r.diagnostics
+        );
+        assert_eq!(r.managed.managed_blocks, 1);
+        assert!(r.managed.sites_via_managed >= 1);
     }
 
     #[test]
