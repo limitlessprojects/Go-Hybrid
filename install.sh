@@ -92,6 +92,17 @@ if ! fetch "$BASE_URL/$ASSET.sha256" "$TMP/$ASSET.sha256"; then
     echo "install.sh: could not download $ASSET.sha256 — aborting before installation; retry when the checksum asset is available" >&2
     exit 1
 fi
+# shasum -c can exit successfully without checking a file when its manifest
+# is empty. Require a checksum record for the downloaded archive first.
+EXPECTED_SHA="" EXPECTED_ASSET=""
+IFS=' ' read -r EXPECTED_SHA EXPECTED_ASSET < "$TMP/$ASSET.sha256" || :
+case "$EXPECTED_SHA" in
+    '' | *[!0-9a-fA-F]*) EXPECTED_SHA="" ;;
+esac
+if [ "${#EXPECTED_SHA}" -ne 64 ] || [ "${EXPECTED_ASSET#\*}" != "$ASSET" ]; then
+    echo "install.sh: invalid checksum record for $ASSET — aborting before installation" >&2
+    exit 1
+fi
 ( cd "$TMP" && sha256sum -c "$ASSET.sha256" >/dev/null 2>&1 ) \
     || ( cd "$TMP" && shasum -a 256 -c "$ASSET.sha256" >/dev/null 2>&1 ) \
     || { echo "install.sh: sha256 MISMATCH — aborting (do not use the download)" >&2; exit 1; }
@@ -110,7 +121,16 @@ if ! HYB_RUNTIME_DIR="$PACKAGE_DIR/runtime" "$PACKAGE_DIR/hyb" explain E0002 >/d
     echo "install.sh: release verification FAILED; existing installation preserved" >&2
     exit 1
 fi
-mkdir -p "$INSTALL_DIR"
+mkdir -p "$INSTALL_DIR/bin" "$BIN_DIR"
+# The launcher execs the payload at $INSTALL_DIR/bin/hyb. If its directory
+# aliases that directory, writing the launcher replaces the payload with a
+# script that execs itself forever. Resolve symlinks before changing an install.
+PAYLOAD_BIN="$(CDPATH= cd -P "$INSTALL_DIR/bin" && pwd -P)"
+LAUNCHER_BIN="$(CDPATH= cd -P "$BIN_DIR" && pwd -P)"
+if [ "$PAYLOAD_BIN" = "$LAUNCHER_BIN" ]; then
+    echo "install.sh: HYB_BIN_DIR must differ from HYB_INSTALL_DIR/bin; existing installation preserved" >&2
+    exit 1
+fi
 rm -rf "$INSTALL_DIR/runtime" "$INSTALL_DIR/bin"
 cp -R "$TMP/hybrid-${TAG}/runtime" "$INSTALL_DIR/runtime"
 mkdir -p "$INSTALL_DIR/bin"
