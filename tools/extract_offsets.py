@@ -36,7 +36,9 @@ def main(binpath):
         off = re.search(r"DW_AT_data_member_location\s*:\s*(\d+)", line)
         sz = re.search(r"DW_AT_byte_size\s*:\s*(\d+)", line)
         if nm is not None:
-            cur["name"] = nm.group(1)
+            # readelf may prefix DWARF string references with their encoding,
+            # e.g. "(indirect string, offset: 0x12): runtime.g".
+            cur["name"] = re.sub(r"^\([^)]*\):\s*", "", nm.group(1))
         if off is not None:
             cur["off"] = int(off.group(1))
         if sz is not None:
