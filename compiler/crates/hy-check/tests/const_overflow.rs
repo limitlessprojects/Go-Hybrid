@@ -88,6 +88,29 @@ fn main() {
 }
 ";
 
+const OVERFLOW_CHAR_INT8: &str = "\
+fn main() {
+    var n int8 = 'ÿ'
+    fmt.println(\"{n}\")
+}
+";
+
+const OVERFLOW_UNICODE_CHAR_INT8: &str = "\
+fn main() {
+    var n int8 = '世'
+    fmt.println(\"{n}\")
+}
+";
+
+const FITS_CHAR_INT8: &str = "\
+fn main() {
+    var n int8 = 'A'
+    var r rune = 'ÿ'
+    var u rune = '世'
+    fmt.println(\"{n} {r} {u}\")
+}
+";
+
 #[test]
 fn int8_constant_300_is_rejected() {
     let r = check(OVERFLOW_INT8);
@@ -190,6 +213,41 @@ fn variable_conversion_truncation_still_accepts() {
     assert!(
         error_codes(&r).is_empty(),
         "variable conversion must stay clean, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+#[test]
+fn char_constant_overflow_is_rejected() {
+    let r = check(OVERFLOW_CHAR_INT8);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for 'ÿ' into int8, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn unicode_char_constant_overflow_is_rejected() {
+    let r = check(OVERFLOW_UNICODE_CHAR_INT8);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for '世' into int8, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn char_constant_fits_accepts() {
+    let r = check(FITS_CHAR_INT8);
+    assert!(
+        error_codes(&r).is_empty(),
+        "'A' into int8, 'ÿ' into rune, and '世' into rune must fit, got {:?}",
         error_codes(&r)
     );
     assert_eq!(r.verdict, Verdict::Accept);

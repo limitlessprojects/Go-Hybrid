@@ -174,6 +174,10 @@ pub(crate) fn const_int_fold(e: &Expr) -> ConstFold {
             Some(v) => ConstFold::Val(v),
             None => ConstFold::NotConst,
         },
+        Expr::Lit {
+            kind: LitKind::Char(c),
+            ..
+        } => ConstFold::Val(*c as i128),
         Expr::Unary {
             op: UnOp::Neg,
             operand,
