@@ -176,6 +176,30 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         }
+                        // A7 / O13: `serde_json.set(v, key, value_handle)` moves
+                        // `value_handle`'s payload into `v`, consuming the handle.
+                        if pkg == "serde_json" && method == "set" {
+                            if let Some(val_arg) = cr.args.get(2) {
+                                if let Some(val_root) = val_arg.value.root_ident() {
+                                    let active_handle = self
+                                        .lookup_binding(st, val_root)
+                                        .map(|b| b.shape.is_handle() && b.moved.is_none())
+                                        .unwrap_or(false);
+                                    if active_handle {
+                                        let rspan =
+                                            root_ident_span(&val_arg.value).unwrap_or(val_arg.span);
+                                        self.mark_move(
+                                            st,
+                                            val_root,
+                                            cr.span,
+                                            format!("the consuming call `{}`", cr.callee.render()),
+                                            MoveKind::Consumed,
+                                        );
+                                        stmt_consumes.push((rspan, cr.span));
+                                    }
+                                }
+                            }
+                        }
                     }
                     CallMode::Consume => {
                         for a in cr.args {
@@ -243,6 +267,37 @@ impl<'a> Checker<'a> {
                     }
                     CallMode::Mutate => {
                         self.check_a2_conflict(st, cr, &root, idx);
+                        // A7 / O13: `v.set(key, value_handle)` moves `value_handle`'s
+                        // payload into `v` (`hy_json_set` frees the value slot and
+                        // zeroes its handle ID). Check A2 conflicts on `value_handle`
+                        // and mark it consumed.
+                        if (tname == "serde_json.value" || tname == "serde_json.view")
+                            && method == "set"
+                        {
+                            if let Some(val_arg) = cr.args.get(1) {
+                                if let Some(val_root) = val_arg.value.root_ident() {
+                                    let active_handle = self
+                                        .lookup_binding(st, val_root)
+                                        .map(|b| b.shape.is_handle() && b.moved.is_none())
+                                        .unwrap_or(false);
+                                    if active_handle {
+                                        if val_root != root {
+                                            self.check_a2_conflict(st, cr, val_root, idx);
+                                        }
+                                        let rspan =
+                                            root_ident_span(&val_arg.value).unwrap_or(val_arg.span);
+                                        self.mark_move(
+                                            st,
+                                            val_root,
+                                            cr.span,
+                                            format!("the consuming call `{}`", cr.callee.render()),
+                                            MoveKind::Consumed,
+                                        );
+                                        stmt_consumes.push((rspan, cr.span));
+                                    }
+                                }
+                            }
+                        }
                     }
                     CallMode::Consume => {
                         // A7: own-transfer INTO the API — receiver moved-from
@@ -1684,10 +1739,18 @@ impl<'a> Checker<'a> {
                     collect_addr_of_roots(value, &mut addr_roots);
                     for src in addr_roots {
                         if src != *name {
-                            if let Some(b) = self.lookup_binding(st, &src) {
-                                if !b.shape.is_sendable_by_type() {
-                                    st.aliases.insert(name.clone(), src);
-                                    break;
+                            let info = self
+                                .lookup_binding(st, &src)
+                                .map(|b| (!b.shape.is_sendable_by_type(), b.non_owned_origin.clone()));
+                            if let Some((true, src_origin)) = info {
+                                st.aliases.entry(name.clone()).or_insert_with(|| src.clone());
+                                st.share_edge(name, &src);
+                                if let Some(origin) = src_origin {
+                                    if let Some(nb) = st.env_lookup_mut(name) {
+                                        if nb.non_owned_origin.is_none() {
+                                            nb.non_owned_origin = Some(origin);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1728,10 +1791,18 @@ impl<'a> Checker<'a> {
                         collect_addr_of_roots(v, &mut addr_roots);
                         for src in addr_roots {
                             if src != *name {
-                                if let Some(b) = self.lookup_binding(st, &src) {
-                                    if !b.shape.is_sendable_by_type() {
-                                        st.aliases.insert(name.clone(), src);
-                                        break;
+                                let info = self
+                                    .lookup_binding(st, &src)
+                                    .map(|b| (!b.shape.is_sendable_by_type(), b.non_owned_origin.clone()));
+                                if let Some((true, src_origin)) = info {
+                                    st.aliases.entry(name.clone()).or_insert_with(|| src.clone());
+                                    st.share_edge(name, &src);
+                                    if let Some(origin) = src_origin {
+                                        if let Some(nb) = st.env_lookup_mut(name) {
+                                            if nb.non_owned_origin.is_none() {
+                                                nb.non_owned_origin = Some(origin);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -2652,6 +2723,7 @@ impl<'a> Checker<'a> {
             match stmt {
                 Stmt::Local(l) => {
                     self.process_closure_const_local(&mut cst, l);
+                    self.record_local_borrow_aliases(&mut cst, l);
                 }
                 Stmt::Assign {
                     targets,
@@ -2835,7 +2907,7 @@ impl<'a> Checker<'a> {
         };
         if name.as_str() != "delete" && name.as_str() != "copy" {
             return;
-        }
+        };
         let Some(first) = cr.args.first() else {
             return;
         };
@@ -2903,6 +2975,47 @@ impl<'a> Checker<'a> {
         None
     }
 
+    fn call_param_is_pointer(&self, st: &FnState, callee: &Expr, idx: usize) -> bool {
+        match callee {
+            Expr::Ident { name, .. } => {
+                if let Some(b) = self.lookup_binding(st, name) {
+                    if let Some(hy_syntax::TypeExpr::Fn { params, .. }) = &b.ty {
+                        return params
+                            .get(idx)
+                            .is_some_and(|pt| matches!(self.shape_of_type(&pt.ty), TypeShape::Pointer(_)));
+                    }
+                    return false;
+                }
+                self.fns
+                    .get(name)
+                    .and_then(|decl| decl.params.get(idx))
+                    .is_some_and(|p| matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_)))
+            }
+            Expr::Field {
+                base,
+                name: method_name,
+                ..
+            } => {
+                let recv_base = match self.shape_of_expr(st, base) {
+                    TypeShape::Struct(Some(s)) => Some(s),
+                    TypeShape::Pointer(inner) => match *inner {
+                        TypeShape::Struct(Some(s)) => Some(s),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                recv_base
+                    .and_then(|rb| self.method_decls.get(&(rb, method_name.clone())).copied())
+                    .and_then(|decl| decl.params.get(idx))
+                    .is_some_and(|p| matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_)))
+            }
+            Expr::FnLit { params, .. } => params
+                .get(idx)
+                .is_some_and(|p| matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_))),
+            _ => false,
+        }
+    }
+
     /// Issue #188: interprocedural T22 enforcement (`HYB-E3006`). When a
     /// `const` composite with reference storage (or `&const_val`) is passed to
     /// a function or closure that mutates that parameter (via index/field
@@ -2939,7 +3052,8 @@ impl<'a> Checker<'a> {
                     .copied()
                 {
                     if let Some(r) = &decl.receiver {
-                        let ptr_recv = matches!(r.ty, hy_syntax::TypeExpr::Pointer { .. });
+                        let ptr_recv =
+                            r.is_pointer || matches!(r.ty, hy_syntax::TypeExpr::Pointer { .. });
                         let recv_const = if ptr_recv {
                             base.root_ident()
                                 .filter(|root| !declared.contains(*root))
@@ -2965,7 +3079,25 @@ impl<'a> Checker<'a> {
             }
         }
         for (i, a) in cr.args.iter().enumerate() {
-            let Some(const_name) = self.const_arg_root(st, &a.value, declared) else {
+            let const_name = self.const_arg_root(st, &a.value, declared).or_else(|| {
+                if self.call_param_is_pointer(st, callee, i) {
+                    a.value
+                        .root_ident()
+                        .filter(|root| !declared.contains(*root))
+                        .and_then(|root| {
+                            self.const_write_root(
+                                st,
+                                &Place {
+                                    kind: PlaceKind::Ident(root.to_string()),
+                                    span: a.value.span(),
+                                },
+                            )
+                        })
+                } else {
+                    None
+                }
+            });
+            let Some(const_name) = const_name else {
                 continue;
             };
             let mutates = match callee {
