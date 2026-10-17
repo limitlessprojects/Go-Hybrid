@@ -639,3 +639,13 @@ so `move h` froze `h` but not `shared` and the emitted Go raced.
 |---|---------|---------|------|------------|-----------|
 | 54 | 54-field-store-alias-at-spawn | REJECT | A1b | `HYB-E3003` | `var h holder; h.m = shared` then `task worker(move h)` then a write to `shared` |
 | 55 | 55-field-store-fresh-at-spawn | ACCEPT | — | — | the over-rejection guard: a FRESH map literal stored into the field shares nothing |
+## Additive corpus registration — 2026-10-17: address-of launder through a call (#435)
+
+`collect_ref_roots` had no arm for either spelling of address-of, so `&h`
+contributed no root: the binding that took the pointer was never linked to
+`h`, and the freeze after `task worker(move h)` reached nothing.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 56 | 56-addr-of-call-alias-at-spawn | REJECT | A1b | `HYB-E3003` | `p := keep(&h)` then `task worker(move h)` then a write through `p` |
+| 57 | 57-addr-of-call-read-control | ACCEPT | — | — | the over-rejection guard: `read(&h)` returns a scalar, so no alias survives |
