@@ -93,7 +93,10 @@ def gen_nest(rng):
     for _ in range(rng.randint(3, 30)):
         shape = rng.choice(NEST_SHAPES)
         if "{body2}" in shape:
-            body = shape.format(body=body, body2=body)
+            # Keep one recursively deep path. Duplicating it in both arms
+            # doubles the source at each branch, before the checker timeout
+            # even starts; 30 branch levels would produce 2**30 leaves.
+            body = shape.format(body=body, body2='fmt.println("shallow")')
         else:
             body = shape.format(body=body)
     return body
