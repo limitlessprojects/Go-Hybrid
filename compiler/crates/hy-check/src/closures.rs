@@ -538,6 +538,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     TypeShape,
                     Option<hy_syntax::TypeExpr>,
                     bool,
+                    bool,
                     Option<String>,
                     Option<String>,
                     Vec<String>,
@@ -550,6 +551,11 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         let reads_self = val_opt
                             .map(|v| ck.value_reads_storage_of(st, v, name))
                             .unwrap_or(false);
+                        let shadowed_const = ck.shape_may_share(&shape)
+                            && reads_self
+                            && ck
+                                .lookup_binding(st, name)
+                                .is_some_and(|b| b.immutable);
                         let shadowed_origin = if ck.shape_may_share(&shape) && reads_self {
                             ck.non_owned_origin_of(st, name).map(|(o, via_share)| {
                                 if via_share && !o.starts_with("a may-share peer of ") {
@@ -589,6 +595,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                             shape,
                             ty,
                             reads_self,
+                            shadowed_const,
                             shadowed_origin,
                             prior_alias,
                             prior_shares,
@@ -600,15 +607,25 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     shape,
                     ty,
                     reads_self,
+                    shadowed_const,
                     shadowed_origin,
                     prior_alias,
                     prior_shares,
                 ) in resolved
                 {
-                    ck.define_binding(st, &name, shape.clone(), ty, immutable, managed);
+                    ck.define_binding(
+                        st,
+                        &name,
+                        shape.clone(),
+                        ty,
+                        immutable || shadowed_const,
+                        managed,
+                    );
                     if reads_self {
                         if let Some(pa) = prior_alias {
-                            st.aliases.insert(name.clone(), pa);
+                            if pa != name {
+                                st.aliases.insert(name.clone(), pa);
+                            }
                         }
                         for peer in prior_shares {
                             st.share_edge(&name, &peer);
