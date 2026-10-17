@@ -85,7 +85,9 @@ renumbered).
 | 32 | 32-closure-local-alias-move-reject | REJECT | A1b | a local rebind inside a closure (`alias := m`, where `m` is a captured outer map) is an alias of non-owned state, but `check_closure_boundaries` called `define_binding` without `record_alias` or `record_may_share`, wiping origin and alias links — before the fix `task worker(move alias, done)` was accepted with 0 diagnostics while `go run -race` produced concurrent map writes (issue #137) |
 
 
-**Distribution: ACCEPT 10 · ACCEPT-MANAGED 2 · REJECT 24 — 36 programs.**
+| 56 | 56-atomic-pointer-fail-closed-reject | REJECT | FC | GUARANTEES row 11: unproven atomic.pointer[T] crossing a task boundary fails closed with HYB-E3005; regression pin for existing behavior. |
+
+**Distribution: ACCEPT 14 · ACCEPT-MANAGED 2 · REJECT 40 — 56 programs.**
 | 36 | 36-closure-capture-move | REJECT | A1b | a closure that captures a reference-bearing outer binding is a live ALIAS of its storage: `ch <- move a` transfers the map, but a later `f()` writes through the capture — on main the program was ACCEPT with 0 diagnostics while the receiver and the closure wrote the same map (`go run -race` WARNING: DATA RACE, issue #109); the fix links the closure binding to its captures with may-share edges so the move freezes `f` (alias-read twin of 20's alias-write form; accept/precision side pinned in hy-check/tests/capture_freeze.rs) |
 | 37 | 37-a3-interproc-window | REJECT | A3 | the insert that invalidates the live `&m["a"]` slot loan is spelled one FRAME away — `bump(m, "fresh")` inserts in its own frame while main's non-lexical window is live — the same runtime event as 08's direct insert (which rejects HYB-E3102); on main this form was ACCEPT with 0 diagnostics while the direct twin rejected (issue #111, with alias and closure-body siblings plus a wrong-result runtime proof: a helper delete resurrected by the loan's store-back); the fix matches A3 events across share-group peers, callee parameters (bounded, fail-closed), and closure call sites (legal twins pinned in hy-check/tests/a3_interproc.rs) |
 
