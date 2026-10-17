@@ -420,13 +420,16 @@ length; `s[i]` is the `u8` at byte index `i` (out-of-range panics, X3);
 `for i, c in s` iterates byte index and `rune`; `for c in s` iterates runes.
 Invalid UTF-8 in a string (only possible via byte-slice conversion) iterates
 as `U+FFFD` per Go's rules. Comparison is bytewise; no normalization is
-performed (Go semantics).
+performed (Go semantics). A `rune` is an `i32` code point (T1, §2.1),
+so `fmt.println(c)` and `"{c}"` display its number (T4's Go `%v` shape);
+`string(c)` displays the character.
 
 ```hy
 s := "héllo"
 fmt.println(len(s))        // expect: 6   (é is 2 bytes)
 fmt.println(s[0])          // expect: 104 (byte 'h')
-for c in s { fmt.println(c) }   // expect: h é l l o   (5 lines; é as one rune)
+for c in s { fmt.println(c) }   // expect: 104 233 108 108 111   (5 lines; é is one rune, U+00E9)
+for c in s { fmt.println(string(c)) }   // expect: h é l l o   (5 lines)
 ```
 
 **T4 — Interpolation.** `"{expr}"` inside an interpreted string formats the
