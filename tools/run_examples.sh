@@ -22,6 +22,17 @@ PASS=""
 
 note() { printf '%s\n' "$*"; }
 
+show_run_failure() {
+    local name="$1"
+    if [ -f "$WORK/$name.diff" ]; then
+        sed 's/^/    /' "$WORK/$name.diff"
+    fi
+    if [ -s "$WORK/$name.err" ]; then
+        note "    stderr:"
+        sed 's/^/    /' "$WORK/$name.err"
+    fi
+}
+
 run_example() {
     local dir="$1"
     local name
@@ -42,12 +53,12 @@ run_example() {
 
     case "$name" in
     01-hello|03-worker-pool|04-pipeline-backpressure|05-json-transform|06-http-server|07-lru-generics|08-graph-ownership)
-        if "$bin" >"$WORK/$name.out" 2>&1 && diff -u "$dir/expected.txt" "$WORK/$name.out" >"$WORK/$name.diff"; then
+        if "$bin" >"$WORK/$name.out" 2>"$WORK/$name.err" && diff -u "$dir/expected.txt" "$WORK/$name.out" >"$WORK/$name.diff"; then
             note "PASS $name (stdout == expected.txt)"
             PASS="$PASS $name"
         else
             note "FAIL $name (output diff)"
-            sed 's/^/    /' "$WORK/$name.diff"
+            show_run_failure "$name"
             FAIL=1
         fi
         ;;
@@ -58,11 +69,12 @@ run_example() {
         # the milliseconds field before diffing. The checksum IS exact
         # (deterministic per pinned crate version + fold algorithm).
         local rc
-        "$bin" >"$WORK/$name.out" 2>&1
+        "$bin" >"$WORK/$name.out" 2>"$WORK/$name.err"
         rc=$?
         if [ "$rc" -ne 0 ]; then
             note "FAIL $name (run exit $rc)"
             sed 's/^/    /' "$WORK/$name.out"
+            show_run_failure "$name"
             FAIL=1
             return
         fi
@@ -72,7 +84,7 @@ run_example() {
             PASS="$PASS $name"
         else
             note "FAIL $name (output diff)"
-            sed 's/^/    /' "$WORK/$name.diff"
+            show_run_failure "$name"
             FAIL=1
         fi
         ;;
@@ -91,13 +103,13 @@ run_example() {
         fi
         printf 'module example.com/app\n\ngo 1.26\n' >"$ws/go.mod"
         cp "$dir/main.go.txt" "$ws/main.go"
-        if (cd "$ws" && go run . >"$WORK/$name.out" 2>&1) && \
+        if (cd "$ws" && go run . >"$WORK/$name.out" 2>"$WORK/$name.err") && \
            diff -u "$dir/expected.txt" "$WORK/$name.out" >"$WORK/$name.diff"; then
             note "PASS $name (Go consumer imports the Hybrid package; rust/regex through the boundary)"
             PASS="$PASS $name"
         else
             note "FAIL $name (output diff)"
-            sed 's/^/    /' "$WORK/$name.diff"
+            show_run_failure "$name"
             FAIL=1
         fi
         ;;
