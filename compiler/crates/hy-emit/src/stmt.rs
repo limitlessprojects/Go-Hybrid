@@ -241,7 +241,7 @@ impl Emitter {
                     .ok_or_else(|| EmitError::unsupported("`const` without an initializer"))?;
                 let value = self.emit_expr(first, 0)?;
                 let composite = matches!(
-                    first,
+                    Self::peel_parens(first),
                     Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
                 );
                 let kw = if composite { "var" } else { "const" };
@@ -333,7 +333,7 @@ impl Emitter {
         e as *const Expr as usize
     }
 
-    fn peel_parens(mut e: &Expr) -> &Expr {
+    pub(crate) fn peel_parens(mut e: &Expr) -> &Expr {
         while let Expr::Paren { inner, .. } = e {
             e = inner;
         }
@@ -1910,3 +1910,34 @@ impl Emitter {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod const_paren_tests {
+    use super::super::emit_go;
+
+    #[test]
+    fn parenthesized_composite_const_lowers_to_var_issue_429() {
+        let src = r#"const shared_paren = (map[string]int{"k": 1})
+
+fn main() {
+    const local_paren = ([1, 2])
+    _ = shared_paren["k"]
+    _ = local_paren[0]
+}
+"#;
+        let file = hy_syntax::parse_file("t.hy", src).expect("parses");
+        let go = emit_go(&file).expect("emits");
+        assert!(
+            go.contains("var shared_paren = (map[string]int{\"k\": 1})"),
+            "file-level parenthesized composite const should lower to var:\n{}",
+            go
+        );
+        assert!(
+            go.contains("var local_paren = ([]int{1, 2})"),
+            "local parenthesized composite const should lower to var:\n{}",
+            go
+        );
+    }
+}
+
+

@@ -634,7 +634,7 @@ impl Emitter {
         // 18's seed_urls) lower to `var`: same identifier surface, the
         // immutability contract is the checker's business, not Go's.
         let composite = matches!(
-            &c.value,
+            Self::peel_parens(&c.value),
             Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
         );
         let kw = if composite { "var" } else { "const" };
