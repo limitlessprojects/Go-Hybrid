@@ -102,3 +102,135 @@ fn bare_filename_generate_writes_too() {
         "bare-filename generate must write beside the source"
     );
 }
+
+// Recursive discovery does not follow child directory symlinks. Keep explicit
+// root links and file links usable, and keep walking real nested directories.
+#[cfg(unix)]
+mod directory_links {
+    use super::*;
+    use std::os::unix::fs::symlink;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    // A bounded subprocess makes a traversal regression fail rather than leave
+    // the integration suite hanging. File output avoids a full pipe blocking it.
+    fn generate(m: &SampleModule, args: &[&str]) -> (i32, String, String) {
+        let stdout_path = m.root.join("test.stdout");
+        let stderr_path = m.root.join("test.stderr");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_hyb"))
+            .args(args)
+            .current_dir(&m.root)
+            .stdout(Stdio::from(fs::File::create(&stdout_path).unwrap()))
+            .stderr(Stdio::from(fs::File::create(&stderr_path).unwrap()))
+            .spawn()
+            .expect("spawn hyb");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let code = loop {
+            if let Some(status) = child.try_wait().expect("poll hyb") {
+                break status.code().unwrap_or(-1);
+            }
+            if Instant::now() >= deadline {
+                child.kill().expect("stop traversal regression");
+                child.wait().expect("reap hyb");
+                panic!("hyb generate exceeded the traversal test deadline");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        (
+            code,
+            fs::read_to_string(stdout_path).unwrap(),
+            fs::read_to_string(stderr_path).unwrap(),
+        )
+    }
+
+    #[test]
+    fn recursive_directory_link_is_not_walked_repeatedly() {
+        let m = SampleModule::new("directory-cycle");
+        symlink(".", m.root.join("loop")).unwrap();
+        let (code, out, err) = generate(&m, &["generate", "."]);
+        assert_eq!(code, 0, "{} {}", out, err);
+        assert!(
+            out.contains("generate: 1 file(s) written, 1 total"),
+            "{}",
+            out
+        );
+        assert!(
+            !out.contains("loop/"),
+            "directory link was traversed: {}",
+            out
+        );
+        let (code, out, err) = generate(&m, &["generate", "--check", "."]);
+        assert_eq!(code, 0, "{} {}", out, err);
+        assert!(out.contains("generate --check: 1 file(s) fresh"), "{}", out);
+    }
+
+    #[test]
+    fn child_directory_links_do_not_generate_in_another_tree() {
+        let m = SampleModule::new("directory-link-owner");
+        let other = SampleModule::new("directory-link-other");
+        for name in ["linked", "linked.hy"] {
+            symlink(&other.root, m.root.join(name)).unwrap();
+        }
+        let (code, out, err) = generate(&m, &["generate", "."]);
+        assert_eq!(code, 0, "{} {}", out, err);
+        assert!(
+            out.contains("generate: 1 file(s) written, 1 total"),
+            "{}",
+            out
+        );
+        assert!(m.root.join("calc.hy.go").exists());
+        assert!(
+            !other.root.join("calc.hy.go").exists(),
+            "walk wrote through a child directory link"
+        );
+    }
+
+    #[test]
+    fn explicitly_selected_directory_link_still_works() {
+        let m = SampleModule::new("explicit-directory-link");
+        let other = SampleModule::new("explicit-directory-target");
+        symlink(&other.root, m.root.join("chosen")).unwrap();
+        let (code, out, err) = generate(&m, &["generate", "chosen"]);
+        assert_eq!(code, 0, "{} {}", out, err);
+        assert!(other.root.join("calc.hy.go").exists());
+        let (code, out, err) = generate(&m, &["generate", "--check", "chosen"]);
+        assert_eq!(code, 0, "{} {}", out, err);
+        assert!(out.contains("generate --check: 1 file(s) fresh"), "{}", out);
+    }
+
+    #[test]
+    fn linked_hy_file_is_still_a_source() {
+        let m = SampleModule::new("linked-source-file");
+        symlink("calc.hy", m.root.join("alias.hy")).unwrap();
+        let (code, out, err) = generate(&m, &["generate", "."]);
+        assert_eq!(code, 0, "{} {}", out, err);
+        assert!(
+            out.contains("generate: 2 file(s) written, 2 total"),
+            "{}",
+            out
+        );
+        assert!(m.root.join("alias.hy.go").exists());
+        let (code, out, err) = generate(&m, &["generate", "--check", "alias.hy"]);
+        assert_eq!(code, 0, "{} {}", out, err);
+    }
+
+    #[test]
+    fn real_nested_directory_is_still_walked() {
+        let m = SampleModule::new("real-nested-directory");
+        let nested = m.root.join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::copy(m.root.join("app.go"), nested.join("app.go")).unwrap();
+        fs::copy(m.root.join("calc.hy"), nested.join("calc.hy")).unwrap();
+        let (code, out, err) = generate(&m, &["generate", "."]);
+        assert_eq!(code, 0, "{} {}", out, err);
+        assert!(
+            out.contains("generate: 2 file(s) written, 2 total"),
+            "{}",
+            out
+        );
+        assert!(nested.join("calc.hy.go").exists());
+        let (code, out, err) = generate(&m, &["generate", "--check", "."]);
+        assert_eq!(code, 0, "{} {}", out, err);
+        assert!(out.contains("generate --check: 2 file(s) fresh"), "{}", out);
+    }
+}

@@ -45,6 +45,7 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 | 6 ownership usability | 10 programs, annotation count | **PASS**: 0 annotations / 0 managed / 0 outside-model (strictest reading; hand-trace); A1–A8 ambiguities + corpus gap recorded | Tier-0 real for MVP corpus; Polonius-style engine + rustc CI oracle |
 
 ## Task List
+- [x] CLI discovery contribution (2026-10-17): `hyb generate` skips child directory symlinks, including a `.hy`-named directory link; explicit directory roots, linked `.hy` files and real nested directories remain supported. Same 7 path tests: original 5 pass/2 fail (self-link produced 33 alias paths), fixed 7/7. Native Mini Rust 1.99.0 / Go 1.26.9: workspace 599/0, real corpus 52/52, differential 52/52. Upstream CI/review pending; no security or bounty claim.
 - [x] Installer checksum download must fail closed | Missing checksum fetch previously installed and executed an unverified archive; now aborts before extraction or replacement. Six offline installer tests added to quick CI; two regression tests fail on base `34525ee`, all six pass locally on Windows/Git Bash. Upstream CI/reward review pending (2026-10-15).
 - [x] Session 1 scaffold | done = files exist, pushed | lead | done
 - [x] Environment detect + pin toolchains | done = this file records versions | lead | done

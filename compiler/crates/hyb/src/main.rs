@@ -288,6 +288,12 @@ fn cmd_generate(args: &[String]) -> ExitCode {
                 for e in entries {
                     let p = e.path();
                     if p.is_dir() {
+                        // Do not recursively follow directory links: a project
+                        // may link back to itself or to another source tree.
+                        // Explicit directory roots and .hy file links still work.
+                        if e.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
+                            continue;
+                        }
                         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
                         if name.starts_with('.') || name == "hybridrt" || name == "vendor" {
                             continue; // no tools' dirs, no the vendored runtime
