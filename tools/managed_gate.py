@@ -156,10 +156,22 @@ def main():
     hyb, baseline_path, progs = args[0], args[1], args[2:]
 
     try:
-        baseline = json.load(open(baseline_path))
+        with open(baseline_path, encoding="utf-8") as f:
+            baseline = json.load(f)
     except FileNotFoundError:
         baseline = {"version": 1, "blocks": {}}
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        print(f"GATE ERROR: {baseline_path}: malformed baseline JSON: {e}")
+        sys.exit(2)
+
+    if not isinstance(baseline, dict):
+        print(f"GATE ERROR: {baseline_path}: baseline must be a JSON object, got {type(baseline).__name__}")
+        sys.exit(2)
+
     base = baseline.setdefault("blocks", {})
+    if not isinstance(base, dict):
+        print(f"GATE ERROR: {baseline_path}: baseline blocks must be a JSON object, got {type(base).__name__}")
+        sys.exit(2)
 
     current = {}
     for prog in progs:
@@ -175,8 +187,9 @@ def main():
 
     if rebaseline:
         baseline["blocks"] = current
-        json.dump(baseline, open(baseline_path, "w"), indent=1, sort_keys=True)
-        open(baseline_path, "a").write("\n")
+        with open(baseline_path, "w", encoding="utf-8") as f:
+            json.dump(baseline, f, indent=1, sort_keys=True)
+            f.write("\n")
         print(f"rebaseline: {len(current)} block(s) recorded in {baseline_path}")
         return
 

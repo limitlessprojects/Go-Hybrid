@@ -187,6 +187,78 @@ class ManagedGateTests(unittest.TestCase):
                     else:
                         self.assertEqual(baseline.read_bytes(), original)
 
+    def assert_invalid_baseline(self, original, diagnostic):
+        # A bad inventory must fail before scanning or rewriting it in either
+        # mode, even when the supplied source and checker are otherwise valid.
+        with tempfile.TemporaryDirectory() as directory:
+            prog = pathlib.Path(directory) / 'test.hy'
+            prog.write_text('fn main() {}', encoding='utf-8')
+            baseline = pathlib.Path(directory) / 'baseline.json'
+            for rebaseline in (False, True):
+                with self.subTest(rebaseline=rebaseline):
+                    baseline.write_bytes(original)
+                    argv = ['managed_gate.py'] + (['--rebaseline'] if rebaseline else [])
+                    argv += ['hyb', str(baseline), str(prog)]
+                    output = io.StringIO()
+                    with patch.object(gate.sys, 'argv', argv), \
+                         patch.object(gate, 'audit') as audit, \
+                         contextlib.redirect_stdout(output):
+                        with self.assertRaises(SystemExit) as error:
+                            gate.main()
+                    self.assertEqual(error.exception.code, 2)
+                    self.assertIn(diagnostic, output.getvalue())
+                    self.assertNotIn('managed gate: PASS', output.getvalue())
+                    audit.assert_not_called()
+                    self.assertEqual(baseline.read_bytes(), original)
+
+    def test_malformed_baseline_json_fails_closed(self):
+        for original in (b'', b'{not json}', b'{"version": 1, ', b'\xff'):
+            with self.subTest(original=original):
+                self.assert_invalid_baseline(original, 'malformed baseline JSON')
+
+    def test_non_object_baseline_fails_closed(self):
+        for value in ([], 'string', 123, None, True):
+            with self.subTest(value=value):
+                self.assert_invalid_baseline(
+                    json.dumps(value).encode(), 'baseline must be a JSON object')
+
+    def test_non_object_baseline_blocks_fails_closed(self):
+        for value in ([], 'invalid', 42, None, True):
+            with self.subTest(value=value):
+                self.assert_invalid_baseline(
+                    json.dumps({'version': 1, 'blocks': value}).encode(),
+                    'baseline blocks must be a JSON object')
+
+    def test_missing_baseline_and_legacy_object_allow_real_empty_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prog = pathlib.Path(directory) / 'test.hy'
+            prog.write_text('fn main() {}', encoding='utf-8')
+            baseline = pathlib.Path(directory) / 'baseline.json'
+            for original in (None, b'{"version": 1}'):
+                for rebaseline in (False, True):
+                    with self.subTest(original=original, rebaseline=rebaseline):
+                        baseline.unlink(missing_ok=True)
+                        if original is not None:
+                            baseline.write_bytes(original)
+                        argv = ['managed_gate.py'] + (['--rebaseline'] if rebaseline else [])
+                        argv += ['hyb', str(baseline), str(prog)]
+                        output = io.StringIO()
+                        with patch.object(gate.sys, 'argv', argv), \
+                             patch.object(gate, 'audit', return_value={}) as audit, \
+                             contextlib.redirect_stdout(output):
+                            gate.main()
+                        audit.assert_called_once_with('hyb', str(prog))
+                        if rebaseline:
+                            self.assertEqual(json.loads(baseline.read_bytes()),
+                                             {'version': 1, 'blocks': {}})
+                            self.assertTrue(baseline.read_bytes().endswith(b'\n'))
+                        elif original is None:
+                            self.assertFalse(baseline.exists())
+                        else:
+                            self.assertEqual(baseline.read_bytes(), original)
+                        self.assertIn('rebaseline:' if rebaseline else 'managed gate: PASS',
+                                      output.getvalue())
+
 
 if __name__ == '__main__':
     unittest.main()

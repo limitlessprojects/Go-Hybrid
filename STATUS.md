@@ -10,3 +10,4 @@
 - Wave-2 landing queue continues: **#244 (option/some/match, fixes #243) leads** — base 6e05c68, expect heavy closures.rs/loans.rs resolution vs #230/#251; then the **#240+#245 duplicate pair** (both fix #238, copy(dst,src) const/may-share — verify both takes, land strongest coverage, credit both authors); then #247, #296, #311/#302, #234, const family, emit-lowering batch; new arrivals #366–#377 (tools/fuzz batch), #373, #364; CI approvals stay per-landing
 - Standing work: old-queue rebase assists (#67/#88/#93/#106/#197/#198/#99/#223), tools/kaggle batch, CI registration checks (#325/#330/#333)
 - Last review gate: G3 PASSED 2026-10-13; community review is a standing input to the queue
+- Contributor branch (2026-10-16): PR #269 narrowed to baseline JSON/shape validation; earlier #113 owns missing-source CLI handling. Managed tests 17/17 and normal-clone Python tools 108/108; upstream CI/review pending.
