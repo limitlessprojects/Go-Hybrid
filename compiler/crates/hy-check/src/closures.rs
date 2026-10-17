@@ -182,11 +182,6 @@ fn collect_stmt_direct_fnlits<'a>(
 ) {
     let mut flits = Vec::new();
     crate::walk::own_fnlits(stmt, &mut flits);
-    if let Stmt::Assign { targets, .. } = stmt {
-        for t in targets {
-            collect_place_direct_fnlits(t, &mut flits);
-        }
-    }
     for flit in flits {
         if let Expr::FnLit { params, results, body, .. } = crate::model::unwrap_parens(flit) {
             nested.push((
@@ -197,19 +192,6 @@ fn collect_stmt_direct_fnlits<'a>(
                 st.aliases.clone(),
                 st.may_share.clone(),
             ));
-        }
-    }
-}
-
-fn collect_place_direct_fnlits<'a>(place: &'a hy_syntax::Place, out: &mut Vec<&'a Expr>) {
-    match &place.kind {
-        hy_syntax::PlaceKind::Ident(_) => {}
-        hy_syntax::PlaceKind::Index { base, index } => {
-            collect_place_direct_fnlits(base, out);
-            crate::walk::expr_fnlits(index, out);
-        }
-        hy_syntax::PlaceKind::Field { base, .. } | hy_syntax::PlaceKind::AddrOf { base } => {
-            collect_place_direct_fnlits(base, out);
         }
     }
 }

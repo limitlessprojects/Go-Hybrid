@@ -170,8 +170,14 @@ impl<'a> Checker<'a> {
 
     fn check_place_builtin_args(&mut self, place: &Place) {
         match &place.kind {
-            PlaceKind::Index { index, .. } => self.check_expr_builtin_args(index),
-            PlaceKind::Field { .. } | PlaceKind::Ident(_) | PlaceKind::AddrOf { .. } => {}
+            PlaceKind::Ident(_) => {}
+            PlaceKind::Index { base, index } => {
+                self.check_place_builtin_args(base);
+                self.check_expr_builtin_args(index);
+            }
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                self.check_place_builtin_args(base);
+            }
         }
     }
 

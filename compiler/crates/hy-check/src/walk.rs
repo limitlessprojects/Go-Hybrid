@@ -513,9 +513,12 @@ pub(crate) struct CallRef<'a> {
     pub span: Span,
 }
 
-/// Collect the calls of THIS statement only. For-statement ITERATE
-/// expressions are excluded here: their borrow calls get loop-extent loans
-/// and are processed by the For handler (loans.rs / lib.rs dispatch).
+/// Collect the calls of THIS statement only (including a `for ... in EXPR`
+/// header). Callers that handle `ForKind::Iterate` headers specially before
+/// calling `own_calls` (`lib.rs::check_fn`,
+/// `closures.rs::check_stmt_boundaries`, and
+/// `loans.rs::check_closure_const_writes`) match `Stmt::For` first so the
+/// header call is not processed twice.
 pub(crate) fn own_calls<'a>(stmt: &'a Stmt, out: &mut Vec<CallRef<'a>>) {
     match stmt {
         Stmt::Local(l) => {
@@ -527,9 +530,7 @@ pub(crate) fn own_calls<'a>(stmt: &'a Stmt, out: &mut Vec<CallRef<'a>>) {
             targets, values, ..
         } => {
             for t in targets {
-                if let PlaceKind::Index { index, .. } = &t.kind {
-                    expr_calls(index, out);
-                }
+                place_calls(t, out);
             }
             for v in values {
                 expr_calls(v, out);
@@ -547,7 +548,7 @@ pub(crate) fn own_calls<'a>(stmt: &'a Stmt, out: &mut Vec<CallRef<'a>>) {
                 expr_calls(lo, out);
                 expr_calls(hi, out);
             }
-            ForKind::Iterate { .. } => {} // handled with loop-extent loans
+            ForKind::Iterate { expr, .. } => expr_calls(expr, out),
             ForKind::Infinite => {}
         },
         Stmt::Return { values, .. } => {
@@ -588,6 +589,17 @@ pub(crate) fn own_calls<'a>(stmt: &'a Stmt, out: &mut Vec<CallRef<'a>>) {
     }
 }
 
+pub(crate) fn place_calls<'e>(place: &'e Place, out: &mut Vec<CallRef<'e>>) {
+    match &place.kind {
+        PlaceKind::Ident(_) => {}
+        PlaceKind::Index { base, index } => {
+            place_calls(base, out);
+            expr_calls(index, out);
+        }
+        PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => place_calls(base, out),
+    }
+}
+
 /// Collect the `FnLit` expressions of THIS statement (#123). Closure BODIES
 /// are not descended here — each closure is handled as a unit by the caller
 /// (the A5 perimeter keeps flatten/uses/calls outside them).
@@ -598,7 +610,12 @@ pub(crate) fn own_fnlits<'a>(stmt: &'a Stmt, out: &mut Vec<&'a Expr>) {
                 expr_fnlits(v, out);
             }
         }
-        Stmt::Assign { values, .. } => {
+        Stmt::Assign {
+            targets, values, ..
+        } => {
+            for t in targets {
+                place_fnlits(t, out);
+            }
             for v in values {
                 expr_fnlits(v, out);
             }
@@ -652,6 +669,17 @@ pub(crate) fn own_fnlits<'a>(stmt: &'a Stmt, out: &mut Vec<&'a Expr>) {
                 }
             }
         }
+    }
+}
+
+pub(crate) fn place_fnlits<'e>(place: &'e Place, out: &mut Vec<&'e Expr>) {
+    match &place.kind {
+        PlaceKind::Ident(_) => {}
+        PlaceKind::Index { base, index } => {
+            place_fnlits(base, out);
+            expr_fnlits(index, out);
+        }
+        PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => place_fnlits(base, out),
     }
 }
 
