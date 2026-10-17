@@ -10,3 +10,4 @@
 - Remaining open PRs (~100, wave grew to #336 mid-session): **next-session triage** — closure family #230 (nested closure env, fixes #229), defer pair #223/#99, #197 (#120), #198 (harness refactor), #208/#232/#237 (const guards), #240/#245 (copy soundness), #242/#247 (slot-loan sweeps), match #244, plus new wave #248–#336 (installer/runner/tools fail-closed batch + soundness reports) — all need first-pass triage comments
 - Standing work: new-wave triage (#248–#336) · CI quota watch · wildcard ledger's first entries · release republish when the conveyor quiets
 - Last review gate: G3 PASSED 2026-10-13; community review is a standing input to the queue
+- Voluntary fuzzer count fix (xmejl, 2026-10-16): 12/12 local Python tests; early-stopped runs no longer report the requested batch as executed. Compiler/upstream CI pending.
