@@ -28,6 +28,7 @@ jobs:
           python3 -m unittest discover -s tools/runner -p test_runner.py -v
           python3 -m unittest discover -s tools -p test_managed_gate.py -v
           python3 -m unittest discover -s tools -p test_differential_loop.py -v
+          python3 -m unittest discover -s tools -p test_differential_output.py -v
           python3 -m unittest discover -s tools -p test_run_examples.py -v
           python3 -m unittest discover -s tools -p test_workload_shape.py -v
           python3 -m unittest discover -s tools -p test_empty_corpus.py -v
