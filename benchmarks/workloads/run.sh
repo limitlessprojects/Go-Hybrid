@@ -29,8 +29,12 @@ echo "== Rust twin =="
 echo "== Hybrid twins (hyb check + build; the checker runs) =="
 "$HYB" check hy/load.hy
 "$HYB" check hy/alloc.hy
-"$HYB" build hy/load.hy -o /tmp/wl-hy-load >/dev/null && /tmp/wl-hy-load
-"$HYB" build hy/alloc.hy -o /tmp/wl-hy-alloc >/dev/null && /tmp/wl-hy-alloc
+# Keep builds outside an && list: errexit ignores a failed left-hand command
+# in that list, which otherwise lets a failed build produce a green run.
+"$HYB" build hy/load.hy -o /tmp/wl-hy-load >/dev/null
+/tmp/wl-hy-load
+"$HYB" build hy/alloc.hy -o /tmp/wl-hy-alloc >/dev/null
+/tmp/wl-hy-alloc
 
 if [ -n "$1" ]; then
   {

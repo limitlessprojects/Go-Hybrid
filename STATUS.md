@@ -10,3 +10,6 @@
 - Wave-2 landing queue continues: **#244 (option/some/match, fixes #243) leads** — base 6e05c68, expect heavy closures.rs/loans.rs resolution vs #230/#251; then the **#240+#245 duplicate pair** (both fix #238, copy(dst,src) const/may-share — verify both takes, land strongest coverage, credit both authors); then #247, #296, #311/#302, #234, const family, emit-lowering batch; new arrivals #366–#377 (tools/fuzz batch), #373, #364; CI approvals stay per-landing
 - Standing work: old-queue rebase assists (#67/#88/#93/#106/#197/#198/#99/#223), tools/kaggle batch, CI registration checks (#325/#330/#333)
 - Last review gate: G3 PASSED 2026-10-13; community review is a standing input to the queue
+
+- 2026-10-17 workload runner: load/alloc build failures now exit nonzero and stop subsequent work. Six offline regression tests and twelve related shape tests pass; full compiler/performance validation not claimed.
+- PR366 review follow-up: register the six workload-run regressions in the existing CI step; Mini 6/6 passes, upstream CI unverified.

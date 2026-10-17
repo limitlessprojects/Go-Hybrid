@@ -30,6 +30,7 @@ jobs:
           python3 -m unittest discover -s tools -p test_differential_loop.py -v
           python3 -m unittest discover -s tools -p test_run_examples.py -v
           python3 -m unittest discover -s tools -p test_workload_shape.py -v
+          python3 -m unittest discover -s tools -p test_workload_run.py -v
           python3 -m unittest discover -s tools -p test_empty_corpus.py -v
           python3 -m unittest discover -s tools -p test_runner_sha.py -v
           python3 -m unittest discover -s tools -p test_check_versions.py -v

@@ -42,6 +42,7 @@ check:
 
 	@$(PY) -m unittest discover -s tools -p test_differential_loop.py -v
 	@$(PY) -m unittest discover -s tools -p test_check_versions.py -v
+	@$(PY) -m unittest discover -s tools -p test_workload_run.py -v
 	@$(PY) -m unittest discover -s tools -p test_corpus_harness.py -v
 	@bash tools/check-versions.sh --no-toolchain && echo "versions OK"
 	@cd /tmp && rm -rf gh-selftest && mkdir gh-selftest && cd gh-selftest && \
