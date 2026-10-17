@@ -565,6 +565,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 ck.process_call(&mut st, &cr, idx, None, &mut stmt_consumes);
             }
         }
+        closures::check_foreign_capture_writes(ck, &st, stmt, managed);
         if !stmt_consumes.is_empty() {
             ck.check_same_stmt_consumes(&st, &uses, &stmt_consumes);
         }
