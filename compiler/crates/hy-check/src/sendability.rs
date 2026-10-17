@@ -600,7 +600,10 @@ impl<'a> Checker<'a> {
                         name
                     ));
                 }
-                if self.fns.contains_key(name) {
+                let base_name = crate::shape::split_generic_name(name)
+                    .map(|(b, _)| b)
+                    .unwrap_or(name.as_str());
+                if self.fns.contains_key(base_name) {
                     return CalleeVerdict::Proven;
                 }
                 CalleeVerdict::Unproven(format!(
@@ -631,11 +634,32 @@ impl<'a> Checker<'a> {
         if self.lookup_binding(st, name).is_some() {
             return None; // shadowed by a local binding — not a static fn call
         }
-        let f = self.fns.get(name)?;
+        let (base_name, type_args) = crate::shape::split_generic_name(name)
+            .map(|(b, args)| (b, Some(args)))
+            .unwrap_or((name.as_str(), None));
+        let f = self.fns.get(base_name)?;
         if f.params.len() != argc {
             return None;
         }
-        Some(f.params.iter().map(|p| self.shape_of_type(&p.ty)).collect())
+        let mut subst = std::collections::HashMap::new();
+        let mut subst_str = std::collections::HashMap::new();
+        if let Some(args) = type_args {
+            let empty_shapes = std::collections::HashMap::new();
+            let empty_strs = std::collections::HashMap::new();
+            for (tp, arg) in f.type_params.iter().zip(args.iter()) {
+                subst.insert(
+                    tp.name.clone(),
+                    self.shape_of_type_str(arg, &empty_shapes, &empty_strs, 0),
+                );
+                subst_str.insert(tp.name.clone(), arg.clone());
+            }
+        }
+        Some(
+            f.params
+                .iter()
+                .map(|p| self.shape_of_type_with_subst(&p.ty, &subst, &subst_str, 0))
+                .collect(),
+        )
     }
 
     /// Could a value of shape `got` legitimately occupy a slot of shape
