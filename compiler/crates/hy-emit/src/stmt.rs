@@ -57,15 +57,19 @@ impl Emitter {
             } => self.emit_if(init.as_deref(), cond, then, otherwise.as_deref()),
             Stmt::For { kind, body, .. } => self.emit_for(kind, body),
             Stmt::Return { values, .. } => self.emit_return(values),
-            Stmt::Task { callee, args, .. } => {
+            Stmt::Task { callee, args, span } => {
                 // task → go (spawn sites were checked by Tier-0; emission is
-                // a plain goroutine).
-                let c = self.emit_expr(callee, 0)?;
-                let mut parts = Vec::new();
-                for a in args {
-                    parts.push(self.emit_expr(&a.value, 0)?);
-                }
-                self.push(&format!("go {}({})", c, parts.join(", ")));
+                // a plain goroutine). Route through emit_call so argument
+                // variadic spread (`...`), pointer parameter auto-addressing,
+                // and package/shape normalization match regular call emission.
+                let call_expr = Expr::Call {
+                    callee: Box::new(callee.clone()),
+                    args: args.clone(),
+                    span: *span,
+                };
+                self.hoist_tries_expr(&call_expr)?;
+                let call = self.emit_call(callee, args)?;
+                self.push(&format!("go {}", call));
                 Ok(())
             }
             Stmt::Managed {

@@ -227,7 +227,12 @@ impl Emitter {
                 Ok(format!("{}{{{}}}", head, parts.join(", ")))
             }
 
-            Expr::FnLit { params, results, body, .. } => {
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => {
                 // Conversion target (Batch E): untyped params take the
                 // TARGET's types (`http.handler(fn(w, r) {…})` — the
                 // literal's `w, r` are typed by HandlerFunc's signature).
@@ -535,7 +540,11 @@ impl Emitter {
         self.member_name(base, name)
     }
 
-    fn emit_call(&mut self, callee: &Expr, args: &[CallArg]) -> Result<String, EmitError> {
+    pub(crate) fn emit_call(
+        &mut self,
+        callee: &Expr,
+        args: &[CallArg],
+    ) -> Result<String, EmitError> {
         // --- make(...): the first argument is a TYPE (bug-#2 fix) ---
         if matches!(callee, Expr::Ident { name, .. } if name == "make") {
             return self.emit_make(args);
@@ -647,9 +656,7 @@ impl Emitter {
                 // SPEC-LANGUAGE line 1991 asserts `u8(300) == 44` as an
                 // executable test-claim. The fold computes that same
                 // two's-complement truncation at emit time.
-                if let Some(folded) =
-                    super::constconv::fold_constant(&args[0].value, name)
-                {
+                if let Some(folded) = super::constconv::fold_constant(&args[0].value, name) {
                     return Ok(format!("{}({})", go, folded));
                 }
                 let a = self.emit_call_arg(&args[0])?;
