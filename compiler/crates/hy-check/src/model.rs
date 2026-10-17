@@ -254,6 +254,11 @@ pub(crate) struct FnState {
     /// composite literal containing `&...`), for O2 `LOAN-ESCAPE` on
     /// named-result / variable returns (`out = &x; return` / `return out`).
     pub borrow_bindings: HashSet<String>,
+    /// Uses recorded inside `defer` statements, paired with the `(scope_depth, name)`
+    /// binding group they alias or may share storage with at the `defer` site.
+    /// Because a deferred call runs at function exit, any subsequent `move` or
+    /// `consume` of a binding in that group is a use-after-move/consume (A1b/A7).
+    pub deferred_uses: Vec<(crate::walk::Use, HashSet<(usize, String)>)>,
 }
 
 impl FnState {
@@ -424,6 +429,21 @@ impl FnState {
             }
         }
         self.env.get(name)
+    }
+
+    /// Scope depth of the innermost binding for `name` (`0` for `env`,
+    /// `i + 1` for `scopes[i]`).
+    pub(crate) fn binding_depth(&self, name: &str) -> Option<usize> {
+        for (i, layer) in self.scopes.iter().enumerate().rev() {
+            if layer.contains_key(name) {
+                return Some(i + 1);
+            }
+        }
+        if self.env.contains_key(name) {
+            Some(0)
+        } else {
+            None
+        }
     }
 
     /// Mutable lookup, same resolution order (moves, rebinds, freezes must

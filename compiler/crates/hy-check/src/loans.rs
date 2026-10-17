@@ -155,6 +155,23 @@ impl<'a> Checker<'a> {
         loop_end: Option<usize>,
         stmt_consumes: &mut Vec<(Span, Span)>,
     ) {
+        if let Some(last) = loop_end {
+            for a in cr.args {
+                if let Some(path) = walk::addr_of_index_base_path(&a.value) {
+                    let binding = a.value.render();
+                    st.loans.push(Loan {
+                        target: LoanTarget::MapSlot {
+                            binding: binding.clone(),
+                            path,
+                        },
+                        created: idx,
+                        last,
+                        span: a.span,
+                        desc: format!("`{}` in `{}`", binding, cr.callee.render()),
+                    });
+                }
+            }
+        }
         match self.resolve_call(st, cr) {
             Resolved::Package { pkg, method } => {
                 match foreign::package_mode(&pkg, &method) {
@@ -285,8 +302,9 @@ impl<'a> Checker<'a> {
                     // window when the call is within it.
                     self.check_a3_call_conflict(st, cr, idx, &name);
                     // A7 borrow-by-default: a handle passed to a Hybrid
-                    // function is lent for the call only
-                    self.lend_handle_args(st, cr, idx, None);
+                    // function is lent for the call (or until function exit
+                    // when the call is deferred)
+                    self.lend_handle_args(st, cr, idx, loop_end);
                 } else if st.closure_mutates.contains_key(&name) {
                     // A3 #111 form 4: a local closure whose body mutates a
                     // captured binding — event attributed to this call site.
@@ -327,8 +345,8 @@ impl<'a> Checker<'a> {
         );
     }
 
-    /// Handle-typed arguments of a call are lent for the call (call-scoped) or
-    /// across the whole loop when the call is a for-loop ITERATE expression.
+    /// Handle-typed arguments of a call are lent for the call (call-scoped,
+    /// or until `loop_end` when deferred / in a loop header).
     fn lend_handle_args(
         &self,
         st: &mut FnState,
@@ -1282,6 +1300,11 @@ impl<'a> Checker<'a> {
                         st.share_edge(name, &peer);
                     }
                 }
+                if let Some(origin) = moved_non_owned {
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        b.non_owned_origin = Some(origin);
+                    }
+                }
                 // A2 non-lexical extension: `u := doc.array(...)` stores an
                 // element VIEW — the borrow loan the call opened on the
                 // handle lives until the view's last use (O7), not just the
@@ -2106,6 +2129,64 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Before `name` is severed at `sever_depth` (by a define or non-self
+    /// rebind), expand any `deferred_uses` group containing `(old_depth, name)`
+    /// with `name`'s current `scoped_binding_group` (capturing post-defer
+    /// aliases/peers), repoint direct alias children so surviving aliases stay
+    /// linked, and remove `(sever_depth, name)` from `deferred_uses`.
+    fn transfer_deferred_uses_before_sever(
+        &self,
+        st: &mut FnState,
+        name: &str,
+        sever_depth: Option<usize>,
+    ) {
+        if !st.deferred_uses.is_empty() {
+            let cur_depth = st.binding_depth(name);
+            let current_group = self.scoped_binding_group(st, name);
+            for (_, group) in &mut st.deferred_uses {
+                if let Some(d) = cur_depth {
+                    if group.contains(&(d, name.to_string())) {
+                        group.extend(current_group.iter().cloned());
+                    }
+                }
+                if let Some(sd) = sever_depth {
+                    group.remove(&(sd, name.to_string()));
+                }
+            }
+        }
+        if sever_depth.is_some() {
+            let parent = st.aliases.get(name).cloned().filter(|p| p != name);
+            let children: Vec<String> = st
+                .aliases
+                .iter()
+                .filter_map(|(k, v)| {
+                    if v == name && k != name {
+                        Some(k.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if let Some(p) = parent {
+                for c in children {
+                    if c != p {
+                        st.aliases.insert(c, p.clone());
+                    } else {
+                        st.aliases.remove(&c);
+                    }
+                }
+            } else {
+                let mut iter = children.into_iter();
+                if let Some(first) = iter.next() {
+                    st.aliases.remove(&first);
+                    for c in iter {
+                        st.aliases.insert(c, first.clone());
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn define_binding(
         &self,
         st: &mut FnState,
@@ -2122,6 +2203,9 @@ impl<'a> Checker<'a> {
             && (st.env.contains_key(name)
                 || st.scopes.iter().rev().skip(1).any(|s| s.contains_key(name))
                 || self.consts.contains_key(name));
+        let depth = st.scopes.len();
+        let sever_depth = st.binding_depth(name).filter(|&d| d == depth);
+        self.transfer_deferred_uses_before_sever(st, name, sever_depth);
         self.preserve_peers_before_sever(st, name, shadows_outer);
         st.aliases.remove(name);
         st.share_clear(name);
@@ -2515,6 +2599,11 @@ impl<'a> Checker<'a> {
                 }
                 if let PlaceKind::Ident(name) = &t.kind {
                     if !info.reads_self {
+                        self.transfer_deferred_uses_before_sever(
+                            st,
+                            name,
+                            st.binding_depth(name),
+                        );
                         self.preserve_peers_before_sever(st, name, false);
                     }
 
@@ -2628,6 +2717,11 @@ impl<'a> Checker<'a> {
                         None
                     };
                     if !reads_self {
+                        self.transfer_deferred_uses_before_sever(
+                            st,
+                            name,
+                            st.binding_depth(name),
+                        );
                         self.preserve_peers_before_sever(st, name, false);
                     }
                     if let Some(b) = st.env_lookup_mut(name) {

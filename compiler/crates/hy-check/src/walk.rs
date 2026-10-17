@@ -58,6 +58,9 @@ pub(crate) struct FlatInfo<'a> {
     /// end at the same index) are preserved in sequence so every `Push`
     /// has a matching `Pop`.
     pub events: HashMap<usize, Vec<ScopeEvent<'a>>>,
+    /// Bindings referenced inside `defer` statements execute at function exit,
+    /// so their loan windows (`last_use`) stay live through the last statement.
+    pub deferred_use_names: Vec<String>,
     next: usize,
 }
 
@@ -104,6 +107,13 @@ pub(crate) fn flatten<'a>(body: &'a Block) -> FlatInfo<'a> {
 pub(crate) fn flatten_with_results<'a>(body: &'a Block, named_results: &[String]) -> FlatInfo<'a> {
     let mut out = FlatInfo::default();
     walk_block(&mut out, body, named_results);
+    let fn_end = out.next.saturating_sub(1);
+    for name in &out.deferred_use_names {
+        let e = out.last_use.entry(name.clone()).or_insert(fn_end);
+        if *e < fn_end {
+            *e = fn_end;
+        }
+    }
     out
 }
 
@@ -155,7 +165,11 @@ fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt, named_results: &[String]
 
     let mut uses = Vec::new();
     own_uses_with_results(stmt, named_results, &mut uses);
+    let is_defer = matches!(stmt, Stmt::Defer { .. });
     for u in uses {
+        if is_defer {
+            out.deferred_use_names.push(u.name.clone());
+        }
         let e = out.last_use.entry(u.name).or_insert(idx);
         if *e < idx {
             *e = idx;

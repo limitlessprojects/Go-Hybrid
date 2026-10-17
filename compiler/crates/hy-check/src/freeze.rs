@@ -233,18 +233,8 @@ impl<'a> Checker<'a> {
     // Move marking + alias freezing (O5.2)
     // -----------------------------------------------------------------------
 
-    /// Mark `name` moved-from at the transfer site and freeze every live
-    /// alias in its alias group (both directions: an alias of the moved
-    /// binding, and the original when an alias is the one moved — they
-    /// denote the same reference-typed value).
-    pub(crate) fn mark_move(
-        &self,
-        st: &mut FnState,
-        name: &str,
-        span: hy_diag::Span,
-        desc: String,
-        kind: MoveKind,
-    ) {
+    /// Every binding name in `name`'s alias + may-share connected component.
+    pub(crate) fn binding_group(&self, st: &FnState, name: &str) -> Vec<String> {
         let root = resolve_alias(st, name);
         let mut members: Vec<String> = vec![name.to_string(), root.clone()];
         for a in st.aliases.keys() {
@@ -263,6 +253,45 @@ impl<'a> Checker<'a> {
         }
         members.sort();
         members.dedup();
+        members
+    }
+
+    /// The `(scope_depth, name)` set for `name`'s alias + may-share group.
+    pub(crate) fn scoped_binding_group(
+        &self,
+        st: &FnState,
+        name: &str,
+    ) -> HashSet<(usize, String)> {
+        self.binding_group(st, name)
+            .into_iter()
+            .filter_map(|m| st.binding_depth(&m).map(|d| (d, m)))
+            .collect()
+    }
+
+    /// Mark `name` moved-from at the transfer site and freeze every live
+    /// alias in its alias group (both directions: an alias of the moved
+    /// binding, and the original when an alias is the one moved — they
+    /// denote the same reference-typed value). Also reports any earlier
+    /// `defer` uses whose captured binding group overlaps the moved group,
+    /// since `defer` executes at function exit after this transfer.
+    pub(crate) fn mark_move(
+        &mut self,
+        st: &mut FnState,
+        name: &str,
+        span: hy_diag::Span,
+        desc: String,
+        kind: MoveKind,
+    ) {
+        let members = self.binding_group(st, name);
+        let scoped_members: HashSet<(usize, String)> = members
+            .iter()
+            .filter_map(|m| st.binding_depth(m).map(|d| (d, m.clone())))
+            .collect();
+        let mv = MoveInfo {
+            span,
+            kind,
+            desc: desc.clone(),
+        };
         let mut origins = Vec::new();
         for m in &members {
             let o = self.non_owned_origin_of(st, m).map(|(orig, via_share)| {
@@ -285,19 +314,11 @@ impl<'a> Checker<'a> {
                 if b.non_owned_origin.is_none() {
                     b.non_owned_origin = orig;
                 }
-                b.moved = Some(MoveInfo {
-                    span,
-                    kind,
-                    desc: desc.clone(),
-                });
+                b.moved = Some(mv.clone());
             } else if let Some(cb) = self.consts.get(m).cloned() {
                 if !cb.shape.is_sendable_by_type() {
                     let mut frozen = cb;
-                    frozen.moved = Some(MoveInfo {
-                        span,
-                        kind,
-                        desc: desc.clone(),
-                    });
+                    frozen.moved = Some(mv.clone());
                     st.env.insert(m.clone(), frozen);
                 }
             }
@@ -311,6 +332,21 @@ impl<'a> Checker<'a> {
                         desc: desc.clone(),
                     });
                 }
+            }
+        }
+        if !st.deferred_uses.is_empty() {
+            let mut fired = Vec::new();
+            let mut remaining = Vec::with_capacity(st.deferred_uses.len());
+            for (du, group) in st.deferred_uses.drain(..) {
+                if group.iter().any(|k| scoped_members.contains(k)) {
+                    fired.push(du);
+                } else {
+                    remaining.push((du, group));
+                }
+            }
+            st.deferred_uses = remaining;
+            for du in fired {
+                self.emit_use_after_move(st, &du, &mv);
             }
         }
     }
@@ -336,6 +372,51 @@ impl<'a> Checker<'a> {
                     index,
                     format!("the index expression `{}`", index.render()),
                 );
+            }
+        }
+    }
+
+    /// Process a `defer <call>` statement for move/freeze rules:
+    /// 1. Validate and mark any `move` operands inside `call` (O5.1 / O5.4).
+    /// 2. Record all remaining live binding uses in `st.deferred_uses` so any
+    ///    subsequent `move` or `consume` before function exit is rejected as
+    ///    use-after-move/consume (HYB-E3003, A1b/A7).
+    pub(crate) fn process_defer_moves(
+        &mut self,
+        st: &mut FnState,
+        call: &Expr,
+        uses: &[Use],
+        managed: bool,
+    ) {
+        let mut move_ops = Vec::new();
+        crate::model::collect_move_operands(call, &mut move_ops);
+        for (op, mspan) in move_ops {
+            if let Expr::Ident { name, .. } = op {
+                if !managed {
+                    self.check_non_owned_move(st, name, mspan);
+                }
+            }
+        }
+        self.mark_move_in_value(
+            st,
+            call,
+            format!("the deferred call `defer {}`", call.render()),
+        );
+        let mut recorded: HashSet<String> = HashSet::new();
+        for u in uses {
+            if u.via_move || !recorded.insert(u.name.clone()) {
+                continue;
+            }
+            let is_live_local = st
+                .env_lookup(&u.name)
+                .map(|b| b.moved.is_none())
+                .unwrap_or(false);
+            if !is_live_local {
+                continue;
+            }
+            let group = self.scoped_binding_group(st, &u.name);
+            if !group.is_empty() {
+                st.deferred_uses.push((u.clone(), group));
             }
         }
     }
