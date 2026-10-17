@@ -18,6 +18,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 
@@ -206,8 +207,20 @@ def actions_fetch(run_id, jobdir):
         dest = os.path.join(jobdir, "result", a["name"] + ".zip")
         req = urllib.request.Request(url)
         req.add_header("Authorization", "token " + tok)
-        with urllib.request.urlopen(req, timeout=120) as r, open(dest, "wb") as f:
-            f.write(r.read())
+        # Finish the response before touching a previous valid archive. Publish
+        # via a sibling temporary file so write/replace failures preserve it too.
+        with urllib.request.urlopen(req, timeout=120) as r:
+            data = r.read()
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=os.path.dirname(dest),
+                                             prefix=".artifact-", delete=False) as f:
+                temporary = f.name
+                f.write(data)
+            os.replace(temporary, dest)
+        finally:
+            if temporary is not None and os.path.exists(temporary):
+                os.remove(temporary)
         print("artifact {} ({} bytes) -> {}".format(a["name"], a["size_in_bytes"], dest))
 
 
