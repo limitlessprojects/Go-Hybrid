@@ -76,6 +76,7 @@ impl<'a> Checker<'a> {
                         self.check_stmt_emit_guard_inner(st, init, true);
                     }
                 }
+                self.check_condition_type(st, cond, cond.span());
                 self.check_expr_emit_guard(st, cond);
                 if deep {
                     for s in &then.stmts {
@@ -88,7 +89,10 @@ impl<'a> Checker<'a> {
             }
             Stmt::For { kind, body, .. } => {
                 match kind {
-                    ForKind::While { cond } => self.check_expr_emit_guard(st, cond),
+                    ForKind::While { cond } => {
+                        self.check_condition_type(st, cond, cond.span());
+                        self.check_expr_emit_guard(st, cond);
+                    }
                     ForKind::Range { lo, hi, .. } => {
                         self.check_expr_emit_guard(st, lo);
                         self.check_expr_emit_guard(st, hi);
@@ -186,18 +190,22 @@ impl<'a> Checker<'a> {
                     _ => {}
                 }
             }
-            Expr::Unary { operand, .. }
-            | Expr::AddrOf { operand, .. }
+            Expr::Unary { op, operand, span } => {
+                self.check_expr_emit_guard(st, operand);
+                self.check_unary_operand(st, *op, operand, *span);
+            }
+            Expr::AddrOf { operand, .. }
             | Expr::Move { operand, .. }
             | Expr::Try { operand, .. }
             | Expr::Paren { inner: operand, .. }
             | Expr::Field { base: operand, .. }
             | Expr::Receive { chan: operand, .. } => self.check_expr_emit_guard(st, operand),
-            Expr::Index { base, index, .. } => {
+            Expr::Index { base, index, span } => {
                 self.check_expr_emit_guard(st, base);
                 self.check_expr_emit_guard(st, index);
+                self.check_index_operand_type(st, base, *span);
             }
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, span } => {
                 self.check_expr_emit_guard(st, base);
                 if let Some(lo) = lo {
                     self.check_expr_emit_guard(st, lo);
@@ -205,12 +213,14 @@ impl<'a> Checker<'a> {
                 if let Some(hi) = hi {
                     self.check_expr_emit_guard(st, hi);
                 }
+                self.check_slice_operand_type(st, base, *span);
             }
-            Expr::Call { callee, args, .. } => {
+            Expr::Call { callee, args, span } => {
                 self.check_expr_emit_guard(st, callee);
                 for a in args {
                     self.check_expr_emit_guard(st, &a.value);
                 }
+                self.check_call_operand_types(st, callee, args, *span);
             }
             Expr::StructLit { fields, .. } => {
                 for f in fields {
@@ -611,6 +621,284 @@ impl<'a> Checker<'a> {
             _ => None,
         })?;
         const_int_value(&d.value)
+    }
+
+    fn check_unary_operand(&mut self, st: &FnState, op: hy_syntax::UnOp, operand: &Expr, span: Span) {
+        let shape = self.shape_of_expr(st, operand);
+        match op {
+            hy_syntax::UnOp::Neg => {
+                if matches!(
+                    shape,
+                    TypeShape::Str
+                        | TypeShape::Map(_, _)
+                        | TypeShape::Slice(_)
+                        | TypeShape::Array(_)
+                        | TypeShape::Chan(_)
+                        | TypeShape::Struct(_)
+                ) {
+                    let msg = format!(
+                        "operator - not defined on `{}` ({}) (issue #425)",
+                        operand.render(),
+                        shape.render()
+                    );
+                    self.diags.push(
+                        Diagnostic::error("HYB-E2009", self.path.clone(), span, msg).with_notes(
+                            vec!["the unary negation operator `-` requires a numeric operand".to_string()],
+                        ),
+                    );
+                }
+            }
+            hy_syntax::UnOp::Not => {
+                if matches!(
+                    shape,
+                    TypeShape::Str
+                        | TypeShape::Map(_, _)
+                        | TypeShape::Slice(_)
+                        | TypeShape::Array(_)
+                        | TypeShape::Chan(_)
+                        | TypeShape::Struct(_)
+                ) {
+                    let msg = format!(
+                        "operator ! not defined on `{}` ({}) (issue #425)",
+                        operand.render(),
+                        shape.render()
+                    );
+                    self.diags.push(
+                        Diagnostic::error("HYB-E2009", self.path.clone(), span, msg).with_notes(
+                            vec!["the logical not operator `!` requires a boolean operand".to_string()],
+                        ),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn check_index_operand_type(&mut self, st: &FnState, base: &Expr, span: Span) {
+        let shape = self.shape_of_expr(st, base);
+        match shape {
+            TypeShape::Primitive
+            | TypeShape::Struct(_)
+            | TypeShape::Chan(_)
+            | TypeShape::Pointer(_)
+            | TypeShape::Atomic
+            | TypeShape::OwnHandle(_)
+            | TypeShape::Closure => {
+                let msg = format!(
+                    "cannot index `{}` ({}) — indexing requires a slice, array, string, or map (issue #425)",
+                    base.render(),
+                    shape.render()
+                );
+                self.diags.push(
+                    Diagnostic::error("HYB-E2009", self.path.clone(), span, msg).with_notes(vec![
+                        "why: indexing a non-indexable value is not valid Go; the accepted subset only emits buildable Go".to_string(),
+                        "fix: index a slice, array, string, or map".to_string(),
+                    ]),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn check_slice_operand_type(&mut self, st: &FnState, base: &Expr, span: Span) {
+        let shape = self.shape_of_expr(st, base);
+        match shape {
+            TypeShape::Primitive
+            | TypeShape::Map(_, _)
+            | TypeShape::Struct(_)
+            | TypeShape::Chan(_)
+            | TypeShape::Pointer(_)
+            | TypeShape::Atomic
+            | TypeShape::OwnHandle(_)
+            | TypeShape::Closure => {
+                let msg = format!(
+                    "cannot slice `{}` ({}) — slicing requires a slice, array, or string (issue #425)",
+                    base.render(),
+                    shape.render()
+                );
+                self.diags.push(
+                    Diagnostic::error("HYB-E2009", self.path.clone(), span, msg).with_notes(vec![
+                        "why: slicing a non-sliceable value is not valid Go; the accepted subset only emits buildable Go".to_string(),
+                        "fix: slice a slice, array, or string".to_string(),
+                    ]),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn check_condition_type(&mut self, st: &FnState, cond: &Expr, span: Span) {
+        let shape = self.shape_of_expr(st, cond);
+        if matches!(
+            shape,
+            TypeShape::Str
+                | TypeShape::Map(_, _)
+                | TypeShape::Slice(_)
+                | TypeShape::Array(_)
+                | TypeShape::Chan(_)
+                | TypeShape::Struct(_)
+        ) {
+            let msg = format!(
+                "non-boolean condition in if/for statement: `{}` has type {} (issue #425)",
+                cond.render(),
+                shape.render()
+            );
+            self.diags.push(
+                Diagnostic::error("HYB-E2009", self.path.clone(), span, msg).with_notes(vec![
+                    "if and for statements require a boolean condition (e.g. `x != 0`, `len(s) > 0`)".to_string(),
+                ]),
+            );
+        }
+    }
+
+    fn check_call_operand_types(
+        &mut self,
+        st: &FnState,
+        callee: &Expr,
+        args: &[hy_syntax::CallArg],
+        span: Span,
+    ) {
+        let unwrap = unwrap_parens(callee);
+        if let Expr::Ident { name, .. } = unwrap {
+            if !args.is_empty() {
+                let arg_shape = self.shape_of_expr(st, &args[0].value);
+                match name.as_str() {
+                    "len" => match arg_shape {
+                        TypeShape::Primitive
+                        | TypeShape::Struct(_)
+                        | TypeShape::Closure
+                        | TypeShape::Atomic
+                        | TypeShape::OwnHandle(_) => {
+                            let msg = format!(
+                                "invalid argument: `{}` ({}) for built-in len (HYB-E2005)",
+                                args[0].value.render(),
+                                arg_shape.render()
+                            );
+                            self.diags.push(
+                                Diagnostic::error("HYB-E2005", self.path.clone(), span, msg).with_notes(
+                                    vec![
+                                        "len expects a string, slice, array, map, or channel".to_string(),
+                                    ],
+                                ),
+                            );
+                        }
+                        _ => {}
+                    },
+                    "cap" => match arg_shape {
+                        TypeShape::Map(_, _)
+                        | TypeShape::Str
+                        | TypeShape::Primitive
+                        | TypeShape::Struct(_)
+                        | TypeShape::Closure
+                        | TypeShape::Atomic
+                        | TypeShape::OwnHandle(_) => {
+                            let msg = format!(
+                                "invalid argument: `{}` ({}) for built-in cap (HYB-E2005)",
+                                args[0].value.render(),
+                                arg_shape.render()
+                            );
+                            self.diags.push(
+                                Diagnostic::error("HYB-E2005", self.path.clone(), span, msg).with_notes(
+                                    vec![
+                                        "cap expects a slice, array, or channel (maps and strings have length, not capacity)".to_string(),
+                                    ],
+                                ),
+                            );
+                        }
+                        _ => {}
+                    },
+                    "close" => match arg_shape {
+                        TypeShape::Primitive
+                        | TypeShape::Map(_, _)
+                        | TypeShape::Slice(_)
+                        | TypeShape::Array(_)
+                        | TypeShape::Str
+                        | TypeShape::Struct(_)
+                        | TypeShape::Closure
+                        | TypeShape::Atomic
+                        | TypeShape::OwnHandle(_) => {
+                            let msg = format!(
+                                "cannot close non-channel `{}` ({}) (HYB-E2005)",
+                                args[0].value.render(),
+                                arg_shape.render()
+                            );
+                            self.diags.push(
+                                Diagnostic::error("HYB-E2005", self.path.clone(), span, msg).with_notes(
+                                    vec!["close requires a channel value".to_string()],
+                                ),
+                            );
+                        }
+                        _ => {}
+                    },
+                    "delete" => match arg_shape {
+                        TypeShape::Primitive
+                        | TypeShape::Slice(_)
+                        | TypeShape::Array(_)
+                        | TypeShape::Str
+                        | TypeShape::Struct(_)
+                        | TypeShape::Chan(_)
+                        | TypeShape::Closure
+                        | TypeShape::Atomic
+                        | TypeShape::OwnHandle(_) => {
+                            let msg = format!(
+                                "invalid argument: `{}` ({}) for built-in delete: first argument must be a map (HYB-E2005)",
+                                args[0].value.render(),
+                                arg_shape.render()
+                            );
+                            self.diags.push(
+                                Diagnostic::error("HYB-E2005", self.path.clone(), span, msg).with_notes(
+                                    vec![
+                                        "delete first argument must be a map: `delete(m, k)`".to_string(),
+                                    ],
+                                ),
+                            );
+                        }
+                        _ => {}
+                    },
+                    "append" => match arg_shape {
+                        TypeShape::Primitive
+                        | TypeShape::Map(_, _)
+                        | TypeShape::Chan(_)
+                        | TypeShape::Str
+                        | TypeShape::Struct(_)
+                        | TypeShape::Closure
+                        | TypeShape::Atomic
+                        | TypeShape::OwnHandle(_) => {
+                            let msg = format!(
+                                "invalid append: argument must be a slice; have `{}` ({}) (HYB-E2005)",
+                                args[0].value.render(),
+                                arg_shape.render()
+                            );
+                            self.diags.push(
+                                Diagnostic::error("HYB-E2005", self.path.clone(), span, msg).with_notes(
+                                    vec![
+                                        "append first argument must be a slice: `s = append(s, v)`".to_string(),
+                                    ],
+                                ),
+                            );
+                        }
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+            if let Some(b) = self.lookup_binding(st, name) {
+                if !matches!(b.shape, TypeShape::Closure | TypeShape::Unknown)
+                    && !matches!(&b.ty, Some(TypeExpr::Fn { .. }))
+                {
+                    let msg = format!(
+                        "cannot call `{}` ({}): non-function type is not callable (issue #425)",
+                        name,
+                        b.shape.render()
+                    );
+                    self.diags.push(
+                        Diagnostic::error("HYB-E2009", self.path.clone(), span, msg).with_notes(
+                            vec!["only functions and closures can be called".to_string()],
+                        ),
+                    );
+                }
+            }
+        }
     }
 }
 
