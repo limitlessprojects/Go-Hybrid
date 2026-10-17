@@ -247,6 +247,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
     // (#306 eval-order alignment, carried into the nested-closure walk).
     if !matches!(stmt, Stmt::If { .. }) {
         check_stmt_own_uses(ck, st, stmt, managed);
+        ck.check_stmt_recv_operands(st, stmt);
     }
 
     // #238: `copy(dst, src)` inside a closure body duplicates reference-bearing
@@ -560,6 +561,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 cond,
                 format!("the condition `{}`", cond.render()),
             );
+            ck.check_stmt_recv_operands(st, stmt);
             st.scope_push();
             check_body_boundaries(ck, st, then, managed, nested);
             st.scope_pop();

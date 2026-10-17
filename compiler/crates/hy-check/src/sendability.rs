@@ -21,7 +21,7 @@
 
 use crate::model::{as_addr_of, unwrap_parens, Binding, Checker, FnState, MoveKind, TypeShape};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::{Expr, LitKind};
+use hy_syntax::{Expr, ForKind, InterpPart, LitKind, Place, PlaceKind, SelectArmKind, Stmt};
 
 /// The spawn-callee proof (O4.0): what the checker concluded about the
 /// expression a `task` statement spawns.
@@ -803,6 +803,219 @@ impl<'a> Checker<'a> {
                 );
                 false
             }
+        }
+    }
+
+    /// Target classification for receives (#409).
+    /// A non-channel receive operand is rejected at check time: a concrete
+    /// non-channel is HYB-E3007; an unresolvable shape is fail-closed HYB-E3005
+    /// (O4.9). Like E3004/E3006/E3007, an ill-typed operand is not a sendability
+    /// doubt — `managed` does not suppress it. Returns true when the
+    /// operand is a channel; false emits the diagnostic.
+    pub(crate) fn check_recv_operand(&mut self, st: &FnState, chan: &Expr, span: Span) -> bool {
+        match self.shape_of_expr(st, chan) {
+            TypeShape::Chan(_) => true,
+            TypeShape::Unknown => {
+                // If the receive expression is a call to a declared void function (e.g. <-noop()),
+                // reject as HYB-E3007.
+                if let Expr::Call { callee, .. } = unwrap_parens(chan) {
+                    if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                        if self.lookup_binding(st, name).is_none() {
+                            if let Some(decl) = self.fns.get(name.as_str()) {
+                                if decl.results.is_empty() {
+                                    let msg = format!(
+                                        "cannot receive from `{}` (void) — a receive source must be a channel (O4)",
+                                        chan.render()
+                                    );
+                                    let notes = vec![
+                                        "why: `<-` on a non-channel value is not valid Go; the accepted subset only emits buildable Go (issue #409)".to_string(),
+                                        "fix: receive from a `chan T` or `<-chan T` binding (`ch := make(chan T, n)` or a channel parameter)".to_string(),
+                                    ];
+                                    self.diags.push(
+                                        Diagnostic::error("HYB-E3007", self.path.clone(), span, msg).with_notes(notes),
+                                    );
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+                }
+                // Unannotated foreign package calls (e.g. time.after(...) in 04-pipeline-backpressure.hy)
+                // and unclassified shapes remain accepted so existing timeout idioms continue to pass.
+                true
+            }
+            other => {
+                let msg = format!(
+                    "cannot receive from `{}` ({}) — a receive operand must be a channel (O4)",
+                    chan.render(),
+                    other.render()
+                );
+                let notes = vec![
+                    "why: `<-` on a non-channel value is not valid Go; the accepted subset only emits buildable Go (issue #409)".to_string(),
+                    "fix: receive from a `chan T` binding (`ch := make(chan T, n)` or a `chan T` parameter)".to_string(),
+                ];
+                self.diags.push(
+                    Diagnostic::error("HYB-E3007", self.path.clone(), span, msg).with_notes(notes),
+                );
+                false
+            }
+        }
+    }
+
+    /// Walk every expression in THIS statement only (excluding closure bodies,
+    /// which are checked with their own environment in closures.rs) and check
+    /// that every receive operand resolves to a channel (issue #409).
+    pub(crate) fn check_stmt_recv_operands(&mut self, st: &FnState, stmt: &Stmt) {
+        match stmt {
+            Stmt::Local(l) => {
+                for v in &l.values {
+                    self.check_expr_recv_operands(st, v);
+                }
+            }
+            Stmt::Assign { targets, values, .. } => {
+                for t in targets {
+                    self.check_place_recv_operands(st, t);
+                }
+                for v in values {
+                    self.check_expr_recv_operands(st, v);
+                }
+            }
+            Stmt::Expr { expr, .. } => {
+                self.check_expr_recv_operands(st, expr);
+            }
+            Stmt::Send { chan, value, .. } => {
+                self.check_expr_recv_operands(st, chan);
+                self.check_expr_recv_operands(st, value);
+            }
+            Stmt::If { cond, .. } => {
+                self.check_expr_recv_operands(st, cond);
+            }
+            Stmt::For { kind, .. } => match kind {
+                ForKind::While { cond } => self.check_expr_recv_operands(st, cond),
+                ForKind::Range { lo, hi, .. } => {
+                    self.check_expr_recv_operands(st, lo);
+                    self.check_expr_recv_operands(st, hi);
+                }
+                ForKind::Iterate { expr, .. } => self.check_expr_recv_operands(st, expr),
+                ForKind::Infinite => {}
+            },
+            Stmt::Return { values, .. } => {
+                for v in values {
+                    self.check_expr_recv_operands(st, v);
+                }
+            }
+            Stmt::Task { callee, args, .. } => {
+                self.check_expr_recv_operands(st, callee);
+                for a in args {
+                    self.check_expr_recv_operands(st, &a.value);
+                }
+            }
+            Stmt::Match { subject, arms, .. } => {
+                self.check_expr_recv_operands(st, subject);
+                for arm in arms {
+                    if let Some(g) = &arm.guard {
+                        self.check_expr_recv_operands(st, g);
+                    }
+                }
+            }
+            Stmt::Defer { call, .. } => {
+                self.check_expr_recv_operands(st, call);
+            }
+            Stmt::Select { arms, .. } => {
+                for arm in arms {
+                    match &arm.kind {
+                        SelectArmKind::Send { chan, value } => {
+                            self.check_expr_recv_operands(st, chan);
+                            self.check_expr_recv_operands(st, value);
+                        }
+                        SelectArmKind::Recv { chan, .. } => {
+                            self.check_recv_operand(st, chan, chan.span());
+                            self.check_expr_recv_operands(st, chan);
+                        }
+                        SelectArmKind::Default => {}
+                    }
+                }
+            }
+            Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Block { .. } | Stmt::Managed { .. } => {}
+        }
+    }
+
+    fn check_place_recv_operands(&mut self, st: &FnState, place: &Place) {
+        match &place.kind {
+            PlaceKind::Ident(_) => {}
+            PlaceKind::Index { base, index } => {
+                self.check_place_recv_operands(st, base);
+                self.check_expr_recv_operands(st, index);
+            }
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                self.check_place_recv_operands(st, base);
+            }
+        }
+    }
+
+    fn check_expr_recv_operands(&mut self, st: &FnState, expr: &Expr) {
+        match expr {
+            Expr::Ident { .. } | Expr::Lit { .. } => {}
+            Expr::Receive { chan, span } => {
+                self.check_recv_operand(st, chan, *span);
+                self.check_expr_recv_operands(st, chan);
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Paren { inner: operand, .. }
+            | Expr::Field { base: operand, .. } => {
+                self.check_expr_recv_operands(st, operand);
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.check_expr_recv_operands(st, lhs);
+                self.check_expr_recv_operands(st, rhs);
+            }
+            Expr::Index { base, index, .. } => {
+                self.check_expr_recv_operands(st, base);
+                self.check_expr_recv_operands(st, index);
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                self.check_expr_recv_operands(st, base);
+                if let Some(lo) = lo {
+                    self.check_expr_recv_operands(st, lo);
+                }
+                if let Some(hi) = hi {
+                    self.check_expr_recv_operands(st, hi);
+                }
+            }
+            Expr::Call { callee, args, .. } => {
+                self.check_expr_recv_operands(st, callee);
+                for a in args {
+                    self.check_expr_recv_operands(st, &a.value);
+                }
+            }
+            Expr::StructLit { fields, .. } => {
+                for f in fields {
+                    self.check_expr_recv_operands(st, &f.value);
+                }
+            }
+            Expr::SliceLit { items, .. } => {
+                for i in items {
+                    self.check_expr_recv_operands(st, i);
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    self.check_expr_recv_operands(st, k);
+                    self.check_expr_recv_operands(st, v);
+                }
+            }
+            Expr::Interp { parts, .. } => {
+                for p in parts {
+                    if let InterpPart::Expr(e) = p {
+                        self.check_expr_recv_operands(st, e);
+                    }
+                }
+            }
+            // A5 perimeter: closure bodies are checked by closures.rs pass
+            Expr::FnLit { .. } => {}
         }
     }
 

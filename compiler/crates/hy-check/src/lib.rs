@@ -543,6 +543,9 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         // (`p := minmax(3, 9)`) — Go refuses the emitted binding.
         ck.check_stmt_multi_value(&st, stmt);
 
+        // Issue #409: a receive operand must resolve to a channel (HYB-E3007 / HYB-E3005).
+        ck.check_stmt_recv_operands(&st, stmt);
+
         // Calls (A2 loan windows, A7 consumes + arg lending). A for-loop
         // ITERATE expression's borrow calls get loop-extent loans: the
         // element views live across the whole loop body (O7).
