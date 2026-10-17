@@ -612,19 +612,6 @@ impl<'a> Checker<'a> {
         }
 
         let mut shadow_scopes: Vec<HashSet<String>> = vec![HashSet::new()];
-        if let Some((_, hy_syntax::Stmt::For { kind, .. })) = loop_stmts.first().map(|(s, idx)| (*idx, *s)) {
-            match kind {
-                hy_syntax::ForKind::Range { var, .. } => {
-                    shadow_scopes[0].insert(var.clone());
-                }
-                hy_syntax::ForKind::Iterate { vars, .. } => {
-                    for v in vars {
-                        shadow_scopes[0].insert(v.clone());
-                    }
-                }
-                _ => {}
-            }
-        }
 
         for (i, (stmt, stmt_idx)) in loop_stmts.iter().enumerate() {
             if i > 0 {
@@ -649,21 +636,6 @@ impl<'a> Checker<'a> {
                                     top.insert(name.to_string());
                                 }
                             }
-                        }
-                    }
-                }
-                if let hy_syntax::Stmt::For { kind, .. } = stmt {
-                    if let Some(top) = shadow_scopes.last_mut() {
-                        match kind {
-                            hy_syntax::ForKind::Range { var, .. } => {
-                                top.insert(var.clone());
-                            }
-                            hy_syntax::ForKind::Iterate { vars, .. } => {
-                                for v in vars {
-                                    top.insert(v.clone());
-                                }
-                            }
-                            _ => {}
                         }
                     }
                 }
@@ -719,14 +691,30 @@ impl<'a> Checker<'a> {
                 }
             }
 
-            if i > 0 {
-                if let hy_syntax::Stmt::Local(l) = stmt {
+            match stmt {
+                hy_syntax::Stmt::Local(l) if i > 0 => {
                     if let Some(top) = shadow_scopes.last_mut() {
                         for name in &l.names {
                             top.insert(name.clone());
                         }
                     }
                 }
+                hy_syntax::Stmt::For { kind, .. } => {
+                    if let Some(top) = shadow_scopes.last_mut() {
+                        match kind {
+                            hy_syntax::ForKind::Range { var, .. } => {
+                                top.insert(var.clone());
+                            }
+                            hy_syntax::ForKind::Iterate { vars, .. } => {
+                                for v in vars {
+                                    top.insert(v.clone());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
