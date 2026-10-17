@@ -194,3 +194,198 @@ fn variable_conversion_truncation_still_accepts() {
     );
     assert_eq!(r.verdict, Verdict::Accept);
 }
+
+const OVERFLOW_UNPARSED_I128_UNTYPED: &str = "\
+fn main() {
+    x := 999999999999999999999999999999999999999999999
+    fmt.println(\"{x}\")
+}
+";
+
+const OVERFLOW_I64_MAX_PLUS_ONE_UNTYPED: &str = "\
+fn main() {
+    x := 9223372036854775808
+    fmt.println(\"{x}\")
+}
+";
+
+const OVERFLOW_I64_MIN_MINUS_ONE_UNTYPED: &str = "\
+fn main() {
+    x := -9223372036854775809
+    fmt.println(\"{x}\")
+}
+";
+
+const OVERFLOW_VAR_UNTYPED: &str = "\
+fn main() {
+    var x = 9223372036854775808
+    fmt.println(\"{x}\")
+}
+";
+
+const OVERFLOW_LET_UNTYPED: &str = "\
+fn main() {
+    let x = 9223372036854775808
+    fmt.println(\"{x}\")
+}
+";
+
+const OVERFLOW_UNPARSED_I128_TYPED: &str = "\
+fn main() {
+    var n int8 = 999999999999999999999999999999999999999999999
+    fmt.println(\"{n}\")
+}
+";
+
+const CONTROLS_DEFAULT_INT_AND_CONST: &str = "\
+const file_big = 9223372036854775808
+
+fn main() {
+    x := 9223372036854775807
+    y := -9223372036854775808
+    var u u64 = 18446744073709551615
+    const local_big = 9223372036854775808
+    const huge_const = 999999999999999999999999999999999999999999999
+    fmt.println(\"{x} {y} {u} {local_big} {huge_const} {file_big}\")
+}
+";
+
+#[test]
+fn untyped_literal_past_i128_is_rejected() {
+    let r = check(OVERFLOW_UNPARSED_I128_UNTYPED);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for huge untyped int literal, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn untyped_literal_i64_max_plus_one_is_rejected() {
+    let r = check(OVERFLOW_I64_MAX_PLUS_ONE_UNTYPED);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for x := 9223372036854775808, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn untyped_literal_i64_min_minus_one_is_rejected() {
+    let r = check(OVERFLOW_I64_MIN_MINUS_ONE_UNTYPED);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for x := -9223372036854775809, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn untyped_var_overflow_is_rejected() {
+    let r = check(OVERFLOW_VAR_UNTYPED);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for var x = 9223372036854775808, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn untyped_let_overflow_is_rejected() {
+    let r = check(OVERFLOW_LET_UNTYPED);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for let x = 9223372036854775808, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn typed_literal_past_i128_is_rejected() {
+    let r = check(OVERFLOW_UNPARSED_I128_TYPED);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for huge literal with declared type, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn controls_default_int_and_untyped_consts_accept() {
+    let r = check(CONTROLS_DEFAULT_INT_AND_CONST);
+    assert!(
+        error_codes(&r).is_empty(),
+        "controls must accept cleanly, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+#[test]
+fn untyped_constant_expression_overflow_is_rejected() {
+    let r = check(
+        "fn main() {\n    x := 9223372036854775807 + 1\n    fmt.println(\"{x}\")\n}\n",
+    );
+    assert!(
+        error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+        "default-int constant expressions must retain the main-branch ConstFold check"
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn landed_constfold_regressions_remain_rejected_after_default_int_port() {
+    for src in [
+        "fn main() {\n    var n int8 = 100 + 100\n    fmt.println(\"{n}\")\n}\n",
+        "fn main() {\n    var x int = 2.5\n    fmt.println(\"{x}\")\n}\n",
+    ] {
+        let r = check(src);
+        assert!(
+            error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+            "landed #224 overflow/truncation behavior must survive #297 integration: {:?}",
+            error_codes(&r)
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+    }
+}
+
+#[test]
+fn folded_default_int_shift_overflows_are_rejected() {
+    for src in [
+        "fn main() {\n    x := 1 << 63\n    fmt.println(\"{x}\")\n}\n",
+        "fn main() {\n    x := 1 << 128\n    fmt.println(\"{x}\")\n}\n",
+    ] {
+        let r = check(src);
+        assert!(
+            error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+            "folded default-int shift overflow must be HYB-E6002: {:?}",
+            error_codes(&r)
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+    }
+}
+
+#[test]
+fn nondecimal_underscore_literal_past_i128_is_rejected() {
+    let r = check(
+        "fn main() {\n    x := 0x1_0000_0000_0000_0000_0000_0000_0000_0000\n    fmt.println(\"{x}\")\n}\n",
+    );
+    assert!(
+        error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+        "radix parsing must retain >i128 overflow instead of failing open: {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}

@@ -1108,6 +1108,10 @@ impl<'a> Checker<'a> {
                 // declared type → HYB-E6002 (Go would refuse to build).
                 if let Some(t) = &l.ty {
                     self.check_const_overflow_init(name, t, value);
+                } else if l.kind != LocalKind::Const {
+                    // Issue #228: untyped variable declarations use the
+                    // target's default int type in emitted Go.
+                    self.check_default_int_overflow(name, value);
                 }
                 // N1: a bare `nil` initializer under a non-nilable
                 // ascription is a compile error (HYB-E4001) — the SPEC's own
