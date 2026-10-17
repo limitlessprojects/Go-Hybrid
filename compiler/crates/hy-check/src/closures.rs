@@ -332,8 +332,18 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     } else {
                         None
                     };
+                    let outer_exists = ck.lookup_binding(st, name).is_some();
                     let prior_alias = if reads_self {
-                        st.aliases.get(name).cloned()
+                        st.aliases.get(name).cloned().or_else(|| {
+                            if ck.shape_may_share(&shape)
+                                && outer_exists
+                                && !st.scopes.is_empty()
+                            {
+                                Some(name.clone())
+                            } else {
+                                None
+                            }
+                        })
                     } else {
                         None
                     };
@@ -395,9 +405,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                                 .insert((name.clone(), depth));
                         }
                         if let Some(pa) = prior_alias {
-                            if pa != *name {
-                                st.aliases.insert(name.clone(), pa);
-                            }
+                            st.aliases.insert(name.clone(), pa);
                         }
                         for child in prior_children {
                             if &child != name {
@@ -434,8 +442,98 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         vec![None; l.names.len()],
                     ),
                 };
-                for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
-                    ck.define_binding(st, name, shape, ty, immutable, managed);
+                let val_opt = l.values.first();
+                let resolved: Vec<(
+                    String,
+                    TypeShape,
+                    Option<hy_syntax::TypeExpr>,
+                    bool,
+                    Option<String>,
+                    Option<String>,
+                    Vec<String>,
+                )> = l
+                    .names
+                    .iter()
+                    .zip(shapes)
+                    .zip(tys)
+                    .map(|((name, shape), ty)| {
+                        let reads_self = val_opt
+                            .map(|v| ck.value_reads_storage_of(st, v, name))
+                            .unwrap_or(false);
+                        let shadowed_origin = if ck.shape_may_share(&shape) && reads_self {
+                            ck.non_owned_origin_of(st, name).map(|(o, via_share)| {
+                                if via_share && !o.starts_with("a may-share peer of ") {
+                                    format!("a may-share peer of {}", o)
+                                } else {
+                                    o
+                                }
+                            })
+                        } else {
+                            None
+                        };
+                        let outer_exists = ck.lookup_binding(st, name).is_some();
+                        let prior_alias = if reads_self {
+                            st.aliases.get(name).cloned().or_else(|| {
+                                if ck.shape_may_share(&shape)
+                                    && outer_exists
+                                    && !st.scopes.is_empty()
+                                {
+                                    Some(name.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                        } else {
+                            None
+                        };
+                        let prior_shares: Vec<String> = if reads_self {
+                            st.may_share
+                                .get(name)
+                                .map(|s| s.iter().cloned().collect())
+                                .unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
+                        (
+                            name.clone(),
+                            shape,
+                            ty,
+                            reads_self,
+                            shadowed_origin,
+                            prior_alias,
+                            prior_shares,
+                        )
+                    })
+                    .collect();
+                for (
+                    name,
+                    shape,
+                    ty,
+                    reads_self,
+                    shadowed_origin,
+                    prior_alias,
+                    prior_shares,
+                ) in resolved
+                {
+                    ck.define_binding(st, &name, shape.clone(), ty, immutable, managed);
+                    if reads_self {
+                        if let Some(pa) = prior_alias {
+                            st.aliases.insert(name.clone(), pa);
+                        }
+                        for peer in prior_shares {
+                            st.share_edge(&name, &peer);
+                        }
+                    }
+                    if let Some(v) = val_opt {
+                        ck.record_multi_value_share_and_alias(st, &name, &shape, v);
+                    }
+                    if let Some(origin) = shadowed_origin {
+                        if let Some(b) = st.env_lookup_mut(&name) {
+                            if b.non_owned_origin.is_none() {
+                                b.non_owned_origin = Some(origin);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -592,8 +690,12 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     let shapes = ck.iterate_var_shapes(st, expr, vars.len());
                     for (name, shape) in vars.iter().zip(shapes) {
                         let is_ref = shape.is_reference_alias();
+                        let may_share = ck.shape_may_share(&shape);
                         ck.define_binding(st, name, shape, None, false, managed);
                         if !is_chan {
+                            if may_share {
+                                ck.record_may_share(st, name, expr);
+                            }
                             if is_ref {
                                 if let Some(root) = expr.root_ident() {
                                     if ck.lookup_binding(st, root).is_some() {

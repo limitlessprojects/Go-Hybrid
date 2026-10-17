@@ -18,8 +18,8 @@
 
 use crate::foreign::{self, CallMode};
 use crate::model::{
-    as_addr_of, collect_addr_of_roots, collect_ref_roots, move_operand_ident, unwrap_parens,
-    Binding, Checker, FnState, Loan, LoanTarget, MoveKind, TypeShape,
+    as_addr_of, collect_ref_roots, move_operand_ident, unwrap_parens, Binding, Checker, FnState,
+    Loan, LoanTarget, MoveKind, TypeShape,
 };
 use crate::shape::receiver_type_name;
 use crate::walk::{self, CallRef};
@@ -504,6 +504,14 @@ impl<'a> Checker<'a> {
     }
 
     fn stmts_mutate_param(&self, stmts: &[Stmt], param: &str, depth: usize) -> bool {
+        let reaches_param = |val: &Expr| {
+            let mut roots = Vec::new();
+            collect_ref_roots(val, &mut roots);
+            roots.iter().any(|r| r == param)
+                || walk::expr_path(val)
+                    .map(|p| path_root(&p) == param)
+                    .unwrap_or(false)
+        };
         for (i, s) in stmts.iter().enumerate() {
             if self.stmt_mutates_param(s, param, depth) {
                 return true;
@@ -511,17 +519,29 @@ impl<'a> Checker<'a> {
             match s {
                 Stmt::Local(l) => {
                     let mut shadowed = false;
-                    for (name, val) in l.names.iter().zip(l.values.iter()) {
-                        let is_alias = walk::expr_path(val)
-                            .map(|p| path_root(&p) == param)
-                            .unwrap_or(false);
-                        if is_alias {
-                            if self.stmts_mutate_param(&stmts[i + 1..], name, depth) {
-                                return true;
+                    if l.names.len() == l.values.len() {
+                        for (name, val) in l.names.iter().zip(l.values.iter()) {
+                            if reaches_param(val) {
+                                if self.stmts_mutate_param(&stmts[i + 1..], name, depth) {
+                                    return true;
+                                }
+                            } else if name == param {
+                                shadowed = true;
                             }
-                        } else if name == param {
-                            shadowed = true;
                         }
+                    } else if l.values.len() == 1 && l.names.len() > 1 {
+                        let reaches = reaches_param(&l.values[0]);
+                        for name in &l.names {
+                            if reaches {
+                                if self.stmts_mutate_param(&stmts[i + 1..], name, depth) {
+                                    return true;
+                                }
+                            } else if name == param {
+                                shadowed = true;
+                            }
+                        }
+                    } else if l.values.is_empty() && l.names.iter().any(|n| n == param) {
+                        shadowed = true;
                     }
                     if shadowed {
                         return false;
@@ -532,10 +552,8 @@ impl<'a> Checker<'a> {
                 } if targets.len() == values.len() => {
                     let mut rebound_other = false;
                     for (t, val) in targets.iter().zip(values.iter()) {
+                        let is_alias = reaches_param(val);
                         if let PlaceKind::Ident(name) = &t.kind {
-                            let is_alias = walk::expr_path(val)
-                                .map(|p| path_root(&p) == param)
-                                .unwrap_or(false);
                             if is_alias {
                                 if name != param
                                     && self.stmts_mutate_param(&stmts[i + 1..], name, depth)
@@ -544,6 +562,44 @@ impl<'a> Checker<'a> {
                                 }
                             } else if name == param {
                                 rebound_other = true;
+                            }
+                        } else if is_alias {
+                            let root = t.root();
+                            if !root.is_empty()
+                                && root != param
+                                && self.stmts_mutate_param(&stmts[i + 1..], root, depth)
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                    if rebound_other {
+                        return false;
+                    }
+                }
+                Stmt::Assign {
+                    targets, values, ..
+                } if values.len() == 1 && targets.len() > 1 => {
+                    let is_alias = reaches_param(&values[0]);
+                    let mut rebound_other = false;
+                    for t in targets {
+                        if let PlaceKind::Ident(name) = &t.kind {
+                            if is_alias {
+                                if name != param
+                                    && self.stmts_mutate_param(&stmts[i + 1..], name, depth)
+                                {
+                                    return true;
+                                }
+                            } else if name == param {
+                                rebound_other = true;
+                            }
+                        } else if is_alias {
+                            let root = t.root();
+                            if !root.is_empty()
+                                && root != param
+                                && self.stmts_mutate_param(&stmts[i + 1..], root, depth)
+                            {
+                                return true;
                             }
                         }
                     }
@@ -1064,7 +1120,16 @@ impl<'a> Checker<'a> {
             }
             let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
             let tys = self.multi_value_tys(st, &l.values[0], l.names.len());
-            let resolved: Vec<(String, TypeShape, Option<hy_syntax::TypeExpr>, Option<String>)> = l
+            struct MultiDefInfo {
+                name: String,
+                shape: TypeShape,
+                ty: Option<hy_syntax::TypeExpr>,
+                reads_self: bool,
+                shadowed_origin: Option<String>,
+                prior_alias: Option<String>,
+                prior_shares: Vec<String>,
+            }
+            let resolved: Vec<MultiDefInfo> = l
                 .names
                 .iter()
                 .zip(shapes)
@@ -1074,9 +1139,8 @@ impl<'a> Checker<'a> {
                         (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
                         (_, s) => (s, ty.or_else(|| l.ty.clone())),
                     };
-                    let shadowed = if self.shape_may_share(&shape)
-                        && self.value_reads_storage_of(st, &l.values[0], name)
-                    {
+                    let reads_self = self.value_reads_storage_of(st, &l.values[0], name);
+                    let shadowed_origin = if self.shape_may_share(&shape) && reads_self {
                         self.non_owned_origin_of(st, name).map(|(o, via_share)| {
                             if via_share && !o.starts_with("a may-share peer of ") {
                                 format!("a may-share peer of {}", o)
@@ -1087,18 +1151,57 @@ impl<'a> Checker<'a> {
                     } else {
                         None
                     };
-                    (name.clone(), shape, ty, shadowed)
+                    let outer_exists = self.lookup_binding(st, name).is_some();
+                    let prior_alias = if reads_self {
+                        st.aliases.get(name).cloned().or_else(|| {
+                            if self.shape_may_share(&shape)
+                                && outer_exists
+                                && !st.scopes.is_empty()
+                            {
+                                Some(name.clone())
+                            } else {
+                                None
+                            }
+                        })
+                    } else {
+                        None
+                    };
+                    let prior_shares: Vec<String> = if reads_self {
+                        st.may_share
+                            .get(name)
+                            .map(|s| s.iter().cloned().collect())
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    MultiDefInfo {
+                        name: name.clone(),
+                        shape,
+                        ty,
+                        reads_self,
+                        shadowed_origin,
+                        prior_alias,
+                        prior_shares,
+                    }
                 })
                 .collect();
-            for (name, shape, ty, shadowed_origin) in resolved {
-                let is_view = matches!(shape, TypeShape::BorrowHandle(_));
-                self.define_binding(st, &name, shape.clone(), ty, immutable, managed);
+            for info in resolved {
+                let is_view = matches!(info.shape, TypeShape::BorrowHandle(_));
+                self.define_binding(st, &info.name, info.shape.clone(), info.ty, immutable, managed);
                 if is_view {
-                    self.extend_call_loans_to_view(st, &l.values[0], &name, idx);
+                    self.extend_call_loans_to_view(st, &l.values[0], &info.name, idx);
                 }
-                self.record_multi_value_share_and_alias(st, &name, &shape, &l.values[0]);
-                if let Some(origin) = shadowed_origin {
-                    if let Some(b) = st.env_lookup_mut(&name) {
+                if info.reads_self {
+                    if let Some(pa) = info.prior_alias {
+                        st.aliases.insert(info.name.clone(), pa);
+                    }
+                    for peer in info.prior_shares {
+                        st.share_edge(&info.name, &peer);
+                    }
+                }
+                self.record_multi_value_share_and_alias(st, &info.name, &info.shape, &l.values[0]);
+                if let Some(origin) = info.shadowed_origin {
+                    if let Some(b) = st.env_lookup_mut(&info.name) {
                         if b.non_owned_origin.is_none() {
                             b.non_owned_origin = Some(origin);
                         }
@@ -1211,8 +1314,16 @@ impl<'a> Checker<'a> {
                 } else {
                     None
                 };
+                let outer_exists =
+                    st.env.contains_key(name) || st.scopes.iter().any(|s| s.contains_key(name));
                 let prior_alias = if reads_self {
-                    st.aliases.get(name).cloned()
+                    st.aliases.get(name).cloned().or_else(|| {
+                        if self.shape_may_share(&shape) && outer_exists && !st.scopes.is_empty() {
+                            Some(name.clone())
+                        } else {
+                            None
+                        }
+                    })
                 } else {
                     None
                 };
@@ -1269,9 +1380,7 @@ impl<'a> Checker<'a> {
                             .insert((name.clone(), depth));
                     }
                     if let Some(pa) = prior_alias {
-                        if pa != *name {
-                            st.aliases.insert(name.clone(), pa);
-                        }
+                        st.aliases.insert(name.clone(), pa);
                     }
                     for child in prior_children {
                         if child != *name {
@@ -1333,6 +1442,12 @@ impl<'a> Checker<'a> {
         match unwrap_parens(value) {
             Expr::Ident { name: src, .. } => src == name,
             Expr::Try { operand, .. } => self.value_reads_storage_of(st, operand, name),
+            Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: hy_syntax::UnOp::Addr,
+                operand,
+                ..
+            } => root_is(operand) || self.value_reads_storage_of(st, operand, name),
             Expr::Slice { base, .. } => {
                 root_is(unwrap_parens(base)) || self.value_reads_storage_of(st, base, name)
             }
@@ -1369,6 +1484,91 @@ impl<'a> Checker<'a> {
             }
             _ => false,
         }
+    }
+
+    /// Collect root identifiers that are borrowed via address-of (`&x`) inside `e`,
+    /// descending through composite literals, re-slices, and borrow-preserving
+    /// projections or calls (`[]*node{&n}[:]`, `[]*node{&n}[0]`, `append([]*node{}, &n)`),
+    /// while stopping at scalar-returning calls (`count_items(&n)` returning `int`).
+    pub(crate) fn collect_expr_addr_of_roots(&self, st: &FnState, e: &Expr, out: &mut Vec<String>) {
+        match unwrap_parens(e) {
+            Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: hy_syntax::UnOp::Addr,
+                operand,
+                ..
+            } => {
+                if let Some(id) = operand.root_ident() {
+                    out.push(id.to_string());
+                }
+                self.collect_expr_addr_of_roots(st, operand, out);
+            }
+            Expr::Try { operand, .. } | Expr::Move { operand, .. } => {
+                self.collect_expr_addr_of_roots(st, operand, out);
+            }
+            Expr::Slice { base, .. } => {
+                self.collect_expr_addr_of_roots(st, base, out);
+            }
+            Expr::Field { base, .. } | Expr::Index { base, .. } => {
+                let sh = self.shape_of_expr(st, e);
+                if field_borrow_kind(&sh).is_some() || matches!(sh, TypeShape::Unknown) {
+                    self.collect_expr_addr_of_roots(st, base, out);
+                }
+            }
+            Expr::Call { callee, args, .. } => {
+                let sh = self.shape_of_expr(st, e);
+                if field_borrow_kind(&sh).is_some() || matches!(sh, TypeShape::Unknown) {
+                    if let Expr::Field { base, .. } = unwrap_parens(callee) {
+                        self.collect_expr_addr_of_roots(st, base, out);
+                    }
+                    for a in args {
+                        self.collect_expr_addr_of_roots(st, &a.value, out);
+                    }
+                }
+            }
+            Expr::StructLit { fields, .. } => {
+                for f in fields {
+                    self.collect_expr_addr_of_roots(st, &f.value, out);
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    self.collect_expr_addr_of_roots(st, k, out);
+                    self.collect_expr_addr_of_roots(st, v, out);
+                }
+            }
+            Expr::SliceLit { items, .. } => {
+                for it in items {
+                    self.collect_expr_addr_of_roots(st, it, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn expr_carries_borrow(&self, st: &FnState, e: &Expr) -> bool {
+        let inner = unwrap_parens(e);
+        if as_addr_of(inner).is_some() || contains_addr_of_in_literal(inner) {
+            return true;
+        }
+        let shape = self.shape_of_expr(st, inner);
+        if field_borrow_kind(&shape).is_none() && !matches!(shape, TypeShape::Unknown) {
+            return false;
+        }
+        let mut addr_roots = Vec::new();
+        self.collect_expr_addr_of_roots(st, inner, &mut addr_roots);
+        if !addr_roots.is_empty() {
+            return true;
+        }
+        let mut ref_roots = Vec::new();
+        collect_ref_roots(inner, &mut ref_roots);
+        ref_roots.iter().any(|r| {
+            st.borrow_bindings.contains(r)
+                || st
+                    .loans
+                    .iter()
+                    .any(|l| matches!(&l.target, LoanTarget::MapSlot { binding, .. } if binding == r))
+        })
     }
 
 
@@ -1430,7 +1630,12 @@ impl<'a> Checker<'a> {
                 let mut idents = Vec::new();
                 collect_capture_idents_block(body, &mut bound, &mut idents);
                 for id in idents {
-                    if self.binding_may_share(st, &id) {
+                    if self.binding_may_share(st, &id)
+                        || self
+                            .lookup_binding(st, &id)
+                            .map(|b| !b.immutable && matches!(b.shape, TypeShape::Array(_)))
+                            .unwrap_or(false)
+                    {
                         st.share_edge(name, &id);
                     }
                 }
@@ -1484,18 +1689,20 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                let mut addr_roots = Vec::new();
-                collect_addr_of_roots(value, &mut addr_roots);
-                for root in addr_roots {
-                    if root != name {
-                        st.share_edge(name, &root);
-                        let origin = self
-                            .lookup_binding(st, &root)
-                            .and_then(|b| b.non_owned_origin.clone());
-                        if let Some(origin) = origin {
-                            if let Some(nb) = st.env_lookup_mut(name) {
-                                if nb.non_owned_origin.is_none() {
-                                    nb.non_owned_origin = Some(origin);
+                if field_borrow_kind(&result).is_some() || matches!(result, TypeShape::Unknown) || is_literal {
+                    let mut addr_roots = Vec::new();
+                    self.collect_expr_addr_of_roots(st, value, &mut addr_roots);
+                    for root in addr_roots {
+                        if root != name {
+                            st.share_edge(name, &root);
+                            let origin = self
+                                .lookup_binding(st, &root)
+                                .and_then(|b| b.non_owned_origin.clone());
+                            if let Some(origin) = origin {
+                                if let Some(nb) = st.env_lookup_mut(name) {
+                                    if nb.non_owned_origin.is_none() {
+                                        nb.non_owned_origin = Some(origin);
+                                    }
                                 }
                             }
                         }
@@ -1718,15 +1925,11 @@ impl<'a> Checker<'a> {
     /// so moving `p` freezes the underlying mutable binding `stats` (#33).
     /// pr-312: the alias recording descends into NESTED address-of operands
     /// inside composite literals (`p := stats{cpu: &usage}`) via
-    /// collect_addr_of_roots, not just the direct as_addr_of form.
+    /// collect_expr_addr_of_roots, not just the direct as_addr_of form.
     pub(crate) fn record_local_borrow_aliases(&self, st: &mut FnState, l: &LocalDecl) {
         if l.names.len() == l.values.len() {
             for (name, value) in l.names.iter().zip(l.values.iter()) {
-                let inner = unwrap_parens(value);
-                let is_borrow = as_addr_of(inner).is_some()
-                    || contains_addr_of_in_literal(inner)
-                    || matches!(inner, Expr::Ident { name: src, .. } if st.borrow_bindings.contains(src));
-                if is_borrow {
+                if self.expr_carries_borrow(st, value) {
                     st.borrow_bindings.insert(name.clone());
                 } else {
                     st.borrow_bindings.remove(name);
@@ -1737,7 +1940,7 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                     let mut addr_roots = Vec::new();
-                    collect_addr_of_roots(value, &mut addr_roots);
+                    self.collect_expr_addr_of_roots(st, value, &mut addr_roots);
                     for src in addr_roots {
                         if src != *name {
                             if let Some(b) = self.lookup_binding(st, &src) {
@@ -1765,12 +1968,9 @@ impl<'a> Checker<'a> {
     ) {
         if op == AssignOp::Assign && values.len() == targets.len() {
             for (t, v) in targets.iter().zip(values.iter()) {
+                let carries_borrow = self.expr_carries_borrow(st, v);
                 if let PlaceKind::Ident(name) = &t.kind {
-                    let inner = unwrap_parens(v);
-                    let is_borrow = as_addr_of(inner).is_some()
-                        || contains_addr_of_in_literal(inner)
-                        || matches!(inner, Expr::Ident { name: src, .. } if st.borrow_bindings.contains(src));
-                    if is_borrow {
+                    if carries_borrow {
                         st.borrow_bindings.insert(name.clone());
                     } else {
                         st.borrow_bindings.remove(name);
@@ -1781,13 +1981,32 @@ impl<'a> Checker<'a> {
                             continue;
                         }
                         let mut addr_roots = Vec::new();
-                        collect_addr_of_roots(v, &mut addr_roots);
+                        self.collect_expr_addr_of_roots(st, v, &mut addr_roots);
                         for src in addr_roots {
                             if src != *name {
                                 if let Some(b) = self.lookup_binding(st, &src) {
                                     if !b.shape.is_sendable_by_type() {
                                         st.aliases.insert(name.clone(), src);
                                         break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    let root = t.root();
+                    if !root.is_empty() && carries_borrow {
+                        st.borrow_bindings.insert(root.to_string());
+                        if move_operand_ident(v).is_none() {
+                            let mut addr_roots = Vec::new();
+                            self.collect_expr_addr_of_roots(st, v, &mut addr_roots);
+                            for src in addr_roots {
+                                if src != root {
+                                    if let Some(b) = self.lookup_binding(st, &src) {
+                                        if !b.shape.is_sendable_by_type() {
+                                            st.aliases.entry(root.to_string()).or_insert(src);
+                                            break;
+                                        }
                                     }
                                 }
                             }
@@ -1869,10 +2088,9 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Record may-share and alias edges for one target `name` of a multi-value
-    /// define or assignment (`h2, ok := alias_pair(h)`, `m, ok := buckets[k]`)
-    /// using that target's resolved `shape` (#75).
-    pub(crate) fn record_multi_value_share_and_alias(
+    /// Record may-share edges for one target `name` (or non-Ident root) of a
+    /// multi-value define or assignment using that target's resolved `shape`.
+    pub(crate) fn record_multi_value_may_share(
         &self,
         st: &mut FnState,
         name: &str,
@@ -1886,6 +2104,22 @@ impl<'a> Checker<'a> {
         collect_ref_roots(value, &mut roots);
         for root in &roots {
             if root == name {
+                let outer_may_share = !st.scopes.is_empty()
+                    && st
+                        .scopes
+                        .iter()
+                        .take(st.scopes.len().saturating_sub(1))
+                        .rev()
+                        .find_map(|s| s.get(name))
+                        .or_else(|| st.env.get(name))
+                        .map(|b| {
+                            self.shape_may_share(&b.shape)
+                                || self.expr_slices_addressable_array(st, value, root)
+                        })
+                        .unwrap_or(false);
+                if outer_may_share {
+                    st.share_edge(name, root);
+                }
                 continue;
             }
             if let Some(b) = self.lookup_binding(st, root) {
@@ -1895,14 +2129,87 @@ impl<'a> Checker<'a> {
                 {
                     continue;
                 }
-                if self.shape_may_share(&b.shape) {
+                if self.shape_may_share(&b.shape)
+                    || self.expr_slices_addressable_array(st, value, root)
+                {
                     st.share_edge(name, root);
                 }
             }
         }
+        if field_borrow_kind(shape).is_some() || matches!(shape, TypeShape::Unknown) {
+            let mut addr_roots = Vec::new();
+            self.collect_expr_addr_of_roots(st, value, &mut addr_roots);
+            for root in addr_roots {
+                if root != name {
+                    st.share_edge(name, &root);
+                    let origin = self
+                        .lookup_binding(st, &root)
+                        .and_then(|b| b.non_owned_origin.clone());
+                    if let Some(origin) = origin {
+                        if let Some(nb) = st.env_lookup_mut(name) {
+                            if nb.non_owned_origin.is_none() {
+                                nb.non_owned_origin = Some(origin);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(origin) = self.moved_non_owned_origin_in_expr(st, value) {
+            if let Some(nb) = st.env_lookup_mut(name) {
+                if nb.non_owned_origin.is_none() {
+                    nb.non_owned_origin = Some(origin);
+                }
+            }
+        }
+    }
+
+    /// Record may-share and alias edges for one target `name` of a multi-value
+    /// define or assignment (`h2, ok := alias_pair(h)`, `m, ok := buckets[k]`)
+    /// using that target's resolved `shape` (#75).
+    pub(crate) fn record_multi_value_share_and_alias(
+        &self,
+        st: &mut FnState,
+        name: &str,
+        shape: &TypeShape,
+        value: &Expr,
+    ) {
+        if !self.shape_may_share(shape) && !matches!(shape, TypeShape::Unknown) {
+            return;
+        }
+        self.record_multi_value_may_share(st, name, shape, value);
+        let mut roots = Vec::new();
+        collect_ref_roots(value, &mut roots);
         if shape.is_reference_alias() || matches!(shape, TypeShape::OwnHandle(_)) {
             for src in &roots {
                 if src == name {
+                    let outer_b = if !st.scopes.is_empty() {
+                        st.scopes
+                            .iter()
+                            .take(st.scopes.len().saturating_sub(1))
+                            .rev()
+                            .find_map(|s| s.get(name))
+                            .or_else(|| st.env.get(name))
+                            .cloned()
+                    } else {
+                        None
+                    };
+                    if let Some(ob) = outer_b {
+                        let ok = if matches!(shape, TypeShape::OwnHandle(_)) {
+                            self.shape_carries_handle(&ob.shape)
+                        } else {
+                            self.shape_may_share(&ob.shape)
+                        };
+                        if ok {
+                            st.aliases.insert(name.to_string(), src.clone());
+                            if let Some(origin) = ob.non_owned_origin {
+                                if let Some(nb) = st.env_lookup_mut(name) {
+                                    nb.non_owned_origin = Some(origin);
+                                }
+                            }
+                            break;
+                        }
+                    }
                     continue;
                 }
                 let matched = self.lookup_binding(st, src).map(|b| {
@@ -1921,13 +2228,6 @@ impl<'a> Checker<'a> {
                         }
                     }
                     break;
-                }
-            }
-        }
-        if let Some(origin) = self.moved_non_owned_origin_in_expr(st, value) {
-            if let Some(nb) = st.env_lookup_mut(name) {
-                if nb.non_owned_origin.is_none() {
-                    nb.non_owned_origin = Some(origin);
                 }
             }
         }
@@ -2197,14 +2497,17 @@ impl<'a> Checker<'a> {
         let mut pre_share_peers: Vec<String> = Vec::new();
         let mut pre_alias_root: Option<String> = None;
         for r in &roots {
-            if self.binding_may_share(st, r) {
+            if self.binding_may_share(st, r)
+                || self.expr_slices_addressable_array(st, subject, r)
+                || !st.share_group(r).is_empty()
+            {
                 pre_share_peers.push(r.clone());
                 pre_share_peers.extend(st.share_group(r));
             }
             if pre_alias_root.is_none()
                 && self
                     .lookup_binding(st, r)
-                    .map(|b| b.shape.is_reference_alias())
+                    .map(|b| self.shape_may_share(&b.shape))
                     .unwrap_or(false)
             {
                 pre_alias_root = Some(crate::freeze::resolve_alias(st, r));
@@ -2691,6 +2994,11 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
+                } else {
+                    let root = t.root();
+                    if !root.is_empty() && self.binding_may_share(st, root) {
+                        self.record_multi_value_may_share(st, root, &shape, &values[0]);
+                    }
                 }
             }
         }
@@ -2952,9 +3260,52 @@ impl<'a> Checker<'a> {
                                 cst.share_clear(name);
                                 self.record_may_share(&mut cst, name, v);
                                 self.record_alias(&mut cst, name, v);
+                            } else {
+                                let root = t.root();
+                                if !root.is_empty() && self.binding_may_share(&cst, root) {
+                                    self.record_may_share(&mut cst, root, v);
+                                }
                             }
                         }
                         self.record_assign_borrow_aliases(&mut cst, targets, *op, values);
+                    } else if *op == AssignOp::Assign && values.len() == 1 && targets.len() > 1 {
+                        let shapes = self.multi_value_shapes(&cst, &values[0], targets.len());
+                        let tys = self.multi_value_tys(&cst, &values[0], targets.len());
+                        for (i, ((t, shape), ty)) in
+                            targets.iter().zip(shapes).zip(tys).enumerate()
+                        {
+                            if is_const_write.get(i).copied().unwrap_or(false) {
+                                continue;
+                            }
+                            if let PlaceKind::Ident(name) = &t.kind {
+                                if let Some(b) = cst.env_lookup_mut(name) {
+                                    if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
+                                        b.shape = shape.clone();
+                                    }
+                                    if ty.is_some() || b.ty.is_none() {
+                                        b.ty = ty;
+                                    }
+                                }
+                                cst.aliases.remove(name);
+                                cst.share_clear(name);
+                                self.record_multi_value_share_and_alias(
+                                    &mut cst,
+                                    name,
+                                    &shape,
+                                    &values[0],
+                                );
+                            } else {
+                                let root = t.root();
+                                if !root.is_empty() && self.binding_may_share(&cst, root) {
+                                    self.record_multi_value_may_share(
+                                        &mut cst,
+                                        root,
+                                        &shape,
+                                        &values[0],
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
                 Stmt::For { kind, .. } => match kind {
@@ -3056,13 +3407,50 @@ impl<'a> Checker<'a> {
     /// initializer reads the storage of a `const` root is itself frozen
     /// (E3006 surface) — the same-stmt share-move form of a const write.
     fn process_closure_const_local(&self, st: &mut FnState, l: &LocalDecl) {
+        let immutable = l.kind == LocalKind::Const;
+        if l.values.len() == 1 && l.names.len() > 1 {
+            let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
+            let tys = self.multi_value_tys(st, &l.values[0], l.names.len());
+            let resolved: Vec<(String, TypeShape, Option<hy_syntax::TypeExpr>, bool)> = l
+                .names
+                .iter()
+                .zip(shapes)
+                .zip(tys)
+                .map(|((name, shape), ty)| {
+                    let (shape, ty) = match (&l.ty, shape) {
+                        (Some(t), TypeShape::Unknown) => {
+                            (self.shape_of_type(t), Some(t.clone()))
+                        }
+                        (_, s) => (s, ty.or_else(|| l.ty.clone())),
+                    };
+                    let shadowed_const = self.shape_may_share(&shape)
+                        && self.value_reads_storage_of(st, &l.values[0], name)
+                        && self
+                            .const_write_root(
+                                st,
+                                &Place {
+                                    kind: PlaceKind::Ident(name.clone()),
+                                    span: l.values[0].span(),
+                                },
+                            )
+                            .is_some();
+                    (name.clone(), shape, ty, immutable || shadowed_const)
+                })
+                .collect();
+            for (name, shape, ty, is_imm) in resolved {
+                self.define_binding(st, &name, shape.clone(), ty, is_imm, false);
+                if move_operand_ident(&l.values[0]).is_none() {
+                    self.record_multi_value_share_and_alias(st, &name, &shape, &l.values[0]);
+                }
+            }
+            return;
+        }
         for (name, value) in l.names.iter().zip(l.values.iter()) {
             let inferred = self.shape_of_expr(st, value);
             let (shape, ty) = match (&l.ty, inferred) {
                 (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
                 (_, inferred) => (inferred, self.ty_of_expr(st, value).or_else(|| l.ty.clone())),
             };
-            let immutable = l.kind == LocalKind::Const;
             let shadowed_const = self.shape_may_share(&shape)
                 && self.value_reads_storage_of(st, value, name)
                 && self
@@ -3370,6 +3758,27 @@ impl<'a> Checker<'a> {
                             } else {
                                 aliases.remove(name);
                             }
+                        } else {
+                            let root = t.root();
+                            if !root.is_empty() && Self::expr_reaches_const_aliases(v, aliases) {
+                                aliases.insert(root.to_string());
+                            }
+                        }
+                    }
+                } else if values.len() == 1 && targets.len() > 1 {
+                    let reaches = Self::expr_reaches_const_aliases(&values[0], aliases);
+                    for t in targets {
+                        if let PlaceKind::Ident(name) = &t.kind {
+                            if reaches {
+                                aliases.insert(name.clone());
+                            } else {
+                                aliases.remove(name);
+                            }
+                        } else {
+                            let root = t.root();
+                            if !root.is_empty() && reaches {
+                                aliases.insert(root.to_string());
+                            }
                         }
                     }
                 }
@@ -3387,6 +3796,15 @@ impl<'a> Checker<'a> {
                 } else if l.names.len() == l.values.len() {
                     for (name, v) in l.names.iter().zip(l.values.iter()) {
                         if Self::expr_reaches_const_aliases(v, aliases) {
+                            aliases.insert(name.clone());
+                        } else {
+                            aliases.remove(name);
+                        }
+                    }
+                } else if l.values.len() == 1 && l.names.len() > 1 {
+                    let reaches = Self::expr_reaches_const_aliases(&l.values[0], aliases);
+                    for name in &l.names {
+                        if reaches {
                             aliases.insert(name.clone());
                         } else {
                             aliases.remove(name);
@@ -3689,7 +4107,11 @@ impl<'a> Checker<'a> {
                 _ => false,
             };
             // O2/LOAN-ESCAPE: a borrow returned from a function
-            if as_addr_of(v).is_some() || contains_addr_of_in_literal(v) || is_bound_borrow {
+            if as_addr_of(v).is_some()
+                || contains_addr_of_in_literal(v)
+                || is_bound_borrow
+                || self.expr_carries_borrow(st, v)
+            {
                 let msg = "a borrow cannot be returned from a function".to_string();
                 let notes = vec![
                     format!(
@@ -3739,7 +4161,7 @@ fn contains_addr_of_in_literal(e: &Expr) -> bool {
 /// Locals defined inside the body are deliberately NOT excluded: a name
 /// that also exists outside resolves to the outer binding on other paths,
 /// and an extra may-share edge is conservative in the safe direction.
-fn collect_capture_idents_block(
+pub(crate) fn collect_capture_idents_block(
     block: &hy_syntax::Block,
     bound: &mut std::collections::HashSet<String>,
     out: &mut Vec<String>,
