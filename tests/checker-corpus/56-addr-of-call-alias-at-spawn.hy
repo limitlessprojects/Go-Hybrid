@@ -17,7 +17,7 @@
 //   [S2] `p.m["main"]++` after it — a WRITE through the laundered pointer.
 //
 // ---- Expected verdict ----
-// EXPECTED-VERDICT: REJECT
+// EXPECTED-VERDICT: REJECT A1b
 //   REJECT — A1b/HYB-E3003. Accepting this program is a P0: the emitted Go
 //   spawns `worker(h)` and keeps writing the same map through `p`
 //   (`fatal error: concurrent map read and map write`, reproduced 5/5).
