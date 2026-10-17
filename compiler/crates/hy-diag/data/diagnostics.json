@@ -191,6 +191,20 @@
       "rule": "BUILDABLE"
     },
     {
+      "code": "HYB-E2009",
+      "name": "range-non-iterable",
+      "category": "type",
+      "severity": "error",
+      "title": "`for x in e` over a value that is not iterable",
+      "summary": "LX13 pins the iterable set: slices, arrays, strings, maps, and channels (integer counting uses `for i in 0..n`). A `for x in e` whose operand resolves to an `int`, `bool`, struct, atomic, void call, or non-array pointer lowers to a Go `range` that fails `go build` with `cannot range over`, violating the accepted-should-emit-buildable-Go contract (issue #411).",
+      "fixits": [
+        "iterate a slice, array, string, map, or channel",
+        "to count, use an integer range: `for i in 0..n`"
+      ],
+      "example": "x := 5; for v in x { }  // reject: HYB-E2009 — cannot range over an int",
+      "rule": "BUILDABLE"
+    },
+    {
       "code": "HYB-E3001",
       "name": "not-sendable-spawn",
       "category": "ownership-sendability",
