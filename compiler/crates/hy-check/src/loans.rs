@@ -293,6 +293,34 @@ impl<'a> Checker<'a> {
             }
             Resolved::None => {
                 self.check_call_const_writes(st, cr, &HashSet::new());
+                if let Some((id, mv)) = self.fnlit_captured_move(st, cr.callee) {
+                    self.emit_use_after_move(
+                        st,
+                        &walk::Use {
+                            name: id,
+                            span: cr.span,
+                            is_write: false,
+                            via_move: false,
+                            via_addr: false,
+                        },
+                        &mv,
+                    );
+                }
+            }
+        }
+        for a in cr.args {
+            if let Some((id, mv)) = self.fnlit_captured_move(st, &a.value) {
+                self.emit_use_after_move(
+                    st,
+                    &walk::Use {
+                        name: id,
+                        span: a.span,
+                        is_write: false,
+                        via_move: false,
+                        via_addr: false,
+                    },
+                    &mv,
+                );
             }
         }
     }
@@ -1317,13 +1345,20 @@ impl<'a> Checker<'a> {
                     !matches!(unwrap_parens(&a.value), Expr::Move { .. })
                         && (root_is(&a.value) || self.value_reads_storage_of(st, &a.value, name))
                 });
-                let via_recv = match unwrap_parens(callee) {
+                let via_callee = match unwrap_parens(callee) {
                     Expr::Field { base, .. } => {
                         root_is(base) || self.value_reads_storage_of(st, base, name)
                     }
-                    _ => false,
+                    other => root_is(other) || self.value_reads_storage_of(st, other, name),
                 };
-                via_arg || via_recv
+                via_arg || via_callee
+            }
+            Expr::FnLit { params, body, .. } => {
+                let bound: std::collections::HashSet<String> =
+                    params.iter().map(|p| p.name.clone()).collect();
+                let mut idents = Vec::new();
+                collect_capture_idents_block(body, &bound, &mut idents);
+                idents.iter().any(|id| id == name)
             }
             _ => false,
         }
@@ -1337,6 +1372,33 @@ impl<'a> Checker<'a> {
         self.lookup_binding(st, name)
             .map(|b| self.shape_may_share(&b.shape))
             .unwrap_or(false)
+    }
+
+    /// If any `Expr::FnLit` inside `value` captures an outer non-sendable
+    /// binding that has already been moved at this point in the function,
+    /// return that `MoveInfo` so the newly defined/rebound closure (or
+    /// composite wrapping it) is born frozen.
+    pub(crate) fn fnlit_captured_move(&self, st: &FnState, value: &Expr) -> Option<(String, crate::model::MoveInfo)> {
+        let mut fnlits = Vec::new();
+        walk::expr_fnlits(value, &mut fnlits);
+        for flit in fnlits {
+            if let Expr::FnLit { params, body, .. } = unwrap_parens(flit) {
+                let bound: std::collections::HashSet<String> =
+                    params.iter().map(|p| p.name.clone()).collect();
+                let mut idents = Vec::new();
+                collect_capture_idents_block(body, &bound, &mut idents);
+                for id in idents {
+                    if let Some(b) = self.lookup_binding(st, &id) {
+                        if !b.shape.is_sendable_by_type() {
+                            if let Some(mv) = &b.moved {
+                                return Some((id, mv.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Record may-share edges for a define/rebind `name <op> value` (#27).
@@ -1386,10 +1448,17 @@ impl<'a> Checker<'a> {
                     params.iter().map(|p| p.name.clone()).collect();
                 bound.extend(results.iter().filter_map(|r| r.name.clone()));
                 let mut idents = Vec::new();
-                collect_capture_idents_block(body, &mut bound, &mut idents);
+                collect_capture_idents_block(body, &bound, &mut idents);
                 for id in idents {
                     if self.binding_may_share(st, &id) {
                         st.share_edge(name, &id);
+                    }
+                }
+                if let Some((_, mv)) = self.fnlit_captured_move(st, value) {
+                    if let Some(nb) = st.env_lookup_mut(name) {
+                        if nb.moved.is_none() {
+                            nb.moved = Some(mv);
+                        }
                     }
                 }
             }
@@ -1435,6 +1504,13 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                if let Some((_, mv)) = self.fnlit_captured_move(st, value) {
+                    if let Some(nb) = st.env_lookup_mut(name) {
+                        if nb.moved.is_none() {
+                            nb.moved = Some(mv);
+                        }
+                    }
+                }
                 if let Some(origin) = self.moved_non_owned_origin_in_expr(st, value) {
                     if let Some(nb) = st.env_lookup_mut(name) {
                         if nb.non_owned_origin.is_none() {
@@ -1462,7 +1538,6 @@ impl<'a> Checker<'a> {
             }
         }
     }
-
     /// True when `value` contains a slice whose base is an addressable
     /// array rooted at `root`. A call that returns an array by value
     /// (`clone(a)[:]`) is a copy: the slice base is the call, so it does
@@ -1541,11 +1616,6 @@ impl<'a> Checker<'a> {
         }
         expr.root_ident()
     }
-    // `record_literal_ref` (pr-28's composite-literal recursion) is gone:
-    // `record_may_share` now walks literals, calls and views with
-    // `collect_ref_roots`, so a literal field that embeds a live binding —
-    // bare (`holder{m: agg}`), projected (`holder{m: h1.m}`) or produced by
-    // a call (`wrap{items: same(agg)}`) — is covered by one collector.
 
     /// Record the may-share edge created by the builtin `copy(dst, src)`
     /// (#178). For a slice whose ELEMENT carries mutable GC storage
@@ -1603,7 +1673,10 @@ impl<'a> Checker<'a> {
             Expr::Ident { name: src, .. } => {
                 if let Some(b) = self.lookup_binding(st, src) {
                     let src_origin = b.non_owned_origin.clone();
-                    if b.shape.is_reference_alias() || b.shape.is_handle() {
+                    if b.shape.is_reference_alias()
+                        || b.shape.is_handle()
+                        || matches!(b.shape, TypeShape::Closure)
+                    {
                         st.aliases.insert(name.to_string(), src.clone());
                         if let Some(origin) = src_origin {
                             if let Some(nb) = st.env_lookup_mut(name) {
@@ -1627,7 +1700,7 @@ impl<'a> Checker<'a> {
             other => {
                 let other_shape = self.shape_of_expr(st, unwrap_parens(other));
                 if other_shape.is_reference_alias()
-                    || matches!(other_shape, TypeShape::OwnHandle(_))
+                    || matches!(other_shape, TypeShape::OwnHandle(_) | TypeShape::Closure)
                 {
                     let mut roots = Vec::new();
                     collect_ref_roots(value, &mut roots);
@@ -1638,8 +1711,11 @@ impl<'a> Checker<'a> {
                         let matched = self.lookup_binding(st, &src).map(|b| {
                             let ok = if matches!(other_shape, TypeShape::OwnHandle(_)) {
                                 self.shape_carries_handle(&b.shape)
+                            } else if self.shape_holds_closure(&other_shape, &mut Vec::new()) {
+                                self.shape_holds_closure(&b.shape, &mut Vec::new())
                             } else {
                                 b.shape.is_reference_alias()
+                                    || matches!(b.shape, TypeShape::Closure)
                             };
                             (ok, b.non_owned_origin.clone())
                         });
@@ -3486,13 +3562,14 @@ fn contains_addr_of_in_literal(e: &Expr) -> bool {
 /// Locals defined inside the body are deliberately NOT excluded: a name
 /// that also exists outside resolves to the outer binding on other paths,
 /// and an extra may-share edge is conservative in the safe direction.
-fn collect_capture_idents_block(
+pub(crate) fn collect_capture_idents_block(
     block: &hy_syntax::Block,
-    bound: &mut std::collections::HashSet<String>,
+    bound: &std::collections::HashSet<String>,
     out: &mut Vec<String>,
 ) {
+    let mut block_bound = bound.clone();
     for s in &block.stmts {
-        collect_capture_idents_stmt(s, bound, out);
+        collect_capture_idents_stmt(s, &mut block_bound, out);
     }
 }
 
@@ -3505,6 +3582,9 @@ fn collect_capture_idents_stmt(
         hy_syntax::Stmt::Local(l) => {
             for v in &l.values {
                 collect_capture_idents_expr(v, bound, out);
+            }
+            for n in &l.names {
+                bound.insert(n.clone());
             }
         }
         hy_syntax::Stmt::Assign { targets, values, .. } => {
@@ -3527,30 +3607,37 @@ fn collect_capture_idents_stmt(
             otherwise,
             ..
         } => {
+            let mut if_bound = bound.clone();
             if let Some(i) = init {
-                collect_capture_idents_stmt(i, bound, out);
+                collect_capture_idents_stmt(i, &mut if_bound, out);
             }
-            collect_capture_idents_expr(cond, bound, out);
-            collect_capture_idents_block(then, bound, out);
+            collect_capture_idents_expr(cond, &mut if_bound, out);
+            collect_capture_idents_block(then, &if_bound, out);
             if let Some(o) = otherwise {
-                collect_capture_idents_stmt(o, bound, out);
+                let mut else_bound = if_bound;
+                collect_capture_idents_stmt(o, &mut else_bound, out);
             }
         }
         hy_syntax::Stmt::For { kind, body, .. } => {
+            let mut for_bound = bound.clone();
             match kind {
                 hy_syntax::ForKind::While { cond } => {
-                    collect_capture_idents_expr(cond, bound, out)
+                    collect_capture_idents_expr(cond, &mut for_bound, out)
                 }
-                hy_syntax::ForKind::Range { lo, hi, .. } => {
-                    collect_capture_idents_expr(lo, bound, out);
-                    collect_capture_idents_expr(hi, bound, out);
+                hy_syntax::ForKind::Range { var, lo, hi, .. } => {
+                    collect_capture_idents_expr(lo, &mut for_bound, out);
+                    collect_capture_idents_expr(hi, &mut for_bound, out);
+                    for_bound.insert(var.clone());
                 }
-                hy_syntax::ForKind::Iterate { expr, .. } => {
-                    collect_capture_idents_expr(expr, bound, out)
+                hy_syntax::ForKind::Iterate { vars, expr } => {
+                    collect_capture_idents_expr(expr, &mut for_bound, out);
+                    for v in vars {
+                        for_bound.insert(v.clone());
+                    }
                 }
                 hy_syntax::ForKind::Infinite => {}
             }
-            collect_capture_idents_block(body, bound, out);
+            collect_capture_idents_block(body, &for_bound, out);
         }
         hy_syntax::Stmt::Return { values, .. } => {
             for v in values {
@@ -3578,17 +3665,21 @@ fn collect_capture_idents_stmt(
         hy_syntax::Stmt::Block { block, .. } => collect_capture_idents_block(block, bound, out),
         hy_syntax::Stmt::Select { arms, .. } => {
             for arm in arms {
+                let mut arm_bound = bound.clone();
                 match &arm.kind {
                     hy_syntax::SelectArmKind::Send { chan, value } => {
-                        collect_capture_idents_expr(chan, bound, out);
-                        collect_capture_idents_expr(value, bound, out);
+                        collect_capture_idents_expr(chan, &mut arm_bound, out);
+                        collect_capture_idents_expr(value, &mut arm_bound, out);
                     }
-                    hy_syntax::SelectArmKind::Recv { chan, .. } => {
-                        collect_capture_idents_expr(chan, bound, out)
+                    hy_syntax::SelectArmKind::Recv { names, chan } => {
+                        collect_capture_idents_expr(chan, &mut arm_bound, out);
+                        for n in names {
+                            arm_bound.insert(n.clone());
+                        }
                     }
                     hy_syntax::SelectArmKind::Default => {}
                 }
-                collect_capture_idents_block(&arm.body, bound, out);
+                collect_capture_idents_block(&arm.body, &arm_bound, out);
             }
         }
     }
@@ -3620,7 +3711,7 @@ fn collect_capture_idents_expr(
                     nested.insert(name.clone());
                 }
             }
-            collect_capture_idents_block(body, &mut nested, out);
+            collect_capture_idents_block(body, &nested, out);
         }
         Expr::Lit { .. } => {}
         Expr::Interp { parts, .. } => {

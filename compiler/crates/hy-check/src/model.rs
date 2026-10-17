@@ -616,15 +616,20 @@ pub(crate) fn collect_ref_roots(e: &Expr, out: &mut Vec<String>) {
         Expr::Slice { base, .. } => collect_ref_roots(base, out),
         Expr::Field { base, .. } => collect_ref_roots(base, out),
         Expr::Index { base, .. } => collect_ref_roots(base, out),
+        Expr::FnLit { params, body, .. } => {
+            let bound: std::collections::HashSet<String> =
+                params.iter().map(|p| p.name.clone()).collect();
+            crate::loans::collect_capture_idents_block(body, &bound, out);
+        }
         Expr::Call { callee, args, .. } => {
             for a in args {
                 collect_ref_roots(&a.value, out);
             }
             // `x := r.method(...)` — the receiver is the callee's base, not a
             // call argument, and a method can hand back interior storage.
-            if let Expr::Field { base, .. } = unwrap_parens(callee) {
-                collect_ref_roots(base, out);
-            }
+            // Likewise `x := get_m()` or `x := (fn() map[string]int { return m })()`
+            // can return storage captured by a closure callee.
+            collect_ref_roots(callee, out);
         }
         Expr::StructLit { fields, .. } => {
             for f in fields {
