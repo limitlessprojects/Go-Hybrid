@@ -150,6 +150,62 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
     }
 }
 
+/// Static result count of a foreign package-level call returning multiple values in Go.
+pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
+    match (pkg, method) {
+        (
+            "strconv",
+            "parse_int"
+                | "parse_uint"
+                | "parse_float"
+                | "parse_bool"
+                | "parse_complex"
+                | "atoi"
+                | "ParseInt"
+                | "ParseUint"
+                | "ParseFloat"
+                | "ParseBool"
+                | "ParseComplex"
+                | "Atoi",
+        ) => Some(2),
+        (
+            "os",
+            "open"
+                | "create"
+                | "read_file"
+                | "write_file"
+                | "getwd"
+                | "user_home_dir"
+                | "user_cache_dir"
+                | "executable"
+                | "lookup_env"
+                | "stat"
+                | "lstat"
+                | "Open"
+                | "Create"
+                | "ReadFile"
+                | "WriteFile"
+                | "Getwd"
+                | "UserHomeDir"
+                | "UserCacheDir"
+                | "Executable"
+                | "LookupEnv"
+                | "Stat"
+                | "Lstat",
+        ) => Some(2),
+        (
+            "io",
+            "read_all"
+                | "read_full"
+                | "read_at_least"
+                | "ReadAll"
+                | "ReadFull"
+                | "ReadAtLeast",
+        ) => Some(2),
+        _ => None,
+    }
+}
+
 /// Mode of a method call on a typed receiver, keyed by the receiver's
 /// boundary type name ("serde_json.value", "flate2.writer", "atomic", ...).
 pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {

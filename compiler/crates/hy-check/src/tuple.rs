@@ -7,17 +7,17 @@
 //! 1 variable but minmax returns 2 values`. Accepted programs must emit
 //! buildable Go, so the binding is rejected here, before emission.
 //!
-//! Scope (narrow on purpose — fire only on a mismatch we are certain of):
+//! Scope:
 //! a define / `let` / `var` / plain `=` assignment whose single right-hand
-//! side is a direct call to a file-local, non-shadowed top-level function
-//! declaring two or more results, with a target count that differs from
-//! the result count. `?`-unwrapped calls, method calls, package calls,
-//! closures and foreign bindings stay permissive (their result counts are
-//! not known here).
+//! side is a call declaring two or more results, with a target count that differs from
+//! the result count. Covers direct top-level fn calls, fn-value bindings / aliases,
+//! declared closures, and curated foreign package calls. `?`-unwrapped calls stay
+//! permissive (unwrapping the error produces a single value).
 
+use crate::foreign;
 use crate::model::{unwrap_parens, Checker, FnState};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::{AssignOp, Expr, Stmt};
+use hy_syntax::{AssignOp, Expr, Stmt, TypeExpr};
 
 impl<'a> Checker<'a> {
     /// Pass-B entry, called once per flattened statement (nested block
@@ -57,19 +57,55 @@ impl<'a> Checker<'a> {
         );
     }
 
-    /// `Some((callee, result count))` when `expr` is a direct call to a
-    /// top-level function of this file that no local binding shadows.
+    /// `Some((callee, result count))` when `expr` is a direct or indirect call
+    /// with statically known result count.
     fn static_result_count(&self, st: &FnState, expr: &Expr) -> Option<(String, usize)> {
         let Expr::Call { callee, .. } = unwrap_parens(expr) else {
             return None;
         };
-        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
-            return None;
-        };
-        if self.lookup_binding(st, name).is_some() {
-            return None; // shadowed by a local — not a static fn call
+        match unwrap_parens(callee) {
+            Expr::Ident { name, .. } => {
+                // 1. Check local bindings (fn values, closures, aliases)
+                if let Some(b) = self.lookup_binding(st, name) {
+                    if let Some(TypeExpr::Fn { results, .. }) = &b.ty {
+                        return Some((name.clone(), results.len()));
+                    }
+                    let root = crate::freeze::resolve_alias(st, name);
+                    if let Some(decl) = self.fns.get(root.as_str()) {
+                        return Some((name.clone(), decl.results.len()));
+                    }
+                    if let Some(rb) = self.lookup_binding(st, &root) {
+                        if let Some(TypeExpr::Fn { results, .. }) = &rb.ty {
+                            return Some((name.clone(), results.len()));
+                        }
+                    }
+                    return None;
+                }
+                // 2. Direct call to file-local top-level function
+                if let Some(decl) = self.fns.get(name.as_str()) {
+                    return Some((name.clone(), decl.results.len()));
+                }
+                None
+            }
+            Expr::FnLit { results, .. } => {
+                Some(("fn".to_string(), results.len()))
+            }
+            Expr::Field { base, name: method_name, .. } => {
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_binding(st, pkg).is_none() {
+                        if let Some(count) = foreign::package_result_count(pkg.as_str(), method_name.as_str()) {
+                            return Some((format!("{pkg}.{method_name}"), count));
+                        }
+                    }
+                }
+                None
+            }
+            _ => {
+                if let Some(TypeExpr::Fn { results, .. }) = self.ty_of_expr(st, callee) {
+                    return Some(("fn".to_string(), results.len()));
+                }
+                None
+            }
         }
-        let decl = self.fns.get(name.as_str())?;
-        Some((name.clone(), decl.results.len()))
     }
 }

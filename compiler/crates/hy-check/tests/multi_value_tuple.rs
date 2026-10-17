@@ -98,3 +98,72 @@ fn local_binding_shadowing_the_fn_name_stays_permissive() {
         r.diagnostics
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #380: HYB-E2002 (T23) bypassed through fn-value binding / foreign call
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fn_value_binding_single_define_is_rejected_e2002() {
+    let r = check(
+        "fn mm2(a int, b int) (int, int) {\n    return a + 1, b + 1\n}\n\nfn main() {\n    mm := mm2\n    p := mm(3, 9)\n    fmt.println(p)\n}\n",
+    );
+    assert_eq!(codes(&r), vec!["HYB-E2002".to_string()]);
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn fn_value_binding_var_and_assign_rejected_e2002() {
+    let r = check(
+        "fn mm2(a int, b int) (int, int) {\n    return a + 1, b + 1\n}\n\nfn main() {\n    mm := mm2\n    var p int\n    p = mm(3, 9)\n    fmt.println(p)\n}\n",
+    );
+    assert_eq!(codes(&r), vec!["HYB-E2002".to_string()]);
+
+    let r2 = check(
+        "fn mm2(a int, b int) (int, int) {\n    return a + 1, b + 1\n}\n\nfn main() {\n    mm := mm2\n    var p = mm(3, 9)\n    fmt.println(p)\n}\n",
+    );
+    assert_eq!(codes(&r2), vec!["HYB-E2002".to_string()]);
+}
+
+#[test]
+fn declared_closure_single_define_is_rejected_e2002() {
+    let r = check(
+        "fn main() {\n    mm := fn(a int, b int) (int, int) { return a, b }\n    p := mm(3, 9)\n    fmt.println(p)\n}\n",
+    );
+    assert_eq!(codes(&r), vec!["HYB-E2002".to_string()]);
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn foreign_call_single_define_is_rejected_e2002() {
+    let r = check(
+        "import \"strconv\"\n\nfn main() {\n    n := strconv.parse_int(\"123\", 10, 64)\n    fmt.println(n)\n}\n",
+    );
+    assert_eq!(codes(&r), vec!["HYB-E2002".to_string()]);
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn fn_value_and_foreign_call_positive_controls_are_accepted() {
+    // 1. Destructuring multi-value results from fn-value binding is accepted
+    let r1 = check(
+        "fn mm2(a int, b int) (int, int) {\n    return a + 1, b + 1\n}\n\nfn main() {\n    mm := mm2\n    a, b := mm(3, 9)\n    fmt.println(\"{a} {b}\")\n}\n",
+    );
+    assert!(codes(&r1).is_empty(), "unexpected errors: {:?}", r1.diagnostics);
+    assert_eq!(r1.verdict, Verdict::Accept);
+
+    // 2. Destructuring multi-value results from foreign call is accepted
+    let r2 = check(
+        "import \"strconv\"\n\nfn main() {\n    n, err := strconv.parse_int(\"123\", 10, 64)\n    fmt.println(\"{n}\")\n    _ = err\n}\n",
+    );
+    assert!(codes(&r2).is_empty(), "unexpected errors: {:?}", r2.diagnostics);
+    assert_eq!(r2.verdict, Verdict::Accept);
+
+    // 3. Foreign call unwrapped with ? produces 1 value and is accepted
+    let r3 = check(
+        "import \"strconv\"\n\nfn main() {\n    n := strconv.atoi(\"123\")?\n    fmt.println(n)\n}\n",
+    );
+    assert!(codes(&r3).is_empty(), "unexpected errors: {:?}", r3.diagnostics);
+    assert_eq!(r3.verdict, Verdict::Accept);
+}
+

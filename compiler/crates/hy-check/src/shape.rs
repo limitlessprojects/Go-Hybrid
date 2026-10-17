@@ -188,10 +188,15 @@ impl<'a> Checker<'a> {
 
     pub(crate) fn shape_of_expr(&self, st: &FnState, expr: &Expr) -> TypeShape {
         match expr {
-            Expr::Ident { name, .. } => self
-                .lookup_binding(st, name)
-                .map(|b| b.shape.clone())
-                .unwrap_or(TypeShape::Unknown),
+            Expr::Ident { name, .. } => {
+                if let Some(b) = self.lookup_binding(st, name) {
+                    b.shape.clone()
+                } else if self.fns.contains_key(name.as_str()) {
+                    TypeShape::Closure
+                } else {
+                    TypeShape::Unknown
+                }
+            }
             Expr::Lit { kind, .. } => match kind {
                 hy_syntax::LitKind::Int(_)
                 | hy_syntax::LitKind::Float(_)
@@ -474,6 +479,13 @@ impl<'a> Checker<'a> {
                 {
                     return Some(TypeExpr::Named {
                         name: ename.clone(),
+                        span: *span,
+                    });
+                }
+                if let Some(decl) = self.fns.get(name.as_str()) {
+                    return Some(TypeExpr::Fn {
+                        params: decl.params.clone(),
+                        results: decl.results.iter().map(|r| r.ty.clone()).collect(),
                         span: *span,
                     });
                 }
