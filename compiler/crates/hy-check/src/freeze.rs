@@ -259,7 +259,16 @@ impl<'a> Checker<'a> {
         // so union in the may-share connected component of every member.
         let seeded = members.clone();
         for m in seeded {
-            members.extend(st.share_group(&m));
+            for peer in st.share_group(&m) {
+                let proot = resolve_alias(st, &peer);
+                members.push(peer);
+                members.push(proot.clone());
+                for a in st.aliases.keys() {
+                    if resolve_alias(st, a) == proot {
+                        members.push(a.clone());
+                    }
+                }
+            }
         }
         members.sort();
         members.dedup();
@@ -551,8 +560,8 @@ impl<'a> Checker<'a> {
     /// moved at the end of the body would be used or moved again on the next
     /// iteration. Walk the loop's statements along the back-edge with those
     /// loop-carried moves active; local definitions (`chunk := ...`, corpus 15)
-    /// live in inner scopes and are discarded when `scopes` is truncated to
-    /// `outer_depth`.
+    /// live in inner scopes and are popped via `scope_pop()` back to
+    /// `outer_depth` so outer alias/may-share freeze propagation runs.
     pub(crate) fn check_loop_backedge(
         &mut self,
         st: &FnState,
@@ -566,7 +575,8 @@ impl<'a> Checker<'a> {
         if matches!(
             loop_body.stmts.last(),
             Some(hy_syntax::Stmt::Break { .. } | hy_syntax::Stmt::Return { .. })
-        ) {
+        ) && !Self::block_has_direct_continue(loop_body)
+        {
             return;
         }
 
@@ -588,22 +598,28 @@ impl<'a> Checker<'a> {
         }
 
         let mut iter_st = st.clone();
-        iter_st.scopes.truncate(outer_depth);
+        while iter_st.scopes.len() > outer_depth {
+            iter_st.scope_pop();
+        }
         let mut any_loop_carried = false;
-        for (name, b) in iter_st
+        let outer_names: Vec<String> = iter_st
             .env
-            .iter_mut()
-            .chain(iter_st.scopes.iter_mut().flat_map(|s| s.iter_mut()))
-        {
-            if b.moved.is_some() {
-                let root = resolve_alias(st, name);
-                if pre_moved.contains(name)
-                    || reported_backedge.contains(&root)
-                    || call_local_roots.contains(&root)
-                {
-                    b.moved = None;
-                } else {
-                    any_loop_carried = true;
+            .keys()
+            .chain(iter_st.scopes.iter().flat_map(|s| s.keys()))
+            .cloned()
+            .collect();
+        for name in outer_names {
+            let root = resolve_alias(&iter_st, &name);
+            let clear = pre_moved.contains(&name)
+                || reported_backedge.contains(&root)
+                || call_local_roots.contains(&root);
+            if let Some(b) = iter_st.env_lookup_mut(&name) {
+                if b.moved.is_some() {
+                    if clear {
+                        b.moved = None;
+                    } else {
+                        any_loop_carried = true;
+                    }
                 }
             }
         }
@@ -612,7 +628,9 @@ impl<'a> Checker<'a> {
         }
 
         let mut shadow_scopes: Vec<HashSet<String>> = vec![HashSet::new()];
-        if let Some((_, hy_syntax::Stmt::For { kind, .. })) = loop_stmts.first().map(|(s, idx)| (*idx, *s)) {
+        if let Some((_, hy_syntax::Stmt::For { kind, .. })) =
+            loop_stmts.first().map(|(s, idx)| (*idx, *s))
+        {
             match kind {
                 hy_syntax::ForKind::Range { var, .. } => {
                     shadow_scopes[0].insert(var.clone());
@@ -684,6 +702,12 @@ impl<'a> Checker<'a> {
                     } => {
                         crate::walk::expr_uses(hi, &mut uses);
                     }
+                    hy_syntax::Stmt::For {
+                        kind: hy_syntax::ForKind::Iterate { expr, .. },
+                        ..
+                    } => {
+                        crate::walk::expr_uses(expr, &mut uses);
+                    }
                     _ => {}
                 }
             } else {
@@ -710,7 +734,16 @@ impl<'a> Checker<'a> {
                 }
                 let seeded = clear_names.clone();
                 for m in seeded {
-                    clear_names.extend(iter_st.share_group(&m));
+                    for peer in iter_st.share_group(&m) {
+                        let proot = resolve_alias(&iter_st, &peer);
+                        clear_names.push(peer);
+                        clear_names.push(proot.clone());
+                        for a in iter_st.aliases.keys() {
+                            if resolve_alias(&iter_st, a) == proot {
+                                clear_names.push(a.clone());
+                            }
+                        }
+                    }
                 }
                 for k in &clear_names {
                     if let Some(b) = iter_st.env_lookup_mut(k) {
@@ -835,5 +868,39 @@ impl<'a> Checker<'a> {
             Expr::SliceLit { items, .. } if items.is_empty()
         )
     }
+
+    /// True if `block` contains a `continue` statement targeting the current
+    /// enclosing loop (nested `for` loops do not propagate their inner
+    /// `continue` statements outward).
+    fn block_has_direct_continue(block: &hy_syntax::Block) -> bool {
+        block.stmts.iter().any(Self::stmt_has_direct_continue)
+    }
+
+    fn stmt_has_direct_continue(stmt: &hy_syntax::Stmt) -> bool {
+        match stmt {
+            hy_syntax::Stmt::Continue { .. } => true,
+            hy_syntax::Stmt::If {
+                then, otherwise, ..
+            } => {
+                Self::block_has_direct_continue(then)
+                    || otherwise
+                        .as_deref()
+                        .map(Self::stmt_has_direct_continue)
+                        .unwrap_or(false)
+            }
+            hy_syntax::Stmt::Block { block, .. } | hy_syntax::Stmt::Managed { body: block, .. } => {
+                Self::block_has_direct_continue(block)
+            }
+            hy_syntax::Stmt::Match { arms, .. } => arms
+                .iter()
+                .any(|arm| Self::block_has_direct_continue(&arm.body)),
+            hy_syntax::Stmt::Select { arms, .. } => arms
+                .iter()
+                .any(|arm| Self::block_has_direct_continue(&arm.body)),
+            hy_syntax::Stmt::For { .. } => false,
+            _ => false,
+        }
+    }
 }
+
 

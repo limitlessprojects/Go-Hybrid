@@ -2415,6 +2415,176 @@ mod tests {
         assert_eq!(r_break.verdict, Verdict::Accept, "{:?}", r_break.diagnostics);
     }
 
+    #[test]
+    fn loop_backedge_nested_shadow_does_not_unfreeze_outer_alias_issue_313() {
+        let r = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               for j in 0..10 { m[\"k\"] = j }\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               alias := m\n\
+               done := make(chan bool, 2)\n\
+               for i in 0..2 {\n\
+                 if i == 0 {\n\
+                   alias := 1\n\
+                   fmt.println(alias)\n\
+                 }\n\
+                 task worker(move alias, done)\n\
+               }\n\
+               <-done\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+    }
+
+    #[test]
+    fn loop_backedge_shadowed_outer_alias_propagates_move_across_iteration_issue_313() {
+        let r = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               for j in 0..10 { m[\"k\"] = j }\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               alias := m\n\
+               done := make(chan bool, 2)\n\
+               for i in 0..2 {\n\
+                 alias[\"k\"] = i\n\
+                 alias := 1\n\
+                 fmt.println(alias)\n\
+                 task worker(move m, done)\n\
+                 m := 2\n\
+                 fmt.println(m)\n\
+               }\n\
+               <-done\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        let d = &r.diagnostics[0];
+        assert_eq!(d.code, "HYB-E3003");
+        assert!(
+            d.message.contains("alias") || d.message.contains("moved"),
+            "{}",
+            d.message
+        );
+    }
+
+    #[test]
+    fn loop_backedge_inner_block_outer_alias_and_may_share_rebind_rejects_issue_313() {
+        let r = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               for j in 0..10 { m[\"k\"] = j }\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               alias := map[string]int{\"init\": 0}\n\
+               done := make(chan bool, 2)\n\
+               for i in 0..2 {\n\
+                 if i == 0 {\n\
+                   alias = m\n\
+                 }\n\
+                 if i == 0 {\n\
+                   task worker(move alias, done)\n\
+                 } else {\n\
+                   task worker(move m, done)\n\
+                 }\n\
+               }\n\
+               <-done\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+    }
+
+    #[test]
+    fn loop_backedge_inner_local_shadow_move_positive_control_accepts_issue_313() {
+        let r = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"outer\": 0}\n\
+               done := make(chan bool, 2)\n\
+               for i in 0..2 {\n\
+                 m := map[string]int{\"inner\": i}\n\
+                 alias := m\n\
+                 task worker(move alias, done)\n\
+               }\n\
+               fmt.println(m[\"outer\"])\n\
+               <-done\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn loop_backedge_continue_before_trailing_break_rejects_issue_253() {
+        let r = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"worker\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"init\": 0}\n\
+               done := make(chan bool, 2)\n\
+               for i in 0..2 {\n\
+                 m[\"main\"] = i\n\
+                 task worker(move m, done)\n\
+                 if i == 0 {\n\
+                   continue\n\
+                 }\n\
+                 break\n\
+               }\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+    }
+
+    #[test]
+    fn loop_backedge_for_iterate_collection_checked_issue_253() {
+        let r = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"worker\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"a\": 1, \"b\": 2}\n\
+               done := make(chan bool, 2)\n\
+               first := true\n\
+               for k, v in m {\n\
+                 _ = k\n\
+                 _ = v\n\
+                 if first {\n\
+                   first = false\n\
+                   task worker(move m, done)\n\
+                   continue\n\
+                 }\n\
+                 break\n\
+               }\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+    }
+
+
     // -----------------------------------------------------------------------
     // Scope-aware bindings (issue #14, LubuSeb's soundness report): an
     // inner-block define must shadow, never overwrite. The flat env let
