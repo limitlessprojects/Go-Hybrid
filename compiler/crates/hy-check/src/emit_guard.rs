@@ -149,7 +149,10 @@ impl<'a> Checker<'a> {
                             self.check_expr_emit_guard(st, chan);
                             self.check_expr_emit_guard(st, value);
                         }
-                        SelectArmKind::Recv { chan, .. } => self.check_expr_emit_guard(st, chan),
+                        SelectArmKind::Recv { chan, .. } => {
+                            self.check_recv_operand(st, chan, chan.span());
+                            self.check_expr_emit_guard(st, chan);
+                        }
                         SelectArmKind::Default => {}
                     }
                     if deep {
@@ -191,8 +194,11 @@ impl<'a> Checker<'a> {
             | Expr::Move { operand, .. }
             | Expr::Try { operand, .. }
             | Expr::Paren { inner: operand, .. }
-            | Expr::Field { base: operand, .. }
-            | Expr::Receive { chan: operand, .. } => self.check_expr_emit_guard(st, operand),
+            | Expr::Field { base: operand, .. } => self.check_expr_emit_guard(st, operand),
+            Expr::Receive { chan: operand, span } => {
+                self.check_recv_operand(st, operand, *span);
+                self.check_expr_emit_guard(st, operand);
+            }
             Expr::Index { base, index, .. } => {
                 self.check_expr_emit_guard(st, base);
                 self.check_expr_emit_guard(st, index);
@@ -249,10 +255,16 @@ impl<'a> Checker<'a> {
                 for r in results {
                     self.check_type_expr(&r.ty);
                 }
-                // Closure bodies are not flattened into Pass B — deep-walk.
-                for stmt in &body.stmts {
-                    self.check_stmt_emit_guard_inner(st, stmt, /*deep=*/ true);
+                // Closure bodies are not flattened into Pass B — deep-walk
+                // with closure parameters and local bindings in scope (#409).
+                let mut cst = st.clone();
+                cst.scope_push();
+                for p in params {
+                    let shape = self.shape_of_type(&p.ty);
+                    self.define_binding(&mut cst, &p.name, shape, Some(p.ty.clone()), false, false);
                 }
+                self.check_closure_block_emit_guard(&mut cst, body);
+                cst.scope_pop();
             }
             Expr::Ident { .. } | Expr::Lit { .. } => {}
         }
@@ -612,6 +624,174 @@ impl<'a> Checker<'a> {
         })?;
         const_int_value(&d.value)
     }
+
+    // ------------------------------------------------------------------
+    // F — receive operand must be a channel (HYB-E3007, issue #409)
+    // ------------------------------------------------------------------
+
+    /// Issue #409: mirror `check_send_target` (#77) on the receive side.
+    /// Any receive expression (`<-x`, `v := <-x`, `v, ok := <-x`) or
+    /// `select` receive arm (`case v := <-x:` / `case <-x:`) whose source
+    /// resolves to a non-channel shape (or a declared void function call)
+    /// is rejected with `HYB-E3007` so the accepted subset never emits
+    /// unbuildable Go (`invalid operation: cannot receive from non-channel`).
+    pub(crate) fn check_recv_operand(&mut self, st: &FnState, chan: &Expr, span: Span) {
+        match self.shape_of_expr(st, chan) {
+            TypeShape::Chan(_) => {}
+            TypeShape::Unknown => {
+                if let Expr::Call { callee, .. } = unwrap_parens(chan) {
+                    if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                        if self.lookup_binding(st, name).is_none() {
+                            if let Some(decl) = self.fns.get(name.as_str()) {
+                                if decl.results.is_empty() {
+                                    let msg = format!(
+                                        "cannot receive from `{}` (void) — a receive source must be a channel (O4)",
+                                        chan.render()
+                                    );
+                                    let notes = vec![
+                                        "why: `<-` on a non-channel value is not valid Go; the accepted subset only emits buildable Go (issue #409)".to_string(),
+                                        "fix: receive from a `chan T` or `<-chan T` binding (`ch := make(chan T, n)` or a channel parameter)".to_string(),
+                                    ];
+                                    self.diags.push(
+                                        Diagnostic::error("HYB-E3007", self.path.clone(), span, msg)
+                                            .with_notes(notes),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            other => {
+                let msg = format!(
+                    "cannot receive from `{}` ({}) — a receive source must be a channel (O4)",
+                    chan.render(),
+                    other.render()
+                );
+                let notes = vec![
+                    "why: `<-` on a non-channel value is not valid Go; the accepted subset only emits buildable Go (issue #409)".to_string(),
+                    "fix: receive from a `chan T` or `<-chan T` binding (`ch := make(chan T, n)` or a channel parameter)".to_string(),
+                ];
+                self.diags.push(
+                    Diagnostic::error("HYB-E3007", self.path.clone(), span, msg).with_notes(notes),
+                );
+            }
+        }
+    }
+
+    fn check_closure_block_emit_guard(&mut self, st: &mut FnState, block: &hy_syntax::Block) {
+        for stmt in &block.stmts {
+            self.check_closure_stmt_emit_guard(st, stmt);
+        }
+    }
+
+    fn check_closure_stmt_emit_guard(&mut self, st: &mut FnState, stmt: &Stmt) {
+        self.check_stmt_emit_guard_inner(st, stmt, /*deep=*/ false);
+        match stmt {
+            Stmt::Local(l) => {
+                let immutable = l.kind == hy_syntax::LocalKind::Const;
+                if l.values.is_empty() {
+                    let shape = l
+                        .ty
+                        .as_ref()
+                        .map(|t| self.shape_of_type(t))
+                        .unwrap_or(TypeShape::Unknown);
+                    let ty = l.ty.clone();
+                    for name in &l.names {
+                        self.define_binding(st, name, shape.clone(), ty.clone(), immutable, false);
+                    }
+                } else if l.names.len() == l.values.len() {
+                    for (name, value) in l.names.iter().zip(l.values.iter()) {
+                        let inferred = self.shape_of_expr(st, value);
+                        let (shape, ty) = match (&l.ty, inferred) {
+                            (Some(t), TypeShape::Unknown) => {
+                                (self.shape_of_type(t), Some(t.clone()))
+                            }
+                            (_, s) => (s, self.ty_of_expr(st, value).or_else(|| l.ty.clone())),
+                        };
+                        self.define_binding(st, name, shape, ty, immutable, false);
+                    }
+                } else if l.values.len() == 1 && l.names.len() > 1 {
+                    let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
+                    let tys = self.multi_value_tys(st, &l.values[0], l.names.len());
+                    for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
+                        self.define_binding(st, name, shape, ty, immutable, false);
+                    }
+                }
+            }
+            Stmt::If {
+                init,
+                then,
+                otherwise,
+                ..
+            } => {
+                st.scope_push();
+                if let Some(i) = init {
+                    self.check_closure_stmt_emit_guard(st, i);
+                }
+                st.scope_push();
+                self.check_closure_block_emit_guard(st, then);
+                st.scope_pop();
+                if let Some(o) = otherwise {
+                    self.check_closure_stmt_emit_guard(st, o);
+                }
+                st.scope_pop();
+            }
+            Stmt::For { kind, body, .. } => {
+                st.scope_push();
+                match kind {
+                    ForKind::Iterate { vars, expr } => {
+                        let shapes = self.iterate_var_shapes(st, expr, vars.len());
+                        for (name, shape) in vars.iter().zip(shapes) {
+                            self.define_binding(st, name, shape, None, false, false);
+                        }
+                    }
+                    ForKind::Range { var, .. } => {
+                        self.define_binding(st, var, TypeShape::Primitive, None, false, false);
+                    }
+                    ForKind::While { .. } | ForKind::Infinite => {}
+                }
+                st.scope_push();
+                self.check_closure_block_emit_guard(st, body);
+                st.scope_pop();
+                st.scope_pop();
+            }
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+                st.scope_push();
+                self.check_closure_block_emit_guard(st, body);
+                st.scope_pop();
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    st.scope_push();
+                    self.check_closure_block_emit_guard(st, &arm.body);
+                    st.scope_pop();
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                for arm in arms {
+                    st.scope_push();
+                    if let SelectArmKind::Recv { names, chan } = &arm.kind {
+                        let elem = match self.shape_of_expr(st, chan) {
+                            TypeShape::Chan(e) => *e,
+                            _ => TypeShape::Unknown,
+                        };
+                        for (i, n) in names.iter().enumerate() {
+                            let shape = if i == 0 {
+                                elem.clone()
+                            } else {
+                                TypeShape::Primitive
+                            };
+                            self.define_binding(st, n, shape, None, false, false);
+                        }
+                    }
+                    self.check_closure_block_emit_guard(st, &arm.body);
+                    st.scope_pop();
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Go's receiver rule: the base type must be a defined type — not a
@@ -650,4 +830,125 @@ fn is_primitive_receiver(name: &str) -> bool {
             | "char"
             | "error"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{check_file, Verdict};
+
+    fn check(src: &str) -> crate::CheckResult {
+        let ast = hy_syntax::parse_file("test.hy", src).expect("test source must parse");
+        check_file(&ast)
+    }
+
+    #[test]
+    fn receive_from_int_literal_rejects_with_e3007() {
+        let r = check("fn main() { <-1 }");
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3007"),
+            "expected HYB-E3007 for `<-1`, got {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn receive_from_non_channel_binding_and_binding_form_rejects_with_e3007() {
+        let r = check(
+            "fn main() {\n\
+               x := 5\n\
+               <-x\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3007"));
+
+        let r_bind = check(
+            "import \"fmt\"\n\
+             fn main() {\n\
+               x := 5\n\
+               v := <-x\n\
+               fmt.println(v)\n\
+             }",
+        );
+        assert_eq!(r_bind.verdict, Verdict::Reject, "{:?}", r_bind.diagnostics);
+        assert!(r_bind.diagnostics.iter().any(|d| d.code == "HYB-E3007"));
+    }
+
+    #[test]
+    fn receive_from_non_channel_call_and_void_call_rejects_with_e3007() {
+        let r = check(
+            "fn f() int { return 5 }\n\
+             fn main() {\n\
+               <-f()\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3007"));
+
+        let r_void = check(
+            "fn noop() {}\n\
+             fn main() {\n\
+               <-noop()\n\
+             }",
+        );
+        assert_eq!(r_void.verdict, Verdict::Reject, "{:?}", r_void.diagnostics);
+        assert!(r_void.diagnostics.iter().any(|d| d.code == "HYB-E3007"));
+    }
+
+    #[test]
+    fn receive_from_map_select_arm_and_closure_rejects_with_e3007() {
+        let r_map = check(
+            "fn main() {\n\
+               m := map[string]int{\"k\": 1}\n\
+               <-m\n\
+             }",
+        );
+        assert_eq!(r_map.verdict, Verdict::Reject, "{:?}", r_map.diagnostics);
+        assert!(r_map.diagnostics.iter().any(|d| d.code == "HYB-E3007"));
+
+        let r_sel = check(
+            "import \"fmt\"\n\
+             fn main() {\n\
+               x := 5\n\
+               select {\n\
+                 v := <-x:\n\
+                   fmt.println(v)\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r_sel.verdict, Verdict::Reject, "{:?}", r_sel.diagnostics);
+        assert!(r_sel.diagnostics.iter().any(|d| d.code == "HYB-E3007"));
+
+        let r_clos = check(
+            "fn main() {\n\
+               f := fn(x int) {\n\
+                 <-x\n\
+               }\n\
+               f(1)\n\
+             }",
+        );
+        assert_eq!(r_clos.verdict, Verdict::Reject, "{:?}", r_clos.diagnostics);
+        assert!(r_clos.diagnostics.iter().any(|d| d.code == "HYB-E3007"));
+    }
+
+    #[test]
+    fn valid_channel_and_time_after_receives_stay_accepted() {
+        let r = check(
+            "import \"fmt\"\n\
+             fn drain(ch <-chan int) {\n\
+               v := <-ch\n\
+               fmt.println(v)\n\
+             }\n\
+             fn main() {\n\
+               ch := make(chan int, 2)\n\
+               ch <- 1\n\
+               <-ch\n\
+               ch <- 2\n\
+               drain(ch)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    }
 }
