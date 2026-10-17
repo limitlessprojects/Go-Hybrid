@@ -12,8 +12,8 @@ Decision Log event, never a silent edit.
 
 | class | guard | trampoline | meaning |
 |-------|-------|------------|---------|
-| SMALL | 1024 B | `Cross1S..4S` | callee's worst case ≤ 1 KiB, no recursion on input-proportional structures |
-| DEFAULT | 4096 B | `Cross1..4` | bounded but not (yet) argued under 1 KiB |
+| SMALL | 1024 B | `NOSPLIT` assembly | callee's worst case ≤ 1 KiB, verified bounded, zero-cost crossing |
+| DEFAULT | 4096 B | `NOSPLIT` assembly | callee's worst case ≤ 4 KiB, verified bounded, zero-cost crossing |
 | DEEP | — (1 MiB pool) | `CrossDeep*` | input-proportional or unbounded stack use |
 
 ## Curated surface (as of row 4)
@@ -59,7 +59,7 @@ nested value is DEEP regardless of the caller's input shape.**
 
 | fn | class | justification |
 |----|-------|---------------|
-| `hy_nop` (G2 bench) | DEFAULT | the G2 gate's measured subject — its recorded evidence (3.37/3.44 ns) is for THIS class; never reclassify (bench-overhead small-class scenarios use their own fn) |
+| `hy_nop` (G2 bench) | SMALL | the G2 gate's measured subject — now migrated to zero-cost NOSPLIT; never reclassify |
 
 ## The regression that guards this ledger
 
