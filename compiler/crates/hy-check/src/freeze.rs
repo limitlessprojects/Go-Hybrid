@@ -260,6 +260,30 @@ impl<'a> Checker<'a> {
     // Move marking + alias freezing (O5.2)
     // -----------------------------------------------------------------------
 
+    /// Check implicit O8 slot/field-loan store-backs (`m[k] = slot` /
+    /// `h.field = f`) emitted by `hy-emit` at the end of a declaring block.
+    pub(crate) fn check_storebacks(
+        &mut self,
+        st: &FnState,
+        storebacks: &[(String, hy_diag::Span)],
+    ) {
+        for (root, span) in storebacks {
+            let uses = [Use {
+                name: root.clone(),
+                span: *span,
+                is_write: true,
+                via_move: false,
+                via_addr: false,
+            }];
+            self.check_uses(st, &uses);
+        }
+    }
+
+    pub(crate) fn flush_scope_pop(&mut self, st: &mut FnState) {
+        let storebacks = st.scope_pop_with_storebacks();
+        self.check_storebacks(st, &storebacks);
+    }
+
     /// Mark `name` moved-from at the transfer site and freeze every live
     /// alias in its alias group (both directions: an alias of the moved
     /// binding, and the original when an alias is the one moved — they

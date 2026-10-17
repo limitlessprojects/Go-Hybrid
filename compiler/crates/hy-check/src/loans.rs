@@ -1083,6 +1083,25 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        // O8 slot/field-loan block-exit store-back (`hy-emit` lowers
+        // `slot := &m[k]` and `f := &h.field` to a copy-read at the define site
+        // plus `m[k] = slot` / `h.field = f` at the end of the declaring block).
+        if l.names.len() == 1
+            && l.values.len() == 1
+            && matches!(l.kind, LocalKind::Define | LocalKind::Let)
+        {
+            if let Some(op) = as_addr_of(unwrap_parens(&l.values[0])) {
+                if matches!(unwrap_parens(op), Expr::Index { .. } | Expr::Field { .. }) {
+                    if let Some(root) = op.root_ident() {
+                        if let Some(frame) = st.storeback_scopes.last_mut() {
+                            frame.push((root.to_string(), l.span));
+                        } else {
+                            st.root_storebacks.push((root.to_string(), l.span));
+                        }
+                    }
+                }
+            }
+        }
 
         // bindings. T22 (SPEC-LANGUAGE.md): only `const` is DEEPLY
         // immutable and therefore class-4 sendable; `let` is SHALLOW
@@ -1396,6 +1415,9 @@ impl<'a> Checker<'a> {
     /// those recorders cannot tell the prior `name` from the new one.
     pub(crate) fn value_reads_storage_of(&self, st: &FnState, value: &Expr, name: &str) -> bool {
         let root_is = |e: &Expr| e.root_ident() == Some(name);
+        if let Some(op) = as_addr_of(unwrap_parens(value)) {
+            return root_is(op) || self.value_reads_storage_of(st, op, name);
+        }
         match unwrap_parens(value) {
             Expr::Ident { name: src, .. } => src == name,
             Expr::Try { operand, .. } => self.value_reads_storage_of(st, operand, name),
@@ -1453,7 +1475,6 @@ impl<'a> Checker<'a> {
             _ => false,
         }
     }
-
 
     /// Does the binding `name` denote a value that a shallow Go copy
     /// would share mutable GC storage with? Includes file-level `const`
@@ -1719,19 +1740,24 @@ impl<'a> Checker<'a> {
                     inner,
                     Expr::StructLit { .. } | Expr::MapLit { .. } | Expr::SliceLit { .. }
                 );
-                let carries = self.shape_may_share(&result)
-                    || matches!(result, TypeShape::Unknown)
-                    || inner.root_ident().is_some()
-                    || is_literal;
+                let carries = !matches!(result, TypeShape::Primitive)
+                    && (self.shape_may_share(&result)
+                        || field_borrow_kind(&result).is_some()
+                        || matches!(result, TypeShape::Unknown)
+                        || inner.root_ident().is_some()
+                        || is_literal);
                 if !carries {
                     return;
                 }
+                let mut borrowed_roots = Vec::new();
+                self.collect_borrowed_roots(st, value, &mut borrowed_roots);
                 let mut roots = Vec::new();
                 collect_ref_roots(value, &mut roots);
                 for root in roots {
                     if root == name {
                         continue;
                     }
+                    let is_borrowed = borrowed_roots.iter().any(|r| r == &root);
                     if let Some(b) = self.lookup_binding(st, &root) {
                         if b.shape.is_handle()
                             && !self.shape_carries_handle(&result)
@@ -1749,6 +1775,7 @@ impl<'a> Checker<'a> {
                         // freezes the array too.
                         if self.shape_may_share(&b.shape)
                             || self.expr_slices_addressable_array(st, value, &root)
+                            || (is_borrowed && self.binding_can_be_borrowed(st, &root))
                         {
                             st.share_edge(name, &root);
                         }
@@ -2696,6 +2723,8 @@ impl<'a> Checker<'a> {
                 if other_shape.is_reference_alias()
                     || matches!(other_shape, TypeShape::OwnHandle(_))
                 {
+                    let mut borrowed_roots = Vec::new();
+                    self.collect_borrowed_roots(st, value, &mut borrowed_roots);
                     let mut roots = Vec::new();
                     collect_ref_roots(value, &mut roots);
                     let mut borrowed_roots = Vec::new();
@@ -4923,6 +4952,14 @@ impl<'a> Checker<'a> {
             } else {
                 self.mark_move_in_value(st, v, format!("the move-return `{}`", v.render()));
             }
+        }
+        // `hy-emit` (`stmt.rs:885-905`) suppresses the declaring block's
+        // synthetic O8 store-backs when the block ends with an explicit
+        // `return`, so do not check them at the subsequent scope pop.
+        if let Some(top) = st.storeback_scopes.last_mut() {
+            top.clear();
+        } else {
+            st.root_storebacks.clear();
         }
     }
 }

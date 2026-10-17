@@ -254,6 +254,11 @@ pub(crate) struct FnState {
     /// composite literal containing `&...`), for O2 `LOAN-ESCAPE` on
     /// named-result / variable returns (`out = &x; return` / `return out`).
     pub borrow_bindings: HashSet<String>,
+    /// Block-scoped O8 slot/field-loan store-backs (`slot := &m[k]` /
+    /// `f := &h.field` lowers to `m[k] = slot` / `h.field = f` at the end of
+    /// its declaring block in `hy-emit`).
+    pub storeback_scopes: Vec<Vec<(String, Span)>>,
+    pub root_storebacks: Vec<(String, Span)>,
 }
 
 impl FnState {
@@ -263,10 +268,24 @@ impl FnState {
         self.alias_scopes.push(self.aliases.clone());
         self.share_scopes.push(self.may_share.clone());
         self.shadow_link_scopes.push(self.shadow_links.clone());
+        self.storeback_scopes.push(Vec::new());
+    }
+
+    /// Exit the innermost block scope (walk.rs's Pop events), returning any
+    /// O8 slot/field-loan store-backs that flush at the end of that block.
+    pub(crate) fn scope_pop_with_storebacks(&mut self) -> Vec<(String, Span)> {
+        let storebacks = self.storeback_scopes.pop().unwrap_or_default();
+        self.scope_pop_inner();
+        storebacks
     }
 
     /// Exit the innermost block scope (walk.rs's Pop events).
     pub(crate) fn scope_pop(&mut self) {
+        let _ = self.storeback_scopes.pop();
+        self.scope_pop_inner();
+    }
+
+    fn scope_pop_inner(&mut self) {
         // Capture any moves on inner aliases or may-share peers before the
         // inner scope and alias/share maps are popped (handles the case where
         // an inner alias/holder was moved while an outer peer was shadowed).

@@ -421,7 +421,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             for ev in evs {
                 match ev {
                     walk::ScopeEvent::Push => st.scope_push(),
-                    walk::ScopeEvent::Pop => st.scope_pop(),
+                    walk::ScopeEvent::Pop => ck.flush_scope_pop(&mut st),
                     walk::ScopeEvent::SelectRecv { names, chan } => {
                         let elem = match ck.shape_of_expr(&st, chan) {
                             TypeShape::Chan(e) => *e,
@@ -887,8 +887,10 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     // capture of a block-local now resolves to nothing and fails closed
     // (HYB-E3005) at the boundary, exactly like any unresolvable name.
     while !st.scopes.is_empty() {
-        st.scope_pop();
+        ck.flush_scope_pop(&mut st);
     }
+    let root_sb = std::mem::take(&mut st.root_storebacks);
+    ck.check_storebacks(&st, &root_sb);
 
     // #123: closure bodies sit outside Pass B (A5), so process_assign and
     // process_call never see their writes — scan every FnLit for assign
@@ -4501,5 +4503,175 @@ mod tests {
                 .count()
                 >= 2
         );
+    }
+
+    #[test]
+    fn pointer_borrow_through_composite_literal_freezes_pointee_e3003() {
+        let r1 = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(xs []*holder, done chan<- bool) {\n\
+               xs[0].m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               h := holder{m: map[string]int{\"k\": 0}}\n\
+               p := &h\n\
+               xs := []*holder{p}\n\
+               done := make(chan bool, 1)\n\
+               task worker(move xs, done)\n\
+               h.m[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r1.verdict, Verdict::Reject, "{:?}", r1.diagnostics);
+        assert_eq!(first_error_rule(&r1).as_deref(), Some("A1b"));
+        assert_eq!(r1.diagnostics[0].code, "HYB-E3003");
+
+        let r2 = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(xs []*holder, done chan<- bool) {\n\
+               xs[0].m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               h := holder{m: map[string]int{\"k\": 0}}\n\
+               xs := []*holder{&h}\n\
+               done := make(chan bool, 1)\n\
+               task worker(move xs, done)\n\
+               h.m[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r2.verdict, Verdict::Reject, "{:?}", r2.diagnostics);
+        assert_eq!(first_error_rule(&r2).as_deref(), Some("A1b"));
+        assert_eq!(r2.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn pointer_borrow_through_call_return_freezes_pointee_e3003() {
+        let r = check(
+            "struct holder { m map[string]int }\n\
+             fn id_ptr(p *holder) *holder { return move p }\n\
+             fn worker(p *holder, done chan<- bool) {\n\
+               p.m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               h := holder{m: map[string]int{\"k\": 0}}\n\
+               p := id_ptr(&h)\n\
+               done := make(chan bool, 1)\n\
+               task worker(move p, done)\n\
+               h.m[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert_eq!(r.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn auto_addressed_pointer_param_call_freezes_scalar_struct_pointee_e3003() {
+        let r = check(
+            "struct stats { count int }\n\
+             fn id_ptr(p *stats) *stats { return move p }\n\
+             fn worker(p *stats, done chan<- bool) {\n\
+               p.count = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               s := stats{count: 0}\n\
+               p := id_ptr(s)\n\
+               done := make(chan bool, 1)\n\
+               task worker(move p, done)\n\
+               s.count = 2\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert_eq!(r.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn pointer_borrow_of_non_owned_param_cannot_be_moved_e3004() {
+        let r = check(
+            "struct stats { count int }\n\
+             fn worker(p *stats, done chan<- bool) {\n\
+               p.count = 1\n\
+               done <- true\n\
+             }\n\
+             fn bad(s stats, done chan<- bool) {\n\
+               p := &s\n\
+               task worker(move p, done)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert_eq!(r.diagnostics[0].code, "HYB-E3004");
+    }
+
+    #[test]
+    fn slot_loan_block_exit_storeback_after_move_rejected_e3003() {
+        let r_inner = check(
+            "struct item { n int }\n\
+             fn worker(m map[string]item, done chan<- bool) {\n\
+               fmt.println(m[\"k\"].n)\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]item{\"k\": item{n: 0}}\n\
+               done := make(chan bool, 1)\n\
+               if true {\n\
+                 slot := &m[\"k\"]\n\
+                 slot.n = 1\n\
+                 task worker(move m, done)\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r_inner.verdict, Verdict::Reject, "{:?}", r_inner.diagnostics);
+        assert_eq!(first_error_rule(&r_inner).as_deref(), Some("A1b"));
+        assert_eq!(r_inner.diagnostics[0].code, "HYB-E3003");
+
+        let r_root = check(
+            "struct item { n int }\n\
+             fn worker(m map[string]item, done chan<- bool) {\n\
+               fmt.println(m[\"k\"].n)\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]item{\"k\": item{n: 0}}\n\
+               done := make(chan bool, 1)\n\
+               slot := &m[\"k\"]\n\
+               slot.n = 1\n\
+               task worker(move m, done)\n\
+             }",
+        );
+        assert_eq!(r_root.verdict, Verdict::Reject, "{:?}", r_root.diagnostics);
+        assert_eq!(first_error_rule(&r_root).as_deref(), Some("A1b"));
+        assert_eq!(r_root.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn field_loan_block_exit_storeback_after_move_rejected_e3003() {
+        let r = check(
+            "struct inner { n int }\n\
+             struct holder {\n\
+               s inner\n\
+               m map[string]int\n\
+             }\n\
+             fn worker(h holder, done chan<- bool) {\n\
+               fmt.println(h.s.n)\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               h := holder{s: inner{n: 0}, m: map[string]int{\"k\": 0}}\n\
+               done := make(chan bool, 1)\n\
+               if true {\n\
+                 f := &h.s\n\
+                 f.n = 1\n\
+                 task worker(move h, done)\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("A1b"));
+        assert_eq!(r.diagnostics[0].code, "HYB-E3003");
     }
 }
