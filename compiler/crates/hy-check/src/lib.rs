@@ -3080,6 +3080,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn helper_frame_out_param_store_freezes_caller_alias_issue_455() {
+        let r = check(
+            "fn set(dst []map[string]int, v map[string]int) {\n\
+               dst[0] = v\n\
+             }\n\
+             fn worker(m map[string]int) {\n\
+               m[\"task\"] = 1\n\
+             }\n\
+             fn main() {\n\
+               shared := map[string]int{}\n\
+               dst := []map[string]int{map[string]int{}}\n\
+               set(dst, shared)\n\
+               task worker(move shared)\n\
+               dst[0][\"main\"] = 2\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "expected HYB-E3003 rejection, got accept");
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3003"),
+            "expected HYB-E3003, got {:?}",
+            r.diagnostics
+        );
+
+        // Positive control: helper does not store v into dst, so no aliasing edge is created
+        let r_control = check(
+            "fn no_store(dst []map[string]int, v map[string]int) {\n\
+               _ = v\n\
+             }\n\
+             fn worker(m map[string]int) {\n\
+               m[\"task\"] = 1\n\
+             }\n\
+             fn main() {\n\
+               shared := map[string]int{}\n\
+               dst := []map[string]int{map[string]int{}}\n\
+               no_store(dst, shared)\n\
+               task worker(move shared)\n\
+               dst[0][\"main\"] = 2\n\
+             }",
+        );
+        assert_eq!(r_control.verdict, Verdict::Accept, "{:?}", r_control.diagnostics);
+    }
+
     /// Positive control: a call with no reference-carrying argument is a
     /// fresh value and must NOT be edged to anything — the widening must not
     /// start rejecting fresh results.

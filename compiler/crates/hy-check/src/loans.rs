@@ -211,6 +211,7 @@ impl<'a> Checker<'a> {
                 let Some(tname) = receiver_type_name(&recv) else {
                     return;
                 };
+                self.record_method_stores_may_share(st, cr, &tname, &method, &root);
                 let receiver_moved = self
                     .lookup_binding(st, &root)
                     .map(|b| b.moved.is_some())
@@ -278,6 +279,7 @@ impl<'a> Checker<'a> {
                 }
                 self.check_call_const_writes(st, cr, &HashSet::new());
                 if self.fns.contains_key(&name) {
+                    self.record_callee_stores_may_share(st, cr, &name);
                     // A3 #111: the callee may insert/delete through the
                     // argument — that event runs inside THIS call site's
                     // window when the call is within it.
@@ -728,6 +730,295 @@ impl<'a> Checker<'a> {
             }
             _ => cr.args.iter().any(&arg_root_is_param),
         }
+    }
+
+    /// Record may-share edges created when a callee stores parameter `j` into
+    /// a container / memory cell rooted at parameter `i` (#455).
+    pub(crate) fn record_callee_stores_may_share(&self, st: &mut FnState, cr: &CallRef, name: &str) {
+        let Some(decl) = self.fns.get(name) else {
+            return;
+        };
+        for (i, pi) in decl.params.iter().enumerate() {
+            for (j, pj) in decl.params.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                if self.fn_stores_param_into_param(decl, &pi.name, &pj.name, 0) {
+                    if let (Some(arg_i), Some(arg_j)) = (cr.args.get(i), cr.args.get(j)) {
+                        let mut dst_roots = Vec::new();
+                        collect_ref_roots(&arg_i.value, &mut dst_roots);
+                        let mut src_roots = Vec::new();
+                        collect_ref_roots(&arg_j.value, &mut src_roots);
+                        for d in &dst_roots {
+                            for s in &src_roots {
+                                if d != s && self.binding_may_share(st, d) && self.binding_may_share(st, s) {
+                                    st.share_edge(d, s);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Record may-share edges when a method call stores a parameter into its receiver or vice-versa (#455).
+    pub(crate) fn record_method_stores_may_share(
+        &self,
+        st: &mut FnState,
+        cr: &CallRef,
+        tname: &str,
+        method: &str,
+        root: &str,
+    ) {
+        let Some(decl) = self.method_decls.get(&(tname.to_string(), method.to_string())) else {
+            return;
+        };
+        let Some(recv_param) = &decl.receiver else {
+            return;
+        };
+        for (j, pj) in decl.params.iter().enumerate() {
+            if self.fn_stores_param_into_param(decl, &recv_param.name, &pj.name, 0) {
+                if let Some(arg_j) = cr.args.get(j) {
+                    let mut src_roots = Vec::new();
+                    collect_ref_roots(&arg_j.value, &mut src_roots);
+                    for s in &src_roots {
+                        if root != s && self.binding_may_share(st, root) && self.binding_may_share(st, s) {
+                            st.share_edge(root, s);
+                        }
+                    }
+                }
+            }
+            if self.fn_stores_param_into_param(decl, &pj.name, &recv_param.name, 0) {
+                if let Some(arg_j) = cr.args.get(j) {
+                    let mut dst_roots = Vec::new();
+                    collect_ref_roots(&arg_j.value, &mut dst_roots);
+                    for d in &dst_roots {
+                        if d != root && self.binding_may_share(st, d) && self.binding_may_share(st, root) {
+                            st.share_edge(d, root);
+                        }
+                    }
+                }
+            }
+        }
+        for (i, pi) in decl.params.iter().enumerate() {
+            for (j, pj) in decl.params.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                if self.fn_stores_param_into_param(decl, &pi.name, &pj.name, 0) {
+                    if let (Some(arg_i), Some(arg_j)) = (cr.args.get(i), cr.args.get(j)) {
+                        let mut dst_roots = Vec::new();
+                        collect_ref_roots(&arg_i.value, &mut dst_roots);
+                        let mut src_roots = Vec::new();
+                        collect_ref_roots(&arg_j.value, &mut src_roots);
+                        for d in &dst_roots {
+                            for s in &src_roots {
+                                if d != s && self.binding_may_share(st, d) && self.binding_may_share(st, s) {
+                                    st.share_edge(d, s);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn fn_stores_param_into_param(
+        &self,
+        decl: &FnDecl,
+        dst_param: &str,
+        src_param: &str,
+        depth: usize,
+    ) -> bool {
+        if depth > 3 {
+            return false;
+        }
+        let Some(body) = &decl.body else {
+            return false;
+        };
+        self.block_stores_param_into_param(body, dst_param, src_param, depth)
+    }
+
+    fn block_stores_param_into_param(
+        &self,
+        block: &Block,
+        dst_param: &str,
+        src_param: &str,
+        depth: usize,
+    ) -> bool {
+        self.stmts_store_param_into_param(&block.stmts, dst_param, src_param, depth)
+    }
+
+    fn stmts_store_param_into_param(
+        &self,
+        stmts: &[Stmt],
+        dst_param: &str,
+        src_param: &str,
+        depth: usize,
+    ) -> bool {
+        for (i, s) in stmts.iter().enumerate() {
+            if self.stmt_stores_param_into_param(s, dst_param, src_param, depth) {
+                return true;
+            }
+            match s {
+                Stmt::Local(l) => {
+                    for (name, val) in l.names.iter().zip(l.values.iter()) {
+                        let mut val_roots = Vec::new();
+                        collect_ref_roots(val, &mut val_roots);
+                        if val_roots.iter().any(|r| r == src_param) {
+                            if self.stmts_store_param_into_param(&stmts[i + 1..], dst_param, name, depth) {
+                                return true;
+                            }
+                        }
+                        if val_roots.iter().any(|r| r == dst_param) {
+                            if self.stmts_store_param_into_param(&stmts[i + 1..], name, src_param, depth) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                Stmt::Assign {
+                    targets, values, ..
+                } if targets.len() == values.len() => {
+                    for (t, val) in targets.iter().zip(values.iter()) {
+                        if let PlaceKind::Ident(name) = &t.kind {
+                            let mut val_roots = Vec::new();
+                            collect_ref_roots(val, &mut val_roots);
+                            if val_roots.iter().any(|r| r == src_param) && name != src_param {
+                                if self.stmts_store_param_into_param(&stmts[i + 1..], dst_param, name, depth) {
+                                    return true;
+                                }
+                            }
+                            if val_roots.iter().any(|r| r == dst_param) && name != dst_param {
+                                if self.stmts_store_param_into_param(&stmts[i + 1..], name, src_param, depth) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn stmt_stores_param_into_param(
+        &self,
+        stmt: &Stmt,
+        dst_param: &str,
+        src_param: &str,
+        depth: usize,
+    ) -> bool {
+        match stmt {
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                if targets.len() == values.len() {
+                    for (t, v) in targets.iter().zip(values.iter()) {
+                        let stores_into_dst = t.root() == dst_param && !t.is_ident(dst_param);
+                        if stores_into_dst {
+                            let mut v_roots = Vec::new();
+                            collect_ref_roots(v, &mut v_roots);
+                            if v_roots.iter().any(|r| r == src_param) {
+                                return true;
+                            }
+                        }
+                    }
+                } else if values.len() == 1 {
+                    let v = &values[0];
+                    let mut v_roots = Vec::new();
+                    collect_ref_roots(v, &mut v_roots);
+                    if v_roots.iter().any(|r| r == src_param) {
+                        for t in targets {
+                            if t.root() == dst_param && !t.is_ident(dst_param) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        // Check calls in this statement
+        let mut calls = Vec::new();
+        walk::own_calls(stmt, &mut calls);
+        for cr in &calls {
+            if let Expr::Ident { name, .. } = unwrap_parens(cr.callee) {
+                if let Some(decl) = self.fns.get(name) {
+                    for (i, a_i) in cr.args.iter().enumerate() {
+                        let mut a_i_roots = Vec::new();
+                        collect_ref_roots(&a_i.value, &mut a_i_roots);
+                        if !a_i_roots.iter().any(|r| r == dst_param) {
+                            continue;
+                        }
+                        for (j, a_j) in cr.args.iter().enumerate() {
+                            if i == j {
+                                continue;
+                            }
+                            let mut a_j_roots = Vec::new();
+                            collect_ref_roots(&a_j.value, &mut a_j_roots);
+                            if !a_j_roots.iter().any(|r| r == src_param) {
+                                continue;
+                            }
+                            if let (Some(pi), Some(pj)) = (decl.params.get(i), decl.params.get(j)) {
+                                if self.fn_stores_param_into_param(decl, &pi.name, &pj.name, depth + 1) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Nested blocks: if/for/match/select/block/managed
+        match stmt {
+            Stmt::If {
+                init,
+                then,
+                otherwise,
+                ..
+            } => {
+                if let Some(i) = init {
+                    if self.stmt_stores_param_into_param(i, dst_param, src_param, depth) {
+                        return true;
+                    }
+                }
+                if self.block_stores_param_into_param(then, dst_param, src_param, depth) {
+                    return true;
+                }
+                if let Some(o) = otherwise {
+                    if self.stmt_stores_param_into_param(o, dst_param, src_param, depth) {
+                        return true;
+                    }
+                }
+            }
+            Stmt::For { body, .. }
+            | Stmt::Managed { body, .. }
+            | Stmt::Block { block: body, .. } => {
+                if self.block_stores_param_into_param(body, dst_param, src_param, depth) {
+                    return true;
+                }
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    if self.block_stores_param_into_param(&arm.body, dst_param, src_param, depth) {
+                        return true;
+                    }
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                for arm in arms {
+                    if self.block_stores_param_into_param(&arm.body, dst_param, src_param, depth) {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        false
     }
 
     /// Record (at define/rebind time) which base paths a local closure's
