@@ -233,6 +233,60 @@ impl<'a> Checker<'a> {
     // Move marking + alias freezing (O5.2)
     // -----------------------------------------------------------------------
 
+    /// Compute the full transitive component of `name` across both `st.aliases`
+    /// (in either direction) and `st.may_share` so multi-hop chains that
+    /// alternate between pointer/reference aliases (`p := &h`) and composite
+    /// sharing (`xs := []*holder{p}`) never miss a live peer.
+    pub(crate) fn alias_and_share_component(st: &FnState, name: &str) -> Vec<String> {
+        let root = resolve_alias(st, name);
+        let mut members: Vec<String> = vec![name.to_string(), root];
+        loop {
+            let prev_len = members.len();
+            let snapshot = members.clone();
+            for m in &snapshot {
+                let m_root = resolve_alias(st, m);
+                members.push(m_root.clone());
+                for a in st.aliases.keys() {
+                    if resolve_alias(st, a) == m_root {
+                        members.push(a.clone());
+                    }
+                }
+                members.extend(st.share_group(m));
+                members.extend(st.share_group(&m_root));
+            }
+            members.sort();
+            members.dedup();
+            if members.len() == prev_len {
+                break;
+            }
+        }
+        members
+    }
+
+    /// Check implicit O8 slot/field-loan store-backs (`m[k] = slot` /
+    /// `h.field = f`) emitted by `hy-emit` at the end of a declaring block.
+    pub(crate) fn check_storebacks(
+        &mut self,
+        st: &FnState,
+        storebacks: &[(String, hy_diag::Span)],
+    ) {
+        for (root, span) in storebacks {
+            let uses = [Use {
+                name: root.clone(),
+                span: *span,
+                is_write: true,
+                via_move: false,
+                via_addr: false,
+            }];
+            self.check_uses(st, &uses);
+        }
+    }
+
+    pub(crate) fn flush_scope_pop(&mut self, st: &mut FnState) {
+        let storebacks = st.scope_pop_with_storebacks();
+        self.check_storebacks(st, &storebacks);
+    }
+
     /// Mark `name` moved-from at the transfer site and freeze every live
     /// alias in its alias group (both directions: an alias of the moved
     /// binding, and the original when an alias is the one moved — they
@@ -245,24 +299,7 @@ impl<'a> Checker<'a> {
         desc: String,
         kind: MoveKind,
     ) {
-        let root = resolve_alias(st, name);
-        let mut members: Vec<String> = vec![name.to_string(), root.clone()];
-        for a in st.aliases.keys() {
-            if resolve_alias(st, a) == root {
-                members.push(a.clone());
-            }
-        }
-        // #27: a move also freezes everything that may share the same mutable
-        // GC storage — shallow struct/array copies, re-slices, field/index
-        // projections, and composite literals that embedded a live binding.
-        // The single-parent `aliases` chain above cannot express that graph,
-        // so union in the may-share connected component of every member.
-        let seeded = members.clone();
-        for m in seeded {
-            members.extend(st.share_group(&m));
-        }
-        members.sort();
-        members.dedup();
+        let members = Self::alias_and_share_component(st, name);
         let mut origins = Vec::new();
         for m in &members {
             let o = self.non_owned_origin_of(st, m).map(|(orig, via_share)| {
@@ -462,25 +499,17 @@ impl<'a> Checker<'a> {
             self.lookup_binding(st, &root)
                 .and_then(|rb| rb.non_owned_origin.clone())
         });
-        // (b) issue #75: failing (a), any non-owned origin in the binding's
-        //     MAY-SHARE component (or the root's — pr-80's union). `h2 := h`
-        //     (shallow struct/array copy), a re-slice, a projection, or a
-        //     literal capture records a share edge but no define-time origin
-        //     inheritance (that path is reference-alias shapes only), so a
-        //     local peer of a parameter used to pass this check — while the
-        //     caller still holds a live binding to the same storage, exactly
-        //     the situation moving the parameter itself is rejected for.
-        //     Peers are scanned in sorted order for deterministic
+        // (b) issue #75 + pointer-borrow transitive closure: failing (a), any
+        //     non-owned origin in the binding's combined alias + may-share
+        //     component. Peers are scanned in sorted order for deterministic
         //     diagnostics.
         let mut origin: Option<(String, bool)> = own.map(|o| (o, false));
         if origin.is_none() {
-            let mut all_peers = st.share_group(name);
-            if root != name {
-                all_peers.extend(st.share_group(&root));
-            }
-            let mut peers: Vec<String> = all_peers.into_iter().collect();
-            peers.sort();
+            let peers = Self::alias_and_share_component(st, name);
             for peer in peers {
+                if peer == name || peer == root {
+                    continue;
+                }
                 let proot = resolve_alias(st, &peer);
                 let po = self
                     .lookup_binding(st, &peer)

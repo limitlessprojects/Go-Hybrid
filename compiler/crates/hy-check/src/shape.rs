@@ -346,7 +346,30 @@ impl<'a> Checker<'a> {
                 let recv = self.shape_of_expr(st, base);
                 match receiver_type_name(&recv) {
                     Some(t) => foreign::method_result(&t, name),
-                    None => TypeShape::Unknown,
+                    None => {
+                        let head = Self::base_named_type_str(name);
+                        let recv_base = self
+                            .ty_of_expr(st, base)
+                            .map(|t| self.resolve_type_alias(&t))
+                            .and_then(|t| Self::base_named_type(&t))
+                            .or_else(|| match &recv {
+                                TypeShape::Struct(Some(s)) => {
+                                    Some(Self::base_named_type_str(s).to_string())
+                                }
+                                TypeShape::Pointer(inner) => match &**inner {
+                                    TypeShape::Struct(Some(s)) => {
+                                        Some(Self::base_named_type_str(s).to_string())
+                                    }
+                                    _ => None,
+                                },
+                                _ => None,
+                            });
+                        recv_base
+                            .and_then(|rb| self.method_decls.get(&(rb, head.to_string())))
+                            .and_then(|f| f.results.first())
+                            .map(|r| self.shape_of_type(&r.ty))
+                            .unwrap_or(TypeShape::Unknown)
+                    }
                 }
             }
             _ => TypeShape::Unknown,

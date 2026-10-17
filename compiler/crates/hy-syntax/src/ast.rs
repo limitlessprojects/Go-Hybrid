@@ -749,6 +749,12 @@ impl Expr {
             Expr::Index { base, .. } => base.root_ident(),
             Expr::Paren { inner, .. } => inner.root_ident(),
             Expr::Try { operand, .. } => operand.root_ident(),
+            Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                ..
+            } => operand.root_ident(),
             _ => None,
         }
     }

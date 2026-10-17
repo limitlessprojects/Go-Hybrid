@@ -247,6 +247,11 @@ pub(crate) struct FnState {
     /// composite literal containing `&...`), for O2 `LOAN-ESCAPE` on
     /// named-result / variable returns (`out = &x; return` / `return out`).
     pub borrow_bindings: HashSet<String>,
+    /// Block-scoped O8 slot/field-loan store-backs (`slot := &m[k]` /
+    /// `f := &h.field` lowers to `m[k] = slot` / `h.field = f` at the end of
+    /// its declaring block in `hy-emit`).
+    pub storeback_scopes: Vec<Vec<(String, Span)>>,
+    pub root_storebacks: Vec<(String, Span)>,
 }
 
 impl FnState {
@@ -255,10 +260,24 @@ impl FnState {
         self.scopes.push(HashMap::new());
         self.alias_scopes.push(self.aliases.clone());
         self.share_scopes.push(self.may_share.clone());
+        self.storeback_scopes.push(Vec::new());
+    }
+
+    /// Exit the innermost block scope (walk.rs's Pop events), returning any
+    /// O8 slot/field-loan store-backs that flush at the end of that block.
+    pub(crate) fn scope_pop_with_storebacks(&mut self) -> Vec<(String, Span)> {
+        let storebacks = self.storeback_scopes.pop().unwrap_or_default();
+        self.scope_pop_inner();
+        storebacks
     }
 
     /// Exit the innermost block scope (walk.rs's Pop events).
     pub(crate) fn scope_pop(&mut self) {
+        let _ = self.storeback_scopes.pop();
+        self.scope_pop_inner();
+    }
+
+    fn scope_pop_inner(&mut self) {
         // Capture any moves on inner aliases or may-share peers before the
         // inner scope and alias/share maps are popped (handles the case where
         // an inner alias/holder was moved while an outer peer was shadowed).
@@ -613,6 +632,12 @@ pub(crate) fn collect_ref_roots(e: &Expr, out: &mut Vec<String>) {
         Expr::Move { .. } => {}
         Expr::Ident { name, .. } => out.push(name.clone()),
         Expr::Try { operand, .. } => collect_ref_roots(operand, out),
+        Expr::AddrOf { operand, .. }
+        | Expr::Unary {
+            op: hy_syntax::UnOp::Addr,
+            operand,
+            ..
+        } => collect_ref_roots(operand, out),
         Expr::Slice { base, .. } => collect_ref_roots(base, out),
         Expr::Field { base, .. } => collect_ref_roots(base, out),
         Expr::Index { base, .. } => collect_ref_roots(base, out),
@@ -642,12 +667,6 @@ pub(crate) fn collect_ref_roots(e: &Expr, out: &mut Vec<String>) {
                 collect_ref_roots(it, out);
             }
         }
-        Expr::AddrOf { operand, .. } => collect_ref_roots(operand, out),
-        Expr::Unary {
-            op: hy_syntax::UnOp::Addr,
-            operand,
-            ..
-        } => collect_ref_roots(operand, out),
         _ => {}
     }
 }
