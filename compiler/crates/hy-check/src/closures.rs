@@ -128,6 +128,9 @@ fn check_one_closure(
                         if sb.moved.is_none() && b.moved.is_some() {
                             sb.moved = b.moved.clone();
                         }
+                        if sb.non_owned_origin.is_none() && b.non_owned_origin.is_some() {
+                            sb.non_owned_origin = b.non_owned_origin.clone();
+                        }
                     }
                     None => {
                         saved_scopes[0].insert(k.clone(), b.clone());
@@ -422,20 +425,56 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     }
                 }
                 ck.record_local_borrow_aliases(st, l);
-            } else {
+            } else if l.values.len() == 1 && l.names.len() > 1 {
                 // multi-name define from one value (`v, ok := m[k]`, `a, b := f()`)
-                let (shapes, tys) = match l.values.first() {
-                    Some(v) => (
-                        ck.multi_value_shapes(st, v, l.names.len()),
-                        ck.multi_value_tys(st, v, l.names.len()),
-                    ),
-                    None => (
-                        vec![TypeShape::Unknown; l.names.len()],
-                        vec![None; l.names.len()],
-                    ),
-                };
-                for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
-                    ck.define_binding(st, name, shape, ty, immutable, managed);
+                let v = &l.values[0];
+                let shapes = ck.multi_value_shapes(st, v, l.names.len());
+                let tys = ck.multi_value_tys(st, v, l.names.len());
+                let resolved: Vec<(
+                    String,
+                    TypeShape,
+                    Option<hy_syntax::TypeExpr>,
+                    Option<String>,
+                )> = l
+                    .names
+                    .iter()
+                    .zip(shapes)
+                    .zip(tys)
+                    .map(|((name, shape), ty)| {
+                        let (shape, ty) = match (&l.ty, shape) {
+                            (Some(t), TypeShape::Unknown) => (ck.shape_of_type(t), Some(t.clone())),
+                            (_, s) => (s, ty.or_else(|| l.ty.clone())),
+                        };
+                        let shadowed = if ck.shape_may_share(&shape)
+                            && ck.value_reads_storage_of(st, v, name)
+                        {
+                            ck.non_owned_origin_of(st, name).map(|(o, via_share)| {
+                                if via_share && !o.starts_with("a may-share peer of ") {
+                                    format!("a may-share peer of {}", o)
+                                } else {
+                                    o
+                                }
+                            })
+                        } else {
+                            None
+                        };
+                        (name.clone(), shape, ty, shadowed)
+                    })
+                    .collect();
+                for (name, shape, ty, shadowed_origin) in resolved {
+                    ck.define_binding(st, &name, shape.clone(), ty, immutable, managed);
+                    ck.record_multi_value_share_and_alias(st, &name, &shape, v);
+                    if let Some(origin) = shadowed_origin {
+                        if let Some(b) = st.env_lookup_mut(&name) {
+                            if b.non_owned_origin.is_none() {
+                                b.non_owned_origin = Some(origin);
+                            }
+                        }
+                    }
+                }
+            } else {
+                for name in &l.names {
+                    ck.define_binding(st, name, TypeShape::Unknown, None, immutable, managed);
                 }
             }
         }
@@ -594,6 +633,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         let is_ref = shape.is_reference_alias();
                         ck.define_binding(st, name, shape, None, false, managed);
                         if !is_chan {
+                            ck.record_may_share(st, name, expr);
                             if is_ref {
                                 if let Some(root) = expr.root_ident() {
                                     if ck.lookup_binding(st, root).is_some() {
