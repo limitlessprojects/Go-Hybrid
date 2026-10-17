@@ -74,6 +74,40 @@ fn make_variable_size_ok() {
 }
 
 #[test]
+fn make_slice_len_cap_accepted() {
+    // `make([]T, len, cap)` is valid Go (issue #353).
+    let r = check("fn main() {\n    s := make([]int, 3, 10)\n    s[0] = 1\n}\n");
+    assert_lacks(&r, "HYB-E2005");
+}
+
+#[test]
+fn make_slice_len_cap_variables_accepted() {
+    let r = check(
+        "fn main() {\n    n := 3\n    m := 10\n    s := make([]int, n, m)\n    s[0] = 1\n}\n",
+    );
+    assert_lacks(&r, "HYB-E2005");
+}
+
+#[test]
+fn make_chan_three_args_rejected() {
+    // The 3-argument form is slice-only: the same arity on a channel stays E2005.
+    let r = check("fn main() {\n    c := make(chan int, 1, 2)\n}\n");
+    assert_has(&r, "HYB-E2005");
+}
+
+#[test]
+fn make_slice_four_args_rejected() {
+    let r = check("fn main() {\n    s := make([]int, 1, 2, 3)\n}\n");
+    assert_has(&r, "HYB-E2005");
+}
+
+#[test]
+fn make_slice_negative_cap_rejected() {
+    let r = check("fn main() {\n    s := make([]int, 1, -2)\n}\n");
+    assert_has(&r, "HYB-E2005");
+}
+
+#[test]
 fn close_literal_rejected() {
     let r = check("fn main() {\n    close(5)\n}\n");
     assert_has(&r, "HYB-E2005");

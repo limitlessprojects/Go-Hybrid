@@ -149,9 +149,7 @@ impl<'a> Checker<'a> {
                             self.check_expr_emit_guard(st, chan);
                             self.check_expr_emit_guard(st, value);
                         }
-                        SelectArmKind::Recv { chan, .. } => {
-                            self.check_expr_emit_guard(st, chan)
-                        }
+                        SelectArmKind::Recv { chan, .. } => self.check_expr_emit_guard(st, chan),
                         SelectArmKind::Default => {}
                     }
                     if deep {
@@ -302,9 +300,8 @@ impl<'a> Checker<'a> {
                 _ => "fix: compare the comparable fields individually — the struct carries an incomparable field".to_string(),
             },
         ];
-        self.diags.push(
-            Diagnostic::error("HYB-E2006", self.path.clone(), span, msg).with_notes(notes),
-        );
+        self.diags
+            .push(Diagnostic::error("HYB-E2006", self.path.clone(), span, msg).with_notes(notes));
     }
 
     /// Shape of an equality operand, treating a bare top-level fn name as
@@ -433,7 +430,12 @@ impl<'a> Checker<'a> {
             TypeExpr::Pointer { .. } => {
                 Some("a pointer receiver may point at most one level (`**T` is not a Go receiver)")
             }
-            TypeExpr::Named { name, .. } if is_primitive_receiver(name) => {
+            TypeExpr::Named { name, .. } if self.type_aliases.contains_key(name) => {
+                Some("a method receiver must be a defined (named) type, not a type alias")
+            }
+            TypeExpr::Named { name, .. }
+                if !self.structs.contains_key(name) && is_primitive_receiver(name) =>
+            {
                 Some("a method receiver must be a defined (named) type, not a primitive or interface")
             }
             TypeExpr::Slice { .. }
@@ -471,10 +473,7 @@ impl<'a> Checker<'a> {
         // -- C: method-set duplication (`method box.get already declared`) --
         let base = r.ty.render();
         if !self.methods.insert((base.clone(), f.name.clone())) {
-            let msg = format!(
-                "method `{}.{}` already declared (HYB-E1003)",
-                base, f.name
-            );
+            let msg = format!("method `{}.{}` already declared (HYB-E1003)", base, f.name);
             self.diags.push(
                 Diagnostic::error("HYB-E1003", self.path.clone(), f.span, msg).with_notes(vec![
                     format!(
@@ -511,7 +510,9 @@ impl<'a> Checker<'a> {
                 self.check_type_expr(key);
                 self.check_type_expr(value);
             }
-            TypeExpr::Fn { params, results, .. } => {
+            TypeExpr::Fn {
+                params, results, ..
+            } => {
                 for p in params {
                     self.check_type_expr(&p.ty);
                 }
@@ -551,8 +552,10 @@ impl<'a> Checker<'a> {
                 );
                 self.diags.push(
                     Diagnostic::error("HYB-E6004", self.path.clone(), span, msg).with_notes(vec![
-                        "why: an array length must be an integer constant in Go (issue #201)".to_string(),
-                        "fix: round the length to an integer constant, or declare a slice (`[]T`)".to_string(),
+                        "why: an array length must be an integer constant in Go (issue #201)"
+                            .to_string(),
+                        "fix: round the length to an integer constant, or declare a slice (`[]T`)"
+                            .to_string(),
                     ]),
                 );
             }

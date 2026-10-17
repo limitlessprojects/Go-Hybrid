@@ -30,10 +30,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use hy_syntax::*;
 
-mod rangebind;
 mod constconv;
+mod rangebind;
 mod shapes;
-use shapes::{import_path_of, lookup_conversion, lookup_rust_crate, lookup_unbound_crate, Conversion};
+use shapes::{
+    import_path_of, lookup_conversion, lookup_rust_crate, lookup_unbound_crate, Conversion,
+};
 
 // ---------------------------------------------------------------------------
 // Hybrid prelude (auto-generated Go, emitted only when the program uses it)
@@ -1180,19 +1182,24 @@ impl Emitter {
     /// allocation.
     pub fn zero_value(&mut self, t: &TypeExpr) -> String {
         match t {
-            TypeExpr::Named { name, .. } if !name.contains('.') => match name.as_str() {
-                "bool" => "false".into(),
-                "string" => "\"\"".into(),
-                // A SPEC primitive spelling takes its own zero value
-                // (`var n u16` -> `var n uint16 = 0`, not `*new(u16)`).
-                // Issue #147.
-                _ if shapes::go_primitive_name(name).is_some() => "0".into(),
-                "byte" | "rune" | "int" | "int8" | "int16" | "int32" | "int64" | "uint"
-                | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr" | "float32" | "float64"
-                | "complex64" | "complex128" => "0".into(),
-                "error" | "any" => "nil".into(),
-                _ => format!("*new({})", name),
-            },
+            TypeExpr::Named { name, .. } if !name.contains('.') => {
+                if self.struct_fields.contains_key(name.as_str()) {
+                    return format!("*new({})", name);
+                }
+                match name.as_str() {
+                    "bool" => "false".into(),
+                    "string" => "\"\"".into(),
+                    // A SPEC primitive spelling takes its own zero value
+                    // (`var n u16` -> `var n uint16 = 0`, not `*new(u16)`).
+                    // Issue #147.
+                    _ if shapes::go_primitive_name(name).is_some() => "0".into(),
+                    "byte" | "rune" | "int" | "int8" | "int16" | "int32" | "int64" | "uint"
+                    | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr" | "float32"
+                    | "float64" | "complex64" | "complex128" => "0".into(),
+                    "error" | "any" => "nil".into(),
+                    _ => format!("*new({})", name),
+                }
+            }
             TypeExpr::Slice { .. }
             | TypeExpr::Map { .. }
             | TypeExpr::Chan { .. }

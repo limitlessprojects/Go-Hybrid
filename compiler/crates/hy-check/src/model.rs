@@ -152,6 +152,11 @@ pub(crate) struct Binding {
     /// capture, or non-channel `for ... in` element), so `move x` at a
     /// concurrency boundary cannot freeze all live aliases (O5.1/O5.2/O5.4).
     pub non_owned_origin: Option<String>,
+    /// Defined (or re-assigned) as an O8 map-slot loan `x := &m[k]`.
+    /// T24: a loan is not an addressable value — `&x` on it is
+    /// HYB-E3104. A shadowing redefinition creates a fresh binding with
+    /// this flag off, so the rule stays scope-correct.
+    pub slot_loan: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

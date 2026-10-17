@@ -34,10 +34,6 @@ jobs:
           python3 -m unittest discover -s tools -p test_runner_sha.py -v
           python3 -m unittest discover -s tools -p test_check_versions.py -v
           python3 -m unittest discover -s tools -p test_differential_reject_rule.py -v
-<<<<<<< HEAD
-          python3 -m py_compile tools/runner/runner.py tools/job.py worker/script.py tools/corpus_harness.py tools/test_corpus_harness.py
-=======
->>>>>>> main
           python3 -m unittest discover -s tools -p test_corpus_harness.py -v
           # runner self-test: execute a trivial inline job end-to-end
           mkdir -p /tmp/selftest && cd /tmp/selftest

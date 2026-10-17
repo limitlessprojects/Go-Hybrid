@@ -132,6 +132,17 @@ impl<'a> Checker<'a> {
                     )],
                 })
             }
+            shape if self.shape_holds_unmovable_leaf(shape, &mut Vec::new()) => {
+                Outcome::Rejected(RejectInfo {
+                    value: name.to_string(),
+                    ty: self.binding_ty_str(b),
+                    notes: vec![format!(
+                        "`{}` is a {} that holds a borrow handle or foreign opaque value; moving the container cannot transfer non-movable interior state across tasks (O4/O7/A5)",
+                        name,
+                        shape.noun()
+                    )],
+                })
+            }
             _ => Outcome::Ok,
         }
     }
@@ -161,6 +172,65 @@ impl<'a> Checker<'a> {
                 fields
                     .iter()
                     .any(|(_, ty)| self.shape_holds_closure(&self.shape_of_type(ty), seen))
+            }
+            _ => false,
+        }
+    }
+
+    /// True when a composite shape reaches a `BorrowHandle` or `ForeignOpaque`
+    /// through its elements or fields (neither can cross tasks via `move`).
+    pub(crate) fn shape_holds_unmovable_leaf(
+        &self,
+        shape: &TypeShape,
+        seen: &mut Vec<String>,
+    ) -> bool {
+        match shape {
+            TypeShape::BorrowHandle(_) | TypeShape::ForeignOpaque(_) => true,
+            TypeShape::Slice(e) | TypeShape::Array(e) | TypeShape::Pointer(e) => {
+                self.shape_holds_unmovable_leaf(e, seen)
+            }
+            TypeShape::Map(k, v) => {
+                self.shape_holds_unmovable_leaf(k, seen)
+                    || self.shape_holds_unmovable_leaf(v, seen)
+            }
+            TypeShape::Struct(Some(sname)) => {
+                if seen.iter().any(|s| s == sname) {
+                    return false;
+                }
+                seen.push(sname.clone());
+                let Some(fields) = self.structs.get(sname) else {
+                    return false;
+                };
+                fields
+                    .iter()
+                    .any(|(_, ty)| self.shape_holds_unmovable_leaf(&self.shape_of_type(ty), seen))
+            }
+            _ => false,
+        }
+    }
+
+    /// True when a `const` value of `shape` is a pure value-copy representation
+    /// with no shared reference backing, no closure captures, no handles, and
+    /// no foreign synchronization/opaque state (Class-4 immutability exemption).
+    pub(crate) fn shape_is_const_sendable(
+        &self,
+        shape: &TypeShape,
+        seen: &mut Vec<String>,
+    ) -> bool {
+        match shape {
+            TypeShape::Primitive | TypeShape::Str | TypeShape::Atomic | TypeShape::Chan(_) => true,
+            TypeShape::Array(elem) => self.shape_is_const_sendable(elem, seen),
+            TypeShape::Struct(Some(sname)) => {
+                if seen.iter().any(|s| s == sname) {
+                    return false;
+                }
+                seen.push(sname.clone());
+                let Some(fields) = self.structs.get(sname) else {
+                    return false;
+                };
+                fields
+                    .iter()
+                    .all(|(_, ty)| self.shape_is_const_sendable(&self.shape_of_type(ty), seen))
             }
             _ => false,
         }
@@ -225,10 +295,7 @@ impl<'a> Checker<'a> {
                                 risky: !b.shape.is_sendable_by_type(),
                             };
                         }
-                        if b.immutable
-                            && !self.shape_may_share(&shape)
-                            && !matches!(shape, TypeShape::Unknown)
-                        {
+                        if b.immutable && self.shape_is_const_sendable(&shape, &mut Vec::new()) {
                             return Outcome::Ok;
                         }
                     }
@@ -265,14 +332,12 @@ impl<'a> Checker<'a> {
             };
         }
         // Issue #188: `const` composites carrying reference storage (maps,
-        // slices, pointers, or structs/arrays containing them) lower to
-        // runtime-mutable Go `var`s. Only `const` bindings whose runtime
-        // representation is a pure value copy (no shared reference backing)
-        // qualify for the Class-4 immutability exemption at spawn/send sites.
-        if b.immutable
-            && !self.shape_may_share(&b.shape)
-            && !matches!(b.shape, TypeShape::Unknown)
-        {
+        // slices, pointers, or structs/arrays containing them), closures,
+        // handles, or foreign opaques lower to runtime Go `var`s or capture
+        // mutable state. Only `const` bindings whose runtime representation is
+        // a pure value copy qualify for the Class-4 immutability exemption at
+        // spawn/send sites.
+        if b.immutable && self.shape_is_const_sendable(&b.shape, &mut Vec::new()) {
             return Outcome::Ok; // class 4 (value-copy const)
         }
         if matches!(b.shape, TypeShape::Unknown) {

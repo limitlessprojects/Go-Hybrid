@@ -591,3 +591,43 @@ it as a Go import, so it cannot fail `go build`); unused `var` /
 composite-`const` locals, select-receive names and match bindings stay
 outside this registration (the same Go error family, tracked separately);
 unread `for ... in` bindings are handled at emission (issue #139).
+
+<<<<<<< HEAD
+## Additive corpus registration — 2026-10-17: shadowed predeclared types (#326)
+
+One case derived from issue #326 before running this fixture. It pins the
+soundness rule that user-defined structs or type aliases shadowing predeclared
+primitive names (e.g. `struct rune { m map[string]string }`) must resolve to the
+user struct rather than falling through to primitive type shape. When passed
+across tasks, non-sendable contents (such as maps or slices) must be rejected
+with `HYB-E3001` (A1c sendability).
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 52 | 52-shadow-predeclared-struct-reject | REJECT | A1c | `HYB-E3001` | `struct rune { m map[string]string }` passed across tasks must reject because the shadowed struct contains a mutable map |
+
+With this addition the registered corpus is **51 programs:
+ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 36** (harness recompute: 51/51
+verdict agreement; tripwire 2/51 = 3.9% verdict-level, 3/51 = 5.9%
+as-written — not fired).
+
+=======
+## Additive corpus registration — 2026-10-17: 3-argument slice `make` (#353)
+
+One case added WITH its fix: `make([]T, len, cap)` is valid Go, was
+rejected as HYB-E2005 before the fix, and is accepted now. The 3-argument
+form is slice-only — the same arity on a channel stays E2005, and
+negative/bad-literal sizes still reject, pinned by unit tests in
+`hy-check/tests/builtin_args_defer.rs`. The old diagnostic claimed "Go
+rejects this builtin shape" — false for the slice form, and true for every
+remaining rejection.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 51 | 51-make-slice-cap | ACCEPT | — | — | `make([]int, 3, 10)` is valid Go; zero check-sites, a fresh local |
+
+With this addition the corpus on disk is **51 programs: ACCEPT 13 ·
+ACCEPT-MANAGED 2 · REJECT 36** (recomputed from the files'
+`EXPECTED-VERDICT` markers; #50 carries its registration with its own fix
+PR).
+>>>>>>> main

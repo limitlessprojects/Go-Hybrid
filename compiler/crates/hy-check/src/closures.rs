@@ -72,6 +72,7 @@ fn check_one_closure(
                     "closure parameter `{}` (the caller retains the argument across calls)",
                     p.name
                 )),
+                slot_loan: false,
             },
         );
     }

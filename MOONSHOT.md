@@ -53,10 +53,37 @@ received → triaged (≤48h) → scheduled → in-review → M1 accepted ($250)
 | ID | Proposal (one line) | Author | Source | Status | Review scheduled | Milestones | Payout | Outcome |
 |----|---------------------|--------|--------|--------|------------------|------------|--------|---------|
 | W-000 | *Track founded 2026-10-15* — owner decision adding the Wildcard Track ($500/cycle) to the bounty program; ops delegated to the AI maintainer | owner | BOUNTY.md Track 3 | **M1 accepted** | 2026-11-01 window | M1 done · M2 = this file | $250 (logged) | track live |
+| W-001 | Kill syntactic alias/loan/freeze tracking: Linear Region Capabilities `Cap[R]` + type-colored sub-graphs replace path-sensitive value-flow (family head) | ajithnair1808-max | #304 | **triaged: accepted** | 2026-11-01 · slot 1 (+ spike PR #336; dup-credit #175) | M1 2026-11-01 · M2 learning | — | — |
+| W-002 | Delete the alias graph: ownership as a capability the type carries (`own`/`share`/`borrow` constructors; may_share is too coarse in both directions) | yaojiajia838-design | #279 | **triaged: accepted** | 2026-11-01 · slot 2 | M1 2026-11-01 · M2 learning | — | — |
+| W-003 | Linear capability types `own[T]`/`share[T]`/`view[T]` + one runtime ownership bit per composite header (static + runtime defense in depth) | zidirahim617-del | #193 | **triaged: accepted** | 2026-11-01 · slot 3 | M1 2026-11-01 · M2 learning | — | — |
+| W-004 | Zero-checker emit: phantom capability witnesses in emitted Go; `cmd/compile` enforces use-after-move (checker becomes witness producer) | area523ufo | #174 | **triaged: accepted** | 2026-11-01 · slot 4 | M1 2026-11-01 · M2 learning | — | — |
+| W-005 | Clone mutable object graphs at task and channel boundaries (message isolation; memo-table preserves cycles inside the copy) | nikolas-sapa | #342 | **triaged: accepted** | 2026-11-01 · slot 5 (dup-credit #308) | M1 2026-11-01 · M2 learning | — | — |
+| W-006 | Cancellation-safety as a one-pass dataflow corollary of Tier-0; flip GUARANTEES row 12 to a checked-subset claim | raju12345-raju | #352 | **triaged: accepted** | 2026-11-01 · slot 6 | M1 2026-11-01 · M2 learning | — | — |
+| W-007 | Certify cancellation-safe structured task regions through blocking-effect admission (opt-in region, compositional summaries) | yupengtang | #348 | **triaged: accepted** | 2026-11-01 · slot 7 | M1 2026-11-01 · M2 learning | — | — |
+| W-008 | Cancellation is not completion: checked settlement for own-handle task regions (terminal-outcome accounting per handle) | luvskyy | #257 | **triaged: accepted** | 2026-11-01 · slot 8 | M1 2026-11-01 · M2 learning | — | — |
+| W-009 | Affine `tx[T]`/`rx[T]` endpoint split + wait-for epochs: row 16 flips via O5-consuming `close(move tx)`, E3201 cycle rejection | lienhoatienphung-svg | #347 | **triaged: accepted** | 2026-11-01 · slot 9 | M1 2026-11-01 · M2 learning | — | — |
+| W-010 | Generate closed channel protocols from one global program (session-type endpoint generation; deadlock freedom in a closed subset) | elliotthugftgo86r66 | #184 | **triaged: accepted** | 2026-11-01 · slot 10 | M1 2026-11-01 · M2 learning | — | — |
+| W-011 | Erase the `.hy`/`.go` split: whole-package Tier-0 on native Go AST + export data (directives-on-Go, `toolexec`) | CarlitoDon | #186 | **triaged: accepted** | 2026-11-01 · slot 11 | M1 2026-11-01 · M2 learning | — | — |
+| W-012 | Self-hosted in-process analysis: `x/tools/go/analysis` driver for gopls/vet/WASM delivery + live typed symbol tables | 1932819331hy-debug | #268 | **triaged: accepted** | 2026-11-01 · slot 12 (co-reviewed with W-011) | M1 2026-11-01 · M2 learning | — | — |
+| W-013 | Make hy-emit untrusted: translation validation of the actual generated Go against a checked-effect IR (certificates are hints) | MyTH-zyxeon | #345 | **triaged: accepted** | 2026-11-01 · slot 13 | M1 2026-11-01 · M2 learning | — | — |
+| W-014 | HyRegion: task-owned off-heap linear slabs + 1-bit region unification; kills the alias graph AND the 758 ns handle-table wall | yodakkak | #239 | **triaged: accepted** | 2026-11-01 · slot 14 | M1 2026-11-01 · M2 learning | — | — |
+| W-015 | Lexical split-join slice capabilities via Go 3-index capacity clipping (`split` block → `s[:mid:mid]`; provable disjoint fork-join) | michellehumes | #294 | **triaged: accepted** | 2026-11-01 · slot 15 | M1 2026-11-01 · M2 learning | — | — |
+| W-016 | A5 Go-escape as check-site with no Go API database: capture-write at a foreign-call boundary takes `managed` | airdropia | #327 | **triaged: accepted** | 2026-11-01 · slot 16 | M1 2026-11-01 · M2 learning | — | — |
+| W-017 | Operational take-and-detach move lowering (runtime-enforced ownership); bridge-deletion half carries a scope note | sonson0910 | #200 | **triaged: accepted** | 2026-11-01 · slot 17 | M1 2026-11-01 · M2 learning | — | — |
 
-*(empty beyond the founding row — the next row is reserved for the first
-community wildcard; the solicitation prompts below name what we want to
-see)*
+*First-window harvest (triaged 2026-10-17, all within the 48-hour acknowledgment
+commitment): 19 submissions → 17 ledger entries + 2 duplicate-credits (#175 →
+W-001 family, #308 → W-005). Review family grouping for the window: **capabilities
+replace the alias graph** (W-001–W-004, W-014, W-017), **message isolation**
+(W-005), **cancellation & protocol liveness** (W-006–W-010), **toolchain rewrites**
+(W-011–W-013), **targeted capabilities** (W-015, W-016). The 2026-11-01 window
+thread links every slot; M1 verdicts land there with written reasons.*
+
+## Review windows
+
+| Window | Entries | Thread | Outcome |
+|--------|---------|--------|---------|
+| 2026-11-01 (opens 00:00 UTC) | W-001 … W-017, spike PR #336 | [#365 — slots assigned, authors invited to pre-answer](https://github.com/limitlessprojects/Go-Hybrid/discussions/365) | pending |
 
 ---
 

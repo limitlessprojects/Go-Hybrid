@@ -149,6 +149,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Resolved::Method { root, method, recv } => {
+                self.check_call_const_writes(st, cr, &HashSet::new());
                 let Some(tname) = receiver_type_name(&recv) else {
                     return;
                 };
@@ -1368,6 +1369,7 @@ impl<'a> Checker<'a> {
                 managed_taint: managed, // O6.2: born inside `managed {}`
                 moved: None,
                 non_owned_origin,
+                slot_loan: false,
             },
         );
     }
@@ -1854,6 +1856,7 @@ impl<'a> Checker<'a> {
                 walk::own_calls(stmt, &mut calls);
                 for cr in &calls {
                     self.check_delete_const(&cst, cr, &HashSet::new());
+                    self.check_call_const_writes(&cst, cr, &HashSet::new());
                 }
             }
 
@@ -2100,6 +2103,52 @@ impl<'a> Checker<'a> {
             }
         }
         let mut hits: Vec<(String, Span)> = Vec::new();
+        if let Expr::Field {
+            base,
+            name: method_name,
+            ..
+        } = callee
+        {
+            let recv_base = match self.shape_of_expr(st, base) {
+                TypeShape::Struct(Some(s)) => Some(s),
+                TypeShape::Pointer(inner) => match *inner {
+                    TypeShape::Struct(Some(s)) => Some(s),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(rname) = recv_base {
+                if let Some(decl) = self
+                    .method_decls
+                    .get(&(rname, method_name.clone()))
+                    .copied()
+                {
+                    if let Some(r) = &decl.receiver {
+                        let ptr_recv = matches!(r.ty, hy_syntax::TypeExpr::Pointer { .. });
+                        let recv_const = if ptr_recv {
+                            base.root_ident()
+                                .filter(|root| !declared.contains(*root))
+                                .and_then(|root| {
+                                    self.const_write_root(
+                                        st,
+                                        &Place {
+                                            kind: PlaceKind::Ident(root.to_string()),
+                                            span: base.span(),
+                                        },
+                                    )
+                                })
+                        } else {
+                            self.const_arg_root(st, base, declared)
+                        };
+                        if let Some(const_name) = recv_const {
+                            if self.fn_mutates_const_param(decl, &r.name, 0) {
+                                hits.push((const_name, base.span()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         for (i, a) in cr.args.iter().enumerate() {
             let Some(const_name) = self.const_arg_root(st, &a.value, declared) else {
                 continue;
@@ -2121,6 +2170,42 @@ impl<'a> Checker<'a> {
                         true
                     } else {
                         false
+                    }
+                }
+                Expr::Field {
+                    base,
+                    name: method_name,
+                    ..
+                } => {
+                    let is_pkg = match crate::model::unwrap_parens(base) {
+                        Expr::Ident { name: pkg, .. } => {
+                            self.lookup_binding(st, pkg).is_none() && self.known_package(pkg)
+                        }
+                        _ => false,
+                    };
+                    if is_pkg {
+                        false
+                    } else if matches!(self.shape_of_expr(st, callee), TypeShape::Closure) {
+                        true
+                    } else {
+                        let recv_base = match self.shape_of_expr(st, base) {
+                            TypeShape::Struct(Some(s)) => Some(s),
+                            TypeShape::Pointer(inner) => match *inner {
+                                TypeShape::Struct(Some(s)) => Some(s),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        if let Some(decl) = recv_base.and_then(|rb| {
+                            self.method_decls.get(&(rb, method_name.clone())).copied()
+                        }) {
+                            match decl.params.get(i) {
+                                Some(p) => self.fn_mutates_const_param(decl, &p.name, 0),
+                                None => true,
+                            }
+                        } else {
+                            false
+                        }
                     }
                 }
                 Expr::FnLit { params, body, .. } => match params.get(i) {
@@ -2407,11 +2492,45 @@ impl<'a> Checker<'a> {
                 }
                 cr.args.iter().any(&arg_reaches_alias)
             }
-            Expr::Field { base, .. } => {
+            Expr::Field {
+                base,
+                name: method_name,
+                ..
+            } => {
                 if let Expr::Ident { name: pkg, .. } = &**base {
                     if A3_PURE_PKGS.contains(&pkg.as_str()) {
                         return false;
                     }
+                }
+                let matching: Vec<&FnDecl> = self
+                    .method_decls
+                    .iter()
+                    .filter(|((_, m), _)| m == method_name)
+                    .map(|(_, d)| *d)
+                    .collect();
+                if Self::expr_reaches_const_aliases(base, aliases)
+                    && (matching.is_empty()
+                        || matching.iter().any(|d| {
+                            d.receiver
+                                .as_ref()
+                                .is_some_and(|r| self.fn_mutates_const_param(d, &r.name, depth + 1))
+                        }))
+                {
+                    return true;
+                }
+                if !matching.is_empty() {
+                    for (i, a) in cr.args.iter().enumerate() {
+                        if !arg_reaches_alias(a) {
+                            continue;
+                        }
+                        if matching.iter().any(|d| match d.params.get(i) {
+                            Some(p) => self.fn_mutates_const_param(d, &p.name, depth + 1),
+                            None => true,
+                        }) {
+                            return true;
+                        }
+                    }
+                    return false;
                 }
                 cr.args.iter().any(&arg_reaches_alias)
             }
@@ -2811,6 +2930,7 @@ impl<'a> Checker<'a> {
             managed_taint: false,
             moved: None,
             non_owned_origin,
+            slot_loan: false,
         }
     }
 }

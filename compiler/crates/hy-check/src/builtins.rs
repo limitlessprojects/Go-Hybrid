@@ -296,18 +296,28 @@ impl<'a> Checker<'a> {
     }
 
     fn check_make_args(&mut self, args: &[hy_syntax::CallArg], span: Span) {
-        if !(1..=2).contains(&args.len()) {
+        // `make([]T, len, cap)` — the 3-argument form — is valid Go for slices
+        // only (issue #353). The parser encodes a type in expression position
+        // as a literal node (`[]T` → SliceLit with no items); every other
+        // type spelling keeps the 1–2 argument limit.
+        let slice_form = args.len() == 3
+            && matches!(
+                args.first().map(|a| unwrap_parens(&a.value)),
+                Some(Expr::SliceLit { items, .. }) if items.is_empty()
+            );
+        let max_args = if slice_form { 3 } else { 2 };
+        if args.is_empty() || args.len() > max_args {
             self.emit_builtin(
                 span,
                 format!(
-                    "`make` requires 1 or 2 arguments (type[, size]), found {} (HYB-E2005)",
+                    "`make` requires 1 or 2 arguments (type[, size]) — or 3 for a slice (type, len, cap) — found {} (HYB-E2005)",
                     args.len()
                 ),
             );
             return;
         }
-        if args.len() == 2 {
-            match classify_make_size(&args[1].value) {
+        for arg in args.iter().skip(1) {
+            match classify_make_size(&arg.value) {
                 MakeSize::Ok | MakeSize::NonLiteral => {}
                 MakeSize::Negative => self.emit_builtin(
                     span,

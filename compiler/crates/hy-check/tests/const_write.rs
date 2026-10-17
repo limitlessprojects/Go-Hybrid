@@ -475,3 +475,212 @@ fn interproc_two_hop_and_copy_on_const_reject_while_readonly_helper_accepts() {
     );
     assert_eq!(r_readonly.verdict, Verdict::Accept);
 }
+
+#[test]
+fn const_struct_holding_closure_or_foreign_opaque_rejects_at_boundary() {
+    let r_closure_struct = check(
+        "struct job {\n\
+             f fn()\n\
+         }\n\n\
+         fn worker(j job, done chan<- bool) {\n\
+             j.f()\n\
+             done <- true\n\
+         }\n\n\
+         fn main() {\n\
+             m := map[string]int{}\n\
+             const j = job{f: fn() { m[\"k\"] = 1 }}\n\
+             done := make(chan bool, 1)\n\
+             task worker(j, done)\n\
+             m[\"k\"] = 2\n\
+             <-done\n\
+         }\n",
+    );
+    assert!(
+        codes(&r_closure_struct).iter().any(|c| c == "HYB-E3001"),
+        "expected HYB-E3001 for const struct holding closure at task boundary, got {:?}",
+        codes(&r_closure_struct)
+    );
+    assert_eq!(r_closure_struct.verdict, Verdict::Reject);
+
+    let r_closure_field = check(
+        "struct job {\n\
+             f fn()\n\
+         }\n\n\
+         fn worker(cb fn(), done chan<- bool) {\n\
+             cb()\n\
+             done <- true\n\
+         }\n\n\
+         fn main() {\n\
+             m := map[string]int{}\n\
+             const j = job{f: fn() { m[\"k\"] = 1 }}\n\
+             done := make(chan bool, 1)\n\
+             task worker(j.f, done)\n\
+             m[\"k\"] = 2\n\
+             <-done\n\
+         }\n",
+    );
+    assert!(
+        codes(&r_closure_field).iter().any(|c| c == "HYB-E3001"),
+        "expected HYB-E3001 for closure field projection of const struct, got {:?}",
+        codes(&r_closure_field)
+    );
+    assert_eq!(r_closure_field.verdict, Verdict::Reject);
+
+    // Pure value-copy const struct still crosses cleanly as Class 4.
+    let r_value_struct = check(
+        "struct pair {\n\
+             a int\n\
+             b string\n\
+         }\n\n\
+         const p = pair{a: 1, b: \"ok\"}\n\n\
+         fn worker(x pair, done chan<- bool) {\n\
+             _ = x\n\
+             done <- true\n\
+         }\n\n\
+         fn main() {\n\
+             done := make(chan bool, 1)\n\
+             task worker(p, done)\n\
+             <-done\n\
+         }\n",
+    );
+    assert_eq!(
+        r_value_struct.verdict,
+        Verdict::Accept,
+        "{:?}",
+        codes(&r_value_struct)
+    );
+}
+
+#[test]
+fn move_of_make_map_and_type_aliased_closure_containers_reject_e3001() {
+    let r_make_map = check(
+        "fn worker(v map[string]fn(), done chan<- bool) {\n\
+             v[\"a\"]()\n\
+             done <- true\n\
+         }\n\n\
+         fn main() {\n\
+             m := map[string]int{}\n\
+             v := make(map[string]fn(){})\n\
+             v[\"a\"] = fn() { m[\"k\"] = 1 }\n\
+             done := make(chan bool, 1)\n\
+             task worker(move v, done)\n\
+             m[\"k\"] = 2\n\
+             <-done\n\
+         }\n",
+    );
+    assert!(
+        codes(&r_make_map).iter().any(|c| c == "HYB-E3001"),
+        "expected HYB-E3001 when moving make(map[string]fn(){{}}), got {:?}",
+        codes(&r_make_map)
+    );
+    assert_eq!(r_make_map.verdict, Verdict::Reject);
+
+    let r_alias_field = check(
+        "type cb = fn()\n\
+         struct job {\n\
+             f cb\n\
+         }\n\n\
+         fn worker(j job, done chan<- bool) {\n\
+             j.f()\n\
+             done <- true\n\
+         }\n\n\
+         fn main() {\n\
+             m := map[string]int{}\n\
+             j := job{f: fn() { m[\"k\"] = 1 }}\n\
+             done := make(chan bool, 1)\n\
+             task worker(move j, done)\n\
+             m[\"k\"] = 2\n\
+             <-done\n\
+         }\n",
+    );
+    assert!(
+        codes(&r_alias_field).iter().any(|c| c == "HYB-E3001"),
+        "expected HYB-E3001 when moving struct with type-aliased closure field, got {:?}",
+        codes(&r_alias_field)
+    );
+    assert_eq!(r_alias_field.verdict, Verdict::Reject);
+}
+
+#[test]
+fn closure_interproc_and_method_const_mutations_reject_e3006() {
+    let r_closure_call = check(
+        "const shared = map[string]int{\"a\": 1}\n\n\
+         fn touch(m map[string]int, v int) {\n\
+             m[\"a\"] = v\n\
+         }\n\n\
+         fn main() {\n\
+             f := fn() {\n\
+                 touch(shared, 2)\n\
+             }\n\
+             f()\n\
+         }\n",
+    );
+    assert!(
+        codes(&r_closure_call).iter().any(|c| c == "HYB-E3006"),
+        "expected HYB-E3006 for interprocedural const mutation inside closure, got {:?}",
+        codes(&r_closure_call)
+    );
+    assert_eq!(r_closure_call.verdict, Verdict::Reject);
+
+    let r_method_recv = check(
+        "struct box {\n\
+             m map[string]int\n\
+         }\n\n\
+         const shared_box = box{m: map[string]int{\"a\": 1}}\n\n\
+         fn (b box) mutate(v int) {\n\
+             b.m[\"a\"] = v\n\
+         }\n\n\
+         fn main() {\n\
+             shared_box.mutate(2)\n\
+         }\n",
+    );
+    assert!(
+        codes(&r_method_recv).iter().any(|c| c == "HYB-E3006"),
+        "expected HYB-E3006 for mutating method call on const struct, got {:?}",
+        codes(&r_method_recv)
+    );
+    assert_eq!(r_method_recv.verdict, Verdict::Reject);
+
+    let r_method_arg = check(
+        "struct writer {\n\
+             tag int\n\
+         }\n\n\
+         const shared = map[string]int{\"a\": 1}\n\n\
+         fn (w writer) put(m map[string]int, v int) {\n\
+             _ = w\n\
+             m[\"a\"] = v\n\
+         }\n\n\
+         fn main() {\n\
+             w := writer{tag: 1}\n\
+             w.put(shared, 2)\n\
+         }\n",
+    );
+    assert!(
+        codes(&r_method_arg).iter().any(|c| c == "HYB-E3006"),
+        "expected HYB-E3006 for passing const map to mutating method, got {:?}",
+        codes(&r_method_arg)
+    );
+    assert_eq!(r_method_arg.verdict, Verdict::Reject);
+
+    // Negative control: read-only method on const struct stays accepted.
+    let r_method_ro = check(
+        "struct box {\n\
+             m map[string]int\n\
+         }\n\n\
+         const shared_box = box{m: map[string]int{\"a\": 1}}\n\n\
+         fn (b box) size() int {\n\
+             return len(b.m)\n\
+         }\n\n\
+         fn main() {\n\
+             n := shared_box.size()\n\
+             _ = n\n\
+         }\n",
+    );
+    assert_eq!(
+        r_method_ro.verdict,
+        Verdict::Accept,
+        "{:?}",
+        codes(&r_method_ro)
+    );
+}
+

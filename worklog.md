@@ -495,3 +495,18 @@ Stage Summary:
 - 14 PRs processed (11 merged + 3 dup-credited) + 2 zombies closed + 1 reopened + ~40 triaged. corpus 45, cargo 442/0, differential FULL, examples 10/10, tools python 104/OK.
 - Pushed: cb53ead → aedfa2d (Batch A) → 57ab16c (#180) → 93aea3d (corpus 45) → 8d05fd7/8389056 (#171 seam) → 194715b (#170) → bfefd10 (BOUNTY wording). CI green on every push.
 - Next session queue: slot-loan stack #214→#218 + #222; const-composite #190/#192; match #173/#210; fail-closed trio #185/#224/#227; closure family #207/#213/#220/#226/#229; defer pair #223/#99; #197; #191; #198; #106 design note; old queue rebase assists; ci.yml filter via API.
+
+---
+
+## Session 12 (2026-10-17) — CI recovery, wildcard first harvest, A-tier wave landings
+
+Started at 00610f7 (+2a147fe/#359 mid-flight), ended at 40f5315. Toolchains re-pinned after sandbox reset (Go 1.26.9, Rust 1.99.0 via the build.rs pin).
+
+- **CI P0**: main's ci.yml carried committed merge-conflict markers (issue #358) — every run failed at YAML parse since ~22:32Z 10-16. Merged #359 (Ratanlavate; its head had the window's only green run), closed #337/#339 same-fix with credit. Push runs verified green (4f5c003, 0c8b537, 6e05c68). The earlier "zero-jobs quota" suspicion was wrong — jobs always ran; the workflow file itself was unparseable.
+- **Wildcard window (user's first ask)**: 19 `[wildcard]` issues had arrived; none were triaged. All 19 got written 48h-verdict comments + labels; **17 entered the MOONSHOT ledger as W-001…W-017**, 2 duplicate-credits (#175→W-001 family, #308→W-005). Families: capabilities-replace-the-alias-graph (W-001..004, W-014, W-017), message isolation (W-005), cancellation/protocol liveness (W-006..010), toolchain rewrites (W-011..013), targeted capabilities (W-015/016). Review window scheduled 2026-11-01 with slots in **discussion #365**; spike PR #336 attached to W-001. MOONSHOT ledger + review-windows table committed.
+- **Wave-2 triage**: written verdicts on every open PR #248–#364 (99 comments; 7 closes). A-tier all landed:
+  #357 (orphan else, fixes #356; end-to-end go run verified) → #360 (make 3-arg, fixes #353; corpus 51) → #355 (const/container guards, fixes #354; two maintainer repros) → #343 (predeclared shadow, fixes #326; corpus renumber 51→52 conflict resolved; #329 same-fix credit) → #323 (inclusive range wrap, fixes #322; cherry-picked off a divergent 17k-line fork history and re-united with #218's loan-frame machinery) → #266 (E2002, fixes #265; lib.rs union kept both guards) → #274 (E3104, fixes #273; via_addr port).
+- **Verified no-delta**: #362 closed after 11/11 of its own tests passed on main + 8/8 probe parity + corpus parity. Issue #361 remains OPEN with 4 pinned wrapped-move shapes (field/index/paren-slice/call wraps of locals) — the real remaining P0 work.
+- **Self-caught incidents**: #343 integration dropped #355's make-shape MapLit resolution (caught by const_write battery after push; restored in 49f5361 with the lesson recorded); accidental deletion of #213's test file (same name as #362's) caught before commit and restored.
+- **Suites at close**: cargo 0 failed (37 binaries), corpus 52/52, differential FULL 15+37, main CI green.
+- **Next session**: landing queue per STATUS.md — #306, #230, #251, #244, #240/#245, #247, #296, #311/#302, #234, const family, emit-lowering batch; then tools/kaggle batch; wildcard M1 verdicts 2026-11-01 in #365.
