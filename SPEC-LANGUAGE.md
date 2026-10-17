@@ -1263,37 +1263,16 @@ generated Go `init()`.
 surface post-MVP; when it lands, atomic-typed values become O4 class 2
 (sendable safe-by-type). No Hybrid-level `atomic` keyword is planned.
 
-### 8.5 A5 — the Go-API escape perimeter (decided: scoped claim + lint)
+### 8.5 A5 — the Go-API escape perimeter (decided: D5 fourth check-site, issue #327)
 
-**C9 — Values passed to foreign Go APIs are NOT check-sites.** This
-resolves Spike-6 ambiguity **A5**: a value handed to `net/http`
-(`mux.handle("/hello", handler)`) escapes into Go code that may run it on
-other goroutines, and Tier 0's spawn/send checks never see it.
+**C9 — Values passed to foreign Go APIs are check-sites for capture-writes.** This resolves Spike-6 ambiguity **A5**: a closure body that writes a captured mutable binding where that closure crosses into foreign Go code (`mux.handle("/hello", http.handler(fn(...) { hits++ }))`) is a Tier-0 check-site. The write must be proven immutable-by-type or taken through `managed`; otherwise `HYB-E3005` (rule FC). No Go API database, no curated per-package list, and no ecosystem treadmill is consulted — the triple (closure × captured mutable write × foreign-call boundary) is visible in the `.hy` file alone.
 
-**Decision: scoped claim, not a fourth check-site class.**
+**Decision: D5 fourth check-site (issue #327), closed-world from Tier 0.**
 
-- The safety claim (§9.2) states Go-API escapes explicitly: they follow
-  Go's DRF-SC memory model with `go test -race` as the backstop — the same
-  contract Go programs already live under.
-- A *lint* (`hy-lint/go-escape-mut-shared`, off by default, curated API
-  list: `net/http`, `time.after_func`, anything registering callbacks)
-  warns when a Hybrid value that is mutably shared across Hybrid tasks is
-  also passed to a concurrent-flagged Go API. It is diagnostic-only: no
-  hard error, ever, in MVP.
-
-**Why scoped-claim over a fourth check-site:** (1) the Go side does not
-cooperate — freezing sender aliases cannot stop *Go* code from mutating a
-shared value, so a hard check would promise race-freedom the runtime cannot
-deliver (an honesty failure, Q1 addition 6); (2) flagging "concurrent" Go
-APIs requires a curated per-package database that will always lag Go's
-ecosystem — a compatibility treadmill; (3) example 06 (the pinned case) is
-race-free and must compile unmodified, which it does under both options,
-so the cheaper one wins (SPEC §9 rule 3: lower risk to MVP first).
-**Reversal:** the lint's curated list is the seed of a fourth check-site
-class; promoting it to a hard check is a logged decision away if the
-adversarial corpus shows silent Go-escape races dominating real bug
-reports. [decided: honesty + risk; tagged open D5, pinned by example 06 +
-Phase-3 `-race` legs]
+- The safety claim (§9.2) states Go-API escapes explicitly: they follow Go's DRF-SC memory model with `go test -race` as the backstop for the parts Tier 0 does not own. The checker owns exactly the capture-write at the foreign-call boundary and makes no claim about races inside foreign code itself (an honesty failure risk the scoped claim avoids, Q1 addition 6).
+- A *lint* (`hy-lint/go-escape-mut-shared`, off by default) remains the advisory layer for the broader "is this API concurrent?" question, which still needs a curated per-package database; the hard check-site is narrower and deliberately avoids that treadmill.
+- Example 06 (the pinned case) is race-free and compiles unmodified under both options; the cheaper, closed-world check wins (SPEC §9 rule 3: lower risk to MVP first).
+**Reversal recorded:** the opt-in lint alone was the pre-D5 default; promoting capture-writes at foreign-call boundaries to a hard check-site (D5) is a logged decision, pinned by corpus 10 (`REJECT`, rule FC) and the `managed` hatch (counted by `--report-managed`).
 
 ## 9. Ownership, borrowing, and the safe/unsafe boundary — TIER 0
 
@@ -1403,10 +1382,7 @@ is also the documented divergence point for the rustc shadow-translation CI
 leg (O16): the shadow encoding must model reads as copies or it will
 over-reject.
 
-**O10 — The Go-API escape perimeter (resolves A5).** Normative statement in
-C9: escapes into foreign Go code are outside the checked claim; Go's DRF-SC
-+ `go test -race` is the backstop; an opt-in diagnostic lint exists. The
-honest-claims paragraph (§9.2) carries the wording.
+**O10 — The Go-API escape perimeter (resolves A5; D5, issue #327).** Escapes into foreign Go code are outside the checked claim for reads and for opaque passthrough, but a closure body that writes a captured mutable binding where the closure crosses into foreign Go code IS a check-site: the write must be proven immutable-by-type or taken through `managed`, otherwise `HYB-E3005` (rule FC). Go's DRF-SC + `go test -race` remains the backstop for what the checker does not own; the honest-claims paragraph (§9.2) carries the wording. No Go API database is consulted.
 
 **O11 — Handle parameters are borrow-by-default (resolves A7).** Passing an
 L3 handle to a Hybrid function **lends** it: the callee may use it in
@@ -1526,17 +1502,21 @@ Diagnostics teach the fix (§9.6/O17): the E3005 fix-it menu is ascribe /
 route through a known channel / take the managed hatch knowingly.
 
 **O4.10 — Closure bodies: boundary statements are checked; captures are
-not (resolves Finding 2).** A `task`/`send`/select-send **statement inside
+not — except capture-writes at foreign-call boundaries (resolves Finding 2;
+D5, issue #327).** A `task`/`send`/select-send **statement inside
 a closure body is a concurrency boundary in the emitted Go** (a goroutine
 spawn, a channel operation) and is checked exactly as in the flat walk —
 fail-closed, `managed`-escapable, with the closure's ascribed params and
 the enclosing function's bindings as the capture view. Everything ELSE in
 a closure body — assignments, calls, captures of mutable state with no
 boundary statement — remains outside the checked subset: that is the A5
-perimeter of the scoped-claim ruling (QUESTIONS.md Q1; corpus 10's
-`http.handler` capture shape stays ACCEPT, CONTESTED under OQ1). The
-boundary is documented, not silent; the fourth check-site class that would
-own API escapes is still the open question OQ1, unchanged by this rule.
+perimeter of the scoped-claim ruling (QUESTIONS.md Q1). The one addition
+(D5): where the closure body itself WRITES a captured mutable binding AND
+the closure is handed to foreign Go code, the write is a check-site —
+proven immutable-by-type or `managed`, otherwise `HYB-E3005` (rule FC).
+No Go API database is consulted. Corpus 10's `http.handler` capture shape
+is now REJECT (rule FC) under D5; OQ1 is resolved by issue #327. The
+boundary is documented, not silent.
 
 ```hy
 mux.handle("/x", http.handler(fn(w http.response_writer) {
@@ -2134,7 +2114,7 @@ cannot be.
 | D2 | `task` of a closure literal: capture semantics at spawn | §8.1 | checker corpus closure-spawn program |
 | D3 | foreign-Go nil dereference: lint → hard error? | §3.1 N2 | examples 02/06 + differential corpus nil-panic cases |
 | D4 | curated Go surface: `sync` (WaitGroup), `sync/atomic` | §10 M5 | example 03 (counting join is the pinned MVP shape); any corpus atomics program |
-| D5 | A5 perimeter: promote the go-escape lint to a fourth check-site? | §8.5 | example 06 + Phase-3 `-race` legs + corpus go-escape races |
+| D5 | A5 perimeter: promote the go-escape lint to a fourth check-site? | §8.5 | **RESOLVED by issue #327 — promoted.** Fourth check-site active: a closure body that writes a captured mutable binding where the closure crosses into foreign Go code is a check-site (rule FC, HYB-E3005) unless immutable-by-type or `managed`; pinned by corpus 10 (`REJECT FC`) |
 | D6 | `result[T, E]` as a library enum post-MVP | §2.11 | positioning evidence (r/rust audience); no MVP pin by design |
 | D7 | monomorphize marked hot generic instantiations | §4 G2 | example 07 macro-benchmark (Phase 4) |
 | D8 | import alias syntax for Go-name normalization collisions | §10 M4 | first real collision in the curated surface |
@@ -2160,7 +2140,7 @@ cannot drift silently.
 | **A2** handle-loan rule (was missing) | borrow-mode uses create non-lexical loans on the handle; mutating-mode calls conflict with live borrow loans | O7 (§9.1) |
 | **A3** map-slot borrows `&m[k]` | legal, unique, non-lexical; invalidated by insert/delete in the window; lowered to read-modify-write | O8 (§9.1) |
 | **A4** Go-heap reads | **copies, not loans** — the load-bearing divergence from rustc | O9 (§9.1) |
-| **A5** Go-API escape perimeter | scoped claim + `-race` backstop + opt-in lint; no fourth check-site in MVP | C9 / O10 (§8.5, §9.2) |
+| **A5** Go-API escape perimeter | **D5, issue #327 — fourth check-site active:** capture-write at a foreign-call boundary (rule FC, HYB-E3005) unless immutable-by-type or `managed`; no Go API database | C9 / O10 (§8.5, §9.2) |
 | **A6** borrows in struct fields | forbidden — fields hold owned values, GC values, ids, or own-handles; same for closure captures | O12 (§9.1) |
 | **A7** handle-parameter mode | **borrow-by-default**; own-transfer at `return`, consuming APIs, and spawn/send | O11 (§9.1) |
 | **A8** top-level `?` exit contract | defers run, then `<prog>: {err}` to stderr, exit 1 | E6 (§6.2) |

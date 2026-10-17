@@ -28,6 +28,7 @@
 
 use crate::model::{Binding, Checker, FnState, TypeShape};
 use hy_syntax::ForKind::*;
+use hy_diag::Diagnostic;
 use hy_syntax::{Block, Expr, LocalKind, SelectArmKind, Stmt};
 
 /// Check the boundary statements of every closure body reachable from
@@ -36,6 +37,148 @@ use hy_syntax::{Block, Expr, LocalKind, SelectArmKind, Stmt};
 pub(crate) fn check_closure_boundaries(ck: &mut Checker<'_>, st: &FnState, body: &Block) {
     for (params, results, body) in collect_fnlits(body) {
         check_one_closure(ck, st, params, results, body);
+    }
+}
+
+/// A5 escalation (D5, closed-world form — issue #327): a closure literal
+/// passed DIRECTLY as an argument to a foreign call is a capture crossing
+/// into Go code that may run it on another goroutine. The checker needs no
+/// per-API database: the property is visible in the `.hy` source — the
+/// closure body WRITES a captured mutable binding. Such a write must be
+/// proven immutable (`let`/`const`) or sit in a `managed` block; otherwise
+/// HYB-E3005. Called per flat statement from Pass B with the live env.
+pub(crate) fn check_foreign_capture_writes(
+    ck: &mut Checker<'_>,
+    st: &FnState,
+    stmt: &Stmt,
+    managed: bool,
+) {
+    let mut calls = Vec::new();
+    crate::walk::own_calls(stmt, &mut calls);
+    for cr in calls {
+        if !is_foreign_callee(ck, st, cr.callee) {
+            continue;
+        }
+        for a in cr.args {
+            if let Expr::FnLit { params, results, body, .. } = crate::model::unwrap_parens(&a.value) {
+                let mut local: std::collections::HashSet<String> = std::collections::HashSet::new();
+                for p in params {
+                    local.insert(p.name.clone());
+                }
+                for r in results {
+                    if let Some(n) = &r.name {
+                        local.insert(n.clone());
+                    }
+                }
+                let mut seen = std::collections::HashSet::new();
+                scan_escaping_writes(ck, st, body, &mut local, managed, &mut seen);
+            }
+        }
+    }
+}
+
+fn is_foreign_callee(ck: &Checker<'_>, st: &FnState, callee: &Expr) -> bool {
+    let Expr::Field { .. } = crate::model::unwrap_parens(callee) else {
+        return false;
+    };
+    let Some(path) = crate::walk::expr_path(callee) else {
+        return false;
+    };
+    let root = path.split('.').next().unwrap_or("");
+    match ck.lookup_binding(st, root) {
+        None => ck.known_package(root),
+        Some(b) => matches!(
+            b.shape,
+            TypeShape::ForeignOpaque(_)
+                | TypeShape::OwnHandle(_)
+                | TypeShape::BorrowHandle(_)
+                | TypeShape::Unknown
+        ),
+    }
+}
+
+fn scan_escaping_writes(
+    ck: &mut Checker<'_>,
+    st: &FnState,
+    body: &Block,
+    local: &mut std::collections::HashSet<String>,
+    outer_managed: bool,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let flat = crate::walk::flatten(body);
+    for (s, idx) in &flat.stmts {
+        if let Stmt::Local(l) = s {
+            for n in &l.names {
+                local.insert(n.clone());
+            }
+        }
+    }
+    for (s, idx) in &flat.stmts {
+        let managed = outer_managed || flat.in_managed(*idx);
+        let mut uses = Vec::new();
+        crate::walk::own_uses(s, &mut uses);
+        for u in uses.iter().filter(|u| u.is_write) {
+            if local.contains(&u.name) || managed {
+                if managed && !local.contains(&u.name) {
+                    if let Some(b) = ck.lookup_binding(st, &u.name) {
+                        if !b.immutable && seen.insert(format!("m{}", u.name)) {
+                            ck.total_sites += 1;
+                            ck.sites_via_managed += 1;
+                            let msg = format!(
+                                "write to captured `{}` inside a closure handed to foreign code, under a `managed` block (unchecked)",
+                                u.name
+                            );
+                            ck.diags.push(Diagnostic::warning(
+                                "HYB-E8001",
+                                ck.path.clone(),
+                                u.span,
+                                msg,
+                            ));
+                        }
+                    }
+                }
+                continue;
+            }
+            let Some(b) = ck.lookup_binding(st, &u.name) else {
+                continue;
+            };
+            if b.immutable {
+                continue;
+            }
+            ck.total_sites += 1;
+            if !seen.insert(u.name.clone()) {
+                continue;
+            }
+            let msg = format!(
+                "`{}` is written inside a closure handed to foreign code — the callee may run it on another goroutine, so this captured write is unproven (A5 escape)",
+                u.name
+            );
+            let notes = vec![
+                "no Go API database is consulted: the closure crosses into foreign Go code and writes a captured mutable binding, both visible in this file".to_string(),
+                "fix: keep the state inside the closure, make it immutable, use an atomic (`var hits atomic.int64`) or a channel instead of a captured plain write".to_string(),
+                "if the write is genuinely guarded, wrap it in `managed(\"why this is safe\", \"mutex\") { ... }` — the explicit, auditable hatch (counted by --report-managed)".to_string(),
+            ];
+            ck.diags.push(
+                Diagnostic::error("HYB-E3005", ck.path.clone(), u.span, msg).with_notes(notes),
+            );
+        }
+        // nested closures: their params are local to them
+        let mut flits = Vec::new();
+        crate::walk::own_fnlits(s, &mut flits);
+        for f in flits {
+            if let Expr::FnLit { params, results, body, .. } = crate::model::unwrap_parens(f) {
+                let mut nl = local.clone();
+                for p in params {
+                    nl.insert(p.name.clone());
+                }
+                for r in results {
+                    if let Some(n) = &r.name {
+                        nl.insert(n.clone());
+                    }
+                }
+                scan_escaping_writes(ck, st, body, &mut nl, managed, seen);
+            }
+        }
     }
 }
 

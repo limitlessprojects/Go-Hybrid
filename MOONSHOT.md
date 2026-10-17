@@ -112,6 +112,13 @@ wall is is worth exactly as much here as an accepted one.
   Deliberately accepted as the price of not being blind-sided by the idea
   we would have rejected.
 
+### L-001 — W-016: A5 Go-escape as a check-site with no Go API database (2026-10-17)
+
+- **Proposal (W-016, issue #327):** make the A5 escape itself a Tier-0 check-site — a closure body that writes a captured mutable binding where the closure crosses into foreign Go code must be proven immutable-by-type or taken through `managed`, else `HYB-E3005` (rule FC). No Go API database, no curated per-package list, no ecosystem treadmill.
+- **Verdict:** implemented and merged (branch `fix-bounty-327`, commit `a4b9e0a` plus this session's test/corpus/docs alignment).
+- **What we learned:** the "concurrent API database" treadmill was solving the wrong question. The decidable property is visible in the `.hy` file alone (capture-write × foreign-call boundary), so Tier 0 can own the fourth check-site closed-world with zero callee knowledge. Corpus 10 (the request-counter-middleware shape) flips ACCEPT → REJECT FC; the opt-in lint stays advisory for the broader "which APIs are concurrent?" question, and `managed` remains the explicit, counted escape hatch. Tripwire stays closed (corpus managed 3.6% verdict-level / 5.5% as-written vs ~25%).
+- **Cost:** one checker pass (~145 lines) + two regression tests + corpus/docs alignment; full workspace suite + corpus harness green.
+
 ---
 
 ## Failure wall

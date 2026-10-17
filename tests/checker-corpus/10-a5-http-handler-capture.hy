@@ -35,17 +35,22 @@
 // ---- Sendability / check sites (task spawn / channel send) ----
 //   NONE in Hybrid code (no `task`, no channel send). PERIMETER: the
 //   `hits` capture in the closure passed to `mux.handle(...)` escapes
-//   into Go code — unchecked under the scoped claim (A5).
+//   into Go code. Issue #327 (D5) lands the fourth check-site here: the
+//   closure body writes captured mutable `hits` and the closure crosses
+//   into foreign Go code, so the write must be proven immutable-by-type
+//   or taken through the `managed` hatch — otherwise HYB-E3005 (rule FC).
+//   No Go API database is consulted; the triple is visible in this file.
 //
 // ---- Expected verdict (PRE-REGISTERED 2026-10-12, before any checker) ----
-// EXPECTED-VERDICT: ACCEPT (CONTESTED)
-//   ACCEPT under the A5 scoped-claim ruling (no check site exists for the
-//   checker to own). Flips to REJECT if the fourth check-site class lands
-//   (OQ1). HONESTY NOTE: production net/http serves handlers concurrently
-//   — `hits++` from two overlapping requests is a REAL Go data race; the
-//   in-process smoke client below is sequential, so this acceptance run
-//   is race-free. The verdict is about which SITES the checker owns, not
-//   about the runtime behavior of foreign code.
+// EXPECTED-VERDICT: REJECT FC
+//   REJECT under issue #327 / D5: `hits++` is a write to a captured mutable
+//   binding inside a closure handed to foreign Go code, and `hits` is neither
+//   immutable-by-type nor inside a `managed` block. Flipped from ACCEPT when
+//   the fourth check-site landed (OQ1). HONESTY NOTE: production net/http
+//   serves handlers concurrently — `hits++` from two overlapping requests is
+//   a REAL Go data race; the in-process smoke client below is sequential, so
+//   this acceptance run is race-free. The verdict is about which SITES the
+//   checker owns, not about the runtime behavior of foreign code.
 //
 // ---- Annotations / managed ----
 //   lifetime annotations: 0. `managed` blocks: 0.
