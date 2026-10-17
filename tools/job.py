@@ -16,6 +16,7 @@ Kaggle kernel slug: from worker/kernel-metadata.json (id field).
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -93,7 +94,7 @@ def kaggle_submit(jobdir):
     with open(os.path.join(WORKER_DIR, "job.json"), "w") as f:  # per SPEC §2 protocol
         f.write(payload)
     try:
-        rc, out = sh("{} kernels push -p {}".format(KAGGLE_CLI, WORKER_DIR), timeout=180)
+        rc, out = sh("{} kernels push -p {}".format(shlex.quote(KAGGLE_CLI), shlex.quote(WORKER_DIR)), timeout=180)
         print(out)
         if rc != 0:
             sys.exit("kaggle kernels push failed")
@@ -114,7 +115,7 @@ def kaggle_submit(jobdir):
 
 def kaggle_status(slug=None):
     slug = slug or kaggle_slug()
-    rc, out = sh("{} kernels status {}".format(KAGGLE_CLI, slug), timeout=60)
+    rc, out = sh("{} kernels status {}".format(shlex.quote(KAGGLE_CLI), shlex.quote(slug)), timeout=60)
     print(out)
     return out
 
@@ -139,7 +140,7 @@ def kaggle_wait(minutes, slug=None):
     saw_active = False
     state, polls = "?", 0
     while time.time() < deadline:
-        rc, out = sh("{} kernels status {}".format(KAGGLE_CLI, slug), timeout=60)
+        rc, out = sh("{} kernels status {}".format(shlex.quote(KAGGLE_CLI), shlex.quote(slug)), timeout=60)
         polls += 1
         try:
             state = out.split('"')[-2].split(".")[-1].upper()  # '"KernelWorkerStatus.RUNNING"'
@@ -160,7 +161,7 @@ def kaggle_fetch(jobdir, slug=None):
     slug = slug or kaggle_slug()
     raw = os.path.join(jobdir, "result", "raw")
     os.makedirs(raw, exist_ok=True)
-    rc, out = sh("{} kernels output {} -p {}".format(KAGGLE_CLI, slug, raw), timeout=180)
+    rc, out = sh("{} kernels output {} -p {}".format(shlex.quote(KAGGLE_CLI), shlex.quote(slug), shlex.quote(raw)), timeout=180)
     print(out)
     # find summary.json anywhere under raw
     found = []
