@@ -133,6 +133,9 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
             TypeShape::OwnHandle("serde_json.value".into())
         }
         ("flate2", "new_writer") => TypeShape::OwnHandle("flate2.writer".into()),
+        ("serde_json", "array" | "get") => TypeShape::BorrowHandle("serde_json.view".into()),
+        ("serde_json", "int") | ("flate2", "write") => TypeShape::Primitive,
+        ("flate2", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
         ("serde_json", "to_string_pretty") | ("serde_json", "string") | ("strings", "join") => {
             TypeShape::Str
         }

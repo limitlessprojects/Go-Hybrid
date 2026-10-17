@@ -96,9 +96,7 @@ fn check_body_boundaries(ck: &mut Checker<'_>, st: &mut FnState, block: &Block, 
     }
 }
 
-fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, managed: bool) {
-    // Check uses on every statement in the closure BEFORE any new defines or
-    // move transfers on this statement take effect (#29).
+fn check_stmt_own_uses(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, managed: bool) {
     let mut uses = Vec::new();
     crate::walk::own_uses(stmt, &mut uses);
     if !managed {
@@ -124,6 +122,15 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
         }
     }
     ck.check_uses(st, &uses);
+}
+
+fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, managed: bool) {
+    // Check uses on every statement in the closure BEFORE any new defines or
+    // move transfers on this statement take effect (#29). For `Stmt::If`,
+    // `init` executes BEFORE `cond`, so `cond`'s uses are checked after `init`.
+    if !matches!(stmt, Stmt::If { .. }) {
+        check_stmt_own_uses(ck, st, stmt, managed);
+    }
 
     match stmt {
         Stmt::Local(l) => {
@@ -151,7 +158,8 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
                 for (name, value) in l.names.iter().zip(l.values.iter()) {
                     let moved_non_owned = crate::model::move_operand_ident(value)
                         .and_then(|src| ck.lookup_binding(st, &src))
-                        .and_then(|b| b.non_owned_origin.clone());
+                        .and_then(|b| b.non_owned_origin.clone())
+                        .or_else(|| ck.moved_non_owned_origin_in_expr(st, value));
                     // ascription fills gaps (O4.9); inference keeps priority
                     // when it resolves (boundary handles stay precise)
                     let inferred = ck.shape_of_expr(st, value);
@@ -162,7 +170,9 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
                             ck.ty_of_expr(st, value).or_else(|| l.ty.clone()),
                         ),
                     };
-                    if crate::model::move_operand_ident(value).is_some() {
+                    if crate::model::move_operand_ident(value).is_some()
+                        || matches!(crate::model::unwrap_parens(value), Expr::Move { .. })
+                    {
                         ck.define_binding(st, name, shape, ty, immutable, managed);
                         if let Some(origin) = moved_non_owned {
                             if let Some(b) = st.env_lookup_mut(name) {
@@ -197,6 +207,13 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
                         Vec::new()
                     };
                     ck.define_binding(st, name, shape, ty, immutable, managed);
+                    if let Some(origin) = &moved_non_owned {
+                        if let Some(b) = st.env_lookup_mut(name) {
+                            if b.non_owned_origin.is_none() {
+                                b.non_owned_origin = Some(origin.clone());
+                            }
+                        }
+                    }
                     if reads_self {
                         if let Some(pa) = prior_alias {
                             if pa != *name {
@@ -331,6 +348,7 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
             if let Some(i) = init {
                 check_stmt_boundaries(ck, st, i, managed);
             }
+            check_stmt_own_uses(ck, st, stmt, managed);
             st.scope_push();
             check_body_boundaries(ck, st, then, managed);
             st.scope_pop();

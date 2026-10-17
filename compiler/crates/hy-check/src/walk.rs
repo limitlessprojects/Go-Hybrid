@@ -106,6 +106,41 @@ fn walk_block<'a>(out: &mut FlatInfo<'a>, block: &'a Block) {
 }
 
 fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt) {
+    if let Stmt::If {
+        init: Some(i),
+        then,
+        otherwise,
+        ..
+    } = stmt
+    {
+        // ONE implicit scope for the if (init vars stay visible through
+        // the whole construct, Go rule); `init` executes BEFORE `cond`,
+        // so walk `init` first inside the if-scope and assign `Stmt::If`
+        // (`cond`) the index immediately after `init`.
+        out.mark(out.next, true, false);
+        walk_one(out, i);
+
+        let idx = out.next;
+        out.next += 1;
+        out.stmts.push((stmt, idx));
+
+        let mut uses = Vec::new();
+        own_uses(stmt, &mut uses);
+        for u in uses {
+            let e = out.last_use.entry(u.name).or_insert(idx);
+            if *e < idx {
+                *e = idx;
+            }
+        }
+
+        scoped_block(out, then);
+        if let Some(o) = otherwise {
+            walk_one(out, o);
+        }
+        out.mark(out.next, false, true); // Pop at the next stmt (or trailing)
+        return;
+    }
+
     let idx = out.next;
     out.next += 1;
     out.stmts.push((stmt, idx));
@@ -121,18 +156,13 @@ fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt) {
 
     match stmt {
         Stmt::If {
-            init,
             then,
             otherwise,
             ..
         } => {
-            // ONE implicit scope for the if (init vars stay visible through
-            // the whole construct, Go rule); the then/else bodies open their
+            // ONE implicit scope for the if; the then/else bodies open their
             // own scopes below.
             out.mark(idx, true, false);
-            if let Some(i) = init {
-                walk_one(out, i);
-            }
             scoped_block(out, then);
             if let Some(o) = otherwise {
                 walk_one(out, o);

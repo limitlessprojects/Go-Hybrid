@@ -114,6 +114,39 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Check for additional uses in the same statement when a `CallMode::Consume`
+    /// call (`enc.finish()`, `flate2.finish(enc)`) consumed a handle during this
+    /// statement (`a, b := enc.finish()?, enc.write(...)`, `a, b := enc.finish()?, enc.finish()?`,
+    /// `enc.write(enc.finish()?)`).
+    pub(crate) fn check_same_stmt_consumes(
+        &mut self,
+        st: &FnState,
+        uses: &[Use],
+        stmt_consumes: &[(hy_diag::Span, hy_diag::Span)],
+    ) {
+        let mut reported: HashSet<(String, u32, u32)> = HashSet::new();
+        for u in uses {
+            let Some(mv) = self.lookup_binding(st, &u.name).and_then(|b| b.moved.clone()) else {
+                continue;
+            };
+            if mv.kind != MoveKind::Consumed {
+                continue;
+            }
+            let Some(&(consumed_ident_span, _)) = stmt_consumes
+                .iter()
+                .find(|&&(_, call_span)| call_span == mv.span)
+            else {
+                continue;
+            };
+            if u.span == consumed_ident_span {
+                continue;
+            }
+            if reported.insert((u.name.clone(), u.span.start.line, u.span.start.col)) {
+                self.emit_use_after_move(st, u, &mv);
+            }
+        }
+    }
+
     fn emit_use_after_move(&mut self, st: &FnState, u: &Use, mv: &MoveInfo) {
         // A may-share peer (#27) is an alias in every way that matters here,
         // even when the single-parent `aliases` chain does not name it (e.g.
@@ -230,8 +263,22 @@ impl<'a> Checker<'a> {
         }
         members.sort();
         members.dedup();
+        let mut origins = Vec::new();
         for m in &members {
+            let o = self.non_owned_origin_of(st, m).map(|(orig, via_share)| {
+                if via_share && !orig.starts_with("a may-share peer of ") {
+                    format!("a may-share peer of {}", orig)
+                } else {
+                    orig
+                }
+            });
+            origins.push(o);
+        }
+        for (m, orig) in members.iter().zip(origins) {
             if let Some(b) = st.env_lookup_mut(m) {
+                if b.non_owned_origin.is_none() {
+                    b.non_owned_origin = orig;
+                }
                 b.moved = Some(MoveInfo {
                     span,
                     kind,

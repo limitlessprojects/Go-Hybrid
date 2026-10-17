@@ -521,6 +521,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         // Calls (A2 loan windows, A7 consumes + arg lending). A for-loop
         // ITERATE expression's borrow calls get loop-extent loans: the
         // element views live across the whole loop body (O7).
+        let mut stmt_consumes = Vec::new();
         if let Stmt::For {
             kind: ForKind::Iterate { expr, .. },
             ..
@@ -530,14 +531,17 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             let mut calls = Vec::new();
             walk::expr_calls(expr, &mut calls);
             for cr in calls {
-                ck.process_call(&mut st, &cr, idx, Some(loop_end));
+                ck.process_call(&mut st, &cr, idx, Some(loop_end), &mut stmt_consumes);
             }
         } else {
             let mut calls = Vec::new();
             walk::own_calls(stmt, &mut calls);
             for cr in calls {
-                ck.process_call(&mut st, &cr, idx, None);
+                ck.process_call(&mut st, &cr, idx, None, &mut stmt_consumes);
             }
+        }
+        if !stmt_consumes.is_empty() {
+            ck.check_same_stmt_consumes(&st, &uses, &stmt_consumes);
         }
 
         // Statement-specific processing.
@@ -3080,6 +3084,348 @@ mod tests {
              }",
         );
         assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    // -----------------------------------------------------------------------
+    // `if <init>; <cond>` evaluation order (Go evaluates `<init>` before
+    // `<cond>`) and same-statement consume / package-level boundary calls.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn if_init_eval_order_enforces_a1b_a7_a2_a3_and_t22_in_cond() {
+        // 1. A1b: moving `m` in `if <init>` freezes `m` before `<cond>` runs.
+        let r_a1b = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 2\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 1}\n\
+               done := make(chan bool, 1)\n\
+               if m2 := move m; m[\"k\"] == 1 {\n\
+                 task worker(move m2, done)\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r_a1b.verdict, Verdict::Reject, "{:?}", r_a1b.diagnostics);
+        assert_eq!(first_error_rule(&r_a1b).as_deref(), Some("A1b"));
+        assert!(r_a1b.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // 2. A1b inside `else if <init>; <cond>` and inside a closure body.
+        let r_closure_if = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 2\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               done := make(chan bool, 1)\n\
+               f := fn() {\n\
+                 m := map[string]int{\"k\": 1}\n\
+                 if false {\n\
+                 } else if m2 := move m; m[\"k\"] == 1 {\n\
+                   task worker(move m2, done)\n\
+                 }\n\
+               }\n\
+               f()\n\
+             }",
+        );
+        assert_eq!(
+            r_closure_if.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_closure_if.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_closure_if).as_deref(), Some("A1b"));
+        assert!(r_closure_if
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3003"));
+
+        // 3. A7: consuming `enc.finish()?` in `if <init>` freezes `enc` before `<cond>`.
+        let r_a7 = check(
+            "import \"rust/flate2\"\n\
+             fn main() {\n\
+               enc := flate2.new_writer(6)?\n\
+               if out := enc.finish()?; enc.write([]byte(\"late\"))? > 0 {\n\
+                 fmt.println(len(out))\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r_a7.verdict, Verdict::Reject, "{:?}", r_a7.diagnostics);
+        assert_eq!(first_error_rule(&r_a7).as_deref(), Some("A7"));
+        assert!(r_a7.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // 4. A2: borrow handle opened in `if <init>` conflicts with mutation in `<cond>`
+        // both when the view is used in the body and when its last use is inside `<cond>`.
+        let r_a2_body = check(
+            "import \"rust/serde_json\"\n\
+             fn main() {\n\
+               doc := serde_json.parse(`{\"users\": []}`)?\n\
+               if u := doc.array(\"users\")?; doc.set(\"pruned\", true)? == 0 {\n\
+                 fmt.println(u.int(\"n\")?)\n\
+               }\n\
+             }",
+        );
+        assert_eq!(
+            r_a2_body.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_a2_body.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_a2_body).as_deref(), Some("A2"));
+        assert!(r_a2_body.diagnostics.iter().any(|d| d.code == "HYB-E3101"));
+
+        let r_a2_cond = check(
+            "import \"rust/serde_json\"\n\
+             fn main() {\n\
+               doc := serde_json.parse(`{\"users\": []}`)?\n\
+               if u := doc.array(\"users\")?; doc.set(\"x\", u.int(\"n\")?)? == 0 {\n\
+                 fmt.println(\"done\")\n\
+               }\n\
+             }",
+        );
+        assert_eq!(
+            r_a2_cond.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_a2_cond.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_a2_cond).as_deref(), Some("A2"));
+        assert!(r_a2_cond.diagnostics.iter().any(|d| d.code == "HYB-E3101"));
+
+        // 5. A3: `&e.m["a"]` loan opened in `if <init>` or mutated via a closure
+        // defined in `if <init>` and called in `<cond>`.
+        let r_a3_cond = check(
+            "struct svc { n int }\n\
+             struct env { m map[string]svc }\n\
+             fn mut_and_read(m map[string]svc, v int) bool {\n\
+               m[\"b\"] = svc{n: v}\n\
+               return true\n\
+             }\n\
+             fn f(e *env) {\n\
+               if s := &e.m[\"a\"]; mut_and_read(e.m, s.n) {\n\
+                 fmt.println(\"ok\")\n\
+               }\n\
+             }",
+        );
+        assert_eq!(
+            r_a3_cond.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_a3_cond.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_a3_cond).as_deref(), Some("A3"));
+        assert!(r_a3_cond.diagnostics.iter().any(|d| d.code == "HYB-E3102"));
+
+        let r_a3_closure = check(
+            "struct svc { n int }\n\
+             struct env { m map[string]svc }\n\
+             fn f(e *env) {\n\
+               s := &e.m[\"a\"]\n\
+               if bump := fn() bool { e.m[\"b\"] = svc{n: 1}\n return true }; bump() {\n\
+                 s.n = 2\n\
+               }\n\
+             }",
+        );
+        assert_eq!(
+            r_a3_closure.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_a3_closure.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_a3_closure).as_deref(), Some("A3"));
+        assert!(r_a3_closure
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3102"));
+
+        // 6. T22: const alias bound in `if <init>` cannot be mutated via `delete` in `<cond>`.
+        let r_t22 = check(
+            "const c = map[string]int{\"k\": 1}\n\
+             fn is_ok(x any) bool { return true }\n\
+             fn main() {\n\
+               if alias := c; is_ok(delete(alias, \"k\")) {\n\
+                 fmt.println(\"deleted\")\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r_t22.verdict, Verdict::Reject, "{:?}", r_t22.diagnostics);
+        assert_eq!(first_error_rule(&r_t22).as_deref(), Some("IMMUT"));
+        assert!(r_t22.diagnostics.iter().any(|d| d.code == "HYB-E3006"));
+
+        // 7. Positive control: using the new binding `m2` in `<cond>` after `if m2 := move m`
+        // and mutating `doc` after a view opened in `if <init>` dies in `<cond>` stay legal.
+        let r_ok = check(
+            "import \"rust/serde_json\"\n\
+             fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 2\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 1}\n\
+               done := make(chan bool, 1)\n\
+               if m2 := move m; m2[\"k\"] == 1 {\n\
+                 task worker(move m2, done)\n\
+               }\n\
+               doc := serde_json.parse(`{\"users\": []}`)?\n\
+               if u := doc.array(\"users\")?; u.int(\"n\")? == 0 {\n\
+                 doc.set(\"pruned\", true)?\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r_ok.verdict, Verdict::Accept, "{:?}", r_ok.diagnostics);
+    }
+
+    #[test]
+    fn a7_same_stmt_use_with_consuming_call_and_package_handle_calls_reject() {
+        // 1. Same-statement consume + mutate (`a, b := enc.finish()?, enc.write(...)?`).
+        let r_consume_mutate = check(
+            "import \"rust/flate2\"\n\
+             fn main() {\n\
+               enc := flate2.new_writer(6)?\n\
+               a, b := enc.finish()?, enc.write([]byte(\"x\"))?\n\
+               fmt.println(len(a), b)\n\
+             }",
+        );
+        assert_eq!(
+            r_consume_mutate.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_consume_mutate.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_consume_mutate).as_deref(), Some("A7"));
+        assert!(r_consume_mutate
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3003"));
+
+        // 2. Same-statement double consume (`a, b := enc.finish()?, enc.finish()?`).
+        let r_double_consume = check(
+            "import \"rust/flate2\"\n\
+             fn main() {\n\
+               enc := flate2.new_writer(6)?\n\
+               a, b := enc.finish()?, enc.finish()?\n\
+               fmt.println(len(a), len(b))\n\
+             }",
+        );
+        assert_eq!(
+            r_double_consume.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_double_consume.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_double_consume).as_deref(), Some("A7"));
+        assert!(r_double_consume
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3003"));
+
+        // 3. Nested consume inside receiver call (`enc.write(enc.finish()?)?`).
+        let r_nested_consume = check(
+            "import \"rust/flate2\"\n\
+             fn main() {\n\
+               enc := flate2.new_writer(6)?\n\
+               enc.write(enc.finish()?)?\n\
+             }",
+        );
+        assert_eq!(
+            r_nested_consume.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_nested_consume.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_nested_consume).as_deref(), Some("A7"));
+        assert!(r_nested_consume
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3003"));
+
+        // 4. Package-form consuming call (`flate2.finish(enc)?`) freezes `enc` under A7.
+        let r_pkg_consume = check(
+            "import \"rust/flate2\"\n\
+             fn main() {\n\
+               enc := flate2.new_writer(6)?\n\
+               out := flate2.finish(enc)?\n\
+               flate2.write(enc, []byte(\"trailer\"))?\n\
+               fmt.println(len(out))\n\
+             }",
+        );
+        assert_eq!(
+            r_pkg_consume.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_pkg_consume.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_pkg_consume).as_deref(), Some("A7"));
+        assert!(r_pkg_consume
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3003"));
+
+        // 5. Package-form borrow + mutate (`serde_json.array(doc, ...)` + `serde_json.set(doc, ...)`)
+        // enforces A2 (`HYB-E3101`) both in `for .. in` and across local view bindings.
+        let r_pkg_a2_loop = check(
+            "import \"rust/serde_json\"\n\
+             fn main() {\n\
+               doc := serde_json.parse(`{\"users\": []}`)?\n\
+               for u in serde_json.array(doc, \"users\")? {\n\
+                 if serde_json.int(u, \"logins\")? == 0 {\n\
+                   serde_json.set(doc, \"pruned\", true)?\n\
+                 }\n\
+               }\n\
+             }",
+        );
+        assert_eq!(
+            r_pkg_a2_loop.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_pkg_a2_loop.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_pkg_a2_loop).as_deref(), Some("A2"));
+        assert!(r_pkg_a2_loop
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3101"));
+
+        let r_pkg_a2_view = check(
+            "import \"rust/serde_json\"\n\
+             fn main() {\n\
+               doc := serde_json.parse(`{\"users\": []}`)?\n\
+               u := serde_json.get(doc, \"users\")?\n\
+               serde_json.remove(doc, \"users\")?\n\
+               fmt.println(serde_json.int(u, \"n\")?)\n\
+             }",
+        );
+        assert_eq!(
+            r_pkg_a2_view.verdict,
+            Verdict::Reject,
+            "{:?}",
+            r_pkg_a2_view.diagnostics
+        );
+        assert_eq!(first_error_rule(&r_pkg_a2_view).as_deref(), Some("A2"));
+        assert!(r_pkg_a2_view
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3101"));
+
+        // 6. Positive control: sequential `flate2.write(enc, ...)` before `flate2.finish(enc)`
+        // and `serde_json.set(doc, ...)` after `serde_json.array(doc, ...)` loan ends stay legal.
+        let r_pkg_ok = check(
+            "import \"rust/flate2\"\n\
+             import \"rust/serde_json\"\n\
+             fn main() {\n\
+               enc := flate2.new_writer(6)?\n\
+               flate2.write(enc, []byte(\"ok\"))?\n\
+               out := flate2.finish(enc)?\n\
+               doc := serde_json.parse(`{\"users\": []}`)?\n\
+               for u in serde_json.array(doc, \"users\")? {\n\
+                 fmt.println(serde_json.int(u, \"logins\")?)\n\
+               }\n\
+               serde_json.set(doc, \"pruned\", true)?\n\
+               fmt.println(len(out))\n\
+             }",
+        );
+        assert_eq!(r_pkg_ok.verdict, Verdict::Accept, "{:?}", r_pkg_ok.diagnostics);
     }
 
     // -----------------------------------------------------------------------
