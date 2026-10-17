@@ -151,6 +151,7 @@ fn check_one_closure(
         }
         check_one_closure(ck, &snap, nparams, nresults, nbody);
     }
+    ck.check_deferred_uses(&cst);
     cst.scope_pop();
 }
 
@@ -571,6 +572,15 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 ck.mark_move_in_value(st, v, format!("the move-return `{}`", v.render()));
             }
             ck.process_return(st, values, *span);
+        }
+        Stmt::Defer { .. } => {
+            let mut d_uses = Vec::new();
+            crate::walk::own_uses(stmt, &mut d_uses);
+            for u in d_uses {
+                if ck.lookup_binding(st, &u.name).map(|b| b.moved.is_none()).unwrap_or(false) {
+                    st.deferred_uses.push(u);
+                }
+            }
         }
         _ => {}
     }

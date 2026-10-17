@@ -402,7 +402,10 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             for ev in evs {
                 match ev {
                     walk::ScopeEvent::Push => st.scope_push(),
-                    walk::ScopeEvent::Pop => st.scope_pop(),
+                    walk::ScopeEvent::Pop => {
+                        ck.check_deferred_uses(&st);
+                        st.scope_pop();
+                    }
                     walk::ScopeEvent::SelectRecv { names, chan } => {
                         let elem = match ck.shape_of_expr(&st, chan) {
                             TypeShape::Chan(e) => *e,
@@ -591,7 +594,10 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 ck.mark_slot_loans_assign(&mut st, targets, *op, values);
             }
 
-            Stmt::Return { values, span } => ck.process_return(&mut st, values, *span),
+            Stmt::Return { values, span } => {
+                ck.check_deferred_uses(&st);
+                ck.process_return(&mut st, values, *span);
+            }
 
             // O4.0 check-site: every task argument (HYB-E3001) + the
             // spawn-callee proof: the callee must resolve to a declared
@@ -726,7 +732,21 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 ck.check_match(&st, subject, arms, *span);
             }
 
-            // If-init Locals, defer, exprs, blocks: already
+            // #415: a deferred call evaluates its arguments here but runs at
+            // function exit. Record its identifier uses so subsequent transfers
+            // (`task worker(move shared)`, `ch <- move shared`, `m2 := move shared`)
+            // are rejected when the value is read after ownership left.
+            Stmt::Defer { .. } => {
+                let mut d_uses = Vec::new();
+                walk::own_uses(stmt, &mut d_uses);
+                for u in d_uses {
+                    if ck.lookup_binding(&st, &u.name).map(|b| b.moved.is_none()).unwrap_or(false) {
+                        st.deferred_uses.push(u);
+                    }
+                }
+            }
+
+            // If-init Locals, exprs, blocks: already
             // covered by the flat walk (init is its own statement entry)
             // and the uses/calls collected above.
             _ => {}
@@ -753,8 +773,10 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     // capture of a block-local now resolves to nothing and fails closed
     // (HYB-E3005) at the boundary, exactly like any unresolvable name.
     while !st.scopes.is_empty() {
+        ck.check_deferred_uses(&st);
         st.scope_pop();
     }
+    ck.check_deferred_uses(&st);
 
     // #123: closure bodies sit outside Pass B (A5), so process_assign and
     // process_call never see their writes — scan every FnLit for assign

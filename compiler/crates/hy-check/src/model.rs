@@ -247,6 +247,10 @@ pub(crate) struct FnState {
     /// composite literal containing `&...`), for O2 `LOAN-ESCAPE` on
     /// named-result / variable returns (`out = &x; return` / `return out`).
     pub borrow_bindings: HashSet<String>,
+    /// Bindings read by deferred calls in this body (#415). A deferred call
+    /// executes at function exit, so any later `move` of a binding read here
+    /// transfers ownership while the deferred call still holds a live reference.
+    pub deferred_uses: Vec<crate::walk::Use>,
 }
 
 impl FnState {
@@ -472,6 +476,9 @@ pub(crate) struct Checker<'a> {
     pub methods: HashSet<(String, String)>,
     /// Emitted diagnostics (unsorted; check_file sorts by span).
     pub diags: Vec<Diagnostic>,
+    /// Deduplication set for deferred use-after-move diagnostics (#415):
+    /// (binding name, span line, span col).
+    pub deferred_reported: HashSet<(String, u32, u32)>,
     // --report-managed counters (O6.3)
     pub managed_blocks: usize,
     pub sites_via_managed: usize,
@@ -508,6 +515,7 @@ impl<'a> Checker<'a> {
             pkg_names: HashMap::new(),
             methods: HashSet::new(),
             diags: Vec::new(),
+            deferred_reported: HashSet::new(),
             managed_blocks: 0,
             sites_via_managed: 0,
             total_sites: 0,

@@ -147,6 +147,28 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Check for deferred call uses whose value was moved away before function
+    /// exit (#415). A deferred call evaluates its arguments at the defer site
+    /// but executes at function return/exit — if the value (or a may-share
+    /// peer) is moved between defer and exit, the deferred call races or reads
+    /// a moved value.
+    pub(crate) fn check_deferred_uses(&mut self, st: &FnState) {
+        for u in &st.deferred_uses {
+            let moved = match self.lookup_binding(st, &u.name) {
+                Some(b) => b.moved.clone(),
+                None => continue,
+            };
+            if let Some(mv) = moved {
+                if self
+                    .deferred_reported
+                    .insert((u.name.clone(), u.span.start.line, u.span.start.col))
+                {
+                    self.emit_use_after_move(st, u, &mv);
+                }
+            }
+        }
+    }
+
     fn emit_use_after_move(&mut self, st: &FnState, u: &Use, mv: &MoveInfo) {
         // A may-share peer (#27) is an alias in every way that matters here,
         // even when the single-parent `aliases` chain does not name it (e.g.
