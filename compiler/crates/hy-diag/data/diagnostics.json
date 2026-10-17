@@ -437,6 +437,90 @@
       "rule": "T"
     },
     {
+      "code": "HYB-E5002",
+      "name": "call-arity-mismatch",
+      "category": "call",
+      "severity": "error",
+      "title": "call does not match the function's declared parameters",
+      "summary": "A call must pass as many arguments as the callee declares. Too few and too many are both errors; Go rejects the emitted program either way (`not enough arguments in call to ...` / `too many arguments in call to ...`).",
+      "fixits": [
+        "pass the missing argument(s)",
+        "remove the extra argument(s)"
+      ],
+      "example": "fn tambah(a int, b int) int { return a + b }  tambah(1)   // reject: HYB-E5002 — 2 declared, 1 given",
+      "rule": "N"
+    },
+    {
+      "code": "HYB-E5003",
+      "name": "return-arity-mismatch",
+      "category": "return",
+      "severity": "error",
+      "title": "return does not match the function's declared results",
+      "summary": "A `return` must produce as many values as the enclosing function or closure declares. A bare `return` stays legal where results are named.",
+      "fixits": [
+        "return the missing value(s)",
+        "remove the extra value(s)"
+      ],
+      "example": "fn dua() (int, int) { return 1 }   // reject: HYB-E5003 — 2 declared, 1 given",
+      "rule": "N"
+    },
+    {
+      "code": "HYB-E5004",
+      "name": "struct-literal-field-mismatch",
+      "category": "struct",
+      "severity": "error",
+      "title": "struct literal names a field the struct does not declare (or gives it twice)",
+      "summary": "A struct literal must name only fields the declared struct has, and each at most once. Go rejects the emitted code with `unknown field ... in struct literal` or `duplicate field ... in struct literal`, so an accepted program can never build.",
+      "fixits": [
+        "use one of the declared field names",
+        "remove the repeated field"
+      ],
+      "example": "struct titik { x int  y int }   titik{x: 1, z: 2}   // reject: HYB-E5004 — no field `z`",
+      "rule": "N"
+    },
+    {
+      "code": "HYB-E5005",
+      "name": "struct-literal-field-value-mismatch",
+      "category": "struct",
+      "severity": "error",
+      "title": "struct literal gives a field a value of an incompatible type",
+      "summary": "A struct-literal field value must be assignable to the declared field type. A value of a different primitive family is rejected; Go refuses to compile the emitted code (`cannot use ... as ... value in struct literal`).",
+      "fixits": [
+        "use a value of the declared field type",
+        "change the declared field type"
+      ],
+      "example": "struct titik { x int }   titik{x: \"bukan int\"}   // reject: HYB-E5005",
+      "rule": "N"
+    },
+    {
+      "code": "HYB-E5006",
+      "name": "struct-field-undefined",
+      "category": "struct",
+      "severity": "error",
+      "title": "struct has no such field or method",
+      "summary": "Accessing or assigning `v.y` where `v`'s resolved struct type declares neither a field `y` nor a method `y` is rejected: Go refuses to compile the emitted access (`v.y undefined (type T has no field or method y)`), so an accepted program would emit unbuildable Go (issue #152).",
+      "fixits": [
+        "use one of the struct's declared fields or methods",
+        "add the missing field or method to the struct declaration"
+      ],
+      "example": "struct a { x int }  v := a{x: 1}; v.y   // reject: HYB-E5006 — type `a` has no field or method `y`",
+      "rule": "N"
+    },
+    {
+      "code": "HYB-E5007",
+      "name": "index-key-type-mismatch",
+      "category": "type",
+      "severity": "error",
+      "title": "map key or slice/array index has an incompatible type",
+      "summary": "Indexing a `map[K]V` with a key of an incompatible primitive family (`m[1]` on `map[string]int`) or indexing a slice/array/string with a floating-point constant (`s[1.5]`) is rejected: Go refuses to compile the emitted index expression (`cannot use ... as ... value in map index` / `truncated to int`), so an accepted program would emit unbuildable Go (issue #152).",
+      "fixits": [
+        "pass a key matching the map's declared key type",
+        "use an integer index for slices, arrays, and strings"
+      ],
+      "example": "m := map[string]int{}; m[1] = 2   // reject: HYB-E5007 — key `1` is int, map key type is string",
+      "rule": "N"
+    },
+    {
       "code": "HYB-E6001",
       "name": "div-by-const-zero",
       "category": "overflow-bounds",
