@@ -153,10 +153,22 @@ def main():
     if args and args[0] == "--rebaseline":
         rebaseline = True
         args = args[1:]
+    if len(args) < 2:
+        print(
+            "Usage:\n"
+            "  python3 tools/managed_gate.py <hyb> <baseline.json> <prog.hy> [more.hy ...]\n"
+            "  python3 tools/managed_gate.py --rebaseline <hyb> <baseline.json> <prog.hy> [more.hy ...]"
+        )
+        sys.exit(2)
+
     hyb, baseline_path, progs = args[0], args[1], args[2:]
+    if not progs:
+        print("GATE ERROR: no program files specified; expected at least one <prog.hy>")
+        sys.exit(2)
 
     try:
-        baseline = json.load(open(baseline_path))
+        with open(baseline_path, "r", encoding="utf-8") as f:
+            baseline = json.load(f)
     except FileNotFoundError:
         baseline = {"version": 1, "blocks": {}}
     base = baseline.setdefault("blocks", {})
@@ -165,8 +177,12 @@ def main():
     for prog in progs:
         current.update(audit(hyb, prog))
 
+    audited_progs = set(progs)
     new = {k: v for k, v in current.items() if k not in base}
-    removed = {k for k in base if k not in current}
+    removed = {
+        k for k in base
+        if k.rsplit(":", 1)[0] in audited_progs and k not in current
+    }
     changed = {
         k
         for k in current
@@ -174,9 +190,12 @@ def main():
     }
 
     if rebaseline:
-        baseline["blocks"] = current
-        json.dump(baseline, open(baseline_path, "w"), indent=1, sort_keys=True)
-        open(baseline_path, "a").write("\n")
+        preserved = {k: v for k, v in base.items() if k.rsplit(":", 1)[0] not in audited_progs}
+        preserved.update(current)
+        baseline["blocks"] = preserved
+        with open(baseline_path, "w", encoding="utf-8") as f:
+            json.dump(baseline, f, indent=1, sort_keys=True)
+            f.write("\n")
         print(f"rebaseline: {len(current)} block(s) recorded in {baseline_path}")
         return
 
