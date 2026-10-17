@@ -684,3 +684,165 @@ fn closure_interproc_and_method_const_mutations_reject_e3006() {
     );
 }
 
+#[test]
+fn const_return_functions_methods_closures_and_interproc_loops_reject_issue_429() {
+    // Reproducer 1: function, multi-return, method, and closure returning const composite.
+    let r_const_return_write = check(
+        "struct holder {\n\
+             m map[string]int\n\
+         }\n\n\
+         const shared = map[string]int{\"a\": 1}\n\
+         const shared_holder = holder{m: map[string]int{\"b\": 2}}\n\n\
+         fn get_shared() map[string]int {\n\
+             return shared\n\
+         }\n\n\
+         fn get_pair() (int, map[string]int) {\n\
+             return 0, shared\n\
+         }\n\n\
+         fn (h holder) inner_map() map[string]int {\n\
+             return h.m\n\
+         }\n\n\
+         fn main() {\n\
+             m1 := get_shared()\n\
+             m1[\"a\"] = 10\n\
+             _, m2 := get_pair()\n\
+             m2[\"a\"] = 20\n\
+             m3 := shared_holder.inner_map()\n\
+             m3[\"b\"] = 30\n\
+             get := fn() map[string]int { return shared }\n\
+             m4 := get()\n\
+             m4[\"a\"] = 40\n\
+         }\n",
+    );
+    let cs_write = codes(&r_const_return_write);
+    assert_eq!(
+        cs_write.iter().filter(|c| c.as_str() == "HYB-E3006").count(),
+        4,
+        "expected 4 HYB-E3006 diagnostics for writes through const-returning functions/methods/closures (#429), got {:?}",
+        cs_write
+    );
+    assert_eq!(r_const_return_write.verdict, Verdict::Reject);
+
+    // Reproducer 2: moving const-returned binding at task boundary rejects HYB-E3004
+    // and freezes sibling const-returned binding with HYB-E3003 + HYB-E3006.
+    let r_const_return_move = check(
+        "const shared = map[string]int{\"k\": 0}\n\n\
+         fn get_shared() map[string]int {\n\
+             return shared\n\
+         }\n\n\
+         fn worker(m map[string]int, done chan<- bool) {\n\
+             m[\"k\"] = 1\n\
+             done <- true\n\
+         }\n\n\
+         fn main() {\n\
+             done := make(chan bool, 1)\n\
+             m1 := get_shared()\n\
+             task worker(move m1, done)\n\
+             m2 := get_shared()\n\
+             m2[\"k\"] = 2\n\
+             <-done\n\
+         }\n",
+    );
+    let cs_move = codes(&r_const_return_move);
+    assert!(
+        cs_move.iter().any(|c| c == "HYB-E3004")
+            && cs_move.iter().any(|c| c == "HYB-E3003")
+            && cs_move.iter().any(|c| c == "HYB-E3006"),
+        "expected HYB-E3004, HYB-E3003, and HYB-E3006 for move/write of const-returned bindings (#429), got {:?}",
+        cs_move
+    );
+    assert_eq!(r_const_return_move.verdict, Verdict::Reject);
+
+    // Reproducer 3: interprocedural const-parameter mutation via for-in iteration,
+    // comma-ok map index unpacking, and post-closure rebind.
+    let r_interproc = check(
+        "const shared_list = [map[string]int{\"k\": 0}]\n\
+         const shared_nested = map[string]map[string]int{\"a\": map[string]int{\"k\": 0}}\n\
+         const shared_map = map[string]int{\"k\": 0}\n\n\
+         fn mutate_via_loop(xs []map[string]int) {\n\
+             for _, m in xs {\n\
+                 m[\"k\"] = 1\n\
+             }\n\
+         }\n\n\
+         fn mutate_via_comma_ok(outer map[string]map[string]int) {\n\
+             inner, ok := outer[\"a\"]\n\
+             if ok {\n\
+                 inner[\"k\"] = 2\n\
+             }\n\
+         }\n\n\
+         fn mutate_via_post_closure_rebind(m map[string]int) {\n\
+             var m2 map[string]int = map[string]int{}\n\
+             f := fn() { m2[\"k\"] = 3 }\n\
+             m2 = m\n\
+             f()\n\
+         }\n\n\
+         fn main() {\n\
+             mutate_via_loop(shared_list)\n\
+             mutate_via_comma_ok(shared_nested)\n\
+             mutate_via_post_closure_rebind(shared_map)\n\
+         }\n",
+    );
+    let cs_interproc = codes(&r_interproc);
+    assert_eq!(
+        cs_interproc.iter().filter(|c| c.as_str() == "HYB-E3006").count(),
+        3,
+        "expected 3 HYB-E3006 diagnostics for interprocedural loop/comma-ok/rebind const mutations (#429), got {:?}",
+        cs_interproc
+    );
+    assert_eq!(r_interproc.verdict, Verdict::Reject);
+
+    // Positive control: read-only access through const-returning helper stays accepted.
+    let r_readonly_ok = check(
+        "const shared = map[string]int{\"k\": 42}\n\n\
+         fn get_shared() map[string]int {\n\
+             return shared\n\
+         }\n\n\
+         fn read_via_loop(xs []map[string]int) int {\n\
+             total := 0\n\
+             for _, m in xs {\n\
+                 v, ok := m[\"k\"]\n\
+                 if ok {\n\
+                     total = total + v\n\
+                 }\n\
+             }\n\
+             return total\n\
+         }\n\n\
+         const shared_list = [map[string]int{\"k\": 1}]\n\
+         const shared_paren = (map[string]int{\"k\": 1})\n\n\
+         fn main() {\n\
+             const local_paren = ([1, 2])\n\
+             m := get_shared()\n\
+             n := len(m) + read_via_loop(shared_list)\n\
+             _ = n\n\
+             _ = shared_paren[\"k\"]\n\
+             _ = local_paren[0]\n\
+         }\n",
+    );
+    assert_eq!(
+        r_readonly_ok.verdict,
+        Verdict::Accept,
+        "read-only const-returning helper and loop must be accepted, got {:?}",
+        codes(&r_readonly_ok)
+    );
+
+    // Reproducer 3 (full check + blank-identifier discard): parenthesized non-scalar const
+    // initializers (`const shared_paren = (map[string]int{"k": 1})`) with consecutive
+    // `_ = ...` discards must pass `check()` cleanly without false HYB-E3006 (#429).
+    let r_paren_const_check = check(
+        "const shared_paren = (map[string]int{\"k\": 1})\n\n\
+         fn main() {\n\
+             const local_paren = ([1, 2])\n\
+             _ = shared_paren[\"k\"]\n\
+             _ = local_paren[0]\n\
+         }\n",
+    );
+    assert_eq!(
+        r_paren_const_check.verdict,
+        Verdict::Accept,
+        "parenthesized non-scalar consts with consecutive `_ = ...` discards must pass check (#429), got {:?}",
+        codes(&r_paren_const_check)
+    );
+}
+
+
+

@@ -2023,6 +2023,7 @@ fn select_recv_two_var_both_read_kept_intact() {
 }
 
 #[test]
+<<<<<<< HEAD
 fn explicit_multi_segment_go_import_emits_full_path() {
     let go = emit("import \"crypto/sha256\"\n\nfn main() {\n    _ = sha256.new()\n}\n");
     assert!(
@@ -2193,4 +2194,23 @@ fn slot_loan_parallel_define_assign_and_try_in_place() {
         go
     );
 }
+
+#[test]
+fn parenthesized_composite_const_lowers_to_var_issue_429() {
+    let src = r#"
+const shared_map = (map[string]int{"a": 1})
+const shared_slice = ([1, 2, 3])
+fn main() {
+    const local_map = ((map[string]int{"b": 2}))
+    _ = shared_map["a"] + shared_slice[0] + local_map["b"]
+}
+"#;
+    let go = emit(src);
+    assert!(
+        go.contains("var shared_map =") && go.contains("var shared_slice =") && go.contains("var local_map ="),
+        "expected parenthesized composite consts to lower to Go var, got:\n{}",
+        go
+    );
+}
+
 

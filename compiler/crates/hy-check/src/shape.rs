@@ -328,12 +328,15 @@ impl<'a> Checker<'a> {
                         };
                         TypeShape::Pointer(Box::new(pointee))
                     }
-                    _ => self
-                        .fns
-                        .get(name.as_str())
-                        .and_then(|f| f.results.first())
-                        .map(|r| self.shape_of_type(&r.ty))
-                        .unwrap_or(TypeShape::Unknown),
+                    _ => {
+                        let head = Self::base_named_type_str(name);
+                        self.fns
+                            .get(name.as_str())
+                            .or_else(|| self.fns.get(head))
+                            .and_then(|f| f.results.first())
+                            .map(|r| self.shape_of_type(&r.ty))
+                            .unwrap_or(TypeShape::Unknown)
+                    }
                 }
             }
             Expr::Field { base, name, .. } => {
@@ -344,12 +347,48 @@ impl<'a> Checker<'a> {
                     }
                 }
                 let recv = self.shape_of_expr(st, base);
-                match receiver_type_name(&recv) {
-                    Some(t) => foreign::method_result(&t, name),
-                    None => TypeShape::Unknown,
+                if let Some(t) = receiver_type_name(&recv) {
+                    return foreign::method_result(&t, name);
                 }
+                let head = Self::base_named_type_str(name);
+                let recv_base = match &recv {
+                    TypeShape::Struct(Some(s)) => {
+                        Some(Self::base_named_type_str(s).to_string())
+                    }
+                    TypeShape::Pointer(inner) => match &**inner {
+                        TypeShape::Struct(Some(s)) => {
+                            Some(Self::base_named_type_str(s).to_string())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(rb) = recv_base {
+                    if let Some(f) = self.method_decls.get(&(rb, head.to_string())) {
+                        return f
+                            .results
+                            .first()
+                            .map(|r| self.shape_of_type(&r.ty))
+                            .unwrap_or(TypeShape::Unknown);
+                    }
+                }
+                if let Some(TypeExpr::Fn { results, .. }) = self.ty_of_expr(st, callee) {
+                    return results
+                        .first()
+                        .map(|r| self.shape_of_type(r))
+                        .unwrap_or(TypeShape::Unknown);
+                }
+                TypeShape::Unknown
             }
-            _ => TypeShape::Unknown,
+            _ => {
+                if let Some(TypeExpr::Fn { results, .. }) = self.ty_of_expr(st, callee) {
+                    return results
+                        .first()
+                        .map(|r| self.shape_of_type(r))
+                        .unwrap_or(TypeShape::Unknown);
+                }
+                TypeShape::Unknown
+            }
         }
     }
 
@@ -499,6 +538,23 @@ impl<'a> Checker<'a> {
                     .get(&sname)
                     .and_then(|fs| fs.iter().find(|(n, _)| n == name))
                     .map(|(_, t)| t.clone())
+            }
+            Expr::Index { base, .. } => {
+                let base_ty = self.ty_of_expr(st, base)?;
+                match self.resolve_type_alias(&base_ty) {
+                    TypeExpr::Map { value, .. } => Some(*value),
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => Some(*elem),
+                    _ => None,
+                }
+            }
+            Expr::Slice { base, span, .. } => {
+                let base_ty = self.ty_of_expr(st, base)?;
+                match self.resolve_type_alias(&base_ty) {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+                        Some(TypeExpr::Slice { elem, span: *span })
+                    }
+                    _ => None,
+                }
             }
             Expr::StructLit { ty, .. } => ty.clone(),
             Expr::MapLit {
@@ -910,24 +966,90 @@ impl<'a> Checker<'a> {
             other => (other, false),
         };
         if let Expr::Call { callee, .. } = call_expr {
-            if let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) {
-                if self.lookup_binding(st, name).is_none() {
-                    if let Some(f) = self.fns.get(name.as_str()) {
-                        let avail = if is_try {
-                            f.results.len().saturating_sub(1)
-                        } else {
-                            f.results.len()
-                        };
-                        if avail == n_names {
-                            return f
-                                .results
-                                .iter()
-                                .take(n_names)
-                                .map(|r| self.shape_of_type(&r.ty))
-                                .collect();
+            match crate::model::unwrap_parens(callee) {
+                Expr::FnLit { results, .. } => {
+                    let avail = if is_try {
+                        results.len().saturating_sub(1)
+                    } else {
+                        results.len()
+                    };
+                    if avail == n_names {
+                        return results
+                            .iter()
+                            .take(n_names)
+                            .map(|r| self.shape_of_type(&r.ty))
+                            .collect();
+                    }
+                }
+                Expr::Ident { name, .. } => {
+                    if let Some(b) = self.lookup_binding(st, name) {
+                        if let Some(TypeExpr::Fn { results, .. }) = &b.ty {
+                            let avail = if is_try {
+                                results.len().saturating_sub(1)
+                            } else {
+                                results.len()
+                            };
+                            if avail == n_names {
+                                return results
+                                    .iter()
+                                    .take(n_names)
+                                    .map(|r| self.shape_of_type(r))
+                                    .collect();
+                            }
+                        }
+                    } else {
+                        let head = Self::base_named_type_str(name);
+                        if let Some(f) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
+                            let avail = if is_try {
+                                f.results.len().saturating_sub(1)
+                            } else {
+                                f.results.len()
+                            };
+                            if avail == n_names {
+                                return f
+                                    .results
+                                    .iter()
+                                    .take(n_names)
+                                    .map(|r| self.shape_of_type(&r.ty))
+                                    .collect();
+                            }
                         }
                     }
                 }
+                Expr::Field { base, name, .. } => {
+                    let head = Self::base_named_type_str(name);
+                    let recv = self.shape_of_expr(st, base);
+                    let recv_base = match &recv {
+                        TypeShape::Struct(Some(s)) => {
+                            Some(Self::base_named_type_str(s).to_string())
+                        }
+                        TypeShape::Pointer(inner) => match &**inner {
+                            TypeShape::Struct(Some(s)) => {
+                                Some(Self::base_named_type_str(s).to_string())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(rb) = recv_base {
+                        if let Some(f) = self.method_decls.get(&(rb, head.to_string())) {
+                            let avail = if is_try {
+                                f.results.len().saturating_sub(1)
+                            } else {
+                                f.results.len()
+                            };
+                            if avail == n_names {
+                                return f
+                                    .results
+                                    .iter()
+                                    .take(n_names)
+                                    .map(|r| self.shape_of_type(&r.ty))
+                                    .collect();
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         vec![TypeShape::Unknown; n_names]
@@ -944,7 +1066,9 @@ impl<'a> Checker<'a> {
         let v = crate::model::unwrap_parens(value);
         if n_names == 2 {
             if let Expr::Index { base, .. } = v {
-                if let Some(TypeExpr::Map { value: val_ty, .. }) = self.ty_of_expr(st, base) {
+                if let Some(TypeExpr::Map { value: val_ty, .. }) =
+                    self.ty_of_expr(st, base).map(|t| self.resolve_type_alias(&t))
+                {
                     return vec![Some(*val_ty), None];
                 }
             }
@@ -954,24 +1078,86 @@ impl<'a> Checker<'a> {
             other => (other, false),
         };
         if let Expr::Call { callee, .. } = call_expr {
-            if let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) {
-                if self.lookup_binding(st, name).is_none() {
-                    if let Some(f) = self.fns.get(name.as_str()) {
-                        let avail = if is_try {
-                            f.results.len().saturating_sub(1)
-                        } else {
-                            f.results.len()
-                        };
-                        if avail == n_names {
-                            return f
-                                .results
-                                .iter()
-                                .take(n_names)
-                                .map(|r| Some(r.ty.clone()))
-                                .collect();
+            match crate::model::unwrap_parens(callee) {
+                Expr::FnLit { results, .. } => {
+                    let avail = if is_try {
+                        results.len().saturating_sub(1)
+                    } else {
+                        results.len()
+                    };
+                    if avail == n_names {
+                        return results
+                            .iter()
+                            .take(n_names)
+                            .map(|r| Some(r.ty.clone()))
+                            .collect();
+                    }
+                }
+                Expr::Ident { name, .. } => {
+                    if let Some(b) = self.lookup_binding(st, name) {
+                        if let Some(TypeExpr::Fn { results, .. }) = &b.ty {
+                            let avail = if is_try {
+                                results.len().saturating_sub(1)
+                            } else {
+                                results.len()
+                            };
+                            if avail == n_names {
+                                return results.iter().take(n_names).cloned().map(Some).collect();
+                            }
+                        }
+                    } else {
+                        let head = Self::base_named_type_str(name);
+                        if let Some(f) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
+                            let avail = if is_try {
+                                f.results.len().saturating_sub(1)
+                            } else {
+                                f.results.len()
+                            };
+                            if avail == n_names {
+                                return f
+                                    .results
+                                    .iter()
+                                    .take(n_names)
+                                    .map(|r| Some(r.ty.clone()))
+                                    .collect();
+                            }
                         }
                     }
                 }
+                Expr::Field { base, name, .. } => {
+                    let head = Self::base_named_type_str(name);
+                    let recv = self.shape_of_expr(st, base);
+                    let recv_base = match &recv {
+                        TypeShape::Struct(Some(s)) => {
+                            Some(Self::base_named_type_str(s).to_string())
+                        }
+                        TypeShape::Pointer(inner) => match &**inner {
+                            TypeShape::Struct(Some(s)) => {
+                                Some(Self::base_named_type_str(s).to_string())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(rb) = recv_base {
+                        if let Some(f) = self.method_decls.get(&(rb, head.to_string())) {
+                            let avail = if is_try {
+                                f.results.len().saturating_sub(1)
+                            } else {
+                                f.results.len()
+                            };
+                            if avail == n_names {
+                                return f
+                                    .results
+                                    .iter()
+                                    .take(n_names)
+                                    .map(|r| Some(r.ty.clone()))
+                                    .collect();
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         vec![None; n_names]
