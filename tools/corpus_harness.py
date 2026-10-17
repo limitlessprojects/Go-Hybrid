@@ -139,6 +139,26 @@ def run_checker(bin_path, hy_path, report_managed=False):
             f"checker exit/verdict mismatch for {hy_path}: "
             f"exit {proc.returncode}, verdict {verdict}"
         )
+    if report_managed:
+        managed = summary.get("managed")
+        # Parse failures have no managed report. A report that is present
+        # must carry the usize counters emitted by hy_diag::ManagedReport;
+        # silently defaulting malformed counters to zero hides audit drift.
+        if managed is not None:
+            if not isinstance(managed, dict):
+                raise RuntimeError(f"checker managed report invalid for {hy_path}: expected an object")
+            for field in ("managed_blocks", "sites_via_managed", "total_sites"):
+                count = managed.get(field)
+                if type(count) is not int or count < 0:
+                    raise RuntimeError(
+                        f"checker managed report invalid for {hy_path}: "
+                        f"{field} must be a nonnegative integer"
+                    )
+            if managed["sites_via_managed"] > managed["total_sites"]:
+                raise RuntimeError(
+                    f"checker managed report inconsistent for {hy_path}: "
+                    "sites_via_managed exceeds total_sites"
+                )
     return summary, diags
 
 
