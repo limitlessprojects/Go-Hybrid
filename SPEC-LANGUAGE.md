@@ -305,6 +305,14 @@ ContinueStmt  = "continue" .
 ```
 
 **LX13 — Range clauses.** `for x in e` iterates slices, arrays, strings
+
+**LX13a — the iterable is TYPE-checked (HYB-E2009/E3005).** LX13's iterable
+set is a closed contract: since issue #411, the checker rejects `for x in e`
+when `e` resolves to a concrete non-iterable shape (an int, bool, struct,
+pointer — anything outside the set above) with `HYB-E2009`; an unresolvable
+operand fails closed under `HYB-E3005` (O4.9), exactly as the send (#77)
+and receive (#409) sides treat an unknown operand. The integer-range form
+`for i in 0..n` is a separate statement kind and carries no iterable check.
 (runes), maps (keys), channels (until close), and integer ranges
 `for i in 0..n` / `for i in 1..=8` (inclusive). `for i, v in e` yields
 index/element for slices/arrays/strings, key/value for maps; `for v in ch`

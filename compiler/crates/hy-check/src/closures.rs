@@ -249,6 +249,11 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
         check_stmt_own_uses(ck, st, stmt, managed);
     }
 
+    // Issue #411: closure bodies sit outside the Tier-0 flat walk, so the
+    // range-iterable rule (HYB-E2009/E3005) must fire here too — the same
+    // A5 perimeter discipline as the send-side checks below.
+    ck.check_stmt_range_iterable(st, stmt);
+
     match stmt {
         Stmt::Local(l) => {
             for v in &l.values {

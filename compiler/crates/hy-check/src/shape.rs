@@ -66,12 +66,24 @@ impl<'a> Checker<'a> {
         if depth > Self::MAX_TYPE_RESOLUTION_DEPTH {
             return TypeShape::Unknown;
         }
+        // Generic instantiation `lru_cache[k, v]` folds its type arguments
+        // into the name string (TypeExpr has no type-argument node — the
+        // parser contract gap noted in parse_type). The struct and alias
+        // tables carry the BASE name, so resolve through the head
+        // (`base_named_type_str`, the same fold `base_named_type` applies
+        // for method receivers). Everything below keeps matching the full
+        // name: for a non-generic name the base IS the name, so this is a
+        // pure widening — a generic receiver like `fn (c *box[t]) m()`
+        // used to classify as `Unknown` and now reaches the declared
+        // struct's field shapes (issue #411: `for i, e in c.order` must
+        // see `c.order` as the declared `[]k`, not an opaque Unknown).
+        let base = Self::base_named_type_str(name);
         // User structs in package scope take precedence over predeclared types.
-        if self.structs.contains_key(name) {
-            return TypeShape::Struct(Some(name.to_string()));
+        if self.structs.contains_key(base) {
+            return TypeShape::Struct(Some(base.to_string()));
         }
         // User type aliases take precedence over predeclared types.
-        if let Some(target) = self.type_aliases.get(name) {
+        if let Some(target) = self.type_aliases.get(base) {
             return self.shape_of_type_depth(target, depth + 1);
         }
         match name {
