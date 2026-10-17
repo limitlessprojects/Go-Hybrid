@@ -1,6 +1,6 @@
 //! buildable.rs — issue #134: an accepted program must emit buildable Go.
 //!
-//! Go's front-end rejects three declaration shapes that `hyb check` used to
+//! Go's front-end rejects four declaration shapes that `hyb check` used to
 //! accept with 0 diagnostics, so the emitted module could never build:
 //!
 //!   1. an unused `:=` binding — `x := 5` with no read of `x` is
@@ -9,9 +9,11 @@
 //!   2. an unused import — the emitter carries every declared Go import
 //!      into the header, and Go rejects `imported and not used`;
 //!   3. a repeated name on the left of one `:=` — `x, x := 1, 2` is
-//!      `x repeated on left side of :=`.
+//!      `x repeated on left side of :=`;
+//!   4. unused function-local `var` or `const` variables emitted as
+//!      Go locals — rejected with `declared and not used`.
 //!
-//! All three reject fail-closed as HYB-E1002 (registry rule `BUILDABLE`):
+//! All four reject fail-closed as HYB-E1002 (registry rule `BUILDABLE`):
 //! what the checker accepts must survive `go build`.
 //!
 //! The read-set is deliberately Go-faithful, not conservative-in-the-wrong-
@@ -22,9 +24,8 @@
 //! write-only local). The same-scope re-define (`x, y := 1, 2` after
 //! `x := 0`) keeps the existing variable, exactly as Go's `:=` does.
 //!
-//! Out of scope, documented: unused `var`/composite-`const` locals,
-//! select-receive names and match bindings (the same Go error family, but
-//! not the issue's three forms), unread `for ... in` bindings (lowered to
+//! Out of scope, documented: select-receive names and match bindings
+//! (distinct source binding paths), unread `for ... in` bindings (lowered to
 //! `_` at emission, issue #139), and unused `rust/` imports (they are never
 //! emitted as Go imports, so they cannot break the build).
 
@@ -37,10 +38,11 @@ use std::collections::{HashMap, HashSet};
 
 use crate::model::Checker;
 
-/// One `:=`/`let` name that must be read somewhere in its function.
+/// One function-local binding that Go requires to be read.
 struct Define {
     name: String,
     span: Span,
+    kind: LocalKind,
     used: bool,
 }
 
@@ -159,8 +161,15 @@ impl Collector {
     }
 
     fn local(&mut self, l: &LocalDecl) {
-        let checked = matches!(l.kind, LocalKind::Define | LocalKind::Let);
-        if checked {
+        // Only the short declaration operator needs freshness checks.
+        // Every kind of fn-local declaration emits a Go binding, whose
+        // name must be read somewhere in its enclosing function.
+        let short_define = matches!(l.kind, LocalKind::Define | LocalKind::Let);
+        let track_read = matches!(
+            l.kind,
+            LocalKind::Define | LocalKind::Let | LocalKind::Var | LocalKind::Const
+        );
+        if short_define {
             // Form 3: `x, x := 1, 2` — `x repeated on left side of :=`.
             let mut seen: HashSet<&str> = HashSet::new();
             for name in &l.names {
@@ -219,7 +228,7 @@ impl Collector {
             self.expr(v);
         }
         for name in &l.names {
-            if !checked {
+            if !track_read {
                 self.exempt(name);
                 continue;
             }
@@ -237,6 +246,7 @@ impl Collector {
             self.defines.push(Define {
                 name: name.clone(),
                 span: l.span,
+                kind: l.kind,
                 used: false,
             });
             top.insert(name.clone(), Some(id));
@@ -579,18 +589,22 @@ impl Collector {
         }
     }
 
-    /// Form 1: every checked define must be read somewhere in its function.
+    /// All fn-local declarations have the same Go unused-binding rule.
     fn finish(&mut self) {
         for d in &self.defines {
             if !d.used {
+                let emitted = match d.kind {
+                    LocalKind::Define | LocalKind::Let => format!("{} := ...", d.name),
+                    LocalKind::Var | LocalKind::Const => format!("var {}", d.name),
+                };
                 self.diags.push(
                     Diagnostic::error(
                         "HYB-E1002",
                         self.path.clone(),
                         d.span,
                         format!(
-                            "`{}` is declared and never used — Go refuses to build the emitted `{} := ...` (declared and not used) (HYB-E1002)",
-                            d.name, d.name
+                            "`{}` is declared and never used — Go refuses to build the emitted `{}` (declared and not used) (HYB-E1002)",
+                            d.name, emitted
                         ),
                     )
                     .with_notes(vec![format!(
