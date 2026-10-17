@@ -308,6 +308,26 @@ impl Emitter {
                         .unwrap_or_else(|| w.to_string());
                     self.handler_writer = Some(name);
                 }
+                let saved_in_main = self.in_main_closure;
+                let saved_cur_fn_error = self.cur_fn_error_returns.clone();
+                self.in_main_closure = false;
+                let last_is_err = matches!(
+                    results.last(),
+                    Some(r) if matches!(&r.ty, TypeExpr::Named { name, .. } if name == "error")
+                );
+                if last_is_err {
+                    let mut texts = Vec::new();
+                    for (i, r) in results.iter().enumerate() {
+                        if i == results.len() - 1 {
+                            texts.push(String::new());
+                        } else {
+                            texts.push(self.zero_value(&r.ty));
+                        }
+                    }
+                    self.cur_fn_error_returns = Some(texts);
+                } else {
+                    self.cur_fn_error_returns = None;
+                }
                 self.fnlit_depth += 1;
                 // Labels do not cross func boundaries: a labeled break/continue
                 // must find its loop INSIDE the literal — reset the depth so
@@ -343,6 +363,8 @@ impl Emitter {
                 self.fnlit_depth -= 1;
                 self.for_depth = saved_for_depth;
                 self.handler_writer = saved_writer;
+                self.in_main_closure = saved_in_main;
+                self.cur_fn_error_returns = saved_cur_fn_error;
                 self.bindings.retain(|k, _| known.contains(k));
                 out.push_str(&closure_body);
                 for _ in 0..self.indent {
