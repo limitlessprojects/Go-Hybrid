@@ -125,10 +125,11 @@
       "title": "defer requires a call expression",
       "summary": "`defer` of a non-call expression is a compile error.",
       "fixits": [
-        "defer the call itself: `defer f.close()?` instead of `defer f.close`"
+        "defer the call itself: `defer f.close()` instead of `defer f.close`"
       ],
       "example": "defer f.close   // reject: HYB-E2001 — defer of a non-call",
-      "rule": "P"
+      "rule": "P",
+      "tier0_rule_id": "P"
     },
     {
       "code": "HYB-E2002",
@@ -421,6 +422,52 @@
       ],
       "example": "var e option[int]   // reject: HYB-E4002 — option[T] has no zero value",
       "rule": "N"
+    },
+    {
+      "code": "HYB-E4003",
+      "name": "try-operand-not-error",
+      "category": "types",
+      "severity": "error",
+      "title": "`?` on a call that does not return `error`",
+      "summary": "SPEC-LANGUAGE E4: `?` on an expression that is not an error-returning call is a type error. A call that declares no `error` result cannot be tried, and the emitter's two-name hoist from it produces Go that fails with `assignment mismatch` (issue #155).",
+      "fixits": [
+        "drop the `?` — the call's value is already the result you want",
+        "if the callee really can fail, give it an `error` result",
+        "handle the failure at the call site rather than propagating it"
+      ],
+      "example": "v := count()?   // reject: HYB-E4003 — `count` returns int, not error",
+      "rule": "E4",
+      "tier0_rule_id": "E4"
+    },
+    {
+      "code": "HYB-E4004",
+      "name": "try-on-option",
+      "category": "types",
+      "severity": "error",
+      "title": "`?` on an `option` result is a type error (T20)",
+      "summary": "SPEC-LANGUAGE E4/T20: `?` on `option` is a type error — absence and failure stay distinct. An `option`-returning call is not a failure path, and the emitter's two-name hoist from a one-result call cannot build either (issue #155).",
+      "fixits": [
+        "use `match` (or a `some(...)`/`none` test) for an `option` result (T20)",
+        "do not conflate absence with failure: an `option` is not an `error`"
+      ],
+      "example": "v := find(k)?   // reject: HYB-E4004 — `find` returns option[int] (T20)",
+      "rule": "E4",
+      "tier0_rule_id": "T20"
+    },
+    {
+      "code": "HYB-E4005",
+      "name": "try-cannot-propagate",
+      "category": "types",
+      "severity": "error",
+      "title": "`?` where the propagation cannot land",
+      "summary": "SPEC-LANGUAGE E3b: where the propagation cannot land (no error result, not main, not an E11 handler) it is a compile error — never a silent swallow. A `?` always binds to the results of the function or closure that lexically contains it (E4).",
+      "fixits": [
+        "add an `error` result to the enclosing function or closure",
+        "handle the failure here instead of propagating it"
+      ],
+      "example": "fn f() int {\n    v := g()?\n    return v\n}   // reject: HYB-E4005",
+      "rule": "E3b",
+      "tier0_rule_id": "E3b"
     },
     {
       "code": "HYB-E5001",
