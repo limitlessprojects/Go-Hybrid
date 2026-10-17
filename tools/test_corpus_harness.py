@@ -1,10 +1,14 @@
 """CLI regressions for optional exact diagnostic metadata (stdlib only)."""
 
 from pathlib import Path
+import importlib.util
+import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 HARNESS = Path(__file__).with_name("corpus_harness.py")
 
@@ -25,16 +29,16 @@ class ExactDiagnosticCliTests(unittest.TestCase):
                 "summary": {"verdict": "reject"},
                 "diagnostics": [{"severity": "error", "tier0_rule": "A1c", "code": code}],
             }
-            checker = root / "hyb"
+            checker = root / "check"
             checker.write_text(
                 f"#!{sys.executable}\nimport json\n"
                 f"print(json.dumps({payload!r}))\nraise SystemExit(1)\n",
                 encoding="utf-8",
             )
-            checker.chmod(0o700)
             return subprocess.run(
-                [sys.executable, str(HARNESS), "--bin", str(checker), "--corpus", str(corpus)],
-                capture_output=True, text=True, timeout=10,
+                [sys.executable, str(HARNESS), "--bin", sys.executable, "--corpus", str(corpus)],
+                cwd=root, env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+                capture_output=True, text=True, encoding="utf-8", timeout=10,
             )
 
     def test_wrong_code_with_same_rule_fails(self):
@@ -86,16 +90,16 @@ class CheckerEnvelopeCliTests(unittest.TestCase):
             (corpus / "01-example.hy").write_text(
                 f"// EXPECTED-VERDICT: {expected}\nfn main() {{}}\n", encoding="utf-8"
             )
-            checker = root / "hyb"
+            checker = root / "check"
             checker.write_text(
                 f"#!{sys.executable}\nimport json\n"
                 f"print(json.dumps({payload!r}))\nraise SystemExit({status})\n",
                 encoding="utf-8",
             )
-            checker.chmod(0o700)
             return subprocess.run(
-                [sys.executable, str(HARNESS), "--bin", str(checker), "--corpus", str(corpus)],
-                capture_output=True, text=True, timeout=10,
+                [sys.executable, str(HARNESS), "--bin", sys.executable, "--corpus", str(corpus)],
+                cwd=root, env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+                capture_output=True, text=True, encoding="utf-8", timeout=10,
             )
 
     def assert_invalid(self, payload, expected="ACCEPT", status=0):
@@ -155,6 +159,67 @@ class CheckerEnvelopeCliTests(unittest.TestCase):
                                             "warnings": 0, "future": "kept"},
                                 "diagnostics": [], "version": 1, "future": {}})
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
+
+class CheckerTextEncodingTests(unittest.TestCase):
+    """Real UTF-8 child output must not depend on the host's text encoding."""
+
+    def run_payload(self, payload, status=0, stderr=""):
+        spec = importlib.util.spec_from_file_location("encoding_harness", HARNESS)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        script = (
+            "import sys\n"
+            f"sys.stdout.buffer.write({json.dumps(payload, ensure_ascii=False).encode('utf-8')!r})\n"
+            f"sys.stderr.buffer.write({stderr.encode('utf-8')!r})\n"
+            f"raise SystemExit({status})\n"
+        )
+        real_run = subprocess.run
+
+        def legacy_locale_run(command, **kwargs):
+            # Simulate a Windows CP1252 default on every test host. Keep the
+            # actual subprocess and pipe decoding; only replace the compiler
+            # with a deterministic UTF-8 producer. Explicit encodings win.
+            kwargs.setdefault("encoding", "cp1252")
+            return real_run([sys.executable, "-c", script], **kwargs)
+
+        with patch.object(module.subprocess, "run", side_effect=legacy_locale_run):
+            return module.run_checker("fake-hyb", "case.hy")
+
+    def test_non_ascii_diagnostic_message_is_preserved(self):
+        payload = {
+            "summary": {"verdict": "accept", "warnings": 1},
+            "diagnostics": [{"severity": "warning", "message": "archivo caf\u00e9"}],
+        }
+        summary, diagnostics = self.run_payload(payload)
+        self.assertEqual(summary, payload["summary"])
+        self.assertEqual(diagnostics, payload["diagnostics"])
+
+    def test_utf8_outside_cp1252_does_not_crash(self):
+        payload = {
+            "summary": {"verdict": "accept", "warnings": 1},
+            "diagnostics": [{"severity": "warning", "message": "variable \u0401"}],
+        }
+        self.assertEqual(self.run_payload(payload)[1], payload["diagnostics"])
+
+    def test_rejection_preserves_unicode_source_path(self):
+        payload = {
+            "summary": {"verdict": "reject", "errors": 1},
+            "diagnostics": [{"severity": "error", "tier0_rule": "A1c",
+                             "span": {"file": "examples/ni\u00f1o.hy"}}],
+        }
+        summary, diagnostics = self.run_payload(payload, status=1)
+        self.assertEqual(summary, payload["summary"])
+        self.assertEqual(diagnostics, payload["diagnostics"])
+
+    def test_unexpected_exit_keeps_utf8_stderr(self):
+        with self.assertRaisesRegex(RuntimeError, "checker exited unexpectedly.*fallo \u0401"):
+            self.run_payload({"summary": {"verdict": "accept"}, "diagnostics": []},
+                             status=2, stderr="fallo \u0401")
+
+    def test_ascii_control_is_unchanged(self):
+        payload = {"summary": {"verdict": "accept"}, "diagnostics": []}
+        self.assertEqual(self.run_payload(payload), (payload["summary"], []))
 
 
 if __name__ == "__main__":
