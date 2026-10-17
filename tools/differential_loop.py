@@ -74,10 +74,13 @@ def read_expected(path):
 
 def checker_rejects(bin_path, hy_path, expected_rule):
     """Require the first error to match the pre-registered rejection rule."""
-    proc = subprocess.run(
-        [bin_path, "check", hy_path, "--json"],
-        capture_output=True, text=True, timeout=60,
-    )
+    try:
+        proc = subprocess.run(
+            [bin_path, "check", hy_path, "--json"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return False, f"checker timed out after {exc.timeout}s"
     if proc.returncode not in (0, 1):
         return False, f"unexpected checker exit {proc.returncode}"
     try:
@@ -119,18 +122,24 @@ def documented_runtime_hazard(stderr, hazards):
 
 def build_and_run(bin_path, hy_path, workdir, hazards=()):
     """Full pipeline: hyb build + run the binary. Returns (ok, detail)."""
-    build = subprocess.run(
-        [bin_path, "build", hy_path],
-        cwd=workdir, capture_output=True, text=True, timeout=300,
-    )
+    try:
+        build = subprocess.run(
+            [bin_path, "build", hy_path],
+            cwd=workdir, capture_output=True, text=True, timeout=300,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return False, f"build timed out after {exc.timeout}s"
     if build.returncode != 0:
         return False, "build failed: " + (build.stderr or build.stdout).strip()[-300:]
     binary = os.path.join(workdir, "a.out")
     if not os.path.exists(binary):
         return False, "no a.out produced"
-    run = subprocess.run(
-        [binary], cwd=workdir, capture_output=True, text=True, timeout=60
-    )
+    try:
+        run = subprocess.run(
+            [binary], cwd=workdir, capture_output=True, text=True, timeout=60
+        )
+    except subprocess.TimeoutExpired as exc:
+        return False, f"run timed out after {exc.timeout}s"
     if run.returncode != 0:
         # A Go fatal normally exits 2; GOTRACEBACK=crash aborts on Unix.
         # Matching text must not hide a different exit or a killed process.
