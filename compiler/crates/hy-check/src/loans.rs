@@ -2489,6 +2489,16 @@ impl<'a> Checker<'a> {
     fn const_write_root(&self, st: &FnState, p: &Place) -> Option<String> {
         match &p.kind {
             PlaceKind::Ident(name) => {
+                // `_` is a discard, never a place: `_ = expr` cannot write through
+                // `expr`, so it has no const root to protect (issue #460). Without
+                // this guard the alias walk below starts from `_`, which the define
+                // path linked to the value's storage, and the NEXT `_ = ...` is then
+                // reported as a write to that value's `const` root — flagging valid
+                // read-only code. Same convention as the named-result skip in
+                // check_closure_bodies, which already treats `_` as not-a-binding.
+                if name == "_" {
+                    return None;
+                }
                 if let Some(hit) = self.binding_const_root(st, name) {
                     return Some(hit);
                 }
