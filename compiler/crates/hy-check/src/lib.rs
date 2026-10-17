@@ -1717,6 +1717,52 @@ mod tests {
     }
 
     #[test]
+    fn loan_escape_return_map_slot_binding_rejects() {
+        let r = check(
+            "fn get(m map[string]int) *int {\n\
+               slot := &m[\"k\"]\n\
+               return slot\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("LOAN-ESCAPE"));
+        let d = &r.diagnostics[0];
+        assert_eq!(d.code, "HYB-E3104");
+        assert!(d.message.contains("borrow"));
+    }
+
+    #[test]
+    fn loan_escape_return_borrow_handle_call_rejects() {
+        let r = check(
+            "import \"rust/serde_json\"\n\
+             fn get_view(doc serde_json.value) serde_json.view {\n\
+               return doc.view()\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("LOAN-ESCAPE"));
+        let d = &r.diagnostics[0];
+        assert_eq!(d.code, "HYB-E3104");
+        assert!(d.message.contains("borrow"));
+    }
+
+    #[test]
+    fn loan_escape_return_borrow_handle_binding_rejects() {
+        let r = check(
+            "import \"rust/serde_json\"\n\
+             fn get_view(doc serde_json.value) serde_json.view {\n\
+               v := doc.view()\n\
+               return v\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+        assert_eq!(first_error_rule(&r).as_deref(), Some("LOAN-ESCAPE"));
+        let d = &r.diagnostics[0];
+        assert_eq!(d.code, "HYB-E3104");
+        assert!(d.message.contains("borrow"));
+    }
+
+    #[test]
     fn a7_use_after_consuming_rejects() {
         // Fixture seam-fix for #134: `out` must be read (`_ = out`), or the
         // snippet itself is a declared-and-not-used program and the HYB-E1002

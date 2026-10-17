@@ -3678,18 +3678,29 @@ impl<'a> Checker<'a> {
             // nils (`return jobT{m: nil}`) carries its own type context
             // (HYB-E4001).
             self.check_composite_nils(st, v);
+
+            // O2/LOAN-ESCAPE: a borrow returned from a function (SPEC O2)
+            let shape = self.shape_of_expr(st, v);
+            let is_borrow_shape = matches!(shape, TypeShape::BorrowHandle(_));
             let is_bound_borrow = match unwrap_parens(v) {
                 Expr::Ident { name, .. } => {
                     st.borrow_bindings.contains(name)
-                        || st
-                            .loans
-                            .iter()
-                            .any(|l| matches!(&l.target, LoanTarget::MapSlot { binding, .. } if binding == name))
+                        || st.loans.iter().any(|l| match &l.target {
+                            LoanTarget::MapSlot { binding, .. } => binding == name,
+                            LoanTarget::Handle { handle, .. } => handle == name,
+                        })
+                        || matches!(
+                            self.lookup_binding(st, name).map(|b| &b.shape),
+                            Some(TypeShape::BorrowHandle(_))
+                        )
                 }
                 _ => false,
             };
-            // O2/LOAN-ESCAPE: a borrow returned from a function
-            if as_addr_of(v).is_some() || contains_addr_of_in_literal(v) || is_bound_borrow {
+            if as_addr_of(v).is_some()
+                || contains_addr_of_in_literal(v)
+                || is_borrow_shape
+                || is_bound_borrow
+            {
                 let msg = "a borrow cannot be returned from a function".to_string();
                 let notes = vec![
                     format!(
