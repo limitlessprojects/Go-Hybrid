@@ -824,6 +824,25 @@ fn const_return_functions_methods_closures_and_interproc_loops_reject_issue_429(
         "read-only const-returning helper and loop must be accepted, got {:?}",
         codes(&r_readonly_ok)
     );
+
+    // Reproducer 3 (full check + blank-identifier discard): parenthesized non-scalar const
+    // initializers (`const shared_paren = (map[string]int{"k": 1})`) with consecutive
+    // `_ = ...` discards must pass `check()` cleanly without false HYB-E3006 (#429).
+    let r_paren_const_check = check(
+        "const shared_paren = (map[string]int{\"k\": 1})\n\n\
+         fn main() {\n\
+             const local_paren = ([1, 2])\n\
+             _ = shared_paren[\"k\"]\n\
+             _ = local_paren[0]\n\
+         }\n",
+    );
+    assert_eq!(
+        r_paren_const_check.verdict,
+        Verdict::Accept,
+        "parenthesized non-scalar consts with consecutive `_ = ...` discards must pass check (#429), got {:?}",
+        codes(&r_paren_const_check)
+    );
 }
+
 
 

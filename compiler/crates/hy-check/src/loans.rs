@@ -3010,6 +3010,9 @@ impl<'a> Checker<'a> {
         immutable: bool,
         managed: bool,
     ) {
+        if name == "_" {
+            return;
+        }
         let shadows_outer = st
             .scopes
             .last()
