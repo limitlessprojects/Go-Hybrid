@@ -1243,6 +1243,21 @@ no other construct is checked. The rules applied at these sites are O4–O6
 (§9). Receiving (`<-ch`) is never a check-site — the receiver owns what it
 receives.
 
+**C5a — Receive operands are TYPE-checked, not sendability-checked
+(HYB-E2008/E3005).** C5's "never a check-site" is about ownership: the
+receiver owns what it receives, so no sendability rule fires. The operand's
+*type* is a different contract — the accepted-subset rule that every
+accepted program emits buildable Go. Since issue #77, a send to a
+non-channel is rejected (`HYB-E3007`; unresolvable targets fail closed
+under `HYB-E3005`, O4.9). The receive direction is symmetric: `<-expr`
+where `expr` resolves to a concrete non-channel is `HYB-E2008`
+(`x := 5; <-x` used to pass with 0 diagnostics and emit Go that fails
+`go build` with `cannot receive from non-channel`); an unresolvable
+operand fails closed under `HYB-E3005`, exactly as the send side does.
+Fires at every syntactic position a receive can occupy — statement,
+binding, nested in an expression, `select` receive clause, and closure
+bodies (the A5 perimeter).
+
 **C6 — Blocking Rust calls are ordinary calls.** A `rust/` crate function
 flagged `blocking` in its descriptor crosses via Spike 4's two-tier path
 (entersyscallblock syswin lane behind sampler-gated admission + bounded

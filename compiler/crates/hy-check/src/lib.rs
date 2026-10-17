@@ -58,6 +58,7 @@ mod shape;
 mod tuple;
 mod walk;
 mod builtins;
+mod recv;
 
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
 
@@ -575,6 +576,11 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         // After the call/loan walk so it does not collide with upstream
         // inserts around check_uses (const-zero-divisor / LX14).
         ck.check_stmt_builtins(stmt);
+
+        // Issue #409: every receive operand must resolve to a channel
+        // (HYB-E2008; fail-closed E3005) — the mirror of the send-side
+        // target classification (#77, HYB-E3007).
+        ck.check_stmt_recv_operands(&st, stmt);
 
         match stmt {
             Stmt::Local(l) => {

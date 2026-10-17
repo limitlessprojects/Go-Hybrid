@@ -191,6 +191,21 @@
       "rule": "BUILDABLE"
     },
     {
+      "code": "HYB-E2008",
+      "name": "receive-non-channel",
+      "category": "type",
+      "severity": "error",
+      "title": "receive from a non-channel",
+      "summary": "`<-expr` where `expr` resolves to a concrete non-channel shape is rejected: a receive is only well-typed against a `chan T`, and the accepted-subset contract is that every accepted program emits buildable Go (issue #409 — the receive-side mirror of the send rule HYB-E3007, issue #77). `<-5`, `<-x` with `x` an int/map, and a receive from a non-channel call result used to pass with 0 diagnostics and then fail `go build` with `cannot receive from non-channel`. An UNRESOLVABLE source stays fail-closed under HYB-E3005 (O4.9), exactly as the send side treats an unknown target.",
+      "fixits": [
+        "receive from a `chan T` binding (`ch := make(chan T, n)` or a `chan T` parameter)",
+        "bind the value first if it is a call result: `ch := make_call()` — then `<-ch`",
+        "a statement STARTING with `<-expr` is a receive — check the operand's type"
+      ],
+      "example": "x := 5; <-x   // reject: HYB-E2008 — x is an int, not a channel",
+      "rule": "BUILDABLE"
+    },
+    {
       "code": "HYB-E3001",
       "name": "not-sendable-spawn",
       "category": "ownership-sendability",

@@ -249,6 +249,12 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
         check_stmt_own_uses(ck, st, stmt, managed);
     }
 
+    // Issue #409: closure bodies sit outside the Tier-0 flat walk, so the
+    // receive-operand rule (HYB-E2008/E3005) must fire here too — the same
+    // perimeter discipline as the send-side checks below. Pure type
+    // classification: no use/define ordering concerns.
+    ck.check_stmt_recv_operands(st, stmt);
+
     match stmt {
         Stmt::Local(l) => {
             for v in &l.values {
