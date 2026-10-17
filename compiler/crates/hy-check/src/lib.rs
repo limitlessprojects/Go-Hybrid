@@ -395,6 +395,9 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                             ck.define_binding(&mut st, n, shape, None, false, managed);
                         }
                     }
+                    walk::ScopeEvent::MatchBind { name, subject } => {
+                        ck.bind_match_arm(&mut st, name, subject, managed);
+                    }
                 }
             }
         }
@@ -3084,6 +3087,214 @@ mod tests {
              }",
         );
         assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn option_some_unwrap_and_match_some_reject_and_freeze_aliases() {
+        // 1. `match opt { some(shared): { task worker(shared, done) } }` must
+        // bind `shared` to the option's payload shape, never inherit a shadowed
+        // outer `shared := 0` (issue #66).
+        let r1 = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               for i in 0..10000 { m[\"k\"] = i }\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               var opt option[map[string]int] = some(m)\n\
+               shared := 0\n\
+               done := make(chan bool, 1)\n\
+               match opt {\n\
+                 some(shared): {\n\
+                   task worker(shared, done)\n\
+                 }\n\
+                 none: {}\n\
+               }\n\
+               for i in 0..10000 { m[\"k\"] = i }\n\
+               <-done\n\
+               fmt.println(shared)\n\
+             }",
+        );
+        assert_eq!(r1.verdict, Verdict::Reject, "{:?}", r1.diagnostics);
+        assert_eq!(first_error_rule(&r1).as_deref(), Some("A1c"));
+        assert_eq!(r1.diagnostics[0].code, "HYB-E3001");
+
+        // 2. Non-match `var opt option[map[string]int] = some(m)` +
+        // `task worker(move opt, done)` must freeze `m` (O5.2, issue #66).
+        let r2 = check(
+            "fn worker(opt option[map[string]int], done chan<- bool) {\n\
+               for i in 0..10000 { opt.val[\"k\"] = i }\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               var opt option[map[string]int] = some(m)\n\
+               done := make(chan bool, 1)\n\
+               task worker(move opt, done)\n\
+               for i in 0..10000 { m[\"k\"] = i }\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r2.verdict, Verdict::Reject, "{:?}", r2.diagnostics);
+        assert_eq!(first_error_rule(&r2).as_deref(), Some("A1b"));
+        assert_eq!(r2.diagnostics[0].code, "HYB-E3003");
+
+        // 3. `match opt { some(x): { task worker(move x) } }` must also freeze `m` (O5.2).
+        let r3 = check(
+            "fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               var opt option[map[string]int] = some(m)\n\
+               match opt {\n\
+                 some(x): { task worker(move x) }\n\
+                 none: {}\n\
+               }\n\
+               m[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r3.verdict, Verdict::Reject, "{:?}", r3.diagnostics);
+        assert_eq!(first_error_rule(&r3).as_deref(), Some("A1b"));
+        assert_eq!(r3.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn type_alias_resolves_for_sendability_and_move_freeze() {
+        // T25: `type map_t = map[string]int` is an identical type alias; it must
+        // resolve to `TypeShape::Map` for O4 sendability and O5.2 may-share freeze.
+        let r1 = check(
+            "type map_t = map[string]int\n\
+             struct holder { m map_t }\n\
+             fn worker(m map[string]int) { m[\"k\"] = 1 }\n\
+             fn main() {\n\
+               h := holder{m: map[string]int{\"k\": 0}}\n\
+               task worker(h.m)\n\
+               h.m[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r1.verdict, Verdict::Reject, "{:?}", r1.diagnostics);
+        assert_eq!(first_error_rule(&r1).as_deref(), Some("A1c"));
+        assert_eq!(r1.diagnostics[0].code, "HYB-E3001");
+
+        // Shallow copy of a struct carrying a type-aliased map field must
+        // freeze on `move h1` (issue #66 + #27).
+        let r2 = check(
+            "type map_t = map[string]int\n\
+             struct holder { m map_t }\n\
+             fn worker(h holder, done chan<- bool) {\n\
+               for i in 0..10000 { h.m[\"k\"] = i }\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               h1 := holder{m: map[string]int{\"k\": 0}}\n\
+               h2 := h1\n\
+               done := make(chan bool, 1)\n\
+               task worker(move h1, done)\n\
+               for i in 0..10000 { h2.m[\"k\"] = i }\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r2.verdict, Verdict::Reject, "{:?}", r2.diagnostics);
+        assert_eq!(first_error_rule(&r2).as_deref(), Some("A1b"));
+        assert_eq!(r2.diagnostics[0].code, "HYB-E3003");
+    }
+
+    #[test]
+    fn option_match_non_owned_const_and_a3_loans_reject() {
+        // 1. Self-shadowing `match opt { some(opt): ... }` moving inner `opt`
+        // freezes outer `opt` and its share peers (HYB-E3003).
+        let r1 = check(
+            "fn worker(m map[int]int) { m[1] = 2 }\n\
+             fn main() {\n\
+               m := map[int]int{1: 1}\n\
+               opt := some(m)\n\
+               match opt {\n\
+                 some(opt): { task worker(move opt) }\n\
+                 none: {}\n\
+               }\n\
+               _ = m[1]\n\
+             }",
+        );
+        assert_eq!(r1.verdict, Verdict::Reject, "{:?}", r1.diagnostics);
+        assert!(r1.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // 2. `match` on a parameter / non-owned option preserves `non_owned_origin`
+        // on the arm binding, rejecting `move b` with HYB-E3004.
+        let r2 = check(
+            "fn sink(m map[int]int) { _ = m }\n\
+             fn helper(p option[map[int]int]) {\n\
+               match p {\n\
+                 some(b): { task sink(move b) }\n\
+                 none: {}\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r2.verdict, Verdict::Reject, "{:?}", r2.diagnostics);
+        assert!(r2.diagnostics.iter().any(|d| d.code == "HYB-E3004"));
+
+        // 3. `some(move m)` at a boundary freezes `m` (HYB-E3003 on post-move use).
+        let r3 = check(
+            "fn sink(opt option[map[int]int]) { _ = opt }\n\
+             fn main() {\n\
+               m := map[int]int{1: 1}\n\
+               task sink(some(move m))\n\
+               _ = m[1]\n\
+             }",
+        );
+        assert_eq!(r3.verdict, Verdict::Reject, "{:?}", r3.diagnostics);
+        assert!(r3.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+
+        // 4. `const` map mutated through a `match` arm binding inside a closure
+        // rejects with HYB-E3006.
+        let r4 = check(
+            "const m = map[int]int{1: 1}\n\
+             fn main() {\n\
+               f := fn() {\n\
+                 match some(m) {\n\
+                   some(b): { b[1] = 2 }\n\
+                   none: {}\n\
+                 }\n\
+               }\n\
+               f()\n\
+             }",
+        );
+        assert_eq!(r4.verdict, Verdict::Reject, "{:?}", r4.diagnostics);
+        assert!(r4.diagnostics.iter().any(|d| d.code == "HYB-E3006"));
+
+        // 5. A3 map-slot loan (`p := &m[1]`) rejects mutation through a `match`
+        // arm binding in a helper fn or closure (HYB-E3102).
+        let r5 = check(
+            "fn mut_opt(opt option[map[int]int]) {\n\
+               match opt {\n\
+                 some(b): { b[2] = 20 }\n\
+                 none: {}\n\
+               }\n\
+             }\n\
+             fn main() {\n\
+               m := map[int]int{1: 10}\n\
+               p := &m[1]\n\
+               mut_opt(some(m))\n\
+               fmt.println(p)\n\
+             }",
+        );
+        assert_eq!(r5.verdict, Verdict::Reject, "{:?}", r5.diagnostics);
+        assert!(r5.diagnostics.iter().any(|d| d.code == "HYB-E3102"));
+
+        let r6 = check(
+            "fn main() {\n\
+               m := map[int]int{1: 10}\n\
+               p := &m[1]\n\
+               f := fn() {\n\
+                 match some(m) {\n\
+                   some(b): { b[2] = 20 }\n\
+                   none: {}\n\
+                 }\n\
+               }\n\
+               f()\n\
+               fmt.println(p)\n\
+             }",
+        );
+        assert_eq!(r6.verdict, Verdict::Reject, "{:?}", r6.diagnostics);
+        assert!(r6.diagnostics.iter().any(|d| d.code == "HYB-E3102"));
     }
 
     // -----------------------------------------------------------------------
