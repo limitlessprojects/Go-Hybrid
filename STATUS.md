@@ -1,4 +1,5 @@
 # STATUS (for the human — 15 lines max)
+- Contributor candidate: runner now validates SHA in linked worktrees; three regression subcases + existing SHA tests pass on Windows. Existing runner CRLF assertion still fails. Compiler suites not run; upstream review pending.
 
 - Phase: **MVP DONE + v0.1.0 released + community OPEN** — session-18: **8 live-soundness PRs landed + the 10-PR tools batch + W-004 spike (#507)** — cargo 867/0, corpus 60/60, differential FULL (17+43)
 - **Soundness wave landed (each: merge-test, isolated target, own suite, corpus, credit merge):** #493 (helper out-param stores, fixes #455), #496 (closure-typed results, fixes #490), #487 (`return m, m` siblings), #484 (pointer-borrow chains, fixes #131), #485 (E2002 fn-values, fixes #380), #473 (blank-ident discard, fixes #460), #483 (lexical capture scoping + scope-aware loans, fixes #449 — 9-piece maintainer graft incl. flat-walk loans rewrite + lexical saved_env), #457 (backedge shadow + method shapes, fixes #456)

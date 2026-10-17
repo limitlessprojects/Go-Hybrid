@@ -5,6 +5,7 @@ import io
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -85,6 +86,69 @@ class RunnerFailureTests(unittest.TestCase):
                                      [step('must-not-run', 'print(2)')])
         self.assertEqual(code, 1)
         self.assertEqual([(s['name'], s['exit']) for s in summary['steps']], [('prior', 0), ('required', 7)])
+
+
+class RunnerGitfileTests(unittest.TestCase):
+    def test_linked_worktree_checks_commit_before_running_steps(self):
+        for mode in ('mismatch', 'match', 'git-error'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                primary = root / 'primary'
+                checkout = root / 'linked'
+
+                def git(*args):
+                    return subprocess.run(
+                        ['git', *map(str, args)], check=True, capture_output=True,
+                        text=True).stdout.strip()
+
+                git('init', '--quiet', primary)
+                git('-C', primary, '-c', 'user.name=Runner Test',
+                    '-c', 'user.email=runner-test@example.invalid',
+                    'commit', '--quiet', '--allow-empty', '-m', 'fixture')
+                sha = git('-C', primary, 'rev-parse', 'HEAD')
+                git('-C', primary, 'worktree', 'add', '--quiet', '--detach',
+                    checkout, 'HEAD')
+                self.assertTrue((checkout / '.git').is_file())
+
+                setup_marker = root / 'setup.ran'
+                command_marker = root / 'command.ran'
+                job_path = root / 'job.json'
+                results = root / 'results'
+                job_path.write_text(json.dumps({
+                    'job': 'gitfile-sha',
+                    'sha': sha if mode == 'match' else '0' * 40,
+                    'setup': [step('setup',
+                        f'from pathlib import Path; Path({str(setup_marker)!r}).touch()')],
+                    'commands': [step('command',
+                        f'from pathlib import Path; Path({str(command_marker)!r}).touch()')],
+                }), encoding='utf-8')
+                argv = ['runner.py', str(job_path), '--results-dir', str(results),
+                        '--repo-dir', str(checkout)]
+                real_run_cmd = runner.run_cmd
+
+                def run_cmd(cmd, *args, **kwargs):
+                    if mode == 'git-error' and cmd == ['git', 'rev-parse', 'HEAD']:
+                        return 128, 0.0, 'simulated Git lookup failure'
+                    return real_run_cmd(cmd, *args, **kwargs)
+
+                with patch.object(sys, 'argv', argv), patch.dict(os.environ), \
+                        patch.object(runner, 'env_report', return_value={'test': True}), \
+                        patch.object(runner, 'run_cmd', side_effect=run_cmd), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    with self.assertRaises(SystemExit) as stopped:
+                        runner.main()
+
+                summary = json.loads((results / 'summary.json').read_text(encoding='utf-8'))
+                matched = mode == 'match'
+                self.assertEqual(stopped.exception.code, 0 if matched else 1)
+                self.assertEqual(summary['ok'], matched)
+                self.assertEqual(setup_marker.exists(), matched)
+                self.assertEqual(command_marker.exists(), matched)
+                self.assertEqual([s['name'] for s in summary['steps']],
+                                 ['sha-check', 'setup', 'command'] if matched else ['sha-check'])
+                self.assertEqual(summary['steps'][0]['exit'], 0 if matched else 1)
+                if mode == 'git-error':
+                    self.assertIn('failed to resolve HEAD', summary['steps'][0]['out_tail'])
 
 
 class RunnerOutputTests(unittest.TestCase):
