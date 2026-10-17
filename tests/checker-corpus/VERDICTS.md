@@ -639,3 +639,15 @@ so `move h` froze `h` but not `shared` and the emitted Go raced.
 |---|---------|---------|------|------------|-----------|
 | 54 | 54-field-store-alias-at-spawn | REJECT | A1b | `HYB-E3003` | `var h holder; h.m = shared` then `task worker(move h)` then a write to `shared` |
 | 55 | 55-field-store-fresh-at-spawn | ACCEPT | — | — | the over-rejection guard: a FRESH map literal stored into the field shares nothing |
+
+## Additive corpus registration — 2026-10-18: composite literal wrapping a shared map at a channel send (#56)
+
+Corpus 45 pins O4.6 at a spawn, and 54 pins the field-store form of the same
+rule, but the SPEC's own example of the claim is a *send* (`jobs <- job{data:
+shared_map}` → HYB-E3002) and no file exercised it. A checker that walks
+composites at a spawn while classifying the send operand by shape alone would
+pass every case in this corpus and still accept this program.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 56 | 56-send-composite-literal-embeds-shared-map | REJECT | A1c | not asserted | `jobs <- []map[string]int{shared}`: a fresh slice literal whose only reference-typed element is a live mutable map still named in main — O4.6 deep sendability, the send half of 45 |
