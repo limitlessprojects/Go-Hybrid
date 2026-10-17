@@ -60,7 +60,9 @@ def gh_api(path, data=None, method=None):
 
 
 def resolve_head():
-    _, out = sh("git rev-parse HEAD", cwd=REPO_DIR)
+    rc, out = sh("git rev-parse --verify HEAD", cwd=REPO_DIR)
+    if rc != 0:
+        sys.exit("Cannot resolve HEAD; refusing to submit a job without a valid revision pin")
     return out.strip()
 
 
