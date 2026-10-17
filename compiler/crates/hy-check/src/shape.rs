@@ -66,12 +66,24 @@ impl<'a> Checker<'a> {
         if depth > Self::MAX_TYPE_RESOLUTION_DEPTH {
             return TypeShape::Unknown;
         }
+        // Generic instantiation `lru_cache[k, v]` folds its type arguments
+        // into the name string (TypeExpr has no type-argument node — the
+        // parser contract gap noted in parse_type). The struct and alias
+        // tables carry the BASE name, so resolve through the head
+        // (`base_named_type_str`, the same fold `base_named_type` applies
+        // for method receivers). Everything below keeps matching the full
+        // name: for a non-generic name the base IS the name, so this is a
+        // pure widening — a generic receiver like `fn (c *box[t]) m()`
+        // used to classify as `Unknown` and now reaches the declared
+        // struct's field shapes (issue #411: `for i, e in c.order` must
+        // see `c.order` as the declared `[]k`, not an opaque Unknown).
+        let base = Self::base_named_type_str(name);
         // User structs in package scope take precedence over predeclared types.
-        if self.structs.contains_key(name) {
-            return TypeShape::Struct(Some(name.to_string()));
+        if self.structs.contains_key(base) {
+            return TypeShape::Struct(Some(base.to_string()));
         }
         // User type aliases take precedence over predeclared types.
-        if let Some(target) = self.type_aliases.get(name) {
+        if let Some(target) = self.type_aliases.get(base) {
             return self.shape_of_type_depth(target, depth + 1);
         }
         match name {
@@ -341,6 +353,39 @@ impl<'a> Checker<'a> {
                 if let Expr::Ident { name: b, .. } = &**base {
                     if self.lookup_binding(st, b).is_none() && self.known_package(b) {
                         return foreign::package_result(b, name);
+                    }
+                }
+                // Issue #411/H2: user-defined methods (`c.keys()`).
+                // `receiver_type_name` only keys the FOREIGN method table, so
+                // every user-method call result used to stay `Unknown` —
+                // fail-closing e.g. `for v in c.keys()` as HYB-E3005 — while
+                // `ty_of_expr`'s Call arm resolves the same callee through
+                // `method_decls` (and `loans.rs` does too): `call_shape` was
+                // the one method-call resolution site without it. Mirror that
+                // resolution: the receiver's base name, then the declared
+                // method's first result. A zero-result method falls through
+                // to the original path unchanged.
+                let recv_base = self
+                    .ty_of_expr(st, base)
+                    .map(|t| self.resolve_type_alias(&t))
+                    .and_then(|t| Self::base_named_type(&t))
+                    .or_else(|| match self.shape_of_expr(st, base) {
+                        TypeShape::Struct(Some(s)) => {
+                            Some(Self::base_named_type_str(&s).to_string())
+                        }
+                        TypeShape::Pointer(inner) => match *inner {
+                            TypeShape::Struct(Some(s)) => {
+                                Some(Self::base_named_type_str(&s).to_string())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    });
+                if let Some(rb) = recv_base {
+                    if let Some(decl) = self.method_decls.get(&(rb, name.to_string())) {
+                        if let Some(r) = decl.results.first() {
+                            return self.shape_of_type(&r.ty);
+                        }
                     }
                 }
                 let recv = self.shape_of_expr(st, base);

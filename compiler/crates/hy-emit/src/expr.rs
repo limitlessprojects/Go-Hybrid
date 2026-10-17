@@ -673,7 +673,7 @@ impl Emitter {
         for (i, a) in args.iter().enumerate() {
             let t = self.emit_call_arg(a)?;
             let wants_ptr = ptr_params.get(i).copied().unwrap_or(false);
-            let already_ptr = matches!(a.value, Expr::AddrOf { .. });
+            let already_ptr = self.expr_is_pointer(&a.value);
             let addressable = matches!(
                 a.value,
                 Expr::Ident { .. } | Expr::Field { .. } | Expr::Index { .. }

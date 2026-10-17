@@ -639,3 +639,8 @@ so `move h` froze `h` but not `shared` and the emitted Go raced.
 |---|---------|---------|------|------------|-----------|
 | 54 | 54-field-store-alias-at-spawn | REJECT | A1b | `HYB-E3003` | `var h holder; h.m = shared` then `task worker(move h)` then a write to `shared` |
 | 55 | 55-field-store-fresh-at-spawn | ACCEPT | — | — | the over-rejection guard: a FRESH map literal stored into the field shares nothing |
+| 56 | 56-defer-live-reference-at-spawn | REJECT | A1b | `HYB-E3003` | `defer report(shared)` then `task worker(move shared)` |
+| 57 | 57-defer-live-reference-at-send | REJECT | A1b | `HYB-E3003` | the send twin: `ch <- move shared` |
+| 58 | 58-defer-live-reference-via-alias | REJECT | A1b | `HYB-E3003` | the deferred call names the ALIAS, the move transfers the ORIGIN |
+| 59 | 59-rebind-forgets-defer-capture | REJECT | A1b | `HYB-E3003` | rebinding the name must not forget the captured storage |
+| 60 | 60-rebind-without-defer-control | ACCEPT | — | — | the over-rejection guard: a rebind with no defer and no boundary |

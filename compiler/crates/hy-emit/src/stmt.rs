@@ -79,8 +79,10 @@ impl Emitter {
                 // greppable in the generated source and now carries the
                 // category + reason + tickets (row 14, discussion #4) — a
                 // reviewer greps the GO output, not just the .hy input.
-                let mut marker =
-                    format!("{{ // managed [{}] {} (audited via hyb check --report-managed)", category, reason);
+                let mut marker = format!(
+                    "{{ // managed [{}] {} (audited via hyb check --report-managed)",
+                    category, reason
+                );
                 if !tickets.is_empty() {
                     marker.push_str(&format!(" tickets: {}", tickets.join(", ")));
                 }
@@ -166,8 +168,42 @@ impl Emitter {
                             let c = self.emit_expr(chan, 0)?;
                             let head = match names.len() {
                                 0 => format!("case <-{}:", c),
-                                1 => format!("case {} := <-{}:", names[0], c),
-                                2 => format!("case {}, {} := <-{}:", names[0], names[1], c),
+                                1 => {
+                                    // An unread or blank single binding cannot emit
+                                    // `case _ := <-c:` (Go rejects: `no new variables on
+                                    // left side of :=`) or `case v := <-c:` (Go rejects:
+                                    // `v declared and not used`). Lower to bare receive.
+                                    let read = names[0] != "_"
+                                        && crate::rangebind::body_reads(&arm.body, &names[0]);
+                                    if read {
+                                        format!("case {} := <-{}:", names[0], c)
+                                    } else {
+                                        format!("case <-{}:", c)
+                                    }
+                                }
+                                2 => {
+                                    // Go rejects unread receive bindings (`declared and
+                                    // not used`) and rejects `case _, _ := <-c:` (`no new
+                                    // variables on left side of :=`).
+                                    // If both unread, drop to bare receive. If one is read,
+                                    // blank the unread slot with `_`.
+                                    let a_read = names[0] != "_"
+                                        && crate::rangebind::body_reads(&arm.body, &names[0]);
+                                    let b_read = names[1] != "_"
+                                        && crate::rangebind::body_reads(&arm.body, &names[1]);
+                                    match (a_read, b_read) {
+                                        (true, true) => {
+                                            format!("case {}, {} := <-{}:", names[0], names[1], c)
+                                        }
+                                        (true, false) => {
+                                            format!("case {}, _ := <-{}:", names[0], c)
+                                        }
+                                        (false, true) => {
+                                            format!("case _, {} := <-{}:", names[1], c)
+                                        }
+                                        (false, false) => format!("case <-{}:", c),
+                                    }
+                                }
                                 n => {
                                     return Err(EmitError::unsupported(format!(
                                         "select receive with {} names",
@@ -177,7 +213,7 @@ impl Emitter {
                             };
                             self.push(&head);
                         }
-                        SelectArmKind::Send { chan, value } => {
+                        SelectArmKind::Send { chan, value, .. } => {
                             let c = self.emit_expr(chan, 0)?;
                             let v = self.emit_expr(value, 0)?;
                             self.push(&format!("case {} <- {}:", c, v));
@@ -198,6 +234,10 @@ impl Emitter {
     // -----------------------------------------------------------------------
 
     fn emit_local(&mut self, l: &LocalDecl) -> Result<(), EmitError> {
+        self.emit_local_in_seq(l, &[])
+    }
+
+    fn emit_local_in_seq(&mut self, l: &LocalDecl, rest: &[Stmt]) -> Result<(), EmitError> {
         match l.kind {
             LocalKind::Var => {
                 let ty = l.ty.as_ref().map(|t| self.type_text(t));
@@ -222,6 +262,11 @@ impl Emitter {
                 // Typed var decls carry receiver knowledge (Batch I):
                 // `var hits atomic.int64` → shape-known, not a pointer.
                 if let Some(t) = &l.ty {
+                    if matches!(t, TypeExpr::Pointer { .. }) {
+                        for n in &l.names {
+                            self.pointer_vars.insert(n.clone());
+                        }
+                    }
                     if let Some(kind) = self.binding_kind_of_ty(t) {
                         for n in &l.names {
                             self.bindings.insert(n.clone(), kind);
@@ -261,28 +306,6 @@ impl Emitter {
             LocalKind::Define | LocalKind::Let => {}
         }
 
-        // `x := &m[k]` / `x := &s.field` — the O8 map-slot loan. Go cannot
-        // take a map-index address; the ownership model's answer (O9: Go-heap
-        // reads are copies) lowers to copy-read now + store-back at the
-        // declaring block's end. A plain `&x` (local var address) is legal
-        // Go and stays verbatim.
-        if l.values.len() == 1 {
-            if let Expr::AddrOf { operand, .. } = &l.values[0] {
-                if matches!(operand.as_ref(), Expr::Index { .. } | Expr::Field { .. }) {
-                    let place = self.emit_expr(operand, 0)?;
-                    let names = l.names.join(", ");
-                    self.push(&format!("{} := {}", names, place));
-                    if l.names.len() == 1 {
-                        if let Some(frame) = self.loan_frames.last_mut() {
-                            frame.push((l.names[0].clone(), place));
-                        }
-                        self.bindings.insert(l.names[0].clone(), BindingKind::Plain);
-                    }
-                    return Ok(());
-                }
-            }
-        }
-
         // `x := f()?` — the try desugar. Values.len() == 1, a Try node.
         if l.values.len() == 1 {
             if let Expr::Try { operand, .. } = &l.values[0] {
@@ -293,14 +316,58 @@ impl Emitter {
         // E3 expression form (Batch G): `?` nested anywhere else in the
         // values hoists to temp bindings + propagation, then substitutes.
         for (idx, v) in l.values.iter().enumerate() {
-            let later_has_try = l.values[idx + 1..]
-                .iter()
-                .any(Self::expr_has_hoistable_try);
+            let later_has_try = l.values[idx + 1..].iter().any(Self::expr_has_hoistable_try);
             if later_has_try {
                 self.hoist_order_before_try(v)?;
             } else {
                 self.hoist_tries_expr(v)?;
             }
+        }
+
+        if l.ty.is_some() {
+            return Err(EmitError::unsupported(
+                "type-ascribed `:=` — write `var x T = e` or `x := e`",
+            ));
+        }
+
+        // `x := &m[k]` / `x := &s.field` (including parallel defines) — the
+        // O8 map-slot/field loan. Go cannot take a map-index address; the
+        // ownership model's answer (O9: Go-heap reads are copies) lowers to
+        // copy-read now + store-back when the loan's non-lexical window ends
+        // (or at the declaring block's end). A plain `&x` (local var address)
+        // is legal Go and stays verbatim.
+        if l.names.len() == l.values.len()
+            && l.values
+                .iter()
+                .any(|v| Self::as_slot_loan_operand(v).is_some())
+        {
+            let mut val_texts = Vec::with_capacity(l.values.len());
+            let mut new_loans = Vec::new();
+            for (name, v) in l.names.iter().zip(l.values.iter()) {
+                if let Some(operand) = Self::as_slot_loan_operand(v) {
+                    let (read_place, write_place) =
+                        self.emit_slot_loan_place(operand, name, rest)?;
+                    val_texts.push(read_place);
+                    if name != "_" {
+                        new_loans.push((name.clone(), write_place));
+                        self.bindings.insert(name.clone(), BindingKind::Plain);
+                    }
+                } else {
+                    val_texts.push(self.emit_expr(v, 0)?);
+                }
+            }
+            for (loan_name, _) in &new_loans {
+                self.flush_loan_for_name(loan_name);
+            }
+            self.push(&format!(
+                "{} := {}",
+                l.names.join(", "),
+                val_texts.join(", ")
+            ));
+            if let Some(frame) = self.loan_frames.last_mut() {
+                frame.extend(new_loans);
+            }
+            return Ok(());
         }
 
         let values = l
@@ -309,14 +376,7 @@ impl Emitter {
             .map(|v| self.emit_expr(v, 0))
             .collect::<Result<Vec<_>, _>>()?;
         let names = l.names.join(", ");
-        match (l.ty.as_ref(), values.len()) {
-            (Some(_), _) => {
-                return Err(EmitError::unsupported(
-                    "type-ascribed `:=` — write `var x T = e` or `x := e`",
-                ));
-            }
-            (None, _) => self.push(&format!("{} := {}", names, values.join(", "))),
-        }
+        self.push(&format!("{} := {}", names, values.join(", ")));
         // A struct-literal define carries the receiver's struct name
         // (Batch I): `stats := pool_stats{}` — field chains type through
         // struct_fields (18's `stats.mu.lock()`).
@@ -376,9 +436,9 @@ impl Emitter {
                         .map(Self::expr_has_hoistable_try)
                         .unwrap_or(false)
             }
-            Expr::StructLit { fields, .. } => {
-                fields.iter().any(|f| Self::expr_has_hoistable_try(&f.value))
-            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| Self::expr_has_hoistable_try(&f.value)),
             Expr::SliceLit { items, .. } => items.iter().any(Self::expr_has_hoistable_try),
             Expr::MapLit { entries, .. } => entries
                 .iter()
@@ -917,15 +977,18 @@ impl Emitter {
         if kind != BindingKind::Plain {
             self.bindings.insert(names[0].clone(), kind);
         }
+        if self.expr_is_pointer(&values[0]) {
+            self.pointer_vars.insert(names[0].clone());
+        }
     }
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
-        let call = match e {
+        let (call, args) = match e {
             Expr::Try { operand, .. } => match operand.as_ref() {
-                Expr::Call { callee, .. } => callee.as_ref(),
+                Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
                 _ => return BindingKind::Plain,
             },
-            Expr::Call { callee, .. } => callee.as_ref(),
+            Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
             _ => return BindingKind::Plain,
         };
         if let Expr::Field { base, name, .. } = call {
@@ -963,12 +1026,38 @@ impl Emitter {
             }
         }
         // make(chan …) → Chan (single-var range emits the value directly).
+        // Only classify as Chan if the first argument is a channel type.
+        // make([]T, n) (SliceLit) and make(map[K]V) (MapLit) must remain Plain
+        // so single-var range binds elements/keys rather than channel values.
         if matches!(call, Expr::Ident { name, .. } if name == "make") {
-            // args[0] is the type-as-value encoding; peek at its shape.
-            // (Verified against the parser's make encoding.)
-            return BindingKind::Chan;
+            if let Some(first) = args.first() {
+                if let Expr::StructLit {
+                    ty: Some(TypeExpr::Chan { .. }),
+                    ..
+                } = &first.value
+                {
+                    return BindingKind::Chan;
+                }
+            }
+            return BindingKind::Plain;
         }
         BindingKind::Plain
+    }
+
+    /// Whether an expression evaluates to a channel type (param, typed local,
+    /// make(chan ...), or a function returning a channel). Channel ranges in
+    /// Go permit only one iteration variable and bind the received value directly.
+    fn is_channel_expr(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Ident { name, .. } => {
+                matches!(self.bindings.get(name), Some(BindingKind::Chan))
+            }
+            Expr::Paren { inner, .. } => self.is_channel_expr(inner),
+            Expr::Call { .. } | Expr::Try { .. } => {
+                self.binding_kind_of(e) == BindingKind::Chan
+            }
+            _ => false,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1000,22 +1089,75 @@ impl Emitter {
         op: AssignOp,
         values: &[Expr],
     ) -> Result<(), EmitError> {
-        // `x := &m[k]` / `x := &s.field` — the O8 map-slot loan. Go cannot
-        // take a map-index address; the ownership model's answer (O9: Go-heap
-        // reads are copies) lowers to copy-read now + store-back at the
-        // declaring block's end. A plain `&x` (local var address) is legal
-        // Go and stays verbatim.
-        if targets.len() == 1 && values.len() == 1 && op == AssignOp::Assign {
-            if let Expr::AddrOf { operand, .. } = &values[0] {
-                if matches!(operand.as_ref(), Expr::Index { .. } | Expr::Field { .. }) {
-                    if let PlaceKind::Ident(name) = &targets[0].kind {
-                        let place = self.emit_expr(operand, 0)?;
-                        self.push(&format!("{} = {}", name, place));
-                        if let Some(frame) = self.loan_frames.last_mut() {
-                            frame.push((name.clone(), place));
-                        }
-                        return Ok(());
+        self.emit_assign_in_seq(targets, op, values, &[])
+    }
+
+    fn emit_assign_in_seq(
+        &mut self,
+        targets: &[Place],
+        op: AssignOp,
+        values: &[Expr],
+        rest: &[Stmt],
+    ) -> Result<(), EmitError> {
+        // `x = &m[k]` / `x = &s.field` — the O8 map-slot loan (single or parallel).
+        // Go cannot take a map-index address; the ownership model's answer (O9: Go-heap
+        // reads are copies) lowers to copy-read now + store-back at the loan's last use
+        // (or declaring block's end). Rebinding an existing slot-loan variable flushes
+        // its previous store-back before overwriting the variable.
+        if op == AssignOp::Assign
+            && targets.len() == values.len()
+            && !values.is_empty()
+            && targets
+                .iter()
+                .all(|t| matches!(&t.kind, PlaceKind::Ident(_)))
+            && values.iter().any(|v| Self::as_slot_loan_operand(v).is_some())
+        {
+            for (idx, v) in values.iter().enumerate() {
+                let later_has_try = values[idx + 1..].iter().any(Self::expr_has_hoistable_try);
+                if later_has_try {
+                    self.hoist_order_before_try(v)?;
+                } else {
+                    self.hoist_tries_expr(v)?;
+                }
+            }
+            let names: Vec<String> = targets
+                .iter()
+                .map(|t| match &t.kind {
+                    PlaceKind::Ident(n) => n.clone(),
+                    _ => unreachable!(),
+                })
+                .collect();
+            for name in &names {
+                if name != "_" {
+                    self.flush_loan_for_name(name);
+                }
+            }
+            let mut rhs_texts = Vec::with_capacity(values.len());
+            let mut new_loans = Vec::new();
+            for (name, v) in names.iter().zip(values.iter()) {
+                if let Some(operand) = Self::as_slot_loan_operand(v) {
+                    let (read_place, write_place) =
+                        self.emit_slot_loan_place(operand, name, rest)?;
+                    rhs_texts.push(read_place);
+                    if name != "_" {
+                        new_loans.push((name.clone(), write_place));
                     }
+                } else {
+                    rhs_texts.push(self.emit_expr(v, 0)?);
+                }
+            }
+            self.push(&format!("{} = {}", names.join(", "), rhs_texts.join(", ")));
+            if let Some(frame) = self.loan_frames.last_mut() {
+                frame.extend(new_loans);
+            }
+            return Ok(());
+        }
+        if targets.len() == 1 && values.len() == 1 && op == AssignOp::Assign {
+            if let PlaceKind::Ident(name) = &targets[0].kind {
+                if self.expr_is_pointer(&values[0]) {
+                    self.pointer_vars.insert(name.clone());
+                } else {
+                    self.pointer_vars.remove(name);
                 }
             }
         }
@@ -1258,26 +1400,17 @@ impl Emitter {
     }
 
     /// Every block body goes through this: a loan frame is pushed, the
-    /// statements render, and the frame's store-backs flush at the block's
-    /// end (before the closing brace) unless the block already terminated via
-    /// `return`, `break`, or `continue` (which flush active loans before the
-    /// control-flow transfer, #203). This is what makes the O8 slot-loan
-    /// desugar sound: mutations through the loaned copy persist exactly for
-    /// the loan's lexical window.
+    /// statements render (flushing any loan whose non-lexical `last_use`
+    /// ended at a statement), and any remaining store-backs flush at the
+    /// block's end (before the closing brace) unless the block already
+    /// terminated via `return`, `break`, or `continue` (#218/#203 flush
+    /// active loans before the control-flow transfer). This is what makes
+    /// the O8 slot-loan desugar sound: mutations through the loaned copy
+    /// persist exactly for the loan's non-lexical live window.
     pub fn emit_block_body(&mut self, stmts: &[Stmt]) -> Result<(), EmitError> {
         self.loan_frames.push(Vec::new());
         self.indent += 1;
-        for st in stmts {
-            self.emit_stmt(st)?;
-        }
-        let frame = self.loan_frames.pop().unwrap_or_default();
-        if !stmts.iter().any(Self::stmt_terminates) {
-            for (name, place) in frame {
-                if !name.is_empty() {
-                    self.push(&format!("{} = {}", place, name));
-                }
-            }
-        }
+        self.emit_stmts_with_loans(stmts)?;
         self.indent -= 1;
         Ok(())
     }
@@ -1384,13 +1517,7 @@ impl Emitter {
                 self.push("break");
                 self.indent -= 1;
                 self.push("}");
-                for st in &body.stmts {
-                    self.emit_stmt(st)?;
-                }
-                let frame = self.loan_frames.pop().unwrap_or_default();
-                for (name, place) in frame {
-                    self.push(&format!("{} = {}", place, name));
-                }
+                self.emit_stmts_with_loans(&body.stmts)?;
                 self.indent -= 1;
                 self.push("}");
                 return Ok(());
@@ -1447,10 +1574,7 @@ impl Emitter {
                         v, cont, lo_once, lo_once, hi_once, cont, v
                     )
                 } else {
-                    format!(
-                        "for {} := {}; {} < {}; {}++ {{",
-                        v, lo_t, v, hi_t, v
-                    )
+                    format!("for {} := {}; {} < {}; {}++ {{", v, lo_t, v, hi_t, v)
                 }
             }
             ForKind::Iterate { vars, expr } => {
@@ -1462,20 +1586,19 @@ impl Emitter {
                     1 => {
                         // `for _ in ch` drains without binding (corpus 17);
                         // `for range e` is Go's blank form for every
-                        // iterable. No variable to register.
-                        if vars[0] == "_" {
+                        // iterable. When a named loop variable is never read in
+                        // the body, Go rejects it (`declared and not used`).
+                        // Drop the binding to `for range e`, completing the
+                        // unread-binding lowering from issue #139.
+                        let read = vars[0] != "_" && crate::rangebind::body_reads(body, &vars[0]);
+                        if !read {
                             format!("for range {} {{", e)
                         } else {
                             // Hybrid's single-var iterate binds the VALUE.
                             // Go's single-var range binds the index (slices/
                             // maps) or the value (channels) — hence the Chan
                             // hint check.
-                            let over_chan = match expr {
-                                Expr::Ident { name, .. } => {
-                                    matches!(self.bindings.get(name), Some(BindingKind::Chan))
-                                }
-                                _ => false,
-                            };
+                            let over_chan = self.is_channel_expr(expr);
                             if over_chan {
                                 format!("for {} := range {} {{", vars[0], e)
                             } else {
@@ -1501,6 +1624,11 @@ impl Emitter {
                         }
                     }
                     2 => {
+                        if self.is_channel_expr(expr) {
+                            return Err(EmitError::unsupported(
+                                "cannot range over channel with two iteration variables: channels permit only one iteration variable (SPEC-LANGUAGE.md LX13)",
+                            ));
+                        }
                         // Go rejects a range binding the body never reads
                         // (`declared and not used`), and `for _, _ :=` is
                         // itself invalid (`no new variables on left side of
@@ -1670,7 +1798,14 @@ impl Emitter {
                 }
             } else if matches!(v, Expr::Ident { name, .. } if name == "_") {
                 match &self.cur_fn_error_returns {
-                    Some(zeros) if i < zeros.len() => vs.push(zeros[i].clone()),
+                    Some(zeros) if i < zeros.len() => {
+                        let z = &zeros[i];
+                        vs.push(if z.is_empty() {
+                            "nil".to_string()
+                        } else {
+                            z.clone()
+                        });
+                    }
                     _ => {
                         return Err(EmitError::unsupported(
                             "`return _` needs a fn whose results end in `error` (E3's zero-fill)",
@@ -1697,7 +1832,11 @@ impl Emitter {
                 });
             }
         }
-        self.push(&format!("return {}", vs.join(", ")));
+        if vs.is_empty() {
+            self.push("return");
+        } else {
+            self.push(&format!("return {}", vs.join(", ")));
+        }
         Ok(())
     }
 
@@ -1811,9 +1950,10 @@ impl Emitter {
                         if binding.as_str() != primary_binding.as_str() {
                             self.push(&format!("{} := {}", binding, primary_binding));
                         }
-                        for st in &arm.body.stmts {
-                            self.emit_stmt(st)?;
-                        }
+                        // Arm bodies are blocks: per-arm loan frame so O8 slot
+                        // loans flush inside the arm (non-lexical last_use).
+                        self.loan_frames.push(Vec::new());
+                        self.emit_stmts_with_loans(&arm.body.stmts)?;
                         self.indent -= 1;
                         chain_opened = true;
                     }
@@ -1825,9 +1965,11 @@ impl Emitter {
                         if binding.as_str() != primary_binding.as_str() {
                             self.push(&format!("{} := {}", binding, primary_binding));
                         }
-                        for st in &arm.body.stmts {
-                            self.emit_stmt(st)?;
-                        }
+                        // Arm bodies are blocks: per-arm loan frame so O8
+                        // slot loans flush inside the arm (non-lexical
+                        // last_use), not at the enclosing block's end.
+                        self.loan_frames.push(Vec::new());
+                        self.emit_stmts_with_loans(&arm.body.stmts)?;
                         if chain_opened {
                             self.indent -= 1;
                             self.push("}");
@@ -1867,9 +2009,11 @@ impl Emitter {
                 if binding.as_str() != primary_binding.as_str() {
                     self.push(&format!("{} := {}", binding, primary_binding));
                 }
-                for st in &arm.body.stmts {
-                    self.emit_stmt(st)?;
-                }
+                // Arm bodies are blocks: give each its own loan frame so O8
+                // slot loans flush at arm exit (non-lexical last_use within
+                // the arm, remaining store-backs at the arm's closing brace).
+                self.loan_frames.push(Vec::new());
+                self.emit_stmts_with_loans(&arm.body.stmts)?;
                 self.indent -= 1;
             }
             self.push("}");
@@ -1881,17 +2025,15 @@ impl Emitter {
                     self.push(&format!("if !{} && !{}.ok {{", matched_temp, temp));
                     self.indent += 1;
                     self.push(&format!("{} = true", matched_temp));
-                    for st in &arm.body.stmts {
-                        self.emit_stmt(st)?;
-                    }
+                    self.loan_frames.push(Vec::new());
+                    self.emit_stmts_with_loans(&arm.body.stmts)?;
                     self.indent -= 1;
                     self.push("}");
                 } else {
                     self.push(&format!("if !{} && !{}.ok {{", matched_temp, temp));
                     self.indent += 1;
-                    for st in &arm.body.stmts {
-                        self.emit_stmt(st)?;
-                    }
+                    self.loan_frames.push(Vec::new());
+                    self.emit_stmts_with_loans(&arm.body.stmts)?;
                     self.indent -= 1;
                     self.push("}");
                 }
@@ -1900,13 +2042,423 @@ impl Emitter {
             if let Some(arm) = wildcard_arm {
                 self.push(&format!("if !{} {{", matched_temp));
                 self.indent += 1;
-                for st in &arm.body.stmts {
-                    self.emit_stmt(st)?;
-                }
+                self.loan_frames.push(Vec::new());
+                self.emit_stmts_with_loans(&arm.body.stmts)?;
                 self.indent -= 1;
                 self.push("}");
             }
         }
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // O8 slot-loan helpers (non-lexical last_use flush, rebind flush, key snapshot)
+    // -----------------------------------------------------------------------
+
+    /// Returns `Some(operand)` when `expr` is an O8 slot-loan `&m[k]` or `&s.field`.
+    fn as_slot_loan_operand(expr: &Expr) -> Option<&Expr> {
+        match expr {
+            Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                ..
+            } if matches!(operand.as_ref(), Expr::Index { .. } | Expr::Field { .. }) => {
+                Some(operand.as_ref())
+            }
+            _ => None,
+        }
+    }
+
+    /// Emits the read-place and store-back-place for an O8 slot loan `&operand`
+    /// bound to `loan_var`, snapshotting the index expression into a fresh
+    /// `hyKeyN` temporary when the index is non-trivial or is mutated before
+    /// the loan's store-back.
+    fn emit_slot_loan_place(
+        &mut self,
+        operand: &Expr,
+        loan_var: &str,
+        rest: &[Stmt],
+    ) -> Result<(String, String), EmitError> {
+        if let Expr::Index { base, index, .. } = operand {
+            let needs_key_snapshot = match index.as_ref() {
+                Expr::Lit { .. } => false,
+                Expr::Ident { name, .. } => {
+                    name == loan_var
+                        || rest.iter().any(|s| Self::stmt_modifies_ident(s, name))
+                }
+                _ => true,
+            };
+            let base_mentions_loan_var =
+                loan_var != "_" && Self::expr_mentions_ident(base, loan_var);
+            if needs_key_snapshot || base_mentions_loan_var {
+                let base_text = self.emit_expr(base, ATOM)?;
+                let idx_text = self.emit_expr(index, 0)?;
+                let key_place = if needs_key_snapshot {
+                    let kt = self.next_temp("hyKey");
+                    self.push(&format!("{} := {}", kt, idx_text));
+                    kt
+                } else {
+                    idx_text
+                };
+                let place = format!("{}[{}]", base_text, key_place);
+                return Ok((place.clone(), place));
+            }
+        }
+        let place = self.emit_expr(operand, 0)?;
+        Ok((place.clone(), place))
+    }
+
+    /// Flushes and removes any active slot-loan entries for `target_name` in
+    /// the current loan frame (used before rebinding `target_name = &...`).
+    fn flush_loan_for_name(&mut self, target_name: &str) {
+        let mut to_flush = Vec::new();
+        if let Some(frame) = self.loan_frames.last_mut() {
+            let mut i = 0;
+            while i < frame.len() {
+                if frame[i].0 == target_name {
+                    to_flush.push(frame.remove(i));
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        for (name, place) in to_flush {
+            self.push(&format!("{} = {}", place, name));
+        }
+    }
+
+    /// Emits a sequence of statements inside the current loan frame, flushing
+    /// each active slot loan as soon as the remaining statements in the block
+    /// no longer reference the loan variable (matching `hy-check`'s non-lexical
+    /// `last_use` window), and flushing any still-active loans at block exit.
+    fn emit_stmts_with_loans(&mut self, stmts: &[Stmt]) -> Result<(), EmitError> {
+        for (idx, st) in stmts.iter().enumerate() {
+            let rest = &stmts[idx + 1..];
+            match st {
+                Stmt::Local(l) => self.emit_local_in_seq(l, rest)?,
+                Stmt::Assign {
+                    targets,
+                    op,
+                    values,
+                    ..
+                } => self.emit_assign_in_seq(targets, *op, values, rest)?,
+                _ => self.emit_stmt(st)?,
+            }
+            // If `rest` can still execute after `st`, flush any loan in the
+            // current frame whose variable has no remaining uses in `rest`
+            // (or is shadowed/rebound before any read of the current loan).
+            if !rest.is_empty() && !Self::stmt_terminates(st) {
+                let mut early_flush = Vec::new();
+                if let Some(frame) = self.loan_frames.last_mut() {
+                    let mut i = 0;
+                    while i < frame.len() {
+                        if !Self::remaining_stmts_use_loan(rest, &frame[i].0) {
+                            early_flush.push(frame.remove(i));
+                        } else {
+                            i += 1;
+                        }
+                    }
+                }
+                for (name, place) in early_flush {
+                    if !name.is_empty() {
+                        self.push(&format!("{} = {}", place, name));
+                    }
+                }
+            }
+        }
+        let frame = self.loan_frames.pop().unwrap_or_default();
+        if !stmts.iter().any(Self::stmt_terminates) {
+            for (name, place) in frame {
+                if !name.is_empty() {
+                    self.push(&format!("{} = {}", place, name));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns `true` if `stmts` may still read or mutate the current slot
+    /// loan bound to `name`. A subsequent `name = &other_place` rebind (whose
+    /// RHS does not itself mention `name`) starts a new loan rather than using
+    /// the current loan.
+    fn remaining_stmts_use_loan(stmts: &[Stmt], name: &str) -> bool {
+        for st in stmts {
+            match st {
+                Stmt::Local(l) => {
+                    if l.values.iter().any(|v| Self::expr_mentions_ident(v, name)) {
+                        return true;
+                    }
+                    if l.names.iter().any(|n| n == name) {
+                        return false;
+                    }
+                }
+                Stmt::Assign {
+                    targets,
+                    op,
+                    values,
+                    ..
+                } if *op == AssignOp::Assign
+                    && targets.len() == values.len()
+                    && targets
+                        .iter()
+                        .all(|t| matches!(&t.kind, PlaceKind::Ident(_)))
+                    && values.iter().any(|v| Self::as_slot_loan_operand(v).is_some()) =>
+                {
+                    if values.iter().any(|v| Self::expr_mentions_ident(v, name)) {
+                        return true;
+                    }
+                    if targets
+                        .iter()
+                        .any(|t| matches!(&t.kind, PlaceKind::Ident(n) if n == name))
+                    {
+                        return false;
+                    }
+                }
+                _ => {
+                    if Self::stmt_mentions_ident(st, name) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn stmt_mentions_ident(st: &Stmt, target: &str) -> bool {
+        match st {
+            Stmt::Local(l) => l
+                .values
+                .iter()
+                .any(|v| Self::expr_mentions_ident(v, target)),
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                targets
+                    .iter()
+                    .any(|t| Self::place_mentions_ident(t, target))
+                    || values
+                        .iter()
+                        .any(|v| Self::expr_mentions_ident(v, target))
+            }
+            Stmt::Expr { expr, .. } => Self::expr_mentions_ident(expr, target),
+            Stmt::Send { chan, value, .. } => {
+                Self::expr_mentions_ident(chan, target)
+                    || Self::expr_mentions_ident(value, target)
+            }
+            Stmt::Return { values, .. } => values
+                .iter()
+                .any(|v| Self::expr_mentions_ident(v, target)),
+            Stmt::If {
+                init,
+                cond,
+                then,
+                otherwise,
+                ..
+            } => {
+                init.as_ref()
+                    .is_some_and(|i| Self::stmt_mentions_ident(i, target))
+                    || Self::expr_mentions_ident(cond, target)
+                    || Self::block_mentions_ident(then, target)
+                    || otherwise
+                        .as_ref()
+                        .is_some_and(|o| Self::stmt_mentions_ident(o, target))
+            }
+            Stmt::For { kind, body, .. } => {
+                let kind_mentions = match kind {
+                    ForKind::Infinite => false,
+                    ForKind::While { cond } => Self::expr_mentions_ident(cond, target),
+                    ForKind::Range { lo, hi, .. } => {
+                        Self::expr_mentions_ident(lo, target)
+                            || Self::expr_mentions_ident(hi, target)
+                    }
+                    ForKind::Iterate { expr, .. } => Self::expr_mentions_ident(expr, target),
+                };
+                kind_mentions || Self::block_mentions_ident(body, target)
+            }
+            Stmt::Match { subject, arms, .. } => {
+                Self::expr_mentions_ident(subject, target)
+                    || arms.iter().any(|a| {
+                        let shadowed = matches!(
+                            &a.pattern,
+                            MatchPattern::Path {
+                                binding: Some(b),
+                                ..
+                            } if b == target
+                        );
+                        !shadowed
+                            && (a
+                                .guard
+                                .as_ref()
+                                .is_some_and(|g| Self::expr_mentions_ident(g, target))
+                                || Self::block_mentions_ident(&a.body, target))
+                    })
+            }
+            Stmt::Select { arms, .. } => arms.iter().any(|a| {
+                let head_mentions = match &a.kind {
+                    SelectArmKind::Recv { chan, .. } => Self::expr_mentions_ident(chan, target),
+                    SelectArmKind::Send { chan, value, .. } => {
+                        Self::expr_mentions_ident(chan, target)
+                            || Self::expr_mentions_ident(value, target)
+                    }
+                    SelectArmKind::Default => false,
+                };
+                head_mentions || Self::block_mentions_ident(&a.body, target)
+            }),
+            Stmt::Defer { call, .. } => Self::expr_mentions_ident(call, target),
+            Stmt::Task { callee, args, .. } => {
+                Self::expr_mentions_ident(callee, target)
+                    || args
+                        .iter()
+                        .any(|a| Self::expr_mentions_ident(&a.value, target))
+            }
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+                Self::block_mentions_ident(body, target)
+            }
+            Stmt::Break { .. } | Stmt::Continue { .. } => false,
+        }
+    }
+
+    fn block_mentions_ident(b: &Block, target: &str) -> bool {
+        for st in &b.stmts {
+            if let Stmt::Local(l) = st {
+                if l.values
+                    .iter()
+                    .any(|v| Self::expr_mentions_ident(v, target))
+                {
+                    return true;
+                }
+                if l.names.iter().any(|n| n == target) {
+                    return false;
+                }
+                continue;
+            }
+            if Self::stmt_mentions_ident(st, target) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn place_mentions_ident(p: &Place, target: &str) -> bool {
+        match &p.kind {
+            PlaceKind::Ident(n) => n == target,
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                Self::place_mentions_ident(base, target)
+            }
+            PlaceKind::Index { base, index } => {
+                Self::place_mentions_ident(base, target)
+                    || Self::expr_mentions_ident(index, target)
+            }
+        }
+    }
+
+    fn expr_mentions_ident(e: &Expr, target: &str) -> bool {
+        match e {
+            Expr::Ident { name, .. } => name == target,
+            Expr::Lit { .. } => false,
+            Expr::Binary { lhs, rhs, .. } => {
+                Self::expr_mentions_ident(lhs, target)
+                    || Self::expr_mentions_ident(rhs, target)
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Receive { chan: operand, .. }
+            | Expr::Field { base: operand, .. }
+            | Expr::Paren { inner: operand, .. } => Self::expr_mentions_ident(operand, target),
+            Expr::Call { callee, args, .. } => {
+                Self::expr_mentions_ident(callee, target)
+                    || args
+                        .iter()
+                        .any(|a| Self::expr_mentions_ident(&a.value, target))
+            }
+            Expr::Index { base, index, .. } => {
+                Self::expr_mentions_ident(base, target)
+                    || Self::expr_mentions_ident(index, target)
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                Self::expr_mentions_ident(base, target)
+                    || lo
+                        .as_ref()
+                        .is_some_and(|x| Self::expr_mentions_ident(x, target))
+                    || hi
+                        .as_ref()
+                        .is_some_and(|x| Self::expr_mentions_ident(x, target))
+            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| Self::expr_mentions_ident(&f.value, target)),
+            Expr::SliceLit { items, .. } => items
+                .iter()
+                .any(|x| Self::expr_mentions_ident(x, target)),
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
+                Self::expr_mentions_ident(k, target) || Self::expr_mentions_ident(v, target)
+            }),
+            Expr::FnLit { params, body, .. } => {
+                !params.iter().any(|p| p.name == target)
+                    && Self::block_mentions_ident(body, target)
+            }
+            Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                InterpPart::Lit(_) => false,
+                InterpPart::Expr(x) => Self::expr_mentions_ident(x, target),
+            }),
+        }
+    }
+
+    fn stmt_modifies_ident(st: &Stmt, target: &str) -> bool {
+        match st {
+            Stmt::Local(l) => l.names.iter().any(|n| n == target),
+            Stmt::Assign { targets, .. } => targets.iter().any(|t| match &t.kind {
+                PlaceKind::Ident(n) => n == target,
+                _ => false,
+            }),
+            Stmt::If {
+                init,
+                then,
+                otherwise,
+                ..
+            } => {
+                init.as_ref()
+                    .is_some_and(|i| Self::stmt_modifies_ident(i, target))
+                    || then
+                        .stmts
+                        .iter()
+                        .any(|s| Self::stmt_modifies_ident(s, target))
+                    || otherwise
+                        .as_ref()
+                        .is_some_and(|o| Self::stmt_modifies_ident(o, target))
+            }
+            Stmt::For { kind, body, .. } => {
+                let head_modifies = match kind {
+                    ForKind::Range { var, .. } => var == target,
+                    ForKind::Iterate { vars, .. } => vars.iter().any(|v| v == target),
+                    _ => false,
+                };
+                head_modifies
+                    || body
+                        .stmts
+                        .iter()
+                        .any(|s| Self::stmt_modifies_ident(s, target))
+            }
+            Stmt::Match { arms, .. } => arms.iter().any(|a| {
+                a.body
+                    .stmts
+                    .iter()
+                    .any(|s| Self::stmt_modifies_ident(s, target))
+            }),
+            Stmt::Select { arms, .. } => arms.iter().any(|a| {
+                a.body
+                    .stmts
+                    .iter()
+                    .any(|s| Self::stmt_modifies_ident(s, target))
+            }),
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => body
+                .stmts
+                .iter()
+                .any(|s| Self::stmt_modifies_ident(s, target)),
+            _ => false,
+        }
     }
 }

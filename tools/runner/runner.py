@@ -56,8 +56,15 @@ def run_cmd(cmd, timeout, cwd=None, env=None):
             timeout=timeout,
         )
         code, out = p.returncode, p.stdout.decode("utf-8", "replace")
-    except subprocess.TimeoutExpired:
-        code, out = 124, "<<TIMEOUT after {}s>>".format(timeout)
+    except subprocess.TimeoutExpired as exc:
+        # communicate() has already collected output before the deadline. Keep it
+        # so a slow build/test does not lose its last useful diagnostic.
+        partial = exc.output or b""
+        if isinstance(partial, bytes):
+            partial = partial.decode("utf-8", "replace")
+        code = 124
+        out = partial + ("" if not partial or partial.endswith("\n") else "\n")
+        out += "<<TIMEOUT after {}s>>".format(timeout)
     except Exception as e:  # noqa: BLE001 — runner must never die
         code, out = 125, "<<runner error: {}>>".format(e)
     out_tail = out[-4000:]

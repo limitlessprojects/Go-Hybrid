@@ -210,6 +210,13 @@ pub(crate) struct FnState {
     /// map, pr-35): a shadowing define's `share_clear` must not survive the
     /// block either — the snapshot restores at pop.
     pub share_scopes: Vec<HashMap<String, HashSet<String>>>,
+    /// Current binding -> set of shadowed outer bindings `(outer_name, depth)`
+    /// (`depth == 0` for `env`, `depth == i + 1` for `scopes[i]`) whose backing
+    /// storage this binding may share. When the binding (or any peer in its
+    /// alias/may-share component) is moved, `mark_move` immediately marks the
+    /// shadowed outer binding at `depth` as moved.
+    pub shadow_links: HashMap<String, HashSet<(String, usize)>>,
+    pub shadow_link_scopes: Vec<HashMap<String, HashSet<(String, usize)>>>,
     /// Block scopes, innermost last (issue #14): a define inside a nested
     /// block lands in the top layer and DIES at block exit, so an inner
     /// `m := 1` can no longer overwrite the outer `m`'s binding and launder
@@ -255,6 +262,7 @@ impl FnState {
         self.scopes.push(HashMap::new());
         self.alias_scopes.push(self.aliases.clone());
         self.share_scopes.push(self.may_share.clone());
+        self.shadow_link_scopes.push(self.shadow_links.clone());
     }
 
     /// Exit the innermost block scope (walk.rs's Pop events).
@@ -298,6 +306,9 @@ impl FnState {
             }
         }
         self.scopes.pop();
+        if let Some(outer_shadows) = self.shadow_link_scopes.pop() {
+            self.shadow_links = outer_shadows;
+        }
         if let Some(outer_aliases) = self.alias_scopes.pop() {
             self.aliases = outer_aliases;
             if let Some(outer_share) = self.share_scopes.pop() {
@@ -380,6 +391,31 @@ impl FnState {
         }
     }
 
+    /// Return the scope depth of the currently visible binding `name`:
+    /// `Some(0)` for `self.env`, `Some(i + 1)` for `self.scopes[i]`.
+    pub(crate) fn lookup_depth(&self, name: &str) -> Option<usize> {
+        for (i, layer) in self.scopes.iter().enumerate().rev() {
+            if layer.contains_key(name) {
+                return Some(i + 1);
+            }
+        }
+        if self.env.contains_key(name) {
+            Some(0)
+        } else {
+            None
+        }
+    }
+
+    /// Mutable lookup of a binding at an explicit scope depth (`0` for `env`,
+    /// `i + 1` for `scopes[i]`).
+    pub(crate) fn binding_at_depth_mut(&mut self, name: &str, depth: usize) -> Option<&mut Binding> {
+        if depth == 0 {
+            self.env.get_mut(name)
+        } else {
+            self.scopes.get_mut(depth - 1).and_then(|s| s.get_mut(name))
+        }
+    }
+
     /// Innermost-first binding lookup (scopes, then the base env).
     pub(crate) fn env_lookup(&self, name: &str) -> Option<&Binding> {
         for layer in self.scopes.iter().rev() {
@@ -427,12 +463,46 @@ impl FnState {
             .entry(b.to_string())
             .or_default()
             .insert(a.to_string());
+        if let Some(a_links) = self.shadow_links.get(a).cloned() {
+            self.shadow_links
+                .entry(b.to_string())
+                .or_default()
+                .extend(a_links);
+        }
+        if let Some(b_links) = self.shadow_links.get(b).cloned() {
+            self.shadow_links
+                .entry(a.to_string())
+                .or_default()
+                .extend(b_links);
+        }
     }
 
     /// Drop `name`'s may-share edges: a whole-binding rebind re-owns the
     /// binding, so it leaves the old sharing component while preserving
     /// transitive sharing links among its remaining peers.
     pub(crate) fn share_clear(&mut self, name: &str) {
+        let neighbors: Vec<String> = self
+            .may_share
+            .get(name)
+            .into_iter()
+            .flatten()
+            .cloned()
+            .chain(
+                self.aliases
+                    .iter()
+                    .filter_map(|(k, v)| if v == name { Some(k.clone()) } else { None })
+                    .chain(self.aliases.get(name).cloned()),
+            )
+            .filter(|p| p != name)
+            .collect();
+        if let Some(links) = self.shadow_links.remove(name) {
+            for nb in &neighbors {
+                self.shadow_links
+                    .entry(nb.clone())
+                    .or_default()
+                    .extend(links.iter().cloned());
+            }
+        }
         if let Some(peers) = self.may_share.remove(name) {
             let peer_list: Vec<String> = peers.into_iter().collect();
             for p in &peer_list {

@@ -108,6 +108,16 @@ pub(crate) fn foreign_named_type(name: &str) -> Option<TypeShape> {
     }
 }
 
+/// The foreign handles the emitter ranges as element sources — the
+/// `ForeignTy` range branch in `hy-emit`'s statement emission, keyed by the
+/// same descriptors as the emitter's SHAPES table. `serde_json.value` is the
+/// element-source handle (corpus 05 ranges `doc.array(...)` views and the
+/// emitter supports ranging the value handle itself); other handles (e.g.
+/// `flate2.writer`) are NOT iterable and must stay rejected (issue #411).
+pub(crate) fn is_iterable_handle(name: &str) -> bool {
+    name == "serde_json.value"
+}
+
 /// Mode of a package-level call: `serde_json.parse(...)`, `fmt.println(...)`.
 pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
     match (pkg, method) {
@@ -140,6 +150,10 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
             TypeShape::Str
         }
         ("strings", "split") | ("strings", "fields") => TypeShape::Slice(Box::new(TypeShape::Str)),
+        // `time.after(d)` returns a receive-only channel (the deadline
+        // pattern, example 04); the element shape is opaque here — the
+        // binding still resolves as a channel so receives on it classify.
+        ("time", "after") => TypeShape::Chan(Box::new(TypeShape::Unknown)),
         ("http", "new_serve_mux") => TypeShape::ForeignOpaque("http.serve_mux".into()),
         ("http", "handler") => TypeShape::ForeignOpaque("http.handler".into()),
         // `atomic.load_pointer` / `atomic.swap_pointer` return an

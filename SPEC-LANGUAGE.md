@@ -311,6 +311,16 @@ index/element for slices/arrays/strings, key/value for maps; `for v in ch`
 yields received values. Two-variable channel receive is the comma-ok
 clause inside `select` (`v, ok := <-sq:`).
 
+**LX13a — the iterable is TYPE-checked (HYB-E2009/E3005).** LX13's iterable
+set is a closed contract: since issue #411, the checker rejects `for x in e`
+when `e` resolves to a concrete non-iterable shape (an int, bool, struct, a
+pointer to a struct/slice/string — anything outside the set above; a pointer
+to an ARRAY stays rangeable, mirroring Go's range rule) with `HYB-E2009`; an
+unresolvable operand fails closed under `HYB-E3005` (O4.9), exactly as the
+send (#77) and receive (#409) sides treat an unknown operand. The
+integer-range form `for i in 0..n` is a separate statement kind and carries
+no iterable check.
+
 **LX14 — `break`/`continue` scope.** They bind to the innermost `for`,
 `loop`, or `select`; `break loop` exits the nearest enclosing `loop`
 statement. General labels (Go's `L:`) are `[TBD]` — the corpus needs none
@@ -1242,6 +1252,21 @@ No other construct moves a value to another task in MVP Hybrid; therefore
 no other construct is checked. The rules applied at these sites are O4–O6
 (§9). Receiving (`<-ch`) is never a check-site — the receiver owns what it
 receives.
+
+**C5a — Receive operands are TYPE-checked, not sendability-checked
+(HYB-E2008/E3005).** C5's "never a check-site" is about ownership: the
+receiver owns what it receives, so no sendability rule fires. The operand's
+*type* is a different contract — the accepted-subset rule that every
+accepted program emits buildable Go. Since issue #77, a send to a
+non-channel is rejected (`HYB-E3007`; unresolvable targets fail closed
+under `HYB-E3005`, O4.9). The receive direction is symmetric: `<-expr`
+where `expr` resolves to a concrete non-channel is `HYB-E2008`
+(`x := 5; <-x` used to pass with 0 diagnostics and emit Go that fails
+`go build` with `cannot receive from non-channel`); an unresolvable
+operand fails closed under `HYB-E3005`, exactly as the send side does.
+Fires at every syntactic position a receive can occupy — statement,
+binding, nested in an expression, `select` receive clause, and closure
+bodies (the A5 perimeter).
 
 **C6 — Blocking Rust calls are ordinary calls.** A `rust/` crate function
 flagged `blocking` in its descriptor crosses via Spike 4's two-tier path

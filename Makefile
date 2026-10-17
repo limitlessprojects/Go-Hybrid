@@ -23,7 +23,7 @@ help:
 	@echo "make test-quick       — sandbox unit tests (grows with the compiler)"
 	@echo "make ci               — what CI runs on push"
 	@echo "make examples         — the ten target programs, byte-exact acceptance"
-	@echo "make corpus           — Tier-0 corpus verdicts (35/35)"
+	@echo "make corpus           — Tier-0 corpus verdicts (60/60)"
 	@echo "make differential     — the differential corpus loop (accept + reject)"
 	@echo "make bench            — G2 call-overhead bench on the live bridge (hyb bench-overhead)"
 	@echo "make spike0-kaggle    — submit Spike 0 part A to the Kaggle worker"
@@ -43,7 +43,9 @@ check:
 	@$(PY) -m unittest discover -s tools -p test_differential_loop.py -v
 	@$(PY) -m unittest discover -s tools -p test_check_versions.py -v
 	@$(PY) -m unittest discover -s tools -p test_corpus_harness.py -v
+	@$(PY) -m unittest discover -s tools/runner -p test_runner.py -v
 	@bash tools/check-versions.sh --no-toolchain && echo "versions OK"
+	@$(PY) tools/check_conflict_markers.py && echo "conflict markers OK"
 	@cd /tmp && rm -rf gh-selftest && mkdir gh-selftest && cd gh-selftest && \
 	printf '%s\n' '{"job":"selftest","tier":"sandbox","sha":"none","repo":"none","gpu":false,"setup":[],"commands":[{"name":"echo","run":"echo selftest-ok","timeout":30}],"expected_results":[]}' > job.json && \
 	$(PY) $(CURDIR)/tools/runner/runner.py job.json --results-dir results >/dev/null && \

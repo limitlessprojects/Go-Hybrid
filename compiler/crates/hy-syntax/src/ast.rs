@@ -1,7 +1,7 @@
 //! The Hybrid AST — the cross-component contract between `hy-syntax`
 //! (produces), `hy-check` (consumes), and the MVP-0 emitter (consumes).
 //!
-//! Scope: the surface exercised by tests/checker-corpus/*.hy (20 programs),
+//! Scope: the surface exercised by tests/checker-corpus/*.hy (60 programs),
 //! examples/ (ten target programs), and spikes/spike6-ownership/work/*.hy
 //! (ten programs). Anything outside that surface is allowed to be
 //! unimplemented by the parser — it must produce a clean `unsupported`
@@ -707,8 +707,20 @@ pub struct SelectArm {
 
 #[derive(Debug, Clone)]
 pub enum SelectArmKind {
-    Send { chan: Expr, value: Expr },
-    Recv { names: Vec<String>, chan: Expr },
+    /// C5: a select send clause (`ch <- v:`) is a sendability check-site
+    /// exactly like a statement send. `is_move` carries the parser's
+    /// `ch <- move v` marker for the very same reason `Stmt::Send` carries
+    /// it: the owned-move route (O4 class 3) must be available here, and the
+    /// freeze (O5.2) must be recorded for the moved binding.
+    Send {
+        chan: Expr,
+        value: Expr,
+        is_move: bool,
+    },
+    Recv {
+        names: Vec<String>,
+        chan: Expr,
+    },
     Default,
 }
 

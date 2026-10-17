@@ -42,7 +42,7 @@ Everything the checker **accepts was proven** sendable; everything it
 | 1 | `task` spawn arguments | Every argument classified by the six sendable classes; shared mutable aliases rejected | **Guaranteed**: no value reaches a spawned task through an unproven path | [§8.4 C5](SPEC-LANGUAGE.md), [§9.3 O4](SPEC-LANGUAGE.md); corpus [01](tests/checker-corpus/01-shared-map-across-tasks.hy) (reject) / [15](tests/checker-corpus/15-fanin-per-task-state.hy) (accept) |
 | 2 | Channel sends (`ch <- v`, `select` send) | Same classification as spawn; failures `HYB-E3002` with a fix-it menu | **Guaranteed**: the sent value is moved, frozen, copied, or knowingly managed | §8.4 C5, §9.3; corpus [16-move-send-clean](tests/checker-corpus/16-move-send-clean.hy), [17-atomic-channel-immutable](tests/checker-corpus/17-atomic-channel-immutable.hy) |
 | 3 | Composites (struct/slice/map literals) | **Deep** sendability: every reference-typed field/element must itself be sendable; a fresh literal wrapping a shared map is still rejected | **Guaranteed**: embedding an alias does not launder it | §9.3 O4.6; corpus [03](tests/checker-corpus/03-pool-shared-struct-unguarded.hy) shape; differential suite |
-| 4 | Unknown / unresolvable types and names | **Fail-closed**: unproven values are rejected (`HYB-E3005`) — never silently passed as safe. Fix-its: ascribe / route through a channel / take the hatch | **Guaranteed**: the checker never blesses what it cannot resolve | §9.3 O4.9 (rule FC); 10 dedicated checker tests; corpus unchanged |
+| 4 | Unknown / unresolvable types and names | **Fail-closed**: unproven values are rejected (`HYB-E3005`) — never silently passed as safe. Fix-its: ascribe / route through a channel / take the hatch | **Guaranteed**: the checker never blesses what it cannot resolve | §9.3 O4.9 (rule FC); dedicated checker tests; corpus `34-select-send-unproven-name` |
 | 5 | Closure bodies | `task`/send statements inside a closure are real boundaries (goroutines in the emitted Go) and are checked fail-closed, `managed`-escapable | **Guaranteed** for boundary statements; captures without a boundary statement are **outside** (documented, [A5](SPEC-LANGUAGE.md)) | §9.3 O4.10; corpus [10](tests/checker-corpus/) pre-registered ACCEPT |
 | 6 | `move` / freeze | Ownership transfer with use-after-move rejected (`HYB-E3003`) | **Guaranteed**: a moved value cannot be used by the sender afterwards | §9.3 O5; corpus 16; differential reject-side |
 | 7 | Loans inside a function body | Polonius-style dataflow over borrows/loans; conflict-free proven or rejected | **Guaranteed** within the checked subset | §9.1 rules O1–O3 (E31xx family); checker unit tests |
@@ -63,24 +63,30 @@ Everything the checker **accepts was proven** sendable; everything it
 ## Evidence inventory (what backs the ✅ rows)
 
 - **Adversarial corpus** — [tests/checker-corpus/](tests/checker-corpus/):
-  20 programs, each with an `EXPECTED-VERDICT` header **pre-registered
-  before the checker existed** (the checker was built against them, not
-  adjusted after): 11 REJECT / 7 ACCEPT / 2 ACCEPT-MANAGED, pinned to
-  specific diagnostic codes.
+  60 programs, each with an `EXPECTED-VERDICT` header. Programs 01–18 were
+  **pre-registered before the checker existed** (the checker was built
+  against them, not adjusted after); 19–20 were added during integration
+  and 21+ after the checker landed, still hand-derived from the rule text
+  first. Current census: **43 REJECT / 15 ACCEPT / 2 ACCEPT-MANAGED**,
+  pinned to specific diagnostic codes. Verdicts may change only by a logged
+  amendment in [VERDICTS.md](tests/checker-corpus/VERDICTS.md).
 - **Differential loop** — [tools/differential_loop.py](tools/differential_loop.py):
-  accept-side programs must build and run byte-exact (9/9); reject-side
-  must be rejected for the pre-registered reason (11/11). Runs in CI on
+  accept-side programs must build and run byte-exact (17/17); reject-side
+  must be rejected for the pre-registered reason (43/43). Runs in CI on
   every push.
-- **Fail-closed tests** — 10 dedicated checker tests (unknown initializer,
+- **Fail-closed tests** — dedicated checker tests (unknown initializer,
   unresolved name, unproven select-recv → `HYB-E3005`; managed escapes →
-  `HYB-E8001`, counted) plus 2 parser no-hang regressions. Full suite:
-  `cargo test --workspace` (210 green after this document's batch).
-- **Fuzzing** — [tools/fuzz/hyfuzz.py](tools/fuzz/hyfuzz.py): 800 cases
-  (token salad + corpus mutations + nest bombs, deterministic seed): no
-  hangs, no crashes, no internal errors; fleet-pinned on GitHub Actions.
+  `HYB-E8001`, counted) plus parser no-hang regressions. Full suite:
+  `cargo test --workspace` — **808 tests, 0 failures** on the
+  `main` CI run for `99c25a4` (run `39060436474`).
+- **Fuzzing** — [tools/fuzz/hyfuzz.py](tools/fuzz/hyfuzz.py): default
+  `--cases 1200` (token salad + corpus mutations + nest bombs,
+  deterministic seed): no hangs, no crashes, no internal errors;
+  fleet-pinned on GitHub Actions, where the `006-sanitizers-fuzzing` job
+  runs a pre-registered 800-case leg.
 - **Sanitizers** — ASan over the four bridge packages (`go test -asan`),
-  `-race` over all five runtime packages: green on the Actions fleet vs
-  the release SHA.
+  `-race` over the six runtime packages (`go test ./...`): green on the
+  Actions fleet vs the release SHA (`jobs/006-sanitizers-fuzzing`).
 - **Honest misses on the record** — the worker-tier fast path measured
   6.93 ns against the 5 ns budget: **recorded as a MISS**, not hidden
   ([PLAN.md](PLAN.md) queue row 3).

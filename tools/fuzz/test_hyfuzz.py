@@ -1,5 +1,6 @@
 import contextlib
 import io
+import random
 import subprocess
 import sys
 import tempfile
@@ -82,6 +83,24 @@ class FuzzProcessTests(unittest.TestCase):
             self.assertEqual(failure.exception.code, 1)
             self.assertIn("UNEXPECTED exit=2", output.getvalue())
             self.assertNotIn("all invariants held", output.getvalue())
+
+
+class NestGenerationTests(unittest.TestCase):
+    def test_branch_heavy_seed_keeps_one_deep_path(self):
+        source = hyfuzz.gen_nest(random.Random(9498))
+        self.assertEqual(source.count('fmt.println("deep")'), 1)
+        self.assertLess(len(source), 4096)
+        self.assertIn('else {', source)
+
+    def test_all_branch_nesting_remains_linear(self):
+        rng = random.Random(0)
+        with patch.object(rng, 'randint', return_value=12), \
+             patch.object(rng, 'choice', return_value=hyfuzz.NEST_SHAPES[3]):
+            source = hyfuzz.gen_nest(rng)
+        self.assertEqual(source.count('if x {'), 12)
+        self.assertEqual(source.count('else {'), 12)
+        self.assertEqual(source.count('fmt.println("deep")'), 1)
+        self.assertLess(len(source), 4096)
 
 
 if __name__ == "__main__":

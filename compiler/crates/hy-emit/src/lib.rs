@@ -322,6 +322,8 @@ pub struct Emitter {
     indent: usize,
     /// Package roots used anywhere in the body → import lines (sorted).
     imports: BTreeSet<String>,
+    /// Explicit package root → full Go import path mapping from `Decl::Import`.
+    explicit_imports: BTreeMap<String, String>,
     /// Per-function binding hints. A flat map per function: MVP-0's hints
     /// are bound at fn-body top level, and closure bodies share the frame.
     bindings: BTreeMap<String, BindingKind>,
@@ -405,6 +407,10 @@ pub struct Emitter {
     /// var → (shape-known dotted type, is_pointer): `var hits atomic.int64`
     /// / `hits *atomic.int64` — the MethodFunc receiver's address-of form.
     var_ty: BTreeMap<String, (String, bool)>,
+    /// Variables known to hold a pointer type in the current function frame.
+    pointer_vars: BTreeSet<String>,
+    /// Functions whose first result is a pointer type.
+    ptr_returning_fns: BTreeSet<String>,
 }
 
 impl Emitter {
@@ -436,6 +442,9 @@ impl Emitter {
             struct_fields: BTreeMap::new(),
             var_struct: BTreeMap::new(),
             var_ty: BTreeMap::new(),
+            pointer_vars: BTreeSet::new(),
+            ptr_returning_fns: BTreeSet::new(),
+            explicit_imports: BTreeMap::new(),
         }
     }
 
@@ -489,6 +498,19 @@ impl Emitter {
                 )),
                 _ => None,
             })
+            .collect();
+        self.ptr_returning_fns = file
+            .fns()
+            .filter(|f| {
+                matches!(
+                    f.results.first(),
+                    Some(FnResult {
+                        ty: TypeExpr::Pointer { .. },
+                        ..
+                    })
+                )
+            })
+            .map(|f| f.name.clone())
             .collect();
         self.fn_shapes = file
             .fns()
@@ -558,6 +580,7 @@ impl Emitter {
                     // import set ("net/http" → root "http"; the body says
                     // `http.X`, and import_path_of maps the line back).
                     let root = path.split('/').next_back().unwrap_or(path);
+                    self.explicit_imports.insert(root.to_string(), path.clone());
                     self.imports.insert(root.to_string());
                 }
                 Decl::Const(c) => self.emit_file_const(c)?,
@@ -591,7 +614,9 @@ impl Emitter {
             // consumer's package path in package mode). The CODE keeps the
             // root spelling — Go's package name for those imports.
             for root in &self.imports {
-                let path = if shapes::RUST_CRATES
+                let path = if let Some(p) = self.explicit_imports.get(root) {
+                    p.clone()
+                } else if shapes::RUST_CRATES
                     .iter()
                     .any(|c| c.binding_root == root.as_str())
                 {
@@ -692,6 +717,7 @@ impl Emitter {
 
     fn emit_fn(&mut self, f: &FnDecl) -> Result<(), EmitError> {
         self.bindings.clear();
+        self.pointer_vars.clear();
         self.temp_n = 0;
         self.try_temps.clear();
         self.loop_labels.clear();
@@ -757,6 +783,9 @@ impl Emitter {
 
         // Hints from parameter types (dotted foreign types → Foreign).
         if let Some(recv) = &f.receiver {
+            if recv.is_pointer {
+                self.pointer_vars.insert(recv.name.clone());
+            }
             let recv_ty = self.type_text(&recv.ty);
             let star = if recv.is_pointer { "*" } else { "" };
             self.push_raw(&format!(
@@ -924,7 +953,27 @@ impl Emitter {
             } else if matches!(p.ty, TypeExpr::Chan { .. }) {
                 self.bindings.insert(p.name.clone(), BindingKind::Chan);
             }
+            if matches!(p.ty, TypeExpr::Pointer { .. }) {
+                self.pointer_vars.insert(p.name.clone());
+            }
             self.register_var_ty(&p.name, &p.ty);
+        }
+    }
+
+    pub(crate) fn expr_is_pointer(&self, e: &Expr) -> bool {
+        match e {
+            Expr::AddrOf { .. } => true,
+            Expr::Paren { inner, .. } => self.expr_is_pointer(inner),
+            Expr::Try { operand, .. } => self.expr_is_pointer(operand),
+            Expr::Ident { name, .. } => self.pointer_vars.contains(name),
+            Expr::Call { callee, .. } => {
+                if let Expr::Ident { name, .. } = callee.as_ref() {
+                    self.ptr_returning_fns.contains(name)
+                } else {
+                    false
+                }
+            }
+            _ => false,
         }
     }
 
@@ -952,6 +1001,9 @@ impl Emitter {
     /// table knows gives ForeignTy(key) — members resolve field-vs-method;
     /// any other dotted type stays generic Foreign.
     fn binding_kind_of_ty(&self, t: &TypeExpr) -> Option<BindingKind> {
+        if matches!(t, TypeExpr::Chan { .. }) {
+            return Some(BindingKind::Chan);
+        }
         let name = match t {
             TypeExpr::Named { name, .. } => name.as_str(),
             TypeExpr::Pointer { to, .. } => return self.binding_kind_of_ty(to),
