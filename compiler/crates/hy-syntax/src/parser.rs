@@ -1468,7 +1468,16 @@ impl Parser {
                             _ => return self.err("select arm must be send, receive, or default"),
                         }
                     }
-                    Stmt::Send { chan, value, .. } => SelectArmKind::Send { chan, value },
+                    Stmt::Send {
+                        chan,
+                        value,
+                        is_move,
+                        ..
+                    } => SelectArmKind::Send {
+                        chan,
+                        value,
+                        is_move,
+                    },
                     Stmt::Expr {
                         expr: Expr::Receive { chan, .. },
                         ..
@@ -3097,6 +3106,41 @@ mod tests {
         assert_eq!(arms.len(), 2);
         assert!(matches!(arms[0].kind, SelectArmKind::Default));
         assert!(matches!(arms[1].kind, SelectArmKind::Recv { .. }));
+    }
+
+    #[test]
+    fn select_send_carries_the_move_marker() {
+        // C5: a select send clause is a sendability check-site exactly like a
+        // statement send, so the parser's `ch <- move v` marker must survive
+        // the statement→arm conversion. Dropping it made the class-3
+        // owned-move route unreachable inside select arms.
+        let f = parse_src("fn main() { select { ch <- move m: {} } }");
+        let Stmt::Select { arms, .. } = first_stmt(&f) else {
+            panic!("select")
+        };
+        let SelectArmKind::Send { value, is_move, .. } = &arms[0].kind else {
+            panic!("send arm")
+        };
+        assert!(*is_move, "the move marker must survive the select conversion");
+        assert!(
+            matches!(value, Expr::Ident { name, .. } if name == "m"),
+            "the arm value is the plain moved ident, got {}",
+            value.render()
+        );
+    }
+
+    #[test]
+    fn select_plain_send_is_not_a_move() {
+        // Negative control for the marker: a send without `move` stays false,
+        // so the arm cannot accidentally claim ownership transfer.
+        let f = parse_src("fn main() { select { ch <- m: {} } }");
+        let Stmt::Select { arms, .. } = first_stmt(&f) else {
+            panic!("select")
+        };
+        let SelectArmKind::Send { is_move, .. } = &arms[0].kind else {
+            panic!("send arm")
+        };
+        assert!(!*is_move);
     }
 
     #[test]

@@ -98,6 +98,10 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 
 ## Test Results
 - Checker UTF-8 decoding (2026-10-17, local): decode JSON and stderr as UTF-8 instead of the host locale. Five real-pipe encoding tests reproduce four failing cases on base `8dd0002`; all 25 focused corpus-harness tests pass on Windows/Python 3.14 with the fix. Existing fake-checker CLI fixtures now run through Python on Windows and POSIX. An independent harness CLI reproduction changes from exit 1/traceback to exit 0/1-of-1 agreement with a deterministic UTF-8 checker stand-in. Full Go/Rust compiler suites and upstream CI were not run; upstream CI remains required.
+- PR #287 integration closeout (2026-10-18): ported onto upstream e2a5f7d while retaining upstream changes; hy-emit 121 unit + 4 integration tests passed; git diff --check passed.
+- PR #289 integration closeout (2026-10-18): ported onto upstream e2a5f7d while retaining upstream changes; hy-emit 120 unit + 4 integration tests passed; git diff --check passed.
+- PR #283 integration closeout (2026-10-18): ported onto upstream e2a5f7d while retaining upstream changes; hy-emit 125 unit + 4 integration tests passed; git diff --check passed.
+
 - Checker JSON envelope validation (2026-10-15): reject malformed envelopes and contradictory supplied error/warning counts; retain omitted counts and extra fields. Focused corpus harness suite 14/14; top-level Python tools suite 70/70 in a normal clone. Full compiler/corpus suites not run locally (pinned rustc terminates with SIGBUS); owner CI remains required.
 - Compiler (session 5): **157 tests green** (8 diag + 75+4 parser + 25+2 checker + 48 emit) — corpus 20/20 verdict agreement, tripwire not fired (10.0% / 15.0% vs ~25%)
 - MVP-0 end-to-end (make examples, go1.26.9): **6/6 PASS** — 01-hello exact; 02-cli-cat BOTH paths exact (bytes verbatim / E6 stderr+exit 1); 03-worker-pool exact [2 2 4 6 8 10 12 18]; 04-pipeline-backpressure exact total=204; 07-lru-generics exact (b evicted / a=1); 08-graph-ownership exact (a reaches d: true / d reaches a: false) — wired into CI

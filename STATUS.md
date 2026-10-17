@@ -1,12 +1,11 @@
 # STATUS (for the human — 15 lines max)
 
-- Phase: **MVP DONE + v0.1.0 released + community OPEN** — session-14: queue pull resumed (**#230 landed**) + **second wildcard spike (W-005, PR #412) race-verified**
-- **#230 landed** (lienhoatienphung-svg, fixes #229 P0): nested closures now check against their ENCLOSING closure's env, not the top-level FnState — outer-closure maps/moves no longer launder past E3001/E3003/E3004; merge resolution grafted main's #306 if-init eval order + #374 non_owned_origin materialization into the PR's restructured walk; race demo: pre-merge main's emitted Go races under -race, post-merge the repros reject
-- **W-005 spike (PR #412, spike/w005-message-isolation)**: no-compiler artifact per the issue's own first-milestone directive — memoized deep clone keyed on the REFERENCED object (cycles/internal aliases/pointer-keys survive inside the copy; chan identity preserved; FAIL-CLOSED on funcs/uintptr/unexported fields); 7/7 pins green under go test -race; demo r1 = the #229 repro under isolation, zero race reports
-- **W-005 M1 verdict: CONDITIONAL** — correctness proven; 2× spawn budget fails at ~40,000× (10k-node graph ≈ 100ms vs 2.5µs spawn); narrowings: opt-in isolation / bounded actor mailboxes / COW; published on #342 + RESULTS.md
-- Suites at close: cargo workspace **594/0** (591 + #230's 3 pins) · corpus **52/52** · differential **FULL (15+37)** · main CI green on the #230 merge (e63415a)
-- Wildcard M1 verdicts due **2026-11-01** in discussion #365 — two running artifacts now: W-015 (PR #379) + W-005 (PR #412)
-- Wave-2 landing queue continues: **#251 (named results)** leads, then #244, #240/#245, #247, #296, #311/#302, #234, const family, emit-lowering batch; new arrivals #366–#377 (tools/fuzz batch), #373, #364; 9 PRs pending CI approval in the queue's per-landing flow
-- Standing work: old-queue rebase assists (#67/#88/#93/#106/#197/#198/#99/#223), tools/kaggle batch, CI registration checks (#325/#330/#333)
-- Last review gate: G3 PASSED 2026-10-13; community review is a standing input to the queue
+- Phase: **MVP DONE + v0.1.0 released + community OPEN** — session-17: **7 more PRs landed (#420 #447 #421 #290 #236 #208 #235) + 8 same-fix credit closes** — cargo 808/0, corpus 60/60, differential FULL (17+43)
+- **Operand-type family closed**: #420 (receive E2008/E3005, fixes #409) + #447 (for-in E2009/E3005 superset of #424 — fail-closed unknowns, method resolution, generic-in fold; fixes #411); credit closes #413/#414/#424/#426/#427
+- **Defer liveness closed**: #421 (exantiv, fixes #415+#438) value-precise deferred-binding freeze — agent XOR analysis REFUTED the old "#418 covers" plan (#418 missed a5/c4/c5, #422 missed b1/b1r); #418/#422 tests spliced as pins (3 wording pins → verdict pins, logged)
+- **Const family closed**: #290 (neg-zero E6001) → #236 (undefined names E1001, fixes #228-A) → #208 (non-const const-init E6003, fixes #205; #433 credit-closed) → #235 (select-send move marker C5; 3 Send-destructure sites gained `..`)
+- Next queue (recipes READY in worklog session-17/D): const-overflow stack **#291 → #297 → #300 → #232** (#232 needs 5-line ConstInt adaptation after #297; #300 leaves struct-field-store gap = follow-up issue), then **#242 as scenario-port** (11/15 live failures = goalposts), then **#288** (defer `?` hoist, validated)
+- Tools batch after that (order re-derived): #364 → #333(cargo recount at merge) → #387 → #383 → #316 → #388 → #403 → #325 → #299(+ci line) → #423
+- Wildcard: 11 ledger-attach comments posted; MOONSHOT rows W-006/7/9/14/15/16/17 + **new W-018** (untalsix #378, spike #384) + windows table updated; W-015 row gap fixed (#379 now named); #416 closed not-ready (silent descriptors.md edit), #464 on governance hold; **M1 verdicts 2026-11-01 in #365**
+- Outreach targets (no artifact): W-002/003/004/006/008/010/011/013/016; CI quota HEALTHY (zero zero-job failures across last 50 runs)
 - Local tooling fix: UTF-8 checker-output decoding + portable CLI fixtures; 25 focused Python tests pass on Windows, four encoding cases fail on base. Full compiler suites and upstream CI remain unverified.

@@ -358,7 +358,7 @@ impl Collector {
                 for arm in arms {
                     self.push_scope();
                     match &arm.kind {
-                        SelectArmKind::Send { chan, value } => {
+                        SelectArmKind::Send { chan, value, .. } => {
                             self.expr(chan);
                             self.expr(value);
                         }

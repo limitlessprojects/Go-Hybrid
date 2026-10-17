@@ -274,6 +274,12 @@ impl<'a> Checker<'a> {
             });
             origins.push(o);
         }
+        let mut shadow_targets: Vec<(String, usize)> = Vec::new();
+        for m in &members {
+            if let Some(links) = st.shadow_links.get(m) {
+                shadow_targets.extend(links.iter().cloned());
+            }
+        }
         for (m, orig) in members.iter().zip(origins) {
             if let Some(b) = st.env_lookup_mut(m) {
                 if b.non_owned_origin.is_none() {
@@ -294,6 +300,42 @@ impl<'a> Checker<'a> {
                     });
                     st.env.insert(m.clone(), frozen);
                 }
+            }
+        }
+        for (outer_name, depth) in shadow_targets {
+            if let Some(b) = st.binding_at_depth_mut(&outer_name, depth) {
+                if b.moved.is_none() {
+                    b.moved = Some(MoveInfo {
+                        span,
+                        kind,
+                        desc: desc.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Process a place expression (assignment target) that may carry a move
+    /// transfer inside its base or index expression (`(move m)["k"] = 1`,
+    /// `m[idx(move x)] = 1`).
+    pub(crate) fn mark_move_in_place(
+        &mut self,
+        st: &mut FnState,
+        place: &hy_syntax::Place,
+    ) {
+        match &place.kind {
+            hy_syntax::PlaceKind::Ident(_) => {}
+            hy_syntax::PlaceKind::Field { base, .. }
+            | hy_syntax::PlaceKind::AddrOf { base } => {
+                self.mark_move_in_place(st, base);
+            }
+            hy_syntax::PlaceKind::Index { base, index } => {
+                self.mark_move_in_place(st, base);
+                self.mark_move_in_value(
+                    st,
+                    index,
+                    format!("the index expression `{}`", index.render()),
+                );
             }
         }
     }
@@ -472,7 +514,13 @@ impl<'a> Checker<'a> {
         //     the situation moving the parameter itself is rejected for.
         //     Peers are scanned in sorted order for deterministic
         //     diagnostics.
-        let mut origin: Option<(String, bool)> = own.map(|o| (o, false));
+        let mut origin: Option<(String, bool)> = own.map(|o| {
+            if let Some(rest) = o.strip_prefix("a may-share peer of ") {
+                (rest.to_string(), true)
+            } else {
+                (o, false)
+            }
+        });
         if origin.is_none() {
             let mut all_peers = st.share_group(name);
             if root != name {
@@ -510,6 +558,7 @@ impl<'a> Checker<'a> {
         st: &FnState,
         outer_depth: usize,
         loop_stmts: &[(&hy_syntax::Stmt, usize)],
+        events: &std::collections::HashMap<usize, Vec<crate::walk::ScopeEvent>>,
         loop_body: &hy_syntax::Block,
         pre_moved: &HashSet<String>,
         reported_backedge: &mut HashSet<String>,
@@ -562,21 +611,89 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        for (i, (stmt, _)) in loop_stmts.iter().enumerate() {
+        let mut shadow_scopes: Vec<HashSet<String>> = vec![HashSet::new()];
+        if let Some((_, hy_syntax::Stmt::For { kind, .. })) = loop_stmts.first().map(|(s, idx)| (*idx, *s)) {
+            match kind {
+                hy_syntax::ForKind::Range { var, .. } => {
+                    shadow_scopes[0].insert(var.clone());
+                }
+                hy_syntax::ForKind::Iterate { vars, .. } => {
+                    for v in vars {
+                        shadow_scopes[0].insert(v.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for (i, (stmt, stmt_idx)) in loop_stmts.iter().enumerate() {
+            if i > 0 {
+                if let Some(evs) = events.get(stmt_idx) {
+                    for ev in evs {
+                        match ev {
+                            crate::walk::ScopeEvent::Push => shadow_scopes.push(HashSet::new()),
+                            crate::walk::ScopeEvent::Pop => {
+                                if shadow_scopes.len() > 1 {
+                                    shadow_scopes.pop();
+                                }
+                            }
+                            crate::walk::ScopeEvent::SelectRecv { names, .. } => {
+                                if let Some(top) = shadow_scopes.last_mut() {
+                                    for n in names.iter() {
+                                        top.insert(n.clone());
+                                    }
+                                }
+                            }
+                            crate::walk::ScopeEvent::MatchBind { name, .. } => {
+                                if let Some(top) = shadow_scopes.last_mut() {
+                                    top.insert(name.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                if let hy_syntax::Stmt::For { kind, .. } = stmt {
+                    if let Some(top) = shadow_scopes.last_mut() {
+                        match kind {
+                            hy_syntax::ForKind::Range { var, .. } => {
+                                top.insert(var.clone());
+                            }
+                            hy_syntax::ForKind::Iterate { vars, .. } => {
+                                for v in vars {
+                                    top.insert(v.clone());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
             let mut uses = Vec::new();
             if i == 0 {
-                if let hy_syntax::Stmt::For {
-                    kind: hy_syntax::ForKind::While { cond },
-                    ..
-                } = stmt
-                {
-                    crate::walk::expr_uses(cond, &mut uses);
+                match stmt {
+                    hy_syntax::Stmt::For {
+                        kind: hy_syntax::ForKind::While { cond },
+                        ..
+                    } => {
+                        crate::walk::expr_uses(cond, &mut uses);
+                    }
+                    hy_syntax::Stmt::For {
+                        kind: hy_syntax::ForKind::Range { hi, .. },
+                        ..
+                    } => {
+                        crate::walk::expr_uses(hi, &mut uses);
+                    }
+                    _ => {}
                 }
             } else {
                 crate::walk::own_uses(stmt, &mut uses);
             }
 
             for u in &uses {
+                if shadow_scopes.iter().any(|s| s.contains(&u.name)) {
+                    continue;
+                }
                 let moved = match self.lookup_binding(&iter_st, &u.name) {
                     Some(b) => b.moved.clone(),
                     None => continue,
@@ -604,10 +721,9 @@ impl<'a> Checker<'a> {
 
             if i > 0 {
                 if let hy_syntax::Stmt::Local(l) = stmt {
-                    for name in &l.names {
-                        iter_st.aliases.remove(name);
-                        if let Some(b) = iter_st.env_lookup_mut(name) {
-                            b.moved = None;
+                    if let Some(top) = shadow_scopes.last_mut() {
+                        for name in &l.names {
+                            top.insert(name.clone());
                         }
                     }
                 }

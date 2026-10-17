@@ -45,6 +45,63 @@ fn main() {
 }
 ";
 
+const MOD_ASSIGN_BY_ZERO: &str = "\
+fn main() {
+    x := 5
+    x %= 0
+    fmt.println(\"{x}\")
+}
+";
+
+const DIV_BY_NEG_ZERO: &str = "\
+fn main() {
+    x := 5
+    y := x / -0
+    fmt.println(\"{y}\")
+}
+";
+
+const MOD_BY_NEG_ZERO: &str = "\
+fn main() {
+    x := 5
+    y := x % -0
+    fmt.println(\"{y}\")
+}
+";
+
+const DIV_ASSIGN_BY_NEG_ZERO: &str = "\
+fn main() {
+    x := 5
+    x /= -0
+    fmt.println(\"{x}\")
+}
+";
+
+const MOD_ASSIGN_BY_NEG_ZERO: &str = "\
+fn main() {
+    x := 5
+    x %= -0
+    fmt.println(\"{x}\")
+}
+";
+
+const PAREN_NEG_ZERO: &str = "\
+fn main() {
+    x := 5
+    y := x / (-0)
+    z := x % -(0)
+    fmt.println(\"{y} {z}\")
+}
+";
+
+const DOUBLE_NEG_ZERO: &str = "\
+fn main() {
+    x := 5
+    y := x / -(-0)
+    fmt.println(\"{y}\")
+}
+";
+
 const NONCONST_ZERO_OK: &str = "\
 fn main() {
     x := 5
@@ -60,6 +117,17 @@ fn main() {
     y := x / 2
     z := x % 3
     fmt.println(\"{y} {z}\")
+}
+";
+
+const NEG_NONZERO_OK: &str = "\
+fn main() {
+    x := 5
+    y := x / -2
+    z := x % -3
+    x /= -5
+    x %= -7
+    fmt.println(\"{y} {z} {x}\")
 }
 ";
 
@@ -100,6 +168,90 @@ fn literal_div_assign_by_zero_is_rejected() {
 }
 
 #[test]
+fn literal_mod_assign_by_zero_is_rejected() {
+    let r = check(MOD_ASSIGN_BY_ZERO);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6001"),
+        "expected HYB-E6001, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn literal_div_by_neg_zero_is_rejected() {
+    let r = check(DIV_BY_NEG_ZERO);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6001"),
+        "expected HYB-E6001, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn literal_mod_by_neg_zero_is_rejected() {
+    let r = check(MOD_BY_NEG_ZERO);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6001"),
+        "expected HYB-E6001, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn literal_div_assign_by_neg_zero_is_rejected() {
+    let r = check(DIV_ASSIGN_BY_NEG_ZERO);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6001"),
+        "expected HYB-E6001, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn literal_mod_assign_by_neg_zero_is_rejected() {
+    let r = check(MOD_ASSIGN_BY_NEG_ZERO);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6001"),
+        "expected HYB-E6001, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn parenthesized_neg_zero_is_rejected() {
+    let r = check(PAREN_NEG_ZERO);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6001"),
+        "expected HYB-E6001, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn double_neg_zero_is_rejected() {
+    let r = check(DOUBLE_NEG_ZERO);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6001"),
+        "expected HYB-E6001, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
 fn nonconst_zero_divisor_stays_accepted() {
     // Run-time panic path — out of scope for #149's first cut.
     let r = check(NONCONST_ZERO_OK);
@@ -118,6 +270,18 @@ fn nonzero_divisor_stays_accepted() {
     assert!(
         !cs.iter().any(|c| c == "HYB-E6001"),
         "nonzero divisor must stay clean, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+#[test]
+fn negative_nonzero_divisor_stays_accepted() {
+    let r = check(NEG_NONZERO_OK);
+    let cs = error_codes(&r);
+    assert!(
+        !cs.iter().any(|c| c == "HYB-E6001"),
+        "negative nonzero divisor must stay clean, got {:?}",
         cs
     );
     assert_eq!(r.verdict, Verdict::Accept);

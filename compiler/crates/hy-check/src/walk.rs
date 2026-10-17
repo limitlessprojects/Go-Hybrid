@@ -35,6 +35,10 @@ pub(crate) enum ScopeEvent<'a> {
         names: &'a [String],
         chan: &'a Expr,
     },
+    MatchBind {
+        name: &'a str,
+        subject: &'a Expr,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -94,18 +98,22 @@ impl<'a> FlatInfo<'a> {
 /// Flatten a function body: assign indices, record structural extents and
 /// per-binding last-use indices.
 pub(crate) fn flatten<'a>(body: &'a Block) -> FlatInfo<'a> {
+    flatten_with_results(body, &[])
+}
+
+pub(crate) fn flatten_with_results<'a>(body: &'a Block, named_results: &[String]) -> FlatInfo<'a> {
     let mut out = FlatInfo::default();
-    walk_block(&mut out, body);
+    walk_block(&mut out, body, named_results);
     out
 }
 
-fn walk_block<'a>(out: &mut FlatInfo<'a>, block: &'a Block) {
+fn walk_block<'a>(out: &mut FlatInfo<'a>, block: &'a Block, named_results: &[String]) {
     for s in &block.stmts {
-        walk_one(out, s);
+        walk_one(out, s, named_results);
     }
 }
 
-fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt) {
+fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt, named_results: &[String]) {
     if let Stmt::If {
         init: Some(i),
         then,
@@ -118,14 +126,14 @@ fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt) {
         // so walk `init` first inside the if-scope and assign `Stmt::If`
         // (`cond`) the index immediately after `init`.
         out.mark(out.next, true, false);
-        walk_one(out, i);
+        walk_one(out, i, named_results);
 
         let idx = out.next;
         out.next += 1;
         out.stmts.push((stmt, idx));
 
         let mut uses = Vec::new();
-        own_uses(stmt, &mut uses);
+        own_uses_with_results(stmt, named_results, &mut uses);
         for u in uses {
             let e = out.last_use.entry(u.name).or_insert(idx);
             if *e < idx {
@@ -133,9 +141,9 @@ fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt) {
             }
         }
 
-        scoped_block(out, then);
+        scoped_block(out, then, named_results);
         if let Some(o) = otherwise {
-            walk_one(out, o);
+            walk_one(out, o, named_results);
         }
         out.mark(out.next, false, true); // Pop at the next stmt (or trailing)
         return;
@@ -146,7 +154,7 @@ fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt) {
     out.stmts.push((stmt, idx));
 
     let mut uses = Vec::new();
-    own_uses(stmt, &mut uses);
+    own_uses_with_results(stmt, named_results, &mut uses);
     for u in uses {
         let e = out.last_use.entry(u.name).or_insert(idx);
         if *e < idx {
@@ -163,29 +171,53 @@ fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt) {
             // ONE implicit scope for the if; the then/else bodies open their
             // own scopes below.
             out.mark(idx, true, false);
-            scoped_block(out, then);
+            scoped_block(out, then, named_results);
             if let Some(o) = otherwise {
-                walk_one(out, o);
+                walk_one(out, o, named_results);
             }
             out.mark(out.next, false, true); // Pop at the next stmt (or trailing)
         }
         Stmt::For { body, .. } => {
             // the loop's implicit scope (range/iterate vars) ...
             out.mark(idx, true, false);
-            scoped_block(out, body); // ... and the body's own scope
+            scoped_block(out, body, named_results); // ... and the body's own scope
             out.loop_end.insert(idx, out.next.saturating_sub(1));
             out.mark(out.next, false, true);
         }
         Stmt::Managed { body, .. } => {
-            scoped_block(out, body);
+            scoped_block(out, body, named_results);
             out.managed_end.insert(idx, out.next.saturating_sub(1));
         }
-        Stmt::Match { arms, .. } => {
+        Stmt::Match { subject, arms, .. } => {
             for arm in arms {
-                scoped_block(out, &arm.body);
+                let first = out.next;
+                let mut ran = false;
+                for s in &arm.body.stmts {
+                    if !ran {
+                        out.mark_event(first, ScopeEvent::Push);
+                        if let hy_syntax::MatchPattern::Path {
+                            binding: Some(name),
+                            ..
+                        } = &arm.pattern
+                        {
+                            out.mark_event(
+                                first,
+                                ScopeEvent::MatchBind {
+                                    name: name.as_str(),
+                                    subject,
+                                },
+                            );
+                        }
+                        ran = true;
+                    }
+                    walk_one(out, s, named_results);
+                }
+                if ran {
+                    out.mark_event(out.next, ScopeEvent::Pop);
+                }
             }
         }
-        Stmt::Block { block, .. } => scoped_block(out, block),
+        Stmt::Block { block, .. } => scoped_block(out, block, named_results),
         Stmt::Select { arms, .. } => {
             for arm in arms {
                 let first = out.next;
@@ -198,7 +230,7 @@ fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt) {
                         }
                         ran = true;
                     }
-                    walk_one(out, s);
+                    walk_one(out, s, named_results);
                 }
                 if ran {
                     out.mark_event(out.next, ScopeEvent::Pop);
@@ -211,7 +243,7 @@ fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt) {
 
 /// Walk a block's statements inside their OWN scope: Push on the first
 /// statement, Pop on the index after the last one (or trailing).
-fn scoped_block<'a>(out: &mut FlatInfo<'a>, block: &'a Block) {
+fn scoped_block<'a>(out: &mut FlatInfo<'a>, block: &'a Block, named_results: &[String]) {
     let first = out.next;
     let mut ran = false;
     for s in &block.stmts {
@@ -219,7 +251,7 @@ fn scoped_block<'a>(out: &mut FlatInfo<'a>, block: &'a Block) {
             out.mark(first, true, false);
             ran = true;
         }
-        walk_one(out, s);
+        walk_one(out, s, named_results);
     }
     if ran {
         out.mark(out.next, false, true);
@@ -248,6 +280,10 @@ pub(crate) struct Use {
 /// Collect the uses of THIS statement only (child statements are separate
 /// flat entries with their own indices).
 pub(crate) fn own_uses(stmt: &Stmt, out: &mut Vec<Use>) {
+    own_uses_with_results(stmt, &[], out);
+}
+
+pub(crate) fn own_uses_with_results(stmt: &Stmt, named_results: &[String], out: &mut Vec<Use>) {
     match stmt {
         Stmt::Local(l) => {
             for v in &l.values {
@@ -279,9 +315,21 @@ pub(crate) fn own_uses(stmt: &Stmt, out: &mut Vec<Use>) {
             ForKind::Iterate { expr, .. } => expr_uses(expr, out),
             ForKind::Infinite => {}
         },
-        Stmt::Return { values, .. } => {
-            for v in values {
-                expr_uses(v, out);
+        Stmt::Return { values, span } => {
+            if values.is_empty() {
+                for name in named_results {
+                    out.push(Use {
+                        name: name.clone(),
+                        span: *span,
+                        is_write: false,
+                        via_move: false,
+                        via_addr: false,
+                    });
+                }
+            } else {
+                for v in values {
+                    expr_uses(v, out);
+                }
             }
         }
         Stmt::Task { callee, args, .. } => {
@@ -295,7 +343,19 @@ pub(crate) fn own_uses(stmt: &Stmt, out: &mut Vec<Use>) {
             expr_uses(subject, out);
             for arm in arms {
                 if let Some(g) = &arm.guard {
-                    expr_uses(g, out);
+                    let bound_name = match &arm.pattern {
+                        hy_syntax::MatchPattern::Path {
+                            binding: Some(n), ..
+                        } => Some(n.as_str()),
+                        _ => None,
+                    };
+                    let mut g_uses = Vec::new();
+                    expr_uses(g, &mut g_uses);
+                    for u in g_uses {
+                        if Some(u.name.as_str()) != bound_name {
+                            out.push(u);
+                        }
+                    }
                 }
             }
         }
@@ -305,7 +365,7 @@ pub(crate) fn own_uses(stmt: &Stmt, out: &mut Vec<Use>) {
         Stmt::Select { arms, .. } => {
             for arm in arms {
                 match &arm.kind {
-                    SelectArmKind::Send { chan, value } => {
+                    SelectArmKind::Send { chan, value, .. } => {
                         expr_uses(chan, out);
                         expr_uses(value, out);
                     }
@@ -516,7 +576,7 @@ pub(crate) fn own_calls<'a>(stmt: &'a Stmt, out: &mut Vec<CallRef<'a>>) {
         Stmt::Select { arms, .. } => {
             for arm in arms {
                 match &arm.kind {
-                    SelectArmKind::Send { chan, value } => {
+                    SelectArmKind::Send { chan, value, .. } => {
                         expr_calls(chan, out);
                         expr_calls(value, out);
                     }
@@ -583,7 +643,7 @@ pub(crate) fn own_fnlits<'a>(stmt: &'a Stmt, out: &mut Vec<&'a Expr>) {
         Stmt::Select { arms, .. } => {
             for arm in arms {
                 match &arm.kind {
-                    SelectArmKind::Send { chan, value } => {
+                    SelectArmKind::Send { chan, value, .. } => {
                         expr_fnlits(chan, out);
                         expr_fnlits(value, out);
                     }
@@ -747,6 +807,12 @@ pub(crate) fn expr_path(expr: &Expr) -> Option<String> {
         Expr::Index { base, .. } => expr_path(base),
         Expr::Paren { inner, .. } => expr_path(inner),
         Expr::Try { operand, .. } => expr_path(operand),
+        Expr::Call { callee, args, .. }
+            if matches!(crate::model::unwrap_parens(callee), Expr::Ident { name, .. } if name == "some")
+                && args.len() == 1 =>
+        {
+            expr_path(&args[0].value)
+        }
         _ => None,
     }
 }

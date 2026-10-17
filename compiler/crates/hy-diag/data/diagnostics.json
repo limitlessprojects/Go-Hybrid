@@ -191,6 +191,36 @@
       "rule": "BUILDABLE"
     },
     {
+      "code": "HYB-E2008",
+      "name": "receive-non-channel",
+      "category": "type",
+      "severity": "error",
+      "title": "receive from a non-channel",
+      "summary": "`<-expr` where `expr` resolves to a concrete non-channel shape is rejected: a receive is only well-typed against a `chan T`, and the accepted-subset contract is that every accepted program emits buildable Go (issue #409 — the receive-side mirror of the send rule HYB-E3007, issue #77). `<-5`, `<-x` with `x` an int/map, and a receive from a non-channel call result used to pass with 0 diagnostics and then fail `go build` with `cannot receive from non-channel`. An UNRESOLVABLE source stays fail-closed under HYB-E3005 (O4.9), exactly as the send side treats an unknown target.",
+      "fixits": [
+        "receive from a `chan T` binding (`ch := make(chan T, n)` or a `chan T` parameter)",
+        "bind the value first if it is a call result: `ch := make_call()` — then `<-ch`",
+        "a statement STARTING with `<-expr` is a receive — check the operand's type"
+      ],
+      "example": "x := 5; <-x   // reject: HYB-E2008 — x is an int, not a channel",
+      "rule": "BUILDABLE"
+    },
+    {
+      "code": "HYB-E2009",
+      "name": "non-iterable-range",
+      "category": "type",
+      "severity": "error",
+      "title": "range over a non-iterable",
+      "summary": "`for x in e` where `e` resolves to a concrete non-iterable shape (int, bool, struct, pointer to a struct/slice/string, ...) is rejected: SPEC-LANGUAGE LX13 allows slices, arrays, strings (runes), maps (keys), and channels, and Go refuses `range` over anything else (a pointer TO AN ARRAY stays rangeable, mirroring Go's range rule), so an accepted Hybrid program would emit unbuildable Go (issue #411). The integer-range form `for i in 0..n` is a different statement kind and is not affected. An UNRESOLVABLE iterable stays fail-closed under HYB-E3005 (O4.9), exactly as the send (#77) and receive (#409) sides treat an unknown operand.",
+      "fixits": [
+        "iterate a slice, array, string, map, or channel binding",
+        "for a number sequence use the integer-range form: `for i in 0..n`",
+        "for a function or method call result that resolves to an iterable, bind it to a local first so the checker can classify it"
+      ],
+      "example": "x := 5; for v in x { }   // reject: HYB-E2009 — x is an int, not an iterable",
+      "rule": "BUILDABLE"
+    },
+    {
       "code": "HYB-E3001",
       "name": "not-sendable-spawn",
       "category": "ownership-sendability",
@@ -463,6 +493,21 @@
         "for a float initializer, drop the fractional part or declare a float type"
       ],
       "example": "var n int8 = 300   // reject: HYB-E6002 — 300 overflows int8; Go cannot build the emitted module",
+      "rule": "BUILDABLE"
+    },
+    {
+      "code": "HYB-E6003",
+      "name": "const-init-not-constant",
+      "category": "overflow-bounds",
+      "severity": "error",
+      "title": "const initializer is not a constant expression",
+      "summary": "A `const` binding whose initializer is not a compile-time constant expression is rejected: the emitter keeps the Go `const` keyword for non-composite initializers, so `const c = get_val()` becomes unbuildable Go (`get_val() (value of type T) is not constant`). Composite literals already lower to `var` and are out of scope here (issue #188). Literals, constant arithmetic, references to other `const` bindings, and typed conversions of constant arguments remain accepted (issue #205).",
+      "fixits": [
+        "use a literal or a constant expression (`const c = 42`, `const c = 1 + 2`)",
+        "reference another `const` binding instead of a function call or variable",
+        "if the value is computed at run time, bind it with `:=` / `let` / `var` instead of `const`"
+      ],
+      "example": "const c = get_val()   // reject: HYB-E6003 — call is not a constant expression; Go cannot build the emitted module",
       "rule": "BUILDABLE"
     },
     {

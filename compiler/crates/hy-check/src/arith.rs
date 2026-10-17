@@ -11,7 +11,7 @@ use crate::model::{unwrap_parens, Checker};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
     AssignOp, BinOp, Expr, ForKind, InterpPart, LitKind, Place, PlaceKind, SelectArmKind,
-    Stmt,
+    Stmt, UnOp,
 };
 
 impl<'a> Checker<'a> {
@@ -134,7 +134,7 @@ impl<'a> Checker<'a> {
             Stmt::Select { arms, .. } => {
                 for arm in arms {
                     match &arm.kind {
-                        SelectArmKind::Send { chan, value } => {
+                        SelectArmKind::Send { chan, value, .. } => {
                             self.check_expr_const_zero_divisor(chan);
                             self.check_expr_const_zero_divisor(value);
                         }
@@ -272,6 +272,11 @@ fn is_int_literal_zero(expr: &Expr) -> bool {
             kind: LitKind::Int(raw),
             ..
         } => int_lit_is_zero(raw),
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => is_int_literal_zero(operand),
         _ => false,
     }
 }
@@ -301,12 +306,32 @@ fn int_lit_is_zero(raw: &str) -> bool {
 
 #[cfg(test)]
 mod lit_zero_tests {
-    use super::int_lit_is_zero;
+    use super::{int_lit_is_zero, is_int_literal_zero};
+    use hy_diag::{Pos, Span};
+    use hy_syntax::{Expr, LitKind, UnOp};
+
+    fn make_int(s: &str) -> Expr {
+        Expr::Lit {
+            kind: LitKind::Int(s.to_string()),
+            span: Span::new(Pos::new(1, 1), Pos::new(1, 1)),
+        }
+    }
+
+    fn make_neg(inner: Expr) -> Expr {
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand: Box::new(inner),
+            span: Span::new(Pos::new(1, 1), Pos::new(1, 1)),
+        }
+    }
 
     #[test]
     fn recognizes_zero_spellings() {
         for s in ["0", "00", "0_0", "0x0", "0X00", "0o0", "0b0", "0b000"] {
             assert!(int_lit_is_zero(s), "{s}");
+            assert!(is_int_literal_zero(&make_int(s)), "{s}");
+            assert!(is_int_literal_zero(&make_neg(make_int(s))), "-{s}");
+            assert!(is_int_literal_zero(&make_neg(make_neg(make_int(s)))), "--{s}");
         }
     }
 
@@ -314,6 +339,8 @@ mod lit_zero_tests {
     fn rejects_nonzero() {
         for s in ["1", "10", "0x1", "0b1", "0o7", "00_1"] {
             assert!(!int_lit_is_zero(s), "{s}");
+            assert!(!is_int_literal_zero(&make_int(s)), "{s}");
+            assert!(!is_int_literal_zero(&make_neg(make_int(s))), "-{s}");
         }
     }
 }
