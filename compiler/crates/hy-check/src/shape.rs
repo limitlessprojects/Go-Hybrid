@@ -1,11 +1,11 @@
-//! shape.rs 窶・the lightweight TypeShape inference (NOT a type system).
+//! shape.rs — the lightweight TypeShape inference (NOT a type system).
 //!
 //! Resolves a `TypeShape` from a declared `TypeExpr` (params, `var`/`let`
 //! ascriptions) or from an initializer expression (defines, loop variables),
 //! consulting the file-level struct/fn/const tables and the builtin foreign
 //! tables in foreign.rs. Everything unresolvable degrades to `Unknown`,
 //! which is FAIL-CLOSED at spawn/send boundaries (O4.9): an unproven shape
-//! may not silently cross (HYB-E3005) 窶・but remains legal inside a function,
+//! may not silently cross (HYB-E3005) — but remains legal inside a function,
 //! where no boundary is involved. Fewer unknowns is still the goal: the
 //! inference below deliberately widens coverage (closures, option, chan
 //! elements) so honest programs classify without ceremony.
@@ -62,14 +62,14 @@ impl<'a> Checker<'a> {
             TypeExpr::Chan { elem, .. } => TypeShape::Chan(Box::new(
                 self.shape_of_type_with_params(elem, type_params, depth + 1),
             )),
-            // option[T] carries T by value in a struct { v T; ok bool } 窶・its
+            // option[T] carries T by value in a struct { v T; ok bool } — its
             // sendability IS the payload's sendability (option[int] crosses,
-            // option[map] does not 窶・the aliased map inside decides).
+            // option[map] does not — the aliased map inside decides).
             TypeExpr::Option { elem, .. } => {
                 self.shape_of_type_with_params(elem, type_params, depth + 1)
             }
             // fn-typed values are closures: captures make them unsendable at
-            // boundaries (Tier 0 窶・the A5 perimeter).
+            // boundaries (Tier 0 — the A5 perimeter).
             TypeExpr::Fn { .. } => TypeShape::Closure,
         }
     }
@@ -359,8 +359,8 @@ impl<'a> Checker<'a> {
     }
 
     /// May a value of this shape share mutable GC storage with a shallow Go
-    /// copy of it? True for reference types (map/slice/pointer), and 窶・the
-    /// #27 gap 窶・transitively true for a struct or array that CARRIES a
+    /// copy of it? True for reference types (map/slice/pointer), and — the
+    /// #27 gap — transitively true for a struct or array that CARRIES a
     /// reference-typed field/element: Go copies such a value by value, but
     /// the reference interior is shared. Used by the freeze rule's alias
     /// tracking so `h2 := h1; task f(move h1)` freezes `h2` too.
@@ -527,7 +527,7 @@ impl<'a> Checker<'a> {
                     .unwrap_or(TypeShape::Unknown),
             })),
             // closures are unsendable values in Tier 0 (the A5 perimeter);
-            // classify_value rejects FnLit literals before shape lookup 窶・
+            // classify_value rejects FnLit literals before shape lookup —
             // this arm covers fn-typed bindings and fn-typed fields
             Expr::FnLit { .. } => TypeShape::Closure,
         }
@@ -565,7 +565,7 @@ impl<'a> Checker<'a> {
                     return TypeShape::Unknown;
                 }
                 match name.as_str() {
-                    // `make(chan T, n)` 窶・defensive against parser spellings of
+                    // `make(chan T, n)` — defensive against parser spellings of
                     // the type argument; defaults Unknown (fail-closed at
                     // boundaries, O4.9). See the TECH DEBT note in foreign.rs.
                     "make" => self.make_shape(args),
@@ -574,8 +574,8 @@ impl<'a> Checker<'a> {
                         .map(|a| self.shape_of_expr(st, &a.value))
                         .unwrap_or(TypeShape::Unknown),
                     "len" | "cap" | "min" | "max" => TypeShape::Primitive,
-                    // `new(T)` is Go's `new`: it returns `*T` 窶・a POINTER to
-                    // zeroed, mutable storage 窶・never a primitive copy. Typing
+                    // `new(T)` is Go's `new`: it returns `*T` — a POINTER to
+                    // zeroed, mutable storage — never a primitive copy. Typing
                     // it Primitive made it sendable-by-type (class 1), so
                     // `p := new(S); task w(p)` shared a `*S` across tasks with no
                     // diagnostic and raced (O4 class table: `*T` is a named
@@ -583,10 +583,10 @@ impl<'a> Checker<'a> {
                     // shapes fail closed). Type it as a pointer so it is
                     // classified as shared mutable state and rejected at every
                     // check-site. The pointee is inferred when the type argument
-                    // resolves; otherwise Unknown 窶・still a non-sendable pointer.
+                    // resolves; otherwise Unknown — still a non-sendable pointer.
                     "new" => {
                         let pointee = match args.first().map(|a| &a.value) {
-                            // `new(pool_stats)` 窶・the argument is a type name,
+                            // `new(pool_stats)` — the argument is a type name,
                             // not a value; name a declared struct precisely.
                             Some(Expr::Ident { name, .. }) if self.structs.contains_key(name) => {
                                 TypeShape::Struct(Some(name.clone()))
@@ -632,17 +632,17 @@ impl<'a> Checker<'a> {
         };
         match &first.value {
             // The parser renders a type in expression position as a literal
-            // node carrying the TypeExpr in `.ty` (`make(chan bool, n)` 竊・
+            // node carrying the TypeExpr in `.ty` (`make(chan bool, n)` →
             // StructLit{ty: Chan}); other spellings degrade to Unknown.
             Expr::StructLit { ty: Some(t), .. } => self.shape_of_type(t),
-            // `make([]T, n)` 窶・keep the ELEMENT shape (not Unknown): the
+            // `make([]T, n)` — keep the ELEMENT shape (not Unknown): the
             // element type decides whether a later `copy(dst, src)` shares
             // references (#178). A primitive element (`[]int`) shares
             // nothing; a reference element (`[]map[...]`) does.
             Expr::SliceLit { elem: Some(t), .. } => {
                 TypeShape::Slice(Box::new(self.shape_of_type(t)))
             }
-            // `make(map[K]V{})` 窶・shape key AND value: an erasure to
+            // `make(map[K]V{})` — shape key AND value: an erasure to
             // Map(Unknown, Unknown) let containers holding closures (or
             // handles) slip past the closure-container move guard (#354,
             // regression-tested in const_write.rs).
@@ -915,7 +915,7 @@ impl<'a> Checker<'a> {
         if let Some(reason) = self.no_zero_value_reason(ty, 0) {
             let names = l.names.join(", ");
             let msg = format!(
-                "`{}` has no zero value 窶・initialize `{}` explicitly (HYB-E4002)",
+                "`{}` has no zero value — initialize `{}` explicitly (HYB-E4002)",
                 ty.render(),
                 names
             );
@@ -968,7 +968,7 @@ impl<'a> Checker<'a> {
                             "HYB-E5001",
                             self.path.clone(),
                             span,
-                            "`_` must be the last match arm 窶・arms after `_` are unreachable (HYB-E5001)",
+                            "`_` must be the last match arm — arms after `_` are unreachable (HYB-E5001)",
                         )
                         .with_notes(vec![
                             "why: `_` matches every remaining variant; placing it before specific arms leaves the following arms dead (T15)".to_string(),
@@ -983,7 +983,7 @@ impl<'a> Checker<'a> {
                             "HYB-E5001",
                             self.path.clone(),
                             span,
-                            "`_` cannot be the first or only match arm 窶・match at least one variant before `_` (HYB-E5001)",
+                            "`_` cannot be the first or only match arm — match at least one variant before `_` (HYB-E5001)",
                         )
                         .with_notes(vec![
                             "why: `_` is a catch-all for remaining variants at the end of a `match` (T15)".to_string(),
@@ -1173,7 +1173,7 @@ impl<'a> Checker<'a> {
                     return vec![*val, TypeShape::Primitive]; // v, ok := m[k]
                 }
             }
-            // `v, ok := <-ch` 窶・the value is the channel's element; `ok` is
+            // `v, ok := <-ch` — the value is the channel's element; `ok` is
             // the receive-ok flag (a bool)
             if let Expr::Receive { chan, .. } = v {
                 let elem = match self.shape_of_expr(st, chan) {
@@ -1374,7 +1374,7 @@ mod tests {
     #[test]
     fn pointer_receiver_move_rejects_as_non_owned_even_without_post_use() {
         // Updated to the non-owned-move doctrine (pr-61): a receiver aliases
-        // caller-owned storage, so `move s` is rejected outright 窶・no
+        // caller-owned storage, so `move s` is rejected outright — no
         // post-move use required. The diagnostic still names the pointee
         // `*stats`, pinning the pointer-receiver shape fix this PR added.
         let r = check(
@@ -1644,4 +1644,41 @@ mod tests {
         );
         assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
     }
+
+    #[test]
+    fn split_top_level_type_args_and_chained_generic_calls_freeze_issue_73() {
+        assert_eq!(
+            super::Checker::split_top_level_type_args(" map[string]int "),
+            vec!["map[string]int".to_string()]
+        );
+        assert_eq!(
+            super::Checker::split_top_level_type_args(" map[string][]int , chan map[string]bool "),
+            vec![
+                "map[string][]int".to_string(),
+                "chan map[string]bool".to_string()
+            ]
+        );
+
+        let r = check(
+            "fn same[t any](x t) t {\n\
+               return x\n\
+             }\n\
+             fn worker(s map[string]int) {\n\
+               s[\"k\"] = 1\n\
+             }\n\
+             fn main() {\n\
+               s := map[string]int{\"k\": 0}\n\
+               t := same(same(s))\n\
+               task worker(move s)\n\
+               t[\"k\"] = 2\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3003"),
+            "expected HYB-E3003 for write through chained generic call result after move, got: {:?}",
+            r.diagnostics
+        );
+    }
 }
+
