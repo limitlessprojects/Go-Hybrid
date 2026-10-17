@@ -119,7 +119,7 @@ impl<'a> Checker<'a> {
                     self.check_expr_builtin_args(&a.value);
                 }
             }
-            Stmt::Managed { body, .. } => {
+            Stmt::Managed { body, .. } | Stmt::Split { body, .. } => {
                 if deep {
                     for s in &body.stmts {
                         self.check_stmt_builtin_args_inner(s, true);

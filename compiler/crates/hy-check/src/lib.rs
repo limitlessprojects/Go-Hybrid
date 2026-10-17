@@ -571,6 +571,22 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
 
             Stmt::Return { values, .. } => ck.process_return(&mut st, values),
 
+            // W-015 spike: lexical split-join. Exclusivity (E3105) + the
+            // split-out scan (E3106) run BEFORE the fork defines so the
+            // forks enter the split's scope as fresh roots with NO alias or
+            // may-share edges (that is the capability grant; the forks'
+            // mutual disjointness is Go's capacity-clip guarantee).
+            Stmt::Split {
+                base,
+                mid,
+                left,
+                right,
+                body,
+                span,
+            } => {
+                ck.process_split(&mut st, base, mid, left, right, body, *span, idx, managed);
+            }
+
             // O4.0 check-site: every task argument (HYB-E3001) + the
             // spawn-callee proof: the callee must resolve to a declared
             // top-level fn (a closure callee shares its captures with the

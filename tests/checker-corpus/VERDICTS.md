@@ -592,7 +592,6 @@ composite-`const` locals, select-receive names and match bindings stay
 outside this registration (the same Go error family, tracked separately);
 unread `for ... in` bindings are handled at emission (issue #139).
 
-<<<<<<< HEAD
 ## Additive corpus registration — 2026-10-17: shadowed predeclared types (#326)
 
 One case derived from issue #326 before running this fixture. It pins the
@@ -606,12 +605,9 @@ with `HYB-E3001` (A1c sendability).
 |---|---------|---------|------|------------|-----------|
 | 52 | 52-shadow-predeclared-struct-reject | REJECT | A1c | `HYB-E3001` | `struct rune { m map[string]string }` passed across tasks must reject because the shadowed struct contains a mutable map |
 
-With this addition the registered corpus is **51 programs:
-ACCEPT 13 · ACCEPT-MANAGED 2 · REJECT 36** (harness recompute: 51/51
-verdict agreement; tripwire 2/51 = 3.9% verdict-level, 3/51 = 5.9%
-as-written — not fired).
+With this addition the registered corpus was 52 programs (harness
+recompute: 52/52 verdict agreement).
 
-=======
 ## Additive corpus registration — 2026-10-17: 3-argument slice `make` (#353)
 
 One case added WITH its fix: `make([]T, len, cap)` is valid Go, was
@@ -630,4 +626,19 @@ With this addition the corpus on disk is **51 programs: ACCEPT 13 ·
 ACCEPT-MANAGED 2 · REJECT 36** (recomputed from the files'
 `EXPECTED-VERDICT` markers; #50 carries its registration with its own fix
 PR).
->>>>>>> main
+
+## Additive corpus registration — 2026-10-17: W-015 split fork-join (spike)
+
+Corpus #53 added WITH the W-015 spike (`split s at mid into left, right`
+blocks): the checker proves the base is exclusively held (HYB-E3105) and
+split-out for the block (HYB-E3106); the forks are capacity-clipped fresh
+roots whose writable ranges are provably disjoint by Go's full slice
+expression semantics, so each moves into its own task race-free (verified
+under `go run -race`: zero reports, output `1 14` across 3 runs).
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 53 | 53-split-fork-join | ACCEPT | O5.1 (W-015) | — | exclusive split + capacity-clipped disjoint forks moved into two tasks; race-clean |
+
+With this addition the registered corpus is **53 programs** (harness
+recompute below; tripwire not fired).

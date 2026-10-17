@@ -332,6 +332,11 @@ impl Collector {
                 }
             }
             Stmt::Managed { body, .. } => self.block_scoped(body),
+            Stmt::Split { base, mid, body, .. } => {
+                self.expr(base);
+                self.expr(mid);
+                self.block_scoped(body);
+            }
             Stmt::Match { subject, arms, .. } => {
                 self.expr(subject);
                 for arm in arms {

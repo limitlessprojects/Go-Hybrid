@@ -336,6 +336,11 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
             check_body_boundaries(ck, st, body, true);
             st.scope_pop();
         }
+        Stmt::Split { body, .. } => {
+            st.scope_push();
+            check_body_boundaries(ck, st, body, true);
+            st.scope_pop();
+        }
         Stmt::If {
             init,
             then,
@@ -527,6 +532,7 @@ fn collect_stmt<'a>(stmt: &'a Stmt, out: &mut Vec<(&'a [hy_syntax::Param], &'a B
             }
         }
         Stmt::Managed { body, .. } => collect_block(body, out),
+        Stmt::Split { body, .. } => collect_block(body, out),
         Stmt::Match { subject, arms, .. } => {
             collect_expr(subject, out);
             for arm in arms {

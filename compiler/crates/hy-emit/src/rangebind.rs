@@ -177,6 +177,7 @@ fn stmt_kata(s: &Stmt, out: &mut HashSet<String>) {
             }
         }
         Stmt::Managed { body, .. } => block_kata(body, out),
+        Stmt::Split { body, .. } => block_kata(body, out),
         Stmt::Match {
             subject, arms, ..
         } => {

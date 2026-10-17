@@ -89,6 +89,27 @@ impl Emitter {
                 self.push("}");
                 Ok(())
             }
+            Stmt::Split {
+                base,
+                mid,
+                left,
+                right,
+                body,
+                ..
+            } => {
+                // W-015 spike: lexical split-join via Go full slice
+                // expressions. The capacity clip makes the forks provably
+                // disjoint; the checker proved exclusivity (E3105) and the
+                // split-out invariant (E3106).
+                let b = self.emit_expr(base, 0)?;
+                let m = self.emit_expr(mid, 0)?;
+                self.push("{ // split (W-015): capacity-clipped disjoint fork-join");
+                self.push(&format!("{} := {}[0:{}:{}]", left, b, m, m));
+                self.push(&format!("{} := {}[{}:len({}):cap({})]", right, b, m, b, b));
+                self.emit_block_body(&body.stmts)?;
+                self.push("}");
+                Ok(())
+            }
             Stmt::Defer { call, .. } => {
                 let c = self.emit_expr(call, 0)?;
                 self.push(&format!("defer {}", c));
@@ -1289,7 +1310,7 @@ impl Emitter {
     fn stmt_terminates(s: &Stmt) -> bool {
         match s {
             Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => true,
-            Stmt::Block { block, .. } | Stmt::Managed { body: block, .. } => {
+            Stmt::Block { block, .. } | Stmt::Managed { body: block, .. } | Stmt::Split { body: block, .. } => {
                 Self::block_terminates(block)
             }
             Stmt::If {
@@ -1585,7 +1606,7 @@ impl Emitter {
                         .unwrap_or(false)
             }
             Stmt::For { .. } => false, // nested loop labels itself
-            Stmt::Block { block, .. } | Stmt::Managed { body: block, .. } => {
+            Stmt::Block { block, .. } | Stmt::Managed { body: block, .. } | Stmt::Split { body: block, .. } => {
                 self.block_has_loop_break(block)
             }
             Stmt::Match { arms, .. } => {

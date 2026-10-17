@@ -674,7 +674,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                hy_syntax::Stmt::For { body, .. } | hy_syntax::Stmt::Managed { body, .. } => {
+                hy_syntax::Stmt::For { body, .. } | hy_syntax::Stmt::Managed { body, .. } | hy_syntax::Stmt::Split { body, .. } => {
                     if !Self::block_returns_only_fresh_append(body, saw_return) {
                         return false;
                     }

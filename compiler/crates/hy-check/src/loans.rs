@@ -558,7 +558,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Stmt::For { body, .. } | Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+            Stmt::For { body, .. } | Stmt::Managed { body, .. } | Stmt::Split { body, .. } | Stmt::Block { block: body, .. } => {
                 if self.block_mutates_param(body, param, depth) {
                     return true;
                 }
@@ -1471,6 +1471,125 @@ impl<'a> Checker<'a> {
                 slot_loan: false,
             },
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // W-015 spike: lexical split-join (capacity-clipped disjoint fork-join)
+    // -----------------------------------------------------------------------
+
+    /// `split s at mid into left, right { ... }`
+    ///
+    /// Soundness argument (W-015 / MOONSHOT ledger):
+    /// 1. E3105 — the base must be a plain local slice binding with NO other
+    ///    live sharers (no may_share peers, no alias parents). Splitting takes
+    ///    EXCLUSIVE ownership of the base's backing array.
+    /// 2. E3106 — the base is split-out for the whole block: any use of it
+    ///    inside is rejected, so the forks are the only reachable handles.
+    /// 3. The forks are defined as fresh roots with NO alias/may_share edges.
+    ///    Their writable ranges are provably disjoint by Go's full slice
+    ///    expression semantics: `s[0:mid:mid]` has capacity mid (an append
+    ///    past mid reallocates — it can never write s[mid:]) and
+    ///    `s[mid:len(s):cap(s)]` starts at mid. Disjoint ranges + exclusive
+    ///    base + no other handles => concurrent mutation of the forks cannot
+    ///    race. The forks die at the block edge (walk.rs scopes them).
+    pub(crate) fn process_split(
+        &mut self,
+        st: &mut FnState,
+        base: &Expr,
+        mid: &Expr,
+        left: &str,
+        right: &str,
+        body: &hy_syntax::Block,
+        span: Span,
+        _idx: usize,
+        managed: bool,
+    ) {
+        let base_name = match base {
+            Expr::Ident { name, .. } => name.clone(),
+            _ => {
+                self.push_split_diag(st, span, "HYB-E3105", format!(
+                    "split base must be a plain local slice binding, not `{}` — splitting takes exclusive ownership of the backing array",
+                    base.render()
+                ));
+                return;
+            }
+        };
+        let _ = mid; // the clip arithmetic is the emit side's job
+        let Some(base_binding) = self.lookup_binding(st, &base_name).cloned() else {
+            self.push_split_diag(st, span, "HYB-E3105", format!(
+                "cannot split `{}` — no such local binding (W-015 splits owned locals only)",
+                base_name
+            ));
+            return;
+        };
+        if !matches!(base_binding.shape, TypeShape::Slice(_)) {
+            self.push_split_diag(st, span, "HYB-E3105", format!(
+                "cannot split `{}` — it is not a slice (W-015 splits slices via Go's full slice expression)",
+                base_name
+            ));
+            return;
+        }
+        // E3105 exclusivity: no OTHER live binding may share the base's storage.
+        let mut sharers: Vec<String> = Vec::new();
+        for (k, set) in st.may_share.iter() {
+            if k == &base_name {
+                for p in set {
+                    if self.lookup_binding(st, p).is_some() && !sharers.contains(p) {
+                        sharers.push(p.clone());
+                    }
+                }
+            } else if set.contains(&base_name)
+                && self.lookup_binding(st, k).is_some()
+                && !sharers.contains(k)
+            {
+                sharers.push(k.clone());
+            }
+        }
+        for (k, tgt) in st.aliases.iter() {
+            if k != &base_name
+                && tgt == &base_name
+                && self.lookup_binding(st, k).is_some()
+                && !sharers.contains(k)
+            {
+                sharers.push(k.clone());
+            }
+        }
+        if !sharers.is_empty() {
+            self.push_split_diag(st, span, "HYB-E3105", format!(
+                "cannot split `{}` — live bindings share its storage: {} (split requires exclusive ownership; drop or move the sharers first)",
+                base_name,
+                sharers.join(", ")
+            ));
+            return;
+        }
+        // E3106 split-out: the base is unreachable for the whole block.
+        let mut bound: std::collections::HashSet<String> =
+            [left, right].iter().map(|s| s.to_string()).collect();
+        let mut idents = Vec::new();
+        collect_capture_idents_block(body, &mut bound, &mut idents);
+        if idents.iter().any(|i| i == &base_name) {
+            self.push_split_diag(st, span, "HYB-E3106", format!(
+                "`{}` is split-out for this block — only the forks `{}` and `{}` are reachable (W-015)",
+                base_name, left, right
+            ));
+            return;
+        }
+        // The forks: fresh roots, deliberately NO record_may_share /
+        // record_alias — no edge is exactly the point (the capability grant).
+        let fork_shape = base_binding.shape.clone();
+        self.define_binding(st, left, fork_shape.clone(), None, false, managed);
+        self.define_binding(st, right, fork_shape, None, false, managed);
+    }
+
+    fn push_split_diag(
+        &mut self,
+        st: &mut FnState,
+        span: Span,
+        code: &str,
+        msg: String,
+    ) {
+        let _ = st;
+        self.diags.push(Diagnostic::error(code, self.path.clone(), span, msg));
     }
 
     // -----------------------------------------------------------------------
@@ -2500,6 +2619,7 @@ impl<'a> Checker<'a> {
             }
             Stmt::For { body, .. }
             | Stmt::Managed { body, .. }
+            | Stmt::Split { body, .. }
             | Stmt::Block { block: body, .. } => {
                 let mut body_aliases = aliases.clone();
                 if self.block_mutates_const_param(body, &mut body_aliases, depth) {
@@ -2826,6 +2946,11 @@ fn collect_capture_idents_stmt(
             }
         }
         hy_syntax::Stmt::Managed { body, .. } => collect_capture_idents_block(body, bound, out),
+        hy_syntax::Stmt::Split { base, mid, body, .. } => {
+            collect_capture_idents_expr(base, bound, out);
+            collect_capture_idents_expr(mid, bound, out);
+            collect_capture_idents_block(body, bound, out);
+        }
         hy_syntax::Stmt::Match { subject, arms, .. } => {
             collect_capture_idents_expr(subject, bound, out);
             for arm in arms {
