@@ -87,5 +87,60 @@ class RunnerFailureTests(unittest.TestCase):
         self.assertEqual([(s['name'], s['exit']) for s in summary['steps']], [('prior', 0), ('required', 7)])
 
 
+class RunnerOutputTests(unittest.TestCase):
+    def timed(self, code):
+        return runner.run_cmd([sys.executable, '-u', '-c', code], 0.5)
+
+    def test_timeout_keeps_stdout_and_stderr(self):
+        code, _, tail = self.timed(
+            'import sys,time; print("compile-start", flush=True); '
+            'print("specific-error", file=sys.stderr, flush=True); time.sleep(60)')
+        self.assertEqual(code, 124)
+        self.assertIn('compile-start', tail)
+        self.assertIn('specific-error', tail)
+        self.assertIn('<<TIMEOUT after 0.5s>>', tail)
+
+    def test_timeout_decodes_incomplete_utf8(self):
+        code, _, tail = self.timed(
+            r"import os,time; os.write(1,b'partial-\xe2\x82'); time.sleep(60)")
+        self.assertEqual(code, 124)
+        self.assertIn('partial-\ufffd', tail)
+        self.assertIn('<<TIMEOUT', tail)
+
+    def test_timeout_output_retains_tail_and_bound(self):
+        code, _, tail = self.timed(
+            'import sys,time; print("discarded-prefix"+"x"*6000+"last-diagnostic", '
+            'flush=True); time.sleep(60)')
+        self.assertEqual(code, 124)
+        self.assertLessEqual(len(tail), 4000)
+        self.assertIn('last-diagnostic', tail)
+        self.assertNotIn('discarded-prefix', tail)
+        self.assertIn('<<TIMEOUT', tail)
+
+    def test_silent_timeout_keeps_existing_marker(self):
+        code, _, tail = self.timed('import time; time.sleep(60)')
+        self.assertEqual(code, 124)
+        self.assertEqual(tail, '<<TIMEOUT after 0.5s>>')
+
+    def test_completed_output_and_exit_remain_unchanged(self):
+        for expected in [0, 7]:
+            with self.subTest(exit=expected):
+                code, _, tail = runner.run_cmd(
+                    [sys.executable, '-c', 'print("completed"); raise SystemExit(%d)' % expected], 10)
+                self.assertEqual(code, expected)
+                self.assertEqual(tail, 'completed\n')
+
+    def test_job_summary_keeps_timeout_diagnostic(self):
+        code, summary = RunnerFailureTests.run_job(self, [], [step(
+            'compile', 'import sys,time; print("compile-progress", flush=True); '
+            'print("compiler-context", file=sys.stderr, flush=True); time.sleep(60)',
+            True, 0.5)])
+        self.assertEqual(code, 1)
+        self.assertFalse(summary['ok'])
+        self.assertEqual(summary['steps'][0]['exit'], 124)
+        self.assertIn('compiler-context', summary['steps'][0]['out_tail'])
+        self.assertIn('<<TIMEOUT', summary['steps'][0]['out_tail'])
+
+
 if __name__ == '__main__':
     unittest.main()

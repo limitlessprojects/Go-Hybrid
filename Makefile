@@ -43,6 +43,7 @@ check:
 	@$(PY) -m unittest discover -s tools -p test_differential_loop.py -v
 	@$(PY) -m unittest discover -s tools -p test_check_versions.py -v
 	@$(PY) -m unittest discover -s tools -p test_corpus_harness.py -v
+	@$(PY) -m unittest discover -s tools/runner -p test_runner.py -v
 	@bash tools/check-versions.sh --no-toolchain && echo "versions OK"
 	@cd /tmp && rm -rf gh-selftest && mkdir gh-selftest && cd gh-selftest && \
 	printf '%s\n' '{"job":"selftest","tier":"sandbox","sha":"none","repo":"none","gpu":false,"setup":[],"commands":[{"name":"echo","run":"echo selftest-ok","timeout":30}],"expected_results":[]}' > job.json && \

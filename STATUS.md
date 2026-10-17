@@ -1,4 +1,5 @@
 # STATUS (for the human — 15 lines max)
+- Contributor runner diagnostics: captured timeout output retained; Mini 13/13 runner (baseline 4 failures), 53 Python tooling, 591 Rust, corpus 52/52, differential 52/52. Upstream CI/review pending; no award claimed.
 
 - Phase: **MVP DONE + v0.1.0 released + community OPEN** — session-13: **both P0 queue leaders landed (#306, #374) + the first wildcard spike is race-verified (PR #379, W-015)**
 - **#306 landed** (duongynhi000005-oss, fixes #305): if-init eval order aligned with go/spec + same-stmt/package-handle consume & loans (E3003 A1b/A7, E3101 A2, E3102 A3) — 7/7 issue repros reject with exact family codes, 5/5 legal twins accept; loans.rs merge conflict resolved preserving both root_span and main's check_call_const_writes
