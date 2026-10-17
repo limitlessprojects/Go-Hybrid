@@ -82,7 +82,13 @@ def env_report():
     rep["cgroup_mem"] = cap("cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null")
     rep["cgroup_cpu"] = cap("cat /sys/fs/cgroup/cpu.max 2>/dev/null || cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null")
     for tool in ("go", "rustc", "cargo", "gcc", "clang", "git", "cc"):
-        rep["tool_" + tool] = cap("{} --version 2>/dev/null | head -1".format(tool))
+        # Go uses `version`, not `--version`. Avoid a pipe to head, whose
+        # successful exit would hide a missing or failing tool's exit status.
+        code, _, out = run_cmd([tool, "version" if tool == "go" else "--version"], 10)
+        version = out.splitlines()[0].strip() if out.splitlines() else ""
+        if code != 0 or not version or (tool == "go" and not version.startswith("go version ")):
+            version = "n/a"
+        rep["tool_" + tool] = version
     rep["kaggle_env"] = redact({k: v for k, v in os.environ.items() if k.startswith("KAGGLE_")})
     rep["ci_env"] = redact({k: v for k, v in os.environ.items() if k.startswith(("GITHUB_", "RUNNER_", "CI"))})
     return rep
