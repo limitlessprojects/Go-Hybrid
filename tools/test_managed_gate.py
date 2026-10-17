@@ -40,6 +40,12 @@ class ManagedGateTests(unittest.TestCase):
     def test_empty_file_has_no_blocks(self):
         self.assertEqual(self.audit('fn main() {}', []), {})
 
+    def test_review_tickets_are_optional_but_valid_tickets_are_preserved(self):
+        source = 'managed("reviewed", "other", "ISSUE-1") {}'
+        expected = {'reason': 'reviewed', 'category': 'other', 'tickets': ['ISSUE-1']}
+        found = self.audit(source, [expected])
+        self.assertEqual(list(found.values()), [expected])
+
     def test_removed_block_keeps_remaining_location(self):
         found = self.audit('\nmanaged("b", "other") {}', [block('b')])
         self.assertEqual([key.rsplit(':', 1)[1] for key in found], ['2'])
@@ -110,6 +116,40 @@ class ManagedGateTests(unittest.TestCase):
             self.audit('managed("a", "invalid") {}',
                        [{'reason': 'a', 'category': 'invalid'}])
         self.assertEqual(error.exception.code, 2)
+
+    def test_incomplete_or_malformed_managed_block_fails_closed(self):
+        invalid_blocks = [
+            {'category': 'other'},
+            {'category': 'other', 'reason': None},
+            {'category': 'other', 'reason': 123},
+            {'category': 'other', 'reason': ''},
+            {'category': 'other', 'reason': 'reviewed', 'tickets': None},
+            {'category': 'other', 'reason': 'reviewed', 'tickets': 'ISSUE-1'},
+            {'category': 'other', 'reason': 'reviewed', 'tickets': [None]},
+        ]
+        for malformed in invalid_blocks:
+            with self.subTest(block=malformed):
+                self.assert_mapping_error('managed("reviewed", "other") {}', [malformed])
+
+    def test_malformed_managed_block_cannot_overwrite_reviewed_baseline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prog = pathlib.Path(directory) / 'test.hy'
+            prog.write_text('managed("reviewed", "other") {}', encoding='utf-8')
+            baseline = pathlib.Path(directory) / 'baseline.json'
+            original = json.dumps({'version': 1, 'blocks': {
+                f'{prog}:1': block('reviewed')}}).encode()
+            baseline.write_bytes(original)
+            report = {'summary': {'managed': {'managed_blocks': 1, 'blocks': [
+                {'category': 'other'}]}}}
+            result = subprocess.CompletedProcess([], 0, json.dumps(report), '')
+            argv = ['managed_gate.py', '--rebaseline', 'hyb', str(baseline), str(prog)]
+            with patch.object(gate.sys, 'argv', argv), \
+                 patch.object(gate.subprocess, 'run', return_value=result), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    gate.main()
+            self.assertEqual(error.exception.code, 2)
+            self.assertEqual(baseline.read_bytes(), original)
 
     def test_checker_failure_fails_the_gate_even_with_parseable_output(self):
         # Issue #53: a rejected/malformed program must not read as "zero

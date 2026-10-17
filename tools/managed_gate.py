@@ -124,6 +124,15 @@ def audit(hyb, prog):
         if not isinstance(category, str) or category not in VALID:
             print(f"GATE ERROR: {prog}: category {category!r} outside the closed set")
             sys.exit(2)
+        reason = b.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            print(f"GATE ERROR: {prog}: missing or invalid managed block reason")
+            sys.exit(2)
+        # Rust omits an empty tickets Vec; a present value must still be a list.
+        tickets = b.get("tickets", [])
+        if not isinstance(tickets, list) or not all(isinstance(t, str) for t in tickets):
+            print(f"GATE ERROR: {prog}: malformed managed block tickets")
+            sys.exit(2)
         blocks.append(b)
     # line numbers: lexically scan the source for `managed (` tokens outside
     # comments and string literals (issue #119; the JSON report is
