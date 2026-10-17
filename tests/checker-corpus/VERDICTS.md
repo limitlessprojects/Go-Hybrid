@@ -639,3 +639,5 @@ so `move h` froze `h` but not `shared` and the emitted Go raced.
 |---|---------|---------|------|------------|-----------|
 | 54 | 54-field-store-alias-at-spawn | REJECT | A1b | `HYB-E3003` | `var h holder; h.m = shared` then `task worker(move h)` then a write to `shared` |
 | 55 | 55-field-store-fresh-at-spawn | ACCEPT | — | — | the over-rejection guard: a FRESH map literal stored into the field shares nothing |
+| 56 | 56-callee-store-alias-at-spawn | REJECT | A1b | `HYB-E3003` | `set(dst, shared)` stores the map into `dst[0]` inside a declared helper, then `task worker(move shared)` then a write to `dst[0]` |
+| 57 | 57-callee-store-fresh-control | ACCEPT | — | — | the over-rejection guard: a declared call that only reads two maps creates no may-share edge |

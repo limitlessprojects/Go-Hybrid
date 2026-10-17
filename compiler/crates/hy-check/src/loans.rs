@@ -24,8 +24,11 @@ use crate::model::{
 use crate::shape::receiver_type_name;
 use crate::walk::{self, CallRef};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::{AssignOp, Block, Expr, FnDecl, LocalDecl, LocalKind, Place, PlaceKind, Stmt};
-use std::collections::HashSet;
+use hy_syntax::{
+    AssignOp, Block, Expr, FnDecl, ForKind, LocalDecl, LocalKind, MatchPattern, Place, PlaceKind,
+    Stmt,
+};
+use std::collections::{HashMap, HashSet};
 
 /// Read-only call targets that can never mutate a map argument — the A3
 /// callee scan fails closed on everything else (#111).
@@ -285,6 +288,23 @@ impl<'a> Checker<'a> {
                     // A7 borrow-by-default: a handle passed to a Hybrid
                     // function is lent for the call only
                     self.lend_handle_args(st, cr, idx, None);
+                    // O5.2 (#455): a helper may retain one reference-bearing
+                    // argument through another (`dst[0] = v` inside the
+                    // callee). The callee's own FnState records that edge;
+                    // the caller's never sees it, so a later `move` would not
+                    // freeze the caller-visible alias. Materialize the edge at
+                    // the call site from the callee's argument-store effect.
+                    if let Some(decl) = self.fns.get(&name).copied() {
+                        for (di, si) in self.collect_param_store_pairs(decl, 0) {
+                            let (Some(dst_arg), Some(src_arg)) = (cr.args.get(di), cr.args.get(si))
+                            else {
+                                continue;
+                            };
+                            if let Some(dst_root) = dst_arg.value.root_ident() {
+                                self.record_may_share(st, dst_root, &src_arg.value);
+                            }
+                        }
+                    }
                 } else if st.closure_mutates.contains_key(&name) {
                     // A3 #111 form 4: a local closure whose body mutates a
                     // captured binding — event attributed to this call site.
@@ -479,6 +499,287 @@ impl<'a> Checker<'a> {
             if roots.iter().any(|r| a3_paths_conflict(st, path, r)) {
                 self.emit_a3_if_live(st, path, cr.span, idx, &verb);
                 return;
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // O5.2 caller-side argument-store effects (#455)
+    // -----------------------------------------------------------------
+
+    /// Pairs `(dst, src)` of parameter indices such that a declared helper
+    /// stores a value rooted at parameter `src` into a place rooted at
+    /// parameter `dst` — directly, through a local alias, through a nested
+    /// block/loop/match, through a capturing closure body, or through a
+    /// nested declared call (depth-limited, like `fn_mutates_param`).
+    fn collect_param_store_pairs(&self, decl: &FnDecl, depth: usize) -> Vec<(usize, usize)> {
+        if depth > 3 {
+            return Vec::new();
+        }
+        let Some(body) = &decl.body else {
+            return Vec::new();
+        };
+        let mut alias: HashMap<String, usize> = HashMap::new();
+        for (i, p) in decl.params.iter().enumerate() {
+            alias.insert(p.name.clone(), i);
+        }
+        let mut out = Vec::new();
+        self.stmts_store_pairs(&body.stmts, &mut alias, depth, &mut out);
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    fn stmts_store_pairs(
+        &self,
+        stmts: &[Stmt],
+        alias: &mut HashMap<String, usize>,
+        depth: usize,
+        out: &mut Vec<(usize, usize)>,
+    ) {
+        for s in stmts {
+            self.stmt_store_pairs(s, alias, depth, out);
+        }
+    }
+
+    fn stmt_store_pairs(
+        &self,
+        s: &Stmt,
+        alias: &mut HashMap<String, usize>,
+        depth: usize,
+        out: &mut Vec<(usize, usize)>,
+    ) {
+        // Calls anywhere in this statement may store through their arguments.
+        let mut calls = Vec::new();
+        walk::own_calls(s, &mut calls);
+        self.calls_store_pairs(&calls, alias, depth, out);
+
+        match s {
+            Stmt::Local(l) => {
+                if l.values.len() == l.names.len() {
+                    for (n, v) in l.names.iter().zip(l.values.iter()) {
+                        match v.root_ident().and_then(|r| alias.get(r).copied()) {
+                            Some(p) => {
+                                alias.insert(n.clone(), p);
+                            }
+                            None => {
+                                alias.remove(n);
+                            }
+                        }
+                    }
+                } else {
+                    // multi-value define / no initializer: names are fresh
+                    for n in &l.names {
+                        alias.remove(n);
+                    }
+                }
+                for v in &l.values {
+                    self.expr_fnlit_store_pairs(v, alias, depth, out);
+                }
+            }
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                for (t, v) in targets.iter().zip(values.iter()) {
+                    match &t.kind {
+                        PlaceKind::Ident(name) => {
+                            // rebinding a name keeps an alias only if the RHS
+                            // still roots at the same parameter
+                            match v.root_ident().and_then(|r| alias.get(r).copied()) {
+                                Some(p) => {
+                                    alias.insert(name.clone(), p);
+                                }
+                                None => {
+                                    alias.remove(name);
+                                }
+                            }
+                        }
+                        _ => {
+                            let dst = alias.get(t.root()).copied();
+                            let src = v.root_ident().and_then(|r| alias.get(r).copied());
+                            if let (Some(dst), Some(src)) = (dst, src) {
+                                if dst != src {
+                                    out.push((dst, src));
+                                }
+                            }
+                        }
+                    }
+                }
+                for v in values {
+                    self.expr_fnlit_store_pairs(v, alias, depth, out);
+                }
+            }
+            Stmt::If {
+                init,
+                then,
+                otherwise,
+                ..
+            } => {
+                if let Some(i) = init {
+                    self.stmt_store_pairs(i, alias, depth, out);
+                }
+                let mut t = alias.clone();
+                self.stmts_store_pairs(&then.stmts, &mut t, depth, out);
+                if let Some(o) = otherwise {
+                    let mut e = alias.clone();
+                    self.stmt_store_pairs(o, &mut e, depth, out);
+                }
+            }
+            Stmt::For { kind, body, .. } => {
+                match kind {
+                    ForKind::While { cond } => {
+                        let mut c = alias.clone();
+                        self.expr_store_pairs(cond, &mut c, depth, out);
+                    }
+                    ForKind::Iterate { expr, .. } => {
+                        let mut c = alias.clone();
+                        self.expr_store_pairs(expr, &mut c, depth, out);
+                    }
+                    ForKind::Range { lo, hi, .. } => {
+                        let mut c = alias.clone();
+                        self.expr_store_pairs(lo, &mut c, depth, out);
+                        let mut c2 = alias.clone();
+                        self.expr_store_pairs(hi, &mut c2, depth, out);
+                    }
+                    ForKind::Infinite => {}
+                }
+                let mut b = alias.clone();
+                self.stmts_store_pairs(&body.stmts, &mut b, depth, out);
+            }
+            Stmt::Block { block, .. } | Stmt::Managed { body: block, .. } => {
+                let mut b = alias.clone();
+                self.stmts_store_pairs(&block.stmts, &mut b, depth, out);
+            }
+            Stmt::Match { subject, arms, .. } => {
+                let subj = subject.root_ident().and_then(|r| alias.get(r).copied());
+                for arm in arms {
+                    let mut a = alias.clone();
+                    if let (
+                        Some(p),
+                        MatchPattern::Path {
+                            binding: Some(b), ..
+                        },
+                    ) = (subj, &arm.pattern)
+                    {
+                        a.insert(b.clone(), p);
+                    }
+                    if let Some(g) = &arm.guard {
+                        let mut ga = a.clone();
+                        self.expr_store_pairs(g, &mut ga, depth, out);
+                    }
+                    self.stmts_store_pairs(&arm.body.stmts, &mut a, depth, out);
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                for arm in arms {
+                    let mut a = alias.clone();
+                    self.stmts_store_pairs(&arm.body.stmts, &mut a, depth, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn expr_store_pairs(
+        &self,
+        e: &Expr,
+        alias: &mut HashMap<String, usize>,
+        depth: usize,
+        out: &mut Vec<(usize, usize)>,
+    ) {
+        let mut calls = Vec::new();
+        walk::expr_calls(e, &mut calls);
+        self.calls_store_pairs(&calls, alias, depth, out);
+        self.expr_fnlit_store_pairs(e, alias, depth, out);
+    }
+
+    /// A closure body inside the callee can capture a parameter and store it;
+    /// its own parameters/results shadow the capture.
+    fn expr_fnlit_store_pairs(
+        &self,
+        e: &Expr,
+        alias: &mut HashMap<String, usize>,
+        depth: usize,
+        out: &mut Vec<(usize, usize)>,
+    ) {
+        match e {
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => {
+                let mut b = alias.clone();
+                for p in params {
+                    b.remove(&p.name);
+                }
+                for r in results {
+                    if let Some(n) = &r.name {
+                        b.remove(n);
+                    }
+                }
+                self.stmts_store_pairs(&body.stmts, &mut b, depth, out);
+            }
+            Expr::Paren { inner, .. }
+            | Expr::Move { operand: inner, .. }
+            | Expr::Try { operand: inner, .. }
+            | Expr::Unary { operand: inner, .. }
+            | Expr::AddrOf { operand: inner, .. } => {
+                self.expr_fnlit_store_pairs(inner, alias, depth, out)
+            }
+            Expr::Call { callee, args, .. } => {
+                self.expr_fnlit_store_pairs(callee, alias, depth, out);
+                for a in args {
+                    self.expr_fnlit_store_pairs(&a.value, alias, depth, out);
+                }
+            }
+            Expr::Index { base, index, .. }
+            | Expr::Binary {
+                lhs: base,
+                rhs: index,
+                ..
+            } => {
+                self.expr_fnlit_store_pairs(base, alias, depth, out);
+                self.expr_fnlit_store_pairs(index, alias, depth, out);
+            }
+            _ => {}
+        }
+    }
+
+    fn calls_store_pairs(
+        &self,
+        calls: &[CallRef],
+        alias: &HashMap<String, usize>,
+        depth: usize,
+        out: &mut Vec<(usize, usize)>,
+    ) {
+        if depth > 3 {
+            return;
+        }
+        for cr in calls {
+            let Expr::Ident { name, .. } = cr.callee else {
+                continue;
+            };
+            let Some(decl) = self.fns.get(name).copied() else {
+                continue;
+            };
+            for (di, si) in self.collect_param_store_pairs(decl, depth + 1) {
+                let (Some(dst_arg), Some(src_arg)) = (cr.args.get(di), cr.args.get(si)) else {
+                    continue;
+                };
+                let dst = dst_arg
+                    .value
+                    .root_ident()
+                    .and_then(|r| alias.get(r).copied());
+                let src = src_arg
+                    .value
+                    .root_ident()
+                    .and_then(|r| alias.get(r).copied());
+                if let (Some(dst), Some(src)) = (dst, src) {
+                    if dst != src {
+                        out.push((dst, src));
+                    }
+                }
             }
         }
     }

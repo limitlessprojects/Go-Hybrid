@@ -1563,6 +1563,11 @@ mux.handle("/x", http.handler(fn(w http.response_writer) {
   idiomatic AND receivers can be proven read-only, the rule may relax to
   writes-only as a logged decision — and the §9.2 claims paragraph narrows
   in the same edit.*
+  Aliases created inside a callee frame count: when a declared helper
+  stores one reference-bearing argument into a place rooted at another
+  (`fn set(dst []map[string]int, v map[string]int) { dst[0] = v }`), the
+  call site records the same may-share edge the direct store would, so
+  `move` of the stored argument freezes the caller's other argument (#455).
 - **O5.3 — Fresh literals and immutable values are not frozen** (nothing
   aliased exists to freeze); channels are never frozen (class 2 — sharing
   them is their purpose).
