@@ -109,20 +109,29 @@ impl<'a> Checker<'a> {
         if depth > 16 {
             return true;
         }
-        if shape.is_reference_alias() || shape.is_handle() {
+        if shape.is_reference_alias() || shape.is_handle() || matches!(shape, TypeShape::Closure) {
             return true;
         }
         match shape {
             TypeShape::Array(elem) => self.shape_may_share_at(elem, depth + 1),
-            TypeShape::Struct(Some(name)) => self
-                .structs
-                .get(name)
-                .map(|fields| {
-                    fields
-                        .iter()
-                        .any(|(_, ty)| self.shape_may_share_at(&self.shape_of_type(ty), depth + 1))
-                })
-                .unwrap_or(false),
+            TypeShape::Struct(Some(name)) => {
+                let resolved = self
+                    .type_aliases
+                    .get(name.as_str())
+                    .and_then(|t| match self.shape_of_type_depth(t, depth + 1) {
+                        TypeShape::Struct(Some(n)) => Some(n),
+                        _ => None,
+                    });
+                let lookup_name = resolved.as_deref().unwrap_or(name.as_str());
+                self.structs
+                    .get(lookup_name)
+                    .map(|fields| {
+                        fields.iter().any(|(_, ty)| {
+                            self.shape_may_share_at(&self.shape_of_type(ty), depth + 1)
+                        })
+                    })
+                    .unwrap_or(false)
+            }
             _ => false,
         }
     }
@@ -243,10 +252,17 @@ impl<'a> Checker<'a> {
                 self.field_shape(&base_shape, name)
             }
             Expr::Call { callee, args, .. } => self.call_shape(st, callee, args),
-            Expr::StructLit { ty, .. } => TypeShape::Struct(match ty {
-                Some(TypeExpr::Named { name, .. }) => Some(name.clone()),
-                _ => None,
-            }),
+            Expr::StructLit { ty, .. } => match ty {
+                Some(t) => match self.shape_of_type(t) {
+                    TypeShape::Struct(s) => TypeShape::Struct(s),
+                    TypeShape::Unknown => match t {
+                        TypeExpr::Named { name, .. } => TypeShape::Struct(Some(name.clone())),
+                        _ => TypeShape::Struct(None),
+                    },
+                    other => other,
+                },
+                None => TypeShape::Struct(None),
+            },
             Expr::MapLit { key, value, .. } => TypeShape::Map(
                 Box::new(self.shape_of_type(key)),
                 Box::new(self.shape_of_type(value)),

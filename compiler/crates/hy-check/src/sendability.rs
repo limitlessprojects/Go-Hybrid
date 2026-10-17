@@ -859,8 +859,8 @@ impl<'a> Checker<'a> {
                 // the literal's own ascription wins; else infer from the env
                 // (an ascribed define `var j jobT = jobT{...}` names the
                 // struct twice — same answer)
-                let sname = ty.as_ref().and_then(|t| match t {
-                    hy_syntax::TypeExpr::Named { name, .. } => Some(name.clone()),
+                let sname = ty.as_ref().and_then(|t| match self.resolve_type_alias(t) {
+                    hy_syntax::TypeExpr::Named { name, .. } => Some(name),
                     _ => None,
                 });
                 if let Some(sname) = sname.or_else(|| {

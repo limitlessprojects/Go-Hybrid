@@ -147,7 +147,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn emit_use_after_move(&mut self, st: &FnState, u: &Use, mv: &MoveInfo) {
+    pub(crate) fn emit_use_after_move(&mut self, st: &FnState, u: &Use, mv: &MoveInfo) {
         // A may-share peer (#27) is an alias in every way that matters here,
         // even when the single-parent `aliases` chain does not name it (e.g.
         // a projection or composite-literal capture).
@@ -245,6 +245,12 @@ impl<'a> Checker<'a> {
         desc: String,
         kind: MoveKind,
     ) {
+        if self.lookup_binding(st, name).is_some_and(|b| {
+            !matches!(b.shape, crate::model::TypeShape::Closure)
+                && self.shape_holds_closure(&b.shape, &mut Vec::new())
+        }) {
+            return;
+        }
         let root = resolve_alias(st, name);
         let mut members: Vec<String> = vec![name.to_string(), root.clone()];
         for a in st.aliases.keys() {
