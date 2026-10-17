@@ -229,6 +229,20 @@ pub(crate) struct FnState {
     pub loans: Vec<Loan>,
     /// name -> last statement index that references it (Pass A result).
     pub last_use: HashMap<String, usize>,
+    /// for-loop statement index -> last statement index inside its body.
+    pub loop_end: HashMap<usize, usize>,
+    /// FnLit span starts declared within each active block scope layer.
+    pub fnlit_scopes: Vec<Vec<(u32, u32)>>,
+    /// FnLit span start -> (merged block-scope bindings, aliases, may_share)
+    /// captured right before the closure's enclosing block scope is popped.
+    pub closure_scoped_envs: HashMap<
+        (u32, u32),
+        (
+            HashMap<String, Binding>,
+            HashMap<String, String>,
+            HashMap<String, HashSet<String>>,
+        ),
+    >,
     /// #111 form 4: a local closure binding -> the base paths its body may
     /// MUTATE (map insert/delete targets, transitively via calls it makes).
     /// Captured roots only (the closure's own params are excluded — they
@@ -243,15 +257,67 @@ pub(crate) struct FnState {
 }
 
 impl FnState {
+    /// Extend a loan's `last` index across any enclosing `for` loop that
+    /// started after the loan was created (`created < for_idx`) when the
+    /// loan is used inside that loop (`last >= for_idx`).
+    pub(crate) fn effective_loan_last(&self, created: usize, mut last: usize) -> usize {
+        loop {
+            let mut changed = false;
+            for (&for_idx, &lend) in &self.loop_end {
+                if created < for_idx && last >= for_idx && last < lend {
+                    last = lend;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        last
+    }
+
     /// Enter a block scope (walk.rs's Push events).
     pub(crate) fn scope_push(&mut self) {
         self.scopes.push(HashMap::new());
         self.alias_scopes.push(self.aliases.clone());
         self.share_scopes.push(self.may_share.clone());
+        self.fnlit_scopes.push(Vec::new());
     }
 
     /// Exit the innermost block scope (walk.rs's Pop events).
     pub(crate) fn scope_pop(&mut self) {
+        let popped_fnlits = self.fnlit_scopes.pop().unwrap_or_default();
+        if !popped_fnlits.is_empty() {
+            let mut merged_scopes = HashMap::new();
+            for layer in &self.scopes {
+                for (k, v) in layer {
+                    merged_scopes.insert(k.clone(), v.clone());
+                }
+            }
+            let cur_aliases = self.aliases.clone();
+            let cur_share = self.may_share.clone();
+            for span_start in &popped_fnlits {
+                if let Some((saved_env, _, _)) = self.closure_scoped_envs.get_mut(span_start) {
+                    for (k, v) in &merged_scopes {
+                        if let Some(sb) = saved_env.get_mut(k) {
+                            if sb.moved.is_none() && v.moved.is_some() {
+                                sb.moved = v.moved.clone();
+                            }
+                        } else {
+                            saved_env.insert(k.clone(), v.clone());
+                        }
+                    }
+                } else {
+                    self.closure_scoped_envs.insert(
+                        *span_start,
+                        (merged_scopes.clone(), cur_aliases.clone(), cur_share.clone()),
+                    );
+                }
+            }
+            if let Some(parent) = self.fnlit_scopes.last_mut() {
+                parent.extend(popped_fnlits);
+            }
+        }
         // Capture any moves on inner aliases or may-share peers before the
         // inner scope and alias/share maps are popped (handles the case where
         // an inner alias/holder was moved while an outer peer was shadowed).
@@ -527,15 +593,16 @@ impl<'a> Checker<'a> {
 // Small shared expression helpers
 // ---------------------------------------------------------------------------
 
-/// `&x` — both legal AST spellings (`Expr::AddrOf` and `Expr::Unary{Addr}`).
+/// `&x` — both legal AST spellings (`Expr::AddrOf` and `Expr::Unary{Addr}`),
+/// stripping any enclosing or inner parentheses (`(&x)`, `&(x)`).
 pub(crate) fn as_addr_of(e: &Expr) -> Option<&Expr> {
-    match e {
-        Expr::AddrOf { operand, .. } => Some(operand),
+    match unwrap_parens(e) {
+        Expr::AddrOf { operand, .. } => Some(unwrap_parens(operand)),
         Expr::Unary {
             op: hy_syntax::UnOp::Addr,
             operand,
             ..
-        } => Some(operand),
+        } => Some(unwrap_parens(operand)),
         _ => None,
     }
 }

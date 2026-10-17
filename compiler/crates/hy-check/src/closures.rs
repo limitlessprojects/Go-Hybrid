@@ -34,22 +34,42 @@ use hy_syntax::{Block, Expr, LocalKind, SelectArmKind, Stmt};
 /// `body` (one env per closure, captures included). Called once per
 /// function, after the flat Pass B loop — the enclosing env is complete.
 pub(crate) fn check_closure_boundaries(ck: &mut Checker<'_>, st: &FnState, body: &Block) {
-    for (params, body) in collect_fnlits(body) {
-        check_one_closure(ck, st, params, body);
+    for (span_start, params, body) in collect_fnlits(body) {
+        check_one_closure(ck, st, span_start, params, body);
     }
 }
 
 fn check_one_closure(
     ck: &mut Checker<'_>,
     st: &FnState,
+    span_start: (u32, u32),
     params: &[hy_syntax::Param],
     body: &Block,
 ) {
-    // env: captures (the enclosing bindings) + the closure's ascribed params.
+    // env: captures (the enclosing bindings, including any block-scoped
+    // bindings active at the closure literal site) + the closure's params.
     let mut cst = FnState {
         env: st.env.clone(),
+        aliases: st.aliases.clone(),
+        may_share: st.may_share.clone(),
+        closure_mutates: st.closure_mutates.clone(),
         ..FnState::default()
     };
+    if let Some((scoped_env, scoped_aliases, scoped_share)) = st.closure_scoped_envs.get(&span_start)
+    {
+        for (k, v) in scoped_env {
+            cst.env.insert(k.clone(), v.clone());
+        }
+        for (k, v) in scoped_aliases {
+            cst.aliases.insert(k.clone(), v.clone());
+        }
+        for (k, peers) in scoped_share {
+            cst.may_share
+                .entry(k.clone())
+                .or_default()
+                .extend(peers.iter().cloned());
+        }
+    }
     for (k, b) in cst.env.iter_mut() {
         if b.non_owned_origin.is_none() {
             b.non_owned_origin = Some(format!(
@@ -76,6 +96,7 @@ fn check_one_closure(
             },
         );
     }
+    ck.check_closure_slot_loans(&cst, body);
     check_body_boundaries(ck, &mut cst, body, false);
 }
 
@@ -457,7 +478,7 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
 /// Every FnLit reachable from `block`, outermost-first, including closures
 /// nested inside other closures' bodies. walk.rs's use/call collectors skip
 /// FnLit deliberately (A5); this walker exists precisely to see them.
-fn collect_fnlits(block: &Block) -> Vec<(&[hy_syntax::Param], &Block)> {
+fn collect_fnlits(block: &Block) -> Vec<((u32, u32), &[hy_syntax::Param], &Block)> {
     let mut out = Vec::new();
     for s in &block.stmts {
         collect_stmt(s, &mut out);
@@ -465,7 +486,10 @@ fn collect_fnlits(block: &Block) -> Vec<(&[hy_syntax::Param], &Block)> {
     out
 }
 
-fn collect_stmt<'a>(stmt: &'a Stmt, out: &mut Vec<(&'a [hy_syntax::Param], &'a Block)>) {
+fn collect_stmt<'a>(
+    stmt: &'a Stmt,
+    out: &mut Vec<((u32, u32), &'a [hy_syntax::Param], &'a Block)>,
+) {
     match stmt {
         Stmt::Local(l) => {
             for v in &l.values {
@@ -557,7 +581,7 @@ fn collect_stmt<'a>(stmt: &'a Stmt, out: &mut Vec<(&'a [hy_syntax::Param], &'a B
 
 fn collect_place<'a>(
     place: &'a hy_syntax::Place,
-    out: &mut Vec<(&'a [hy_syntax::Param], &'a Block)>,
+    out: &mut Vec<((u32, u32), &'a [hy_syntax::Param], &'a Block)>,
 ) {
     match &place.kind {
         hy_syntax::PlaceKind::Ident(_) => {}
@@ -570,17 +594,25 @@ fn collect_place<'a>(
     }
 }
 
-fn collect_block<'a>(block: &'a Block, out: &mut Vec<(&'a [hy_syntax::Param], &'a Block)>) {
+fn collect_block<'a>(
+    block: &'a Block,
+    out: &mut Vec<((u32, u32), &'a [hy_syntax::Param], &'a Block)>,
+) {
     for s in &block.stmts {
         collect_stmt(s, out);
     }
 }
 
-fn collect_expr<'a>(expr: &'a Expr, out: &mut Vec<(&'a [hy_syntax::Param], &'a Block)>) {
+fn collect_expr<'a>(
+    expr: &'a Expr,
+    out: &mut Vec<((u32, u32), &'a [hy_syntax::Param], &'a Block)>,
+) {
     match expr {
         Expr::Ident { .. } => {}
-        Expr::FnLit { params, body, .. } => {
-            out.push((params, body));
+        Expr::FnLit {
+            params, body, span, ..
+        } => {
+            out.push(((span.start.line, span.start.col), params, body));
             // nested closures inside this closure's body
             for s in &body.stmts {
                 collect_stmt(s, out);
