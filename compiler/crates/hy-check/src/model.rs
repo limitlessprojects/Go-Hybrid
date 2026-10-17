@@ -309,7 +309,34 @@ impl FnState {
         if let Some(outer_shadows) = self.shadow_link_scopes.pop() {
             self.shadow_links = outer_shadows;
         }
+        let inner_aliases = self.aliases.clone();
+        let inner_share = self.may_share.clone();
         if let Some(outer_aliases) = self.alias_scopes.pop() {
+            let mut new_outer_aliases: Vec<(String, String)> = Vec::new();
+            for (a, target) in &inner_aliases {
+                let root = crate::freeze::resolve_alias(self, target);
+                if !popped_scope.contains_key(a)
+                    && !popped_scope.contains_key(&root)
+                    && a != &root
+                {
+                    new_outer_aliases.push((a.clone(), root));
+                }
+            }
+            let mut new_outer_shares: Vec<(String, String)> = Vec::new();
+            for (k, peers) in &inner_share {
+                if !popped_scope.contains_key(k) {
+                    for peer in peers {
+                        if !popped_scope.contains_key(peer) && k != peer {
+                            new_outer_shares.push((k.clone(), peer.clone()));
+                        } else {
+                            let proot = crate::freeze::resolve_alias(self, peer);
+                            if !popped_scope.contains_key(&proot) && k != &proot {
+                                new_outer_shares.push((k.clone(), proot));
+                            }
+                        }
+                    }
+                }
+            }
             self.aliases = outer_aliases;
             if let Some(outer_share) = self.share_scopes.pop() {
                 self.may_share = outer_share;
@@ -317,16 +344,28 @@ impl FnState {
                     self.share_edge(&a, &b);
                 }
             }
-            for (root, mv) in inner_root_moves {
-                if let Some(br) = self.env_lookup_mut(&root) {
-                    if br.moved.is_none() {
-                        br.moved = Some(mv.clone());
-                    }
+            for (a, root) in new_outer_aliases {
+                if !self.aliases.contains_key(&a) {
+                    self.aliases.insert(a, root);
+                } else if crate::freeze::resolve_alias(self, &a) != root {
+                    self.share_edge(&a, &root);
                 }
-                for peer in self.share_group(&root) {
-                    if let Some(bp) = self.env_lookup_mut(&peer) {
-                        if bp.moved.is_none() {
-                            bp.moved = Some(mv.clone());
+            }
+            for (k, peer) in new_outer_shares {
+                self.share_edge(&k, &peer);
+            }
+            for (root, mv) in inner_root_moves {
+                if !popped_scope.contains_key(&root) {
+                    if let Some(br) = self.env_lookup_mut(&root) {
+                        if br.moved.is_none() {
+                            br.moved = Some(mv.clone());
+                        }
+                    }
+                    for peer in self.share_group(&root) {
+                        if let Some(bp) = self.env_lookup_mut(&peer) {
+                            if bp.moved.is_none() {
+                                bp.moved = Some(mv.clone());
+                            }
                         }
                     }
                 }
