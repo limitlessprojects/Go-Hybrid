@@ -26,6 +26,7 @@ jobs:
           python3 -m py_compile tools/runner/runner.py tools/job.py worker/script.py tools/corpus_harness.py tools/test_corpus_harness.py
           python3 -m unittest discover -s tools/fuzz -p 'test_hyfuzz.py'
           python3 -m unittest discover -s tools/runner -p test_runner.py -v
+          python3 -m unittest discover -s tools -p test_job_cli.py -v
           python3 -m unittest discover -s tools -p test_managed_gate.py -v
           python3 -m unittest discover -s tools -p test_differential_loop.py -v
           python3 -m unittest discover -s tools -p test_run_examples.py -v
