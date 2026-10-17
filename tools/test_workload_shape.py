@@ -29,6 +29,9 @@ class WorkloadShapeTests(unittest.TestCase):
             target = self.workloads / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / "benchmarks/workloads" / name, target)
+            # Git may have checked out CRLF on Windows. The generator writes
+            # canonical LF, so make byte-for-byte regeneration tests portable.
+            target.write_bytes(target.read_bytes().replace(b"\r\n", b"\n"))
             # A fixed old mtime detects even a byte-identical rewrite.
             os.utime(target, (1_000_000_000, 1_000_000_000))
 
@@ -57,6 +60,19 @@ class WorkloadShapeTests(unittest.TestCase):
     def test_matching_outputs_are_not_rewritten(self):
         result = self.assert_check_preserves_tree(0)
         self.assertIn("triplet shapes in sync", result.stdout)
+
+    def test_hybrid_alloc_caches_alphabet_outside_timed_work(self):
+        """The Rust twin initializes its alphabet once; Hybrid must not
+        rebuild a slice twice per byte inside the measured allocation loop.
+        """
+        source = (self.workloads / "hy/alloc.hy").read_text(encoding="utf-8")
+        main = source.split("fn main() {", 1)[1]
+        self.assertEqual(main.count("alphabet()"), 1)
+        self.assertIn("alphabet_values := alphabet()", main)
+        self.assertLess(main.index("alphabet_values := alphabet()"),
+                        main.index("for w in 0..windows"))
+        self.assertIn(
+            "append(item, alphabet_values[(j+k)%len(alphabet_values)])", main)
 
     def test_manifest_drift_fails_without_repairing_it(self):
         manifest = self.workloads / "rust/Cargo.toml"
