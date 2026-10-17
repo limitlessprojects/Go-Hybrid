@@ -11,3 +11,5 @@
 - **Wildcard M1 verdicts due 2026-11-01** in discussion #365 — authors invited to pre-answer the per-entry "review will press on" questions
 - Standing work: old-queue rebase assists (#67/#88/#93/#106/#197/#198/#99/#223), tools/kaggle batch (#97/#113/#124/#189/#219/#317/#320/#321/#328/#335/#340/#341/#363), CI registration checks (#325/#330/#333)
 - Last review gate: G3 PASSED 2026-10-13; community review is a standing input to the queue
+
+- 2026-10-17 installed-version probe status: baseline produces two false-green failing subcases; corrected gate passes all 13 test methods with real local shell fixtures. No installed compiler or paid service used.
