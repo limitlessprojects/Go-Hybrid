@@ -120,21 +120,8 @@ fn check_one_closure(
     let mut nested = Vec::new();
     cst.scope_push();
     check_body_boundaries(ck, &mut cst, body, false, &mut nested);
-    for (nparams, nresults, nbody, mut saved_scopes, saved_aliases, saved_share) in nested {
-        if !saved_scopes.is_empty() && !cst.scopes.is_empty() {
-            for (k, b) in &cst.scopes[0] {
-                match saved_scopes[0].get_mut(k) {
-                    Some(sb) => {
-                        if sb.moved.is_none() && b.moved.is_some() {
-                            sb.moved = b.moved.clone();
-                        }
-                    }
-                    None => {
-                        saved_scopes[0].insert(k.clone(), b.clone());
-                    }
-                }
-            }
-        }
+    sync_nested_moves(&cst, &mut nested);
+    for (nparams, nresults, nbody, saved_scopes, saved_aliases, saved_share) in nested {
         let mut snap = cst.clone();
         snap.scopes = saved_scopes;
         // A nested closure checks against ITS OWN named results: reset the
@@ -149,9 +136,63 @@ fn check_one_closure(
         for (k, vs) in saved_share {
             snap.may_share.entry(k).or_default().extend(vs);
         }
+        propagate_moved_peers(&mut snap);
         check_one_closure(ck, &snap, nparams, nresults, nbody);
     }
     cst.scope_pop();
+}
+
+fn sync_nested_moves(st: &FnState, nested: &mut [NestedClosure<'_>]) {
+    for (_, _, _, saved_scopes, _, _) in nested.iter_mut() {
+        let depth = st.scopes.len().min(saved_scopes.len());
+        for d in 0..depth {
+            for (k, b) in &st.scopes[d] {
+                if b.moved.is_some() {
+                    if let Some(sb) = saved_scopes[d].get_mut(k) {
+                        if sb.moved.is_none() && sb.shape == b.shape {
+                            sb.moved = b.moved.clone();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn propagate_moved_peers(snap: &mut FnState) {
+    let mut moved_seeds: Vec<(String, crate::model::MoveInfo)> = Vec::new();
+    for (k, b) in &snap.env {
+        if let Some(mv) = &b.moved {
+            moved_seeds.push((k.clone(), mv.clone()));
+        }
+    }
+    for scope in &snap.scopes {
+        for (k, b) in scope {
+            if let Some(mv) = &b.moved {
+                moved_seeds.push((k.clone(), mv.clone()));
+            }
+        }
+    }
+    for (name, mv) in moved_seeds {
+        let root = crate::freeze::resolve_alias(snap, &name);
+        let mut members: Vec<String> = vec![name.clone(), root.clone()];
+        for a in snap.aliases.keys() {
+            if crate::freeze::resolve_alias(snap, a) == root {
+                members.push(a.clone());
+            }
+        }
+        let seeded = members.clone();
+        for m in seeded {
+            members.extend(snap.share_group(&m));
+        }
+        for m in members {
+            if let Some(b) = snap.env_lookup_mut(&m) {
+                if b.moved.is_none() {
+                    b.moved = Some(mv.clone());
+                }
+            }
+        }
+    }
 }
 
 /// Walk one closure body recursively, checking boundary statements only.
@@ -167,8 +208,7 @@ fn check_body_boundaries<'a>(
 ) {
     for stmt in &block.stmts {
         check_stmt_boundaries(ck, st, stmt, managed, nested);
-    }
-    for stmt in &block.stmts {
+        sync_nested_moves(st, nested);
         collect_stmt_direct_fnlits(stmt, st, nested);
     }
 }

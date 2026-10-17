@@ -503,6 +503,72 @@ impl<'a> Checker<'a> {
         self.stmts_mutate_param(&block.stmts, param, depth)
     }
 
+    fn expr_reaches_param(val: &Expr, param: &str) -> bool {
+        if walk::expr_path(val)
+            .map(|p| path_root(&p) == param)
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        let mut roots = Vec::new();
+        collect_ref_roots(val, &mut roots);
+        roots.iter().any(|r| r == param)
+    }
+
+    fn collect_assigned_aliases_in_stmt(stmt: &Stmt, param: &str, out: &mut Vec<String>) {
+        match stmt {
+            Stmt::Assign {
+                targets, values, ..
+            } if targets.len() == values.len() => {
+                for (t, val) in targets.iter().zip(values.iter()) {
+                    if let PlaceKind::Ident(name) = &t.kind {
+                        if name != param && Self::expr_reaches_param(val, param) {
+                            out.push(name.clone());
+                        }
+                    }
+                }
+            }
+            Stmt::If {
+                init,
+                then,
+                otherwise,
+                ..
+            } => {
+                if let Some(i) = init {
+                    Self::collect_assigned_aliases_in_stmt(i, param, out);
+                }
+                for s in &then.stmts {
+                    Self::collect_assigned_aliases_in_stmt(s, param, out);
+                }
+                if let Some(o) = otherwise {
+                    Self::collect_assigned_aliases_in_stmt(o, param, out);
+                }
+            }
+            Stmt::For { body, .. }
+            | Stmt::Managed { body, .. }
+            | Stmt::Block { block: body, .. } => {
+                for s in &body.stmts {
+                    Self::collect_assigned_aliases_in_stmt(s, param, out);
+                }
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    for s in &arm.body.stmts {
+                        Self::collect_assigned_aliases_in_stmt(s, param, out);
+                    }
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                for arm in arms {
+                    for s in &arm.body.stmts {
+                        Self::collect_assigned_aliases_in_stmt(s, param, out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn stmts_mutate_param(&self, stmts: &[Stmt], param: &str, depth: usize) -> bool {
         for (i, s) in stmts.iter().enumerate() {
             if self.stmt_mutates_param(s, param, depth) {
@@ -512,11 +578,11 @@ impl<'a> Checker<'a> {
                 Stmt::Local(l) => {
                     let mut shadowed = false;
                     for (name, val) in l.names.iter().zip(l.values.iter()) {
-                        let is_alias = walk::expr_path(val)
-                            .map(|p| path_root(&p) == param)
-                            .unwrap_or(false);
+                        let is_alias = Self::expr_reaches_param(val, param);
                         if is_alias {
-                            if self.stmts_mutate_param(&stmts[i + 1..], name, depth) {
+                            if name != param
+                                && self.stmts_mutate_param(&stmts[i + 1..], name, depth)
+                            {
                                 return true;
                             }
                         } else if name == param {
@@ -533,9 +599,7 @@ impl<'a> Checker<'a> {
                     let mut rebound_other = false;
                     for (t, val) in targets.iter().zip(values.iter()) {
                         if let PlaceKind::Ident(name) = &t.kind {
-                            let is_alias = walk::expr_path(val)
-                                .map(|p| path_root(&p) == param)
-                                .unwrap_or(false);
+                            let is_alias = Self::expr_reaches_param(val, param);
                             if is_alias {
                                 if name != param
                                     && self.stmts_mutate_param(&stmts[i + 1..], name, depth)
@@ -551,7 +615,15 @@ impl<'a> Checker<'a> {
                         return false;
                     }
                 }
-                _ => {}
+                _ => {
+                    let mut assigned = Vec::new();
+                    Self::collect_assigned_aliases_in_stmt(s, param, &mut assigned);
+                    for alias_name in assigned {
+                        if self.stmts_mutate_param(&stmts[i + 1..], &alias_name, depth) {
+                            return true;
+                        }
+                    }
+                }
             }
         }
         false
@@ -771,6 +843,11 @@ impl<'a> Checker<'a> {
         let mut local_aliases: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         let mut local_shadows: HashSet<String> = bound.clone();
+        let mut scope_stack: Vec<(
+            std::collections::HashMap<String, String>,
+            HashSet<String>,
+            HashSet<String>,
+        )> = Vec::new();
         let mut match_aliases: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
         let resolve = |raw: &str,
@@ -785,19 +862,93 @@ impl<'a> Checker<'a> {
             }
             Some(raw.to_string())
         };
+        let resolve_expr = |val: &Expr,
+                            aliases: &std::collections::HashMap<String, String>,
+                            shadows: &HashSet<String>|
+         -> Option<String> {
+            if let Some(p) = walk::expr_path(val) {
+                if let Some(r) = resolve(path_root(&p), aliases, shadows) {
+                    return Some(r);
+                }
+            }
+            let mut roots = Vec::new();
+            collect_ref_roots(val, &mut roots);
+            roots
+                .into_iter()
+                .find_map(|r| resolve(&r, aliases, shadows))
+        };
         let flat = walk::flatten(body);
-        for (stmt, _idx) in &flat.stmts {
+        for (stmt, idx) in &flat.stmts {
+            if let Some(evs) = flat.events.get(idx) {
+                for ev in evs {
+                    match ev {
+                        walk::ScopeEvent::Push => {
+                            scope_stack.push((
+                                local_aliases.clone(),
+                                local_shadows.clone(),
+                                HashSet::new(),
+                            ));
+                        }
+                        walk::ScopeEvent::Pop => {
+                            if let Some((saved_aliases, saved_shadows, block_locals)) =
+                                scope_stack.pop()
+                            {
+                                for bl in &block_locals {
+                                    if let Some(prev_a) = saved_aliases.get(bl) {
+                                        local_aliases.insert(bl.clone(), prev_a.clone());
+                                    } else {
+                                        local_aliases.remove(bl);
+                                    }
+                                    if saved_shadows.contains(bl) {
+                                        local_shadows.insert(bl.clone());
+                                    } else {
+                                        local_shadows.remove(bl);
+                                    }
+                                }
+                                let current_shadows: Vec<String> =
+                                    local_shadows.iter().cloned().collect();
+                                for k in current_shadows {
+                                    if !block_locals.contains(&k) && !saved_shadows.contains(&k) {
+                                        local_shadows.remove(&k);
+                                    }
+                                }
+                            }
+                        }
+                        walk::ScopeEvent::SelectRecv { names, .. } => {
+                            for n in *names {
+                                if let Some((_, _, block_locals)) = scope_stack.last_mut() {
+                                    block_locals.insert(n.clone());
+                                }
+                                local_aliases.remove(n.as_str());
+                                local_shadows.insert(n.clone());
+                            }
+                        }
+                        walk::ScopeEvent::MatchBind { .. } => {}
+                    }
+                }
+            }
             match stmt {
                 Stmt::Local(l) => {
-                    for (name, val) in l.names.iter().zip(l.values.iter()) {
-                        let resolved = walk::expr_path(val)
-                            .and_then(|p| resolve(path_root(&p), &local_aliases, &local_shadows));
-                        if let Some(r) = resolved {
-                            local_shadows.remove(name.as_str());
-                            local_aliases.insert(name.clone(), r);
-                        } else {
+                    for name in &l.names {
+                        if let Some((_, _, block_locals)) = scope_stack.last_mut() {
+                            block_locals.insert(name.clone());
+                        }
+                    }
+                    if l.values.is_empty() {
+                        for name in &l.names {
                             local_aliases.remove(name.as_str());
                             local_shadows.insert(name.clone());
+                        }
+                    } else {
+                        for (name, val) in l.names.iter().zip(l.values.iter()) {
+                            let resolved = resolve_expr(val, &local_aliases, &local_shadows);
+                            if let Some(r) = resolved {
+                                local_shadows.remove(name.as_str());
+                                local_aliases.insert(name.clone(), r);
+                            } else {
+                                local_aliases.remove(name.as_str());
+                                local_shadows.insert(name.clone());
+                            }
                         }
                     }
                 }
@@ -806,9 +957,7 @@ impl<'a> Checker<'a> {
                 } if targets.len() == values.len() => {
                     for (t, val) in targets.iter().zip(values.iter()) {
                         if let PlaceKind::Ident(name) = &t.kind {
-                            let resolved = walk::expr_path(val).and_then(|p| {
-                                resolve(path_root(&p), &local_aliases, &local_shadows)
-                            });
+                            let resolved = resolve_expr(val, &local_aliases, &local_shadows);
                             if let Some(r) = resolved {
                                 local_shadows.remove(name.as_str());
                                 local_aliases.insert(name.clone(), r);
