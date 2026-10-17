@@ -22,7 +22,7 @@ impl<'a> Checker<'a> {
         self.check_stmt_builtin_args_inner(stmt, /*deep=*/ false);
     }
 
-    fn check_stmt_defer_call(&mut self, stmt: &Stmt) {
+    pub(crate) fn check_stmt_defer_call(&mut self, stmt: &Stmt) {
         let Stmt::Defer { call, span } = stmt else {
             return;
         };

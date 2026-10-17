@@ -249,6 +249,13 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
         check_stmt_own_uses(ck, st, stmt, managed);
     }
 
+    // Issue #288 integration: closure bodies sit outside the Tier-0 flat
+    // walk, where builtins.rs owns the HYB-E2001 defer-operand rule — so a
+    // `defer 3` one scope in passed main with 0 diagnostics and failed late
+    // in the emitter. One owner (builtins.rs), wired here for the A5
+    // perimeter. Pure shape classification: no use/define ordering concerns.
+    ck.check_stmt_defer_call(stmt);
+
     match stmt {
         Stmt::Local(l) => {
             for v in &l.values {

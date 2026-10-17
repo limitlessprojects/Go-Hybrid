@@ -90,7 +90,28 @@ impl Emitter {
                 Ok(())
             }
             Stmt::Defer { call, .. } => {
-                let c = self.emit_expr(call, 0)?;
+                // P1 (§7): a deferred CALL's arguments are evaluated at defer
+                // time, so a `?` inside them hoists to a binding BEFORE this
+                // `defer`, in evaluation order — the same hoist every other
+                // statement form runs (define, assign, send, if/for/match
+                // conditions). Without it the hoister never registers the
+                // temp and `emit_expr` refuses the `?` as "outside a binding
+                // position".
+                //
+                // The operand's parens are peeled for BOTH the hoist gate and
+                // the emission, mirroring the checker's HYB-E2001 test, which
+                // unwraps parens too (a parenthesized call is still a call).
+                // Emission MUST use the peeled operand: Go rejects a
+                // parenthesized defer operand ("expression in defer must be
+                // function call"), so `defer (f.close())` has to lower to
+                // `defer f.Close()` — emitting `defer (f.Close())` would be
+                // invalid Go. A non-call operand (which the checker rejects)
+                // is left peeled-but-ungated and fails loudly below.
+                let operand = Self::peel_parens(call);
+                if matches!(operand, Expr::Call { .. }) {
+                    self.hoist_tries_expr(operand)?;
+                }
+                let c = self.emit_expr(operand, 0)?;
                 self.push(&format!("defer {}", c));
                 Ok(())
             }

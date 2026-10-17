@@ -209,6 +209,64 @@ fn example02_try_desugar_and_defer() {
     );
 }
 
+    #[test]
+    fn defer_call_argument_try_hoists_before_the_defer() {
+        // P1 (§7): a deferred call's arguments are evaluated at defer time, so a
+        // `?` inside them hoists to a binding BEFORE the `defer` — the call
+        // itself stays deferred. Regression for the check→emit gap where the
+        // hoister never registered the temp and `emit_expr` refused the `?` as
+        // "outside a binding position" on a program the checker accepted.
+        let go = emit(
+            "fn probe() (n int, e error) {\n    return 1, nil\n}\n\nfn sink(n int) {\n    fmt.println(n)\n}\n\nfn main() (code int) {\n    defer sink(probe()?)\n    return 0\n}\n",
+        );
+        let hoist = go
+            .find(":= probe()")
+            .unwrap_or_else(|| panic!("argument `?` must hoist://n{}", go));
+        let defer_at = go
+            .find("defer sink(")
+            .unwrap_or_else(|| panic!("defer stays a deferred call://n{}", go));
+        assert!(hoist < defer_at, "hoist must precede the defer://n{}", go);
+    }
+
+    #[test]
+    fn defer_parenthesized_operand_emits_without_parens() {
+        // Go rejects a parenthesized defer operand ("expression in defer must be
+        // function call"), so a parenthesized call must lower to a bare one:
+        // `defer (fmt.println("done"))` -> `defer fmt.Println("done")`.
+        let go = emit("fn main() {\n    defer (fmt.println(\"done\"))\n}\n");
+        assert!(go.contains("defer fmt.Println(\"done\")"), ":\n{}", go);
+        assert!(
+            !go.contains("defer ("),
+            "the defer operand must not keep its parens://n{}",
+            go
+        );
+    }
+
+    #[test]
+    fn defer_parenthesized_call_argument_try_hoists_before_the_defer() {
+        // Regression (adversarial review): `defer (sink(probe()?))` — the operand
+        // is a `Paren{Call}`, so the hoist gate has to unwrap parens exactly like
+        // the checker's HYB-E2001 test does (a parenthesized call is still a
+        // call). Otherwise the checker accepts the program and the emitter dies
+        // late with "`?` outside a binding position" — the very gap this branch
+        // closes, reintroduced by one set of parens.
+        let go = emit(
+            "fn probe() (n int, e error) {\n    return 1, nil\n}\n\nfn sink(n int) {\n    fmt.println(n)\n}\n\nfn main() (code int) {\n    defer (sink(probe()?))\n    return 0\n}\n",
+        );
+        let hoist = go
+            .find(":= probe()")
+            .unwrap_or_else(|| panic!("parenthesized argument `?` must hoist://n{}", go));
+        let defer_at = go
+            .find("defer sink(")
+            .unwrap_or_else(|| panic!("defer lowered without parens://n{}", go));
+        assert!(hoist < defer_at, "hoist must precede the defer://n{}", go);
+        assert!(
+            !go.contains("defer ("),
+            "no parens in the emitted defer://n{}",
+            go
+        );
+    }
+
 // ---------------------------------------------------------------------------
 // Example 03 — worker pool (structs-first, task→go, send/receive, close)
 // ---------------------------------------------------------------------------
