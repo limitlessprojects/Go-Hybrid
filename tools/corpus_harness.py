@@ -45,7 +45,13 @@ DIAGNOSTIC_RE = re.compile(r"//[ \t]*EXPECTED-DIAGNOSTIC:[ \t]*(HYB-E[0-9]{4})[ 
 # As-written managed (the friction number) — the pre-registered static list
 # from VERDICTS.md "Tripwire baseline" (04 counts only while lock-mediated
 # sharing stays outside Tier 0, OQ2):
-AS_WRITTEN_MANAGED = {"01", "03", "04"}
+# Match registered fixture filenames, not just numbers: a custom --corpus
+# may use the same numbering for unrelated programs.
+AS_WRITTEN_MANAGED = {
+    "01-shared-map-across-tasks.hy",
+    "03-pool-shared-struct-unguarded.hy",
+    "04-pool-shared-struct-mutex.hy",
+}
 TRIPWIRE_PCT = 25.0  # ~25%, recorded tunable (SPEC §9.7)
 
 
@@ -198,6 +204,7 @@ def main():
     managed_sites = 0
     total_sites = 0
     accept_managed_count = 0
+    as_written_managed_count = 0
     expected_diagnostics = {}
     got_diagnostics = {}
 
@@ -214,7 +221,8 @@ def main():
             print(f"SKIP (no EXPECTED-VERDICT): {fname}")
             continue
         total += 1
-        num = fname.split("-", 1)[0]
+        if fname in AS_WRITTEN_MANAGED:
+            as_written_managed_count += 1
         try:
             summary, diags = run_checker(args.bin, path, args.report_managed)
         except RuntimeError as e:
@@ -267,9 +275,9 @@ def main():
 
     # tripwire recompute (definitions fixed in VERDICTS.md)
     verdict_level = 100.0 * accept_managed_count / total if total else 0.0
-    as_written = 100.0 * len(AS_WRITTEN_MANAGED) / total if total else 0.0
+    as_written = 100.0 * as_written_managed_count / total if total else 0.0
     print(f"tripwire (verdict-level managed): {accept_managed_count}/{total} = {verdict_level:.1f}%")
-    print(f"tripwire (as-written managed):    {len(AS_WRITTEN_MANAGED)}/{total} = {as_written:.1f}%")
+    print(f"tripwire (as-written managed):    {as_written_managed_count}/{total} = {as_written:.1f}%")
     print(f"tripwire threshold: ~{TRIPWIRE_PCT}% (tunable, SPEC §9.7)")
     if verdict_level > TRIPWIRE_PCT or as_written > TRIPWIRE_PCT:
         print("TRIPWIRE FIRED: reopen G0 with the §9.4 alternatives table")
