@@ -389,8 +389,80 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         vec![None; l.names.len()],
                     ),
                 };
-                for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
-                    ck.define_binding(st, name, shape, ty, immutable, managed);
+                for (i, ((name, shape), ty)) in l.names.iter().zip(shapes).zip(tys).enumerate() {
+                    let is_index_unpack = i == 0
+                        && l.names.len() == 2
+                        && (ck.shape_may_share(&shape) || matches!(shape, TypeShape::Unknown))
+                        && l.values
+                            .first()
+                            .is_some_and(|v| matches!(crate::model::unwrap_parens(v), Expr::Index { .. }));
+                    let shadowed_const = is_index_unpack
+                        && ck.shape_may_share(&shape)
+                        && l.values.first().is_some_and(|v| {
+                            ck.value_reads_storage_of(st, v, name)
+                                && ck
+                                    .lookup_binding(st, name)
+                                    .is_some_and(|b| b.immutable)
+                        });
+                    let reads_self = is_index_unpack
+                        && l.values
+                            .first()
+                            .is_some_and(|v| ck.value_reads_storage_of(st, v, name));
+                    let shadowed_origin = if ck.shape_may_share(&shape) && reads_self {
+                        ck.non_owned_origin_of(st, name).map(|(o, via_share)| {
+                            if via_share && !o.starts_with("a may-share peer of ") {
+                                format!("a may-share peer of {}", o)
+                            } else {
+                                o
+                            }
+                        })
+                    } else {
+                        None
+                    };
+                    let prior_alias = if reads_self {
+                        st.aliases.get(name).cloned()
+                    } else {
+                        None
+                    };
+                    let prior_shares: Vec<String> = if reads_self {
+                        st.may_share
+                            .get(name)
+                            .map(|s| s.iter().cloned().collect())
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    ck.define_binding(
+                        st,
+                        name,
+                        shape,
+                        ty,
+                        immutable || shadowed_const,
+                        managed,
+                    );
+                    if reads_self {
+                        if let Some(pa) = prior_alias {
+                            if pa != *name {
+                                st.aliases.insert(name.clone(), pa);
+                            }
+                        }
+                        for peer in prior_shares {
+                            st.share_edge(name, &peer);
+                        }
+                    }
+                    if is_index_unpack {
+                        if let Some(v) = l.values.first() {
+                            ck.record_may_share(st, name, v);
+                            ck.record_alias(st, name, v);
+                        }
+                        if let Some(origin) = shadowed_origin {
+                            if let Some(b) = st.env_lookup_mut(name) {
+                                if b.non_owned_origin.is_none() {
+                                    b.non_owned_origin = Some(origin);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
