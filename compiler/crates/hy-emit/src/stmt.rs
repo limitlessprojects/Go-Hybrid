@@ -234,6 +234,10 @@ impl Emitter {
     // -----------------------------------------------------------------------
 
     fn emit_local(&mut self, l: &LocalDecl) -> Result<(), EmitError> {
+        self.emit_local_in_seq(l, &[])
+    }
+
+    fn emit_local_in_seq(&mut self, l: &LocalDecl, rest: &[Stmt]) -> Result<(), EmitError> {
         match l.kind {
             LocalKind::Var => {
                 let ty = l.ty.as_ref().map(|t| self.type_text(t));
@@ -302,28 +306,6 @@ impl Emitter {
             LocalKind::Define | LocalKind::Let => {}
         }
 
-        // `x := &m[k]` / `x := &s.field` — the O8 map-slot loan. Go cannot
-        // take a map-index address; the ownership model's answer (O9: Go-heap
-        // reads are copies) lowers to copy-read now + store-back at the
-        // declaring block's end. A plain `&x` (local var address) is legal
-        // Go and stays verbatim.
-        if l.values.len() == 1 {
-            if let Expr::AddrOf { operand, .. } = &l.values[0] {
-                if matches!(operand.as_ref(), Expr::Index { .. } | Expr::Field { .. }) {
-                    let place = self.emit_expr(operand, 0)?;
-                    let names = l.names.join(", ");
-                    self.push(&format!("{} := {}", names, place));
-                    if l.names.len() == 1 {
-                        if let Some(frame) = self.loan_frames.last_mut() {
-                            frame.push((l.names[0].clone(), place));
-                        }
-                        self.bindings.insert(l.names[0].clone(), BindingKind::Plain);
-                    }
-                    return Ok(());
-                }
-            }
-        }
-
         // `x := f()?` — the try desugar. Values.len() == 1, a Try node.
         if l.values.len() == 1 {
             if let Expr::Try { operand, .. } = &l.values[0] {
@@ -342,20 +324,59 @@ impl Emitter {
             }
         }
 
+        if l.ty.is_some() {
+            return Err(EmitError::unsupported(
+                "type-ascribed `:=` — write `var x T = e` or `x := e`",
+            ));
+        }
+
+        // `x := &m[k]` / `x := &s.field` (including parallel defines) — the
+        // O8 map-slot/field loan. Go cannot take a map-index address; the
+        // ownership model's answer (O9: Go-heap reads are copies) lowers to
+        // copy-read now + store-back when the loan's non-lexical window ends
+        // (or at the declaring block's end). A plain `&x` (local var address)
+        // is legal Go and stays verbatim.
+        if l.names.len() == l.values.len()
+            && l.values
+                .iter()
+                .any(|v| Self::as_slot_loan_operand(v).is_some())
+        {
+            let mut val_texts = Vec::with_capacity(l.values.len());
+            let mut new_loans = Vec::new();
+            for (name, v) in l.names.iter().zip(l.values.iter()) {
+                if let Some(operand) = Self::as_slot_loan_operand(v) {
+                    let (read_place, write_place) =
+                        self.emit_slot_loan_place(operand, name, rest)?;
+                    val_texts.push(read_place);
+                    if name != "_" {
+                        new_loans.push((name.clone(), write_place));
+                        self.bindings.insert(name.clone(), BindingKind::Plain);
+                    }
+                } else {
+                    val_texts.push(self.emit_expr(v, 0)?);
+                }
+            }
+            for (loan_name, _) in &new_loans {
+                self.flush_loan_for_name(loan_name);
+            }
+            self.push(&format!(
+                "{} := {}",
+                l.names.join(", "),
+                val_texts.join(", ")
+            ));
+            if let Some(frame) = self.loan_frames.last_mut() {
+                frame.extend(new_loans);
+            }
+            return Ok(());
+        }
+
         let values = l
             .values
             .iter()
             .map(|v| self.emit_expr(v, 0))
             .collect::<Result<Vec<_>, _>>()?;
         let names = l.names.join(", ");
-        match (l.ty.as_ref(), values.len()) {
-            (Some(_), _) => {
-                return Err(EmitError::unsupported(
-                    "type-ascribed `:=` — write `var x T = e` or `x := e`",
-                ));
-            }
-            (None, _) => self.push(&format!("{} := {}", names, values.join(", "))),
-        }
+        self.push(&format!("{} := {}", names, values.join(", ")));
         // A struct-literal define carries the receiver's struct name
         // (Batch I): `stats := pool_stats{}` — field chains type through
         // struct_fields (18's `stats.mu.lock()`).
@@ -1068,24 +1089,68 @@ impl Emitter {
         op: AssignOp,
         values: &[Expr],
     ) -> Result<(), EmitError> {
-        // `x := &m[k]` / `x := &s.field` — the O8 map-slot loan. Go cannot
-        // take a map-index address; the ownership model's answer (O9: Go-heap
-        // reads are copies) lowers to copy-read now + store-back at the
-        // declaring block's end. A plain `&x` (local var address) is legal
-        // Go and stays verbatim.
-        if targets.len() == 1 && values.len() == 1 && op == AssignOp::Assign {
-            if let Expr::AddrOf { operand, .. } = &values[0] {
-                if matches!(operand.as_ref(), Expr::Index { .. } | Expr::Field { .. }) {
-                    if let PlaceKind::Ident(name) = &targets[0].kind {
-                        let place = self.emit_expr(operand, 0)?;
-                        self.push(&format!("{} = {}", name, place));
-                        if let Some(frame) = self.loan_frames.last_mut() {
-                            frame.push((name.clone(), place));
-                        }
-                        return Ok(());
-                    }
+        self.emit_assign_in_seq(targets, op, values, &[])
+    }
+
+    fn emit_assign_in_seq(
+        &mut self,
+        targets: &[Place],
+        op: AssignOp,
+        values: &[Expr],
+        rest: &[Stmt],
+    ) -> Result<(), EmitError> {
+        // `x = &m[k]` / `x = &s.field` — the O8 map-slot loan (single or parallel).
+        // Go cannot take a map-index address; the ownership model's answer (O9: Go-heap
+        // reads are copies) lowers to copy-read now + store-back at the loan's last use
+        // (or declaring block's end). Rebinding an existing slot-loan variable flushes
+        // its previous store-back before overwriting the variable.
+        if op == AssignOp::Assign
+            && targets.len() == values.len()
+            && !values.is_empty()
+            && targets
+                .iter()
+                .all(|t| matches!(&t.kind, PlaceKind::Ident(_)))
+            && values.iter().any(|v| Self::as_slot_loan_operand(v).is_some())
+        {
+            for (idx, v) in values.iter().enumerate() {
+                let later_has_try = values[idx + 1..].iter().any(Self::expr_has_hoistable_try);
+                if later_has_try {
+                    self.hoist_order_before_try(v)?;
+                } else {
+                    self.hoist_tries_expr(v)?;
                 }
             }
+            let names: Vec<String> = targets
+                .iter()
+                .map(|t| match &t.kind {
+                    PlaceKind::Ident(n) => n.clone(),
+                    _ => unreachable!(),
+                })
+                .collect();
+            for name in &names {
+                if name != "_" {
+                    self.flush_loan_for_name(name);
+                }
+            }
+            let mut rhs_texts = Vec::with_capacity(values.len());
+            let mut new_loans = Vec::new();
+            for (name, v) in names.iter().zip(values.iter()) {
+                if let Some(operand) = Self::as_slot_loan_operand(v) {
+                    let (read_place, write_place) =
+                        self.emit_slot_loan_place(operand, name, rest)?;
+                    rhs_texts.push(read_place);
+                    if name != "_" {
+                        new_loans.push((name.clone(), write_place));
+                    }
+                } else {
+                    rhs_texts.push(self.emit_expr(v, 0)?);
+                }
+            }
+            self.push(&format!("{} = {}", names.join(", "), rhs_texts.join(", ")));
+            if let Some(frame) = self.loan_frames.last_mut() {
+                frame.extend(new_loans);
+            }
+            return Ok(());
         }
         if targets.len() == 1 && values.len() == 1 && op == AssignOp::Assign {
             if let PlaceKind::Ident(name) = &targets[0].kind {
@@ -1344,17 +1409,7 @@ impl Emitter {
     pub fn emit_block_body(&mut self, stmts: &[Stmt]) -> Result<(), EmitError> {
         self.loan_frames.push(Vec::new());
         self.indent += 1;
-        for st in stmts {
-            self.emit_stmt(st)?;
-        }
-        let frame = self.loan_frames.pop().unwrap_or_default();
-        if !stmts.iter().any(Self::stmt_terminates) {
-            for (name, place) in frame {
-                if !name.is_empty() {
-                    self.push(&format!("{} = {}", place, name));
-                }
-            }
-        }
+        self.emit_stmts_with_loans(stmts)?;
         self.indent -= 1;
         Ok(())
     }
@@ -1461,13 +1516,7 @@ impl Emitter {
                 self.push("break");
                 self.indent -= 1;
                 self.push("}");
-                for st in &body.stmts {
-                    self.emit_stmt(st)?;
-                }
-                let frame = self.loan_frames.pop().unwrap_or_default();
-                for (name, place) in frame {
-                    self.push(&format!("{} = {}", place, name));
-                }
+                self.emit_stmts_with_loans(&body.stmts)?;
                 self.indent -= 1;
                 self.push("}");
                 return Ok(());
@@ -1889,9 +1938,8 @@ impl Emitter {
                         if binding.as_str() != primary_binding.as_str() {
                             self.push(&format!("{} := {}", binding, primary_binding));
                         }
-                        for st in &arm.body.stmts {
-                            self.emit_stmt(st)?;
-                        }
+                        self.loan_frames.push(Vec::new());
+                        self.emit_stmts_with_loans(&arm.body.stmts)?;
                         self.indent -= 1;
                         chain_opened = true;
                     }
@@ -1903,9 +1951,8 @@ impl Emitter {
                         if binding.as_str() != primary_binding.as_str() {
                             self.push(&format!("{} := {}", binding, primary_binding));
                         }
-                        for st in &arm.body.stmts {
-                            self.emit_stmt(st)?;
-                        }
+                        self.loan_frames.push(Vec::new());
+                        self.emit_stmts_with_loans(&arm.body.stmts)?;
                         if chain_opened {
                             self.indent -= 1;
                             self.push("}");
@@ -1945,9 +1992,8 @@ impl Emitter {
                 if binding.as_str() != primary_binding.as_str() {
                     self.push(&format!("{} := {}", binding, primary_binding));
                 }
-                for st in &arm.body.stmts {
-                    self.emit_stmt(st)?;
-                }
+                self.loan_frames.push(Vec::new());
+                self.emit_stmts_with_loans(&arm.body.stmts)?;
                 self.indent -= 1;
             }
             self.push("}");
@@ -1959,32 +2005,451 @@ impl Emitter {
                     self.push(&format!("if !{} && !{}.ok {{", matched_temp, temp));
                     self.indent += 1;
                     self.push(&format!("{} = true", matched_temp));
-                    for st in &arm.body.stmts {
-                        self.emit_stmt(st)?;
-                    }
+                    self.loan_frames.push(Vec::new());
+                    self.emit_stmts_with_loans(&arm.body.stmts)?;
                     self.indent -= 1;
                     self.push("}");
                 } else {
                     self.push(&format!("if !{} && !{}.ok {{", matched_temp, temp));
-                    self.indent += 1;
-                    for st in &arm.body.stmts {
-                        self.emit_stmt(st)?;
-                    }
-                    self.indent -= 1;
+                    self.emit_block_body(&arm.body.stmts)?;
                     self.push("}");
                 }
             }
 
             if let Some(arm) = wildcard_arm {
                 self.push(&format!("if !{} {{", matched_temp));
-                self.indent += 1;
-                for st in &arm.body.stmts {
-                    self.emit_stmt(st)?;
-                }
-                self.indent -= 1;
+                self.emit_block_body(&arm.body.stmts)?;
                 self.push("}");
             }
         }
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // O8 slot-loan emission helpers (Issue #246)
+    // -----------------------------------------------------------------------
+
+    /// Recognize any `&<index-or-field-place>` (or parenthesized form):
+    /// `&m[k]`, `&s.field`, `&m[k].field`, `&s[i][j].inner`, etc.
+    pub(crate) fn as_slot_loan_operand(e: &Expr) -> Option<&Expr> {
+        match Self::peel_parens(e) {
+            Expr::AddrOf { operand, .. } => {
+                let inner = Self::peel_parens(operand);
+                if matches!(inner, Expr::Index { .. } | Expr::Field { .. }) {
+                    Some(inner)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Emit the place of an O8 slot loan while stabilizing any dynamic or
+    /// mutated index / key expressions into temporary `hyKeyN` bindings so
+    /// both the initial copy-read and the later writeback address the exact
+    /// same slot.
+    pub(crate) fn emit_slot_loan_place(
+        &mut self,
+        place: &Expr,
+        loan_var: &str,
+        rest: &[Stmt],
+    ) -> Result<(String, String), EmitError> {
+        // Slice `rest` down to the active window of `loan_var` (through its
+        // last mention in `rest`).
+        let last_use_len = rest
+            .iter()
+            .rposition(|s| Self::stmt_mentions_ident(s, loan_var))
+            .map(|idx| idx + 1)
+            .unwrap_or(0);
+        let active_rest = &rest[..last_use_len];
+        let p = self.emit_slot_loan_place_inner(place, active_rest)?;
+        Ok((p.clone(), p))
+    }
+
+    fn emit_slot_loan_place_inner(
+        &mut self,
+        place: &Expr,
+        active_rest: &[Stmt],
+    ) -> Result<String, EmitError> {
+        match Self::peel_parens(place) {
+            Expr::Field { base, name, .. } => {
+                let b = self.emit_slot_loan_place_inner(base, active_rest)?;
+                Ok(format!("{}.{}", b, self.member_of_typed(base, name)))
+            }
+            Expr::Index { base, index, .. } => {
+                let b = match Self::peel_parens(base) {
+                    Expr::Index { .. } | Expr::Field { .. } => {
+                        self.emit_slot_loan_place_inner(base, active_rest)?
+                    }
+                    _ => self.emit_expr(base, ATOM)?,
+                };
+                let idx_inner = Self::peel_parens(index);
+                let needs_snapshot = match idx_inner {
+                    Expr::Lit { .. } | Expr::Try { .. } => false,
+                    Expr::Ident { name, .. } => active_rest
+                        .iter()
+                        .any(|s| Self::stmt_modifies_ident(s, name)),
+                    _ => true,
+                };
+                let idx_str = if needs_snapshot {
+                    let raw = self.emit_expr(index, 0)?;
+                    let key_tmp = self.next_temp("hyKey");
+                    self.push(&format!("{} := {}", key_tmp, raw));
+                    key_tmp
+                } else {
+                    self.emit_expr(index, 0)?
+                };
+                Ok(format!("{}[{}]", b, idx_str))
+            }
+            other => self.emit_expr(other, ATOM),
+        }
+    }
+
+    /// If `target_name` is currently registered as an active slot loan in the
+    /// lexical loan frames, flush its writeback (`place = target_name`) and
+    /// remove it from the frame before `target_name` is rebound or reassigned.
+    pub(crate) fn flush_loan_for_name(&mut self, target_name: &str) {
+        let mut flushes: Vec<(String, String)> = Vec::new();
+        for frame in self.loan_frames.iter_mut().rev() {
+            if frame.first().map(|(n, _)| n.is_empty()).unwrap_or(false) {
+                continue;
+            }
+            let mut i = 0;
+            while i < frame.len() {
+                if frame[i].0 == target_name {
+                    let (src, place) = frame.remove(i);
+                    flushes.push((src, place));
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        for (src, place) in flushes {
+            self.push(&format!("{} = {}", place, src));
+        }
+    }
+
+    /// Emit a sequence of statements inside an already-pushed `loan_frames`
+    /// scope, flushing any active slot loan as soon as its NLL last-use point
+    /// passes (when none of the remaining statements in `stmts` read the loan
+    /// variable) or at block exit if still active.
+    pub(crate) fn emit_stmts_with_loans(&mut self, stmts: &[Stmt]) -> Result<(), EmitError> {
+        for (idx, st) in stmts.iter().enumerate() {
+            let remaining = &stmts[idx + 1..];
+            match st {
+                Stmt::Local(l) => self.emit_local_in_seq(l, remaining)?,
+                Stmt::Assign {
+                    targets,
+                    op,
+                    values,
+                    ..
+                } => self.emit_assign_in_seq(targets, *op, values, remaining)?,
+                _ => self.emit_stmt(st)?,
+            }
+            if Self::stmt_terminates(st) {
+                break;
+            }
+            let mut early_flushes: Vec<(String, String)> = Vec::new();
+            if let Some(frame) = self.loan_frames.last_mut() {
+                let is_sentinel = frame.first().map(|(n, _)| n.is_empty()).unwrap_or(false);
+                if !is_sentinel && !remaining.is_empty() {
+                    let mut i = 0;
+                    while i < frame.len() {
+                        let var_name = &frame[i].0;
+                        if !var_name.is_empty()
+                            && !Self::remaining_stmts_use_loan(remaining, var_name)
+                        {
+                            let (src, place) = frame.remove(i);
+                            early_flushes.push((src, place));
+                        } else {
+                            i += 1;
+                        }
+                    }
+                }
+            }
+            for (src, place) in early_flushes {
+                self.push(&format!("{} = {}", place, src));
+            }
+        }
+        let frame = self.loan_frames.pop().unwrap_or_default();
+        if !stmts.iter().any(Self::stmt_terminates) {
+            for (name, place) in frame {
+                if !name.is_empty() {
+                    self.push(&format!("{} = {}", place, name));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn remaining_stmts_use_loan(stmts: &[Stmt], var_name: &str) -> bool {
+        for st in stmts {
+            // If `st` is a pure overwrite of `var_name` (`var_name = ...` or
+            // `var_name := ...`) whose RHS does not read `var_name`, the
+            // current loan is NOT used by `st` or anything after it.
+            match st {
+                Stmt::Local(l) if l.names.iter().any(|n| n == var_name) => {
+                    return l
+                        .values
+                        .iter()
+                        .any(|v| Self::expr_mentions_ident(v, var_name));
+                }
+                Stmt::Assign {
+                    targets,
+                    op: AssignOp::Assign,
+                    values,
+                    ..
+                } if targets
+                    .iter()
+                    .any(|t| matches!(&t.kind, PlaceKind::Ident(n) if n == var_name)) =>
+                {
+                    let rhs_mentions = values
+                        .iter()
+                        .any(|v| Self::expr_mentions_ident(v, var_name));
+                    let other_target_mentions = targets.iter().any(|t| {
+                        !matches!(&t.kind, PlaceKind::Ident(n) if n == var_name)
+                            && Self::place_mentions_ident(t, var_name)
+                    });
+                    return rhs_mentions || other_target_mentions;
+                }
+                _ => {}
+            }
+            if Self::stmt_mentions_ident(st, var_name) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn stmt_mentions_ident(s: &Stmt, target: &str) -> bool {
+        match s {
+            Stmt::Local(l) => {
+                l.names.iter().any(|n| n == target)
+                    || l.values
+                        .iter()
+                        .any(|v| Self::expr_mentions_ident(v, target))
+            }
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                targets.iter().any(|t| Self::place_mentions_ident(t, target))
+                    || values.iter().any(|v| Self::expr_mentions_ident(v, target))
+            }
+            Stmt::Expr { expr, .. } => Self::expr_mentions_ident(expr, target),
+            Stmt::Send { chan, value, .. } => {
+                Self::expr_mentions_ident(chan, target)
+                    || Self::expr_mentions_ident(value, target)
+            }
+            Stmt::If {
+                init,
+                cond,
+                then,
+                otherwise,
+                ..
+            } => {
+                init.as_ref()
+                    .map(|i| Self::stmt_mentions_ident(i, target))
+                    .unwrap_or(false)
+                    || Self::expr_mentions_ident(cond, target)
+                    || Self::block_mentions_ident(then, target)
+                    || otherwise
+                        .as_ref()
+                        .map(|o| Self::stmt_mentions_ident(o, target))
+                        .unwrap_or(false)
+            }
+            Stmt::For { kind, body, .. } => {
+                let kind_mentions = match kind {
+                    ForKind::Infinite => false,
+                    ForKind::While { cond } => Self::expr_mentions_ident(cond, target),
+                    ForKind::Range { var, lo, hi, .. } => {
+                        var == target
+                            || Self::expr_mentions_ident(lo, target)
+                            || Self::expr_mentions_ident(hi, target)
+                    }
+                    ForKind::Iterate { vars, expr } => {
+                        vars.iter().any(|v| v == target)
+                            || Self::expr_mentions_ident(expr, target)
+                    }
+                };
+                kind_mentions || Self::block_mentions_ident(body, target)
+            }
+            Stmt::Return { values, .. } => {
+                values.iter().any(|v| Self::expr_mentions_ident(v, target))
+            }
+            Stmt::Task { callee, args, .. } => {
+                Self::expr_mentions_ident(callee, target)
+                    || args
+                        .iter()
+                        .any(|a| Self::expr_mentions_ident(&a.value, target))
+            }
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+                Self::block_mentions_ident(body, target)
+            }
+            Stmt::Match { subject, arms, .. } => {
+                Self::expr_mentions_ident(subject, target)
+                    || arms.iter().any(|a| {
+                        a.guard
+                            .as_ref()
+                            .map(|g| Self::expr_mentions_ident(g, target))
+                            .unwrap_or(false)
+                            || Self::block_mentions_ident(&a.body, target)
+                    })
+            }
+            Stmt::Defer { call, .. } => Self::expr_mentions_ident(call, target),
+            Stmt::Break { .. } | Stmt::Continue { .. } => false,
+            Stmt::Select { arms, .. } => arms.iter().any(|a| {
+                let head = match &a.kind {
+                    SelectArmKind::Recv { names, chan } => {
+                        names.iter().any(|n| n == target)
+                            || Self::expr_mentions_ident(chan, target)
+                    }
+                    SelectArmKind::Send { chan, value } => {
+                        Self::expr_mentions_ident(chan, target)
+                            || Self::expr_mentions_ident(value, target)
+                    }
+                    SelectArmKind::Default => false,
+                };
+                head || Self::block_mentions_ident(&a.body, target)
+            }),
+        }
+    }
+
+    fn block_mentions_ident(b: &Block, target: &str) -> bool {
+        b.stmts.iter().any(|s| Self::stmt_mentions_ident(s, target))
+    }
+
+    fn place_mentions_ident(p: &Place, target: &str) -> bool {
+        match &p.kind {
+            PlaceKind::Ident(n) => n == target,
+            PlaceKind::Index { base, index } => {
+                Self::place_mentions_ident(base, target)
+                    || Self::expr_mentions_ident(index, target)
+            }
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                Self::place_mentions_ident(base, target)
+            }
+        }
+    }
+
+    fn expr_mentions_ident(e: &Expr, target: &str) -> bool {
+        match e {
+            Expr::Ident { name, .. } => name == target,
+            Expr::Lit { .. } => false,
+            Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                InterpPart::Expr(ex) => Self::expr_mentions_ident(ex, target),
+                _ => false,
+            }),
+            Expr::Binary { lhs, rhs, .. } => {
+                Self::expr_mentions_ident(lhs, target)
+                    || Self::expr_mentions_ident(rhs, target)
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Field { base: operand, .. }
+            | Expr::Paren { inner: operand, .. } => Self::expr_mentions_ident(operand, target),
+            Expr::Receive { chan, .. } => Self::expr_mentions_ident(chan, target),
+            Expr::Index { base, index, .. } => {
+                Self::expr_mentions_ident(base, target)
+                    || Self::expr_mentions_ident(index, target)
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                Self::expr_mentions_ident(base, target)
+                    || lo
+                        .as_ref()
+                        .map(|x| Self::expr_mentions_ident(x, target))
+                        .unwrap_or(false)
+                    || hi
+                        .as_ref()
+                        .map(|x| Self::expr_mentions_ident(x, target))
+                        .unwrap_or(false)
+            }
+            Expr::Call { callee, args, .. } => {
+                Self::expr_mentions_ident(callee, target)
+                    || args
+                        .iter()
+                        .any(|a| Self::expr_mentions_ident(&a.value, target))
+            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| Self::expr_mentions_ident(&f.value, target)),
+            Expr::SliceLit { items, .. } => items
+                .iter()
+                .any(|v| Self::expr_mentions_ident(v, target)),
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
+                Self::expr_mentions_ident(k, target) || Self::expr_mentions_ident(v, target)
+            }),
+            Expr::FnLit { body, .. } => Self::block_mentions_ident(body, target),
+        }
+    }
+
+    fn place_root_ident(p: &Place) -> Option<&str> {
+        match &p.kind {
+            PlaceKind::Ident(n) => Some(n.as_str()),
+            PlaceKind::Index { base, .. }
+            | PlaceKind::Field { base, .. }
+            | PlaceKind::AddrOf { base } => Self::place_root_ident(base),
+        }
+    }
+
+    /// Does statement `s` potentially mutate or rebind `target`? Used to decide
+    /// whether an index variable `k` in `&m[k]` must be snapshotted into `hyKeyN`
+    /// because `k` is modified before the loan's store-back.
+    pub(crate) fn stmt_modifies_ident(s: &Stmt, target: &str) -> bool {
+        match s {
+            Stmt::Local(l) => l.names.iter().any(|n| n == target),
+            Stmt::Assign { targets, .. } => targets
+                .iter()
+                .any(|t| Self::place_root_ident(t) == Some(target)),
+            Stmt::If {
+                init,
+                then,
+                otherwise,
+                ..
+            } => {
+                init.as_ref()
+                    .map(|i| Self::stmt_modifies_ident(i, target))
+                    .unwrap_or(false)
+                    || then
+                        .stmts
+                        .iter()
+                        .any(|st| Self::stmt_modifies_ident(st, target))
+                    || otherwise
+                        .as_ref()
+                        .map(|o| Self::stmt_modifies_ident(o, target))
+                        .unwrap_or(false)
+            }
+            Stmt::For { kind, body, .. } => {
+                let head_modifies = match kind {
+                    ForKind::Range { var, .. } => var == target,
+                    ForKind::Iterate { vars, .. } => vars.iter().any(|v| v == target),
+                    _ => false,
+                };
+                head_modifies
+                    || body
+                        .stmts
+                        .iter()
+                        .any(|st| Self::stmt_modifies_ident(st, target))
+            }
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => body
+                .stmts
+                .iter()
+                .any(|st| Self::stmt_modifies_ident(st, target)),
+            Stmt::Match { arms, .. } => arms.iter().any(|a| {
+                a.body
+                    .stmts
+                    .iter()
+                    .any(|st| Self::stmt_modifies_ident(st, target))
+            }),
+            Stmt::Select { arms, .. } => arms.iter().any(|a| {
+                a.body
+                    .stmts
+                    .iter()
+                    .any(|st| Self::stmt_modifies_ident(st, target))
+            }),
+            _ => false,
+        }
     }
 }
