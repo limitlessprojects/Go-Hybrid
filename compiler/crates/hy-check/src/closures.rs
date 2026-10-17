@@ -252,6 +252,10 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
                 };
                 for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
                     ck.define_binding(st, name, shape, ty, immutable, managed);
+                    if let Some(v) = l.values.first() {
+                        ck.record_may_share(st, name, v);
+                        ck.record_alias(st, name, v);
+                    }
                 }
             }
         }
@@ -373,13 +377,15 @@ fn check_stmt_boundaries(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, ma
                     let shapes = ck.iterate_var_shapes(st, expr, vars.len());
                     for (name, shape) in vars.iter().zip(shapes) {
                         let is_ref = shape.is_reference_alias();
+                        let may_share = ck.shape_may_share(&shape);
                         ck.define_binding(st, name, shape, None, false, managed);
                         if !is_chan {
-                            if is_ref {
-                                if let Some(root) = expr.root_ident() {
-                                    if ck.lookup_binding(st, root).is_some() {
-                                        st.aliases.insert(name.clone(), root.to_string());
-                                    }
+                            if let Some(root) = expr.root_ident() {
+                                if is_ref && ck.lookup_binding(st, root).is_some() {
+                                    st.aliases.insert(name.clone(), root.to_string());
+                                }
+                                if may_share && ck.binding_may_share(st, root) {
+                                    st.share_edge(name, root);
                                 }
                             }
                             if let Some(b) = st.env_lookup_mut(name) {
