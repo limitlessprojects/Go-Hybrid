@@ -83,16 +83,25 @@ def kaggle_submit(jobdir):
             sys.exit("REFUSING to push: secret pattern {} in job.json".format(pat))
 
     script = os.path.join(WORKER_DIR, "script.py")
-    with open(script) as f:
-        src = f.read()
+    with open(script, "rb") as f:
+        original_script = f.read()
+    src = original_script.decode("utf-8")
     if INJECT_MARKER not in src:
         sys.exit("worker/script.py missing inject marker")
     injected = src.replace(INJECT_MARKER, "JOB_JSON = " + repr(payload))
-    with open(script, "w") as f:
-        f.write(injected)
-    with open(os.path.join(WORKER_DIR, "job.json"), "w") as f:  # per SPEC §2 protocol
-        f.write(payload)
+    sidecar = os.path.join(WORKER_DIR, "job.json")
     try:
+        with open(sidecar, "rb") as f:
+            original_sidecar = f.read()
+    except FileNotFoundError:
+        original_sidecar = None
+    try:
+        # Include preparation in the cleanup scope: a failed sidecar write
+        # must not leave an injected template behind.
+        with open(script, "wb") as f:
+            f.write(injected.encode("utf-8"))
+        with open(sidecar, "w", encoding="utf-8") as f:  # per SPEC §2 protocol
+            f.write(payload)
         rc, out = sh("{} kernels push -p {}".format(KAGGLE_CLI, WORKER_DIR), timeout=180)
         print(out)
         if rc != 0:
@@ -103,13 +112,15 @@ def kaggle_submit(jobdir):
                        "job": job["job"]}, f, indent=2)
         print("submitted job {} at sha {}".format(job["job"], head[:10]))
     finally:
-        # always restore the pristine template
-        with open(script, "w") as f:
-            f.write(src.replace("JOB_JSON = r'''" + payload + "'''", INJECT_MARKER))
-        # double safety: restore from git if anything went wrong
-        sh("git checkout -- worker/script.py", cwd=REPO_DIR)
-        if os.path.exists(os.path.join(WORKER_DIR, "job.json")):
-            os.remove(os.path.join(WORKER_DIR, "job.json"))
+        # Restore the caller's exact files, including uncommitted edits and
+        # line endings. A git checkout here would silently discard local work.
+        with open(script, "wb") as f:
+            f.write(original_script)
+        if original_sidecar is not None:
+            with open(sidecar, "wb") as f:
+                f.write(original_sidecar)
+        elif os.path.exists(sidecar):
+            os.remove(sidecar)
 
 
 def kaggle_status(slug=None):
