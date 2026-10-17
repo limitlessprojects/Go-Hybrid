@@ -612,6 +612,16 @@ pub(crate) fn collect_ref_roots(e: &Expr, out: &mut Vec<String>) {
     match unwrap_parens(e) {
         Expr::Move { .. } => {}
         Expr::Ident { name, .. } => out.push(name.clone()),
+        // #435: `&h` KEEPS `h` live. An address-of that reaches the result
+        // through a call (`p := keep(&h)`) contributed no root at all, so
+        // `move h` froze nothing that `p` could still reach. Both AST
+        // spellings are legal (the parser picks one), so both are walked.
+        Expr::AddrOf { operand, .. } => collect_ref_roots(operand, out),
+        Expr::Unary {
+            op: hy_syntax::UnOp::Addr,
+            operand,
+            ..
+        } => collect_ref_roots(operand, out),
         Expr::Try { operand, .. } => collect_ref_roots(operand, out),
         Expr::Slice { base, .. } => collect_ref_roots(base, out),
         Expr::Field { base, .. } => collect_ref_roots(base, out),
