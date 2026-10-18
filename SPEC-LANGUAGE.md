@@ -167,6 +167,12 @@ Everything else — `:=`, `var`, `const`, `type`, `struct`, `if`/`else`,
 `for`, `select`, `defer`, `panic`, `import`, package layout, operator set
 and precedence — is Go's, carried over deliberately.
 
+For unused explicit Go imports, a read of a local binding with the same
+name does not use the package. Lexical scopes apply, including parameters
+and captured locals. A `:=` binding starts after its right-hand side; a
+package reference after an inner scope ends still uses the import. An
+otherwise unused explicit Go import rejects with `HYB-E1002` (`BUILDABLE`).
+
 **LX5 — Visibility.** `pub` marks a top-level declaration as exported from its
 package; everything else is package-private. Go-export mapping in §10.
 

@@ -51,7 +51,7 @@ struct Collector {
     /// `for`/select/match bindings) but is outside the issue's scope.
     scopes: Vec<HashMap<String, Option<usize>>>,
     defines: Vec<Define>,
-    /// Every identifier mentioned in the file plus every dotted type root —
+    /// Unshadowed identifiers in the file plus every dotted type root —
     /// the import-usage set (the emitter's declared-import header needs it).
     roots: HashSet<String>,
     diags: Vec<Diagnostic>,
@@ -114,9 +114,16 @@ impl Collector {
         }
     }
 
-    /// Every identifier mention feeds the import-usage set.
+    /// Only names outside local scopes feed the import-usage set.
     fn mention(&mut self, name: &str) {
-        self.roots.insert(name.to_string());
+        if !self
+            .scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.contains_key(name))
+        {
+            self.roots.insert(name.to_string());
+        }
     }
 
     /// A read of `name`: marks the innermost checked define it resolves to.
@@ -153,6 +160,11 @@ impl Collector {
         }
         for p in &f.params {
             self.exempt(&p.name);
+        }
+        for r in &f.results {
+            if let Some(name) = &r.name {
+                self.exempt(name);
+            }
         }
         self.block_stmts(body);
         self.pop_scope();
@@ -497,6 +509,11 @@ impl Collector {
                 self.push_scope();
                 for p in params {
                     self.exempt(&p.name);
+                }
+                for r in results {
+                    if let Some(name) = &r.name {
+                        self.exempt(name);
+                    }
                 }
                 self.block_stmts(body);
                 self.pop_scope();

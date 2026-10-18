@@ -644,3 +644,19 @@ so `move h` froze `h` but not `shared` and the emitted Go raced.
 | 58 | 58-defer-live-reference-via-alias | REJECT | A1b | `HYB-E3003` | the deferred call names the ALIAS, the move transfers the ORIGIN |
 | 59 | 59-rebind-forgets-defer-capture | REJECT | A1b | `HYB-E3003` | rebinding the name must not forget the captured storage |
 | 60 | 60-rebind-without-defer-control | ACCEPT | — | — | the over-rejection guard: a rebind with no defer and no boundary |
+
+## Additive corpus registration, 2026-10-17: shadowed unused import
+
+Case 61 extends case 47 under the existing LX4 lexical scope and
+`BUILDABLE` contract. Reading a local `strings` binding does not use the
+explicit `strings` import. The unused import must reject with `HYB-E1002`.
+This changes no earlier corpus expectation.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 61 | 61-shadowed-unused-import-reject | REJECT | BUILDABLE | `HYB-E1002` | a local read cannot make the shadowed package import used |
+
+The original local reproduction and fix preceded this registration. The
+expected result was recorded before the first corpus run containing this case.
+This is a regression record, not a claim that the result was predicted
+before the defect was found.
