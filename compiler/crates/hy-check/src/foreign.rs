@@ -164,6 +164,124 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
     }
 }
 
+/// Static result count of a foreign package-level call returning multiple
+/// values in Go (`(T, error)`, `(before, after, found)`, etc.) when not
+/// unwrapped with `?` (#380 / T23 `HYB-E2002`).
+pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
+    match (pkg, method) {
+        (
+            "strconv",
+            "parse_int"
+                | "parse_uint"
+                | "parse_float"
+                | "parse_bool"
+                | "parse_complex"
+                | "atoi"
+                | "unquote"
+                | "ParseInt"
+                | "ParseUint"
+                | "ParseFloat"
+                | "ParseBool"
+                | "ParseComplex"
+                | "Atoi"
+                | "Unquote",
+        ) => Some(2),
+        (
+            "os",
+            "open"
+                | "create"
+                | "read_file"
+                | "read_dir"
+                | "getwd"
+                | "user_home_dir"
+                | "user_cache_dir"
+                | "user_config_dir"
+                | "executable"
+                | "lookup_env"
+                | "stat"
+                | "lstat"
+                | "create_temp"
+                | "mkdir_temp"
+                | "Open"
+                | "Create"
+                | "ReadFile"
+                | "ReadDir"
+                | "Getwd"
+                | "UserHomeDir"
+                | "UserCacheDir"
+                | "UserConfigDir"
+                | "Executable"
+                | "LookupEnv"
+                | "Stat"
+                | "Lstat"
+                | "CreateTemp"
+                | "MkdirTemp",
+        ) => Some(2),
+        (
+            "io",
+            "read_all"
+                | "read_full"
+                | "read_at_least"
+                | "copy"
+                | "copy_n"
+                | "copy_buffer"
+                | "write_string"
+                | "ReadAll"
+                | "ReadFull"
+                | "ReadAtLeast"
+                | "Copy"
+                | "CopyN"
+                | "CopyBuffer"
+                | "WriteString",
+        ) => Some(2),
+        (
+            "strings",
+            "cut_prefix" | "cut_suffix" | "CutPrefix" | "CutSuffix",
+        ) => Some(2),
+        ("strings", "cut" | "Cut") => Some(3),
+        (
+            "filepath",
+            "abs"
+                | "rel"
+                | "eval_symlinks"
+                | "glob"
+                | "match"
+                | "split"
+                | "Abs"
+                | "Rel"
+                | "EvalSymlinks"
+                | "Glob"
+                | "Match"
+                | "Split",
+        ) => Some(2),
+        ("path", "match" | "split" | "Match" | "Split") => Some(2),
+        (
+            "time",
+            "parse"
+                | "parse_duration"
+                | "load_location"
+                | "Parse"
+                | "ParseDuration"
+                | "LoadLocation",
+        ) => Some(2),
+        (
+            "net",
+            "listen"
+                | "dial"
+                | "resolve_tcp_addr"
+                | "lookup_host"
+                | "Listen"
+                | "Dial"
+                | "ResolveTCPAddr"
+                | "LookupHost",
+        ) => Some(2),
+        ("net", "split_host_port" | "SplitHostPort") => Some(3),
+        ("hex", "decode_string" | "DecodeString") => Some(2),
+        ("regex", "compile" | "match_string" | "Compile" | "MatchString") => Some(2),
+        _ => None,
+    }
+}
+
 /// Mode of a method call on a typed receiver, keyed by the receiver's
 /// boundary type name ("serde_json.value", "flate2.writer", "atomic", ...).
 pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {

@@ -705,8 +705,12 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     let shapes = ck.iterate_var_shapes(&st, expr, vars.len());
                     for (name, shape) in vars.iter().zip(shapes) {
                         let is_ref = shape.is_reference_alias();
+                        let may_share = ck.shape_may_share(&shape);
                         ck.define_binding(&mut st, name, shape, None, false, managed);
                         if !is_chan {
+                            if may_share {
+                                ck.record_may_share(&mut st, name, expr);
+                            }
                             if is_ref {
                                 if let Some(root) = expr.root_ident() {
                                     if ck.lookup_binding(&st, root).is_some() {

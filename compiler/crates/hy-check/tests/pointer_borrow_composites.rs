@@ -638,3 +638,281 @@ fn main() {
     assert_eq!(res.diagnostics.len(), 0, "{:?}", res.diagnostics);
     assert!(matches!(res.verdict, Verdict::Accept));
 }
+
+#[test]
+fn reslice_of_pointer_slice_literal_freezes_borrowed_value_struct() {
+    let src = r#"
+import "fmt"
+
+struct node {
+    val int
+}
+
+fn worker(n node) {}
+
+fn main() {
+    n := node{val: 10}
+    ps := []*node{&n}[:]
+    task worker(move n)
+    fmt.println(ps[0].val)
+}
+"#;
+    let res = check(src);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3003"),
+        "expected HYB-E3003 for resliced pointer slice literal after move n, got {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn index_into_pointer_slice_literal_freezes_borrowed_value_struct() {
+    let src = r#"
+import "fmt"
+
+struct node {
+    val int
+}
+
+fn worker(n node) {}
+
+fn main() {
+    n := node{val: 10}
+    p := []*node{&n}[0]
+    task worker(move n)
+    fmt.println(p.val)
+}
+"#;
+    let res = check(src);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3003"),
+        "expected HYB-E3003 for indexed pointer slice literal after move n, got {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn append_with_addr_of_value_struct_freezes_borrowed_value_struct() {
+    let src = r#"
+import "fmt"
+
+struct node {
+    val int
+}
+
+fn worker(n node) {}
+
+fn main() {
+    n := node{val: 10}
+    ps := append([]*node{}, &n)
+    task worker(move n)
+    fmt.println(ps[0].val)
+}
+"#;
+    let res = check(src);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3003"),
+        "expected HYB-E3003 for append([]*node{{}}, &n) after move n, got {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn returning_composite_or_map_containing_bound_borrow_rejects_loan_escape() {
+    let src1 = r#"
+struct node {
+    val int
+}
+
+fn bad_slice() []*node {
+    n := node{val: 1}
+    p := &n
+    return []*node{p}
+}
+
+fn main() {}
+"#;
+    let res1 = check(src1);
+    assert!(
+        res1.diagnostics.iter().any(|d| d.code == "HYB-E3104"),
+        "expected HYB-E3104 when returning []*node{{p}} containing local borrow p, got {:?}",
+        res1.diagnostics
+    );
+
+    let src2 = r#"
+struct node {
+    val int
+}
+
+fn bad_map() map[string]*node {
+    n := node{val: 1}
+    mp := map[string]*node{}
+    mp["a"] = &n
+    return mp
+}
+
+fn main() {}
+"#;
+    let res2 = check(src2);
+    assert!(
+        res2.diagnostics.iter().any(|d| d.code == "HYB-E3104"),
+        "expected HYB-E3104 when returning map tainted by mp[\"a\"] = &n, got {:?}",
+        res2.diagnostics
+    );
+}
+
+#[test]
+fn block_self_shadowing_with_addr_of_freezes_outer_binding_after_scope_pop() {
+    let src = r#"
+import "fmt"
+
+struct holder {
+    m map[string]int
+}
+
+fn worker(h holder) {}
+
+fn main() {
+    h := holder{m: map[string]int{"a": 1}}
+    other := holder{m: map[string]int{"b": 2}}
+    p := &other
+    if true {
+        h := &h
+        p = h
+    }
+    task worker(move h)
+    fmt.println(p.m["a"])
+}
+"#;
+    let res = check(src);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3003"),
+        "expected HYB-E3003 when p receives &h via self-shadowing h := &h and outer h is moved, got {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn multi_value_and_closure_array_slice_share_freezes_backing_array() {
+    let src1 = r#"
+import "fmt"
+
+fn worker(s []int) {}
+
+fn main() {
+    var a [3]int
+    m := map[string][]int{"k": a[:]}
+    s, ok := m["k"]
+    task worker(move s)
+    if ok {
+        fmt.println(a[0])
+    }
+}
+"#;
+    let res1 = check(src1);
+    assert!(
+        res1.diagnostics.iter().any(|d| d.code == "HYB-E3003"),
+        "expected HYB-E3003 when multi-value map lookup unpacks slice backed by local array a and moves it, got {:?}",
+        res1.diagnostics
+    );
+
+    let src2 = r#"
+import "fmt"
+
+fn worker(s []int) {}
+
+fn main() {
+    var a [3]int
+    f := fn() int {
+        return a[0]
+    }
+    g := f
+    s := a[:]
+    task worker(move s)
+    fmt.println(g())
+}
+"#;
+    let res2 = check(src2);
+    assert!(
+        res2.diagnostics.iter().any(|d| d.code == "HYB-E3003"),
+        "expected HYB-E3003 when slice of local array a moves and closure copy g reading a is called, got {:?}",
+        res2.diagnostics
+    );
+}
+
+#[test]
+fn multi_value_field_store_links_may_share_and_freezes_source() {
+    let src = r#"
+import "fmt"
+
+struct holder {
+    m map[string]int
+}
+
+fn worker(h holder) {}
+
+fn main() {
+    buckets := map[string]map[string]int{"k": map[string]int{"x": 1}}
+    h := holder{m: map[string]int{}}
+    ok := false
+    h.m, ok = buckets["k"]
+    task worker(move h)
+    if ok {
+        fmt.println(buckets["k"]["x"])
+    }
+}
+"#;
+    let res = check(src);
+    assert!(
+        res.diagnostics.iter().any(|d| d.code == "HYB-E3003"),
+        "expected HYB-E3003 when multi-value unpack into h.m moves h and source map is read, got {:?}",
+        res.diagnostics
+    );
+}
+
+#[test]
+fn closure_and_interproc_field_store_and_multi_value_const_write_rejects_e3006() {
+    let src1 = r#"
+const const_buckets = map[string]map[string]int{"k": map[string]int{"x": 1}}
+
+fn main() {
+    f := fn() {
+        m, ok := const_buckets["k"]
+        if ok {
+            m["x"] = 2
+        }
+    }
+    f()
+}
+"#;
+    let res1 = check(src1);
+    assert!(
+        res1.diagnostics.iter().any(|d| d.code == "HYB-E3006"),
+        "expected HYB-E3006 when closure unpacks const map via multi-value lookup and mutates it, got {:?}",
+        res1.diagnostics
+    );
+
+    let src2 = r#"
+const const_map = map[string]int{"a": 1}
+
+struct holder {
+    m map[string]int
+}
+
+fn mutate_via_field(src map[string]int) {
+    h := holder{m: map[string]int{}}
+    h.m = src
+    h.m["a"] = 99
+}
+
+fn main() {
+    mutate_via_field(const_map)
+}
+"#;
+    let res2 = check(src2);
+    assert!(
+        res2.diagnostics.iter().any(|d| d.code == "HYB-E3006"),
+        "expected HYB-E3006 when callee stores const map parameter into struct field and mutates it, got {:?}",
+        res2.diagnostics
+    );
+}

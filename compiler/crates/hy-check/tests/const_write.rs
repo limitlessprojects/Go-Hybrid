@@ -684,3 +684,42 @@ fn closure_interproc_and_method_const_mutations_reject_e3006() {
     );
 }
 
+#[test]
+fn read_const_followed_by_blank_assign_accepted_issue_460() {
+    // Issue #460: assigning to the blank identifier `_` must not link `_` to a
+    // const's share-group or trigger HYB-E3006 on subsequent assignments to `_`.
+    let r = check(
+        "const shared = map[string]int{\"k\": 1}\n\n\
+         fn main() {\n\
+             _ = shared[\"k\"]\n\
+             xs := [1, 2]\n\
+             _ = xs[0]\n\
+         }\n",
+    );
+    assert_eq!(
+        r.verdict,
+        Verdict::Accept,
+        "expected accept for read of const followed by blank index assign (#460), got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn parenthesized_const_reads_to_blank_ident_accepted_issue_460() {
+    // Issue #460 minimal reproducer: parenthesized const composite reads to `_`.
+    let r = check(
+        "const shared_paren = (map[string]int{\"k\": 1})\n\n\
+         fn main() {\n\
+             const local_paren = ([1, 2])\n\
+             _ = shared_paren[\"k\"]\n\
+             _ = local_paren[0]\n\
+         }\n",
+    );
+    assert_eq!(
+        r.verdict,
+        Verdict::Accept,
+        "expected accept for parenthesized const reads (#460), got {:?}",
+        codes(&r)
+    );
+}
+

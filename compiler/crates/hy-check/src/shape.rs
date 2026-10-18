@@ -121,7 +121,10 @@ impl<'a> Checker<'a> {
         if depth > 16 {
             return true;
         }
-        if shape.is_reference_alias() || shape.is_handle() {
+        if shape.is_reference_alias()
+            || shape.is_handle()
+            || matches!(shape, TypeShape::Closure)
+        {
             return true;
         }
         match shape {
@@ -317,7 +320,10 @@ impl<'a> Checker<'a> {
                         .first()
                         .map(|a| self.shape_of_expr(st, &a.value))
                         .unwrap_or(TypeShape::Unknown),
-                    "len" | "cap" | "min" | "max" => TypeShape::Primitive,
+                    "len" | "cap" | "min" | "max" | "int" | "int8" | "int16" | "int32"
+                    | "int64" | "uint" | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr"
+                    | "float32" | "float64" | "bool" | "byte" | "rune" => TypeShape::Primitive,
+                    "string" => TypeShape::Str,
                     // `new(T)` is Go's `new`: it returns `*T` — a POINTER to
                     // zeroed, mutable storage — never a primitive copy. Typing
                     // it Primitive made it sendable-by-type (class 1), so
@@ -340,12 +346,15 @@ impl<'a> Checker<'a> {
                         };
                         TypeShape::Pointer(Box::new(pointee))
                     }
-                    _ => self
-                        .fns
-                        .get(name.as_str())
-                        .and_then(|f| f.results.first())
-                        .map(|r| self.shape_of_type(&r.ty))
-                        .unwrap_or(TypeShape::Unknown),
+                    _ => {
+                        let head = Self::base_named_type_str(name);
+                        self.fns
+                            .get(name.as_str())
+                            .or_else(|| self.fns.get(head))
+                            .and_then(|f| f.results.first())
+                            .map(|r| self.shape_of_type(&r.ty))
+                            .unwrap_or(TypeShape::Unknown)
+                    }
                 }
             }
             Expr::Field { base, name, .. } => {
@@ -355,44 +364,70 @@ impl<'a> Checker<'a> {
                         return foreign::package_result(b, name);
                     }
                 }
+                let head = Self::base_named_type_str(name);
+                if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
+                    if self.lookup_binding(st, root).is_none() {
+                        let full = format!("{}.{}", root, head);
+                        if let Some(f) = self.fns.get(full.as_str()) {
+                            return f
+                                .results
+                                .first()
+                                .map(|r| self.shape_of_type(&r.ty))
+                                .unwrap_or(TypeShape::Unknown);
+                        }
+                    }
+                }
                 // Issue #411/H2: user-defined methods (`c.keys()`).
-                // `receiver_type_name` only keys the FOREIGN method table, so
-                // every user-method call result used to stay `Unknown` —
-                // fail-closing e.g. `for v in c.keys()` as HYB-E3005 — while
-                // `ty_of_expr`'s Call arm resolves the same callee through
-                // `method_decls` (and `loans.rs` does too): `call_shape` was
-                // the one method-call resolution site without it. Mirror that
-                // resolution: the receiver's base name, then the declared
-                // method's first result. A zero-result method falls through
-                // to the original path unchanged.
-                let recv_base = self
+                let recv = self.shape_of_expr(st, base);
+                if let Some(recv_base) = self
                     .ty_of_expr(st, base)
                     .map(|t| self.resolve_type_alias(&t))
                     .and_then(|t| Self::base_named_type(&t))
-                    .or_else(|| match self.shape_of_expr(st, base) {
+                    .or_else(|| match &recv {
                         TypeShape::Struct(Some(s)) => {
-                            Some(Self::base_named_type_str(&s).to_string())
+                            Some(Self::base_named_type_str(s).to_string())
                         }
-                        TypeShape::Pointer(inner) => match *inner {
+                        TypeShape::Pointer(inner) => match &**inner {
                             TypeShape::Struct(Some(s)) => {
-                                Some(Self::base_named_type_str(&s).to_string())
+                                Some(Self::base_named_type_str(s).to_string())
                             }
                             _ => None,
                         },
                         _ => None,
-                    });
-                if let Some(rb) = recv_base {
-                    if let Some(decl) = self.method_decls.get(&(rb, name.to_string())) {
-                        if let Some(r) = decl.results.first() {
+                    })
+                {
+                    if let Some(f) = self.method_decls.get(&(recv_base, head.to_string())) {
+                        if let Some(r) = f.results.first() {
                             return self.shape_of_type(&r.ty);
                         }
                     }
                 }
                 let recv = self.shape_of_expr(st, base);
-                match receiver_type_name(&recv) {
-                    Some(t) => foreign::method_result(&t, name),
-                    None => TypeShape::Unknown,
+                if let Some(t) = receiver_type_name(&recv) {
+                    return foreign::method_result(&t, name);
                 }
+                let head = Self::base_named_type_str(name);
+                let recv_base = self
+                    .ty_of_expr(st, base)
+                    .map(|t| self.resolve_type_alias(&t))
+                    .and_then(|t| Self::base_named_type(&t))
+                    .or_else(|| match &recv {
+                        TypeShape::Struct(Some(s)) => {
+                            Some(Self::base_named_type_str(s).to_string())
+                        }
+                        TypeShape::Pointer(inner) => match &**inner {
+                            TypeShape::Struct(Some(s)) => {
+                                Some(Self::base_named_type_str(s).to_string())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    });
+                recv_base
+                    .and_then(|rb| self.method_decls.get(&(rb, head.to_string())))
+                    .and_then(|f| f.results.first())
+                    .map(|r| self.shape_of_type(&r.ty))
+                    .unwrap_or(TypeShape::Unknown)
             }
             _ => TypeShape::Unknown,
         }
@@ -522,6 +557,14 @@ impl<'a> Checker<'a> {
                         span: *span,
                     });
                 }
+                let head = Self::base_named_type_str(name);
+                if let Some(decl) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
+                    return Some(TypeExpr::Fn {
+                        params: decl.params.clone(),
+                        results: decl.results.iter().map(|r| r.ty.clone()).collect(),
+                        span: *span,
+                    });
+                }
                 None
             }
             Expr::Field { base, name, span } => {
@@ -544,6 +587,14 @@ impl<'a> Checker<'a> {
                     .get(&sname)
                     .and_then(|fs| fs.iter().find(|(n, _)| n == name))
                     .map(|(_, t)| t.clone())
+            }
+            Expr::Index { base, .. } => {
+                let base_ty = self.ty_of_expr(st, base)?;
+                match self.resolve_type_alias(&base_ty) {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => Some(*elem),
+                    TypeExpr::Map { value, .. } => Some(*value),
+                    _ => None,
+                }
             }
             Expr::StructLit { ty, .. } => ty.clone(),
             Expr::MapLit {
@@ -578,8 +629,10 @@ impl<'a> Checker<'a> {
                 Expr::FnLit { results, .. } => results.first().map(|r| r.ty.clone()),
                 Expr::Ident { name, .. } => {
                     if let Some(b) = self.lookup_binding(st, name) {
-                        if let Some(TypeExpr::Fn { results, .. }) = &b.ty {
-                            return results.first().cloned();
+                        if let Some(ty) = &b.ty {
+                            if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(ty) {
+                                return results.first().cloned();
+                            }
                         }
                         return None;
                     }
@@ -631,13 +684,32 @@ impl<'a> Checker<'a> {
                                 _ => None,
                             },
                             _ => None,
-                        })?;
-                    self.method_decls
-                        .get(&(recv_base, head.to_string()))
-                        .and_then(|f| f.results.first())
-                        .map(|r| r.ty.clone())
+                        });
+                    if let Some(rb) = recv_base {
+                        if let Some(ret) = self
+                            .method_decls
+                            .get(&(rb, head.to_string()))
+                            .and_then(|f| f.results.first())
+                            .map(|r| r.ty.clone())
+                        {
+                            return Some(ret);
+                        }
+                    }
+                    let callee_ty = self.ty_of_expr(st, callee)?;
+                    if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&callee_ty) {
+                        results.first().cloned()
+                    } else {
+                        None
+                    }
                 }
-                _ => None,
+                other => {
+                    let callee_ty = self.ty_of_expr(st, other)?;
+                    if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&callee_ty) {
+                        results.first().cloned()
+                    } else {
+                        None
+                    }
+                }
             },
             _ => None,
         }
@@ -925,6 +997,59 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn call_result_tys(&self, st: &FnState, callee: &Expr) -> Option<Vec<TypeExpr>> {
+        match crate::model::unwrap_parens(callee) {
+            Expr::FnLit { results, .. } => Some(results.iter().map(|r| r.ty.clone()).collect()),
+            Expr::Ident { name, .. } => {
+                if let Some(b) = self.lookup_binding(st, name) {
+                    if let Some(ty) = &b.ty {
+                        if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(ty) {
+                            return Some(results);
+                        }
+                    }
+                    return None;
+                }
+                let head = Self::base_named_type_str(name);
+                self.fns
+                    .get(name.as_str())
+                    .or_else(|| self.fns.get(head))
+                    .map(|f| f.results.iter().map(|r| r.ty.clone()).collect())
+            }
+            Expr::Field { base, name, .. } => {
+                let head = Self::base_named_type_str(name);
+                if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
+                    if self.lookup_binding(st, root).is_none() {
+                        let full = format!("{}.{}", root, head);
+                        if let Some(f) = self.fns.get(full.as_str()) {
+                            return Some(f.results.iter().map(|r| r.ty.clone()).collect());
+                        }
+                    }
+                }
+                let recv = self.shape_of_expr(st, base);
+                let recv_base = self
+                    .ty_of_expr(st, base)
+                    .map(|t| self.resolve_type_alias(&t))
+                    .and_then(|t| Self::base_named_type(&t))
+                    .or_else(|| match &recv {
+                        TypeShape::Struct(Some(s)) => {
+                            Some(Self::base_named_type_str(s).to_string())
+                        }
+                        TypeShape::Pointer(inner) => match &**inner {
+                            TypeShape::Struct(Some(s)) => {
+                                Some(Self::base_named_type_str(s).to_string())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    })?;
+                self.method_decls
+                    .get(&(recv_base, head.to_string()))
+                    .map(|f| f.results.iter().map(|r| r.ty.clone()).collect())
+            }
+            _ => None,
+        }
+    }
+
     /// Shapes for a multi-name define/assign from one value (`v, ok := m[k]`,
     /// `v, ok := <-ch`, `a, b := f()`, `a, b = f()?`).
     pub(crate) fn multi_value_shapes(
@@ -955,23 +1080,18 @@ impl<'a> Checker<'a> {
             other => (other, false),
         };
         if let Expr::Call { callee, .. } = call_expr {
-            if let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) {
-                if self.lookup_binding(st, name).is_none() {
-                    if let Some(f) = self.fns.get(name.as_str()) {
-                        let avail = if is_try {
-                            f.results.len().saturating_sub(1)
-                        } else {
-                            f.results.len()
-                        };
-                        if avail == n_names {
-                            return f
-                                .results
-                                .iter()
-                                .take(n_names)
-                                .map(|r| self.shape_of_type(&r.ty))
-                                .collect();
-                        }
-                    }
+            if let Some(results) = self.call_result_tys(st, callee) {
+                let avail = if is_try {
+                    results.len().saturating_sub(1)
+                } else {
+                    results.len()
+                };
+                if avail == n_names {
+                    return results
+                        .iter()
+                        .take(n_names)
+                        .map(|ty| self.shape_of_type(ty))
+                        .collect();
                 }
             }
         }
@@ -999,23 +1119,18 @@ impl<'a> Checker<'a> {
             other => (other, false),
         };
         if let Expr::Call { callee, .. } = call_expr {
-            if let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) {
-                if self.lookup_binding(st, name).is_none() {
-                    if let Some(f) = self.fns.get(name.as_str()) {
-                        let avail = if is_try {
-                            f.results.len().saturating_sub(1)
-                        } else {
-                            f.results.len()
-                        };
-                        if avail == n_names {
-                            return f
-                                .results
-                                .iter()
-                                .take(n_names)
-                                .map(|r| Some(r.ty.clone()))
-                                .collect();
-                        }
-                    }
+            if let Some(results) = self.call_result_tys(st, callee) {
+                let avail = if is_try {
+                    results.len().saturating_sub(1)
+                } else {
+                    results.len()
+                };
+                if avail == n_names {
+                    return results
+                        .into_iter()
+                        .take(n_names)
+                        .map(Some)
+                        .collect();
                 }
             }
         }

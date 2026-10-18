@@ -98,3 +98,190 @@ fn local_binding_shadowing_the_fn_name_stays_permissive() {
         r.diagnostics
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #380: HYB-E2002 (T23) across fn-value bindings, closures, user
+// methods, indirect callees, and foreign calls
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fn_value_binding_and_alias_chain_rejected_e2002() {
+    // 1. Direct fn-value binding (`mm := minmax; p := mm(3, 9)`)
+    let r1 = check(&with_main(
+        "    mm := minmax\n    p := mm(3, 9)\n    fmt.println(p)\n",
+    ));
+    assert_eq!(codes(&r1), vec!["HYB-E2002".to_string()]);
+    assert_eq!(r1.verdict, Verdict::Reject);
+
+    // 2. Multi-hop alias (`mm := minmax; m2 := mm; p := m2(3, 9)`)
+    let r2 = check(&with_main(
+        "    mm := minmax\n    m2 := mm\n    p := m2(3, 9)\n    fmt.println(p)\n",
+    ));
+    assert_eq!(codes(&r2), vec!["HYB-E2002".to_string()]);
+
+    // 3. `var p int; p = mm(3, 9)` and `var p = mm(3, 9)`
+    let r3 = check(&with_main(
+        "    mm := minmax\n    var p int\n    p = mm(3, 9)\n    fmt.println(p)\n",
+    ));
+    assert_eq!(codes(&r3), vec!["HYB-E2002".to_string()]);
+
+    let r4 = check(&with_main(
+        "    mm := minmax\n    var p = mm(3, 9)\n    fmt.println(p)\n",
+    ));
+    assert_eq!(codes(&r4), vec!["HYB-E2002".to_string()]);
+
+    // 4. Type-aliased function binding (`type pair_fn = fn(a int, b int) int int`)
+    let r5 = check(
+        "type pair_fn = fn(a int, b int) int int\n\
+         const _anchor = 0\n\
+         fn minmax(a int, b int) (int, int) { return a, b }\n\
+         fn main() {\n\
+             var mm pair_fn = minmax\n\
+             p := mm(3, 9)\n\
+             fmt.println(p)\n\
+         }\n",
+    );
+    assert_eq!(codes(&r5), vec!["HYB-E2002".to_string()]);
+}
+
+#[test]
+fn declared_and_inline_closures_and_closure_bodies_rejected_e2002() {
+    // 1. Declared closure variable returning 2 values bound to 1 name
+    let r1 = check(
+        "fn main() {\n\
+             mm := fn(a int, b int) (int, int) { return a, b }\n\
+             p := mm(3, 9)\n\
+             fmt.println(p)\n\
+         }\n",
+    );
+    assert_eq!(codes(&r1), vec!["HYB-E2002".to_string()]);
+
+    // 2. Inline closure call returning 2 values bound to 1 name
+    let r2 = check(
+        "fn main() {\n\
+             p := (fn() (int, int) { return 1, 2 })()\n\
+             fmt.println(p)\n\
+         }\n",
+    );
+    assert_eq!(codes(&r2), vec!["HYB-E2002".to_string()]);
+
+    // 3. Multi-value bind inside a closure body (direct top-level fn & captured fn-value)
+    let r3 = check(&with_main(
+        "    mm := minmax\n\
+             cb := fn() {\n\
+                 p := mm(3, 9)\n\
+                 fmt.println(p)\n\
+             }\n\
+             cb()\n",
+    ));
+    assert_eq!(codes(&r3), vec!["HYB-E2002".to_string()]);
+}
+
+#[test]
+fn user_method_and_indirect_fn_callees_rejected_e2002() {
+    // 1. User-defined struct method returning 2 values bound to 1 name
+    let r1 = check(
+        "struct pair_box { a int\n b int }\n\
+         fn (p pair_box) unpack() (int, int) { return p.a, p.b }\n\
+         fn main() {\n\
+             b := pair_box{a: 3, b: 9}\n\
+             x := b.unpack()\n\
+             fmt.println(x)\n\
+         }\n",
+    );
+    assert_eq!(codes(&r1), vec!["HYB-E2002".to_string()]);
+
+    // 2. Struct field holding a 2-result fn value (`h.mm(3, 9)`)
+    let r2 = check(
+        "struct holder { mm fn(a int, b int) int int }\n\
+         fn minmax(a int, b int) (int, int) { return a, b }\n\
+         fn main() {\n\
+             h := holder{mm: minmax}\n\
+             p := h.mm(3, 9)\n\
+             fmt.println(p)\n\
+         }\n",
+    );
+    assert_eq!(codes(&r2), vec!["HYB-E2002".to_string()]);
+
+    // 3. Slice element holding a 2-result fn value (`fns[0](3, 9)`)
+    let r3 = check(
+        "fn minmax(a int, b int) (int, int) { return a, b }\n\
+         fn main() {\n\
+             fns := []fn(a int, b int) int int{minmax}\n\
+             p := fns[0](3, 9)\n\
+             fmt.println(p)\n\
+         }\n",
+    );
+    assert_eq!(codes(&r3), vec!["HYB-E2002".to_string()]);
+
+    // 4. Higher-order function returning a 2-result fn value (`get_mm()(3, 9)`)
+    let r4 = check(
+        "fn minmax(a int, b int) (int, int) { return a, b }\n\
+         fn get_mm() fn(a int, b int) int int { return minmax }\n\
+         fn main() {\n\
+             p := get_mm()(3, 9)\n\
+             fmt.println(p)\n\
+         }\n",
+    );
+    assert_eq!(codes(&r4), vec!["HYB-E2002".to_string()]);
+
+    // 5. Parallel define with a 2-result call in a 1-value slot (`a, b := minmax(3, 9), 1`)
+    let r5 = check(&with_main(
+        "    a, b := minmax(3, 9), 1\n    fmt.println(\"{a} {b}\")\n",
+    ));
+    assert_eq!(codes(&r5), vec!["HYB-E2002".to_string()]);
+}
+
+#[test]
+fn foreign_multi_value_calls_rejected_e2002() {
+    let r1 = check(
+        "import \"strconv\"\n\
+         fn main() {\n\
+             n := strconv.parse_int(\"123\", 10, 64)\n\
+             fmt.println(n)\n\
+         }\n",
+    );
+    assert_eq!(codes(&r1), vec!["HYB-E2002".to_string()]);
+
+    let r2 = check(
+        "import \"strings\"\n\
+         fn main() {\n\
+             before, after := strings.cut(\"a:b\", \":\")\n\
+             fmt.println(\"{before} {after}\")\n\
+         }\n",
+    );
+    assert_eq!(codes(&r2), vec!["HYB-E2002".to_string()]);
+}
+
+#[test]
+fn positive_controls_destructuring_try_unwrap_and_rebind_accept() {
+    // 1. Destructuring fn-value and foreign calls
+    let r1 = check(
+        "import \"strconv\"\n\
+         fn minmax(a int, b int) (int, int) { return a, b }\n\
+         fn main() {\n\
+             mm := minmax\n\
+             a, b := mm(3, 9)\n\
+             n, err := strconv.parse_int(\"123\", 10, 64)\n\
+             s := strconv.atoi(\"42\")?\n\
+             fmt.println(\"{a} {b} {n} {s}\")\n\
+             _ = err\n\
+         }\n",
+    );
+    assert!(codes(&r1).is_empty(), "unexpected errors: {:?}", r1.diagnostics);
+    assert_eq!(r1.verdict, Verdict::Accept);
+
+    // 2. Rebinding a local fn variable from 2-result to 1-result updates b.ty
+    let r2 = check(
+        "fn minmax(a int, b int) (int, int) { return a, b }\n\
+         fn plus(a int, b int) int { return a + b }\n\
+         fn main() {\n\
+             mm := minmax\n\
+             mm = plus\n\
+             p := mm(3, 9)\n\
+             fmt.println(p)\n\
+         }\n",
+    );
+    assert!(codes(&r2).is_empty(), "unexpected errors: {:?}", r2.diagnostics);
+    assert_eq!(r2.verdict, Verdict::Accept);
+}
