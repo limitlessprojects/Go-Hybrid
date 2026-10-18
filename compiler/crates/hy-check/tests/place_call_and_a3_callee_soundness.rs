@@ -416,7 +416,7 @@ fn pointer_receiver_methods_and_closure_rebinds_update_a3_state() {
     let r_ptr_recv = check(
         "struct svc { n int }\n\
          struct engine { services map[string]svc }\n\
-         fn (e *engine) reset() {\n\
+         fn (e engine) reset() {\n\
              delete(e.services, \"k\")\n\
          }\n\
          fn main() {\n\
@@ -724,7 +724,7 @@ fn temporary_receiver_holding_loaned_map_and_inner_alias_closure_rebind_reject()
     let r_temp_recv = check(
         "struct svc { n int }\n\
          struct engine { services map[string]svc }\n\
-         fn (e *engine) reset() {\n\
+         fn (e engine) reset() {\n\
              delete(e.services, \"k\")\n\
          }\n\
          fn main() {\n\
