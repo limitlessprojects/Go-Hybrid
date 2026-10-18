@@ -880,3 +880,46 @@ fn non_struct_lexical_binding_shadowing_top_level_fn_rejects() {
         "parameter println shadowing builtin println must not bypass const-write check with E3006",
     );
 }
+
+#[test]
+fn parallel_closure_swap_preserves_a3_param_and_capture_mutation_summaries() {
+    let r_param_swap = check(
+        "struct svc { n int }\n\
+         fn main() {\n\
+             m := map[string]svc{\"k\": svc{n: 1}}\n\
+             f := fn(x map[string]svc) { delete(x, \"k\") }\n\
+             g := fn(x map[string]svc) { _ = x }\n\
+             f, g = g, f\n\
+             slot := &m[\"k\"]\n\
+             g(m)\n\
+             slot.n = 2\n\
+             _ = f\n\
+             _ = g\n\
+         }\n",
+    );
+    assert_code(
+        &r_param_swap,
+        "HYB-E3102",
+        "parallel swap f, g = g, f must preserve f's parameter-mutating summary on g in A3",
+    );
+
+    let r_capture_swap = check(
+        "struct svc { n int }\n\
+         fn main() {\n\
+             m := map[string]svc{\"k\": svc{n: 1}}\n\
+             f := fn() { delete(m, \"k\") }\n\
+             g := fn() {}\n\
+             f, g = g, f\n\
+             slot := &m[\"k\"]\n\
+             g()\n\
+             slot.n = 2\n\
+             _ = f\n\
+             _ = g\n\
+         }\n",
+    );
+    assert_code(
+        &r_capture_swap,
+        "HYB-E3102",
+        "parallel swap f, g = g, f must preserve f's capture-mutating summary on g in A3",
+    );
+}
