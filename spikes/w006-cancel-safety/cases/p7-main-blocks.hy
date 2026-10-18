@@ -1,6 +1,5 @@
 // EXPECTED-CANCEL: CLEAN
-// main is the root task: nothing cancels it, so its blocking sites are
-// outside the claim (root mode reports nothing).
+// main (root) is not claimed.
 fn worker(results chan int) {
     select {
         results <- 1: {}

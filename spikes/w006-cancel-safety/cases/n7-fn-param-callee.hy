@@ -1,8 +1,5 @@
 // EXPECTED-CANCEL: E8002 x1
-// The task invokes a closure obtained from a call: its body is not visible
-// at the call site, so the pass fails closed.
-// (Amended before the pass existed: a fn-typed spawn ARGUMENT is rejected by
-// Tier-0 itself — HYB-E3005 — so the unresolved callee is built in-task.)
+// Closure returned by a call: body not visible, fail closed.
 fn make_step() fn() {
     return fn() { fmt.println("tick") }
 }

@@ -1,6 +1,5 @@
 // EXPECTED-CANCEL: E8002 x1
-// main's close() targets a SHADOWING `done`, not the channel the worker
-// holds: the worker's done is not a token.
+// main closes a shadowing `done`, not the worker's.
 fn worker(done chan bool) {
     <-done
 }

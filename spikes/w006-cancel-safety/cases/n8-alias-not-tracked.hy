@@ -1,6 +1,5 @@
 // EXPECTED-CANCEL: E8002 x1
-// Documented conservative false positive: `d` aliases `done`, but the pass
-// does not track aliases, so the worker's receive is not proven observable.
+// Known false positive: aliases (`d := done`) are not tracked.
 fn worker(done chan bool) {
     <-done
 }

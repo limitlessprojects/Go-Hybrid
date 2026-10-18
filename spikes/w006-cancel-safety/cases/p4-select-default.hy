@@ -1,5 +1,5 @@
 // EXPECTED-CANCEL: CLEAN
-// A select with default never blocks.
+// `select` with `default` never blocks.
 fn worker(jobs chan int) {
     select {
         v := <-jobs: fmt.println("{v}")

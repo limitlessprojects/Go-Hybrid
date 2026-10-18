@@ -1,6 +1,5 @@
 // EXPECTED-CANCEL: E8002 x1
-// Two receive arms, neither a token nor a timer: the select can block
-// forever after main closes `done`.
+// `select` with no token, timer, or default arm.
 fn worker(done chan bool, a chan int, b chan int) {
     select {
         v := <-a: { fmt.println("{v}") }

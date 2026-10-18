@@ -1,6 +1,5 @@
 // EXPECTED-CANCEL: CLEAN
-// The worker's only blocking site is a select with a receive arm on `done`,
-// which main closes: done is a token, the select is cancel-observable.
+// `select` with a token arm.
 fn worker(done chan bool, jobs chan int) {
     loop {
         select {

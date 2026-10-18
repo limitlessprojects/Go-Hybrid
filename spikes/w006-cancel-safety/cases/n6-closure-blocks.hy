@@ -1,5 +1,5 @@
 // EXPECTED-CANCEL: E8002 x1
-// A closure literal invoked inside the task blocks on a non-token channel.
+// Closure invoked in the task blocks on a non-token.
 fn worker(done chan bool, jobs chan int) {
     take := fn() int { return <-jobs }
     v := take()

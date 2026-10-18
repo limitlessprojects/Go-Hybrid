@@ -1,5 +1,5 @@
 // EXPECTED-CANCEL: CLEAN
-// The blocking site lives in a callee; the token flows through the call.
+// Token passes through a call.
 fn wait_or_take(done chan bool, jobs chan int) {
     select {
         v := <-jobs: fmt.println("{v}")

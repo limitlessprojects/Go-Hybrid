@@ -1,7 +1,5 @@
 // EXPECTED-CANCEL: E8002 x1
-// FALSIFIER (hunt round 1, found against pass v1): a closure handed to a
-// foreign API is not walked (its own sites run on foreign goroutines), so a
-// checked `task` spawned inside it was never discovered.
+// A task spawned inside a foreign callback is still checked code.
 fn worker(done chan bool, jobs chan int) {
     v := <-jobs
     fmt.println("{v}")

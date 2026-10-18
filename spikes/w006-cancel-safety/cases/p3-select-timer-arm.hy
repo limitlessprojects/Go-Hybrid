@@ -1,5 +1,5 @@
 // EXPECTED-CANCEL: CLEAN
-// No token, but the select carries a time.after arm: the wait is bounded.
+// Fresh `time.after` arm bounds the wait.
 fn worker(jobs chan int) {
     deadline := time.after(time.seconds(1))
     select {

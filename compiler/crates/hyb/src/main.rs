@@ -181,8 +181,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
 
     // check
     let mut result = hy_check::check_file(&ast);
-    // W-006 (#352): opt-in cancellation pass — its HYB-E8002 warnings join
-    // the output only when asked for, so default verdicts/output never move.
+    // W-006 (#352): opt-in; default output is unchanged.
     let cancel = report_cancel.then(|| hy_check::check_cancel(&ast));
     if let Some(c) = &cancel {
         result.diagnostics.extend(c.diagnostics.iter().cloned());
@@ -260,10 +259,11 @@ fn cmd_check(args: &[String]) -> ExitCode {
         }
         if let Some(c) = &cancel {
             println!(
-                "cancel: {} cancel-oblivious site(s) (HYB-E8002), {} context(s) analyzed, {} foreign call(s) in task code (outside the claim)",
+                "cancel: {} cancel-oblivious site(s) (HYB-E8002), {} context(s) analyzed, {} foreign call(s) in task code and {} blocking site(s) in tasks nothing cancels (both outside the claim)",
                 c.diagnostics.len(),
                 c.contexts,
-                c.foreign_calls
+                c.foreign_calls,
+                c.uncancelled_sites
             );
         }
         if result.diagnostics.is_empty() {
@@ -271,9 +271,7 @@ fn cmd_check(args: &[String]) -> ExitCode {
         }
     }
 
-    // CI policy gate (--deny-cancel), the --deny-managed twin: any
-    // cancel-oblivious site fails the check. The warnings themselves stay
-    // warnings (E8nnn can never fail a build on their own).
+    // --deny-cancel: policy gate like --deny-managed (E8002 stays a warning).
     if let Some(c) = cancel
         .as_ref()
         .filter(|c| deny_cancel && !c.diagnostics.is_empty())

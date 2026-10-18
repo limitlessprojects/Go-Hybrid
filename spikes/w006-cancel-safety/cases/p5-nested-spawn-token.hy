@@ -1,6 +1,5 @@
 // EXPECTED-CANCEL: CLEAN
-// `done` is a token of parent (main closes it); parent re-spawns child with
-// it, so it is a token of child too, and child's receive is observable.
+// Token passes through a nested spawn.
 fn child(done chan bool) {
     <-done
 }

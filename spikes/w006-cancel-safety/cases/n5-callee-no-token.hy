@@ -1,5 +1,5 @@
 // EXPECTED-CANCEL: E8002 x1
-// The helper blocks on `jobs`; only `done` is a token in the worker.
+// Callee blocks on `jobs`; only `done` is a token.
 fn take(jobs chan int) int {
     return <-jobs
 }
