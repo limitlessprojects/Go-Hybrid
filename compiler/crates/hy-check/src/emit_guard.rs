@@ -56,6 +56,11 @@ impl<'a> Checker<'a> {
                         for (name, value) in l.names.iter().zip(l.values.iter()) {
                             self.check_const_overflow_init(name, ty, value, Some(st));
                         }
+                    } else if !matches!(l.kind, hy_syntax::LocalKind::Const) {
+                        for (name, value) in l.names.iter().zip(l.values.iter()) {
+                            self.check_default_int_overflow(name, value, Some(st));
+                            self.check_default_float_overflow(name, value, Some(st));
+                        }
                     }
                     self.bind_closure_local_for_emit_guard(st, l);
                     self.mark_slot_loans_local(st, l);

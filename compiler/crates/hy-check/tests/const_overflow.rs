@@ -1333,3 +1333,154 @@ fn const_alias_into_untyped_decl_is_rejected() {
     );
     assert_eq!(r.verdict, Verdict::Reject);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #683: untyped float constants past float64/float32 range
+// ---------------------------------------------------------------------------
+
+#[test]
+fn untyped_float64_overflow_is_rejected() {
+    let r = check("fn main() {\n    let y = 1e400\n    fmt.println(\"{y}\")\n}\n");
+    assert!(
+        error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+        "let y = 1e400 must reject HYB-E6002: {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+
+    let r2 = check("fn main() {\n    y := 1e400\n    fmt.println(\"{y}\")\n}\n");
+    assert!(
+        error_codes(&r2).iter().any(|c| c == "HYB-E6002"),
+        "y := 1e400 must reject HYB-E6002: {:?}",
+        error_codes(&r2)
+    );
+    assert_eq!(r2.verdict, Verdict::Reject);
+
+    let r3 = check("fn main() {\n    let h = -1e400\n    fmt.println(\"{h}\")\n}\n");
+    assert!(
+        error_codes(&r3).iter().any(|c| c == "HYB-E6002"),
+        "let h = -1e400 must reject HYB-E6002: {:?}",
+        error_codes(&r3)
+    );
+    assert_eq!(r3.verdict, Verdict::Reject);
+}
+
+#[test]
+fn ascribed_float32_and_float64_overflow_is_rejected() {
+    let r_f32 = check("fn main() {\n    var f float32 = 1e40\n    fmt.println(\"{f}\")\n}\n");
+    assert!(
+        error_codes(&r_f32).iter().any(|c| c == "HYB-E6002"),
+        "var f float32 = 1e40 must reject HYB-E6002: {:?}",
+        error_codes(&r_f32)
+    );
+    assert_eq!(r_f32.verdict, Verdict::Reject);
+
+    let r_f64 = check("fn main() {\n    var x float64 = 1e400\n    fmt.println(\"{x}\")\n}\n");
+    assert!(
+        error_codes(&r_f64).iter().any(|c| c == "HYB-E6002"),
+        "var x float64 = 1e400 must reject HYB-E6002: {:?}",
+        error_codes(&r_f64)
+    );
+    assert_eq!(r_f64.verdict, Verdict::Reject);
+}
+
+#[test]
+fn reassignment_to_float64_binding_is_rejected() {
+    let r = check("fn main() {\n    var y float64 = 1.0\n    y = 1e400\n    fmt.println(\"{y}\")\n}\n");
+    assert!(
+        error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+        "y = 1e400 must reject HYB-E6002: {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn closure_body_local_float_overflow_is_rejected() {
+    let r1 = check("fn f() {\n    let y = 1e400\n    fmt.println(\"{y}\")\n}\n");
+    assert!(
+        error_codes(&r1).iter().any(|c| c == "HYB-E6002"),
+        "fn f() let y = 1e400 must reject HYB-E6002: {:?}",
+        error_codes(&r1)
+    );
+    assert_eq!(r1.verdict, Verdict::Reject);
+
+    let r2 = check("fn main() {\n    let cb = fn() {\n        let y = 1e400\n        fmt.println(\"{y}\")\n    }\n    cb()\n}\n");
+    assert!(
+        error_codes(&r2).iter().any(|c| c == "HYB-E6002"),
+        "closure local let y = 1e400 must reject HYB-E6002: {:?}",
+        error_codes(&r2)
+    );
+    assert_eq!(r2.verdict, Verdict::Reject);
+}
+
+#[test]
+fn return_statement_float64_overflow_is_rejected() {
+    let r = check("fn f() float64 {\n    return 1e400\n}\n");
+    assert!(
+        error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+        "return 1e400 must reject HYB-E6002: {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn slice_literal_element_and_append_float64_overflow_is_rejected() {
+    let r_slice = check("fn main() {\n    let xs = []float64{1e400}\n    fmt.println(\"{xs}\")\n}\n");
+    assert!(
+        error_codes(&r_slice).iter().any(|c| c == "HYB-E6002"),
+        "[]float64{{1e400}} must reject HYB-E6002: {:?}",
+        error_codes(&r_slice)
+    );
+    assert_eq!(r_slice.verdict, Verdict::Reject);
+
+    let r_append = check("fn main() {\n    let xs = []float64{}\n    let ys = append(xs, 1e400)\n    fmt.println(\"{ys}\")\n}\n");
+    assert!(
+        error_codes(&r_append).iter().any(|c| c == "HYB-E6002"),
+        "append(xs, 1e400) must reject HYB-E6002: {:?}",
+        error_codes(&r_append)
+    );
+    assert_eq!(r_append.verdict, Verdict::Reject);
+}
+
+#[test]
+fn huge_integer_literal_at_float64_site_is_rejected() {
+    let mut huge_int = String::from("1");
+    for _ in 0..400 {
+        huge_int.push('0');
+    }
+    let src = format!("fn main() {{\n    var x float64 = {}\n    fmt.println(\"{{x}}\")\n}}\n", huge_int);
+    let r = check(&src);
+    assert!(
+        error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+        "var x float64 = 1000..0 must reject HYB-E6002: {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn float_controls_inside_range_are_accepted() {
+    let controls = [
+        "fn main() {\n    var x float64 = 1.7976931348623157e308\n    fmt.println(\"{x}\")\n}\n",
+        "fn main() {\n    var x float64 = 1.7976931348623158e308\n    fmt.println(\"{x}\")\n}\n",
+        "fn main() {\n    var x float32 = 3.4028235e38\n    fmt.println(\"{x}\")\n}\n",
+        "fn main() {\n    var x float64 = 1e-400\n    fmt.println(\"{x}\")\n}\n",
+        "fn main() {\n    var x float32 = 1e-46\n    fmt.println(\"{x}\")\n}\n",
+        "fn main() {\n    x := 1e308\n    fmt.println(\"{x}\")\n}\n",
+        "fn main() {\n    let g = 1e308\n    fmt.println(\"{g}\")\n}\n",
+    ];
+
+    for (i, src) in controls.iter().enumerate() {
+        let r = check(src);
+        assert_eq!(
+            r.verdict,
+            Verdict::Accept,
+            "control #{} must accept: {:?}\nsrc: {}",
+            i + 1,
+            error_codes(&r),
+            src
+        );
+    }
+}
