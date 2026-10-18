@@ -26,8 +26,8 @@ fn codes(r: &hy_check::CheckResult) -> Vec<String> {
 fn assert_code(r: &hy_check::CheckResult, want: &str, what: &str) {
     let cs = codes(r);
     assert!(
-        cs.iter().any(|c| c == want),
-        "expected {} ({}), got {:?}",
+        !cs.is_empty() && cs.iter().all(|c| c == want),
+        "expected only {} ({}), got {:?}",
         want,
         what,
         cs
@@ -332,7 +332,7 @@ fn positive_controls_read_only_closures_methods_and_pure_pkg_parens_accept() {
 fn wrapped_closures_and_computed_callees_fail_closed_in_a3_and_const_checks() {
     let r_wrapped = check(
         "struct svc { n int }\n\
-         fn wrap(cb fn(map[string]svc) int) fn(map[string]svc) int {\n\
+         fn wrap(cb fn(_ map[string]svc) int) fn(_ map[string]svc) int {\n\
              _ = cb\n\
              return fn(x map[string]svc) int {\n\
                  delete(x, \"k\")\n\
@@ -359,7 +359,7 @@ fn wrapped_closures_and_computed_callees_fail_closed_in_a3_and_const_checks() {
         "struct svc { n int }\n\
          fn main() {\n\
              m := map[string]svc{\"k\": svc{n: 1}}\n\
-             fs := []fn(map[string]svc){fn(x map[string]svc) {\n\
+             fs := []fn(_ map[string]svc){fn(x map[string]svc) {\n\
                  delete(x, \"k\")\n\
              }}\n\
              slot := &m[\"k\"]\n\
@@ -375,7 +375,7 @@ fn wrapped_closures_and_computed_callees_fail_closed_in_a3_and_const_checks() {
 
     let r_call_callee = check(
         "struct svc { n int }\n\
-         fn getf() fn(map[string]svc) {\n\
+         fn getf() fn(_ map[string]svc) {\n\
              return fn(x map[string]svc) {\n\
                  delete(x, \"k\")\n\
              }\n\
@@ -395,7 +395,7 @@ fn wrapped_closures_and_computed_callees_fail_closed_in_a3_and_const_checks() {
 
     let r_const_computed = check(
         "const shared = map[string]int{\"a\": 1}\n\
-         fn get_mutator() fn(map[string]int) {\n\
+         fn get_mutator() fn(_ map[string]int) {\n\
              return fn(x map[string]int) {\n\
                  x[\"a\"] = 99\n\
              }\n\
@@ -435,7 +435,7 @@ fn pointer_receiver_methods_and_closure_rebinds_update_a3_state() {
 
     let r_rebind_to_wrapped = check(
         "struct svc { n int }\n\
-         fn wrap(cb fn(map[string]svc) int) fn(map[string]svc) int {\n\
+         fn wrap(cb fn(_ map[string]svc) int) fn(_ map[string]svc) int {\n\
              return cb\n\
          }\n\
          fn main() {\n\
@@ -576,7 +576,7 @@ fn method_name_disambiguation_and_for_iterate_single_diagnostic() {
 fn closure_shadowing_and_branch_rebinds_preserve_lexical_soundness() {
     let r_shadow_wrapped = check(
         "struct svc { n int }\n\
-         fn wrap(cb fn(map[string]svc) int) fn(map[string]svc) int {\n\
+         fn wrap(cb fn(_ map[string]svc) int) fn(_ map[string]svc) int {\n\
              _ = cb\n\
              return fn(x map[string]svc) int {\n\
                  delete(x, \"k\")\n\
@@ -801,7 +801,7 @@ fn non_struct_lexical_binding_shadowing_top_level_fn_rejects() {
          fn op(m map[string]svc) int {\n\
              return len(m)\n\
          }\n\
-         fn helper(op fn(map[string]svc) int, m map[string]svc) int {\n\
+         fn helper(op fn(_ map[string]svc) int, m map[string]svc) int {\n\
              return op(m)\n\
          }\n\
          fn main() {\n\
@@ -848,7 +848,7 @@ fn non_struct_lexical_binding_shadowing_top_level_fn_rejects() {
 
     let r_shadowed_builtin_a3 = check(
         "struct svc { n int }\n\
-         fn helper(println fn(map[string]svc) int, m map[string]svc) int {\n\
+         fn helper(println fn(_ map[string]svc) int, m map[string]svc) int {\n\
              return println(m)\n\
          }\n\
          fn main() {\n\
@@ -866,7 +866,7 @@ fn non_struct_lexical_binding_shadowing_top_level_fn_rejects() {
 
     let r_shadowed_builtin_const = check(
         "struct svc { n int }\n\
-         fn helper(println fn(map[string]svc) int, m map[string]svc) int {\n\
+         fn helper(println fn(_ map[string]svc) int, m map[string]svc) int {\n\
              return println(m)\n\
          }\n\
          fn main() {\n\
