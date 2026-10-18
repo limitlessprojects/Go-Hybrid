@@ -29,21 +29,65 @@ import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# One discovery invocation, quoted or bare pattern: `... discover -s X -p Y`.
-DISCOVER_RE = re.compile(r"unittest\s+discover\b[^\n]*?-p\s+'?([^'\s]+)")
+# Unittest discovery invocations: extracts -s <dir> and -p <pattern> per command.
+DISCOVER_CMD_RE = re.compile(
+    r"^[ \t]*(?:[a-zA-Z0-9_./-]*python[0-9.]*\s+)?(?:-m\s+)?unittest\s+discover\b(?P<args>[^\n#]*)",
+    re.MULTILINE,
+)
+OPT_S_RE = re.compile(r"(?:^|\s)-s\s+(?:'([^']*)'|\"([^\"]*)\"|(\S+))")
+OPT_P_RE = re.compile(r"(?:^|\s)-p\s+(?:'([^']*)'|\"([^\"]*)\"|(\S+))")
 
 # Directories whose test files this guard covers, and how each is invoked.
 DISCOVER_DIR = "tools"   # referenced through a `unittest discover -p` pattern
 DIRECT_DIRS = ("tests",)  # referenced by literal repo-relative path
 
 
+def registered_discoveries(workflow_text):
+    """Every (start_dir, pattern) tuple passed to `unittest discover`."""
+    results = []
+    for match in DISCOVER_CMD_RE.finditer(workflow_text):
+        args = match.group("args")
+        s_match = OPT_S_RE.search(args)
+        start_dir = "."
+        if s_match:
+            start_dir = s_match.group(1) or s_match.group(2) or s_match.group(3) or "."
+        start_dir = os.path.normpath(start_dir).replace("\\", "/")
+        if start_dir.startswith("./"):
+            start_dir = start_dir[2:]
+
+        p_match = OPT_P_RE.search(args)
+        pattern = "test*.py"
+        if p_match:
+            pattern = p_match.group(1) or p_match.group(2) or p_match.group(3) or "test*.py"
+
+        results.append((start_dir, pattern))
+    return results
+
+
 def registered_patterns(workflow_text):
     """Every `-p` pattern the workflow passes to `unittest discover`."""
-    return DISCOVER_RE.findall(workflow_text)
+    return [p for _, p in registered_discoveries(workflow_text)]
 
 
-def is_registered_discover(name, patterns):
-    return any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
+def is_registered_discover(target, spec):
+    """Checks if target is reached by discovery.
+
+    If spec is a list of strings (legacy pattern list), checks fnmatch on basename.
+    If spec is a list of (start_dir, pattern) tuples, checks directory prefix and pattern.
+    """
+    if not spec:
+        return False
+    if isinstance(spec[0], str):
+        basename = os.path.basename(target)
+        return any(fnmatch.fnmatch(basename, p) for p in spec)
+
+    rel = os.path.normpath(target).replace("\\", "/")
+    basename = os.path.basename(rel)
+    for start_dir, pattern in spec:
+        if start_dir == "." or rel == start_dir or rel.startswith(start_dir + "/"):
+            if fnmatch.fnmatch(basename, pattern):
+                return True
+    return False
 
 
 def is_registered_direct(relpath, workflow_text):
@@ -66,11 +110,11 @@ def find_test_files(root, directory):
 
 def unregistered(root, workflow_text):
     """Test files no reference in the workflow reaches."""
-    patterns = registered_patterns(workflow_text)
+    discoveries = registered_discoveries(workflow_text)
     missing = []
     for rel in find_test_files(root, DISCOVER_DIR):
-        if not is_registered_discover(os.path.basename(rel), patterns):
-            missing.append((rel, "no `unittest discover -p` pattern matches it"))
+        if not is_registered_discover(rel, discoveries):
+            missing.append((rel, "no `unittest discover -s DIR -p PATTERN` invocation reaches it"))
     for directory in DIRECT_DIRS:
         for rel in find_test_files(root, directory):
             if not is_registered_direct(rel, workflow_text):

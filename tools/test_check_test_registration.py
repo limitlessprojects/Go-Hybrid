@@ -101,6 +101,22 @@ class RegistrationTests(unittest.TestCase):
         missing = guard.unregistered(root, text)
         self.assertEqual([rel for rel, _ in missing], ["tests/test_install_upgrade.py"])
 
+    def test_discovery_start_directory_boundary_is_respected(self):
+        workflow = "          python3 -m unittest discover -s tools/fuzz -p test_same.py\n"
+        root, text = self.build(
+            workflow,
+            ["tools/fuzz/test_same.py", "tools/runner/test_same.py"])
+        missing = guard.unregistered(root, text)
+        self.assertEqual([rel for rel, _ in missing], ["tools/runner/test_same.py"])
+
+    def test_discovery_start_directory_quoted_and_options_order(self):
+        workflow = "          python3 -m unittest discover -p 'test_same.py' -s \"tools/runner\"\n"
+        root, text = self.build(
+            workflow,
+            ["tools/fuzz/test_same.py", "tools/runner/test_same.py"])
+        missing = guard.unregistered(root, text)
+        self.assertEqual([rel for rel, _ in missing], ["tools/fuzz/test_same.py"])
+
 
 class GuardMisuseTests(unittest.TestCase):
     def run_main(self, workflow, suites=()):
