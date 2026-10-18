@@ -110,7 +110,9 @@ valid (and paid) outcome, all outcomes published: [MOONSHOT.md](MOONSHOT.md).
 
 - The table covers **Tier-0 (sendability/ownership)**. It does not claim
   deadlock-freedom, general liveness, or absence of logical races that are
-  not data races.
+  not data races. Replayability of concurrent execution is supported via
+  the experimental Replayable Task Island mechanism, which provides a
+  compiler-certified guarantee of reproducibility for admitted regions.
 - Rows 10–16 describe primitives **outside the `.hy` surface**: the
   checker's fail-closed behavior means such values cannot silently cross a
   boundary, but the checker is not an authority on those primitives
