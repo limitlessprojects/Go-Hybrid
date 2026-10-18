@@ -55,7 +55,8 @@ def gh_api(path, data=None, method=None):
     tok = gh_token()
     req = urllib.request.Request(GITHUB_API + path)
     if tok:
-        req.add_header("Authorization", "token " + tok)
+        # Credentials belong to the initial API request, not its redirects.
+        req.add_unredirected_header("Authorization", "token " + tok)
     req.add_header("Accept", "application/vnd.github+json")
     if data is not None:
         req.add_header("Content-Type", "application/json")
@@ -292,7 +293,9 @@ def actions_fetch(run_id, jobdir):
         url = a["archive_download_url"]
         dest = os.path.join(jobdir, "result", a["name"] + ".zip")
         req = urllib.request.Request(url)
-        req.add_header("Authorization", "token " + tok)
+        # GitHub redirects archive downloads to a signed storage URL. urllib
+        # forwards normal headers across hosts; do not send our token there.
+        req.add_unredirected_header("Authorization", "token " + tok)
         # Finish the response before touching a previous valid archive. Publish
         # via a sibling temporary file so write/replace failures preserve it too.
         with urllib.request.urlopen(req, timeout=120) as r:
