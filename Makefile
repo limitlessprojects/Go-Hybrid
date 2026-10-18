@@ -42,6 +42,8 @@ check:
 
 	@$(PY) -m unittest discover -s tools -p test_differential_loop.py -v
 	@$(PY) -m unittest discover -s tools -p test_check_versions.py -v
+	@$(PY) -m unittest discover -s tools -p test_workload_run.py -v
+	@$(PY) -m unittest discover -s tools -p test_runner_env_report.py -v
 	@$(PY) -m unittest discover -s tools -p test_corpus_harness.py -v
 	@$(PY) -m unittest discover -s tools -p test_package_version.py -v
 	@$(PY) -m unittest discover -s tools/runner -p test_runner.py -v
@@ -50,7 +52,7 @@ check:
 	@bash tools/check-versions.sh --no-toolchain && echo "versions OK"
 	@$(PY) tools/check_conflict_markers.py && echo "conflict markers OK"
 	@cd /tmp && rm -rf gh-selftest && mkdir gh-selftest && cd gh-selftest && \
-	printf '%s\n' '{"job":"selftest","tier":"sandbox","sha":"none","repo":"none","gpu":false,"setup":[],"commands":[{"name":"echo","run":"echo selftest-ok","timeout":30}],"expected_results":[]}' > job.json && \
+	printf '%s\n' '{"job":"selftest","tier":"sandbox","sha":"HEAD","repo":"none","gpu":false,"setup":[],"commands":[{"name":"echo","run":"echo selftest-ok","timeout":30}],"expected_results":[]}' > job.json && \
 	$(PY) $(CURDIR)/tools/runner/runner.py job.json --results-dir results >/dev/null && \
 	test -f results/summary.json && grep -q '"ok": true' results/summary.json && echo "runner selftest OK"
 	@$(PY) -c "import glob,json;[json.load(open(p)) for p in glob.glob('jobs/*/job.json')];print('job specs OK')"

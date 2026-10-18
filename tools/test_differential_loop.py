@@ -19,6 +19,9 @@ HARNESS = pathlib.Path(__file__).with_name("differential_loop.py")
 HARNESS_SPEC = importlib.util.spec_from_file_location("differential_harness", HARNESS)
 HARNESS_MOD = importlib.util.module_from_spec(HARNESS_SPEC)
 HARNESS_SPEC.loader.exec_module(HARNESS_MOD)
+# patch.object(HARNESS_MOD.subprocess, "run", ...) patches the shared
+# subprocess module, so a fake must call the real run through this handle.
+REAL_RUN = subprocess.run
 
 
 class RuntimeHazardTests(unittest.TestCase):
@@ -45,7 +48,8 @@ class RuntimeHazardTests(unittest.TestCase):
             return subprocess.run(
                 [sys.executable, str(HARNESS), "--bin", str(builder),
                  "--corpus", str(corpus)],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, encoding="utf-8", errors="replace",
+                timeout=10,
             )
 
     def assert_result(self, result, code):
@@ -212,7 +216,8 @@ class RelativeCorpusPathTests(unittest.TestCase):
                 return subprocess.run(
                     [sys.executable, str(HARNESS), "--bin", bin_arg,
                      "--corpus", corpus_arg],
-                    capture_output=True, text=True, timeout=10,
+                    capture_output=True, encoding="utf-8", errors="replace",
+                    timeout=10,
                 )
             finally:
                 os.chdir(previous)
@@ -231,6 +236,115 @@ class RelativeCorpusPathTests(unittest.TestCase):
         result = self._run(relative_corpus=True, relative_bin=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("FULL AGREEMENT", result.stdout)
+
+
+class CheckerUtf8Tests(unittest.TestCase):
+    """checker_rejects must read checker JSON as UTF-8, not the host locale.
+
+    The checker's JSON is UTF-8 by contract; decoding it with a legacy
+    locale (Windows cp936) corrupts or rejects valid non-ASCII
+    diagnostics. These drive the real function through real OS pipes with
+    the legacy fallback forced, so Linux CI exercises the Windows failure
+    without changing the global locale.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = pathlib.Path(self.directory.name)
+        self.checker = self.root / "checker.py"
+        # Emit exact bytes, independently of the child's own locale. The
+        # non-ASCII case carries its discriminator in tier0_rule: under a
+        # mojibake decode the rule comparison flips, so the test pins the
+        # decoded content, not merely the absence of a crash.
+        self.checker.write_text(
+            f"#!{sys.executable}\n"
+            "import json, sys\n"
+            "case = sys.argv[2]\n"
+            "if case.endswith('invalid.hy'):\n"
+            "    sys.stdout.buffer.write(b'\\xff')\n"
+            "elif case.endswith('weird-exit.hy'):\n"
+            "    raise SystemExit(3)\n"
+            "else:\n"
+            "    rule = 'A1' if case.endswith('ascii.hy') else "
+            "('B2' if case.endswith('mismatch.hy') else '\\u951f')\n"
+            "    value = {'summary': {'verdict': 'reject'},\n"
+            "             'diagnostics': [{'severity': 'error',\n"
+            "                             'tier0_rule': rule, 'message': 'note'}]}\n"
+            "    sys.stdout.buffer.write("
+            "json.dumps(value, ensure_ascii=False).encode('utf-8'))\n"
+            "    raise SystemExit(1)\n",
+            encoding="utf-8")
+
+    def run_with_legacy_locale(self, command, **kwargs):
+        # Keep real OS pipes/decoding. Select the legacy fallback on every
+        # host so Linux CI also exercises the Windows cp936 failure,
+        # without changing global locale or mocking the checker output.
+        # Note the blast radius: patching HARNESS_MOD.subprocess.run
+        # patches the shared subprocess module, so this wrapper sees every
+        # subprocess.run issued while a case is in scope.
+        if kwargs.get("text") or kwargs.get("universal_newlines"):
+            kwargs.setdefault("encoding", "cp936")
+        return REAL_RUN([sys.executable, command[0], *command[1:]], **kwargs)
+
+    def call_checker(self, name, expected_rule="A1"):
+        with patch.object(HARNESS_MOD.subprocess, "run",
+                          self.run_with_legacy_locale):
+            return HARNESS_MOD.checker_rejects(
+                str(self.checker), name, expected_rule)
+
+    def test_utf8_rule_survives_non_utf8_locale(self):
+        # The discriminator is non-ASCII; a mojibake decode would compare
+        # a different rule and flip the verdict to False.
+        ok, detail = self.call_checker("valid.hy", expected_rule="\u951f")
+        self.assertTrue(ok, detail)
+
+    def test_ascii_json_keeps_the_existing_contract(self):
+        ok, detail = self.call_checker("ascii.hy")
+        self.assertTrue(ok, detail)
+
+    def test_invalid_utf8_output_is_reported_not_raised(self):
+        ok, detail = self.call_checker("invalid.hy")
+        self.assertFalse(ok)
+        self.assertIn("not valid UTF-8", detail)
+
+    def test_unexpected_exit_still_reported(self):
+        ok, detail = self.call_checker("weird-exit.hy")
+        self.assertFalse(ok)
+        self.assertIn("unexpected checker exit 3", detail)
+
+    def test_checker_that_cannot_run_is_reported(self):
+        # Not patched: a missing checker raises OSError out of run(), which
+        # must surface as a reported (False, detail), never a traceback
+        # that aborts the whole differential loop.
+        ok, detail = HARNESS_MOD.checker_rejects(
+            str(self.root / "missing-checker"), "valid.hy", "A1")
+        self.assertFalse(ok)
+        self.assertIn("checker could not be run", detail)
+
+    def test_rule_mismatch_still_reported(self):
+        ok, detail = self.call_checker("mismatch.hy", expected_rule="A1")
+        self.assertFalse(ok)
+        self.assertIn("first_rule=B2", detail)
+
+    @unittest.skipUnless(os.name == "posix", "CLI fixture uses POSIX executable scripts")
+    def test_invalid_utf8_output_does_not_crash_the_loop(self):
+        corpus = self.root / "corpus"
+        corpus.mkdir()
+        (corpus / "01-invalid.hy").write_text(
+            "// EXPECTED-VERDICT: REJECT A1\nfn main() {}\n", encoding="utf-8")
+        (corpus / "02-valid.hy").write_text(
+            "// EXPECTED-VERDICT: REJECT A1\nfn main() {}\n", encoding="utf-8")
+        self.checker.chmod(0o755)
+        result = subprocess.run(
+            [sys.executable, str(HARNESS), "--bin", str(self.checker),
+             "--corpus", str(corpus)],
+            capture_output=True, encoding="utf-8", errors="replace",
+            timeout=10)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("not valid UTF-8", result.stdout)
+        self.assertIn("02-valid.hy", result.stdout)
+        self.assertNotIn("Traceback", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

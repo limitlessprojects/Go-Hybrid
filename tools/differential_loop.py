@@ -73,15 +73,40 @@ def read_expected(path):
 
 
 def checker_rejects(bin_path, hy_path, expected_rule):
-    """Require the first error to match the pre-registered rejection rule."""
-    proc = subprocess.run(
-        [bin_path, "check", hy_path, "--json"],
-        capture_output=True, text=True, timeout=60,
-    )
-    if proc.returncode not in (0, 1):
-        return False, f"unexpected checker exit {proc.returncode}"
+    """Require the first error to match the pre-registered rejection rule.
+
+    False also covers harness faults — an unexecutable checker, a decode
+    failure, or undecodable output — not only checker disagreement: the
+    differential loop must never crash on them, and never count them as
+    agreement.
+    """
+    # The checker emits UTF-8 JSON, not text in the caller's locale. With
+    # text=True on a non-UTF-8 host (Windows cp936) the locale decode
+    # raises out of run() itself, or leaves the stream None in a reader
+    # thread; capture bytes and decode here so both become a reportable
+    # (False, detail) instead of a traceback — the same failure class as
+    # corpus_harness.run_checker (#492).
     try:
-        payload = json.loads(proc.stdout.strip())
+        proc = subprocess.run(
+            [bin_path, "check", hy_path, "--json"],
+            capture_output=True, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"checker could not be run: {exc}"
+    if proc.returncode not in (0, 1):
+        detail = f"unexpected checker exit {proc.returncode}"
+        if proc.stderr:
+            detail += ": " + proc.stderr.decode("utf-8", "replace").strip()[-200:]
+        return False, detail
+    try:
+        out = proc.stdout.decode("utf-8").lstrip("\ufeff").strip()
+    except UnicodeDecodeError as exc:
+        detail = f"checker output is not valid UTF-8: {exc}"
+        if proc.stderr:
+            detail += ": " + proc.stderr.decode("utf-8", "replace").strip()[-200:]
+        return False, detail
+    try:
+        payload = json.loads(out)
     except json.JSONDecodeError:
         return False, "no/invalid checker JSON"
     summary = payload.get("summary", {})

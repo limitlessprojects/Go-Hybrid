@@ -22,8 +22,8 @@ use crate::const_overflow::{const_float_value, const_int_value};
 use crate::model::{unwrap_parens, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
-    AssignOp, BinOp, Expr, FnDecl, ForKind, InterpPart, Place, PlaceKind, SelectArmKind, Stmt,
-    TypeExpr,
+    AssignOp, BinOp, CallArg, Expr, FnDecl, ForKind, InterpPart, Place, PlaceKind, SelectArmKind,
+    Stmt, TypeExpr,
 };
 
 impl<'a> Checker<'a> {
@@ -103,11 +103,16 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::Return { values, .. } => {
-                for v in values {
+                for (i, v) in values.iter().enumerate() {
+                    if let Some(res_ty) = st.result_types.get(i) {
+                        let resolved_ty = self.resolve_type_alias(res_ty);
+                        self.check_const_overflow_init("return statement", &resolved_ty, v, None);
+                    }
                     self.check_expr_emit_guard(st, v);
                 }
             }
             Stmt::Task { callee, args, .. } => {
+                self.check_call_const_overflow(st, callee, args);
                 self.check_expr_emit_guard(st, callee);
                 for a in args {
                     self.check_expr_emit_guard(st, &a.value);
@@ -207,23 +212,61 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::Call { callee, args, .. } => {
+                self.check_call_const_overflow(st, callee, args);
                 self.check_expr_emit_guard(st, callee);
                 for a in args {
                     self.check_expr_emit_guard(st, &a.value);
                 }
             }
-            Expr::StructLit { fields, .. } => {
+            Expr::StructLit { ty, fields, .. } => {
+                if let Some(TypeExpr::Named { name, .. }) = ty {
+                    let mut sname = name.clone();
+                    while let Some(TypeExpr::Named { name: target, .. }) =
+                        self.type_aliases.get(&sname)
+                    {
+                        sname = target.clone();
+                    }
+                    if let Some(struct_fields) = self.structs.get(&sname).cloned() {
+                        for f in fields {
+                            if let Some((_, f_ty)) =
+                                struct_fields.iter().find(|(fname, _)| fname == &f.name)
+                            {
+                                self.check_const_overflow_init(
+                                    &format!("{}.{}", sname, f.name),
+                                    f_ty,
+                                    &f.value,
+                                    None,
+                                );
+                            }
+                        }
+                    }
+                }
                 for f in fields {
                     self.check_expr_emit_guard(st, &f.value);
                 }
             }
-            Expr::SliceLit { items, .. } => {
+            Expr::SliceLit { elem, items, .. } => {
+                if let Some(elem_ty) = elem {
+                    let elem_ty = *elem_ty.clone();
+                    for i in items {
+                        self.check_const_overflow_init("slice literal element", &elem_ty, i, None);
+                    }
+                }
                 for i in items {
                     self.check_expr_emit_guard(st, i);
                 }
             }
-            Expr::MapLit { entries, .. } => {
+            Expr::MapLit {
+                key,
+                value,
+                entries,
+                ..
+            } => {
+                let key_ty = *key.clone();
+                let val_ty = *value.clone();
                 for (k, v) in entries {
+                    self.check_const_overflow_init("map literal key", &key_ty, k, None);
+                    self.check_const_overflow_init("map literal value", &val_ty, v, None);
                     self.check_expr_emit_guard(st, k);
                     self.check_expr_emit_guard(st, v);
                 }
@@ -250,11 +293,125 @@ impl<'a> Checker<'a> {
                     self.check_type_expr(&r.ty);
                 }
                 // Closure bodies are not flattened into Pass B — deep-walk.
+                let mut inner_st = st.clone();
+                inner_st.result_types = results.iter().map(|r| r.ty.clone()).collect();
                 for stmt in &body.stmts {
-                    self.check_stmt_emit_guard_inner(st, stmt, /*deep=*/ true);
+                    self.check_stmt_emit_guard_inner(&inner_st, stmt, /*deep=*/ true);
                 }
             }
             Expr::Ident { .. } | Expr::Lit { .. } => {}
+        }
+    }
+
+    fn check_call_const_overflow(&mut self, st: &FnState, callee: &Expr, args: &[CallArg]) {
+        let unwrapped = crate::model::unwrap_parens(callee);
+
+        // 1. Built-in: append(slice, items...)
+        if let Expr::Ident { name, .. } = unwrapped {
+            if name == "append" {
+                if let Some(first_arg) = args.first() {
+                    let elem_ty = self
+                        .ty_of_expr(st, &first_arg.value)
+                        .map(|t| self.resolve_type_alias(&t))
+                        .and_then(|t| match t {
+                            TypeExpr::Slice { elem, .. } => Some(*elem),
+                            _ => None,
+                        });
+                    if let Some(elem_ty) = elem_ty {
+                        for a in &args[1..] {
+                            if !a.spread {
+                                self.check_const_overflow_init("argument of append", &elem_ty, &a.value, None);
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+        }
+
+        // 2. Resolve parameter list
+        let param_types: Option<Vec<(String, TypeExpr)>> = match unwrapped {
+            Expr::Ident { name, .. } => {
+                if self.lookup_binding(st, name).is_none() {
+                    self.fns.get(name.as_str()).map(|decl| {
+                        decl.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect()
+                    })
+                } else if let Some(b) = self.lookup_binding(st, name) {
+                    if let Some(TypeExpr::Fn { params, .. }) = &b.ty {
+                        Some(params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            Expr::Field { base, name: method_name, .. } => {
+                let is_pkg = if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) {
+                    self.lookup_binding(st, pkg).is_none()
+                        && self.fns.contains_key(&format!("{}.{}", pkg, method_name))
+                } else {
+                    false
+                };
+
+                if is_pkg {
+                    let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) else {
+                        unreachable!()
+                    };
+                    let full = format!("{}.{}", pkg, method_name);
+                    self.fns.get(full.as_str()).map(|decl| {
+                        decl.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect()
+                    })
+                } else {
+                    let recv_struct = match self.shape_of_expr(st, base) {
+                        TypeShape::Struct(Some(s)) => {
+                            Some(Self::base_named_type_str(&s).to_string())
+                        }
+                        TypeShape::Pointer(inner) => match *inner {
+                            TypeShape::Struct(Some(s)) => {
+                                Some(Self::base_named_type_str(&s).to_string())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    let decl = if let Some(s) = recv_struct {
+                        self.method_decls.get(&(s, method_name.clone())).copied()
+                    } else {
+                        self.method_decls
+                            .iter()
+                            .find(|((_, m), _)| m == method_name)
+                            .map(|(_, d)| *d)
+                    };
+                    decl.map(|d| d.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect())
+                }
+            }
+            Expr::FnLit { params, .. } => {
+                Some(params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect())
+            }
+            _ => None,
+        };
+
+        if let Some(params) = param_types {
+            for (i, a) in args.iter().enumerate() {
+                if a.spread {
+                    continue;
+                }
+                let target = if let Some(ref arg_name) = a.name {
+                    params.iter().find(|(p_name, _)| p_name == arg_name)
+                } else {
+                    params.get(i)
+                };
+                if let Some((p_name, p_ty)) = target {
+                    let resolved_ty = self.resolve_type_alias(p_ty);
+                    self.check_const_overflow_init(
+                        &format!("parameter `{}`", p_name),
+                        &resolved_ty,
+                        &a.value,
+                        None,
+                    );
+                }
+            }
         }
     }
 

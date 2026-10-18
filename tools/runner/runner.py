@@ -89,7 +89,13 @@ def env_report():
     rep["cgroup_mem"] = cap("cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null")
     rep["cgroup_cpu"] = cap("cat /sys/fs/cgroup/cpu.max 2>/dev/null || cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us 2>/dev/null")
     for tool in ("go", "rustc", "cargo", "gcc", "clang", "git", "cc"):
-        rep["tool_" + tool] = cap("{} --version 2>/dev/null | head -1".format(tool))
+        # Go uses `version`, not `--version`. Avoid a pipe to head, whose
+        # successful exit would hide a missing or failing tool's exit status.
+        code, _, out = run_cmd([tool, "version" if tool == "go" else "--version"], 10)
+        version = out.splitlines()[0].strip() if out.splitlines() else ""
+        if code != 0 or not version or (tool == "go" and not version.startswith("go version ")):
+            version = "n/a"
+        rep["tool_" + tool] = version
     rep["kaggle_env"] = redact({k: v for k, v in os.environ.items() if k.startswith("KAGGLE_")})
     rep["ci_env"] = redact({k: v for k, v in os.environ.items() if k.startswith(("GITHUB_", "RUNNER_", "CI"))})
     return rep
@@ -150,10 +156,11 @@ def main():
 
     # sanity: verify we are at the pinned SHA when a repo checkout exists
     sha_ok = True
+    unverifiable_pin = False
+    want = job.get("sha")
     if os.path.isdir(os.path.join(repo_dir, ".git")):
         code, _, out = run_cmd(["git", "rev-parse", "HEAD"], 10, cwd=repo_dir)
         at = out.strip()
-        want = job.get("sha")
         if code != 0:
             sha_ok = False
             record("sha-check", "check", 1, 0.0, "failed to resolve HEAD: {}".format(out.strip()))
@@ -165,10 +172,29 @@ def main():
             record("sha-check", "check", 1, 0.0, "repo at {} but job pins {}".format(at, want))
         else:
             record("sha-check", "check", 0, 0.0, "at {}".format(at))
+    elif want not in (None, "HEAD", ""):
+        # A pinned job against a checkout with no .git (e.g. the Kaggle worker's
+        # codeload-tarball fallback): there is nothing to verify the pin against,
+        # so the job must not run or report ok. Reporting green here would make
+        # summary.json evidence for a commit that was never checked out.
+        sha_ok = False
+        unverifiable_pin = True
+        record(
+            "sha-check",
+            "check",
+            1,
+            0.0,
+            "no .git in {}; cannot verify pinned sha {}".format(repo_dir, str(want)[:12]),
+        )
 
     hard_setup_failed = False
     if not sha_ok:
-        print("[{}] check sha-check: failed, skipping setup and commands".format(UTC()), flush=True)
+        print(
+            "[{}] check sha-check: failed ({}), skipping setup and commands".format(
+                UTC(), "pin unverifiable" if unverifiable_pin else "commit mismatch"
+            ),
+            flush=True,
+        )
     else:
         for step in job.get("setup", []):
             cwd = repo_dir if step.get("cwd") == "repo" else (step.get("cwd") or None)

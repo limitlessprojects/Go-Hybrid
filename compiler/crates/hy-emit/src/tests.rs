@@ -209,6 +209,64 @@ fn example02_try_desugar_and_defer() {
     );
 }
 
+    #[test]
+    fn defer_call_argument_try_hoists_before_the_defer() {
+        // P1 (§7): a deferred call's arguments are evaluated at defer time, so a
+        // `?` inside them hoists to a binding BEFORE the `defer` — the call
+        // itself stays deferred. Regression for the check→emit gap where the
+        // hoister never registered the temp and `emit_expr` refused the `?` as
+        // "outside a binding position" on a program the checker accepted.
+        let go = emit(
+            "fn probe() (n int, e error) {\n    return 1, nil\n}\n\nfn sink(n int) {\n    fmt.println(n)\n}\n\nfn main() (code int) {\n    defer sink(probe()?)\n    return 0\n}\n",
+        );
+        let hoist = go
+            .find(":= probe()")
+            .unwrap_or_else(|| panic!("argument `?` must hoist://n{}", go));
+        let defer_at = go
+            .find("defer sink(")
+            .unwrap_or_else(|| panic!("defer stays a deferred call://n{}", go));
+        assert!(hoist < defer_at, "hoist must precede the defer://n{}", go);
+    }
+
+    #[test]
+    fn defer_parenthesized_operand_emits_without_parens() {
+        // Go rejects a parenthesized defer operand ("expression in defer must be
+        // function call"), so a parenthesized call must lower to a bare one:
+        // `defer (fmt.println("done"))` -> `defer fmt.Println("done")`.
+        let go = emit("fn main() {\n    defer (fmt.println(\"done\"))\n}\n");
+        assert!(go.contains("defer fmt.Println(\"done\")"), ":\n{}", go);
+        assert!(
+            !go.contains("defer ("),
+            "the defer operand must not keep its parens://n{}",
+            go
+        );
+    }
+
+    #[test]
+    fn defer_parenthesized_call_argument_try_hoists_before_the_defer() {
+        // Regression (adversarial review): `defer (sink(probe()?))` — the operand
+        // is a `Paren{Call}`, so the hoist gate has to unwrap parens exactly like
+        // the checker's HYB-E2001 test does (a parenthesized call is still a
+        // call). Otherwise the checker accepts the program and the emitter dies
+        // late with "`?` outside a binding position" — the very gap this branch
+        // closes, reintroduced by one set of parens.
+        let go = emit(
+            "fn probe() (n int, e error) {\n    return 1, nil\n}\n\nfn sink(n int) {\n    fmt.println(n)\n}\n\nfn main() (code int) {\n    defer (sink(probe()?))\n    return 0\n}\n",
+        );
+        let hoist = go
+            .find(":= probe()")
+            .unwrap_or_else(|| panic!("parenthesized argument `?` must hoist://n{}", go));
+        let defer_at = go
+            .find("defer sink(")
+            .unwrap_or_else(|| panic!("defer lowered without parens://n{}", go));
+        assert!(hoist < defer_at, "hoist must precede the defer://n{}", go);
+        assert!(
+            !go.contains("defer ("),
+            "no parens in the emitted defer://n{}",
+            go
+        );
+    }
+
 // ---------------------------------------------------------------------------
 // Example 03 — worker pool (structs-first, task→go, send/receive, close)
 // ---------------------------------------------------------------------------
@@ -2194,3 +2252,81 @@ fn slot_loan_parallel_define_assign_and_try_in_place() {
     );
 }
 
+
+#[test]
+fn task_preserves_variadic_spread() {
+    let go = emit(
+        "fn worker(items []string) {}\n\nfn main() {\n    items := []string{\"a\", \"b\"}\n    task worker(items...)\n}\n",
+    );
+    assert!(
+        go.contains("go worker(items...)"),
+        "task must preserve variadic spread `...`:\n{}",
+        go
+    );
+}
+
+#[test]
+fn task_auto_addresses_pointer_params() {
+    let go = emit(
+        "struct env {\n    name string\n}\n\nfn worker(e *env) {}\n\nfn main() {\n    e := env{name: \"prod\"}\n    task worker(e)\n}\n",
+    );
+    assert!(
+        go.contains("go worker(&e)"),
+        "task must auto-address addressable pointer argument:\n{}",
+        go
+    );
+}
+
+#[test]
+fn task_preserves_already_addressed_pointer_param() {
+    let go = emit(
+        "struct env {\n    name string\n}\n\nfn worker(e *env) {}\n\nfn main() {\n    e := env{name: \"prod\"}\n    task worker(&e)\n}\n",
+    );
+    assert!(
+        go.contains("go worker(&e)"),
+        "task must not double-address:\n{}",
+        go
+    );
+}
+
+#[test]
+fn task_package_call_uses_package_and_normalizes_name() {
+    let go = emit(
+        "fn main() {\n    task time.sleep(100)\n}\n",
+    );
+    assert!(
+        go.contains("\"time\""),
+        "package must be imported:\n{}",
+        go
+    );
+    assert!(
+        go.contains("go time.Sleep(100)"),
+        "method name must normalize and emit go:\n{}",
+        go
+    );
+}
+
+#[test]
+fn task_plain_call_still_emits_verbatim() {
+    let go = emit(
+        "fn worker(x int) {}\n\nfn main() {\n    x := 42\n    task worker(x)\n}\n",
+    );
+    assert!(
+        go.contains("go worker(x)"),
+        "plain task call must emit verbatim:\n{}",
+        go
+    );
+}
+
+#[test]
+fn task_with_try_args_hoists_in_order_before_spawn() {
+    let go = emit(
+        "fn worker(a int, b int) {}\nfn first() (int, error) { return 1, nil }\nfn second() (int, error) { return 2, nil }\nfn run() error {\n    task worker(first()?, second()?)\n    return nil\n}\n",
+    );
+    let first_at = go.find("first()").expect("first() present");
+    let second_at = go.find("second()").expect("second() present");
+    let spawn_at = go.find("go worker(").expect("go worker spawn present");
+    assert!(first_at < second_at, "first try must evaluate before second try");
+    assert!(second_at < spawn_at, "tries must evaluate before goroutine spawn");
+    assert!(go.contains("go worker(hyT0, hyT2)"), "arguments substituted with temps:\n{}", go);
+}

@@ -75,9 +75,12 @@ grep -qxF -- "- Rust: **$PINNED_RUST**" <(sed -E 's/^(- Rust: \*\*[^*]*\*\*).*/\
 # --- 3. Installed toolchains match the pins (skippable on bare CI) ----------
 if [ "${1:-}" != "--no-toolchain" ]; then
     if command -v go >/dev/null 2>&1; then
-        INSTALLED_GO="$(go version 2>/dev/null | awk '{print $3}')"
+        GO_PROBE_STATUS=0
+        INSTALLED_GO="$(go version 2>/dev/null | awk '{print $3}')" || GO_PROBE_STATUS=$?
         if [ -z "$INSTALLED_GO" ]; then
             pass "go shim unusable — skipping (hyb build enforces at runtime)"
+        elif [ "$GO_PROBE_STATUS" -ne 0 ]; then
+            fail "go version probe failed (exit $GO_PROBE_STATUS)"
         elif [ "$INSTALLED_GO" = "$PINNED_GO" ]; then
             pass "installed go == $PINNED_GO"
         else
@@ -87,11 +90,14 @@ if [ "${1:-}" != "--no-toolchain" ]; then
         pass "go not installed — skipping (hyb build enforces at runtime)"
     fi
     if command -v rustc >/dev/null 2>&1; then
-        INSTALLED_RUST="$(rustc --version 2>/dev/null | awk '{print $2}')"
+        RUST_PROBE_STATUS=0
+        INSTALLED_RUST="$(rustc --version 2>/dev/null | awk '{print $2}')" || RUST_PROBE_STATUS=$?
         if [ -z "$INSTALLED_RUST" ]; then
             # A rustup shim with no default toolchain (bare CI images) — treat
             # as not installed; hyb build enforces the pin at runtime.
             pass "rustc shim has no default toolchain — skipping (hyb build enforces)"
+        elif [ "$RUST_PROBE_STATUS" -ne 0 ]; then
+            fail "rustc version probe failed (exit $RUST_PROBE_STATUS)"
         elif [ "$INSTALLED_RUST" = "$PINNED_RUST" ]; then
             pass "installed rustc == $PINNED_RUST"
         else

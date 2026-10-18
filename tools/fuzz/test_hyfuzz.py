@@ -1,5 +1,7 @@
 import contextlib
+import hashlib
 import io
+import json
 import random
 import subprocess
 import sys
@@ -85,6 +87,90 @@ class FuzzProcessTests(unittest.TestCase):
             self.assertNotIn("all invariants held", output.getvalue())
 
 
+class FuzzArtifactTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="hyfuzz-artifacts-test-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.corpus = self.root / "corpus"
+        self.corpus.mkdir()
+        (self.corpus / "sample.hy").write_text("fn main() {}", encoding="utf-8")
+        self.source = "// full reproduction \u65e5\u672c\u8a9e\n" + "x " * 200 + "TAIL_MARKER\n"
+        self.checker = self.root / "checker"
+        self.checker.write_text(
+            "#!" + sys.executable + "\n"
+            "from pathlib import Path\nimport sys\n"
+            "source = Path(sys.argv[2]).read_text(encoding='utf-8')\n"
+            "sys.exit(23 if source.endswith('TAIL_MARKER\\n') else 0)\n",
+            encoding="utf-8",
+        )
+        self.checker.chmod(0o755)
+        self.destination = self.root / "failures"
+
+    def invoke(self, destination=True, source=None):
+        args = [
+            "hyfuzz.py", "--hyb", str(self.checker), "--corpus", str(self.corpus),
+            "--cases", "1", "--seed", "470", "--timeout", "2",
+        ]
+        if destination:
+            args += ["--failures-dir", str(self.destination)]
+        stdout, stderr = io.StringIO(), io.StringIO()
+        code = 0
+        with patch.object(sys, "argv", args), patch.object(
+            hyfuzz, "gen_salad", return_value=self.source if source is None else source,
+        ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            try:
+                hyfuzz.main()
+            except SystemExit as exc:
+                code = exc.code
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_full_source_and_metadata_are_saved_and_replayable(self):
+        code, stdout, stderr = self.invoke()
+        self.assertEqual(code, 1, stdout + stderr)
+        sources = list(self.destination.glob("hyfuzz-*/*.hy"))
+        self.assertEqual(len(sources), 1)
+        saved = sources[0]
+        self.assertEqual(saved.read_text(encoding="utf-8"), self.source)
+        metadata = json.loads(saved.with_suffix(".json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["seed"], 470)
+        self.assertEqual(metadata["case_index"], 0)
+        self.assertEqual(metadata["kind"], 0)
+        self.assertEqual(metadata["failure"], "UNEXPECTED exit=23")
+        self.assertEqual(metadata["source_file"], saved.name)
+        self.assertEqual(metadata["source_sha256"], hashlib.sha256(saved.read_bytes()).hexdigest())
+        replay = subprocess.run(
+            [str(self.checker), "check", str(saved)], capture_output=True, timeout=5,
+        )
+        self.assertEqual(replay.returncode, 23)
+        self.assertIn(str(saved), stdout)
+
+    def test_success_creates_no_output_directory(self):
+        code, stdout, stderr = self.invoke(source="fn main() {}")
+        self.assertEqual(code, 0, stdout + stderr)
+        self.assertFalse(self.destination.exists())
+
+    def test_repeated_seed_does_not_overwrite_existing_reproduction(self):
+        self.assertEqual(self.invoke()[0], 1)
+        before = {path: path.read_bytes() for path in self.destination.rglob("*") if path.is_file()}
+        self.assertEqual(self.invoke()[0], 1)
+        self.assertEqual(len(list(self.destination.glob("hyfuzz-*"))), 2)
+        for path, data in before.items():
+            self.assertEqual(path.read_bytes(), data)
+
+    def test_output_io_error_is_visible_and_not_success(self):
+        self.destination.write_text("existing user data", encoding="utf-8")
+        code, stdout, stderr = self.invoke()
+        self.assertEqual(code, 2, stdout + stderr)
+        self.assertIn("cannot save failure artifact", stderr)
+        self.assertNotIn("all invariants held", stdout)
+        self.assertEqual(self.destination.read_text(encoding="utf-8"), "existing user data")
+
+    def test_no_option_keeps_existing_failure_behavior(self):
+        code, stdout, stderr = self.invoke(destination=False)
+        self.assertEqual(code, 1, stdout + stderr)
+        self.assertIn("UNEXPECTED exit=23", stdout)
+        self.assertFalse(self.destination.exists())
 class NestGenerationTests(unittest.TestCase):
     def test_branch_heavy_seed_keeps_one_deep_path(self):
         source = hyfuzz.gen_nest(random.Random(9498))

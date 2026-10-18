@@ -13,9 +13,11 @@ Baseline shape: {"version": 1, "blocks": {"<file>:<line>": {"reason": ...,
 count as new (deliberate: moving a hatch is a review event too).
 """
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 
 VALID = {"mutex", "atomic", "actor", "finalizer", "interop", "other"}
 
@@ -156,7 +158,8 @@ def main():
     hyb, baseline_path, progs = args[0], args[1], args[2:]
 
     try:
-        baseline = json.load(open(baseline_path))
+        with open(baseline_path) as source:
+            baseline = json.load(source)
     except FileNotFoundError:
         baseline = {"version": 1, "blocks": {}}
     base = baseline.setdefault("blocks", {})
@@ -175,8 +178,32 @@ def main():
 
     if rebaseline:
         baseline["blocks"] = current
-        json.dump(baseline, open(baseline_path, "w"), indent=1, sort_keys=True)
-        open(baseline_path, "a").write("\n")
+        # Never truncate the reviewed baseline until the complete replacement
+        # has been written and closed successfully. Buffered writes can fail
+        # at close (e.g. ENOSPC/EFBIG), after json.dump itself has returned.
+        # Resolve symlinks so rebaselining keeps updating their target.
+        target = os.path.realpath(baseline_path)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=os.path.dirname(target),
+                prefix="." + os.path.basename(target) + ".", delete=False,
+            ) as output:
+                temporary = output.name
+                if os.path.exists(target):
+                    os.chmod(temporary, os.stat(target).st_mode & 0o777)
+                json.dump(baseline, output, indent=1, sort_keys=True)
+                output.write("\n")
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, target)
+            temporary = None
+        except OSError as error:
+            print(f"GATE ERROR: cannot replace baseline {baseline_path}: {error}")
+            sys.exit(2)
+        finally:
+            if temporary is not None:
+                os.unlink(temporary)
         print(f"rebaseline: {len(current)} block(s) recorded in {baseline_path}")
         return
 

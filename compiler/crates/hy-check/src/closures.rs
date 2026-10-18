@@ -342,6 +342,12 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
         }
         ck.record_callee_param_stores(st, cr);
     }
+    // Issue #288 integration: closure bodies sit outside the Tier-0 flat
+    // walk, where builtins.rs owns the HYB-E2001 defer-operand rule — so a
+    // `defer 3` one scope in passed main with 0 diagnostics and failed late
+    // in the emitter. One owner (builtins.rs), wired here for the A5
+    // perimeter. Pure shape classification: no use/define ordering concerns.
+    ck.check_stmt_defer_call(stmt);
 
     match stmt {
         Stmt::Local(l) => {
@@ -656,6 +662,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 let vals: Vec<&Expr> = vec![value];
                 let targets = ck.chan_elem_shape(st, chan);
                 ck.check_site(st, *span, "HYB-E3002", &vals, managed, &desc, *is_move, None, targets.as_deref());
+                ck.check_chan_send_const_overflow(st, chan, value);
             }
         }
         Stmt::Select { arms, .. } => {
@@ -691,6 +698,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                             let vals: Vec<&Expr> = vec![value];
                             let targets = ck.chan_elem_shape(st, chan);
                             ck.check_site(st, span, "HYB-E3002", &vals, managed, &desc, *is_move, None, targets.as_deref());
+                            ck.check_chan_send_const_overflow(st, chan, value);
                         }
                     }
                     SelectArmKind::Recv { names, chan } => {

@@ -1,8 +1,8 @@
 //! Integration test: EVERY must-parse file parses cleanly.
 //!
-//!   * tests/checker-corpus/*.hy            (60 programs — the checker corpus)
-//!   * spikes/spike6-ownership/work/*.hy    (10 programs â€” Tier-0 rewrites)
-//!   * tests/checker-corpus/*.hy            (32 programs — the checker corpus)
+//!   * tests/checker-corpus/*.hy            (61 programs — the checker corpus;
+//!     61-string-escape-fail-closed.hy is the corpus's first PARSE-reject
+//!     fixture and is pinned to fail closed instead)
 //!   * spikes/spike6-ownership/work/*.hy    (10 programs — Tier-0 rewrites)
 //!   * examples/01,02,03/program.hy         (MVP-0 target programs)
 //!
@@ -49,9 +49,44 @@ fn must_parse(path: &PathBuf) {
 #[test]
 fn checker_corpus_all_parse() {
     let files = hy_files_under("tests/checker-corpus");
-    assert_eq!(files.len(), 60, "expected exactly 60 corpus programs",);
+    assert_eq!(files.len(), 61, "expected exactly 61 corpus programs",);
+    // 61-string-escape-fail-closed.hy is the corpus's first PARSE-reject
+    // fixture (a malformed LX7 string escape must be named by the lexer,
+    // never silently accepted): it is excluded from the must-parse loop
+    // and pinned to fail closed by corpus_parse_reject_fixtures_fail_closed.
+    let parse_rejects = ["61-string-escape-fail-closed.hy"];
     for f in &files {
-        must_parse(f);
+        let name = f.file_name().unwrap().to_str().unwrap();
+        if !parse_rejects.contains(&name) {
+            must_parse(f);
+        }
+    }
+}
+
+#[test]
+fn corpus_parse_reject_fixtures_fail_closed() {
+    // The lexer's parse-reject corpus fixture: `"\u{41}"` (the LX6 rune
+    // form inside an interpreted string) must FAIL to parse with
+    // HYB-E0002 tagged rule LX7 — before the fix it was silently
+    // accepted and the value corrupted to "41}".
+    let path = repo_root()
+        .join("tests/checker-corpus")
+        .join("61-string-escape-fail-closed.hy");
+    let src = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {}", path.display(), e));
+    match parse_file(&path.display().to_string(), &src) {
+        Ok(_) => panic!(
+            "61-string-escape-fail-closed.hy must not parse cleanly: the \\u{{…}} rune form in a string is a malformed LX7 escape"
+        ),
+        Err(diags) => {
+            assert!(
+                diags
+                    .iter()
+                    .any(|d| d.code == "HYB-E0002" && d.tier0_rule.as_deref() == Some("LX7")),
+                "expected HYB-E0002 tagged LX7, got: {:?}",
+                diags.iter().map(|d| d.render_head()).collect::<Vec<_>>()
+            );
+        }
     }
 }
 

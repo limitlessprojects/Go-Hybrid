@@ -93,5 +93,60 @@ class CheckVersionsTests(unittest.TestCase):
         self.assertDrift("hyb default pin (compiler/crates/hyb/src/main.rs) != go1.26.9")
 
 
+    def toolchain_check(self, *, go_exit=0, rust_exit=0, silent=False, skip=False):
+        # Use real subprocesses but only our two local shell fixtures: neither
+        # the installed toolchains nor the host's private environment is read.
+        bindir = self.root / "fixture-bin"
+        bindir.mkdir(exist_ok=True)
+        for name, output, status in (
+            ("go", "go version go1.26.9 test/fixture", go_exit),
+            ("rustc", "rustc 1.99.0 (fixture)", rust_exit),
+        ):
+            executable = bindir / name
+            executable.write_text(
+                "#!/bin/sh\n"
+                + ("" if silent else "printf '%s\\n' '" + output + "'\n")
+                + "exit " + str(status) + "\n", encoding="utf-8"
+            )
+            executable.chmod(0o755)
+        shutil.copy2(ROOT / "tools/env.sh", self.root / "tools/env.sh")
+        with (self.root / "tools/env.sh").open("a", encoding="utf-8") as env:
+            env.write('\nexport PATH="' + str(bindir) + ':/usr/bin:/bin:/usr/sbin:/sbin"\n')
+        command = ["/bin/bash", str(self.root / "tools/check-versions.sh")]
+        if skip:
+            command.append("--no-toolchain")
+        return subprocess.run(command, cwd=self.root, capture_output=True,
+                              text=True, timeout=30, check=False,
+                              env={"PATH": "/usr/bin:/bin", "HOME": str(self.root),
+                                   "TMPDIR": str(self.root), "LC_ALL": "C"})
+
+    def test_matching_toolchain_probes_succeed(self):
+        result = self.toolchain_check()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("installed go == go1.26.9", result.stdout)
+        self.assertIn("installed rustc == 1.99.0", result.stdout)
+
+    def test_nonzero_probes_cannot_pass_on_matching_stdout(self):
+        for tool in ("go", "rustc"):
+            with self.subTest(tool=tool):
+                result = self.toolchain_check(go_exit=7 if tool == "go" else 0,
+                                              rust_exit=7 if tool == "rustc" else 0)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("FAIL: " + tool + " version probe failed (exit 7)", result.stdout)
+                self.assertNotIn("versions: CONSISTENT", result.stdout)
+
+    def test_silent_unconfigured_shims_keep_existing_skip_contract(self):
+        result = self.toolchain_check(go_exit=1, rust_exit=1, silent=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("go shim unusable", result.stdout)
+        self.assertIn("rustc shim has no default toolchain", result.stdout)
+
+    def test_no_toolchain_keeps_probes_optional(self):
+        result = self.toolchain_check(go_exit=7, rust_exit=7, skip=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("installed go", result.stdout)
+        self.assertNotIn("installed rustc", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

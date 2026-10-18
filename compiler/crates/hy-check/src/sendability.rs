@@ -21,7 +21,7 @@
 
 use crate::model::{as_addr_of, unwrap_parens, Binding, Checker, FnState, MoveKind, TypeShape};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::{Expr, LitKind};
+use hy_syntax::{Expr, LitKind, TypeExpr};
 
 /// The spawn-callee proof (O4.0): what the checker concluded about the
 /// expression a `task` statement spawns.
@@ -756,6 +756,29 @@ impl<'a> Checker<'a> {
         match self.shape_of_expr(st, chan) {
             TypeShape::Chan(e) => Some(vec![*e]),
             _ => None,
+        }
+    }
+
+    /// The element type of a channel expression, when it resolves.
+    pub(crate) fn chan_elem_ty(&self, st: &FnState, chan: &Expr) -> Option<TypeExpr> {
+        let ty = self.ty_of_expr(st, chan)?;
+        let resolved = self.resolve_type_alias(&ty);
+        match resolved {
+            TypeExpr::Chan { elem, .. } => Some(*elem),
+            _ => None,
+        }
+    }
+
+    /// Check for constant overflow or float truncation in a channel send.
+    pub(crate) fn check_chan_send_const_overflow(
+        &mut self,
+        st: &FnState,
+        chan: &Expr,
+        value: &Expr,
+    ) {
+        if let Some(elem_ty) = self.chan_elem_ty(st, chan) {
+            let desc = format!("channel `{}`", chan.render());
+            self.check_const_overflow_init(&desc, &elem_ty, value, Some(st));
         }
     }
 

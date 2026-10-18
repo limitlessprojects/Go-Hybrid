@@ -668,6 +668,13 @@ impl<'a> Lexer<'a> {
 
     /// One escape sequence after `\`. `str_mode` selects the Go string escape
     /// set (`\uNNNN`); char literals use the rune set (`\u{…}`, LX6).
+    ///
+    /// Fail-closed contract (GUARANTEES.md row 4's spirit, extended to the
+    /// lexer): every malformed escape this function can SEE must record a
+    /// diagnostic before returning `None` — both callers assume "diag
+    /// recorded" on `None`. The one silent `None` left is end-of-input
+    /// mid-escape: the literal loop then runs to EOF and the caller emits
+    /// its own `unterminated string/char literal` diagnostic.
     fn escape_char(&mut self, str_mode: bool) -> Option<char> {
         let start = self.pos();
         let c = self.bump()?;
@@ -687,8 +694,19 @@ impl<'a> Lexer<'a> {
                 let mut v: u32 = 0;
                 for _ in 0..2 {
                     let h = self.bump()?;
-                    v = v * 16 + h.to_digit(16)?;
+                    let Some(d) = h.to_digit(16) else {
+                        self.escape_diag(
+                            start,
+                            str_mode,
+                            format!(
+                                "malformed \\x escape: `{h}` is not a hex digit (\\x takes exactly two hex digits, e.g. \\x41)"
+                            ),
+                        );
+                        return None;
+                    };
+                    v = v * 16 + d;
                 }
+                // v <= 0xFF is always a scalar value; from_u32 cannot fail.
                 char::from_u32(v)?
             }
             'u' => {
@@ -696,12 +714,27 @@ impl<'a> Lexer<'a> {
                     let mut v: u32 = 0;
                     for _ in 0..4 {
                         let h = self.bump()?;
-                        v = v * 16 + h.to_digit(16)?;
+                        let Some(d) = h.to_digit(16) else {
+                            self.escape_diag(
+                                start,
+                                str_mode,
+                                format!(
+                                    "malformed \\u escape: `{h}` is not a hex digit (\\u takes exactly four hex digits, e.g. \\u00e9; the \\u{{…}} rune form (LX6) is char-literal syntax only)"
+                                ),
+                            );
+                            return None;
+                        };
+                        v = v * 16 + d;
                     }
-                    char::from_u32(v)?
+                    self.scalar_or_diag(v, start, str_mode, "\\u")?
                 } else {
                     // rune style: \u{1F600}
                     if self.bump() != Some('{') {
+                        self.escape_diag(
+                            start,
+                            str_mode,
+                            "malformed \\u{…} escape: expected `{` after \\u in the rune form",
+                        );
                         return None;
                     }
                     let mut v: u32 = 0;
@@ -715,22 +748,40 @@ impl<'a> Lexer<'a> {
                                 self.bump();
                                 break;
                             }
-                            _ => return None,
+                            _ => {
+                                self.escape_diag(
+                                    start,
+                                    str_mode,
+                                    "malformed \\u{…} escape: expected hex digits then `}`",
+                                );
+                                return None;
+                            }
                         }
                     }
-                    char::from_u32(v)?
+                    self.scalar_or_diag(v, start, str_mode, "\\u{…}")?
                 }
             }
             'U' => {
                 let mut v: u32 = 0;
                 for _ in 0..8 {
                     let h = self.bump()?;
-                    v = v * 16 + h.to_digit(16)?;
+                    let Some(d) = h.to_digit(16) else {
+                        self.escape_diag(
+                            start,
+                            str_mode,
+                            format!(
+                                "malformed \\U escape: `{h}` is not a hex digit (\\U takes exactly eight hex digits, e.g. \\U0001F600)"
+                            ),
+                        );
+                        return None;
+                    };
+                    v = v * 16 + d;
                 }
-                char::from_u32(v)?
+                self.scalar_or_diag(v, start, str_mode, "\\U")?
             }
             '1'..='7' => {
-                // octal \NNN
+                // octal \NNN — at most three digits, so v <= 0o777 and
+                // from_u32 cannot fail here.
                 let mut v: u32 = c.to_digit(8)?;
                 loop {
                     let d = self.at(0).and_then(|c| c.to_digit(8));
@@ -754,6 +805,41 @@ impl<'a> Lexer<'a> {
             }
         };
         Some(out)
+    }
+
+    /// `char::from_u32(v)` or a named fail-closed diagnostic (surrogate
+    /// D800–DFFF or above U+10FFFF). `\u`, `\u{…}` and `\U` share it.
+    fn scalar_or_diag(
+        &mut self,
+        v: u32,
+        start: Pos,
+        str_mode: bool,
+        escape_name: &str,
+    ) -> Option<char> {
+        match char::from_u32(v) {
+            Some(ch) => Some(ch),
+            None => {
+                self.escape_diag(
+                    start,
+                    str_mode,
+                    format!(
+                        "invalid {escape_name} escape: U+{v:X} is not a Unicode scalar value (D800–DFFF surrogates and values above U+10FFFF are invalid)"
+                    ),
+                );
+                None
+            }
+        }
+    }
+
+    /// Record a malformed-escape diagnostic tagged with the lexical rule in
+    /// force (LX6 rune literals / LX7 interpreted strings) so the corpus
+    /// harness can join on it.
+    fn escape_diag(&mut self, start: Pos, str_mode: bool, msg: impl Into<String>) {
+        let rule = if str_mode { "LX7" } else { "LX6" };
+        self.diags.push(
+            Diagnostic::error(PARSE_ERR_CODE, self.path.clone(), Span::new(start, self.pos()), msg)
+                .with_rule(rule),
+        );
     }
 }
 
@@ -903,6 +989,73 @@ mod tests {
                 Tok::Eof,
             ]
         );
+    }
+
+    // -- malformed escapes fail closed (issue: silent value corruption) ------
+    // Regression: `\x`/`\u`/`\U` with a non-hex digit, the rune-style
+    // `\u{…}` inside a STRING, and surrogate/oversized scalars used to
+    // return `None` from escape_char WITHOUT recording the diagnostic both
+    // callers assume ("diag recorded"), so `"\u{41}"` was ACCEPTED with a
+    // silently corrupted value ("41}"). Every malformed escape the lexer
+    // can see must now be named and tagged LX6/LX7.
+
+    fn lex_errs(src: &str) -> Vec<Diagnostic> {
+        match lex("test.hy", src) {
+            Ok(_) => panic!("expected lex failure for: {src}"),
+            Err(d) => d,
+        }
+    }
+
+    #[test]
+    fn malformed_string_u_brace_escape_is_diagnosed() {
+        // The LX6 rune form used in an interpreted string (LX7 = Go escape set).
+        let errs = lex_errs(r#"fn main() { s := "\u{41}" }"#);
+        assert!(errs.iter().any(|d| d.message.contains("malformed \\u escape")
+            && d.tier0_rule.as_deref() == Some("LX7")), "{errs:?}");
+    }
+
+    #[test]
+    fn malformed_string_x_escape_is_diagnosed() {
+        let errs = lex_errs(r#"fn main() { s := "\xG1" }"#);
+        assert!(errs.iter().any(|d| d.message.contains("malformed \\x escape")
+            && d.tier0_rule.as_deref() == Some("LX7")), "{errs:?}");
+    }
+
+    #[test]
+    fn malformed_string_short_u_escape_is_diagnosed() {
+        let errs = lex_errs(r#"fn main() { s := "\u12G4" }"#);
+        assert!(errs.iter().any(|d| d.message.contains("malformed \\u escape")
+            && d.tier0_rule.as_deref() == Some("LX7")), "{errs:?}");
+    }
+
+    #[test]
+    fn surrogate_string_u_escape_is_diagnosed() {
+        let errs = lex_errs(r#"fn main() { s := "\ud800" }"#);
+        assert!(errs.iter().any(|d| d.message.contains("not a Unicode scalar value")
+            && d.tier0_rule.as_deref() == Some("LX7")), "{errs:?}");
+    }
+
+    #[test]
+    fn malformed_rune_u_without_brace_is_diagnosed() {
+        let errs = lex_errs(r#"fn main() { c := '\u12' }"#);
+        assert!(errs.iter().any(|d| d.message.contains("expected `{` after \\u")
+            && d.tier0_rule.as_deref() == Some("LX6")), "{errs:?}");
+    }
+
+    #[test]
+    fn surrogate_rune_u_brace_escape_is_diagnosed() {
+        let errs = lex_errs(r#"fn main() { c := '\u{D800}' }"#);
+        assert!(errs.iter().any(|d| d.message.contains("not a Unicode scalar value")
+            && d.tier0_rule.as_deref() == Some("LX6")), "{errs:?}");
+    }
+
+    #[test]
+    fn valid_escapes_still_lex_clean() {
+        // Over-rejection guard: the full VALID escape surface stays accepted.
+        let t = toks(r#"fn main() { s := "\u00e9\x41\U0001F600\101" c := '\u{1F600}' d := '\x41' }"#);
+        assert!(t.contains(&Tok::StrChunk("\u{e9}A\u{1F600}A".into())));
+        assert!(t.contains(&Tok::CharLit('\u{1F600}')));
+        assert!(t.contains(&Tok::CharLit('A')));
     }
 
     #[test]
