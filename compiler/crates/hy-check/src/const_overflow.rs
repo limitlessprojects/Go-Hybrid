@@ -37,6 +37,42 @@ impl<'a> Checker<'a> {
         else {
             return;
         };
+        // Float declared types: an untyped float (or past-i128 integer)
+        // constant whose magnitude exceeds the target's representable
+        // range makes Go reject the declaration outright
+        // (`cannot use … as floatN value … (overflows)`). Literal-only
+        // scope — the same as the E6001/E6006 constant matrix.
+        if let Some(is_f32) = float_type_width(ty_name) {
+            if let Some(f) = conv_const_float(value) {
+                if float_const_overflows(f, is_f32) {
+                    let span = value.span();
+                    let msg = format!(
+                        "constant `{}` overflows declared type `{}` of `{}` (HYB-E6002)",
+                        value.render(),
+                        ty_name,
+                        name
+                    );
+                    let notes = vec![
+                        format!(
+                            "why: Go rejects a `{ty_name}` constant outside its representable range (`cannot use … as {ty_name} value … (overflows)`), so an accepted Hybrid program would emit unbuildable Go (issue #683)"
+                        ),
+                        format!(
+                            "fix: use a value within `{ty_name}` range ({}), or widen the declared type to `f64`",
+                            float_type_max(ty_name)
+                        ),
+                        format!(
+                            "note: the declared type was written here ({})",
+                            span_hint(*ty_span)
+                        ),
+                    ];
+                    self.diags.push(
+                        Diagnostic::error("HYB-E6002", self.path.clone(), span, msg)
+                            .with_notes(notes),
+                    );
+                }
+            }
+            return;
+        }
         let Some((lo, hi)) = fixed_width_int_range(ty_name) else {
             return;
         };
@@ -147,6 +183,40 @@ impl<'a> Checker<'a> {
         else {
             return;
         };
+        // Float declared types: same representability rule as the
+        // declaration site — Go rejects `x = 1e400` where `x` is float64
+        // (or float32 past ~3.4e38) at compile time (issue #683).
+        if let Some(is_f32) = float_type_width(ty_name) {
+            if let Some(f) = conv_const_float(value) {
+                if float_const_overflows(f, is_f32) {
+                    let span = value.span();
+                    let msg = format!(
+                        "constant `{}` overflows declared type `{}` of `{}` (HYB-E6002)",
+                        value.render(),
+                        ty_name,
+                        target
+                    );
+                    let notes = vec![
+                        format!(
+                            "why: Go rejects a `{ty_name}` constant outside its representable range (`cannot use … as {ty_name} value … (overflows)`), so an accepted Hybrid program would emit unbuildable Go (issue #683)"
+                        ),
+                        format!(
+                            "fix: use a value within `{ty_name}` range ({}), or widen the declared type to `f64`",
+                            float_type_max(ty_name)
+                        ),
+                        format!(
+                            "note: the declared type was written here ({})",
+                            span_hint(*ty_span)
+                        ),
+                    ];
+                    self.diags.push(
+                        Diagnostic::error("HYB-E6002", self.path.clone(), span, msg)
+                            .with_notes(notes),
+                    );
+                }
+            }
+            return;
+        }
         let Some((lo, hi)) = fixed_width_int_range(ty_name) else {
             return;
         };
@@ -270,6 +340,39 @@ impl<'a> Checker<'a> {
         self.diags.push(
             Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
         );
+    }
+
+    /// Check float constants in variable declarations without an explicit
+    /// type. Go gives these declarations the target's default `float64`
+    /// type, so an untyped float literal past float64's magnitude is
+    /// rejected at compile time (`cannot use … as float64 value in
+    /// assignment (overflows)` — issue #683). Only float literals are
+    /// checked here: a huge INTEGER literal at the default site takes the
+    /// default `int` type and is already covered by
+    /// `check_default_int_overflow`.
+    pub(crate) fn check_default_float_overflow(&mut self, name: &str, value: &Expr) {
+        let Some(f) = const_float_value(value) else {
+            return;
+        };
+        if !f.is_finite() {
+            let span = value.span();
+            let msg = format!(
+                "constant expression `{}` overflows default type `float64` of `{}` (HYB-E6002)",
+                value.render(),
+                name
+            );
+            let notes = vec![
+                "why: Go assigns default type `float64` to an untyped float constant in a variable declaration and rejects a value outside float64's range (`cannot use … as float64 value in assignment (overflows)`), so an accepted Hybrid program would emit unbuildable Go (issue #683)"
+                    .to_string(),
+                format!(
+                    "fix: use a value within {} (±1.7976931348623157e308), declare an explicit type, or keep the value as an untyped constant",
+                    float_type_max("float64")
+                ),
+            ];
+            self.diags.push(
+                Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -924,6 +1027,70 @@ fn is_64bit_int_target(name: &str) -> bool {
 
 fn is_f32_target(name: &str) -> bool {
     matches!(name, "f32" | "float32")
+}
+
+/// The built-in float TYPES (as written in an ascription / declaration):
+/// `Some(true)` = float32, `Some(false)` = float64. `None` = not a float
+/// type (the caller falls back to the integer / other-type paths).
+fn float_type_width(name: &str) -> Option<bool> {
+    match name {
+        "f32" | "float32" => Some(true),
+        "f64" | "float64" => Some(false),
+        _ => None,
+    }
+}
+
+/// Human-readable magnitude bound for a float type's fix-it text.
+fn float_type_max(name: &str) -> &'static str {
+    if is_f32_target(name) {
+        "±3.4028234663852886e38 (float32 max)"
+    } else {
+        "±1.7976931348623157e308 (float64 max)"
+    }
+}
+
+/// Fold a literal-constant expression down to its `f64` reading for the
+/// float representability check. Only the CONSTANT OPERAND shapes Go
+/// folds at compile time count: literals, unary negation, and parens.
+/// (Composite literals / non-constant expressions fold to `None` —
+/// runtime values are never this checker's business.)
+fn conv_const_float(e: &Expr) -> Option<f64> {
+    match unwrap_parens(e) {
+        Expr::Lit {
+            kind: LitKind::Float(s),
+            ..
+        } => Some(s.replace('_', "").parse::<f64>().unwrap_or(f64::INFINITY)),
+        Expr::Lit {
+            kind: LitKind::Int(s),
+            ..
+        } => Some(huge_int_as_f64(s)),
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => conv_const_float(operand).map(|v| -v),
+        _ => None,
+    }
+}
+
+/// Does this `f64` reading overflow the target float type?
+///
+/// - float64: anything past ±f64::MAX reads as ±inf from the literal's
+///   decimal (Go's `parse`/`strtod` round-to-nearest returns inf).
+/// - float32: the correctly-rounded f64→f32 cast is `inf`, which is
+///   exactly Go's compile-time `overflows float32` rule (a value within
+///   half an ulp of f32::MAX that rounds DOWN is NOT an overflow — the
+///   issue #683 control `3.4028235e38` builds).
+///
+/// Underflow (a subnormal / zero result) is deliberately NOT rejected —
+/// go1.26 `var x float64 = 1e-400` and `var x float32 = 1e-46` both
+/// build (verified with `go vet`).
+fn float_const_overflows(f: f64, is_f32: bool) -> bool {
+    if is_f32 {
+        (f as f32).is_infinite()
+    } else {
+        !f.is_finite()
+    }
 }
 
 fn span_hint(span: Span) -> String {

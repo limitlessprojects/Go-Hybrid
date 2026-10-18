@@ -1549,6 +1549,10 @@ impl<'a> Checker<'a> {
                     // target's default int type in emitted Go (the emitted
                     // Go declaration is `int` when no ascription is present).
                     self.check_default_int_overflow(name, value, Some(st));
+                    // Issue #683: an untyped FLOAT initializer uses the
+                    // default `float64` type instead; a literal past
+                    // float64's range is a compile error in Go.
+                    self.check_default_float_overflow(name, value);
                 }
                 // N1: a bare `nil` initializer under a non-nilable
                 // ascription is a compile error (HYB-E4001) — the SPEC's own

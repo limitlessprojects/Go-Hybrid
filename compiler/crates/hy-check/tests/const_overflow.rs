@@ -1333,3 +1333,312 @@ fn const_alias_into_untyped_decl_is_rejected() {
     );
     assert_eq!(r.verdict, Verdict::Reject);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #683: the FLOAT leg of the literal-overflow family. Go gives an
+// untyped float initializer the default `float64` type and rejects a
+// magnitude past f64::MAX at compile time (`cannot use 1e400 (untyped float
+// constant 1e+400) as float64 value in assignment (overflows)`). An
+// ascribed float32/float64 site rejects the same way past that type's MAX.
+// ---------------------------------------------------------------------------
+
+const FLOAT_DEFAULT_PAST_F64_MAX: &str = "\
+fn main() {
+    let y = 1e400
+    fmt.println(\"{y}\")
+}
+";
+
+const FLOAT_DEFAULT_NEG_PAST_F64_MAX: &str = "\
+fn main() {
+    let h = -1e400
+    fmt.println(\"{h}\")
+}
+";
+
+const FLOAT_WALRUS_PAST_F64_MAX: &str = "\
+fn main() {
+    y := 1e400
+    fmt.println(\"{y}\")
+}
+";
+
+const FLOAT_CLOSURE_DEFAULT_PAST_F64_MAX: &str = "\
+fn f() {
+    let y = 1e400
+    fmt.println(\"{y}\")
+}
+
+fn main() {
+    f()
+}
+";
+
+const FLOAT32_ASCRIBED_PAST_F32_MAX: &str = "\
+fn main() {
+    var f float32 = 1e40
+    fmt.println(\"{f}\")
+}
+";
+
+const FLOAT64_ASCRIBED_PAST_F64_MAX: &str = "\
+fn main() {
+    var x float64 = 1e400
+    fmt.println(\"{x}\")
+}
+";
+
+const FLOAT_ASSIGN_PAST_F64_MAX: &str = "\
+fn main() {
+    var y float64 = 1.0
+    y = 1e400
+    fmt.println(\"{y}\")
+}
+";
+
+const FLOAT_RETURN_PAST_F64_MAX: &str = "\
+fn f() float64 {
+    return 1e400
+}
+
+fn main() {
+    let x = f()
+    fmt.println(\"{x}\")
+}
+";
+
+const FLOAT_SLICE_LIT_ELEM_PAST_F64_MAX: &str = "\
+fn main() {
+    let xs = []float64{1e400}
+    fmt.println(\"{xs}\")
+}
+";
+
+const FLOAT_APPEND_ARG_PAST_F64_MAX: &str = "\
+fn main() {
+    let xs = []float64{}
+    let ys = append(xs, 1e400)
+    fmt.println(\"{ys}\")
+}
+";
+
+const FLOAT_FILE_CONST_ASCRIBED_PAST_F64_MAX: &str = "\
+const c float64 = 1e400
+
+fn main() {
+    fmt.println(\"{c}\")
+}
+";
+
+const HUGE_INT_LITERAL_AT_FLOAT64_SITE: &str = "\
+fn main() {
+    var x float64 = 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+    fmt.println(\"{x}\")
+}
+";
+
+// Controls — every one of these BUILDS in go1.26 (`go vet` clean). The
+// float representability boundary is rounding-aware, so the checker must
+// NOT reject any of them.
+
+const FLOAT64_MAX_EXACT: &str = "\
+fn main() {
+    var x float64 = 1.7976931348623157e308
+    fmt.println(\"{x}\")
+}
+";
+
+const FLOAT64_MAX_ROUNDS_DOWN: &str = "\
+fn main() {
+    var x float64 = 1.7976931348623158e308
+    fmt.println(\"{x}\")
+}
+";
+
+const FLOAT32_MAX_ROUNDS_DOWN: &str = "\
+fn main() {
+    var x float32 = 3.4028235e38
+    fmt.println(\"{x}\")
+}
+";
+
+const FLOAT64_SUBNORMAL_UNDERFLOWS_TO_ZERO: &str = "\
+fn main() {
+    var x float64 = 1e-400
+    fmt.println(\"{x}\")
+}
+";
+
+const FLOAT32_SUBNORMAL_UNDERFLOWS_TO_ZERO: &str = "\
+fn main() {
+    var x float32 = 1e-46
+    fmt.println(\"{x}\")
+}
+";
+
+const FLOAT_DEFAULT_INSIDE_F64_MAX: &str = "\
+fn main() {
+    let y = 1e308
+    fmt.println(\"{y}\")
+}
+";
+
+const FLOAT_SLICE_LIT_ELEMS_IN_RANGE: &str = "\
+fn main() {
+    let xs = []float64{1.5, 2.5}
+    fmt.println(\"{xs}\")
+}
+";
+
+fn rejects_e6002(src: &str, what: &str) {
+    let r = check(src);
+    assert!(
+        error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+        "{what} must be HYB-E6002: {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Reject, "{what}");
+}
+
+fn accepts_clean(src: &str, what: &str) {
+    let r = check(src);
+    assert_eq!(
+        r.verdict,
+        Verdict::Accept,
+        "{what} must stay accepted (go1.26 builds it): {:?}",
+        error_codes(&r)
+    );
+    assert!(
+        error_codes(&r).is_empty(),
+        "{what} must stay accepted: {:?}",
+        error_codes(&r)
+    );
+}
+
+#[test]
+fn float_default_past_f64_max_is_rejected() {
+    rejects_e6002(FLOAT_DEFAULT_PAST_F64_MAX, "let y = 1e400");
+}
+
+#[test]
+fn float_default_neg_past_f64_max_is_rejected() {
+    rejects_e6002(FLOAT_DEFAULT_NEG_PAST_F64_MAX, "let h = -1e400");
+}
+
+#[test]
+fn float_walrus_past_f64_max_is_rejected() {
+    rejects_e6002(FLOAT_WALRUS_PAST_F64_MAX, "y := 1e400");
+}
+
+#[test]
+fn float_closure_default_past_f64_max_is_rejected() {
+    rejects_e6002(
+        FLOAT_CLOSURE_DEFAULT_PAST_F64_MAX,
+        "closure-body let y = 1e400",
+    );
+}
+
+#[test]
+fn float32_ascribed_past_f32_max_is_rejected() {
+    rejects_e6002(
+        FLOAT32_ASCRIBED_PAST_F32_MAX,
+        "var f float32 = 1e40",
+    );
+}
+
+#[test]
+fn float64_ascribed_past_f64_max_is_rejected() {
+    rejects_e6002(
+        FLOAT64_ASCRIBED_PAST_F64_MAX,
+        "var x float64 = 1e400",
+    );
+}
+
+#[test]
+fn float_reassign_past_f64_max_is_rejected() {
+    rejects_e6002(FLOAT_ASSIGN_PAST_F64_MAX, "y = 1e400");
+}
+
+#[test]
+fn float_return_past_f64_max_is_rejected() {
+    rejects_e6002(FLOAT_RETURN_PAST_F64_MAX, "return 1e400");
+}
+
+#[test]
+fn float_slice_lit_elem_past_f64_max_is_rejected() {
+    rejects_e6002(
+        FLOAT_SLICE_LIT_ELEM_PAST_F64_MAX,
+        "[]float64{1e400}",
+    );
+}
+
+#[test]
+fn float_append_arg_past_f64_max_is_rejected() {
+    rejects_e6002(FLOAT_APPEND_ARG_PAST_F64_MAX, "append(xs, 1e400)");
+}
+
+#[test]
+fn float_file_const_ascribed_past_f64_max_is_rejected() {
+    rejects_e6002(
+        FLOAT_FILE_CONST_ASCRIBED_PAST_F64_MAX,
+        "const c float64 = 1e400",
+    );
+}
+
+#[test]
+fn huge_int_literal_at_float64_site_is_rejected() {
+    rejects_e6002(
+        HUGE_INT_LITERAL_AT_FLOAT64_SITE,
+        "var x float64 = 10^300-ish integer literal",
+    );
+}
+
+#[test]
+fn float64_max_exact_is_accepted() {
+    accepts_clean(FLOAT64_MAX_EXACT, "var x float64 = f64::MAX");
+}
+
+#[test]
+fn float64_max_rounds_down_is_accepted() {
+    accepts_clean(
+        FLOAT64_MAX_ROUNDS_DOWN,
+        "f64 just past MAX, rounds back down to MAX",
+    );
+}
+
+#[test]
+fn float32_max_rounds_down_is_accepted() {
+    accepts_clean(
+        FLOAT32_MAX_ROUNDS_DOWN,
+        "f32 just past MAX, rounds back down to f32::MAX",
+    );
+}
+
+#[test]
+fn float64_underflow_to_zero_is_accepted() {
+    accepts_clean(
+        FLOAT64_SUBNORMAL_UNDERFLOWS_TO_ZERO,
+        "float64 = 1e-400 (rounds to 0, not an error)",
+    );
+}
+
+#[test]
+fn float32_underflow_to_zero_is_accepted() {
+    accepts_clean(
+        FLOAT32_SUBNORMAL_UNDERFLOWS_TO_ZERO,
+        "float32 = 1e-46 (rounds to 0, not an error)",
+    );
+}
+
+#[test]
+fn float_default_inside_f64_max_is_accepted() {
+    accepts_clean(FLOAT_DEFAULT_INSIDE_F64_MAX, "let y = 1e308");
+}
+
+#[test]
+fn float_slice_lit_elems_in_range_are_accepted() {
+    accepts_clean(
+        FLOAT_SLICE_LIT_ELEMS_IN_RANGE,
+        "[]float64{1.5, 2.5}",
+    );
+}
