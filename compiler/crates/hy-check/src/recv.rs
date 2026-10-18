@@ -38,9 +38,7 @@ impl<'a> Checker<'a> {
             }
             Stmt::Assign { targets, values, .. } => {
                 for t in targets {
-                    if let PlaceKind::Index { index, .. } = &t.kind {
-                        self.check_expr_recv_operands(st, index);
-                    }
+                    self.check_place_recv_operands(st, t);
                 }
                 for v in values {
                     self.check_expr_recv_operands(st, v);
@@ -55,9 +53,48 @@ impl<'a> Checker<'a> {
                 self.check_expr_recv_operands(st, value);
             }
             // `if`/`for` init statements arrive as their own flattened
-            // entries (walk.rs walk_one) — only the condition expression
-            // belongs to this statement.
-            Stmt::If { cond, .. } => self.check_expr_recv_operands(st, cond),
+            // entries in Pass B (walk.rs walk_one), whereas closures.rs calls
+            // `check_stmt_recv_operands` on `Stmt::If` before walking `init`.
+            // Bind `init` locals into a temporary scope when checking `cond`
+            // so `if ch := make(chan int, 1); (<-ch) > 0` resolves `ch` in
+            // both passes without double-checking `init` itself.
+            Stmt::If { init, cond, .. } => {
+                if let Some(hy_syntax::Stmt::Local(l)) = init.as_deref() {
+                    let mut tmp = st.clone();
+                    tmp.scope_push();
+                    let immutable = l.kind == hy_syntax::LocalKind::Const;
+                    if l.values.is_empty() {
+                        let shape = l
+                            .ty
+                            .as_ref()
+                            .map(|t| self.shape_of_type(t))
+                            .unwrap_or(TypeShape::Unknown);
+                        for name in &l.names {
+                            self.define_binding(
+                                &mut tmp,
+                                name,
+                                shape.clone(),
+                                l.ty.clone(),
+                                immutable,
+                                false,
+                            );
+                        }
+                    } else if l.names.len() == l.values.len() {
+                        for (name, val) in l.names.iter().zip(l.values.iter()) {
+                            let inferred = self.shape_of_expr(&tmp, val);
+                            let shape = match (&l.ty, inferred) {
+                                (Some(t), TypeShape::Unknown) => self.shape_of_type(t),
+                                (_, s) => s,
+                            };
+                            let ty = l.ty.clone().or_else(|| self.ty_of_expr(&tmp, val));
+                            self.define_binding(&mut tmp, name, shape, ty, immutable, false);
+                        }
+                    }
+                    self.check_expr_recv_operands(&tmp, cond);
+                } else {
+                    self.check_expr_recv_operands(st, cond);
+                }
+            }
             Stmt::For { kind, .. } => match kind {
                 hy_syntax::ForKind::While { cond } => self.check_expr_recv_operands(st, cond),
                 hy_syntax::ForKind::Range { lo, hi, .. } => {
@@ -110,6 +147,19 @@ impl<'a> Checker<'a> {
             | Stmt::Continue { .. }
             | Stmt::Block { .. }
             | Stmt::Managed { .. } => {}
+        }
+    }
+
+    fn check_place_recv_operands(&mut self, st: &FnState, place: &hy_syntax::Place) {
+        match &place.kind {
+            PlaceKind::Ident(_) => {}
+            PlaceKind::Index { base, index } => {
+                self.check_place_recv_operands(st, base);
+                self.check_expr_recv_operands(st, index);
+            }
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                self.check_place_recv_operands(st, base);
+            }
         }
     }
 
@@ -187,7 +237,44 @@ impl<'a> Checker<'a> {
     /// does not suppress it.
     pub(crate) fn check_recv_operand(&mut self, st: &FnState, chan: &Expr, span: Span) -> bool {
         match self.shape_of_expr(st, chan) {
-            TypeShape::Chan(_) => true,
+            TypeShape::Chan(_) => {
+                if let Some(ty) = self.ty_of_expr(st, chan) {
+                    let resolved = self.resolve_type_alias(&ty);
+                    if matches!(
+                        resolved,
+                        hy_syntax::TypeExpr::Chan {
+                            dir: hy_syntax::ChanDir::Send,
+                            ..
+                        }
+                    ) {
+                        // HYB-E3008 (chan-direction-mismatch) owns directed-channel
+                        // misuse on main; this generic arm only reports when E3008
+                        // has not already diagnosed the same site, so a defect is
+                        // reported once by its precise code.
+                        if !self
+                            .diags
+                            .iter()
+                            .any(|d| d.code == "HYB-E3008" && d.span == span)
+                        {
+                            let msg = format!(
+                                "cannot receive from `{}` (`{}`) — channel is send-only (HYB-E2008)",
+                                chan.render(),
+                                resolved.render()
+                            );
+                            let notes = vec![
+                                "why: Go rejects `<-ch` on a `chan<- T` send-only channel (`invalid operation: cannot receive from send-only channel`), so an accepted Hybrid program would emit unbuildable Go".to_string(),
+                                "fix: declare the parameter or binding as a bidirectional (`chan T`) or receive-only (`<-chan T`) channel".to_string(),
+                            ];
+                            self.diags.push(
+                                Diagnostic::error("HYB-E2008", self.path.clone(), span, msg)
+                                    .with_notes(notes),
+                            );
+                        }
+                        return false;
+                    }
+                }
+                true
+            }
             TypeShape::Unknown => {
                 let msg = format!(
                     "cannot prove `{}` is a channel — a receive source must resolve to `chan T` (O4.9)",

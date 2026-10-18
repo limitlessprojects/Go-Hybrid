@@ -27,6 +27,7 @@ impl<'a> Checker<'a> {
     }
 
     pub(crate) fn check_stmt_const_zero_divisor(&mut self, stmt: &Stmt) {
+        self.check_file_close_and_range_directions(stmt);
         self.check_stmt_const_zero_divisor_inner(stmt, /*deep=*/ false);
     }
 

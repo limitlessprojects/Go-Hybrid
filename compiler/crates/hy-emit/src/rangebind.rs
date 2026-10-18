@@ -15,120 +15,148 @@
 //! one merely leaves the old emission, which Go rejects as it does today.
 
 use hy_syntax::{
-    Block, Expr, ForKind, InterpPart, MatchPattern, PlaceKind, SelectArmKind, Stmt,
+    Block, Expr, ForKind, InterpPart, MatchPattern, PlaceKind, SelectArmKind, Stmt, TypeExpr,
 };
-use std::collections::HashSet;
 
-/// Does the loop body mention `name` anywhere?
+/// Does `body` reference `name` anywhere that is not shadowed by an inner
+/// binding of `name`?
 pub fn body_reads(body: &Block, name: &str) -> bool {
-    let mut kata = HashSet::new();
-    block_kata(body, &mut kata);
-    kata.contains(name)
+    if name == "_" {
+        return false;
+    }
+    block_reads(body, name)
 }
 
-fn block_kata(b: &Block, out: &mut HashSet<String>) {
+fn block_reads(b: &Block, target: &str) -> bool {
     for st in &b.stmts {
-        stmt_kata(st, out);
+        if let Stmt::Local(l) = st {
+            if l.ty.as_ref().is_some_and(|t| ty_reads(t, target))
+                || l.values.iter().any(|v| expr_reads(v, target))
+            {
+                return true;
+            }
+            if l.names.iter().any(|n| n == target) {
+                return false;
+            }
+            continue;
+        }
+        if stmt_reads(st, target) {
+            return true;
+        }
+    }
+    false
+}
+
+fn ty_reads(t: &TypeExpr, target: &str) -> bool {
+    match t {
+        TypeExpr::Named { .. } => false,
+        TypeExpr::Pointer { to, .. } => ty_reads(to, target),
+        TypeExpr::Slice { elem, .. }
+        | TypeExpr::Chan { elem, .. }
+        | TypeExpr::Option { elem, .. } => ty_reads(elem, target),
+        TypeExpr::Array { len, elem, .. } => {
+            len.as_ref().is_some_and(|l| expr_reads(l, target)) || ty_reads(elem, target)
+        }
+        TypeExpr::Map { key, value, .. } => ty_reads(key, target) || ty_reads(value, target),
+        TypeExpr::Fn {
+            params, results, ..
+        } => {
+            params.iter().any(|p| ty_reads(&p.ty, target))
+                || results.iter().any(|r| ty_reads(r, target))
+        }
     }
 }
 
-fn expr_kata(e: &Expr, out: &mut HashSet<String>) {
+pub(crate) fn expr_reads(e: &Expr, target: &str) -> bool {
     match e {
-        Expr::Ident { name, .. } => {
-            out.insert(name.clone());
-        }
-        Expr::Lit { .. } => {}
-        Expr::Interp { parts, .. } => {
-            for p in parts {
-                if let InterpPart::Expr(x) = p {
-                    expr_kata(x, out);
-                }
-            }
-        }
-        Expr::Binary { lhs, rhs, .. } => {
-            expr_kata(lhs, out);
-            expr_kata(rhs, out);
-        }
+        Expr::Ident { name, .. } => name == target,
+        Expr::Lit { .. } => false,
+        Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+            InterpPart::Expr(x) => expr_reads(x, target),
+            InterpPart::Lit(_) => false,
+        }),
+        Expr::Binary { lhs, rhs, .. } => expr_reads(lhs, target) || expr_reads(rhs, target),
         Expr::Unary { operand, .. }
         | Expr::AddrOf { operand, .. }
         | Expr::Move { operand, .. }
-        | Expr::Try { operand, .. } => expr_kata(operand, out),
-        Expr::Receive { chan, .. } => expr_kata(chan, out),
-        Expr::Index { base, index, .. } => {
-            expr_kata(base, out);
-            expr_kata(index, out);
-        }
+        | Expr::Try { operand, .. } => expr_reads(operand, target),
+        Expr::Receive { chan, .. } => expr_reads(chan, target),
+        Expr::Index { base, index, .. } => expr_reads(base, target) || expr_reads(index, target),
         Expr::Slice { base, lo, hi, .. } => {
-            expr_kata(base, out);
-            if let Some(x) = lo {
-                expr_kata(x, out);
-            }
-            if let Some(x) = hi {
-                expr_kata(x, out);
-            }
+            expr_reads(base, target)
+                || lo.as_ref().is_some_and(|x| expr_reads(x, target))
+                || hi.as_ref().is_some_and(|x| expr_reads(x, target))
         }
-        Expr::Field { base, .. } => expr_kata(base, out),
+        Expr::Field { base, .. } => expr_reads(base, target),
         Expr::Call { callee, args, .. } => {
-            expr_kata(callee, out);
-            for a in args {
-                expr_kata(&a.value, out);
-            }
+            expr_reads(callee, target) || args.iter().any(|a| expr_reads(&a.value, target))
         }
-        Expr::StructLit { fields, .. } => {
-            for f in fields {
-                expr_kata(&f.value, out);
-            }
+        Expr::StructLit { ty, fields, .. } => {
+            ty.as_ref().is_some_and(|t| ty_reads(t, target))
+                || fields.iter().any(|f| expr_reads(&f.value, target))
         }
-        Expr::SliceLit { items, .. } => {
-            for v in items {
-                expr_kata(v, out);
-            }
+        Expr::SliceLit { elem, items, .. } => {
+            elem.as_ref().is_some_and(|t| ty_reads(t, target))
+                || items.iter().any(|v| expr_reads(v, target))
         }
-        Expr::MapLit { entries, .. } => {
-            for (k, v) in entries {
-                expr_kata(k, out);
-                expr_kata(v, out);
-            }
+        Expr::MapLit {
+            key,
+            value,
+            entries,
+            ..
+        } => {
+            ty_reads(key, target)
+                || ty_reads(value, target)
+                || entries
+                    .iter()
+                    .any(|(k, v)| expr_reads(k, target) || expr_reads(v, target))
         }
-        Expr::FnLit { body, .. } => block_kata(body, out),
-        Expr::Paren { inner, .. } => expr_kata(inner, out),
+        Expr::FnLit {
+            params,
+            results,
+            body,
+            ..
+        } => {
+            if params.iter().any(|p| ty_reads(&p.ty, target))
+                || results.iter().any(|r| ty_reads(&r.ty, target))
+            {
+                return true;
+            }
+            if params.iter().any(|p| p.name == target)
+                || results.iter().any(|r| r.name.as_deref() == Some(target))
+            {
+                return false;
+            }
+            block_reads(body, target)
+        }
+        Expr::Paren { inner, .. } => expr_reads(inner, target),
     }
 }
 
-fn place_kata(p: &hy_syntax::Place, out: &mut HashSet<String>) {
+fn place_reads(p: &hy_syntax::Place, target: &str) -> bool {
     match &p.kind {
-        PlaceKind::Ident(n) => {
-            out.insert(n.clone());
-        }
+        PlaceKind::Ident(n) => n == target,
         PlaceKind::Index { base, index } => {
-            place_kata(base, out);
-            expr_kata(index, out);
+            place_reads(base, target) || expr_reads(index, target)
         }
-        PlaceKind::Field { base, .. } => place_kata(base, out),
-        PlaceKind::AddrOf { base } => place_kata(base, out),
+        PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => place_reads(base, target),
     }
 }
 
-fn stmt_kata(s: &Stmt, out: &mut HashSet<String>) {
+fn stmt_reads(s: &Stmt, target: &str) -> bool {
     match s {
         Stmt::Local(l) => {
-            for v in &l.values {
-                expr_kata(v, out);
-            }
+            l.ty.as_ref().is_some_and(|t| ty_reads(t, target))
+                || l.values.iter().any(|v| expr_reads(v, target))
         }
-        Stmt::Assign { targets, values, .. } => {
-            for t in targets {
-                place_kata(t, out);
-            }
-            for v in values {
-                expr_kata(v, out);
-            }
+        Stmt::Assign {
+            targets, values, ..
+        } => {
+            targets.iter().any(|t| place_reads(t, target))
+                || values.iter().any(|v| expr_reads(v, target))
         }
-        Stmt::Expr { expr, .. } => expr_kata(expr, out),
-        Stmt::Send { chan, value, .. } => {
-            expr_kata(chan, out);
-            expr_kata(value, out);
-        }
+        Stmt::Expr { expr, .. } => expr_reads(expr, target),
+        Stmt::Send { chan, value, .. } => expr_reads(chan, target) || expr_reads(value, target),
         Stmt::If {
             init,
             cond,
@@ -137,83 +165,98 @@ fn stmt_kata(s: &Stmt, out: &mut HashSet<String>) {
             ..
         } => {
             if let Some(i) = init {
-                stmt_kata(i, out);
+                if stmt_reads(i, target) {
+                    return true;
+                }
+                if let Stmt::Local(l) = i.as_ref() {
+                    if l.names.iter().any(|n| n == target) {
+                        return false;
+                    }
+                }
             }
-            expr_kata(cond, out);
-            block_kata(then, out);
-            if let Some(o) = otherwise {
-                stmt_kata(o, out);
-            }
+            expr_reads(cond, target)
+                || block_reads(then, target)
+                || otherwise.as_deref().is_some_and(|o| stmt_reads(o, target))
         }
         Stmt::For { kind, body, .. } => {
-            // A nested loop's own bindings are mentions like any other; they
-            // only ever suppress an `_`, never introduce one.
             match kind {
                 ForKind::Iterate { vars, expr } => {
-                    for v in vars {
-                        out.insert(v.clone());
+                    if expr_reads(expr, target) {
+                        return true;
                     }
-                    expr_kata(expr, out);
+                    if vars.iter().any(|v| v == target) {
+                        return false;
+                    }
                 }
-                ForKind::While { cond } => expr_kata(cond, out),
+                ForKind::While { cond } => {
+                    if expr_reads(cond, target) {
+                        return true;
+                    }
+                }
                 ForKind::Range { var, lo, hi, .. } => {
-                    out.insert(var.clone());
-                    expr_kata(lo, out);
-                    expr_kata(hi, out);
+                    if expr_reads(lo, target) || expr_reads(hi, target) {
+                        return true;
+                    }
+                    if var == target {
+                        return false;
+                    }
                 }
                 ForKind::Infinite => {}
             }
-            block_kata(body, out);
+            block_reads(body, target)
         }
-        Stmt::Return { values, .. } => {
-            for v in values {
-                expr_kata(v, out);
-            }
-        }
+        Stmt::Return { values, .. } => values.iter().any(|v| expr_reads(v, target)),
         Stmt::Task { callee, args, .. } => {
-            expr_kata(callee, out);
-            for a in args {
-                expr_kata(&a.value, out);
-            }
+            expr_reads(callee, target) || args.iter().any(|a| expr_reads(&a.value, target))
         }
-        Stmt::Managed { body, .. } => block_kata(body, out),
-        Stmt::Match {
-            subject, arms, ..
-        } => {
-            expr_kata(subject, out);
+        Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => block_reads(body, target),
+        Stmt::Match { subject, arms, .. } => {
+            if expr_reads(subject, target) {
+                return true;
+            }
             for arm in arms {
-                if let MatchPattern::Path {
-                    binding: Some(b), ..
-                } = &arm.pattern
+                if matches!(
+                    &arm.pattern,
+                    MatchPattern::Path {
+                        binding: Some(b),
+                        ..
+                    } if b == target
+                ) {
+                    continue;
+                }
+                if arm.guard.as_ref().is_some_and(|g| expr_reads(g, target))
+                    || block_reads(&arm.body, target)
                 {
-                    out.insert(b.clone());
+                    return true;
                 }
-                if let Some(g) = &arm.guard {
-                    expr_kata(g, out);
-                }
-                block_kata(&arm.body, out);
             }
+            false
         }
-        Stmt::Defer { call, .. } => expr_kata(call, out),
-        Stmt::Break { .. } | Stmt::Continue { .. } => {}
-        Stmt::Block { block, .. } => block_kata(block, out),
+        Stmt::Defer { call, .. } => expr_reads(call, target),
+        Stmt::Break { .. } | Stmt::Continue { .. } => false,
         Stmt::Select { arms, .. } => {
             for arm in arms {
                 match &arm.kind {
                     SelectArmKind::Recv { names, chan } => {
-                        for n in names {
-                            out.insert(n.clone());
+                        if expr_reads(chan, target) {
+                            return true;
                         }
-                        expr_kata(chan, out);
+                        if names.iter().any(|n| n == target) {
+                            continue;
+                        }
                     }
                     SelectArmKind::Send { chan, value, .. } => {
-                        expr_kata(chan, out);
-                        expr_kata(value, out);
+                        if expr_reads(chan, target) || expr_reads(value, target) {
+                            return true;
+                        }
                     }
                     SelectArmKind::Default => {}
                 }
-                block_kata(&arm.body, out);
+                if block_reads(&arm.body, target) {
+                    return true;
+                }
             }
+            false
         }
     }
 }

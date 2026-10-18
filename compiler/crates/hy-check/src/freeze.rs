@@ -116,6 +116,7 @@ impl<'a> Checker<'a> {
                         span: u.span,
                         kind: MoveKind::Moved,
                         desc: format!("`move {}` earlier in the same statement", u.name),
+                        moved_name: u.name.clone(),
                     },
                 ));
             }
@@ -181,6 +182,17 @@ impl<'a> Checker<'a> {
         let is_alias =
             st.aliases.contains_key(&u.name) || st.may_share.contains_key(&u.name);
         let orig = resolve_alias(st, &u.name);
+        // Name the binding whose ownership actually left. `orig` is the root of
+        // the USED binding, which is the wrong name when the use is a may-share
+        // peer of the moved value rather than a member of its alias chain (a
+        // reference-typed field or element read out earlier): there `orig`
+        // resolved to the peer itself, so the notes named the wrong binding and
+        // reported it as aliasing itself.
+        let moved_label = if mv.moved_name.is_empty() {
+            orig.clone()
+        } else {
+            mv.moved_name.clone()
+        };
         let span_str = format!("{}:{}", mv.span.start.line, mv.span.start.col);
 
         let msg = if u.via_move {
@@ -207,26 +219,26 @@ impl<'a> Checker<'a> {
         if mv.kind == MoveKind::Consumed {
             notes.push(format!(
                 "ownership of `{}` was transferred by {} (marked `consume` in the boundary descriptor), {}:{}",
-                orig, mv.desc, self.path, span_str
+                moved_label, mv.desc, self.path, span_str
             ));
             notes.push(
                 "the transfer site is reported above so you can see where ownership left — not just the line that noticed".to_string(),
             );
-            if is_alias {
+            if is_alias && u.name != moved_label {
                 notes.push(format!(
                     "`{}` aliases `{}` — the consume freeze covers every live alias too (O13)",
-                    u.name, orig
+                    u.name, moved_label
                 ));
             }
         } else {
             notes.push(format!(
                 "ownership of `{}` left this task at {} ({}:{})",
-                orig, mv.desc, self.path, span_str
+                moved_label, mv.desc, self.path, span_str
             ));
-            if is_alias {
+            if is_alias && u.name != moved_label {
                 notes.push(format!(
                     "`{}` aliases `{}` — the freeze covers every live alias, otherwise the alias binding would defeat it entirely (O5.2)",
-                    u.name, orig
+                    u.name, moved_label
                 ));
                 if u.is_write {
                     notes.push(
@@ -304,6 +316,7 @@ impl<'a> Checker<'a> {
                     span,
                     kind,
                     desc: desc.clone(),
+                    moved_name: name.to_string(),
                 });
             } else if let Some(cb) = self.consts.get(m).cloned() {
                 if !cb.shape.is_sendable_by_type() {
@@ -312,6 +325,7 @@ impl<'a> Checker<'a> {
                         span,
                         kind,
                         desc: desc.clone(),
+                        moved_name: name.to_string(),
                     });
                     st.env.insert(m.clone(), frozen);
                 }
@@ -324,6 +338,7 @@ impl<'a> Checker<'a> {
                         span,
                         kind,
                         desc: desc.clone(),
+                        moved_name: name.to_string(),
                     });
                 }
             }

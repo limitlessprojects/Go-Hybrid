@@ -136,6 +136,25 @@ pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
     }
 }
 
+/// The argument index a package-level call mutates IN PLACE (T22: passing a
+/// `const` root there is a write, `HYB-E3006`). `None` = the descriptor stubs
+/// record no in-place write for this API.
+pub(crate) fn package_mutated_arg(pkg: &str, method: &str) -> Option<usize> {
+    match (pkg, method) {
+        (
+            "sort",
+            "ints" | "strings" | "float64s" | "slice" | "slice_stable" | "sort" | "stable"
+            | "Ints" | "Strings" | "Float64s" | "Slice" | "SliceStable" | "Sort" | "Stable",
+        ) => Some(0),
+        (
+            "io",
+            "read_full" | "read_at_least" | "ReadFull" | "ReadAtLeast",
+        ) => Some(1),
+        ("io", "copy_buffer" | "CopyBuffer") => Some(2),
+        _ => None,
+    }
+}
+
 /// Result shape of a package-level call (for defines / loop variables).
 pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
     match (pkg, method) {

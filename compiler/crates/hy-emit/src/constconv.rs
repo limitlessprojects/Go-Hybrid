@@ -60,24 +60,43 @@ pub fn parse_int(text: &str) -> Option<i128> {
     Some(if neg { -v } else { v })
 }
 
+fn const_int_expr(mut expr: &hy_syntax::Expr) -> Option<i128> {
+    let mut neg = false;
+    loop {
+        match expr {
+            hy_syntax::Expr::Paren { inner, .. } => {
+                expr = inner;
+            }
+            hy_syntax::Expr::Unary {
+                op: hy_syntax::UnOp::Neg,
+                operand,
+                ..
+            } => {
+                neg = !neg;
+                expr = operand;
+            }
+            hy_syntax::Expr::Lit {
+                kind: LitKind::Int(t),
+                ..
+            } => {
+                let v = parse_int(t)?;
+                return if neg { v.checked_neg() } else { Some(v) };
+            }
+            _ => return None,
+        }
+    }
+}
+
 /// Fold a constant conversion operand into the target's representation.
 ///
 /// Returns `None` when nothing should change: not an integer literal, an
-/// unknown width, a value that already fits, or a width of 64 (whose folding
-/// cannot be represented on the host without loss).
+/// unknown width, or a value that already fits.
 pub fn fold_constant(operand: &hy_syntax::Expr, spec_name: &str) -> Option<i128> {
     let (bits, signed) = width_of(spec_name)?;
-    if bits >= 64 {
+    if bits > 64 {
         return None;
     }
-    let text = match operand {
-        hy_syntax::Expr::Lit {
-            kind: LitKind::Int(t),
-            ..
-        } => t,
-        _ => return None,
-    };
-    let v = parse_int(text)?;
+    let v = const_int_expr(operand)?;
 
     let len = 1i128 << bits;
     let masked = v & (len - 1);

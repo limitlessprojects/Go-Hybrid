@@ -11,9 +11,9 @@
 //! and are intentionally out of scope here — their runtime-mutable /
 //! sendability story is issue #188.
 
-use crate::model::{unwrap_parens, Checker, FnState};
+use crate::model::{unwrap_parens, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::{Expr, UnOp};
+use hy_syntax::{BinOp, Decl, Expr, LitKind, UnOp};
 
 impl<'a> Checker<'a> {
     /// When `value` would be emitted as a Go `const` initializer but is not
@@ -28,7 +28,11 @@ impl<'a> Checker<'a> {
             // Emitter rewrites these to `var` — not the #205 contract break.
             return;
         }
-        if self.expr_is_constant(value, st) {
+        let mut visiting = Vec::new();
+        if st.is_none() {
+            visiting.push(name.to_string());
+        }
+        if self.expr_is_constant_inner(value, st, &mut visiting, 0) {
             return;
         }
         let span = value.span();
@@ -49,34 +53,55 @@ impl<'a> Checker<'a> {
 
     /// Compile-time constant expression under the narrow MVP rules that
     /// match what Go's `const` accepts for the shapes Hybrid emits.
-    fn expr_is_constant(&self, e: &Expr, st: Option<&FnState>) -> bool {
+    fn expr_is_constant_inner(
+        &self,
+        e: &Expr,
+        st: Option<&FnState>,
+        visiting: &mut Vec<String>,
+        ref_depth: usize,
+    ) -> bool {
+        if ref_depth > 32 {
+            return false;
+        }
         match unwrap_parens(e) {
             Expr::Lit { .. } => true,
             Expr::Unary {
                 op: UnOp::Neg | UnOp::Not,
                 operand,
                 ..
-            } => self.expr_is_constant(operand, st),
+            } => self.expr_is_constant_inner(operand, st, visiting, ref_depth),
             Expr::Unary { op: UnOp::Addr, .. } => false,
             Expr::Binary { lhs, rhs, .. } => {
-                self.expr_is_constant(lhs, st) && self.expr_is_constant(rhs, st)
+                self.expr_is_constant_inner(lhs, st, visiting, ref_depth)
+                    && self.expr_is_constant_inner(rhs, st, visiting, ref_depth)
             }
-            Expr::Ident { name, .. } => self.ident_is_constant(name, st),
-            // Typed conversion of a constant: `int8(42)`, `byte(0xff)`.
-            // A call to a real function (`get_val()`) is never constant.
+            Expr::Ident { name, .. } => {
+                self.ident_is_constant(name, st, visiting, ref_depth + 1)
+            }
+            // Typed conversion of a constant (`int8(42)`, `byte(0xff)`) or
+            // `len("const_str")`. A call to a real function (`get_val()`) or
+            // shadowed local binding is never constant.
             Expr::Call { callee, args, .. } => {
                 let Some(ty_name) = conversion_callee_name(callee) else {
                     return false;
                 };
-                if !is_conversion_type_name(ty_name) {
+                if st.is_some_and(|s| s.env_lookup(ty_name).is_some()) {
                     return false;
                 }
-                // Known top-level fns win over type names if somehow shared.
                 if self.fns.contains_key(ty_name) {
                     return false;
                 }
-                args.iter()
-                    .all(|a| self.expr_is_constant(&a.value, st))
+                if args.len() != 1 || args[0].spread {
+                    return false;
+                }
+                if ty_name == "len" {
+                    return self.expr_is_constant_inner(&args[0].value, st, visiting, ref_depth)
+                        && self.is_const_string_expr(&args[0].value, st, ref_depth);
+                }
+                if !self.is_const_conversion_target(ty_name) {
+                    return false;
+                }
+                self.expr_is_constant_inner(&args[0].value, st, visiting, ref_depth)
             }
             // Everything else (field calls, index, receive, try, interp,
             // move, addr-of, composites nested under non-composite forms…)
@@ -85,16 +110,98 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn ident_is_constant(&self, name: &str, st: Option<&FnState>) -> bool {
-        if self.consts.contains_key(name) {
+    fn is_const_conversion_target(&self, name: &str) -> bool {
+        if is_conversion_type_name(name) {
             return true;
         }
+        if let Some(ty) = self.type_aliases.get(name) {
+            let resolved = self.resolve_type_alias(ty);
+            if let hy_syntax::TypeExpr::Named { name: target, .. } = resolved {
+                return is_conversion_type_name(&target);
+            }
+        }
+        false
+    }
+
+    fn is_const_string_expr(&self, e: &Expr, st: Option<&FnState>, ref_depth: usize) -> bool {
+        if ref_depth > 32 {
+            return false;
+        }
+        match unwrap_parens(e) {
+            Expr::Lit {
+                kind: LitKind::Str(_) | LitKind::RawStr(_),
+                ..
+            } => true,
+            Expr::Binary {
+                op: BinOp::Add,
+                lhs,
+                rhs,
+                ..
+            } => {
+                self.is_const_string_expr(lhs, st, ref_depth)
+                    && self.is_const_string_expr(rhs, st, ref_depth)
+            }
+            Expr::Ident { name, .. } => {
+                if let Some(st) = st {
+                    if let Some(b) = st.env_lookup(name) {
+                        return b.immutable && matches!(b.shape, TypeShape::Str);
+                    }
+                }
+                if let Some(cdecl) = self.file_const_decl(name) {
+                    return self.is_const_string_expr(&cdecl.value, None, ref_depth + 1);
+                }
+                false
+            }
+            Expr::Call { callee, args, .. } => {
+                conversion_callee_name(callee) == Some("string")
+                    && args.len() == 1
+                    && !args[0].spread
+            }
+            _ => false,
+        }
+    }
+
+    fn file_const_decl(&self, name: &str) -> Option<&hy_syntax::ConstDecl> {
+        self.file.decls.iter().find_map(|d| match d {
+            Decl::Const(c) if c.name == name => Some(c),
+            _ => None,
+        })
+    }
+
+    fn ident_is_constant(
+        &self,
+        name: &str,
+        st: Option<&FnState>,
+        visiting: &mut Vec<String>,
+        ref_depth: usize,
+    ) -> bool {
+        if ref_depth > 32 {
+            return false;
+        }
+        // Local bindings and parameters shadow file-level constants.
         if let Some(st) = st {
             if let Some(b) = st.env_lookup(name) {
-                // Only `const` bindings set `immutable` (let is shallow and
-                // does not); matching Go: only const names are constant.
-                return b.immutable;
+                // Only scalar/string `const` bindings are Go compile-time
+                // constants; composite `const`s lower to Go `var`.
+                return b.immutable && matches!(b.shape, TypeShape::Primitive | TypeShape::Str);
             }
+        }
+        if visiting.iter().any(|v| v == name) {
+            return false;
+        }
+        if let Some(cdecl) = self.file_const_decl(name) {
+            if is_composite_lit(&cdecl.value) {
+                return false;
+            }
+            if let Some(ty) = &cdecl.ty {
+                if !matches!(self.shape_of_type(ty), TypeShape::Primitive | TypeShape::Str) {
+                    return false;
+                }
+            }
+            visiting.push(name.to_string());
+            let ok = self.expr_is_constant_inner(&cdecl.value, None, visiting, ref_depth);
+            visiting.pop();
+            return ok;
         }
         false
     }

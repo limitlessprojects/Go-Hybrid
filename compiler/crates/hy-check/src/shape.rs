@@ -258,10 +258,22 @@ impl<'a> Checker<'a> {
                 self.field_shape(&base_shape, name)
             }
             Expr::Call { callee, args, .. } => self.call_shape(st, callee, args),
-            Expr::StructLit { ty, .. } => TypeShape::Struct(match ty {
-                Some(TypeExpr::Named { name, .. }) => Some(name.clone()),
-                _ => None,
-            }),
+            // A struct literal written through a type alias
+            // (`type holder_alias = holder; h := holder_alias{m: m1}`) names the
+            // alias, not the struct. Reporting the alias name made
+            // `shape_may_share` miss it (`self.structs` is keyed by the real
+            // name), so `h2 := h` recorded no may-share edge and moving `h` into
+            // a task left `h2` free to mutate the same map (#385). Resolve the
+            // alias first; predeclared spellings (`make(chan T, n)`,
+            // `make([]T, n)`) keep their own shape through `shape_of_type`.
+            Expr::StructLit { ty: Some(t), .. } => match self.shape_of_type(t) {
+                shape @ TypeShape::Struct(_) => shape,
+                _ => TypeShape::Struct(match t {
+                    TypeExpr::Named { name, .. } => Some(name.clone()),
+                    _ => None,
+                }),
+            },
+            Expr::StructLit { ty: None, .. } => TypeShape::Struct(None),
             Expr::MapLit { key, value, .. } => TypeShape::Map(
                 Box::new(self.shape_of_type(key)),
                 Box::new(self.shape_of_type(value)),

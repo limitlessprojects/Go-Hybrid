@@ -215,7 +215,15 @@ impl<'a> Scan<'a> {
             } => {
                 self.run_expr(subject);
                 for arm in arms {
-                    if let MatchPattern::Path { binding, .. } = &arm.pattern {
+                    if let MatchPattern::Path { segments, binding } = &arm.pattern {
+                        if segments.len() == 1 {
+                            let arm_span = arm
+                                .guard
+                                .as_ref()
+                                .map(|g| g.span())
+                                .unwrap_or(arm.body.span);
+                            self.ident(&segments[0], arm_span);
+                        }
                         if let Some(b) = binding {
                             self.define(b);
                         }
@@ -425,9 +433,6 @@ fn collect_file_tables(file: &hy_syntax::File) -> HashSet<String> {
             }
             Decl::Struct(st) => {
                 s.insert(st.name.clone());
-                for tp in &st.type_params {
-                    s.insert(tp.name.clone());
-                }
             }
             Decl::Enum(e) => {
                 s.insert(e.name.clone());
@@ -446,9 +451,30 @@ fn collect_file_tables(file: &hy_syntax::File) -> HashSet<String> {
     s
 }
 
+fn seed_receiver_type_params(ty: &TypeExpr, allowed: &mut HashSet<String>) {
+    match ty {
+        TypeExpr::Named { name, .. } => {
+            if let Some((_, rest)) = name.split_once('[') {
+                if let Some((inside, _)) = rest.rsplit_once(']') {
+                    for part in inside.split(',') {
+                        if let Some(tp) = part.split_whitespace().next() {
+                            if !tp.is_empty() {
+                                allowed.insert(tp.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        TypeExpr::Pointer { to, .. } => seed_receiver_type_params(to, allowed),
+        _ => {}
+    }
+}
+
 fn seed_fn_scope(f: &FnDecl, allowed: &mut HashSet<String>) {
     if let Some(r) = &f.receiver {
         allowed.insert(r.name.clone());
+        seed_receiver_type_params(&r.ty, allowed);
     }
     for p in &f.params {
         allowed.insert(p.name.clone());
@@ -471,11 +497,7 @@ fn decl_signature_types<'a>(d: &'a Decl) -> Vec<&'a TypeExpr> {
                 out.push(t);
             }
         }
-        Decl::Struct(st) => {
-            for f in &st.fields {
-                out.push(&f.ty);
-            }
-        }
+        Decl::Struct(_) => {}
         Decl::Enum(e) => {
             for v in &e.variants {
                 if let Some(t) = &v.payload {
@@ -516,6 +538,15 @@ impl Checker<'_> {
                 _ => None,
             })
             .collect();
+        let structs: Vec<&hy_syntax::StructDecl> = self
+            .file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Struct(st) => Some(st),
+                _ => None,
+            })
+            .collect();
         let types: Vec<&TypeExpr> = self
             .file
             .decls
@@ -525,21 +556,39 @@ impl Checker<'_> {
         let path = &self.path;
         let packages = &self.packages;
         let diags = &mut self.diags;
-        let mut scan = Scan {
-            path,
-            packages,
-            allowed: &mut allowed,
-            diags,
-            mode: Mode::Check,
-        };
-        for (v, t) in consts {
-            if let Some(t) = t {
+        {
+            let mut scan = Scan {
+                path,
+                packages,
+                allowed: &mut allowed,
+                diags,
+                mode: Mode::Check,
+            };
+            for (v, t) in consts {
+                if let Some(t) = t {
+                    scan.run_type(t);
+                }
+                scan.run_expr(v);
+            }
+            for t in types {
                 scan.run_type(t);
             }
-            scan.run_expr(v);
         }
-        for t in types {
-            scan.run_type(t);
+        for st_decl in structs {
+            let mut struct_allowed = allowed.clone();
+            for tp in &st_decl.type_params {
+                struct_allowed.insert(tp.name.clone());
+            }
+            let mut scan = Scan {
+                path,
+                packages,
+                allowed: &mut struct_allowed,
+                diags,
+                mode: Mode::Check,
+            };
+            for f in &st_decl.fields {
+                scan.run_type(&f.ty);
+            }
         }
     }
 

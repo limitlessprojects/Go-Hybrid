@@ -155,14 +155,35 @@ def main():
     if args and args[0] == "--rebaseline":
         rebaseline = True
         args = args[1:]
+
+    # An empty source list is a missing scan, not evidence that all managed
+    # blocks were removed. Reject it before reading or replacing the baseline.
+    if len(args) < 3:
+        print(
+            "GATE ERROR: supply a checker, a baseline, and at least one source file\n"
+            "usage: managed_gate.py [--rebaseline] <hyb> <baseline.json> <prog.hy> [more.hy ...]",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     hyb, baseline_path, progs = args[0], args[1], args[2:]
 
     try:
-        with open(baseline_path) as source:
-            baseline = json.load(source)
+        with open(baseline_path, encoding="utf-8") as f:
+            baseline = json.load(f)
     except FileNotFoundError:
         baseline = {"version": 1, "blocks": {}}
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        print(f"GATE ERROR: {baseline_path}: malformed baseline JSON: {e}")
+        sys.exit(2)
+
+    if not isinstance(baseline, dict):
+        print(f"GATE ERROR: {baseline_path}: baseline must be a JSON object, got {type(baseline).__name__}")
+        sys.exit(2)
+
     base = baseline.setdefault("blocks", {})
+    if not isinstance(base, dict):
+        print(f"GATE ERROR: {baseline_path}: baseline blocks must be a JSON object, got {type(base).__name__}")
+        sys.exit(2)
 
     current = {}
     for prog in progs:

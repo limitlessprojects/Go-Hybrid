@@ -17,6 +17,7 @@ Exit codes: 0 = success, 1 = the fetch retrieved nothing (failed download,
 no artifacts, or no summary.json), 2 = usage error.
 """
 import json
+import math
 import os
 import re
 import subprocess
@@ -41,7 +42,10 @@ def sh(cmd, cwd=None, timeout=120):
 
 
 def gh_token():
-    """Read the token from the git remote (never print it)."""
+    """Read the token from the environment or git remote (never print it)."""
+    env_tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if env_tok:
+        return env_tok
     _, out = sh("git remote get-url origin", cwd=REPO_DIR)
     m = re.search(r"https://([^@]+)@github.com", out)
     return m.group(1) if m else None
@@ -248,6 +252,10 @@ def actions_watch(run_id=None):
 
 
 def actions_fetch(run_id, jobdir):
+    tok = gh_token()
+    if not tok:
+        print("actions fetch requires GITHUB_TOKEN (set in environment or origin remote)", file=sys.stderr)
+        sys.exit(1)
     # This endpoint defaults to only 30 results. Fetch every page before
     # downloading so a sharded run cannot silently lose later artifacts.
     arts = []
@@ -280,7 +288,6 @@ def actions_fetch(run_id, jobdir):
         print("actions fetch: run {} has no artifacts to download".format(run_id), file=sys.stderr)
         return 1
     os.makedirs(os.path.join(jobdir, "result"), exist_ok=True)
-    tok = gh_token()
     for a in arts:
         url = a["archive_download_url"]
         dest = os.path.join(jobdir, "result", a["name"] + ".zip")
@@ -310,12 +317,22 @@ def main():
         sys.exit(2)
     tier, action = sys.argv[1], sys.argv[2]
     if tier == "kaggle" and action == "submit" and len(sys.argv) == 4:
-        kaggle_submit(os.path.abspath(sys.argv[3]))
-    elif tier == "kaggle" and action == "status":
-        kaggle_status(sys.argv[4] if len(sys.argv) > 4 else None)
-    elif tier == "kaggle" and action == "wait" and len(sys.argv) >= 4:
-        minutes = float(sys.argv[3])
-        sys.exit(kaggle_wait(minutes, sys.argv[4] if len(sys.argv) > 4 else None))
+        jobdir = os.path.abspath(sys.argv[3])
+        if not os.path.isfile(os.path.join(jobdir, "job.json")):
+            print("kaggle submit requires a job directory containing job.json", file=sys.stderr)
+            sys.exit(2)
+        kaggle_submit(jobdir)
+    elif tier == "kaggle" and action == "status" and len(sys.argv) in (3, 4):
+        kaggle_status(sys.argv[3] if len(sys.argv) == 4 else None)
+    elif tier == "kaggle" and action == "wait" and len(sys.argv) in (4, 5):
+        try:
+            minutes = float(sys.argv[3])
+            if not (math.isfinite(minutes) and minutes > 0):
+                raise ValueError
+        except ValueError:
+            print("kaggle wait requires a positive number of minutes", file=sys.stderr)
+            sys.exit(2)
+        sys.exit(kaggle_wait(minutes, sys.argv[4] if len(sys.argv) == 5 else None))
     elif tier == "kaggle" and action == "fetch" and len(sys.argv) == 4:
         sys.exit(kaggle_fetch(os.path.abspath(sys.argv[3])))
     elif tier == "actions" and action == "dispatch" and len(sys.argv) == 8:
@@ -328,10 +345,26 @@ def main():
             print("actions dispatch requires positive integers for shards and maxparallel", file=sys.stderr)
             sys.exit(2)
         actions_dispatch(sys.argv[3], sys.argv[4], sys.argv[5], shards, maxparallel)
-    elif tier == "actions" and action == "watch":
-        actions_watch(int(sys.argv[4]) if len(sys.argv) > 4 else None)
+    elif tier == "actions" and action == "watch" and len(sys.argv) in (3, 4):
+        run_id = None
+        if len(sys.argv) == 4:
+            try:
+                run_id = int(sys.argv[3])
+                if run_id <= 0:
+                    raise ValueError
+            except ValueError:
+                print("actions watch requires a positive integer run_id", file=sys.stderr)
+                sys.exit(2)
+        actions_watch(run_id)
     elif tier == "actions" and action == "fetch" and len(sys.argv) == 5:
-        sys.exit(actions_fetch(int(sys.argv[3]), os.path.abspath(sys.argv[4])))
+        try:
+            run_id = int(sys.argv[3])
+            if run_id <= 0:
+                raise ValueError
+        except ValueError:
+            print("actions fetch requires a positive integer run_id", file=sys.stderr)
+            sys.exit(2)
+        sys.exit(actions_fetch(run_id, os.path.abspath(sys.argv[4])))
     else:
         print(__doc__)
         sys.exit(2)

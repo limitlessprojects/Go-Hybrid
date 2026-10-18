@@ -332,6 +332,38 @@
       "tier0_rule_id": "A1c"
     },
     {
+      "code": "HYB-E3008",
+      "name": "chan-direction-mismatch",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "a send to a receive-only channel, or a receive from a send-only channel, is not valid Go",
+      "summary": "Go's channel direction types (`chan<- T` send-only, `<-chan T` receive-only) constrain what operations the binding allows; the parser and emitter both carry the direction, so sending to a `<-chan T` or receiving from a `chan<- T` (in statements, expressions, select arms, or closure bodies) emits invalid Go that fails `go build` / `go vet` (issue #89).",
+      "fixits": [
+        "declare the parameter/local with the direction the body actually uses (`chan T` for both, `chan<- T` to only send, `<-chan T` to only receive)",
+        "if the body needs the opposite operation, widen the declaration to `chan T` (bidirectional) — or split into two channels, one per direction",
+        "receives are `v := <-ch` / select recv arms; sends are `ch <- v` / select send arms — check which side of the arrow the misdeclared binding sits on"
+      ],
+      "example": "fn worker(ch <-chan int) { ch <- 1 }   // reject: HYB-E3008 — cannot send to a receive-only channel",
+      "rule": "O4",
+      "tier0_rule_id": "A1c"
+    },
+    {
+      "code": "HYB-E3009",
+      "name": "chan-direction-mismatch-op",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "channel direction forbids this operation (close / range)",
+      "summary": "Channel direction is a type contract the emitter preserves in the Go signature: `close()` requires a bidirectional or send-only channel (a `<-chan T` has no send capability), and `for … in` over a channel requires receive capability (a `chan<- T` cannot be ranged over). Both are invalid Go that `hyb build --emit-go` reproduces faithfully, so accepting them breaks the accepted-should-emit-buildable-Go contract (issue #94).",
+      "fixits": [
+        "declare the channel as `chan T` (bidirectional) where the operation happens",
+        "for close: pass a `chan<- T` or `chan T` binding — receive-only channels are closed by their send-side owner",
+        "for range: iterate over a `chan T` or `<-chan T` binding — send-only channels are consumed via receives on the other side"
+      ],
+      "example": "var rc <-chan int = c; close(rc)   // reject: HYB-E3009 — cannot close a receive-only channel",
+      "rule": "O4",
+      "tier0_rule_id": "A1c"
+    },
+    {
       "code": "HYB-E3010",
       "name": "loop-label-out-of-scope",
       "category": "resolve",
