@@ -35,10 +35,14 @@ class WorkloadShapeTests(unittest.TestCase):
             # A fixed old mtime detects even a byte-identical rewrite.
             os.utime(target, (1_000_000_000, 1_000_000_000))
 
-    def run_shape(self, *args):
+    def run_shape(self, *args, env=None):
+        run_env = os.environ.copy()
+        if env:
+            run_env.update(env)
         return subprocess.run(
             [sys.executable, str(self.workloads / "shape.py"), *args],
             cwd=self.root, capture_output=True, text=True, timeout=10,
+            env=run_env,
         )
 
     def snapshot(self):
@@ -76,7 +80,7 @@ class WorkloadShapeTests(unittest.TestCase):
 
     def test_manifest_drift_fails_without_repairing_it(self):
         manifest = self.workloads / "rust/Cargo.toml"
-        manifest.write_text(manifest.read_text().replace("opt-level = 3", "opt-level = 0"))
+        manifest.write_text(manifest.read_text(encoding="utf-8").replace("opt-level = 3", "opt-level = 0"), encoding="utf-8")
         result = self.assert_check_preserves_tree(1)
         self.assertIn("rust/Cargo.toml", result.stdout)
 
@@ -86,7 +90,7 @@ class WorkloadShapeTests(unittest.TestCase):
         self.assertIn("rust/Cargo.toml", result.stdout)
 
     def test_program_drift_fails_without_rewriting_other_outputs(self):
-        (self.workloads / "go/main.go").write_text("// drifted\n")
+        (self.workloads / "go/main.go").write_text("// drifted\n", encoding="utf-8")
         result = self.assert_check_preserves_tree(1)
         self.assertIn("go/main.go", result.stdout)
 
@@ -132,6 +136,21 @@ class WorkloadShapeTests(unittest.TestCase):
         self.assertEqual(
             {name: (self.workloads / name).read_bytes() for name in GENERATED}, expected,
         )
+
+    def test_check_succeeds_under_non_utf8_locale(self):
+        result = self.run_shape("--check", env={"LC_ALL": "C", "PYTHONUTF8": "0"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("triplet shapes in sync", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_generation_succeeds_under_non_utf8_locale(self):
+        for name in GENERATED:
+            (self.workloads / name).unlink()
+        result = self.run_shape(env={"LC_ALL": "C", "PYTHONUTF8": "0"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        for name in GENERATED:
+            self.assertTrue((self.workloads / name).exists())
 
 
 if __name__ == "__main__":

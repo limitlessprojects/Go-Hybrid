@@ -1,5 +1,5 @@
 // ============================================================================
-// chan-slice-fresh-control ? Checker corpus (bounty track: "grow the adversarial corpus").
+// chan-slice-fresh-control — Checker corpus (bounty track: "grow the adversarial corpus").
 //
 // PURPOSE: the ACCEPT control for chan-slice-aliased-at-send. The channel element type
 //   is unchanged; the sent value is a fresh literal, so no other binding names
@@ -13,12 +13,12 @@
 //   Layer 1 (Go-side GC): `ch` (chan []int); the literal's array has no other
 //     binding.
 // ---- Sendability / check sites ----
-//   [S1] `ch <- []int{1, 2, 3}` ? a fresh composite literal at the send site:
+//   [S1] `ch <- []int{1, 2, 3}` — a fresh composite literal at the send site:
 //        nothing else holds it, so the value is sendable.
 // ---- Expected verdict (hand-derived from VERDICTS.md rule key + SPEC O4
 //      BEFORE running the checker) ----
 // EXPECTED-VERDICT: ACCEPT
-//   ACCEPT ? 0 annotations, 0 managed. Pins that the REJECT above tracks the
+//   ACCEPT — 0 annotations, 0 managed. Pins that the REJECT above tracks the
 //   ALIAS, not the `chan []int` element type itself.
 //
 // ---- Annotations / managed ----

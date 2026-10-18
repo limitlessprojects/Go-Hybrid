@@ -118,6 +118,40 @@ class RejectEnvelopeTests(unittest.TestCase):
     def test_contradictory_error_count_fails_without_traceback(self):
         self.assert_invalid('{"summary": {"verdict": "reject", "errors": 0}, "diagnostics": [{"severity": "error", "tier0_rule": "A1"}]}')
 
+    def test_contradictory_summary_count_variants_fail(self):
+        # from pr-601 (residual of #582/#260): both count fields must be
+        # nonnegative ints matching their diagnostic entries; booleans,
+        # strings, and nulls are not counts.
+        diag = '[{"severity": "error", "tier0_rule": "A1"}]'
+        for field, count in (("errors", True), ("errors", -1), ("errors", '"1"'),
+                             ("errors", "null"), ("warnings", 5), ("warnings", True),
+                             ("warnings", -1)):
+            with self.subTest(field=field, count=count):
+                summary = '{"verdict": "reject", "errors": 1, "warnings": 0, "%s": %s}' % (field, count)
+                self.assert_invalid('{"summary": %s, "diagnostics": %s}' % (summary, diag))
+
+    def test_contradictory_warning_count_fails_without_traceback(self):
+        self.assert_invalid(
+            '{"summary": {"verdict": "reject", "errors": 1, "warnings": 5}, '
+            '"diagnostics": [{"severity": "error", "tier0_rule": "A1"}]}')
+
+    def test_consistent_error_and_warning_counts_preserve_agreement(self):
+        # from pr-601: older fixtures omitting counts, and consistent
+        # counts, both keep working.
+        res = self.run_raw_payload(
+            '{"summary": {"verdict": "reject", "errors": 1, "warnings": 1}, '
+            '"diagnostics": [{"severity": "error", "tier0_rule": "A1"}, '
+            '{"severity": "warning", "code": "HYB-E8001"}]}', exit_code=1)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("FULL AGREEMENT", res.stdout)
+
+    def test_omitted_counts_still_agree(self):
+        res = self.run_raw_payload(
+            '{"summary": {"verdict": "reject"}, '
+            '"diagnostics": [{"severity": "error", "tier0_rule": "A1"}]}', exit_code=1)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("FULL AGREEMENT", res.stdout)
+
     def test_empty_stdout_fails_without_traceback(self):
         self.assert_invalid("")
 

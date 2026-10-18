@@ -10,7 +10,7 @@ use crate::model::{Checker, FnState, MoveInfo, MoveKind};
 use crate::walk::Use;
 use hy_diag::Diagnostic;
 use hy_syntax::Expr;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Follow an alias chain to its root. If a mutual rebind (`m2 := m; m = m2`)
 /// created a cycle in `st.aliases`, return the lexicographically smallest
@@ -41,6 +41,16 @@ pub(crate) fn resolve_alias(st: &FnState, name: &str) -> String {
 /// Transitive connected component of `seed` across both `aliases` (parent and
 /// child directions) and `may_share`, including `seed` itself.
 fn storage_component(st: &FnState, seed: &str) -> HashSet<String> {
+    if !st.aliases.contains_key(seed)
+        && st.may_share.get(seed).is_none_or(|peers| peers.is_empty())
+        && !st.aliases.values().any(|parent| parent == seed)
+    {
+        return HashSet::from([seed.to_string()]);
+    }
+    let mut children: HashMap<&str, Vec<&String>> = HashMap::new();
+    for (child, parent) in &st.aliases {
+        children.entry(parent.as_str()).or_default().push(child);
+    }
     let mut seen: HashSet<String> = HashSet::new();
     let mut stack = vec![seed.to_string()];
     while let Some(cur) = stack.pop() {
@@ -52,9 +62,11 @@ fn storage_component(st: &FnState, seed: &str) -> HashSet<String> {
                 stack.push(parent.clone());
             }
         }
-        for (child, parent) in &st.aliases {
-            if parent == &cur && !seen.contains(child) {
-                stack.push(child.clone());
+        if let Some(children) = children.get(cur.as_str()) {
+            for &child in children {
+                if !seen.contains(child) {
+                    stack.push(child.clone());
+                }
             }
         }
         if let Some(peers) = st.may_share.get(&cur) {
@@ -74,6 +86,13 @@ fn same_or_shared(st: &FnState, a: &str, root_a: &str, b: &str, root_b: &str) ->
     }
     let comp = storage_component(st, a);
     comp.contains(b) || comp.contains(root_b)
+}
+
+#[derive(Clone, Copy)]
+struct LoopFlow {
+    continue_reach: bool,
+    loop_break_reach: bool,
+    select_break_reach: Option<bool>,
 }
 
 impl<'a> Checker<'a> {
@@ -599,26 +618,9 @@ impl<'a> Checker<'a> {
         if matches!(
             loop_body.stmts.last(),
             Some(hy_syntax::Stmt::Break { .. } | hy_syntax::Stmt::Return { .. })
-        ) && !block_has_continue_for_loop(loop_body)
+        ) && !Self::has_continue_after_loop_move(loop_body, st, pre_moved, outer_depth)
         {
             return;
-        }
-
-        let mut call_local_roots: HashSet<String> = HashSet::new();
-        for (stmt, _) in loop_stmts.iter().skip(1) {
-            if let hy_syntax::Stmt::Local(l) = stmt {
-                for (lhs, rhs) in l.names.iter().zip(l.values.iter()) {
-                    let is_inner = st.scopes[outer_depth..]
-                        .iter()
-                        .any(|s| s.contains_key(lhs.as_str()));
-                    if is_inner
-                        && self.call_returns_fresh_copy(rhs)
-                        && st.aliases.contains_key(lhs.as_str())
-                    {
-                        call_local_roots.insert(resolve_alias(st, lhs));
-                    }
-                }
-            }
         }
 
         let mut iter_st = st.clone();
@@ -636,7 +638,6 @@ impl<'a> Checker<'a> {
                 let root = resolve_alias(&popped_st, name);
                 if pre_moved.contains(name)
                     || reported_backedge.contains(&root)
-                    || call_local_roots.contains(&root)
                 {
                     b.moved = None;
                 } else {
@@ -713,6 +714,17 @@ impl<'a> Checker<'a> {
                 }
             } else {
                 crate::walk::own_uses(stmt, &mut uses);
+                if let hy_syntax::Stmt::Select { arms, .. } = stmt {
+                    for arm in arms {
+                        match &arm.kind {
+                            hy_syntax::SelectArmKind::Recv { chan, .. }
+                            | hy_syntax::SelectArmKind::Send { chan, .. } => {
+                                crate::walk::expr_uses(chan, &mut uses);
+                            }
+                            hy_syntax::SelectArmKind::Default => {}
+                        }
+                    }
+                }
             }
 
             for u in &uses {
@@ -772,28 +784,274 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn has_continue_after_loop_move(
+        loop_body: &hy_syntax::Block,
+        st: &FnState,
+        pre_moved: &HashSet<String>,
+        outer_depth: usize,
+    ) -> bool {
+        if !block_has_continue_for_loop(loop_body) {
+            return false;
+        }
+        let mut outer = st.clone();
+        while outer.scopes.len() > outer_depth {
+            outer.scope_pop();
+        }
+        outer.env.iter().chain(outer.scopes.iter().flat_map(|s| s.iter())).any(|(name, b)| {
+            !pre_moved.contains(name)
+                && b.moved.as_ref().is_some_and(|mv| Self::move_span_can_reach_backedge(loop_body, mv.span))
+        })
+    }
+
+    fn move_span_can_reach_backedge(
+        loop_body: &hy_syntax::Block,
+        move_span: hy_diag::Span,
+    ) -> bool {
+        let top_flow = LoopFlow {
+            continue_reach: true,
+            loop_break_reach: false,
+            select_break_reach: None,
+        };
+        Self::block_move_can_reach_backedge(loop_body, move_span, true, top_flow)
+            .unwrap_or_else(|| Self::block_can_reach_backedge(loop_body, true, top_flow))
+    }
+
+    fn block_can_reach_backedge(
+        block: &hy_syntax::Block,
+        tail_reach: bool,
+        flow: LoopFlow,
+    ) -> bool {
+        let mut cur_after = tail_reach;
+        for stmt in block.stmts.iter().rev() {
+            cur_after = Self::stmt_can_reach_backedge(stmt, cur_after, flow);
+        }
+        cur_after
+    }
+
+    fn stmt_can_reach_backedge(
+        stmt: &hy_syntax::Stmt,
+        after_reach: bool,
+        flow: LoopFlow,
+    ) -> bool {
+        match stmt {
+            hy_syntax::Stmt::Return { .. } => false,
+            hy_syntax::Stmt::Continue { .. } => flow.continue_reach,
+            hy_syntax::Stmt::Break {
+                label: Some(_), ..
+            } => flow.loop_break_reach,
+            hy_syntax::Stmt::Break { label: None, .. } => {
+                flow.select_break_reach.unwrap_or(flow.loop_break_reach)
+            }
+            hy_syntax::Stmt::Block { block, .. }
+            | hy_syntax::Stmt::Managed { body: block, .. } => {
+                Self::block_can_reach_backedge(block, after_reach, flow)
+            }
+            hy_syntax::Stmt::If {
+                then, otherwise, ..
+            } => {
+                let then_reach = Self::block_can_reach_backedge(then, after_reach, flow);
+                let else_reach = match otherwise.as_deref() {
+                    Some(o) => Self::stmt_can_reach_backedge(o, after_reach, flow),
+                    None => after_reach,
+                };
+                then_reach || else_reach
+            }
+            hy_syntax::Stmt::Match { arms, .. } => {
+                if arms.is_empty() {
+                    after_reach
+                } else {
+                    arms.iter()
+                        .any(|a| Self::block_can_reach_backedge(&a.body, after_reach, flow))
+                        || (arms.iter().all(|a| a.guard.is_some()) && after_reach)
+                }
+            }
+            hy_syntax::Stmt::Select { arms, .. } => {
+                let sel_flow = LoopFlow {
+                    select_break_reach: Some(after_reach),
+                    ..flow
+                };
+                arms.iter()
+                    .any(|a| Self::block_can_reach_backedge(&a.body, after_reach, sel_flow))
+            }
+            hy_syntax::Stmt::For { kind, body, .. } => {
+                if matches!(kind, hy_syntax::ForKind::Infinite) {
+                    let inner_flow = LoopFlow {
+                        continue_reach: false,
+                        loop_break_reach: after_reach,
+                        select_break_reach: None,
+                    };
+                    Self::block_can_reach_backedge(body, false, inner_flow)
+                } else {
+                    after_reach
+                }
+            }
+            hy_syntax::Stmt::Local(_)
+            | hy_syntax::Stmt::Assign { .. }
+            | hy_syntax::Stmt::Expr { .. }
+            | hy_syntax::Stmt::Send { .. }
+            | hy_syntax::Stmt::Task { .. }
+            | hy_syntax::Stmt::Defer { .. } => after_reach,
+        }
+    }
+
+    fn block_move_can_reach_backedge(
+        block: &hy_syntax::Block,
+        move_span: hy_diag::Span,
+        tail_reach: bool,
+        flow: LoopFlow,
+    ) -> Option<bool> {
+        if !Self::span_contains(block.span, move_span) {
+            return None;
+        }
+        let mut cur_after = tail_reach;
+        for stmt in block.stmts.iter().rev() {
+            if let Some(res) = Self::stmt_move_can_reach_backedge(stmt, move_span, cur_after, flow)
+            {
+                return Some(res);
+            }
+            cur_after = Self::stmt_can_reach_backedge(stmt, cur_after, flow);
+        }
+        None
+    }
+
+    fn stmt_move_can_reach_backedge(
+        stmt: &hy_syntax::Stmt,
+        move_span: hy_diag::Span,
+        after_reach: bool,
+        flow: LoopFlow,
+    ) -> Option<bool> {
+        if !Self::span_contains(stmt.span(), move_span) {
+            return None;
+        }
+        match stmt {
+            hy_syntax::Stmt::Return { .. } => Some(false),
+            hy_syntax::Stmt::Continue { .. } => Some(flow.continue_reach),
+            hy_syntax::Stmt::Break {
+                label: Some(_), ..
+            } => Some(flow.loop_break_reach),
+            hy_syntax::Stmt::Break { label: None, .. } => {
+                Some(flow.select_break_reach.unwrap_or(flow.loop_break_reach))
+            }
+            hy_syntax::Stmt::Block { block, .. }
+            | hy_syntax::Stmt::Managed { body: block, .. } => {
+                Self::block_move_can_reach_backedge(block, move_span, after_reach, flow)
+            }
+            hy_syntax::Stmt::If {
+                then, otherwise, ..
+            } => {
+                if let Some(res) =
+                    Self::block_move_can_reach_backedge(then, move_span, after_reach, flow)
+                {
+                    return Some(res);
+                }
+                if let Some(o) = otherwise.as_deref() {
+                    if let Some(res) =
+                        Self::stmt_move_can_reach_backedge(o, move_span, after_reach, flow)
+                    {
+                        return Some(res);
+                    }
+                }
+                Some(Self::stmt_can_reach_backedge(stmt, after_reach, flow))
+            }
+            hy_syntax::Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    if let Some(res) =
+                        Self::block_move_can_reach_backedge(&arm.body, move_span, after_reach, flow)
+                    {
+                        return Some(res);
+                    }
+                }
+                Some(Self::stmt_can_reach_backedge(stmt, after_reach, flow))
+            }
+            hy_syntax::Stmt::Select { arms, .. } => {
+                let sel_flow = LoopFlow {
+                    select_break_reach: Some(after_reach),
+                    ..flow
+                };
+                for arm in arms {
+                    if let Some(res) = Self::block_move_can_reach_backedge(
+                        &arm.body,
+                        move_span,
+                        after_reach,
+                        sel_flow,
+                    ) {
+                        return Some(res);
+                    }
+                }
+                // Channel and send-value expressions in `select` arm headers are
+                // evaluated before an arm is chosen, so a move/consume in a
+                // header reaches the loop back-edge whenever ANY arm of the
+                // `select` can reach the back-edge.
+                Some(Self::stmt_can_reach_backedge(stmt, after_reach, flow))
+            }
+            hy_syntax::Stmt::For { body, .. } => {
+                let loop_exits = Self::stmt_can_reach_backedge(stmt, after_reach, flow);
+                let inner_flow = LoopFlow {
+                    continue_reach: loop_exits,
+                    loop_break_reach: after_reach,
+                    select_break_reach: None,
+                };
+                if let Some(res) =
+                    Self::block_move_can_reach_backedge(body, move_span, loop_exits, inner_flow)
+                {
+                    return Some(res);
+                }
+                Some(loop_exits)
+            }
+            hy_syntax::Stmt::Local(_)
+            | hy_syntax::Stmt::Assign { .. }
+            | hy_syntax::Stmt::Expr { .. }
+            | hy_syntax::Stmt::Send { .. }
+            | hy_syntax::Stmt::Task { .. }
+            | hy_syntax::Stmt::Defer { .. } => Some(after_reach),
+        }
+    }
+
+    fn span_contains(outer: hy_diag::Span, inner: hy_diag::Span) -> bool {
+        (outer.start.line, outer.start.col) <= (inner.start.line, inner.start.col)
+            && (inner.end.line, inner.end.col) <= (outer.end.line, outer.end.col)
+    }
+
     /// True only when `expr` calls a file-local function whose return statements
     /// all construct a fresh value-element slice via `append([]T{}, ...)` (such
     /// as corpus 15's `chunk_of`), so the returned slice cannot share mutable
-    /// backing storage with the caller's argument across loop iterations (#194).
-    fn call_returns_fresh_copy(&self, expr: &Expr) -> bool {
+    /// backing storage with the caller's argument (#194).
+    pub(crate) fn call_returns_fresh_copy(&self, st: &FnState, expr: &Expr) -> bool {
         let Expr::Call { callee, .. } = crate::model::unwrap_parens(expr) else {
             return false;
         };
         let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) else {
             return false;
         };
+        if self.lookup_binding(st, name).is_some() {
+            return false;
+        }
         let Some(fdecl) = self.fns.get(name.as_str()) else {
             return false;
         };
-        if fdecl.results.len() != 1 {
+        if !fdecl.type_params.is_empty()
+            || fdecl.results.len() != 1
+            || fdecl.results[0].name.is_some()
+        {
+            return false;
+        }
+        if self.consts.contains_key("append")
+            || self.fns.contains_key("append")
+            || self.structs.contains_key("append")
+            || self.enums.contains_key("append")
+            || self.type_aliases.contains_key("append")
+            || self.packages.contains("append")
+        {
+            return false;
+        }
+        if fdecl.params.iter().any(|p| p.name == "append") {
             return false;
         }
         let ret_shape = self.shape_of_type(&fdecl.results[0].ty);
         let crate::model::TypeShape::Slice(elem) = ret_shape else {
             return false;
         };
-        if self.shape_may_share(&elem) || matches!(*elem, crate::model::TypeShape::Unknown) {
+        if !self.shape_is_proven_pure_value(&elem, 0) {
             return false;
         }
         let Some(body) = &fdecl.body else {
@@ -806,9 +1064,47 @@ impl<'a> Checker<'a> {
         saw_return
     }
 
+    fn shape_is_proven_pure_value(&self, shape: &crate::model::TypeShape, depth: usize) -> bool {
+        if depth > 16 {
+            return false;
+        }
+        match shape {
+            crate::model::TypeShape::Primitive | crate::model::TypeShape::Str => true,
+            crate::model::TypeShape::Array(inner) => {
+                self.shape_is_proven_pure_value(inner, depth + 1)
+            }
+            crate::model::TypeShape::Struct(Some(sname)) => {
+                if self.file.decls.iter().any(|d| {
+                    matches!(
+                        d,
+                        hy_syntax::Decl::Struct(s)
+                            if s.name == *sname && !s.type_params.is_empty()
+                    )
+                }) {
+                    return false;
+                }
+                let Some(fields) = self.structs.get(sname.as_str()) else {
+                    return false;
+                };
+                fields.iter().all(|(_, fty)| {
+                    self.shape_is_proven_pure_value(&self.shape_of_type(fty), depth + 1)
+                })
+            }
+            _ => false,
+        }
+    }
+
     fn block_returns_only_fresh_append(block: &hy_syntax::Block, saw_return: &mut bool) -> bool {
         for stmt in &block.stmts {
             match stmt {
+                hy_syntax::Stmt::Defer { .. } => {
+                    return false;
+                }
+                hy_syntax::Stmt::Local(l) => {
+                    if l.names.iter().any(|n| n == "append") {
+                        return false;
+                    }
+                }
                 hy_syntax::Stmt::Return { values, .. } => {
                     *saw_return = true;
                     if values.len() != 1 || !Self::is_fresh_empty_slice_append(&values[0]) {
@@ -816,8 +1112,20 @@ impl<'a> Checker<'a> {
                     }
                 }
                 hy_syntax::Stmt::If {
-                    then, otherwise, ..
+                    init,
+                    then,
+                    otherwise,
+                    ..
                 } => {
+                    if let Some(i) = init {
+                        let init_block = hy_syntax::Block {
+                            stmts: vec![(**i).clone()],
+                            span: i.span(),
+                        };
+                        if !Self::block_returns_only_fresh_append(&init_block, saw_return) {
+                            return false;
+                        }
+                    }
                     if !Self::block_returns_only_fresh_append(then, saw_return) {
                         return false;
                     }
@@ -831,7 +1139,23 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                hy_syntax::Stmt::For { body, .. } | hy_syntax::Stmt::Managed { body, .. } => {
+                hy_syntax::Stmt::For { kind, body, .. } => {
+                    match kind {
+                        hy_syntax::ForKind::Range { var, .. } if var == "append" => {
+                            return false;
+                        }
+                        hy_syntax::ForKind::Iterate { vars, .. }
+                            if vars.iter().any(|v| v == "append") =>
+                        {
+                            return false;
+                        }
+                        _ => {}
+                    }
+                    if !Self::block_returns_only_fresh_append(body, saw_return) {
+                        return false;
+                    }
+                }
+                hy_syntax::Stmt::Managed { body, .. } => {
                     if !Self::block_returns_only_fresh_append(body, saw_return) {
                         return false;
                     }
@@ -843,6 +1167,14 @@ impl<'a> Checker<'a> {
                 }
                 hy_syntax::Stmt::Match { arms, .. } => {
                     for arm in arms {
+                        if let hy_syntax::MatchPattern::Path {
+                            binding: Some(b), ..
+                        } = &arm.pattern
+                        {
+                            if b == "append" {
+                                return false;
+                            }
+                        }
                         if !Self::block_returns_only_fresh_append(&arm.body, saw_return) {
                             return false;
                         }
@@ -850,6 +1182,11 @@ impl<'a> Checker<'a> {
                 }
                 hy_syntax::Stmt::Select { arms, .. } => {
                     for arm in arms {
+                        if let hy_syntax::SelectArmKind::Recv { names, .. } = &arm.kind {
+                            if names.iter().any(|n| n == "append") {
+                                return false;
+                            }
+                        }
                         if !Self::block_returns_only_fresh_append(&arm.body, saw_return) {
                             return false;
                         }

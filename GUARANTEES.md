@@ -63,16 +63,16 @@ Everything the checker **accepts was proven** sendable; everything it
 ## Evidence inventory (what backs the ✅ rows)
 
 - **Adversarial corpus** — [tests/checker-corpus/](tests/checker-corpus/):
-  60 programs, each with an `EXPECTED-VERDICT` header. Programs 01–18 were
+  113 programs, each with an `EXPECTED-VERDICT` header. Programs 01–18 were
   **pre-registered before the checker existed** (the checker was built
   against them, not adjusted after); 19–20 were added during integration
   and 21+ after the checker landed, still hand-derived from the rule text
-  first. Current census: **43 REJECT / 15 ACCEPT / 2 ACCEPT-MANAGED**,
+  first. Current census: **67 REJECT / 32 ACCEPT / 2 ACCEPT-MANAGED**,
   pinned to specific diagnostic codes. Verdicts may change only by a logged
   amendment in [VERDICTS.md](tests/checker-corpus/VERDICTS.md).
 - **Differential loop** — [tools/differential_loop.py](tools/differential_loop.py):
-  accept-side programs must build and run byte-exact (17/17); reject-side
-  must be rejected for the pre-registered reason (43/43). Runs in CI on
+  accept-side programs must build and run byte-exact (34/34); reject-side
+  must be rejected for the pre-registered reason (67/67). Runs in CI on
   every push.
 - **Fail-closed tests** — dedicated checker tests (unknown initializer,
   unresolved name, unproven select-recv → `HYB-E3005`; managed escapes →

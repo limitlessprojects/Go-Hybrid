@@ -17,7 +17,7 @@
 //! the A3 loan). The flag lives on the `Binding`, so a shadowing
 //! redefinition in an inner block starts clean (no false rejects).
 
-use crate::model::{as_addr_of, unwrap_parens, Checker, FnState};
+use crate::model::{as_addr_of, unwrap_parens, Checker, FnState, TypeShape};
 use crate::walk::{self, Use};
 use hy_diag::{Diagnostic, FixIt, Span};
 use hy_syntax::{AssignOp, Expr, ForKind, InterpPart, LocalDecl, Place, PlaceKind, SelectArmKind, Stmt};
@@ -68,6 +68,73 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+    }
+
+    /// T24 + O8: a live map-slot loan cannot be re-bound to a general
+    /// pointer (`x = &T{}`, `x = p`, `x = nil`). The emitter lowers the loan
+    /// to a copy of the slot plus a store-back at its last use, so the
+    /// re-bind either emits a Go assignment of `*T` to a `T` variable that
+    /// cannot build, or — for a pointer-typed binding — makes the
+    /// store-back write the new pointee into the map slot. Runs BEFORE
+    /// `mark_slot_loans_assign` so it sees the binding's prior form.
+    pub(crate) fn check_slot_loan_rebind(&mut self, st: &FnState, stmt: &Stmt) {
+        let Stmt::Assign {
+            targets,
+            op: AssignOp::Assign,
+            values,
+            ..
+        } = stmt
+        else {
+            return;
+        };
+        if targets.len() != values.len() {
+            return;
+        }
+        for (t, v) in targets.iter().zip(values.iter()) {
+            let PlaceKind::Ident(name) = &t.kind else {
+                continue;
+            };
+            let Some(b) = self.lookup_binding(st, name) else {
+                continue;
+            };
+            if !b.slot_loan
+                || walk::addr_of_index_base_path(v).is_some()
+                || !self.is_general_pointer_value(st, v)
+            {
+                continue;
+            }
+            let msg = format!(
+                "`{} = {}` re-binds the map-slot loan `{}` to a general pointer: a loan is not a pointer (T24) and cannot hold one",
+                name,
+                v.render(),
+                name
+            );
+            let mut d = Diagnostic::error("HYB-E3104", self.path.clone(), t.span, msg).with_notes(vec![
+                "an O8 loan `&m[k]` is a checker fact, not a runtime pointer: it lowers to a copy of the slot plus a store-back at its last use, so the binding holds a value, not an address".to_string(),
+                "re-binding it to a general pointer emits a Go assignment that cannot build, or makes the store-back write the new pointee into the map slot".to_string(),
+            ]);
+            d.fixits = vec![FixIt {
+                description: format!(
+                    "bind the loan to its own name (`n := &m[k]`) and keep `{}` for the pointer",
+                    name
+                ),
+                replacement: None,
+            }];
+            self.diags.push(d);
+        }
+    }
+
+    /// A value that is a general Go pointer (or `nil`), not another loan.
+    fn is_general_pointer_value(&self, st: &FnState, v: &hy_syntax::Expr) -> bool {
+        if Checker::is_nil_literal(v) {
+            return true;
+        }
+        if let hy_syntax::Expr::Ident { name, .. } = unwrap_parens(v) {
+            if self.lookup_binding(st, name).is_some_and(|b| b.slot_loan) {
+                return false;
+            }
+        }
+        matches!(self.shape_of_expr(st, v), TypeShape::Pointer(_))
     }
 
     /// T24: `&x` where `x` is a live slot-loan binding.

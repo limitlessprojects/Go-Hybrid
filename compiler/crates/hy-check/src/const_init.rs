@@ -64,7 +64,7 @@ impl<'a> Checker<'a> {
             return false;
         }
         match unwrap_parens(e) {
-            Expr::Lit { .. } => true,
+            Expr::Lit { kind, .. } => !matches!(kind, LitKind::Nil),
             Expr::Unary {
                 op: UnOp::Neg | UnOp::Not,
                 operand,
@@ -223,7 +223,7 @@ fn conversion_callee_name(callee: &Expr) -> Option<&str> {
 
 /// Type names Hybrid spells that Go accepts as conversion targets in a
 /// `const` initializer (`const x = int8(42)`).
-fn is_conversion_type_name(name: &str) -> bool {
+pub(crate) fn is_conversion_type_name(name: &str) -> bool {
     matches!(
         name,
         "bool"

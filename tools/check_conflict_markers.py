@@ -13,7 +13,7 @@ down.
    with no logs — blocking every open pull request, because a PR is tested
    against its base.
 
-2. A column-zero line inside `.github/workflows/*.yml` that is not a
+2. A column-zero line inside `.github/workflows/*.{yml,yaml}` that is not a
    top-level key. Workflow files are a mapping at column zero, so a stray
    column-zero line is a parse error, and the most likely source is a
    duplicated shell line pasted out of a `run: |` block (the indentation is
@@ -53,8 +53,11 @@ TEXT_NAMES = {"Makefile", "Dockerfile", "LICENSE", "NOTICE"}
 # A workflow file is a mapping at column zero, so every column-zero line must
 # be a key, a comment, or a document marker. Anything else is a parse error.
 WORKFLOW_DIR = os.path.join(".github", "workflows")
+WORKFLOW_EXTS = {".yml", ".yaml"}
 WORKFLOW_EXT = ".yml"
-TOP_LEVEL_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.\-]*\s*:")
+TOP_LEVEL_KEY_RE = re.compile(
+    r"^(?:[A-Za-z_][A-Za-z0-9_.\-]*|'[^'\n]+'|\"[^\"\n]+\")\s*:"
+)
 
 
 def is_text_candidate(path):
@@ -107,7 +110,12 @@ def scan_workflow_file(path):
                     continue
                 if stripped[0] in " \t":
                     continue
-                if stripped.startswith("#") or stripped.startswith("---"):
+                if (
+                    stripped.startswith("#")
+                    or stripped.startswith("---")
+                    or stripped.startswith("...")
+                    or stripped.startswith("%")
+                ):
                     continue
                 if TOP_LEVEL_KEY_RE.match(stripped):
                     continue
@@ -119,7 +127,7 @@ def scan_workflow_file(path):
 
 def _is_workflow(path):
     return (
-        os.path.splitext(path)[1].lower() == WORKFLOW_EXT
+        os.path.splitext(path)[1].lower() in WORKFLOW_EXTS
         and os.path.basename(os.path.dirname(path)) == "workflows"
         and os.path.basename(os.path.dirname(os.path.dirname(path))) == ".github"
     )

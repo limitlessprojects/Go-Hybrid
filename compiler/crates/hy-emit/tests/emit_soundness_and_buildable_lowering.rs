@@ -298,3 +298,33 @@ fn main() {
         "expected shadowed inner block and closure param to emit `x.milliseconds` while outer duration binding restores `x.Milliseconds()`, got:\n{go}"
     );
 }
+
+#[test]
+fn float_trailing_dot_emits_valid_statements_issue_659() {
+    let go = emit_src(
+        "\
+package main
+
+import \"fmt\"
+
+fn main() {
+    var scale f64 = 2.
+    fmt.println(scale)
+    fmt.println(scale * 3.0)
+}
+",
+    );
+    assert!(
+        go.contains("var scale float64 = 2."),
+        "expected var scale float64 = 2., got:\n{go}"
+    );
+    assert!(
+        go.contains("fmt.Println(scale)"),
+        "expected fmt.Println(scale) as its own statement, got:\n{go}"
+    );
+    assert!(
+        !go.contains("2.fmt"),
+        "must not fold 2. into 2.fmt, got:\n{go}"
+    );
+}
+

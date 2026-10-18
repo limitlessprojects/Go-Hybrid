@@ -339,3 +339,22 @@ fn closure_body_legal_iterable_stays_accepted() {
     );
     assert_eq!(r.verdict, Verdict::Accept);
 }
+
+#[test]
+fn set_range_iteration_accepts_single_var() {
+    let r = check("fn main() {\n    seen := set[int]{}\n    for v in seen {\n    }\n}\n");
+    assert!(
+        codes(&r).is_empty(),
+        "for v in set must be accepted, got {:?}",
+        codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+#[test]
+fn set_range_iteration_rejects_two_vars() {
+    let r = check("fn main() {\n    seen := set[int]{}\n    for i, v in seen {\n    }\n}\n");
+    assert_eq!(codes(&r), vec!["HYB-E2009"]);
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+

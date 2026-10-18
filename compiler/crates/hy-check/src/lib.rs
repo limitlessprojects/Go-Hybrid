@@ -44,6 +44,7 @@
 //! diagnostics are returned in source order.
 
 mod addr_loan;
+mod addressable;
 mod arith;
 mod buildable;
 mod const_overflow;
@@ -105,6 +106,7 @@ pub fn check_file(file: &File) -> CheckResult {
     build_tables(&mut ck);
     ck.check_struct_decls(); // A6: borrow-handle / pointer struct fields
     ck.check_file_const_zero_divisors(); // Issue #149/#508: constant zero divisor in file consts
+    ck.check_file_map_literal_duplicate_keys(); // Issue #687: duplicate constant keys in map literals
 
     // Issue #228 family A: value-position names nothing declares must be
     // HYB-E1001 here, not `undefined: X` at go build. Const initializers and
@@ -175,24 +177,24 @@ fn build_tables(ck: &mut Checker<'_>) {
                 ck.packages.insert(root.to_string());
             }
             Decl::Const(c) => {
-                // Issue #148: a file-level `const n int8 = 300` must not
-                // pass the checker and then fail `go build` (overflow).
-                if let Some(ty) = &c.ty {
-                    ck.check_const_overflow_init(&c.name, ty, &c.value, None);
-                }
                 ck.declare_pkg_name(&c.name, "const", c.span);
                 let b = ck.const_binding(c);
                 ck.consts.insert(c.name.clone(), b);
                 ck.const_values.insert(c.name.clone(), &c.value);
-                // Issue #205: file-level `const c = get_val()` must not pass check then fail go build.
-                // Placed after insert so this hook sits below main's E6002 overflow check and
-                // 3-way-merges cleanly (same pattern as PR #191 relocated hooks).
-                ck.check_const_init_is_constant(&c.name, &c.value, None);
             }
             Decl::Struct(s) => {
                 // Issue #201-C: package-scope names are unique across
                 // fns / consts / structs (Go's single package block).
                 ck.declare_pkg_name(&s.name, "struct", s.span);
+                ck.struct_type_params
+                    .insert(s.name.clone(), s.type_params.clone());
+                ck.check_type_params(
+                    &s.name,
+                    "struct",
+                    &s.type_params,
+                    s.fields.iter().map(|f| &f.ty),
+                    s.span,
+                );
                 // `type X = int` aliases parse as zero-field struct decls;
                 // they are not containers — leave them unresolved (Unknown
                 // is permissive, and alias-of-primitive values must never
@@ -238,6 +240,16 @@ fn build_tables(ck: &mut Checker<'_>) {
                 );
             }
             Decl::Fn(f) => {
+                ck.check_type_params(
+                    &f.name,
+                    "function",
+                    &f.type_params,
+                    f.params
+                        .iter()
+                        .map(|p| &p.ty)
+                        .chain(f.results.iter().map(|r| &r.ty)),
+                    f.span,
+                );
                 // Only top-level functions belong in `ck.fns` (methods have a
                 // receiver and must not overwrite or impersonate top-level fns).
                 if let Some(r) = &f.receiver {
@@ -270,15 +282,21 @@ fn build_tables(ck: &mut Checker<'_>) {
     }
 
     // Issue #201-E pass 2: array-length validity over every DECLARED type,
-    // after all file-level consts are known (`[n]int` where `n` is a const).
+    // after all file-level consts, type aliases, and fns are known.
     for d in &file.decls {
         match d {
             Decl::Const(c) => {
                 if let Some(ty) = &c.ty {
                     ck.check_type_expr(ty);
+                    ck.check_local_array_lit_len_match(ty, &c.value);
+                    ck.check_const_overflow_init(&c.name, ty, &c.value, None);
                 }
+                ck.check_expr_emit_guard(&FnState::default(), &c.value);
+                ck.check_composite_nils(&FnState::default(), &c.value);
+                ck.check_expr_builtin_args(&c.value);
                 let b = ck.const_binding(c);
                 ck.consts.insert(c.name.clone(), b);
+                ck.check_const_init_is_constant(&c.name, &c.value, None);
             }
             Decl::Struct(s) => {
                 for f in &s.fields {
@@ -342,6 +360,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 shape,
                 ty,
                 immutable: false,
+                is_let: false,
                 managed_taint: false,
                 moved: None,
                 non_owned_origin: Some(format!(
@@ -360,6 +379,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 shape,
                 ty: Some(p.ty.clone()),
                 immutable: false,
+                is_let: false,
                 managed_taint: false,
                 moved: None,
                 non_owned_origin: Some(format!(
@@ -384,6 +404,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         shape: shape.clone(),
                         ty: Some(r.ty.clone()),
                         immutable: false,
+                        is_let: false,
                         managed_taint: false,
                         moved: None,
                         non_owned_origin: None,
@@ -437,7 +458,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                             } else {
                                 TypeShape::Primitive
                             };
-                            ck.define_binding(&mut st, n, shape, None, false, managed);
+                            ck.define_binding(&mut st, n, shape, None, false, managed, false);
                         }
                     }
                     walk::ScopeEvent::MatchBind { name, subject } => {
@@ -477,7 +498,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         if let Stmt::Break { label: Some(_), span, .. }
         | Stmt::Continue { label: Some(_), span, .. } = stmt
         {
-            if !flat.in_loop(idx) {
+            if !flat.in_infinite_loop(idx) {
                 ck.diags.push(
                     Diagnostic::error(
                         "HYB-E3010",
@@ -486,7 +507,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         "`break loop` / `continue loop` with no enclosing loop — the label has no target here (HYB-E3010)",
                     )
                     .with_notes(vec![
-                        "the `loop` label binds to the nearest enclosing `for`/`loop` (LX14); labels do not cross function or closure boundaries".to_string(),
+                        "the `loop` label binds to the nearest enclosing `loop` statement (LX14); labels do not cross function or closure boundaries".to_string(),
                         "remove the `loop` label (plain `break`/`continue` targets the innermost loop), or move this statement inside a loop".to_string(),
                     ]),
                 );
@@ -500,6 +521,9 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         ck.check_uses(&st, &uses);
         // T24: no address-of on a map-slot loan (HYB-E3104).
         ck.check_addr_of_loan(&st, &uses);
+        // T24 + O8: a live slot loan cannot be re-bound to a general
+        // pointer — the loan lowers to a copy + store-back (HYB-E3104).
+        ck.check_slot_loan_rebind(&st, stmt);
 
         let mut fnlits = Vec::new();
         walk::own_fnlits(stmt, &mut fnlits);
@@ -614,6 +638,12 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     Some(callee),
                     targets.as_deref(),
                 );
+                let cr = walk::CallRef {
+                    callee,
+                    args,
+                    span: *span,
+                };
+                ck.check_call_const_writes(&st, &cr, &std::collections::HashSet::new());
             }
 
             // O4.0 check-site: the sent value (HYB-E3002). The parser flags
@@ -672,7 +702,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     for (name, shape) in vars.iter().zip(shapes) {
                         let is_ref = shape.is_reference_alias();
                         let may_share = ck.shape_may_share(&shape);
-                        ck.define_binding(&mut st, name, shape, None, false, managed);
+                        ck.define_binding(&mut st, name, shape, None, false, managed, false);
                         if !is_chan {
                             if may_share {
                                 ck.record_may_share(&mut st, name, expr);
@@ -705,7 +735,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         hi,
                         format!("the range bound `{}`", hi.render()),
                     );
-                    ck.define_binding(&mut st, var, TypeShape::Primitive, None, false, managed);
+                    ck.define_binding(&mut st, var, TypeShape::Primitive, None, false, managed, false);
                 }
                 ForKind::While { cond } => {
                     ck.mark_move_in_value(
@@ -3663,11 +3693,28 @@ mod tests {
             .any(|d| d.code == "HYB-E3102"));
 
         // 6. T22: const alias bound in `if <init>` cannot be mutated via `delete` in `<cond>`.
+        //
+        // FIXTURE NOTE (issue #682): this case used to read
+        //   `if alias := c; is_ok(delete(alias, "k"))`
+        // with a helper `fn is_ok(x any) bool`. `delete` produces no value in
+        // Go, so `is_ok(delete(...))` was itself an accepted-but-unbuildable
+        // program - Go reports `delete(alias, "k") (no value) used as value`.
+        // The new U8 rule correctly flags that, which changed which rule came
+        // first and broke this assertion.
+        //
+        // The delete now sits in a closure BODY (statement position) and the
+        // closure is called in `<cond>` - the same shape the A3 case above
+        // uses. The fixture still tests "a const alias mutated via `delete`
+        // inside `<cond>`" and both assertions below stay strict; only the
+        // incidental second defect is gone.
         let r_t22 = check(
             "const c = map[string]int{\"k\": 1}\n\
-             fn is_ok(x any) bool { return true }\n\
              fn main() {\n\
-               if alias := c; is_ok(delete(alias, \"k\")) {\n\
+               if del := fn() bool {\n\
+                 alias := c\n\
+                 delete(alias, \"k\")\n\
+                 return true\n\
+               }; del() {\n\
                  fmt.println(\"deleted\")\n\
                }\n\
              }",

@@ -12,10 +12,16 @@ This guard resolves each test file the way the workflow would have to
 reference it, and fails closed on any file no reference reaches:
 
   tools/**/test_*.py  run by `python3 -m unittest discover -s DIR -p PATTERN`
-                      -> the file's basename must match a `-p` pattern
-                         (a glob such as `test_job*.py` covers a family)
+                      -> the file must lie inside DIR, be reachable through
+                         package directories, and match PATTERN (a glob such
+                         as `test_job*.py` covers a family)
   tests/**/test_*.py  run directly, e.g. `python3 tests/test_install_runtime.py`
-                      -> the repo-relative path must appear in the workflow
+                      -> the path must be the invoked Python entry point
+
+Only explicit single-line Python invocations count. Comments, echoed text,
+step names, interpreter flags, chained later commands, and paths passed as
+arguments to other scripts register nothing. This is not a general
+shell/YAML interpreter.
 
 Usage: python3 tools/check_test_registration.py [--workflow PATH] [--root DIR]
 Exit:  0 = every test file is registered; 1 = unregistered file(s); 2 = guard misuse.
@@ -24,32 +30,124 @@ Exit:  0 = every test file is registered; 1 = unregistered file(s); 2 = guard mi
 import argparse
 import fnmatch
 import os
+from pathlib import Path
 import re
+import shlex
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# One discovery invocation, quoted or bare pattern: `... discover -s X -p Y`.
-DISCOVER_RE = re.compile(r"unittest\s+discover\b[^\n]*?-p\s+'?([^'\s]+)")
+# The workflow uses explicit Python commands, either in a run block or in a
+# single-line run field. Do not count comments, step names, or echoed text
+# as execution.
+PYTHON_RE = re.compile(r"(?:.*/)?python(?:3(?:\.\d+)?)?\Z")
+PYTHON_FLAGS_RE = re.compile(r"-[bBdEIOPqRsSuvx]+\Z")
+
+
+def shell_words(line):
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|<>()")
+    lexer.whitespace_split = True
+    return list(lexer)
+
+
+def python_commands(workflow_text):
+    """Yield arguments of explicit, single-line Python invocations."""
+    for line in workflow_text.splitlines():
+        line = line.strip()
+        inline_run = re.match(r"(?:-\s+)?run:\s*(.*)", line)
+        if inline_run:
+            line = inline_run.group(1)
+        try:
+            tokens = shell_words(line)
+            # A quoted YAML run scalar wraps the whole shell command.
+            if inline_run and len(tokens) == 1:
+                tokens = shell_words(tokens[0])
+        except ValueError:
+            continue
+        if tokens and PYTHON_RE.fullmatch(tokens[0]):
+            # Only the first simple command is covered. A following echo's
+            # -p flag must never become another unittest discovery pattern.
+            end = next((i for i, token in enumerate(tokens)
+                        if token and all(c in ";&|<>()" for c in token)), len(tokens))
+            arguments = tokens[1:end]
+            while arguments:
+                option = arguments[0]
+                if PYTHON_FLAGS_RE.fullmatch(option):
+                    arguments = arguments[1:]
+                elif option in ("-W", "-X", "--check-hash-based-pycs"):
+                    arguments = arguments[2:]
+                elif option.startswith(("-W", "-X")):
+                    arguments = arguments[1:]
+                elif option == "--":
+                    arguments = arguments[1:]
+                    break
+                else:
+                    break  # In particular, never interpret a -c string.
+            yield arguments
+
 
 # Directories whose test files this guard covers, and how each is invoked.
 DISCOVER_DIR = "tools"   # referenced through a `unittest discover -p` pattern
 DIRECT_DIRS = ("tests",)  # referenced by literal repo-relative path
 
 
+def registered_discoveries(workflow_text):
+    """Pair each discovery pattern with its own start directory (repo cwd).
+
+    Like the original guard, this reads explicit one-line commands run from
+    the repository root; it is not a general shell/YAML or load_tests
+    interpreter.
+    """
+    discoveries = []
+    for arguments in python_commands(workflow_text):
+        if arguments[:3] != ["-m", "unittest", "discover"]:
+            continue
+        start, pattern = ".", None
+        for index, argument in enumerate(arguments[3:], 3):
+            if argument in ("-s", "--start-directory") and index + 1 < len(arguments):
+                start = arguments[index + 1]
+            elif argument in ("-p", "--pattern") and index + 1 < len(arguments):
+                pattern = arguments[index + 1]
+            elif argument.startswith("--start-directory="):
+                start = argument.split("=", 1)[1]
+            elif argument.startswith("--pattern="):
+                pattern = argument.split("=", 1)[1]
+        if pattern is not None:
+            discoveries.append((start, pattern))
+    return discoveries
+
+
 def registered_patterns(workflow_text):
     """Every `-p` pattern the workflow passes to `unittest discover`."""
-    return DISCOVER_RE.findall(workflow_text)
+    return [pattern for _, pattern in registered_discoveries(workflow_text)]
 
 
 def is_registered_discover(name, patterns):
     return any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
 
 
+def is_reached_discover(root, relpath, start, pattern):
+    """Mirror discovery's directory boundary without importing test code."""
+    target = (Path(root) / relpath).resolve()
+    start_dir = (Path(root) / start).resolve()
+    if not start_dir.is_dir() or not target.is_relative_to(start_dir):
+        return False
+    if not is_registered_discover(target.name, [pattern]):
+        return False
+    # unittest visits files in the start directory directly, but only
+    # recurses into subdirectories that are regular Python packages.
+    parent = target.parent
+    while parent != start_dir:
+        if not (parent / "__init__.py").is_file():
+            return False
+        parent = parent.parent
+    return True
+
+
 def is_registered_direct(relpath, workflow_text):
-    """A directly-invoked script is registered when its path is named."""
-    return re.search(r"(?<![\w./-])" + re.escape(relpath) + r"(?![\w.-])",
-                     workflow_text) is not None
+    """A script must be the Python entry point, not a comment or argument."""
+    return any(arguments and arguments[0] in (relpath, "./" + relpath)
+               for arguments in python_commands(workflow_text))
 
 
 def find_test_files(root, directory):
@@ -66,11 +164,12 @@ def find_test_files(root, directory):
 
 def unregistered(root, workflow_text):
     """Test files no reference in the workflow reaches."""
-    patterns = registered_patterns(workflow_text)
+    discoveries = registered_discoveries(workflow_text)
     missing = []
     for rel in find_test_files(root, DISCOVER_DIR):
-        if not is_registered_discover(os.path.basename(rel), patterns):
-            missing.append((rel, "no `unittest discover -p` pattern matches it"))
+        if not any(is_reached_discover(root, rel, start, pattern)
+                   for start, pattern in discoveries):
+            missing.append((rel, "no `unittest discover -s ... -p ...` invocation reaches it"))
     for directory in DIRECT_DIRS:
         for rel in find_test_files(root, directory):
             if not is_registered_direct(rel, workflow_text):
@@ -109,7 +208,7 @@ def main():
         for rel, why in missing:
             print(f"  {rel} — {why}")
         print(f"Register each in {args.workflow}: a variant of "
-              "`python3 -m unittest discover -p …` for a discover suite (a glob "
+              "`python3 -m unittest discover -s … -p …` for a discover suite (a glob "
               "like `test_job*.py` covers a family), or a direct "
               "`python3 <path>` invocation. Delete it instead if it is dead.")
         return 1

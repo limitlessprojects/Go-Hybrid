@@ -1,12 +1,17 @@
 """Regression tests for fail-closed CLI argument validation (no network)."""
 import importlib.util
+import io
 import json
+import os
+import runpy
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ENTRY = Path(__file__).with_name("job.py")
@@ -69,10 +74,14 @@ class FetchFailureTests(unittest.TestCase):
 
     def test_kaggle_fetch_present_summary_is_zero(self):
         with tempfile.TemporaryDirectory() as td:
-            raw = Path(td) / "result" / "raw" / "nested"
-            raw.mkdir(parents=True)
-            (raw / "summary.json").write_text(json.dumps({"ok": True}), encoding="utf-8")
-            with patch.object(JOB, "sh", return_value=(0, "ok")):
+            # The staged download delivers the summary; only this invocation's
+            # files are promotion candidates (#478).
+            def download(command, **kwargs):
+                staging = next((Path(td) / "result" / "raw").glob(".staging-*"))
+                (staging / "summary.json").write_text(json.dumps({"ok": True}), encoding="utf-8")
+                return 0, "ok"
+
+            with patch.object(JOB, "sh", side_effect=download):
                 rc = JOB.kaggle_fetch(td, slug="demo/kernel")
             self.assertEqual(rc, 0)
             self.assertTrue((Path(td) / "result" / "summary.json").exists())
@@ -337,6 +346,19 @@ class KaggleArgumentTests(unittest.TestCase):
         self.assertIn("[slug]", result.stdout)
         self.assertNotIn("Traceback", result.stdout + result.stderr)
 
+    def test_status_without_slug_uses_default(self):
+        # 0xSixtos PR #564: an omitted slug must still call the service once,
+        # with None so kaggle_status falls back to the configured kernel id.
+        import importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("job_module", ENTRY)
+        job_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(job_mod)
+        with mock.patch.object(sys, "argv", ["job.py", "kaggle", "status"]), \
+             mock.patch.object(job_mod, "kaggle_status") as mock_status:
+            job_mod.main()
+            mock_status.assert_called_once_with(None)
+
     def test_status_passes_slug_argument(self):
         import importlib.util
         from unittest import mock
@@ -360,6 +382,211 @@ class GhTokenTests(unittest.TestCase):
             self.assertEqual(job_mod.gh_token(), "token_from_env")
         with mock.patch.dict("os.environ", {"GITHUB_TOKEN": "", "GH_TOKEN": "token_from_gh"}):
             self.assertEqual(job_mod.gh_token(), "token_from_gh")
+
+
+class KaggleFetchFreshnessTests(unittest.TestCase):
+    """kaggle_fetch must promote only this invocation's summary (#478).
+
+    A successful download can omit paths left by an older run, so the
+    persistent cache mixes fresh and stale summaries; lexical order is not
+    age (zzz-old sorts last). The fix stages the download and selects only
+    from it, keeping every prior download in the cache.
+    """
+
+    IDENTITY = {"job": "demo", "sha": "a" * 40}
+
+    def make_job(self, tmp):
+        root = Path(tmp)
+        raw = root / "result" / "raw"
+        (raw / "zzz-old").mkdir(parents=True)
+        stale = dict(self.IDENTITY, ok=True)
+        (raw / "zzz-old" / "summary.json").write_text(
+            json.dumps(stale), encoding="utf-8")
+        return root, stale
+
+    def run_fetch(self, root, download=None, rc=0):
+        fetch = runpy.run_path(str(ENTRY))["kaggle_fetch"]
+
+        def fake_sh(command, **kwargs):
+            if download is not None:
+                # The staged directory is the one .staging-* entry the fix
+                # just created under the cache; read it from the
+                # filesystem instead of parsing the command (quoting and
+                # platform separators make parsing fragile).
+                staging = next((root / "result" / "raw").glob(".staging-*"))
+                download(staging)
+            return rc, "offline download"
+
+        with patch.dict(fetch.__globals__, {"sh": fake_sh}):
+            return fetch(str(root), slug="fixture/no-network")
+
+    def test_fresh_summary_wins_over_stale_zzz_old_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _ = self.make_job(tmp)
+            fresh = dict(self.IDENTITY, ok=False)
+
+            def download(staging):
+                (staging / "summary.json").write_text(
+                    json.dumps(fresh), encoding="utf-8")
+
+            self.run_fetch(root, download=download)
+            promoted = json.loads(
+                (root / "result" / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(promoted, fresh)
+
+    def test_failed_download_does_not_promote_cached_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _ = self.make_job(tmp)
+            with patch("sys.stderr", new=io.StringIO()) as err:
+                returned = self.run_fetch(root, rc=1)
+            self.assertEqual(returned, 1)
+            self.assertIn("no summary promoted", err.getvalue())
+            self.assertFalse((root / "result" / "summary.json").exists())
+            # A failed run still retains its partial output for diagnosis.
+            self.assertTrue(
+                (root / "result" / "raw" / "zzz-old" / "summary.json").exists())
+
+    def test_cache_retains_previous_downloads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _ = self.make_job(tmp)
+            fresh = dict(self.IDENTITY, ok=False)
+
+            def download(staging):
+                (staging / "summary.json").write_text(
+                    json.dumps(fresh), encoding="utf-8")
+
+            self.run_fetch(root, download=download)
+            raw = root / "result" / "raw"
+            self.assertTrue((raw / "zzz-old" / "summary.json").exists())
+            self.assertEqual(
+                json.loads((raw / "summary.json").read_text(encoding="utf-8")),
+                fresh)
+
+    def test_staging_is_cleaned_up(self):
+        for rc in (0, 1):
+            with self.subTest(rc=rc):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root, _ = self.make_job(tmp)
+                    fresh = dict(self.IDENTITY, ok=False)
+
+                    def download(staging):
+                        (staging / "summary.json").write_text(
+                            json.dumps(fresh), encoding="utf-8")
+
+                    self.run_fetch(root, download=download, rc=rc)
+                    self.assertEqual(
+                        list((root / "result" / "raw").glob(".staging-*")), [])
+
+    def test_staging_lives_inside_the_job_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _ = self.make_job(tmp)
+            captured = []
+
+            def download(staging):
+                captured.append(staging)
+
+            self.run_fetch(root, download=download)
+            self.assertEqual(len(captured), 1)
+            raw = root / "result" / "raw"
+            self.assertEqual(captured[0].resolve().parent, raw.resolve())
+
+    def test_multiple_fresh_summaries_keep_lexical_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _ = self.make_job(tmp)
+            first = dict(self.IDENTITY, ok=False, note="first")
+            last = dict(self.IDENTITY, ok=False, note="last")
+
+            def download(staging):
+                for name, payload in [("aaa", first), ("bbb", last)]:
+                    (staging / name).mkdir()
+                    (staging / name / "summary.json").write_text(
+                        json.dumps(payload), encoding="utf-8")
+
+            self.run_fetch(root, download=download)
+            promoted = json.loads(
+                (root / "result" / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(promoted, last)
+            # The cache keeps the nested fresh artifacts too.
+            raw = root / "result" / "raw"
+            self.assertEqual(
+                json.loads((raw / "aaa" / "summary.json").read_text(
+                    encoding="utf-8")), first)
+            self.assertEqual(
+                json.loads((raw / "bbb" / "summary.json").read_text(
+                    encoding="utf-8")), last)
+
+    def test_missing_summary_warns_without_traceback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _ = self.make_job(tmp)
+
+            def download(staging):
+                (staging / "kernel.log").write_text("no summary", encoding="utf-8")
+
+            with patch("sys.stderr", new=io.StringIO()) as err:
+                self.run_fetch(root, download=download)
+            self.assertIn("no summary.json", err.getvalue())
+            self.assertNotIn("Traceback", err.getvalue())
+            self.assertFalse((root / "result" / "summary.json").exists())
+
+    def test_uncacheable_summary_is_not_promoted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _ = self.make_job(tmp)
+            fresh = dict(self.IDENTITY, ok=False)
+
+            def download(staging):
+                (staging / "summary.json").write_text(
+                    json.dumps(fresh), encoding="utf-8")
+                (staging / "kernel.log").write_text("log", encoding="utf-8")
+
+            real_copy2 = shutil.copy2
+
+            def failing_copy2(src, dst, **kwargs):
+                if Path(src).name == "summary.json":
+                    raise OSError("disk full")
+                return real_copy2(src, dst, **kwargs)
+
+            fetch = runpy.run_path(str(ENTRY))["kaggle_fetch"]
+            with patch("sys.stderr", new=io.StringIO()) as err, \
+                    patch.dict(fetch.__globals__, {
+                        "sh": self._fake_sh(root, download, 0),
+                        "shutil": SimpleNamespace(
+                            copy2=failing_copy2, rmtree=shutil.rmtree)}):
+                fetch(str(root), slug="fixture/no-network")
+            self.assertIn("could not cache summary.json", err.getvalue())
+            self.assertFalse((root / "result" / "summary.json").exists())
+            self.assertTrue((root / "result" / "raw" / "kernel.log").exists())
+            self.assertEqual(
+                list((root / "result" / "raw").glob(".staging-*")), [])
+
+    @staticmethod
+    def _fake_sh(root, download, rc):
+        def fake_sh(command, **kwargs):
+            if download is not None:
+                staging = next((root / "result" / "raw").glob(".staging-*"))
+                download(staging)
+            return rc, "offline download"
+        return fake_sh
+
+    @unittest.skipUnless(os.name == "posix", "job.py's sh() runs /bin/sh")
+    @unittest.skipUnless(
+        (Path(ENTRY).parent.parent / "worker" / "kernel-metadata.json").exists(),
+        "worker/kernel-metadata.json provides the kernel slug")
+    def test_cli_failed_download_exits_nonzero(self):
+        # End to end: kaggle_fetch returns the exit status and main()
+        # propagates it, so `job.py kaggle fetch` fails closed at the
+        # shell instead of exiting 0 after a failed download.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "result" / "raw").mkdir(parents=True)
+            env = dict(os.environ, KAGGLE_CLI="/nonexistent/kaggle")
+            result = subprocess.run(
+                [sys.executable, str(ENTRY), "kaggle", "fetch", str(root)],
+                capture_output=True, text=True, timeout=30, env=env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("no summary promoted", result.stderr)
+            self.assertNotIn("Traceback", result.stdout + result.stderr)
+            self.assertEqual(
+                list((root / "result" / "raw").glob(".staging-*")), [])
 
 
 if __name__ == "__main__":

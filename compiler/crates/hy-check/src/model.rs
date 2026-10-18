@@ -142,6 +142,8 @@ pub(crate) struct Binding {
     pub ty: Option<TypeExpr>,
     /// `let`/`const` binding or a file-level `const` (class 4).
     pub immutable: bool,
+    /// `let` binding (T22: shallow immutable binding — no rebinding/reassignment).
+    pub is_let: bool,
     /// Born inside a `managed` block (O6.2 taint): sendable everywhere,
     /// outside the §9.2 guarantee for its whole lifetime.
     pub managed_taint: bool,
@@ -191,8 +193,14 @@ pub(crate) enum LoanTarget {
     /// O7/A2: borrow-mode loan on a boundary handle binding.
     Handle { handle: String },
     /// O8/A3: unique loan on one map slot; `binding` is the defined name
-    /// (for last-use computation), `path` is the base map path ("e.services").
-    MapSlot { binding: String, path: String },
+    /// (for last-use computation), `path` is the base map path ("e.services"),
+    /// `key` the literal index when it provably names one slot (see
+    /// `walk::addr_of_index_slot_key`); `None` may alias any slot of `path`.
+    MapSlot {
+        binding: String,
+        path: String,
+        key: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -734,6 +742,8 @@ pub(crate) struct Checker<'a> {
     pub path: String,
     /// struct name -> (field name, field type) — file-level struct decls.
     pub structs: HashMap<String, Vec<(String, TypeExpr)>>,
+    /// struct name -> declared type parameters (including empty-field structs, #722).
+    pub struct_type_params: HashMap<String, Vec<hy_syntax::TypeParam>>,
     /// enum name -> declared variant names in source order (T13/T14 HYB-E5001).
     pub enums: HashMap<String, Vec<String>>,
     /// enum name -> whether the first variant is payload-free (N3 HYB-E4002).
@@ -768,6 +778,9 @@ pub(crate) struct Checker<'a> {
     pub total_sites: usize,
     // Row 14 (discussion #4): every managed block's payload, for the audit.
     pub managed_audit: Vec<ManagedBlockAudit>,
+    /// Names each enclosing closure body rebinds, innermost last — the
+    /// emit-guard deep walk skips them (addressable.rs).
+    pub closure_bound: Vec<HashSet<String>>,
 }
 
 /// Row 14 (discussion #4): the CLOSED category set — the invariant a
@@ -788,6 +801,7 @@ impl<'a> Checker<'a> {
             file,
             path: file.path.clone(),
             structs: HashMap::new(),
+            struct_type_params: HashMap::new(),
             enums: HashMap::new(),
             enum_has_zero_value: HashMap::new(),
             type_aliases: HashMap::new(),
@@ -803,6 +817,7 @@ impl<'a> Checker<'a> {
             sites_via_managed: 0,
             total_sites: 0,
             managed_audit: Vec::new(),
+            closure_bound: Vec::new(),
         }
     }
 
@@ -862,7 +877,7 @@ pub(crate) fn move_operand_ident(e: &Expr) -> Option<String> {
 /// Collect the root binding of every reference-carrying sub-expression of
 /// `e` — the generalized form of `Expr::root_ident()`.
 ///
-/// `root_ident()` stops at anything that is not an ident/field/index chain:
+/// `root_ident()` stops at anything that is not an ident/field/index/slice chain:
 /// a CALL result (`same(same(m))`), a view of a call result (`same(m)[0:2]`),
 /// a composite literal (`wrap{items: same(m)}`), a field read out of a
 /// literal (`box{items: m}.items`) or a call that returns a parameter field

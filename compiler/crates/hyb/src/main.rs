@@ -91,12 +91,49 @@ fn cmd_explain(args: &[String]) -> ExitCode {
 }
 
 fn cmd_check(args: &[String]) -> ExitCode {
-    let file = args.iter().find(|a| !a.starts_with('-')).cloned();
-    let json = args.iter().any(|a| a == "--json");
-    let report_managed = args.iter().any(|a| a == "--report-managed");
-    let deny_managed = args.iter().any(|a| a == "--deny-managed");
+    const USAGE: &str =
+        "usage: hyb check [--json] [--report-managed] [--deny-managed] [--] <file.hy>";
+    let mut file = None;
+    let mut json = false;
+    let mut report_managed = false;
+    let mut deny_managed = false;
+    let mut end_of_options = false;
+    // Validate the entire invocation before reading or checking any source.
+    // Otherwise a second file or a mistyped option can silently go unchecked.
+    for arg in args {
+        if !end_of_options {
+            match arg.as_str() {
+                "--" => {
+                    end_of_options = true;
+                    continue;
+                }
+                "--json" => {
+                    json = true;
+                    continue;
+                }
+                "--report-managed" => {
+                    report_managed = true;
+                    continue;
+                }
+                "--deny-managed" => {
+                    deny_managed = true;
+                    continue;
+                }
+                value if value.starts_with('-') => {
+                    eprintln!("unknown option: {value}\n{USAGE}");
+                    return ExitCode::from(2);
+                }
+                _ => {}
+            }
+        }
+        if file.is_some() {
+            eprintln!("check expects exactly one input file; unexpected argument: {arg}\n{USAGE}");
+            return ExitCode::from(2);
+        }
+        file = Some(arg.clone());
+    }
     let Some(file) = file else {
-        eprintln!("usage: hyb check <file.hy> [--json] [--report-managed] [--deny-managed]");
+        eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
 
@@ -491,12 +528,12 @@ fn generate_one(
         .map(|e| e.path())
         .filter(|p| p.extension().map(|x| x == "go").unwrap_or(false))
         // Generated .hy.go files join the production package. Go test files
-        // may declare a separate <package>_test package and cannot choose it.
+        // may declare a separate <package>_test package and cannot choose it,
+        // and pre-existing .hy.go outputs are generated artifacts (not
+        // hand-written package authorities).
         .filter(|p| {
-            !p.file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .ends_with("_test.go")
+            let name = p.file_name().unwrap_or_default().to_string_lossy();
+            !name.ends_with("_test.go") && !name.ends_with(".hy.go")
         })
         .collect::<Vec<_>>();
     siblings.sort();
@@ -509,27 +546,19 @@ fn generate_one(
     for go in &siblings {
         let text = std::fs::read_to_string(go)
             .map_err(|e| format!("reading {}: {}", go.display(), e))?;
-        for line in text.lines() {
-            let t = line.trim();
-            if let Some(rest) = t.strip_prefix("package ") {
-                let name = rest.split_whitespace().next().unwrap_or("").to_string();
-                if name.is_empty() || name.contains(';') {
-                    continue;
+        if let Some(name) = extract_go_package_name(&text) {
+            match &pkg {
+                None => pkg = Some(name),
+                Some(p) if p != &name => {
+                    return Err(format!(
+                        "{}: sibling .go files disagree on the package ({} vs {} in {})",
+                        hy.display(),
+                        p,
+                        name,
+                        go.display()
+                    ));
                 }
-                match &pkg {
-                    None => pkg = Some(name),
-                    Some(p) if p != &name => {
-                        return Err(format!(
-                            "{}: sibling .go files disagree on the package ({} vs {} in {})",
-                            hy.display(),
-                            p,
-                            name,
-                            go.display()
-                        ));
-                    }
-                    _ => {}
-                }
-                break;
+                _ => {}
             }
         }
     }
@@ -1222,6 +1251,52 @@ fn coff_machine_matches(m: u16) -> bool {
     }
 }
 
+/// Extract the Go `package <name>` identifier from a `.go` source file,
+/// skipping leading whitespace, UTF-8 BOM, `//` line comments, and `/* ... */`
+/// block comments.
+pub(crate) fn extract_go_package_name(src: &str) -> Option<String> {
+    fn skip_ws_and_comments(mut input: &str) -> Option<&str> {
+        loop {
+            input = input.trim_start();
+            if let Some(rest) = input.strip_prefix("//") {
+                input = match rest.find('\n') {
+                    Some(idx) => &rest[idx + 1..],
+                    None => "",
+                };
+                continue;
+            }
+            if let Some(rest) = input.strip_prefix("/*") {
+                let end = rest.find("*/")?;
+                input = &rest[end + 2..];
+                continue;
+            }
+            return Some(input);
+        }
+    }
+    let mut s = src.strip_prefix('\u{feff}').unwrap_or(src);
+    s = skip_ws_and_comments(s)?;
+    let after_kw = s.strip_prefix("package")?;
+    let first_after = after_kw.chars().next()?;
+    if !first_after.is_whitespace() && !after_kw.starts_with("/*") {
+        return None;
+    }
+    let after_sep = skip_ws_and_comments(after_kw)?;
+    let mut chars = after_sep.char_indices();
+    let (_, first) = chars.next()?;
+    if !(first == '_' || first.is_alphabetic()) {
+        return None;
+    }
+    let mut end = first.len_utf8();
+    for (idx, ch) in chars {
+        if ch == '_' || ch.is_alphanumeric() {
+            end = idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    Some(after_sep[..end].to_string())
+}
+
 /// Lay the chosen staticlib into a target lib/ directory under the name the
 /// cgo contract links (`-lhyrt` → libhyrt.a) — and, when the source is an
 /// msvc .lib, ALSO under the .lib spellings so MS-style consumers and any
@@ -1332,16 +1407,8 @@ fn build_with_bridge(
     //    and copied whatever cargo produced: a foreign-arch lib under cross
     //    builds, found via cargo_bin()'s old ~/.cargo fallback even in the
     //    rustless smoke. The bridge smoke on the arm64 fleet leg caught it.)
-    let lib = ws.join("lib/libhyrt.a");
     let src_lib = ensure_staticlib(&rt)?;
-    std::fs::copy(&src_lib, &lib).map_err(|e| {
-        BuildError::Tool(format!(
-            "copying {} → {}: {}",
-            src_lib.display(),
-            lib.display(),
-            e
-        ))
-    })?;
+    install_staticlib(&src_lib, &ws.join("lib")).map_err(BuildError::Tool)?;
 
     // 2. Workspace assembly.
     std::fs::write(ws.join("go.mod"), "module hybrid.program\n\ngo 1.26\n")
@@ -2010,6 +2077,59 @@ mod tests {
         install_staticlib(&src2, &libdir2).unwrap();
         assert!(libdir2.join("libhyrt.a").is_file());
         assert!(!libdir2.join("hyrt.lib").exists(), "gnu flavor must not alias");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_go_package_name_handles_block_comments_tabs_semicolons_and_trailing_comments() {
+        assert_eq!(
+            extract_go_package_name("/*\npackage fake_in_comment\n*/\npackage realpkg\n"),
+            Some("realpkg".to_string())
+        );
+        assert_eq!(
+            extract_go_package_name("// header\npackage\tcalc//inline comment\n"),
+            Some("calc".to_string())
+        );
+        assert_eq!(
+            extract_go_package_name("package/*c*/calc_2;\n"),
+            Some("calc_2".to_string())
+        );
+        assert_eq!(
+            extract_go_package_name("package_not_keyword\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn generate_one_ignores_stale_generated_hy_go_siblings_on_package_rename() {
+        let dir = std::env::temp_dir().join(format!("hyb-gentest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let main_go = dir.join("main.go");
+        let stale_hy_go = dir.join("calc.hy.go");
+        let calc_hy = dir.join("calc.hy");
+        std::fs::write(&main_go, "package oldpkg\n").unwrap();
+        std::fs::write(&calc_hy, "fn add(a int, b int) int {\n    return a + b\n}\n").unwrap();
+
+        generate_one(&calc_hy, false, "hybrid.program").expect("initial generate_one succeeds");
+        assert!(
+            std::fs::read_to_string(&stale_hy_go)
+                .unwrap()
+                .contains("package oldpkg")
+        );
+
+        std::fs::write(
+            &main_go,
+            "/*\npackage commentpkg\n*/\npackage\tnewpkg; // active\n",
+        )
+        .unwrap();
+        generate_one(&calc_hy, false, "hybrid.program")
+            .expect("generate_one succeeds despite stale .hy.go");
+        let generated = std::fs::read_to_string(&stale_hy_go).unwrap();
+        assert!(
+            generated.contains("package newpkg"),
+            "expected regenerated calc.hy.go to adopt `package newpkg`, got:\n{generated}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

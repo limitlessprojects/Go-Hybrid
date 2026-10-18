@@ -489,6 +489,29 @@ impl<'a> Lexer<'a> {
                     break;
                 }
             }
+            let digits = &s[2..];
+            if digits.is_empty() {
+                self.escape_diag(
+                    start,
+                    false,
+                    format!(
+                        "malformed 0{base} integer literal: expected at least one digit after `0{base}`"
+                    ),
+                );
+            } else if let Some(bad) = digits.chars().find(|&c| match base {
+                'x' => !c.is_ascii_hexdigit(),
+                'o' => !matches!(c, '0'..='7'),
+                'b' => !matches!(c, '0' | '1'),
+                _ => true,
+            }) {
+                self.escape_diag(
+                    start,
+                    false,
+                    format!(
+                        "malformed 0{base} integer literal: invalid digit `{bad}` for `0{base}` base"
+                    ),
+                );
+            }
             return self.tok(start, Tok::Int(s));
         }
 
@@ -504,20 +527,32 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        // fractional part — only when a digit follows the dot (so `0..n`
-        // lexes as Int(0) + `..` + Int(n), and `1..=8` as Int + `..=` + Int)
-        if self.at(0) == Some('.') && self.at(1).map(|d| d.is_ascii_digit()) == Some(true) {
-            is_float = true;
-            s.push('.');
-            self.bump();
-            while let Some(c) = self.at(0) {
-                if c == '_' || c.is_ascii_digit() {
-                    if c != '_' {
-                        s.push(c);
+        // fractional part — SPEC LX6: `1.5`, `2.`, `.5`, `1e9`.
+        // A dot after digits is part of a float unless:
+        // 1. It is followed by `.` (ranges `0..n`, `1..=8`, ellipsis `...`)
+        // 2. It is followed by an identifier/keyword start (e.g. `2.foo`),
+        //    UNLESS that starts an exponent (`2.e3`, `2.e+3`, `2.e-3`).
+        if self.at(0) == Some('.') {
+            let is_range = self.at(1) == Some('.');
+            let is_exp = matches!(self.at(1), Some('e') | Some('E')) && {
+                let k = if matches!(self.at(2), Some('+') | Some('-')) { 3 } else { 2 };
+                self.at(k).map(|d| d.is_ascii_digit()) == Some(true)
+            };
+            let is_ident_start = self.at(1).map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false);
+
+            if !is_range && (!is_ident_start || is_exp) {
+                is_float = true;
+                s.push('.');
+                self.bump();
+                while let Some(c) = self.at(0) {
+                    if c == '_' || c.is_ascii_digit() {
+                        if c != '_' {
+                            s.push(c);
+                        }
+                        self.bump();
+                    } else {
+                        break;
                     }
-                    self.bump();
-                } else {
-                    break;
                 }
             }
         }
@@ -551,6 +586,17 @@ impl<'a> Lexer<'a> {
         if is_float {
             self.tok(start, Tok::Float(s))
         } else {
+            if s.starts_with('0') && s.len() > 1 {
+                if let Some(bad) = s.chars().find(|&c| !matches!(c, '0'..='7')) {
+                    self.escape_diag(
+                        start,
+                        false,
+                        format!(
+                            "malformed octal integer literal `{s}`: invalid digit `{bad}` in leading-zero octal literal"
+                        ),
+                    );
+                }
+            }
             self.tok(start, Tok::Int(s))
         }
     }
@@ -558,23 +604,37 @@ impl<'a> Lexer<'a> {
     fn lex_char(&mut self) -> Token {
         let start = self.pos();
         self.bump(); // opening quote
+        if self.at(0) == Some('\'') {
+            self.bump();
+            self.escape_diag(start, false, "empty char literal");
+            return self.tok(start, Tok::CharLit('\0'));
+        }
         let ch = match self.at(0) {
             Some('\\') => {
                 let esc_start = self.pos();
                 self.bump();
                 let e = self.escape_char(false);
                 if e.is_none() {
-                    // diagnostic already recorded; keep going with something
+                    // diagnostic already recorded; recover to closing quote on this line
+                    while let Some(c) = self.at(0) {
+                        if c == '\n' {
+                            break;
+                        }
+                        self.bump();
+                        if c == '\'' {
+                            break;
+                        }
+                    }
                     return self.tok(start, Tok::CharLit('\0'));
                 }
                 let _ = esc_start;
                 e.unwrap()
             }
-            Some(c) => {
+            Some(c) if c != '\n' => {
                 self.bump();
                 c
             }
-            None => {
+            _ => {
                 self.diag(PARSE_ERR_CODE, start, "unterminated char literal");
                 return self.tok(start, Tok::CharLit('\0'));
             }
@@ -583,6 +643,15 @@ impl<'a> Lexer<'a> {
             self.bump();
         } else {
             self.diag(PARSE_ERR_CODE, start, "unterminated char literal");
+            while let Some(c) = self.at(0) {
+                if c == '\n' {
+                    break;
+                }
+                self.bump();
+                if c == '\'' {
+                    break;
+                }
+            }
         }
         self.tok(start, Tok::CharLit(ch))
     }
@@ -748,7 +817,6 @@ impl<'a> Lexer<'a> {
             '\\' => '\\',
             '"' => '"',
             '\'' => '\'',
-            '0' => '\0',
             'a' => '\u{7}',
             'b' => '\u{8}',
             'f' => '\u{c}',
@@ -801,14 +869,25 @@ impl<'a> Lexer<'a> {
                         return None;
                     }
                     let mut v: u32 = 0;
+                    let mut digits: usize = 0;
                     loop {
                         match self.at(0) {
                             Some(h) if h.is_ascii_hexdigit() => {
-                                v = v * 16 + h.to_digit(16).unwrap_or(0);
+                                let d = h.to_digit(16).unwrap_or(0);
+                                v = v.saturating_mul(16).saturating_add(d);
+                                digits += 1;
                                 self.bump();
                             }
                             Some('}') => {
                                 self.bump();
+                                if digits == 0 {
+                                    self.escape_diag(
+                                        start,
+                                        str_mode,
+                                        "malformed \\u{…} escape: expected hex digits then `}`",
+                                    );
+                                    return None;
+                                }
                                 break;
                             }
                             _ => {
@@ -842,19 +921,26 @@ impl<'a> Lexer<'a> {
                 }
                 self.scalar_or_diag(v, start, str_mode, "\\U")?
             }
-            '1'..='7' => {
-                // octal \NNN — at most three digits, so v <= 0o777 and
-                // from_u32 cannot fail here.
+            '0'..='7' => {
+                // octal \NNN — at most three digits (c plus up to two more),
+                // representing a byte value 0..=0o377 (0..=255).
                 let mut v: u32 = c.to_digit(8)?;
-                loop {
-                    let d = self.at(0).and_then(|c| c.to_digit(8));
-                    match d {
-                        Some(d) => {
-                            v = v * 8 + d;
-                            self.bump();
-                        }
-                        None => break,
-                    }
+                for _ in 0..2 {
+                    let Some(d) = self.at(0).and_then(|ch| ch.to_digit(8)) else {
+                        break;
+                    };
+                    v = v * 8 + d;
+                    self.bump();
+                }
+                if v > 0xFF {
+                    self.escape_diag(
+                        start,
+                        str_mode,
+                        format!(
+                            "invalid octal escape: \\{v:o} ({v}) exceeds maximum byte value 255 (\\377)"
+                        ),
+                    );
+                    return None;
                 }
                 char::from_u32(v)?
             }
@@ -1129,6 +1215,27 @@ mod tests {
         assert!(t.contains(&Tok::Int("0x1F".into())));
         assert!(t.contains(&Tok::Float("1.5e3".into())));
         assert!(t.contains(&Tok::Punct("..")));
+    }
+
+    #[test]
+    fn float_trailing_dot_and_ranges_issue_659() {
+        // LX6: Float literals include `2.`, `.5`, `1.5`, `1e9`.
+        let t = toks("var scale f64 = 2.\nx := 2. + 1.0\ny := .5\nz := 2.e3\nw := 2.e+3\nfor i in 0..n {}\nfor j in 1..=8 {}");
+        assert!(t.contains(&Tok::Float("2.".into())));
+        assert!(t.contains(&Tok::Float(".5".into())));
+        assert!(t.contains(&Tok::Float("2.e3".into())));
+        assert!(t.contains(&Tok::Float("2.e+3".into())));
+        assert!(t.contains(&Tok::Punct("..")));
+        assert!(t.contains(&Tok::Punct("..=")));
+
+        // Range operators keep their leading integer intact
+        let r1 = toks("0..n");
+        assert_eq!(r1[0], Tok::Int("0".into()));
+        assert_eq!(r1[1], Tok::Punct(".."));
+
+        let r2 = toks("1..=8");
+        assert_eq!(r2[0], Tok::Int("1".into()));
+        assert_eq!(r2[1], Tok::Punct("..="));
     }
 
     #[test]

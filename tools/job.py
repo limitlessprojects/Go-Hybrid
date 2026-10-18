@@ -20,6 +20,8 @@ import json
 import math
 import os
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -55,7 +57,8 @@ def gh_api(path, data=None, method=None):
     tok = gh_token()
     req = urllib.request.Request(GITHUB_API + path)
     if tok:
-        req.add_header("Authorization", "token " + tok)
+        # Credentials belong to the initial API request, not its redirects.
+        req.add_unredirected_header("Authorization", "token " + tok)
     req.add_header("Accept", "application/vnd.github+json")
     if data is not None:
         req.add_header("Content-Type", "application/json")
@@ -112,7 +115,7 @@ def kaggle_submit(jobdir):
             f.write(injected.encode("utf-8"))
         with open(sidecar, "w", encoding="utf-8") as f:  # per SPEC §2 protocol
             f.write(payload)
-        rc, out = sh("{} kernels push -p {}".format(KAGGLE_CLI, WORKER_DIR), timeout=180)
+        rc, out = sh("{} kernels push -p {}".format(shlex.quote(KAGGLE_CLI), shlex.quote(WORKER_DIR)), timeout=180)
         print(out)
         if rc != 0:
             sys.exit("kaggle kernels push failed")
@@ -135,7 +138,7 @@ def kaggle_submit(jobdir):
 
 def kaggle_status(slug=None):
     slug = slug or kaggle_slug()
-    rc, out = sh("{} kernels status {}".format(KAGGLE_CLI, slug), timeout=60)
+    rc, out = sh("{} kernels status {}".format(shlex.quote(KAGGLE_CLI), shlex.quote(slug)), timeout=60)
     print(out)
     return out
 
@@ -160,7 +163,7 @@ def kaggle_wait(minutes, slug=None):
     saw_active = False
     state, polls = "?", 0
     while time.time() < deadline:
-        rc, out = sh("{} kernels status {}".format(KAGGLE_CLI, slug), timeout=60)
+        rc, out = sh("{} kernels status {}".format(shlex.quote(KAGGLE_CLI), shlex.quote(slug)), timeout=60)
         polls += 1
         try:
             state = out.split('"')[-2].split(".")[-1].upper()  # '"KernelWorkerStatus.RUNNING"'
@@ -178,24 +181,69 @@ def kaggle_wait(minutes, slug=None):
 
 
 def kaggle_fetch(jobdir, slug=None):
+    """Download kernel output; promote only this invocation's summary.
+
+    The download is staged inside the cache directory and the summary is
+    selected from that staging directory alone: a successful transfer can
+    omit paths left by an older run, so selecting from the persistent
+    cache would promote stale output (lexical order is not age — zzz-old
+    sorts last). The candidate list is final, not a starting point; a
+    caller that falls back to searching the cache reinstates the stale
+    promotion. The cache keeps every prior download (a fresh file
+    supersedes the same-named file from an earlier run), and a failed run
+    retains its partial output without promoting anything; a file whose
+    cache copy fails is likewise left out of the candidates. Symlinked
+    files are dereferenced into the cache; symlinked directories are not
+    descended. Staging beside the cache avoids a cross-device copy and a
+    system tmp that may be too small for the kernel output.
+    Returns 0 on success, 1 when nothing was promoted (the documented
+    exit-code contract; the raw CLI status is reported in the message).
+    """
     slug = slug or kaggle_slug()
     raw = os.path.join(jobdir, "result", "raw")
     os.makedirs(raw, exist_ok=True)
-    rc, out = sh("{} kernels output {} -p {}".format(KAGGLE_CLI, slug, raw), timeout=180)
-    print(out)
-    # A failed download must not read as a successful fetch: an empty result
-    # dir is indistinguishable from "the kernel produced nothing".
-    if rc != 0:
-        print("kaggle fetch: kernels output exited {} (download failed)".format(rc), file=sys.stderr)
+    try:
+        staging = tempfile.mkdtemp(prefix=".staging-", dir=raw)
+    except OSError as e:
+        print("WARNING: cannot stage download under {}: {}".format(raw, e), file=sys.stderr)
         return 1
-    # find summary.json anywhere under raw
-    found = []
-    for root, _, files in os.walk(raw):
-        for fn in files:
-            if fn == "summary.json":
-                found.append(os.path.join(root, fn))
+    try:
+        rc, out = sh("{} kernels output {} -p {}".format(
+            shlex.quote(KAGGLE_CLI), shlex.quote(slug), shlex.quote(staging)), timeout=180)
+        print(out)
+        # Retain the downloaded artifacts in the cache regardless of the
+        # exit status, then promote only on success.
+        found = []
+        for root, _, files in os.walk(staging):
+            rel = os.path.relpath(root, staging)
+            cache_dir = os.path.join(raw, rel)
+            try:
+                os.makedirs(cache_dir, exist_ok=True)
+            except OSError as e:
+                # A cached name that changed from file to directory (or a
+                # full disk) must not abort the fetch with a traceback.
+                print("WARNING: could not create cache dir {}: {}".format(rel, e), file=sys.stderr)
+                continue
+            for fn in files:
+                src = os.path.join(root, fn)
+                try:
+                    shutil.copy2(src, os.path.join(cache_dir, fn))
+                except OSError as e:
+                    print("WARNING: could not cache {}: {}".format(fn, e), file=sys.stderr)
+                    continue
+                if fn == "summary.json":
+                    # Track the cache copy, not the staging path: staging is
+                    # removed in the finally block before promotion runs.
+                    found.append(os.path.join(cache_dir, fn))
+        # A failed download must not read as a successful fetch: an empty result
+        # dir is indistinguishable from "the kernel produced nothing".
+        if rc != 0:
+            print("WARNING: kaggle kernels output failed (exit {}); "
+                  "no summary promoted".format(rc), file=sys.stderr)
+            return 1
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     if found:
-        import shutil
         source = sorted(found)[-1]
         # A successful transfer may still contain an older kernel's result.
         # Validate before replacing the local summary used as job evidence.
@@ -292,7 +340,9 @@ def actions_fetch(run_id, jobdir):
         url = a["archive_download_url"]
         dest = os.path.join(jobdir, "result", a["name"] + ".zip")
         req = urllib.request.Request(url)
-        req.add_header("Authorization", "token " + tok)
+        # GitHub redirects archive downloads to a signed storage URL. urllib
+        # forwards normal headers across hosts; do not send our token there.
+        req.add_unredirected_header("Authorization", "token " + tok)
         # Finish the response before touching a previous valid archive. Publish
         # via a sibling temporary file so write/replace failures preserve it too.
         with urllib.request.urlopen(req, timeout=120) as r:

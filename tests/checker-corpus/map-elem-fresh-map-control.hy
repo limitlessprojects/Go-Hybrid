@@ -1,10 +1,10 @@
 // ============================================================================
-// map-elem-fresh-map-control ? Checker corpus (bounty track: "grow the adversarial corpus").
+// map-elem-fresh-map-control — Checker corpus (bounty track: "grow the adversarial corpus").
 //
 // PURPOSE: the ACCEPT control for map-elem-map-alias-at-spawn. Identical program with
 //   ONE change: the write after the move targets a FRESH map that never came
 //   out of `m`, so no alias of the moved storage is touched. A checker that
-//   rejects this is over-strict ? it would ban every map local in a function
+//   rejects this is over-strict — it would ban every map local in a function
 //   that later moves an unrelated map.
 //
 // RULE CITATION: A1b does not apply: the moved value's storage is never reached again;
@@ -15,13 +15,13 @@
 //   Layer 2 (Rust-side owned): none.
 
 // ---- Sendability / check sites ----
-//   [S1] `task worker(move m, done)` ? legal owned move.
-//   [S2] `fresh["z"] = 9` ? an ordinary write to storage no one else holds.
+//   [S1] `task worker(move m, done)` — legal owned move.
+//   [S2] `fresh["z"] = 9` — an ordinary write to storage no one else holds.
 
 // ---- Expected verdict (hand-derived from VERDICTS.md rule key + SPEC
 //      O3/O4/O9 BEFORE running the checker) ----
 // EXPECTED-VERDICT: ACCEPT
-//   ACCEPT ? 0 annotations, 0 managed. Pins that the REJECT above tracks the
+//   ACCEPT — 0 annotations, 0 managed. Pins that the REJECT above tracks the
 //   ALIAS, not the presence of a map local near a move.
 //
 // ---- Annotations / managed ----

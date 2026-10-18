@@ -1,7 +1,8 @@
-//! #546: an O8 slot loan whose last use is inside an `if` that also spawns
-//! or sends using the loan's base map must not get a single store-back
-//! after the whole `if` — on the path that moved the map, that write races
-//! the new task. The loan is handed down into every branch instead.
+//! #546 & #547: an O8 slot loan whose last use is inside a branching/compound
+//! statement that also spawns, sends, or mutates using the loan's base map
+//! must not get a single store-back after the whole construct — on the path
+//! that moved or mutated the map, that write races the new task or clobbers
+//! the branch's mutation. Instead, the loan is handed down into each branch.
 
 use hy_emit::emit_go;
 use hy_syntax::parse_file;
@@ -88,6 +89,23 @@ fn branch_write_is_visible_before_a_later_read_in_that_branch_issue_546() {
 }
 
 #[test]
+fn branch_write_is_visible_before_later_read_even_without_sibling_move_issue_546() {
+    let go = emit(
+        "    m := map[string]item{\"a\": item{x: 0}}
+    n := &m[\"a\"]
+    if len(m) == 1 {
+        n.x = 7
+        fmt.println(m[\"a\"].x)
+    }
+",
+    );
+    assert!(
+        between(&go, "n.x = 7", "fmt.Println(m[\"a\"].x)").contains("m[\"a\"] = n"),
+        "the loan write must land before the branch reads the slot even without a move:\n{go}"
+    );
+}
+
+#[test]
 fn missing_else_gets_a_synthetic_store_back_issue_546() {
     let go = emit(
         "    m := map[string]item{\"a\": item{x: 0}}
@@ -115,27 +133,101 @@ fn missing_else_gets_a_synthetic_store_back_issue_546() {
 
 #[test]
 fn sibling_branch_delete_does_not_resurrect_the_key_issue_546() {
-    let src = "\
-struct item {
+    for op in ["delete(m, \"a\")", "clear(m)"] {
+        let src = format!(
+            "\
+struct item {{
     x int
+}}
+
+fn main() {{
+    m := map[string]item{{\"a\": item{{x: 0}}}}
+    n := &m[\"a\"]
+    if len(m) > 5 {{
+        n.x = 1
+    }} else {{
+        {op}
+    }}
+    fmt.println(len(m))
+}}
+"
+        );
+        let ast = parse_file("loan_branch_delete.hy", &src).expect("parses");
+        let go = emit_go(&ast).expect("emits");
+        assert!(
+            !between(&go, op, "fmt.Println(len(m))").contains("m[\"a\"] = n"),
+            "a store-back after `{op}` would resurrect the key:\n{go}"
+        );
+    }
 }
 
-fn main() {
-    m := map[string]item{\"a\": item{x: 0}}
-    n := &m[\"a\"]
-    if len(m) > 5 {
-        n.x = 1
-    } else {
-        delete(m, \"a\")
-    }
-    fmt.println(len(m))
-}
-";
-    let ast = parse_file("loan_branch_delete.hy", src).expect("parses");
-    let go = emit_go(&ast).expect("emits");
+#[test]
+fn match_and_select_and_block_handoff_before_move_issue_546() {
+    // 1. `match` with unguarded `some` and `none` moving `m`
+    let src_match = format!(
+        "{WORKER}\nfn maybe_v() option[int] {{\n    return none\n}}\nfn main() {{\n    m := map[string]item{{\"a\": item{{x: 0}}}}\n    done := make(chan bool, 1)\n    n := &m[\"a\"]\n    match maybe_v() {{\n        some(v): {{\n            n.x = v\n            done <- true\n        }}\n        none: {{\n            task worker(move m, done)\n        }}\n    }}\n    <-done\n}}\n"
+    );
+    let ast_match = parse_file("loan_match_move.hy", &src_match).expect("parses");
+    let go_match = emit_go(&ast_match).expect("emits");
     assert!(
-        !between(&go, "delete(m, \"a\")", "fmt.Println(len(m))").contains("m[\"a\"] = n"),
-        "a store-back after the delete would resurrect the key:\n{go}"
+        !between(&go_match, "go worker(m, done)", "<-done").contains("m[\"a\"] = n"),
+        "match arm move must not have store-back after spawn:\n{go_match}"
+    );
+    assert!(
+        between(&go_match, "n.x = v", "done <- true").contains("m[\"a\"] = n"),
+        "match some arm stores back before done:\n{go_match}"
+    );
+    assert!(
+        between(&go_match, "} else {", "go worker(m, done)").contains("m[\"a\"] = n"),
+        "match none arm stores back before spawn:\n{go_match}"
+    );
+
+    // 2. `select` with one arm mutating `n` and `default` moving `m`
+    let go_select = emit(
+        "    m := map[string]item{\"a\": item{x: 0}}
+    done := make(chan bool, 1)
+    ch := make(chan int, 1)
+    n := &m[\"a\"]
+    select {
+        v := <-ch: {
+            n.x = v
+            done <- true
+        }
+        default: {
+            task worker(move m, done)
+        }
+    }
+    <-done
+",
+    );
+    assert!(
+        !between(&go_select, "go worker(m, done)", "<-done").contains("m[\"a\"] = n"),
+        "select arm move must not have store-back after spawn:\n{go_select}"
+    );
+    assert!(
+        between(&go_select, "default:", "go worker(m, done)").contains("m[\"a\"] = n"),
+        "select default arm stores back before spawn:\n{go_select}"
+    );
+
+    // 3. Bare nested block `{ n.x = 1; task worker(move m, done) }`
+    let go_block = emit(
+        "    m := map[string]item{\"a\": item{x: 0}}
+    done := make(chan bool, 1)
+    n := &m[\"a\"]
+    {
+        n.x = 1
+        task worker(move m, done)
+    }
+    <-done
+",
+    );
+    assert!(
+        between(&go_block, "n.x = 1", "go worker(m, done)").contains("m[\"a\"] = n"),
+        "bare block must flush outer loan before spawn inside block:\n{go_block}"
+    );
+    assert!(
+        !between(&go_block, "go worker(m, done)", "<-done").contains("m[\"a\"] = n"),
+        "bare block must not flush outer loan after spawn:\n{go_block}"
     );
 }
 

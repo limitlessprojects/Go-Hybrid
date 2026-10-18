@@ -187,6 +187,144 @@ class TestRunnerShaValidation(unittest.TestCase):
             summary = json.loads((results_dir / "summary.json").read_text(encoding="utf-8"))
             self.assertTrue(summary["ok"])
 
+    def test_gitfile_worktree_pinned_sha_and_head_pin_succeed(self):
+        # In `git worktree` and submodule checkouts, `.git` is a regular file
+        # (`gitdir: <path>`) rather than a directory. Both exact-SHA pins and
+        # `HEAD` pins must still run `sha-check` against `git rev-parse HEAD`.
+        with tempfile.TemporaryDirectory(prefix="test-sha-gitfile-") as td:
+            root = Path(td)
+            real_git_dir = subprocess.check_output(
+                ["git", "rev-parse", "--git-dir"],
+                cwd=str(self.repo_dir),
+                text=True,
+            ).strip()
+            real_git_path = (self.repo_dir / real_git_dir).resolve()
+            actual_head = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(self.repo_dir),
+                text=True,
+            ).strip()
+
+            worktree_repo = root / "worktree-repo"
+            worktree_repo.mkdir()
+            gitfile = worktree_repo / ".git"
+            gitfile.write_text(f"gitdir: {real_git_path}\n", encoding="utf-8")
+            self.assertTrue(gitfile.is_file())
+            self.assertFalse(gitfile.is_dir())
+
+            # 1. Exact commit SHA pin against a gitfile worktree checkout succeeds.
+            cmd_marker = root / "cmd-pinned.ran"
+            job_pinned = {
+                "job": "test-sha-gitfile-pinned",
+                "sha": actual_head,
+                "tier": "local",
+                "commands": [{"name": "c1", "run": [sys.executable, "-c", f"from pathlib import Path; Path(r'{cmd_marker}').write_text('1')"]}],
+            }
+            job_pinned_file = root / "job-pinned.json"
+            job_pinned_file.write_text(json.dumps(job_pinned), encoding="utf-8")
+            results_pinned = root / "results-pinned"
+
+            res_pinned = subprocess.run(
+                [sys.executable, str(self.runner_py), str(job_pinned_file), "--repo-dir", str(worktree_repo), "--results-dir", str(results_pinned)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res_pinned.returncode, 0, res_pinned.stdout + res_pinned.stderr)
+            self.assertTrue(cmd_marker.exists())
+            summary_pinned = json.loads((results_pinned / "summary.json").read_text(encoding="utf-8"))
+            self.assertTrue(summary_pinned["ok"])
+            self.assertEqual([s["name"] for s in summary_pinned["steps"]], ["sha-check", "c1"])
+
+            # 2. HEAD pin against a gitfile worktree checkout records the sha-check step.
+            cmd_head_marker = root / "cmd-head.ran"
+            job_head = {
+                "job": "test-sha-gitfile-head",
+                "sha": "HEAD",
+                "tier": "local",
+                "commands": [{"name": "c1", "run": [sys.executable, "-c", f"from pathlib import Path; Path(r'{cmd_head_marker}').write_text('1')"]}],
+            }
+            job_head_file = root / "job-head.json"
+            job_head_file.write_text(json.dumps(job_head), encoding="utf-8")
+            results_head = root / "results-head"
+
+            res_head = subprocess.run(
+                [sys.executable, str(self.runner_py), str(job_head_file), "--repo-dir", str(worktree_repo), "--results-dir", str(results_head)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res_head.returncode, 0, res_head.stdout + res_head.stderr)
+            self.assertTrue(cmd_head_marker.exists())
+            summary_head = json.loads((results_head / "summary.json").read_text(encoding="utf-8"))
+            self.assertTrue(summary_head["ok"])
+            self.assertEqual([s["name"] for s in summary_head["steps"]], ["sha-check", "c1"])
+
+    def test_gitfile_worktree_corrupt_gitdir_fails_closed(self):
+        # A broken `.git` gitfile (pointing to a missing/corrupt gitdir) must
+        # fail closed on `git rev-parse HEAD` rather than being treated as a
+        # `.git`-less tarball checkout.
+        with tempfile.TemporaryDirectory(prefix="test-sha-gitfile-corrupt-") as td:
+            root = Path(td)
+            corrupt_worktree = root / "corrupt-worktree"
+            corrupt_worktree.mkdir()
+            (corrupt_worktree / ".git").write_text(f"gitdir: {root / 'missing-gitdir'}\n", encoding="utf-8")
+            cmd_marker = root / "cmd.ran"
+            job = {
+                "job": "test-sha-gitfile-corrupt",
+                "sha": "HEAD",
+                "tier": "local",
+                "commands": [{"name": "c1", "run": [sys.executable, "-c", f"from pathlib import Path; Path(r'{cmd_marker}').write_text('1')"]}],
+            }
+            job_file = root / "job.json"
+            job_file.write_text(json.dumps(job), encoding="utf-8")
+            results_dir = root / "results"
+
+            res = subprocess.run(
+                [sys.executable, str(self.runner_py), str(job_file), "--repo-dir", str(corrupt_worktree), "--results-dir", str(results_dir)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res.returncode, 1)
+            self.assertFalse(cmd_marker.exists())
+            summary = json.loads((results_dir / "summary.json").read_text(encoding="utf-8"))
+            self.assertFalse(summary["ok"])
+            steps = summary.get("steps", [])
+            self.assertEqual(len(steps), 1)
+            self.assertEqual(steps[0]["name"], "sha-check")
+            self.assertEqual(steps[0]["exit"], 1)
+            self.assertIn("failed to resolve HEAD", steps[0]["out_tail"])
+
+    def test_corrupt_git_dir_inside_parent_repo_does_not_leak_parent_head(self):
+        # An empty/corrupt `.git` directory inside an ancestor git repository
+        # must fail closed rather than walking up parent directories and
+        # resolving the ancestor repository's HEAD.
+        with tempfile.TemporaryDirectory(prefix="test-sha-ceiling-", dir=str(self.repo_dir)) as td:
+            root = Path(td)
+            corrupt_repo = root / "nested-repo"
+            (corrupt_repo / ".git").mkdir(parents=True)
+            cmd_marker = root / "cmd.ran"
+            job = {
+                "job": "test-sha-ceiling-corrupt",
+                "sha": "HEAD",
+                "tier": "local",
+                "commands": [{"name": "c1", "run": [sys.executable, "-c", f"from pathlib import Path; Path(r'{cmd_marker}').write_text('1')"]}],
+            }
+            job_file = root / "job.json"
+            job_file.write_text(json.dumps(job), encoding="utf-8")
+            results_dir = root / "results"
+
+            res = subprocess.run(
+                [sys.executable, str(self.runner_py), str(job_file), "--repo-dir", str(corrupt_repo), "--results-dir", str(results_dir)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res.returncode, 1)
+            self.assertFalse(cmd_marker.exists())
+            summary = json.loads((results_dir / "summary.json").read_text(encoding="utf-8"))
+            self.assertFalse(summary["ok"])
+            self.assertEqual([s["name"] for s in summary["steps"]], ["sha-check"])
+            self.assertEqual(summary["steps"][0]["exit"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
+

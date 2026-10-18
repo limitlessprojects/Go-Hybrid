@@ -704,7 +704,7 @@ fn sibling_labeled_loops_get_distinct_go_labels() {
     // emitted two declarations → `go vet`: "label hyLoop already declared",
     // so an accepted program could never build.
     let go = emit(
-        "fn main() {\n    for i in 0..2 {\n        break loop\n    }\n    for j in 0..2 {\n        break loop\n    }\n}\n",
+        "fn main() {\n    loop {\n        break loop\n    }\n    loop {\n        break loop\n    }\n}\n",
     );
     assert_eq!(
         go.matches("hyLoop:").count(),
@@ -729,7 +729,7 @@ fn nested_labeled_loops_break_their_own_loop() {
     // (LX14), so each level carries its own label and each break must name
     // the one it is lexically inside.
     let go = emit(
-        "fn main() {\n    for i in 0..2 {\n        for j in 0..2 {\n            break loop\n        }\n        break loop\n    }\n}\n",
+        "fn main() {\n    loop {\n        loop {\n            break loop\n        }\n        break loop\n    }\n}\n",
     );
     assert_eq!(go.matches("hyLoop:").count(), 1, ":\n{}", go);
     assert_eq!(go.matches("hyLoop1:").count(), 1, ":\n{}", go);
@@ -808,6 +808,41 @@ fn assoc_fn_call_mangles_dotted_name() {
         "struct box[t any] {\n    v t\n}\n\nfn box.new[t any](v t) box[t] {\n    return box[t]{v: v}\n}\n\nfn main() {\n    b := box.new[int](3)\n}\n",
     );
     assert!(go.contains("box_new[int](3)"), ":\n{}", go);
+}
+
+#[test]
+fn generic_struct_and_fn_infer_missing_constraints_722() {
+    // Issue #722: `struct box[t] { v t }` without an explicit constraint must
+    // emit `type box[t any] struct {` so `gofmt` does not rewrite `box[t] struct`
+    // into the invalid array type `type box [t]struct {`.
+    let go = emit(
+        "struct box[t] {\n    v t\n}\n\nstruct table[k, v] {\n    m map[k]v\n}\n\nfn id[t](x t) t {\n    return x\n}\n\nfn main() {\n    b := box[u8]{ v: 3 }\n    fmt.println(id[u8](b.v))\n}\n",
+    );
+    assert!(
+        go.contains("type box[t any] struct {"),
+        "expected `type box[t any] struct {{` in:\n{}",
+        go
+    );
+    assert!(
+        go.contains("type table[k comparable, v any] struct {"),
+        "expected `k comparable, v any` in:\n{}",
+        go
+    );
+    assert!(
+        go.contains("func id[t any](x t) t {"),
+        "expected `func id[t any](x t) t {{` in:\n{}",
+        go
+    );
+    assert!(
+        go.contains("box[uint8]{v: 3}"),
+        "expected SPEC primitive type arg `u8` to lower to `uint8` in:\n{}",
+        go
+    );
+    assert!(
+        go.contains("id[uint8](b.v)"),
+        "expected generic fn call type arg `u8` to lower to `uint8` in:\n{}",
+        go
+    );
 }
 
 #[test]
@@ -984,6 +1019,32 @@ fn assign_slot_loan_copies_and_stores_back() {
     assert!(
         go.contains("g.nodes[from] = n"),
         "store-back at block end:\n{}",
+        go
+    );
+}
+
+#[test]
+fn assign_slot_loan_into_pointer_var_points_at_copy() {
+    // A pointer-typed target cannot hold the copied element itself
+    // (`cannot use g.nodes[from] (variable of struct type node) as *node`):
+    // it points at a fresh copy, and the store-back dereferences it.
+    let go = emit(
+        "struct node {\n    edges []int\n}\n\nstruct graph {\n    nodes map[int]node\n}\n\nfn (g *graph) connect(from int, to int) {\n    var n *node\n    n = &g.nodes[from]\n    n.edges = append(n.edges, to)\n}\n",
+    );
+    assert!(
+        go.contains("hyLoan0 := g.nodes[from]"),
+        "copy into a temp:\n{}",
+        go
+    );
+    assert!(go.contains("n = &hyLoan0"), "pointer at the copy:\n{}", go);
+    assert!(
+        !go.contains("n = g.nodes[from]"),
+        "value copy into a pointer var cannot build:\n{}",
+        go
+    );
+    assert!(
+        go.contains("g.nodes[from] = *n"),
+        "dereferenced store-back:\n{}",
         go
     );
 }
@@ -1563,6 +1624,34 @@ fn diff_elided_map_value_struct_literal() {
 }
 
 #[test]
+fn diff_elided_map_value_struct_literal_under_parens() {
+    // Same elision, one redundant paren deeper: `({replicas: 2, tag: "prod"})`
+    // is the same expression, so the expected TYPE must still be applied.
+    // Before the peel this fell through to the "spell the type" refusal — a
+    // check-accepts / emit-rejects gap.
+    let go = emit(
+        "struct service {\n    replicas int\n    tag string\n}\n\nfn main() {\n    e := env{services: map[string]service{\n        \"frontend\": ({replicas: 2, tag: \"prod\"}),\n    }}\n    _ = e\n}\n\nstruct env {\n    services map[string]service\n}",
+    );
+    assert!(
+        go.contains("\"frontend\": service{replicas: 2, tag: \"prod\"}"),
+        "elided head filled through parens:\n{}",
+        go
+    );
+}
+
+#[test]
+fn diff_elided_slice_elem_struct_literal_under_parens() {
+    let go = emit(
+        "struct service {\n    replicas int\n}\n\nfn main() {\n    s := []service{({replicas: 2}), (({replicas: 3}))}\n    _ = s\n}\n",
+    );
+    assert!(
+        go.contains("[]service{service{replicas: 2}, service{replicas: 3}}"),
+        "elided heads filled through (nested) parens:\n{}",
+        go
+    );
+}
+
+#[test]
 fn diff_short_return_fills_error_slot() {
     // corpus 13: `return v` in a (value, error) fn → `return v, nil`.
     let go = emit(
@@ -1828,9 +1917,9 @@ fn match_arm_labeled_break_labels_enclosing_loop() {
 }
 
 #[test]
-fn match_arm_labeled_continue_labels_enclosing_while_for() {
+fn match_arm_labeled_continue_labels_enclosing_loop() {
     let go = emit(
-        "fn main() {\n    o := some(1)\n    x := 1\n    for x > 0 {\n        match o {\n            some(v) => if v > 0 { continue loop }\n            none => {}\n        }\n    }\n}\n",
+        "fn main() {\n    o := some(1)\n    x := 1\n    loop {\n        for x > 0 {\n            match o {\n                some(v) => if v > 0 { continue loop }\n                none => {}\n            }\n        }\n    }\n}\n",
     );
     assert!(go.contains("hyLoop:"), "label missing:\n{}", go);
     assert!(go.contains("continue hyLoop"), ":\n{}", go);
@@ -2529,3 +2618,293 @@ fn parenthesized_slot_loan_lowers_to_copy_and_storeback() {
         go
     );
 }
+
+#[test]
+fn array_composite_literals_emit_fixed_and_ellipsis_go_arrays() {
+    let src = r#"
+const n = 2
+
+struct pair {
+    a int
+    b int
+}
+
+struct holder {
+    tags [3]string
+}
+
+fn take(xs [3]string) [3]string {
+    return xs
+}
+
+fn main() {
+    a := [3]int{1, 2, 3}
+    b := [...]int{1, 2, 3}
+    c := [3]int{}
+    d := [3]int{1}
+    e := [n]int{1, 2}
+    f := [n + 1]int{1, 2, 3}
+    g := [2][2]int{{1, 2}, {3, 4}}
+    h := [2]pair{{a: 1, b: 2}, {a: 3, b: 4}}
+    s := take([3]string{"a", "b", "c"})
+    hd := holder{tags: [3]string{"x", "y", "z"}}
+    m := map[string][2]int{"k": [2]int{7, 8}}
+    for i, v in [3]int{10, 20, 30} {
+        fmt.println(i, v)
+    }
+    fmt.println(a[0], b[1], c[2], d[0], e[1], f[2], g[1][0], h[0].b, s[0], hd.tags[1], m["k"][0])
+}
+"#;
+    let go = emit(src);
+    assert!(go.contains("a := [3]int{1, 2, 3}"), ":\n{go}");
+    assert!(go.contains("b := [...]int{1, 2, 3}"), ":\n{go}");
+    assert!(go.contains("c := [3]int{}"), ":\n{go}");
+    assert!(go.contains("d := [3]int{1}"), ":\n{go}");
+    assert!(go.contains("e := [n]int{1, 2}"), ":\n{go}");
+    assert!(go.contains("f := [n + 1]int{1, 2, 3}"), ":\n{go}");
+    assert!(
+        go.contains("g := [2][2]int{[2]int{1, 2}, [2]int{3, 4}}"),
+        ":\n{go}"
+    );
+    assert!(
+        go.contains("h := [2]pair{pair{a: 1, b: 2}, pair{a: 3, b: 4}}"),
+        ":\n{go}"
+    );
+    assert!(
+        go.contains("s := take([3]string{\"a\", \"b\", \"c\"})"),
+        ":\n{go}"
+    );
+    assert!(
+        go.contains("for i, v := range [3]int{10, 20, 30} {"),
+        ":\n{go}"
+    );
+    if std::process::Command::new("go")
+        .arg("version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+    {
+        let tmp = std::env::temp_dir().join(format!("hyb_emit_arr_643_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        std::fs::write(tmp.join("go.mod"), "module arrlit643\n\ngo 1.21\n").expect("write go.mod");
+        std::fs::write(tmp.join("main.go"), &go).expect("write main.go");
+        let out = std::process::Command::new("go")
+            .arg("run")
+            .arg(".")
+            .current_dir(&tmp)
+            .output()
+            .expect("invoke go run");
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            out.status.success(),
+            "go run failed on emitted Go:\n{}\nstderr:\n{}",
+            go,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("1 2 0 1 2 3 3 2 a y 7"),
+            "unexpected runtime stdout:\n{stdout}"
+        );
+    }
+}
+#[test]
+fn test_emit_t9_set_surface() {
+    let go = emit(
+        "fn main() {\n    seen := set[int]{}\n    seen.insert(1)\n    fmt.println(len(seen))\n    delete(seen, 1)\n    for v in seen {\n        fmt.println(v)\n    }\n}\n",
+    );
+    assert!(go.contains("seen.len()"), "len(seen) should lower to seen.len():\n{}", go);
+    assert!(go.contains("seen.remove(1)"), "delete(seen, 1) should lower to seen.remove(1):\n{}", go);
+    assert!(go.contains("for v := range seen.m {"), "for v in seen should lower to for v := range seen.m:\n{}", go);
+    assert!(go.contains("type set[t comparable] struct {"), "SET_PRELUDE should be included:\n{}", go);
+}
+
+#[test]
+fn test_emit_t20_option_surface() {
+    let go = emit(
+        "fn main() {\n    o := some(5)\n    fmt.println(o.unwrap())\n    fmt.println(o.or(0))\n    fmt.println(o.is_some())\n}\n",
+    );
+    assert!(go.contains("func (o option[v]) unwrap() v {"), "unwrap method in prelude:\n{}", go);
+    assert!(go.contains("func (o option[v]) or(defaultVal v) v {"), "or method in prelude:\n{}", go);
+    assert!(go.contains("func (o option[v]) is_some() bool {"), "is_some method in prelude:\n{}", go);
+}
+
+#[test]
+fn break_loop_and_continue_loop_in_nested_for_bind_nearest_loop_issue_654() {
+    let src = r#"
+package main
+
+import "fmt"
+
+fn main() {
+    rounds := 0
+    loop {
+        rounds += 1
+        if rounds == 4 {
+            fmt.println("loop guard hit")
+            break loop
+        }
+        for i in 0..3 {
+            if i == 1 {
+                break loop
+            }
+        }
+        fmt.println("after for")
+    }
+
+    visits := 0
+    passes := 0
+    loop {
+        passes += 1
+        if passes == 3 {
+            break loop
+        }
+        for v in []int{1, 2, 3} {
+            visits += v
+            continue loop
+        }
+        fmt.println("after for (continue)")
+    }
+}
+"#;
+    let go = emit(src);
+    // Outer loop 1 receives hyLoop:
+    assert!(go.contains("hyLoop:\n\tfor {"), "outer loop 1 must have hyLoop label:\n{}", go);
+    // Inner for i in 0..3 must NOT receive a label
+    assert!(!go.contains("hyLoop1:\n\t\tfor i :="), "inner for must not receive a label:\n{}", go);
+    // break loop inside inner for must break hyLoop
+    assert!(go.contains("break hyLoop\n"), "break loop in inner for must target hyLoop:\n{}", go);
+
+    // Outer loop 2 receives hyLoop1:
+    assert!(go.contains("hyLoop1:\n\tfor {"), "outer loop 2 must have hyLoop1 label:\n{}", go);
+    // continue loop inside inner for must continue hyLoop1
+    assert!(go.contains("continue hyLoop1\n"), "continue loop in inner for must target hyLoop1:\n{}", go);
+}
+
+#[test]
+fn break_loop_inside_for_without_loop_statement_refused_emit() {
+    let src = r#"
+fn main() {
+    for i in 0..3 {
+        if i == 1 {
+            break loop
+        }
+    }
+}
+"#;
+    let err = emit_err(src);
+    assert!(
+        err.contains("break loop` with no enclosing loop"),
+        "expected unsupported error for break loop outside loop statement, got: {}",
+        err
+    );
+}
+
+#[test]
+fn errors_wrap_lowers_to_fmt_errorf_and_preserves_errors_is() {
+    let src = r#"
+package main
+
+import "errors"
+import "fmt"
+
+fn main() {
+    not_found := errors.new("not found")
+    err := errors.wrap(not_found, "opening config")
+    fmt.println(err)
+    fmt.println(errors.is(err, not_found))
+}
+"#;
+    let go = emit(src);
+    assert!(
+        go.contains("err := fmt.Errorf(\"%s: %w\", \"opening config\", not_found)"),
+        "expected errors.wrap to lower to fmt.Errorf with msg and err, got:\n{}",
+        go
+    );
+    assert!(
+        go.contains("\"errors\""),
+        "must import errors when errors.New or errors.Is is used, got:\n{}",
+        go
+    );
+    assert!(
+        go.contains("\"fmt\""),
+        "must import fmt for fmt.Errorf and fmt.Println, got:\n{}",
+        go
+    );
+}
+
+#[test]
+fn errors_wrap_alone_omits_unused_errors_import() {
+    let src = r#"
+package main
+
+import "errors"
+
+fn wrap_it(err error) error {
+    return errors.wrap(err, "context")
+}
+"#;
+    let go = emit(src);
+    assert!(
+        go.contains("return fmt.Errorf(\"%s: %w\", \"context\", err)"),
+        "expected errors.wrap to lower to fmt.Errorf, got:\n{}",
+        go
+    );
+    assert!(
+        go.contains("\"fmt\""),
+        "must auto-import fmt for fmt.Errorf, got:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("\"errors\""),
+        "must prune unused errors import when only errors.wrap is used, got:\n{}",
+        go
+    );
+}
+
+#[test]
+fn errors_wrap_named_arguments_and_arg_count_validation() {
+    let src = r#"
+package main
+
+import "errors"
+
+fn wrap_named(err error) error {
+    return errors.wrap(msg="ctx", err=err)
+}
+"#;
+    let go = emit(src);
+    assert!(
+        go.contains("return fmt.Errorf(\"%s: %w\", \"ctx\", err)"),
+        "expected named args to order correctly in fmt.Errorf, got:\n{}",
+        go
+    );
+
+    let err_src = r#"
+package main
+
+import "errors"
+
+fn f(err error) error {
+    return errors.wrap(err)
+}
+"#;
+    let err = emit_err(err_src);
+    assert!(
+        err.contains("errors.wrap takes exactly two arguments"),
+        "expected argument count error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn m4_initialism_mapping_for_foreign_go_names_issue_658() {
+    let go = emit(
+        "fn main() {\n    _ = io.eof\n    _ = http.status_ok\n    _ = time.rfc3339\n    _ = strings.to_valid_utf8(\"a\", \"b\")\n}\n",
+    );
+    assert!(go.contains("io.EOF"), "expected io.EOF, got:\n{}", go);
+    assert!(go.contains("http.StatusOK"), "expected http.StatusOK, got:\n{}", go);
+    assert!(go.contains("time.RFC3339"), "expected time.RFC3339, got:\n{}", go);
+    assert!(go.contains("strings.ToValidUTF8(\"a\", \"b\")"), "expected strings.ToValidUTF8, got:\n{}", go);
+}
+

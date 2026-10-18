@@ -20,16 +20,22 @@ class SummaryIdentityTests(unittest.TestCase):
     def fetch(self, payload, submitted=PIN, valid=True):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            nested = root / "result/raw/nested"
-            nested.mkdir(parents=True)
-            source = nested / "summary.json"
-            source.write_text(payload, encoding="utf-8")
             dest = root / "result/summary.json"
+            dest.parent.mkdir(parents=True, exist_ok=True)
             previous = b'{"previous": "reviewed result"}\n'
             dest.write_bytes(previous)
             if submitted is not MISSING:
                 (root / "submitted.json").write_text(json.dumps(submitted), encoding="utf-8")
-            with mock.patch.object(job, "sh", return_value=(0, "offline successful transfer")), \
+
+            # The staged download delivers the summary; only this invocation's
+            # files are promotion candidates (#478), and the cache copy keeps
+            # the fetched bytes for diagnosis.
+            def offline_download(command, **kwargs):
+                staging = next((root / "result/raw").glob(".staging-*"))
+                (staging / "summary.json").write_text(payload, encoding="utf-8")
+                return 0, "offline successful transfer"
+
+            with mock.patch.object(job, "sh", side_effect=offline_download), \
                  contextlib.redirect_stdout(io.StringIO()):
                 if valid:
                     job.kaggle_fetch(str(root), slug="fixture/kernel")
@@ -37,8 +43,12 @@ class SummaryIdentityTests(unittest.TestCase):
                     with self.assertRaises(SystemExit) as caught:
                         job.kaggle_fetch(str(root), slug="fixture/kernel")
                     self.assertNotEqual(caught.exception.code, 0)
-            self.assertEqual(dest.read_bytes(), source.read_bytes() if valid else previous)
-            self.assertEqual(source.read_text(encoding="utf-8"), payload)
+            self.assertEqual(
+                dest.read_bytes(),
+                payload.encode("utf-8") if valid else previous)
+            self.assertEqual(
+                (root / "result/raw/summary.json").read_text(encoding="utf-8"),
+                payload)
 
     def test_wrong_job_or_revision_does_not_replace_reviewed_summary(self):
         for field, wrong in (("job", "different-job"), ("sha", "b" * 40)):

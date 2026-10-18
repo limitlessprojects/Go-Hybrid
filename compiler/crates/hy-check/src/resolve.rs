@@ -76,7 +76,10 @@ enum Mode {
 struct Scan<'a> {
     path: &'a str,
     packages: &'a HashSet<String>,
+    file_decls: &'a HashSet<String>,
     allowed: &'a mut HashSet<String>,
+    local_decls: &'a mut HashSet<String>,
+    uncurated_imports: &'a HashSet<String>,
     diags: &'a mut Vec<hy_diag::Diagnostic>,
     mode: Mode,
 }
@@ -85,6 +88,7 @@ impl<'a> Scan<'a> {
     fn define(&mut self, name: &str) {
         if self.mode == Mode::Collect {
             self.allowed.insert(name.to_string());
+            self.local_decls.insert(name.to_string());
         }
     }
 
@@ -97,6 +101,30 @@ impl<'a> Scan<'a> {
         }
         if crate::foreign::BUILTIN_PACKAGES.contains(&name) {
             return;
+        }
+        // `parser.rs` (`fold_type_args`) folds bracketed type arguments (and
+        // single-ident index expressions before `(`) into `Expr::Ident`
+        // (`id[int](42)` -> `Ident("id[int]")`, `m[k](42)` -> `Ident("m[k]")`).
+        if let Some((head, rest)) = name.split_once('[') {
+            let head_ok = self.allowed.contains(head)
+                || self.packages.contains(head)
+                || crate::foreign::BUILTIN_PACKAGES.contains(&head);
+            if head_ok {
+                if !self.file_decls.contains(head) {
+                    if let Some(inside) = rest.strip_suffix(']') {
+                        let trimmed = inside.trim();
+                        if !trimmed.is_empty()
+                            && trimmed
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                            && !trimmed.chars().next().unwrap().is_ascii_digit()
+                        {
+                            self.ident(trimmed, span);
+                        }
+                    }
+                }
+                return;
+            }
         }
         let msg = format!(
             "`{}` is not available here — nothing declares this name in the file or this scope \
@@ -265,7 +293,49 @@ impl<'a> Scan<'a> {
                 self.run_place(base);
                 self.run_expr(index);
             }
-            PlaceKind::Field { base, .. } => self.run_place(base),
+            PlaceKind::Field { base, name } => {
+                if self.mode == Mode::Check {
+                    if let PlaceKind::Ident(base_name) = &base.kind {
+                        if !self.local_decls.contains(base_name) {
+                            if self.uncurated_imports.contains(base_name)
+                                || crate::foreign::is_uncurated_go_stdlib_root(base_name)
+                            {
+                                let msg = format!(
+                                    "package `{}` is not in the M5 curated allowlist ({}) (HYB-E1001)",
+                                    base_name,
+                                    crate::foreign::CURATED_ALLOWLIST_DISPLAY
+                                );
+                                self.diags.push(
+                                    hy_diag::Diagnostic::error(
+                                        "HYB-E1001",
+                                        self.path.to_string(),
+                                        p.span,
+                                        msg,
+                                    ),
+                                );
+                                return;
+                            } else if crate::foreign::is_curated_package_root(base_name) {
+                                if !crate::foreign::is_curated_package_member(base_name, name) {
+                                    let msg = format!(
+                                        "`{}.{}` is not a resolved member of curated package `{}` (HYB-E1001)",
+                                        base_name, name, base_name
+                                    );
+                                    self.diags.push(
+                                        hy_diag::Diagnostic::error(
+                                            "HYB-E1001",
+                                            self.path.to_string(),
+                                            p.span,
+                                            msg,
+                                        ),
+                                    );
+                                }
+                                return;
+                            }
+                        }
+                    }
+                }
+                self.run_place(base);
+            }
             PlaceKind::AddrOf { base } => self.run_place(base),
         }
     }
@@ -304,21 +374,52 @@ impl<'a> Scan<'a> {
                     self.run_expr(h);
                 }
             }
-            // A DIRECT ident base of a dotted access is exempt: that shape is
-            // the package-prefix surface (`fmt.println`, spike-10's `hex.encode`,
-            // any std root the emitter's usage-driven import collection maps),
-            // and the emitter's contract is "unknown roots still work — they
-            // emit verbatim and get an import" (hy-emit is_package_root). The
-            // checker cannot tell a real root from a typo'd one, so a dotted
-            // first segment stays with the go toolchain; everything bare
-            // (callees, plain reads, assignment targets, array lengths) is
-            // checked here.
-            Expr::Field { base, .. } => {
-                let bare = matches!(
-                    crate::model::unwrap_parens(base),
-                    Expr::Ident { .. }
-                );
-                if !bare {
+            Expr::Field { base, name, span } => {
+                if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
+                    if self.mode == Mode::Check && !self.local_decls.contains(root) {
+                        if self.uncurated_imports.contains(root)
+                            || crate::foreign::is_uncurated_go_stdlib_root(root)
+                        {
+                            self.diags.push(
+                                hy_diag::Diagnostic::error(
+                                    "HYB-E1001",
+                                    self.path.to_string(),
+                                    *span,
+                                    format!(
+                                        "`{}.{}` cannot be resolved — package `{}` is outside the M5 curated allowlist (allowlist: {}) (HYB-E1001)",
+                                        root,
+                                        name,
+                                        root,
+                                        crate::foreign::CURATED_ALLOWLIST_DISPLAY
+                                    ),
+                                )
+                                .with_notes(vec![
+                                    "SPEC M5: only packages on the curated allowlist have normalized bindings".to_string(),
+                                ]),
+                            );
+                        } else if crate::foreign::is_curated_package_root(root)
+                            && !crate::foreign::is_curated_package_member(root, name)
+                        {
+                            self.diags.push(
+                                hy_diag::Diagnostic::error(
+                                    "HYB-E1001",
+                                    self.path.to_string(),
+                                    *span,
+                                    format!(
+                                        "`{}.{}` is not a resolved member of curated package `{}` (HYB-E1001)",
+                                        root, name, root
+                                    ),
+                                )
+                                .with_notes(vec![
+                                    format!(
+                                        "check the M4 snake_case spelling for `{}` exports (e.g. `io.eof`, `http.status_ok`)",
+                                        root
+                                    ),
+                                ]),
+                            );
+                        }
+                    }
+                } else {
                     self.run_expr(base);
                 }
             }
@@ -363,17 +464,62 @@ impl<'a> Scan<'a> {
                 body,
                 ..
             } => {
-                for p in params {
-                    self.define(&p.name);
-                    self.run_type(&p.ty);
-                }
-                for r in results {
-                    if let Some(n) = &r.name {
-                        self.define(n);
+                if self.mode == Mode::Collect {
+                    for p in params {
+                        self.define(&p.name);
+                        self.run_type(&p.ty);
                     }
-                    self.run_type(&r.ty);
+                    for r in results {
+                        if let Some(n) = &r.name {
+                            self.define(n);
+                        }
+                        self.run_type(&r.ty);
+                    }
+                    self.run_block(body);
+                } else {
+                    let mut fn_allowed = self.allowed.clone();
+                    let mut fn_locals = self.local_decls.clone();
+                    {
+                        let mut collect = Scan {
+                            path: self.path,
+                            packages: self.packages,
+                            file_decls: self.file_decls,
+                            allowed: &mut fn_allowed,
+                            local_decls: &mut fn_locals,
+                            uncurated_imports: self.uncurated_imports,
+                            diags: self.diags,
+                            mode: Mode::Collect,
+                        };
+                        for p in params {
+                            collect.define(&p.name);
+                            collect.run_type(&p.ty);
+                        }
+                        for r in results {
+                            if let Some(n) = &r.name {
+                                collect.define(n);
+                            }
+                            collect.run_type(&r.ty);
+                        }
+                        collect.run_block(body);
+                    }
+                    let mut check = Scan {
+                        path: self.path,
+                        packages: self.packages,
+                        file_decls: self.file_decls,
+                        allowed: &mut fn_allowed,
+                        local_decls: &mut fn_locals,
+                        uncurated_imports: self.uncurated_imports,
+                        diags: self.diags,
+                        mode: Mode::Check,
+                    };
+                    for p in params {
+                        check.run_type(&p.ty);
+                    }
+                    for r in results {
+                        check.run_type(&r.ty);
+                    }
+                    check.run_block(body);
                 }
-                self.run_block(body);
             }
         }
     }
@@ -411,6 +557,34 @@ impl<'a> Scan<'a> {
     }
 }
 
+/// Top-level declaration names (functions, structs, enums, variants, type
+/// aliases, plus predeclared conversions/builtins) whose `[…]` suffix in a
+/// call is generic type instantiation rather than map/slice indexing.
+fn collect_file_decl_names(file: &hy_syntax::File) -> HashSet<String> {
+    let mut s: HashSet<String> = PREDECLARED.iter().map(|n| n.to_string()).collect();
+    for d in &file.decls {
+        match d {
+            Decl::Struct(st) => {
+                s.insert(st.name.clone());
+            }
+            Decl::Enum(e) => {
+                s.insert(e.name.clone());
+                for v in &e.variants {
+                    s.insert(v.name.clone());
+                }
+            }
+            Decl::TypeAlias(a) => {
+                s.insert(a.name.clone());
+            }
+            Decl::Fn(f) => {
+                s.insert(f.name.clone());
+            }
+            Decl::Import { .. } | Decl::Const(_) => {}
+        }
+    }
+    s
+}
+
 /// File-level tables every scope can see: predeclared names, builtin package
 /// prefixes, imports, and every top-level declaration (fns, consts, structs,
 /// enums + their variants, type aliases) plus type-parameter names on
@@ -445,6 +619,47 @@ fn collect_file_tables(file: &hy_syntax::File) -> HashSet<String> {
             }
             Decl::Fn(f) => {
                 s.insert(f.name.clone());
+            }
+        }
+    }
+    s
+}
+
+fn collect_file_local_decls(file: &hy_syntax::File) -> HashSet<String> {
+    let mut s = HashSet::new();
+    for d in &file.decls {
+        match d {
+            Decl::Import { .. } => {}
+            Decl::Const(c) => {
+                s.insert(c.name.clone());
+            }
+            Decl::Struct(st) => {
+                s.insert(st.name.clone());
+            }
+            Decl::Enum(e) => {
+                s.insert(e.name.clone());
+                for v in &e.variants {
+                    s.insert(v.name.clone());
+                }
+            }
+            Decl::TypeAlias(a) => {
+                s.insert(a.name.clone());
+            }
+            Decl::Fn(f) => {
+                s.insert(f.name.clone());
+            }
+        }
+    }
+    s
+}
+
+fn collect_uncurated_imports(file: &hy_syntax::File) -> HashSet<String> {
+    let mut s = HashSet::new();
+    for d in &file.decls {
+        if let Decl::Import { path, .. } = d {
+            if !crate::foreign::is_curated_import(path) {
+                let root = path.rsplit('/').next().unwrap_or(path.as_str());
+                s.insert(root.to_string());
             }
         }
     }
@@ -497,7 +712,7 @@ fn decl_signature_types<'a>(d: &'a Decl) -> Vec<&'a TypeExpr> {
                 out.push(t);
             }
         }
-        Decl::Struct(_) => {}
+        Decl::Struct(_) | Decl::Fn(_) => {}
         Decl::Enum(e) => {
             for v in &e.variants {
                 if let Some(t) = &v.payload {
@@ -506,29 +721,45 @@ fn decl_signature_types<'a>(d: &'a Decl) -> Vec<&'a TypeExpr> {
             }
         }
         Decl::TypeAlias(a) => out.push(&a.ty),
-        Decl::Fn(f) => {
-            if let Some(r) = &f.receiver {
-                out.push(&r.ty);
-            }
-            for p in &f.params {
-                out.push(&p.ty);
-            }
-            for r in &f.results {
-                out.push(&r.ty);
-            }
-        }
         Decl::Import { .. } => {}
     }
     out
 }
 
 impl Checker<'_> {
-    /// File-level half of HYB-E1001: const initializers and every expression
-    /// that hides inside a declaration's types (array lengths). Called once
-    /// from `check_file` after the tables are built. Function BODIES are not
-    /// scanned here — `check_fn_undefined_names` owns those (per-fn scope).
+    /// File-level half of HYB-E1001: M5 curated import allowlist, const
+    /// initializers, and every expression that hides inside a declaration's
+    /// types (array lengths). Called once from `check_file` after the tables
+    /// are built. Function BODIES are not scanned here —
+    /// `check_fn_undefined_names` owns those (per-fn scope).
     pub(crate) fn check_file_undefined_names(&mut self) {
+        for d in &self.file.decls {
+            if let Decl::Import { path, span } = d {
+                if !crate::foreign::is_curated_import(path) {
+                    self.diags.push(
+                        hy_diag::Diagnostic::error(
+                            "HYB-E1001",
+                            self.path.to_string(),
+                            *span,
+                            format!(
+                                "import {:?} is outside the M5 curated package allowlist \
+                                 (allowlist: {}) (HYB-E1001)",
+                                path,
+                                crate::foreign::CURATED_ALLOWLIST_DISPLAY
+                            ),
+                        )
+                        .with_notes(vec![
+                            "SPEC M5: MVP Hybrid imports a curated allowlist of Go packages and pinned Rust crates; anything outside the allowlist is a compile error naming the allowlist, not a silent link failure"
+                                .to_string(),
+                        ]),
+                    );
+                }
+            }
+        }
         let mut allowed = collect_file_tables(self.file);
+        let file_decls = collect_file_decl_names(self.file);
+        let mut local_decls = collect_file_local_decls(self.file);
+        let uncurated_imports = collect_uncurated_imports(self.file);
         let consts: Vec<(&Expr, Option<&TypeExpr>)> = self
             .file
             .decls
@@ -547,6 +778,15 @@ impl Checker<'_> {
                 _ => None,
             })
             .collect();
+        let fns: Vec<&FnDecl> = self
+            .file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Fn(f) => Some(f),
+                _ => None,
+            })
+            .collect();
         let types: Vec<&TypeExpr> = self
             .file
             .decls
@@ -560,7 +800,10 @@ impl Checker<'_> {
             let mut scan = Scan {
                 path,
                 packages,
+                file_decls: &file_decls,
                 allowed: &mut allowed,
+                local_decls: &mut local_decls,
+                uncurated_imports: &uncurated_imports,
                 diags,
                 mode: Mode::Check,
             };
@@ -576,13 +819,18 @@ impl Checker<'_> {
         }
         for st_decl in structs {
             let mut struct_allowed = allowed.clone();
+            let mut struct_locals = local_decls.clone();
             for tp in &st_decl.type_params {
                 struct_allowed.insert(tp.name.clone());
+                struct_locals.insert(tp.name.clone());
             }
             let mut scan = Scan {
                 path,
                 packages,
+                file_decls: &file_decls,
                 allowed: &mut struct_allowed,
+                local_decls: &mut struct_locals,
+                uncurated_imports: &uncurated_imports,
                 diags,
                 mode: Mode::Check,
             };
@@ -590,21 +838,54 @@ impl Checker<'_> {
                 scan.run_type(&f.ty);
             }
         }
+        for f_decl in fns {
+            let mut fn_allowed = allowed.clone();
+            let mut fn_locals = local_decls.clone();
+            seed_fn_scope(f_decl, &mut fn_allowed);
+            seed_fn_scope(f_decl, &mut fn_locals);
+            let mut scan = Scan {
+                path,
+                packages,
+                file_decls: &file_decls,
+                allowed: &mut fn_allowed,
+                local_decls: &mut fn_locals,
+                uncurated_imports: &uncurated_imports,
+                diags,
+                mode: Mode::Check,
+            };
+            if let Some(r) = &f_decl.receiver {
+                scan.run_type(&r.ty);
+            }
+            for p in &f_decl.params {
+                scan.run_type(&p.ty);
+            }
+            for r in &f_decl.results {
+                scan.run_type(&r.ty);
+            }
+        }
     }
 
-    /// Function-body half of HYB-E1001 (issue #228 family A). Two walks over
-    /// the same body: COLLECT records every name the function declares
-    /// anywhere (including closure params/locals), CHECK reports each
-    /// value-position ident and assignment-target root outside that set.
+    /// Function-body half of HYB-E1001 (issue #228 family A + #658 M4/M5).
+    /// Two walks over the same body: COLLECT records every name the function
+    /// declares anywhere (including closure params/locals), CHECK reports each
+    /// value-position ident, assignment-target root, and unresolved curated
+    /// package member.
     pub(crate) fn check_fn_undefined_names(&mut self, f: &FnDecl) {
         let Some(body) = &f.body else { return };
         let mut allowed = collect_file_tables(self.file);
+        let file_decls = collect_file_decl_names(self.file);
+        let mut local_decls = collect_file_local_decls(self.file);
+        let uncurated_imports = collect_uncurated_imports(self.file);
         seed_fn_scope(f, &mut allowed);
+        seed_fn_scope(f, &mut local_decls);
         {
             let mut scan = Scan {
                 path: &self.path,
                 packages: &self.packages,
+                file_decls: &file_decls,
                 allowed: &mut allowed,
+                local_decls: &mut local_decls,
+                uncurated_imports: &uncurated_imports,
                 diags: &mut self.diags,
                 mode: Mode::Collect,
             };
@@ -613,7 +894,10 @@ impl Checker<'_> {
         let mut scan = Scan {
             path: &self.path,
             packages: &self.packages,
+            file_decls: &file_decls,
             allowed: &mut allowed,
+            local_decls: &mut local_decls,
+            uncurated_imports: &uncurated_imports,
             diags: &mut self.diags,
             mode: Mode::Check,
         };

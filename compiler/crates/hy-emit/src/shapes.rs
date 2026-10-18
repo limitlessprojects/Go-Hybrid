@@ -207,15 +207,42 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
             members: &[
                 ("lock", method("Lock", None)),
                 ("unlock", method("Unlock", None)),
+                ("try_lock", method("TryLock", None)),
                 ("rlock", method("RLock", None)),
                 ("runlock", method("RUnlock", None)),
+                ("try_rlock", method("TryRLock", None)),
+            ],
+        },
+    ),
+    (
+        // Scalar sync/atomic struct types recognized as class-2 sendable by
+        // hy-check/src/foreign.rs (SCALAR_ATOMICS).
+        "atomic.bool",
+        TypeShape {
+            members: &[
+                ("load", method("Load", None)),
+                ("store", method("Store", None)),
+                ("swap", method("Swap", None)),
+                ("compare_and_swap", method("CompareAndSwap", None)),
+            ],
+        },
+    ),
+    (
+        "atomic.int32",
+        TypeShape {
+            members: &[
+                ("load", method("Load", None)),
+                ("store", method("Store", None)),
+                ("add", method("Add", None)),
+                ("swap", method("Swap", None)),
+                ("compare_and_swap", method("CompareAndSwap", None)),
             ],
         },
     ),
     (
         // 17: atomic.int64 — Go's atomic.Int64 STRUCT (methods Add/Load/
-        // Store/Swap with pointer receivers; Go auto-addresses value
-        // receivers, so both `var hits atomic.Int64` and `hits *atomic.
+        // Store/Swap/CompareAndSwap with pointer receivers; Go auto-addresses
+        // value receivers, so both `var hits atomic.Int64` and `hits *atomic.
         // Int64` call `hits.Add(1)` identically). hy spells the methods
         // lowercase; the shape table carries the exact Go names.
         "atomic.int64",
@@ -225,6 +252,43 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
                 ("store", method("Store", None)),
                 ("add", method("Add", None)),
                 ("swap", method("Swap", None)),
+                ("compare_and_swap", method("CompareAndSwap", None)),
+            ],
+        },
+    ),
+    (
+        "atomic.uint32",
+        TypeShape {
+            members: &[
+                ("load", method("Load", None)),
+                ("store", method("Store", None)),
+                ("add", method("Add", None)),
+                ("swap", method("Swap", None)),
+                ("compare_and_swap", method("CompareAndSwap", None)),
+            ],
+        },
+    ),
+    (
+        "atomic.uint64",
+        TypeShape {
+            members: &[
+                ("load", method("Load", None)),
+                ("store", method("Store", None)),
+                ("add", method("Add", None)),
+                ("swap", method("Swap", None)),
+                ("compare_and_swap", method("CompareAndSwap", None)),
+            ],
+        },
+    ),
+    (
+        "atomic.uintptr",
+        TypeShape {
+            members: &[
+                ("load", method("Load", None)),
+                ("store", method("Store", None)),
+                ("add", method("Add", None)),
+                ("swap", method("Swap", None)),
+                ("compare_and_swap", method("CompareAndSwap", None)),
             ],
         },
     ),
@@ -479,11 +543,16 @@ pub fn import_path_of(root: &str) -> String {
     match root {
         "http" => "net/http".to_string(),
         "httptest" => "net/http/httptest".to_string(),
+        "url" => "net/url".to_string(),
+        "filepath" => "path/filepath".to_string(),
         "hex" => "encoding/hex".to_string(),
         // 17: the code says `atomic.Int64` — Go's package name for the
         // path is `atomic`, but the PATH is sync/atomic (the naive last-
         // segment import `"atomic"` is not in std).
         "atomic" => "sync/atomic".to_string(),
+        "filepath" => "path/filepath".to_string(),
+        "json" => "encoding/json".to_string(),
+        "url" => "net/url".to_string(),
         "sha3binding" => "hybrid.program/sha3binding".to_string(),
         "jsonbinding" => "hybrid.program/jsonbinding".to_string(),
         "regexbinding" => "hybrid.program/regexbinding".to_string(),
@@ -535,6 +604,8 @@ mod tests {
     fn import_paths_map_net_packages() {
         assert_eq!(import_path_of("http"), "net/http");
         assert_eq!(import_path_of("httptest"), "net/http/httptest");
+        assert_eq!(import_path_of("url"), "net/url");
+        assert_eq!(import_path_of("filepath"), "path/filepath");
         assert_eq!(import_path_of("fmt"), "fmt");
         assert_eq!(import_path_of("strconv"), "strconv");
     }
@@ -581,9 +652,13 @@ pub fn go_primitive_name(name: &str) -> Option<&'static str> {
         "int8" => "int8",
         "int16" => "int16",
         "int32" => "int32",
+        "int64" => "int64",
         "uint8" => "uint8",
         "uint16" => "uint16",
         "uint32" => "uint32",
+        "uint64" => "uint64",
+        "float32" => "float32",
+        "float64" => "float64",
         _ => return None,
     })
 }

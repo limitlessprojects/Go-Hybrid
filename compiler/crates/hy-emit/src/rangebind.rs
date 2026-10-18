@@ -193,12 +193,20 @@ fn stmt_reads(s: &Stmt, target: &str) -> bool {
                         return true;
                     }
                 }
-                ForKind::Range { var, lo, hi, .. } => {
-                    if expr_reads(lo, target) || expr_reads(hi, target) {
+                ForKind::Range {
+                    var,
+                    lo,
+                    hi,
+                    inclusive,
+                } => {
+                    if expr_reads(lo, target) {
                         return true;
                     }
                     if var == target {
-                        return false;
+                        return *inclusive && expr_reads(hi, target);
+                    }
+                    if expr_reads(hi, target) {
+                        return true;
                     }
                 }
                 ForKind::Infinite => {}
@@ -214,13 +222,77 @@ fn stmt_reads(s: &Stmt, target: &str) -> bool {
             if expr_reads(subject, target) {
                 return true;
             }
+            let is_option_match = !arms.is_empty()
+                && !matches!(arms.first().map(|a| &a.pattern), Some(MatchPattern::Wildcard))
+                && arms.iter().all(|a| {
+                    matches!(
+                        &a.pattern,
+                        MatchPattern::Path {
+                            segments,
+                            binding: Some(_),
+                        } if segments == &["some"]
+                    ) || matches!(
+                        &a.pattern,
+                        MatchPattern::Path { segments, .. } if segments == &["none"]
+                    ) || matches!(&a.pattern, MatchPattern::Wildcard)
+                });
+            if is_option_match {
+                let mut some_arms: Vec<(&str, &hy_syntax::MatchArm)> = Vec::new();
+                let mut none_arm: Option<&hy_syntax::MatchArm> = None;
+                let mut wildcard_arm: Option<&hy_syntax::MatchArm> = None;
+                for arm in arms {
+                    match &arm.pattern {
+                        MatchPattern::Path {
+                            segments,
+                            binding: Some(b),
+                        } if segments == &["some"] => {
+                            some_arms.push((b.as_str(), arm));
+                        }
+                        MatchPattern::Path { segments, .. } if segments == &["none"] => {
+                            none_arm = Some(arm);
+                        }
+                        MatchPattern::Wildcard => {
+                            wildcard_arm = Some(arm);
+                        }
+                        _ => {}
+                    }
+                }
+                if some_arms.is_empty() {
+                    return false;
+                }
+                let reachable_len = some_arms
+                    .iter()
+                    .position(|(_, arm)| arm.guard.is_none())
+                    .map(|idx| idx + 1)
+                    .unwrap_or(some_arms.len());
+                let reachable_some_arms = &some_arms[..reachable_len];
+                let has_unguarded_some = reachable_some_arms
+                    .iter()
+                    .any(|(_, arm)| arm.guard.is_none());
+                for (binding, arm) in reachable_some_arms {
+                    if *binding == target {
+                        continue;
+                    }
+                    if arm.guard.as_ref().is_some_and(|g| expr_reads(g, target))
+                        || block_reads(&arm.body, target)
+                    {
+                        return true;
+                    }
+                }
+                if has_unguarded_some {
+                    let else_arm = none_arm.or(wildcard_arm);
+                    return else_arm.is_some_and(|arm| block_reads(&arm.body, target));
+                }
+                return none_arm.is_some_and(|arm| block_reads(&arm.body, target))
+                    || wildcard_arm.is_some_and(|arm| block_reads(&arm.body, target));
+            }
             for arm in arms {
                 if matches!(
                     &arm.pattern,
                     MatchPattern::Path {
+                        segments,
                         binding: Some(b),
-                        ..
-                    } if b == target
+                    } if segments == &["some"] && b == target
                 ) {
                     continue;
                 }

@@ -45,7 +45,8 @@ pub fn width_of(spec_name: &str) -> Option<(u32, bool)> {
 }
 
 /// Integer literal text -> value. Accepts the SPEC-LANGUAGE §LX6 forms:
-/// decimal, `0x`/`0o`/`0b` prefixed, `_` digit separators.
+/// decimal, `0x`/`0o`/`0b` prefixed, legacy leading-zero octal (`0755`), and
+/// `_` digit separators.
 pub fn parse_int(text: &str) -> Option<i128> {
     let t = text.replace('_', "");
     let (neg, t) = match t.strip_prefix('-') {
@@ -58,43 +59,109 @@ pub fn parse_int(text: &str) -> Option<i128> {
         i128::from_str_radix(o, 8).ok()?
     } else if let Some(b) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
         i128::from_str_radix(b, 2).ok()?
+    } else if t.len() > 1 && t.starts_with('0') && t.bytes().all(|c| (b'0'..=b'7').contains(&c)) {
+        i128::from_str_radix(&t, 8).ok()?
     } else {
         t.parse::<i128>().ok()?
     };
-    Some(if neg { -v } else { v })
+    if neg { v.checked_neg() } else { Some(v) }
 }
 
-fn const_int_expr(mut expr: &hy_syntax::Expr) -> Option<i128> {
-    let mut neg = false;
-    loop {
-        match expr {
-            hy_syntax::Expr::Paren { inner, .. } => {
-                expr = inner;
+fn const_int_expr(expr: &hy_syntax::Expr) -> Option<i128> {
+    use hy_syntax::{BinOp, Expr, UnOp};
+    match expr {
+        Expr::Paren { inner, .. } => const_int_expr(inner),
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => const_int_expr(operand)?.checked_neg(),
+        Expr::Lit {
+            kind: LitKind::Int(t),
+            ..
+        } => parse_int(t),
+        Expr::Lit {
+            kind: LitKind::Char(c),
+            ..
+        } => Some(*c as u32 as i128),
+        Expr::Binary { op, lhs, rhs, .. } => {
+            let l = const_int_expr(lhs)?;
+            let r = const_int_expr(rhs)?;
+            match op {
+                BinOp::Add => l.checked_add(r),
+                BinOp::Sub => l.checked_sub(r),
+                BinOp::Mul => l.checked_mul(r),
+                BinOp::Div => {
+                    if r == 0 {
+                        None
+                    } else {
+                        l.checked_div(r)
+                    }
+                }
+                BinOp::Mod => {
+                    if r == 0 {
+                        None
+                    } else {
+                        l.checked_rem(r)
+                    }
+                }
+                BinOp::BitAnd => Some(l & r),
+                BinOp::BitOr => Some(l | r),
+                BinOp::BitXor => Some(l ^ r),
+                BinOp::Shl => {
+                    let shift = u32::try_from(r).ok()?;
+                    if shift >= 127 {
+                        None
+                    } else {
+                        l.checked_shl(shift)
+                    }
+                }
+                BinOp::Shr => {
+                    let shift = u32::try_from(r).ok()?;
+                    if shift >= 127 {
+                        None
+                    } else {
+                        l.checked_shr(shift)
+                    }
+                }
+                _ => None,
             }
-            hy_syntax::Expr::Unary {
-                op: hy_syntax::UnOp::Neg,
-                operand,
-                ..
-            } => {
-                neg = !neg;
-                expr = operand;
-            }
-            hy_syntax::Expr::Lit {
-                kind: LitKind::Int(t),
-                ..
-            } => {
-                let v = parse_int(t)?;
-                return if neg { v.checked_neg() } else { Some(v) };
-            }
-            _ => return None,
         }
+        _ => None,
+    }
+}
+
+fn has_out_of_range_subexpr(expr: &hy_syntax::Expr, bits: u32, signed: bool) -> bool {
+    use hy_syntax::Expr;
+    let Some(v) = const_int_expr(expr) else {
+        return false;
+    };
+    let len = 1i128 << bits;
+    let masked = v & (len - 1);
+    let folded = if signed && (masked >> (bits - 1)) & 1 == 1 {
+        masked - len
+    } else {
+        masked
+    };
+    if v != folded {
+        return true;
+    }
+    match expr {
+        Expr::Paren { inner, .. } | Expr::Unary { operand: inner, .. } => {
+            has_out_of_range_subexpr(inner, bits, signed)
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            has_out_of_range_subexpr(lhs, bits, signed)
+                || has_out_of_range_subexpr(rhs, bits, signed)
+        }
+        _ => false,
     }
 }
 
 /// Fold a constant conversion operand into the target's representation.
 ///
-/// Returns `None` when nothing should change: not an integer literal, an
-/// unknown width, or a value that already fits.
+/// Returns `None` when nothing should change: not an integer constant, an
+/// unknown width, or a value (and all subexpressions) that already fits.
 pub fn fold_constant(operand: &hy_syntax::Expr, spec_name: &str) -> Option<i128> {
     let (bits, signed) = width_of(spec_name)?;
     if bits > 64 {
@@ -110,8 +177,9 @@ pub fn fold_constant(operand: &hy_syntax::Expr, spec_name: &str) -> Option<i128>
         masked
     };
 
-    // Only rewrite what Go would refuse; a fitting value stays verbatim.
-    if v == folded {
+    // Only rewrite what Go would refuse; a fitting value whose sub-operands
+    // also fit in the target width stays verbatim.
+    if v == folded && !has_out_of_range_subexpr(operand, bits, signed) {
         None
     } else {
         Some(folded)

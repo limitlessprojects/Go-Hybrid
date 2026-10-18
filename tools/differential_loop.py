@@ -10,7 +10,8 @@ that contract; THIS harness pins the PIPELINE side:
       the program must survive the FULL pipeline — `hyb build` (parse →
       check → emit → go build, assembling the bridge workspace when the
       program crosses the rust boundary) — and the built binary must run
-      with exit 0. A checker accept that cannot execute is a false
+      with exit 0, and match EXPECTED-OUTPUT when registered. A checker
+      accept that cannot execute is a false
       positive: an emitter bug or a surface gap. (Batch I landed exactly
       this way: the loop exposed seven distinct emission gaps, all fixed.)
 
@@ -47,6 +48,8 @@ VERDICT_RE = re.compile(
 HAZARD_RE = re.compile(
     r"^//\s*RUNTIME-HAZARD:\s*(.+)$", re.M
 )
+OUTPUT_HEADER_RE = re.compile(r"^//[ \t]*EXPECTED-OUTPUT\b[^\r\n]*", re.M)
+OUTPUT_RE = re.compile(r"//[ \t]*EXPECTED-OUTPUT:[ \t]*(.*)")
 
 
 def read_expected(path):
@@ -70,6 +73,26 @@ def read_expected(path):
         raise SystemExit(f"corpus error: {path} has REJECT without a rule id")
     hazards = [h.strip().lower() for h in HAZARD_RE.findall(src)]
     return verdict, (rule or None), hazards
+
+
+def read_expected_output(path, expected):
+    """Read an optional single-line stdout assertion without changing verdicts.
+
+    Annotation padding is trimmed. Output may have one terminal newline
+    (LF or CRLF); other whitespace and extra lines remain significant.
+    """
+    with open(path, encoding="utf-8") as f:
+        headers = OUTPUT_HEADER_RE.findall(f.read())
+    if not headers:
+        return None
+    if len(headers) != 1:
+        raise SystemExit(f"corpus error: {path} has multiple EXPECTED-OUTPUT markers")
+    match = OUTPUT_RE.fullmatch(headers[0])
+    if match is None or not match.group(1).strip():
+        raise SystemExit(f"corpus error: {path} has malformed EXPECTED-OUTPUT marker")
+    if expected is None or expected[0] not in ("ACCEPT", "ACCEPT-MANAGED"):
+        raise SystemExit(f"corpus error: {path} declares EXPECTED-OUTPUT without ACCEPT")
+    return match.group(1).strip()
 
 
 def checker_rejects(bin_path, hy_path, expected_rule):
@@ -112,7 +135,8 @@ def checker_rejects(bin_path, hy_path, expected_rule):
     # Envelope validation (PR #260): a well-formed JSON scalar/list, a
     # non-dict summary, non-list diagnostics, or non-dict diagnostic items
     # used to escape as AttributeError tracebacks; a summary "errors" count
-    # contradicting the diagnostics was silently accepted.
+    # contradicting the diagnostics was silently accepted (#601 extended the
+    # count check to "warnings" too).
     if not isinstance(payload, dict):
         return False, "invalid checker JSON envelope: expected an object"
     summary = payload.get("summary", {})
@@ -121,11 +145,16 @@ def checker_rejects(bin_path, hy_path, expected_rule):
         not isinstance(d, dict) for d in diags
     ):
         return False, "invalid checker JSON envelope: summary/diagnostics"
-    if "errors" in summary:
-        count = summary["errors"]
-        actual = sum(d.get("severity") == "error" for d in diags)
-        if type(count) is not int or count < 0 or count != actual:
-            return False, f"inconsistent summary errors count: {count!r} vs {actual}"
+    # Match the corpus harness's protocol checks (PR #260 + its #601 residual):
+    # a contradictory error OR warning count cannot establish rejection
+    # agreement, even with a matching rule. Older checker fixtures may omit
+    # counts entirely.
+    for field, severity in (("errors", "error"), ("warnings", "warning")):
+        if field in summary:
+            count = summary[field]
+            actual = sum(d.get("severity") == severity for d in diags)
+            if type(count) is not int or count < 0 or count != actual:
+                return False, f"inconsistent summary {field} count: {count!r} vs {actual}"
     if proc.returncode != 1:
         return False, (
             f"checker exit/verdict mismatch: exit {proc.returncode}, "
@@ -177,20 +206,30 @@ def documented_runtime_hazard(stderr, hazards):
     return False
 
 
-def build_and_run(bin_path, hy_path, workdir, hazards=()):
+def build_and_run(bin_path, hy_path, workdir, hazards=(), expected_output=None):
     """Full pipeline: hyb build + run the binary. Returns (ok, detail)."""
-    build = subprocess.run(
-        [bin_path, "build", hy_path],
-        cwd=workdir, capture_output=True, text=True, timeout=300,
-    )
+    # TimeoutExpired is a per-case harness fault like any other build/run
+    # failure (pr-468): report the case, keep the corpus running, and let
+    # the aggregate report carry the failure — never abort the loop.
+    try:
+        build = subprocess.run(
+            [bin_path, "build", hy_path],
+            cwd=workdir, capture_output=True, text=True, timeout=300,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return False, f"build timed out after {exc.timeout}s"
     if build.returncode != 0:
         return False, "build failed: " + (build.stderr or build.stdout).strip()[-300:]
     binary = os.path.join(workdir, "a.out")
     if not os.path.exists(binary):
         return False, "no a.out produced"
-    run = subprocess.run(
-        [binary], cwd=workdir, capture_output=True, text=True, timeout=60
-    )
+    try:
+        run = subprocess.run(
+            [binary], cwd=workdir, capture_output=True, text=True, timeout=60
+        )
+    except subprocess.TimeoutExpired as exc:
+        return False, f"run timed out after {exc.timeout}s"
+    detail = "exit 0"
     if run.returncode != 0:
         # A Go fatal normally exits 2; GOTRACEBACK=crash aborts on Unix.
         # Matching text must not hide a different exit or a killed process.
@@ -198,9 +237,15 @@ def build_and_run(bin_path, hy_path, workdir, hazards=()):
             os.name == "posix" and run.returncode == -signal.SIGABRT
         )
         if go_fatal_exit and documented_runtime_hazard(run.stderr, hazards):
-            return True, "documented RUNTIME-HAZARD fatal (pre-registered)"
-        return False, f"run exit {run.returncode}: {(run.stderr or run.stdout)[-200:]}"
-    return True, "exit 0"
+            detail = "documented RUNTIME-HAZARD fatal (pre-registered)"
+        else:
+            return False, f"run exit {run.returncode}: {(run.stderr or run.stdout)[-200:]}"
+    if expected_output is not None:
+        stdout = run.stdout.replace("\r\n", "\n")
+        if stdout not in (expected_output, expected_output + "\n"):
+            return False, (f"stdout mismatch: expected {expected_output[:200]!r}, "
+                           f"got {run.stdout[:200]!r}")
+    return True, detail
 
 
 def main():
@@ -230,6 +275,7 @@ def main():
 
     for path in files:
         expected = read_expected(path)
+        expected_output = read_expected_output(path, expected)
         if expected is None:
             continue
         name = os.path.basename(path)
@@ -247,7 +293,9 @@ def main():
             accept_total += 1
             workdir = tempfile.mkdtemp(prefix="hydiff-")
             try:
-                ok, detail = build_and_run(bin_path, path, workdir, hazards)
+                ok, detail = build_and_run(
+                    bin_path, path, workdir, hazards, expected_output=expected_output
+                )
             finally:
                 shutil.rmtree(workdir, ignore_errors=True)
             if ok:

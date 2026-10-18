@@ -33,6 +33,7 @@ use hy_syntax::*;
 mod constconv;
 mod rangebind;
 mod shapes;
+mod zeroinit;
 use shapes::{
     import_path_of, lookup_conversion, lookup_rust_crate, lookup_unbound_crate, Conversion,
 };
@@ -52,6 +53,28 @@ const OPTION_PRELUDE: &str = concat!(
     "\n",
     "func some[v any](val v) option[v] {\n",
     "\treturn option[v]{val: val, ok: true}\n",
+    "}\n",
+    "\n",
+    "func (o option[v]) unwrap() v {\n",
+    "\tif !o.ok {\n",
+    "\t\tpanic(\"HY-PANIC/unwrap-none\")\n",
+    "\t}\n",
+    "\treturn o.val\n",
+    "}\n",
+    "\n",
+    "func (o option[v]) or(defaultVal v) v {\n",
+    "\tif !o.ok {\n",
+    "\t\treturn defaultVal\n",
+    "\t}\n",
+    "\treturn o.val\n",
+    "}\n",
+    "\n",
+    "func (o option[v]) is_some() bool {\n",
+    "\treturn o.ok\n",
+    "}\n",
+    "\n",
+    "func (o option[v]) is_none() bool {\n",
+    "\treturn !o.ok\n",
     "}\n",
 );
 
@@ -79,7 +102,7 @@ const SET_PRELUDE: &str = concat!(
     "\tdelete(s.m, v)\n",
     "}\n",
     "\n",
-    "func (s *set[t]) len() int {\n",
+    "func (s set[t]) len() int {\n",
     "\treturn len(s.m)\n",
     "}\n",
 );
@@ -183,6 +206,8 @@ pub enum BindingKind {
     /// Bound to a channel (param type or `make(chan …)`) — single-var
     /// `for v in ch` ranges the VALUE directly; slices/maps need `_, v`.
     Chan,
+    /// Bound to a set (`set[T]`) — `len(s)` / `delete(s, v)` / `for v in s`.
+    Set,
     /// Our own struct / plain value — members emit verbatim.
     Plain,
 }
@@ -217,11 +242,78 @@ const GO_BUILTIN_TYPES: &[&str] = &[
     "complex128",
 ];
 
-/// snake_case → Go exported name (`read_all` → `ReadAll`, `args` → `Args`).
+/// Standard Go initialisms (SPEC M4: `io.eof` → `io.EOF`,
+/// `http.status_ok` → `http.StatusOK`, `time.rfc3339` → `time.RFC3339`,
+/// `strings.to_valid_utf8` → `strings.ToValidUTF8`).
+fn go_initialism(seg: &str) -> Option<&'static str> {
+    Some(match seg {
+        "acl" => "ACL",
+        "api" => "API",
+        "ascii" => "ASCII",
+        "cpu" => "CPU",
+        "crlf" => "CRLF",
+        "css" => "CSS",
+        "dns" => "DNS",
+        "eof" => "EOF",
+        "guid" => "GUID",
+        "html" => "HTML",
+        "http" => "HTTP",
+        "https" => "HTTPS",
+        "id" => "ID",
+        "ip" => "IP",
+        "ipv4" => "IPv4",
+        "ipv6" => "IPv6",
+        "json" => "JSON",
+        "lhs" => "LHS",
+        "ok" => "OK",
+        "qps" => "QPS",
+        "ram" => "RAM",
+        "rfc822" => "RFC822",
+        "rfc822z" => "RFC822Z",
+        "rfc850" => "RFC850",
+        "rfc1123" => "RFC1123",
+        "rfc1123z" => "RFC1123Z",
+        "rfc3339" => "RFC3339",
+        "rhs" => "RHS",
+        "rpc" => "RPC",
+        "sha1" => "SHA1",
+        "sha256" => "SHA256",
+        "sha384" => "SHA384",
+        "sha512" => "SHA512",
+        "sla" => "SLA",
+        "smtp" => "SMTP",
+        "sql" => "SQL",
+        "ssh" => "SSH",
+        "tcp" => "TCP",
+        "tls" => "TLS",
+        "ttl" => "TTL",
+        "udp" => "UDP",
+        "ui" => "UI",
+        "uid" => "UID",
+        "uri" => "URI",
+        "url" => "URL",
+        "utf8" => "UTF8",
+        "utf16" => "UTF16",
+        "utf32" => "UTF32",
+        "uuid" => "UUID",
+        "vm" => "VM",
+        "xml" => "XML",
+        "xmpp" => "XMPP",
+        "xsrf" => "XSRF",
+        "xss" => "XSS",
+        _ => return None,
+    })
+}
+
+/// snake_case → Go exported name (`read_all` → `ReadAll`, `args` → `Args`,
+/// `eof` → `EOF`, `status_ok` → `StatusOK`).
 pub(crate) fn to_go_name(name: &str) -> String {
     name.split('_')
         .filter(|p| !p.is_empty())
         .map(|p| {
+            if let Some(init) = go_initialism(p) {
+                return init.to_string();
+            }
             let mut cs = p.chars();
             match cs.next() {
                 Some(c) => c.to_uppercase().collect::<String>() + cs.as_str(),
@@ -293,6 +385,8 @@ pub(crate) fn special_member(pkg: &str, name: &str) -> Option<MemberSpecial> {
         ("time", "hours") => Some(MemberSpecial::Duration("Hour")),
         // hex.encode → Go's EncodeToString (example 10; M5 allowlist growth).
         ("hex", "encode") => Some(MemberSpecial::Renamed("EncodeToString")),
+        // errors.wrap(err, "ctx") → fmt.Errorf("%s: %w", "ctx", err) (E2 wrap-on-demand)
+        ("errors", "wrap") => Some(MemberSpecial::ErrorsWrap),
         _ => None,
     }
 }
@@ -306,6 +400,8 @@ pub(crate) enum MemberSpecial {
     Duration(&'static str),
     /// A member Go spells differently: `hex.encode(b)` → `hex.EncodeToString(b)`.
     Renamed(&'static str),
+    /// `errors.wrap(err, msg)` → `fmt.Errorf("%s: %w", msg, err)` (E2 / Spike 5)
+    ErrorsWrap,
 }
 
 // ---------------------------------------------------------------------------
@@ -359,13 +455,17 @@ pub struct Emitter {
     /// Map-slot loans (O8): `x := &m[k]` cannot be a Go map-index address,
     /// so it lowers to a COPY read now + store-back at the loan's block end
     /// (O9's honesty: Go-heap reads are copies). Frames are block-scoped:
-    /// a loan flushes at the end of the block that declared it.
+    /// a loan flushes at the end of the block that declared it. Each entry
+    /// is (loan variable, its store-back statement): `m[k] = n`, or
+    /// `m[k] = *n` when `n` is a pointer-typed binding.
     loan_frames: Vec<Vec<(String, String)>>,
-    /// #546: outer slot loans handed down into the branches of an `if`
-    /// whose branches spawn/send using the loan's base. Every branch body
-    /// of that `if` starts with these loans in its frame (and a missing
-    /// `else` gets a synthetic one), so the store-back runs on each path
-    /// before any move instead of once after the whole `if`.
+    /// #546: outer slot loans handed down into the branches/blocks of a
+    /// compound statement (`if`, `match`, `select`, `block`, `managed`, `for`)
+    /// whose body contains a concurrency boundary or invalidating write on
+    /// the loan's base map. Every branch body starts with these loans in its
+    /// frame (and a missing `else` / match fallthrough gets a synthetic
+    /// store-back), so the store-back runs on each path before any move or
+    /// delete instead of once after the whole compound statement.
     branch_inherit: Option<Vec<(String, String)>>,
     /// E11 handler contract: inside a closure that converts to a
     /// propagation-carrying target (`http.handler`), `?` fires
@@ -419,6 +519,10 @@ pub struct Emitter {
     local_vars: BTreeSet<String>,
     /// Functions whose first result is a pointer type.
     ptr_returning_fns: BTreeSet<String>,
+    /// N5 (zeroinit.rs): non-generic user struct → its declared fields,
+    /// and user type alias → its target, for zero values that allocate.
+    n5_structs: BTreeMap<String, Vec<FieldDecl>>,
+    n5_aliases: BTreeMap<String, TypeExpr>,
 }
 
 pub(crate) struct ScopeSnapshot {
@@ -463,6 +567,8 @@ impl Emitter {
             local_vars: BTreeSet::new(),
             ptr_returning_fns: BTreeSet::new(),
             explicit_imports: BTreeMap::new(),
+            n5_structs: BTreeMap::new(),
+            n5_aliases: BTreeMap::new(),
         }
     }
 
@@ -552,6 +658,24 @@ impl Emitter {
                         .map(|f| (f.name.clone(), base_ty_name(&f.ty).unwrap_or_default()))
                         .collect::<Vec<_>>(),
                 )),
+                _ => None,
+            })
+            .collect();
+        self.n5_structs = file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Struct(s) if s.type_params.is_empty() => {
+                    Some((s.name.clone(), s.fields.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        self.n5_aliases = file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::TypeAlias(t) => Some((t.name.clone(), t.ty.clone())),
                 _ => None,
             })
             .collect();
@@ -662,14 +786,24 @@ impl Emitter {
         let mut out = String::from("package ");
         out.push_str(&self.package_name);
         out.push('\n');
-        if !self.imports.is_empty() {
+        let active_imports: Vec<&String> = self
+            .imports
+            .iter()
+            .filter(|root| {
+                // An explicit `import "errors"` whose only Hybrid call was
+                // `errors.wrap(err, msg)` lowers to `fmt.Errorf(...)` and
+                // leaves no `errors.` reference in the emitted Go body (#657).
+                !(root.as_str() == "errors" && !self.body.contains("errors."))
+            })
+            .collect();
+        if !active_imports.is_empty() {
             out.push_str("\nimport (\n");
             // Roots map to their real Go import paths (http → net/http,
             // SPEC M5's curated allowlist); binding packages live under the
             // configured prefix (hybrid.program for program builds, the
             // consumer's package path in package mode). The CODE keeps the
             // root spelling — Go's package name for those imports.
-            for root in &self.imports {
+            for root in active_imports {
                 let path = if let Some(p) = self.explicit_imports.get(root) {
                     p.clone()
                 } else if shapes::RUST_CRATES
@@ -686,7 +820,10 @@ impl Emitter {
         }
         let body = &self.body;
         let needs_option = body.contains("option[") || body.contains("some(");
-        let needs_set = body.contains("set[");
+        let needs_set = body.contains("set[")
+            || body.contains(".remove(")
+            || body.contains(".contains(")
+            || body.contains(".insert(");
         let needs_pop = body.contains("hy_pop(");
         if needs_option || needs_set || needs_pop {
             out.push('\n');
@@ -715,7 +852,7 @@ impl Emitter {
         // 18's seed_urls) lower to `var`: same identifier surface, the
         // immutability contract is the checker's business, not Go's.
         let composite = matches!(
-            &c.value,
+            Self::peel_parens(&c.value),
             Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
         );
         let kw = if composite { "var" } else { "const" };
@@ -731,17 +868,17 @@ impl Emitter {
 
     fn emit_struct(&mut self, s: &StructDecl) -> Result<(), EmitError> {
         if !s.type_params.is_empty() {
-            // Generic struct (example-07 surface) — batch B lands the full
-            // generics story; emit the common shape now, it is legal Go.
-            let params = s
-                .type_params
-                .iter()
-                .map(|p| match &p.constraint {
-                    Some(c) => format!("{} {}", p.name, self.constraint_text(c)),
-                    None => p.name.clone(),
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
+            // Generic struct (example-07 surface): Go requires a constraint on
+            // every type parameter (`type box[t any] struct {`). Without a
+            // constraint, `type box[t] struct {` is parsed by Go as an array
+            // type `[t]struct{}` (`undefined: t`, issue #722).
+            let param_names: BTreeSet<String> =
+                s.type_params.iter().map(|p| p.name.clone()).collect();
+            let mut comparable_params = BTreeSet::new();
+            for f in &s.fields {
+                Self::collect_comparable_in_ty(&f.ty, &param_names, &mut comparable_params);
+            }
+            let params = self.format_type_params(&s.type_params, &comparable_params);
             self.push(&format!("type {}[{}] struct {{", s.name, params));
         } else {
             self.push(&format!("type {} struct {{", s.name));
@@ -765,6 +902,274 @@ impl Emitter {
     fn constraint_text(&self, c: &str) -> String {
         // `comparable` / `any` are Go's spellings already.
         c.to_string()
+    }
+
+    /// Format a type parameter list for Go emission, supplying a constraint
+    /// (`comparable` when used as a map key or set element, inherited from a
+    /// grouped trailing constraint `[a, b comparable]`, or `any` by default)
+    /// whenever the Hybrid source omits one (#722).
+    fn format_type_params(
+        &self,
+        type_params: &[TypeParam],
+        comparable_params: &BTreeSet<String>,
+    ) -> String {
+        type_params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let constraint = match &p.constraint {
+                    Some(c) => self.constraint_text(c),
+                    None => {
+                        if comparable_params.contains(&p.name) {
+                            "comparable".to_string()
+                        } else if let Some(inherited) = type_params[i + 1..]
+                            .iter()
+                            .find_map(|next| next.constraint.as_deref())
+                        {
+                            self.constraint_text(inherited)
+                        } else {
+                            "any".to_string()
+                        }
+                    }
+                };
+                format!("{} {}", p.name, constraint)
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn collect_comparable_in_ty(
+        ty: &TypeExpr,
+        param_names: &BTreeSet<String>,
+        out: &mut BTreeSet<String>,
+    ) {
+        match ty {
+            TypeExpr::Map { key, value, .. } => {
+                if let TypeExpr::Named { name, .. } = key.as_ref() {
+                    if param_names.contains(name) {
+                        out.insert(name.clone());
+                    }
+                }
+                Self::collect_comparable_in_ty(key, param_names, out);
+                Self::collect_comparable_in_ty(value, param_names, out);
+            }
+            TypeExpr::Named { name, .. } => {
+                if let Some(inner) = name.strip_prefix("set[").and_then(|s| s.strip_suffix(']')) {
+                    let elem = inner.trim();
+                    if param_names.contains(elem) {
+                        out.insert(elem.to_string());
+                    }
+                }
+            }
+            TypeExpr::Pointer { to, .. } => Self::collect_comparable_in_ty(to, param_names, out),
+            TypeExpr::Slice { elem, .. }
+            | TypeExpr::Array { elem, .. }
+            | TypeExpr::Chan { elem, .. }
+            | TypeExpr::Option { elem, .. } => {
+                Self::collect_comparable_in_ty(elem, param_names, out);
+            }
+            TypeExpr::Fn {
+                params, results, ..
+            } => {
+                for p in params {
+                    Self::collect_comparable_in_ty(&p.ty, param_names, out);
+                }
+                for r in results {
+                    Self::collect_comparable_in_ty(r, param_names, out);
+                }
+            }
+        }
+    }
+
+    fn collect_comparable_in_block(
+        b: &Block,
+        param_names: &BTreeSet<String>,
+        out: &mut BTreeSet<String>,
+    ) {
+        for s in &b.stmts {
+            Self::collect_comparable_in_stmt(s, param_names, out);
+        }
+    }
+
+    fn collect_comparable_in_stmt(
+        s: &Stmt,
+        param_names: &BTreeSet<String>,
+        out: &mut BTreeSet<String>,
+    ) {
+        match s {
+            Stmt::Local(l) => {
+                if let Some(ty) = &l.ty {
+                    Self::collect_comparable_in_ty(ty, param_names, out);
+                }
+                for v in &l.values {
+                    Self::collect_comparable_in_expr(v, param_names, out);
+                }
+            }
+            Stmt::Assign { values, .. } | Stmt::Return { values, .. } => {
+                for v in values {
+                    Self::collect_comparable_in_expr(v, param_names, out);
+                }
+            }
+            Stmt::Expr { expr, .. } | Stmt::Defer { call: expr, .. } => {
+                Self::collect_comparable_in_expr(expr, param_names, out);
+            }
+            Stmt::Send { chan, value, .. } => {
+                Self::collect_comparable_in_expr(chan, param_names, out);
+                Self::collect_comparable_in_expr(value, param_names, out);
+            }
+            Stmt::If {
+                init,
+                cond,
+                then,
+                otherwise,
+                ..
+            } => {
+                if let Some(i) = init {
+                    Self::collect_comparable_in_stmt(i, param_names, out);
+                }
+                Self::collect_comparable_in_expr(cond, param_names, out);
+                Self::collect_comparable_in_block(then, param_names, out);
+                if let Some(o) = otherwise {
+                    Self::collect_comparable_in_stmt(o, param_names, out);
+                }
+            }
+            Stmt::For { kind, body, .. } => {
+                match kind {
+                    ForKind::While { cond } => {
+                        Self::collect_comparable_in_expr(cond, param_names, out);
+                    }
+                    ForKind::Range { lo, hi, .. } => {
+                        Self::collect_comparable_in_expr(lo, param_names, out);
+                        Self::collect_comparable_in_expr(hi, param_names, out);
+                    }
+                    ForKind::Iterate { expr, .. } => {
+                        Self::collect_comparable_in_expr(expr, param_names, out);
+                    }
+                    ForKind::Infinite => {}
+                }
+                Self::collect_comparable_in_block(body, param_names, out);
+            }
+            Stmt::Block { block, .. } | Stmt::Managed { body: block, .. } => {
+                Self::collect_comparable_in_block(block, param_names, out);
+            }
+            Stmt::Task { callee, args, .. } => {
+                Self::collect_comparable_in_expr(callee, param_names, out);
+                for a in args {
+                    Self::collect_comparable_in_expr(&a.value, param_names, out);
+                }
+            }
+            Stmt::Match { subject, arms, .. } => {
+                Self::collect_comparable_in_expr(subject, param_names, out);
+                for a in arms {
+                    if let Some(g) = &a.guard {
+                        Self::collect_comparable_in_expr(g, param_names, out);
+                    }
+                    Self::collect_comparable_in_block(&a.body, param_names, out);
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                for a in arms {
+                    Self::collect_comparable_in_block(&a.body, param_names, out);
+                }
+            }
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        }
+    }
+
+    fn collect_comparable_in_expr(
+        e: &Expr,
+        param_names: &BTreeSet<String>,
+        out: &mut BTreeSet<String>,
+    ) {
+        match e {
+            Expr::MapLit { key, value, entries, .. } => {
+                if let TypeExpr::Named { name, .. } = key.as_ref() {
+                    if param_names.contains(name) {
+                        out.insert(name.clone());
+                    }
+                }
+                Self::collect_comparable_in_ty(key, param_names, out);
+                Self::collect_comparable_in_ty(value, param_names, out);
+                for (k, v) in entries {
+                    Self::collect_comparable_in_expr(k, param_names, out);
+                    Self::collect_comparable_in_expr(v, param_names, out);
+                }
+            }
+            Expr::StructLit { ty, fields, .. } => {
+                if let Some(t) = ty {
+                    Self::collect_comparable_in_ty(t, param_names, out);
+                }
+                for f in fields {
+                    Self::collect_comparable_in_expr(&f.value, param_names, out);
+                }
+            }
+            Expr::SliceLit { elem, items, .. } => {
+                if let Some(t) = elem {
+                    Self::collect_comparable_in_ty(t, param_names, out);
+                }
+                for i in items {
+                    Self::collect_comparable_in_expr(i, param_names, out);
+                }
+            }
+            Expr::Call { callee, args, .. } => {
+                Self::collect_comparable_in_expr(callee, param_names, out);
+                for a in args {
+                    Self::collect_comparable_in_expr(&a.value, param_names, out);
+                }
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                Self::collect_comparable_in_expr(lhs, param_names, out);
+                Self::collect_comparable_in_expr(rhs, param_names, out);
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Paren { inner: operand, .. } => {
+                Self::collect_comparable_in_expr(operand, param_names, out);
+            }
+            Expr::Receive { chan, .. } => {
+                Self::collect_comparable_in_expr(chan, param_names, out);
+            }
+            Expr::Index { base, index, .. } => {
+                Self::collect_comparable_in_expr(base, param_names, out);
+                Self::collect_comparable_in_expr(index, param_names, out);
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                Self::collect_comparable_in_expr(base, param_names, out);
+                if let Some(l) = lo {
+                    Self::collect_comparable_in_expr(l, param_names, out);
+                }
+                if let Some(h) = hi {
+                    Self::collect_comparable_in_expr(h, param_names, out);
+                }
+            }
+            Expr::Field { base, .. } => {
+                Self::collect_comparable_in_expr(base, param_names, out);
+            }
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => {
+                for p in params {
+                    Self::collect_comparable_in_ty(&p.ty, param_names, out);
+                }
+                for r in results {
+                    Self::collect_comparable_in_ty(&r.ty, param_names, out);
+                }
+                Self::collect_comparable_in_block(body, param_names, out);
+            }
+            Expr::Interp { parts, .. } => {
+                for p in parts {
+                    if let InterpPart::Expr(x) = p {
+                        Self::collect_comparable_in_expr(x, param_names, out);
+                    }
+                }
+            }
+            Expr::Ident { .. } | Expr::Lit { .. } => {}
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -883,15 +1288,19 @@ impl Emitter {
             if f.type_params.is_empty() {
                 self.push_raw(&format!("func {}(", go_name));
             } else {
-                let params = f
-                    .type_params
-                    .iter()
-                    .map(|p| match &p.constraint {
-                        Some(c) => format!("{} {}", p.name, c),
-                        None => p.name.clone(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let param_names: BTreeSet<String> =
+                    f.type_params.iter().map(|p| p.name.clone()).collect();
+                let mut comparable_params = BTreeSet::new();
+                for p in &f.params {
+                    Self::collect_comparable_in_ty(&p.ty, &param_names, &mut comparable_params);
+                }
+                for r in &f.results {
+                    Self::collect_comparable_in_ty(&r.ty, &param_names, &mut comparable_params);
+                }
+                if let Some(body) = &f.body {
+                    Self::collect_comparable_in_block(body, &param_names, &mut comparable_params);
+                }
+                let params = self.format_type_params(&f.type_params, &comparable_params);
                 self.push_raw(&format!("func {}[{}]({}", go_name, params, ""));
             }
         }
@@ -1077,10 +1486,12 @@ impl Emitter {
         if base.is_empty() {
             return;
         }
+        let struct_base = base.split('[').next().unwrap_or(&base);
         if shapes::SHAPES.iter().any(|(k, _)| *k == base.as_str()) {
             self.var_ty.insert(name.to_string(), (base, ptr));
-        } else if self.struct_fields.contains_key(&base) {
-            self.var_struct.insert(name.to_string(), base);
+        } else if self.struct_fields.contains_key(struct_base) {
+            self.var_struct
+                .insert(name.to_string(), struct_base.to_string());
         }
     }
 
@@ -1096,6 +1507,9 @@ impl Emitter {
             TypeExpr::Pointer { to, .. } => return self.binding_kind_of_ty(to),
             _ => return None,
         };
+        if name.starts_with("set[") || name == "set" {
+            return Some(BindingKind::Set);
+        }
         if name.is_empty() || !name.contains('.') {
             return None;
         }
@@ -1252,7 +1666,7 @@ impl Emitter {
                     let n = self.expr_text_static(e);
                     format!("[{}]{}", n, self.type_text(elem))
                 }
-                None => format!("[]{}", self.type_text(elem)), // [...]T → slice at emission
+                None => format!("[...]{}", self.type_text(elem)),
             },
             TypeExpr::Map { key, value, .. } => {
                 format!("map[{}]{}", self.type_text(key), self.type_text(value))
@@ -1295,7 +1709,48 @@ impl Emitter {
     /// One type NAME in Go spelling. Dotted = foreign (`http.request` →
     /// `http.Request`, import registered). Undotted = ours or a Go builtin —
     /// verbatim (never CamelCased: `node_id` and `int` both stay).
-    fn go_type_name(&mut self, name: &str) -> String {
+    /// Also translates folded type arguments (`box[u8]` → `box[uint8]`,
+    /// `box[http.request]` → `box[http.Request]`, issue #722).
+    pub(crate) fn go_type_name(&mut self, name: &str) -> String {
+        let name = name.trim();
+        if let Some(rest) = name.strip_prefix('*') {
+            return format!("*{}", self.go_type_name(rest));
+        }
+        if let Some(rest) = name.strip_prefix("[]") {
+            return format!("[]{}", self.go_type_name(rest));
+        }
+        if let Some(rest) = name.strip_prefix("[...]") {
+            return format!("[...]{}", self.go_type_name(rest));
+        }
+        if let Some(rest) = name.strip_prefix("<-chan ") {
+            return format!("<-chan {}", self.go_type_name(rest));
+        }
+        if let Some(rest) = name.strip_prefix("chan<- ") {
+            return format!("chan<- {}", self.go_type_name(rest));
+        }
+        if let Some(rest) = name.strip_prefix("chan ") {
+            return format!("chan {}", self.go_type_name(rest));
+        }
+        if let Some(rest) = name.strip_prefix("map[") {
+            if let Some((key_s, val_s)) = Self::split_bracket_prefix(rest) {
+                let k = self.go_type_name(key_s);
+                let v = self.go_type_name(val_s);
+                return format!("map[{}]{}", k, v);
+            }
+        }
+        if let Some(open) = name.find('[') {
+            if open > 0 && name.ends_with(']') {
+                let head = &name[..open];
+                let inner = &name[open + 1..name.len() - 1];
+                let go_head = self.go_type_name(head);
+                let go_args = Self::split_top_level_type_args(inner)
+                    .into_iter()
+                    .map(|a| self.go_type_name(a))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return format!("{}[{}]", go_head, go_args);
+            }
+        }
         if let Some((root, rest)) = name.split_once('.') {
             // Rust-owned types map to their binding package's handle type
             // (serde_json.value → jsonbinding.Value) — NOT the naive
@@ -1321,6 +1776,60 @@ impl Emitter {
         }
     }
 
+    /// Translate a bracketed type-argument suffix like `"[string, u8]"` into
+    /// Go type spellings `"[string, uint8]"`.
+    pub(crate) fn translate_type_args_suffix(&mut self, suffix: &str) -> String {
+        if let Some(inner) = suffix.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            let args = Self::split_top_level_type_args(inner)
+                .into_iter()
+                .map(|a| self.go_type_name(a))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{}]", args)
+        } else {
+            suffix.to_string()
+        }
+    }
+
+    fn split_bracket_prefix(s: &str) -> Option<(&str, &str)> {
+        let mut depth = 1usize;
+        for (i, ch) in s.char_indices() {
+            match ch {
+                '[' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((&s[..i], &s[i + 1..]));
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    pub(crate) fn split_top_level_type_args(s: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        let mut depth = 0usize;
+        let mut start = 0usize;
+        for (i, ch) in s.char_indices() {
+            match ch {
+                '[' | '(' => depth += 1,
+                ']' | ')' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    out.push(s[start..i].trim());
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        let tail = s[start..].trim();
+        if !tail.is_empty() {
+            out.push(tail);
+        }
+        out
+    }
+
     // -----------------------------------------------------------------------
     // Small helpers
     // -----------------------------------------------------------------------
@@ -1330,7 +1839,7 @@ impl Emitter {
     /// allocation.
     pub fn zero_value(&mut self, t: &TypeExpr) -> String {
         match t {
-            TypeExpr::Named { name, .. } if !name.contains('.') => {
+            TypeExpr::Named { name, .. } if !name.contains('.') && !name.contains('[') => {
                 if self.struct_fields.contains_key(name.as_str()) {
                     return format!("*new({})", name);
                 }

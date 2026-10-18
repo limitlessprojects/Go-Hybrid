@@ -32,6 +32,9 @@ impl<'a> Checker<'a> {
     pub(crate) fn check_stmt_recv_operands(&mut self, st: &FnState, stmt: &Stmt) {
         match stmt {
             Stmt::Local(l) => {
+                if let Some(ty) = &l.ty {
+                    self.check_type_recv_operands(st, ty);
+                }
                 for v in &l.values {
                     self.check_expr_recv_operands(st, v);
                 }
@@ -63,6 +66,7 @@ impl<'a> Checker<'a> {
                     let mut tmp = st.clone();
                     tmp.scope_push();
                     let immutable = l.kind == hy_syntax::LocalKind::Const;
+                    let is_let = l.kind == hy_syntax::LocalKind::Let;
                     if l.values.is_empty() {
                         let shape = l
                             .ty
@@ -77,17 +81,48 @@ impl<'a> Checker<'a> {
                                 l.ty.clone(),
                                 immutable,
                                 false,
+                                is_let,
                             );
                         }
                     } else if l.names.len() == l.values.len() {
-                        for (name, val) in l.names.iter().zip(l.values.iter()) {
-                            let inferred = self.shape_of_expr(&tmp, val);
-                            let shape = match (&l.ty, inferred) {
-                                (Some(t), TypeShape::Unknown) => self.shape_of_type(t),
-                                (_, s) => s,
-                            };
-                            let ty = l.ty.clone().or_else(|| self.ty_of_expr(&tmp, val));
-                            self.define_binding(&mut tmp, name, shape, ty, immutable, false);
+                        // Parallel multi-name init (PR-665 composed with
+                        // main's T22 is_let): RHS expressions are evaluated
+                        // against the PRE-statement scope `st` (Go parallel
+                        // assignment semantics), not the progressively
+                        // defined `tmp`, so `if x, y := 1, x; ...` sees the
+                        // outer `x` before the new `x` is bound.
+                        let bindings: Vec<_> = l
+                            .names
+                            .iter()
+                            .zip(l.values.iter())
+                            .map(|(name, val)| {
+                                let inferred = self.shape_of_expr(st, val);
+                                let shape = match (&l.ty, inferred) {
+                                    (Some(t), TypeShape::Unknown) => self.shape_of_type(t),
+                                    (_, s) => s,
+                                };
+                                let ty = l.ty.clone().or_else(|| self.ty_of_expr(st, val));
+                                (name, shape, ty)
+                            })
+                            .collect();
+                        for (name, shape, ty) in bindings {
+                            self.define_binding(&mut tmp, name, shape, ty, immutable, false, is_let);
+                        }
+                    } else if l.values.len() == 1 && l.names.len() > 1 {
+                        let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
+                        let tys = self.multi_value_tys(st, &l.values[0], l.names.len());
+                        for ((name, shape), ty) in
+                            l.names.iter().zip(shapes.into_iter()).zip(tys.into_iter())
+                        {
+                            self.define_binding(
+                                &mut tmp,
+                                name,
+                                shape,
+                                l.ty.clone().or(ty),
+                                immutable,
+                                false,
+                                is_let,
+                            );
                         }
                     }
                     self.check_expr_recv_operands(&tmp, cond);
@@ -119,7 +154,27 @@ impl<'a> Checker<'a> {
                 self.check_expr_recv_operands(st, subject);
                 for arm in arms {
                     if let Some(g) = &arm.guard {
-                        self.check_expr_recv_operands(st, g);
+                        let mut arm_st = st.clone();
+                        arm_st.scope_push();
+                        if let hy_syntax::MatchPattern::Path {
+                            segments,
+                            binding: Some(b),
+                        } = &arm.pattern
+                        {
+                            if segments == &["some"] {
+                                self.bind_match_arm(&mut arm_st, b, subject, false);
+                                if let Some(ty) = self.ty_of_expr(st, subject) {
+                                    if let hy_syntax::TypeExpr::Option { elem, .. } =
+                                        self.resolve_type_alias(&ty)
+                                    {
+                                        if let Some(binding) = arm_st.env_lookup_mut(b) {
+                                            binding.ty = Some(*elem);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        self.check_expr_recv_operands(&arm_st, g);
                     }
                 }
             }
@@ -147,6 +202,36 @@ impl<'a> Checker<'a> {
             | Stmt::Continue { .. }
             | Stmt::Block { .. }
             | Stmt::Managed { .. } => {}
+        }
+    }
+
+    fn check_type_recv_operands(&mut self, st: &FnState, ty: &hy_syntax::TypeExpr) {
+        match ty {
+            hy_syntax::TypeExpr::Named { .. } => {}
+            hy_syntax::TypeExpr::Pointer { to, .. } => self.check_type_recv_operands(st, to),
+            hy_syntax::TypeExpr::Slice { elem, .. }
+            | hy_syntax::TypeExpr::Chan { elem, .. }
+            | hy_syntax::TypeExpr::Option { elem, .. } => self.check_type_recv_operands(st, elem),
+            hy_syntax::TypeExpr::Array { len, elem, .. } => {
+                if let Some(len) = len {
+                    self.check_expr_recv_operands(st, len);
+                }
+                self.check_type_recv_operands(st, elem);
+            }
+            hy_syntax::TypeExpr::Map { key, value, .. } => {
+                self.check_type_recv_operands(st, key);
+                self.check_type_recv_operands(st, value);
+            }
+            hy_syntax::TypeExpr::Fn {
+                params, results, ..
+            } => {
+                for p in params {
+                    self.check_type_recv_operands(st, &p.ty);
+                }
+                for r in results {
+                    self.check_type_recv_operands(st, r);
+                }
+            }
         }
     }
 
@@ -228,6 +313,25 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn recv_chan_type_expr(&self, st: &FnState, expr: &Expr) -> Option<hy_syntax::TypeExpr> {
+        if let Some(ty) = self.ty_of_expr(st, expr) {
+            return Some(ty);
+        }
+        match expr {
+            Expr::Paren { inner, .. }
+            | Expr::Move { operand: inner, .. }
+            | Expr::Try { operand: inner, .. } => self.recv_chan_type_expr(st, inner),
+            Expr::Receive { chan, .. } => {
+                let outer_ty = self.recv_chan_type_expr(st, chan)?;
+                match self.resolve_type_alias(&outer_ty) {
+                    hy_syntax::TypeExpr::Chan { elem, .. } => Some(*elem),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Classify a receive's SOURCE — the mirror of `check_send_target`
     /// (issue #409): a receive is only well-typed when the channel
     /// expression resolves to a channel shape. A concrete non-channel is
@@ -238,7 +342,7 @@ impl<'a> Checker<'a> {
     pub(crate) fn check_recv_operand(&mut self, st: &FnState, chan: &Expr, span: Span) -> bool {
         match self.shape_of_expr(st, chan) {
             TypeShape::Chan(_) => {
-                if let Some(ty) = self.ty_of_expr(st, chan) {
+                if let Some(ty) = self.recv_chan_type_expr(st, chan) {
                     let resolved = self.resolve_type_alias(&ty);
                     if matches!(
                         resolved,
