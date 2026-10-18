@@ -105,6 +105,7 @@ pub fn check_file(file: &File) -> CheckResult {
     build_tables(&mut ck);
     ck.check_struct_decls(); // A6: borrow-handle / pointer struct fields
     ck.check_file_const_zero_divisors(); // Issue #149/#508: constant zero divisor in file consts
+    ck.check_import_allowlist(); // SPEC M5 (issue #658 gap 2): curated import allowlist
 
     // Issue #228 family A: value-position names nothing declares must be
     // HYB-E1001 here, not `undefined: X` at go build. Const initializers and
@@ -4764,7 +4765,7 @@ mod tests {
         );
 
         let view = check(
-            "import \"serde_json\"\n\
+            "import \"rust/serde_json\"\n\
              struct holder { v serde_json.value }\n\
              fn main() {\n\
                doc := serde_json.parse(\"[1, 2]\")\n\

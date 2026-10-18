@@ -7468,7 +7468,7 @@ mod tests {
     #[test]
     fn parallel_assign_field_borrow_rejects_a6() {
         let r = check(
-            "import \"serde_json\"\n\
+            "import \"rust/serde_json\"\n\
              struct holder {\n\
                v serde_json.value\n\
                ok bool\n\

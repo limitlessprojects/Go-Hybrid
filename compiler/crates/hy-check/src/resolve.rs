@@ -8,12 +8,14 @@
 //! a closure body reading a name nothing declares, a `[N]T` array length
 //! naming a constant that does not exist — issue #228 family A).
 //!
-//! Dotted first segments are deliberately EXEMPT (see the Field arm): a
-//! direct ident base under a `.` is the package-prefix surface, and the
-//! emitter's contract lets unknown roots emit verbatim and collect an import
-//! (`hex.encode` in spike-10 is exactly that — a root the checker's own
-//! foreign table never listed). The checker cannot tell a real root from a
-//! typo, so those stay with the go toolchain.
+//! Dotted first segments must name a curated package root (SPEC M5,
+//! issue #658 gap 2 / HYB-E1004): the package-prefix surface
+//! (`fmt.println`, spike-10's `hex.encode`) passes only when the root is
+//! on the curated allowlist or resolves to a local/file binding; an
+//! unknown root is a clear compile error naming the allowlist, not a
+//! silent link failure. Explicit `import` lines get the same treatment
+//! (`check_import_allowlist`). Members of curated roots stay open-world
+//! for now (gaps 1/3 of #658 are separate families).
 //!
 //! The pass is deliberately OVER-APPROXIMATING about scope: the allowed set
 //! for a function is every name that is declared ANYWHERE in that function
@@ -304,20 +306,57 @@ impl<'a> Scan<'a> {
                     self.run_expr(h);
                 }
             }
-            // A DIRECT ident base of a dotted access is exempt: that shape is
-            // the package-prefix surface (`fmt.println`, spike-10's `hex.encode`,
-            // any std root the emitter's usage-driven import collection maps),
-            // and the emitter's contract is "unknown roots still work — they
-            // emit verbatim and get an import" (hy-emit is_package_root). The
-            // checker cannot tell a real root from a typo'd one, so a dotted
-            // first segment stays with the go toolchain; everything bare
-            // (callees, plain reads, assignment targets, array lengths) is
-            // checked here.
+            // A DIRECT ident base of a dotted access is the package-prefix
+            // surface (`fmt.println`, spike-10's `hex.encode`). SPEC M5:
+            // the curated allowlist is exhaustive — a root that is neither
+            // a local/file binding nor on the curated list is a clear
+            // compile error naming the allowlist (HYB-E1004), not a
+            // silent link failure (issue #658 gap 2). Curated roots keep
+            // the open-world behaviour for MEMBERS (gap 1/3 are separate
+            // families); everything bare stays with E1001.
             Expr::Field { base, .. } => {
-                let bare = matches!(
-                    crate::model::unwrap_parens(base),
-                    Expr::Ident { .. }
-                );
+                let bare = match crate::model::unwrap_parens(base) {
+                    Expr::Ident { name, span } => {
+                        if self.mode == Mode::Check
+                            && !self.allowed.contains(name)
+                            && !self.packages.contains(name)
+                            && !crate::foreign::BUILTIN_PACKAGES.contains(&name.as_str())
+                            && !crate::foreign::is_curated_root(name)
+                        {
+                            let msg = format!(
+                                "`{}` is not on the curated import allowlist (M5) — an unknown \
+                                 package root would emit an import that fails `go build` \
+                                 (HYB-E1004)",
+                                name
+                            );
+                            self.diags.push(
+                                hy_diag::Diagnostic::error(
+                                    "HYB-E1004",
+                                    self.path.to_string(),
+                                    *span,
+                                    msg,
+                                )
+                                .with_notes(vec![
+                                    format!(
+                                        "the curated Go surface is: {}",
+                                        crate::foreign::CURATED_IMPORT_PATHS.join(", ")
+                                    ),
+                                    "the allowlist grows by Decision Log entries (SPEC M5) — \
+                                     if a package is genuinely needed, request it rather than \
+                                     importing it silently"
+                                        .to_string(),
+                                    format!(
+                                        "if `{}` is a local value (not a package), its fields \
+                                         are checked where it is declared",
+                                        name
+                                    ),
+                                ]),
+                            );
+                        }
+                        true
+                    }
+                    _ => false,
+                };
                 if !bare {
                     self.run_expr(base);
                 }
@@ -523,6 +562,49 @@ fn decl_signature_types<'a>(d: &'a Decl) -> Vec<&'a TypeExpr> {
 }
 
 impl Checker<'_> {
+    /// SPEC M5 import allowlist (issue #658 gap 2): an explicit
+    /// `import` whose path is not on the curated list — and is not a
+    /// `rust/` bridge path (the emitter enforces the pinned binding set
+    /// for those against the module manifest) — is a clear compile
+    /// error naming the allowlist, not a silent link failure.
+    pub(crate) fn check_import_allowlist(&mut self) {
+        let imports: Vec<(String, Span)> = self
+            .file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Import { path, span } => Some((path.clone(), *span)),
+                _ => None,
+            })
+            .collect();
+        for (path, span) in imports {
+            if crate::foreign::is_curated_import_path(&path) {
+                continue;
+            }
+            let msg = format!(
+                "import `{}` is outside the curated Go allowlist (M5) — it would emit an \
+                 import that fails `go build` (HYB-E1004)",
+                path
+            );
+            self.diags.push(
+                hy_diag::Diagnostic::error("HYB-E1004", self.path.clone(), span, msg).with_notes(
+                    vec![
+                        format!(
+                            "the curated import allowlist is: {}",
+                            crate::foreign::CURATED_IMPORT_PATHS.join(", ")
+                        ),
+                        "plus any `rust/<crate>` path whose crate is pinned in hybrid.mod \
+                         (the emitter rejects unpinned crates separately)"
+                            .to_string(),
+                        "SPEC M5: the allowlist grows by Decision Log entries — request a \
+                         package instead of importing it silently"
+                            .to_string(),
+                    ],
+                ),
+            );
+        }
+    }
+
     /// File-level half of HYB-E1001: const initializers and every expression
     /// that hides inside a declaration's types (array lengths). Called once
     /// from `check_file` after the tables are built. Function BODIES are not

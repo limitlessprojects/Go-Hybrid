@@ -118,6 +118,21 @@
       "rule": "BUILDABLE"
     },
     {
+      "code": "HYB-E1004",
+      "name": "import-outside-allowlist",
+      "category": "resolve",
+      "severity": "error",
+      "title": "package root or import path is not on the curated allowlist",
+      "summary": "SPEC M5 pins a curated allowlist of Go packages. An `import` line (or a dotted-name package root) outside that list would emit an import the go tool cannot resolve, failing `go build` after an accepted check, so an accepted Hybrid program would emit unbuildable Go (issue #658). The allowlist grows by Decision Log entries. `rust/<crate>` imports pass the shape check because the emitter separately enforces the pinned binding set against hybrid.mod (SPEC M6).",
+      "fixits": [
+        "import a package from the curated list instead",
+        "if the package is genuinely needed, request a Decision Log entry to extend the allowlist",
+        "check the spelling of the package root"
+      ],
+      "example": "import \"math\"\nfn main() { fmt.println(math.sqrt(2.0)) }   // reject: HYB-E1004 - `math` is outside the curated allowlist",
+      "rule": "BUILDABLE"
+    },
+    {
       "code": "HYB-E2001",
       "name": "defer-non-call",
       "category": "type",

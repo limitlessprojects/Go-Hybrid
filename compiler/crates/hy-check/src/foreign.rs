@@ -37,6 +37,94 @@ pub(crate) const BUILTIN_PACKAGES: &[&str] = &[
     "errors",
 ];
 
+/// M5 — the curated IMPORT-PATH allowlist (SPEC-LANGUAGE.md M5 + D4 +
+/// the M6 rust-bridge spellings + the `import_path_of` targets the
+/// emitter maps). SPEC M5: "Anything outside the allowlist is a clear
+/// compile error naming the allowlist, not a silent link failure"
+/// (issue #658 gap 2). The list grows by Decision Log entries.
+///
+/// Both Hybrid short spellings (`http`, `atomic`, `hex`) and the real
+/// Go paths they map to (`net/http`, `sync/atomic`, `encoding/hex`)
+/// are listed: the emitter accepts either form on an `import` line
+/// (explicit paths win over `import_path_of`).
+pub(crate) const CURATED_IMPORT_PATHS: &[&str] = &[
+    // M5 pinned by the ten examples
+    "fmt",
+    "os",
+    "io",
+    "time",
+    "sort",
+    "strconv",
+    "net/http",
+    "httptest",
+    "net/http/httptest",
+    // D4 (example 03 / corpus atomics pin)
+    "sync",
+    "sync/atomic",
+    // extended by the curated surface the emitter/checker already back
+    "strings",
+    "errors",
+    "net",
+    "bufio",
+    "path",
+    "filepath",
+    "hex",
+    "encoding/hex",
+    "sha3",
+    "regex",
+    "atomic",
+    "http",
+    // M6 rust bridge — the emitter separately enforces the pinned
+    // binding set (`rust crate import ... is not in the pinned binding
+    // set`), so every `rust/` path passes the shape check here.
+    "rust/serde_json",
+    "rust/flate2",
+    "rust/regex",
+    "rust/sha3",
+];
+
+/// The package ROOTS (first segment of a dotted name) the curated
+/// import surface provides — `net/http` -> `http`, `sync/atomic` ->
+/// `atomic`, `encoding/hex` -> `hex`; rust crates keep their crate
+/// name. A dotted-name base that resolves to no local/file binding
+/// and is not one of these roots is a HYB-E1004 allowlist error
+/// (issue #658 gap 2), not an open-world pass-through.
+pub(crate) const CURATED_PACKAGE_ROOTS: &[&str] = &[
+    "fmt",
+    "os",
+    "io",
+    "time",
+    "sort",
+    "strconv",
+    "errors",
+    "strings",
+    "sync",
+    "net",
+    "bufio",
+    "path",
+    "filepath",
+    "hex",
+    "sha3",
+    "regex",
+    "atomic",
+    "http",
+    "httptest",
+    "serde_json",
+    "flate2",
+];
+
+/// Is this `import` path on the M5 curated allowlist? `rust/` paths
+/// pass the shape check (the emitter enforces the pinned binding set
+/// against the module manifest); everything else must be listed.
+pub(crate) fn is_curated_import_path(path: &str) -> bool {
+    path.starts_with("rust/") || CURATED_IMPORT_PATHS.contains(&path)
+}
+
+/// Is this dotted-name root on the curated package-root list?
+pub(crate) fn is_curated_root(root: &str) -> bool {
+    CURATED_PACKAGE_ROOTS.contains(&root)
+}
+
 /// How a call uses its receiver / arguments (O7 handle modes + O13 consume).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CallMode {
