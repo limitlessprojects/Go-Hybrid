@@ -433,7 +433,24 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
 
     match stmt {
         Stmt::Local(l) => {
+            if let Some(t) = &l.ty {
+                let shape = ck.shape_of_type(t);
+                for (name, value) in l.names.iter().zip(l.values.iter()) {
+                    if Checker::is_nil_literal(value)
+                        && !matches!(shape, TypeShape::Unknown)
+                        && !Checker::is_nilable_shape(&shape)
+                    {
+                        ck.emit_nil_type_error_text(
+                            &shape,
+                            t.render(),
+                            value.span(),
+                            &format!("the declared type of `{}`", name),
+                        );
+                    }
+                }
+            }
             for v in &l.values {
+                ck.check_composite_nils(st, v);
                 ck.mark_move_in_value(st, v, format!("the move-define `{}`", v.render()));
             }
             sync_nested_moves(st, nested);
@@ -490,6 +507,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                             }
                         }
                         ck.apply_closure_mutations(st, name, centry, true);
+                        ck.record_move_const_and_a3_loans(st, name, value, 0);
                         continue;
                     }
                     let reads_self = ck.value_reads_storage_of(st, value, name);
@@ -587,9 +605,10 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     // so local aliases of non-owned captured bindings inherit origin
                     // and cannot bypass O5.1 / O5.4 move restrictions.
                     ck.record_may_share(st, name, value);
+                    ck.record_move_const_and_a3_loans(st, name, value, 0);
                     ck.record_alias(st, name, value);
                     ck.apply_closure_mutations(st, name, centry, true);
-                    if let Some(origin) = shadowed_origin {
+                    if let Some(origin) = shadowed_origin.or(moved_non_owned) {
                         if let Some(b) = st.env_lookup_mut(name) {
                             if b.non_owned_origin.is_none() {
                                 b.non_owned_origin = Some(origin);
@@ -600,6 +619,10 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 ck.record_local_borrow_aliases(st, l);
             } else {
                 // multi-name define from one value (`v, ok := m[k]`, `a, b := f()`)
+                let moved_non_owned = l
+                    .values
+                    .first()
+                    .and_then(|v| ck.moved_non_owned_origin_in_expr(st, v));
                 let (shapes, tys) = match l.values.first() {
                     Some(v) => (
                         ck.multi_value_shapes(st, v, l.names.len()),
@@ -610,9 +633,112 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         vec![None; l.names.len()],
                     ),
                 };
-                for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
-                    mark_nested_overwritten(st, name, nested);
-                    ck.define_binding(st, name, shape, ty, immutable, managed);
+                let val_opt = l.values.first();
+                let resolved: Vec<(
+                    String,
+                    TypeShape,
+                    Option<hy_syntax::TypeExpr>,
+                    bool,
+                    Option<String>,
+                    Option<String>,
+                    Vec<String>,
+                )> = l
+                    .names
+                    .iter()
+                    .zip(shapes)
+                    .zip(tys)
+                    .map(|((name, shape), ty)| {
+                        let reads_self = val_opt
+                            .map(|v| ck.value_reads_storage_of(st, v, name))
+                            .unwrap_or(false);
+                        let shadowed_origin = if ck.shape_may_share(&shape) && reads_self {
+                            ck.non_owned_origin_of(st, name).map(|(o, via_share)| {
+                                if via_share && !o.starts_with("a may-share peer of ") {
+                                    format!("a may-share peer of {}", o)
+                                } else {
+                                    o
+                                }
+                            })
+                        } else {
+                            None
+                        };
+                        let outer_exists = ck.lookup_binding(st, name).is_some();
+                        let prior_alias = if reads_self {
+                            st.aliases.get(name).cloned().or_else(|| {
+                                if ck.shape_may_share(&shape)
+                                    && outer_exists
+                                    && !st.scopes.is_empty()
+                                {
+                                    Some(name.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                        } else {
+                            None
+                        };
+                        let prior_shares: Vec<String> = if reads_self {
+                            st.may_share
+                                .get(name)
+                                .map(|s| s.iter().cloned().collect())
+                                .unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
+                        (
+                            name.clone(),
+                            shape,
+                            ty,
+                            reads_self,
+                            shadowed_origin,
+                            prior_alias,
+                            prior_shares,
+                        )
+                    })
+                    .collect();
+                for (
+                    name,
+                    shape,
+                    ty,
+                    reads_self,
+                    shadowed_origin,
+                    prior_alias,
+                    prior_shares,
+                ) in resolved
+                {
+                    let carries = ck.shape_may_share(&shape);
+                    mark_nested_overwritten(st, &name, nested);
+                    ck.define_binding(st, &name, shape.clone(), ty, immutable, managed);
+                    if reads_self {
+                        if let Some(pa) = prior_alias {
+                            st.aliases.insert(name.clone(), pa);
+                        }
+                        for peer in prior_shares {
+                            st.share_edge(&name, &peer);
+                        }
+                    }
+                    if let Some(v) = val_opt {
+                        ck.record_multi_value_share_and_alias(st, &name, &shape, v);
+                    }
+                    if let Some(origin) = shadowed_origin {
+                        if let Some(b) = st.env_lookup_mut(&name) {
+                            if b.non_owned_origin.is_none() {
+                                b.non_owned_origin = Some(origin);
+                            }
+                        }
+                    }
+                    if carries {
+                        if let Some(origin) = &moved_non_owned {
+                            if let Some(b) = st.env_lookup_mut(&name) {
+                                if b.non_owned_origin.is_none() {
+                                    b.non_owned_origin = Some(origin.clone());
+                                }
+                            }
+                        }
+                        if let Some(v) = val_opt {
+                            ck.record_move_const_and_a3_loans(st, &name, v, 0);
+                        }
+                    }
                 }
                 if let Some(v) = l.values.first() {
                     ck.link_multi_value_return_aliases(st, v, &l.names);
@@ -744,8 +870,14 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 pop_scope_and_sync(st, nested);
             }
         }
-        Stmt::Managed { body, .. } => {
-            ck.managed_blocks += 1; // O6.3 parity with the flat walk
+        Stmt::Managed {
+            reason,
+            category,
+            tickets,
+            body,
+            span,
+        } => {
+            ck.audit_managed_block(reason, category, tickets, *span);
             st.scope_push();
             check_body_boundaries(ck, st, body, true, nested);
             pop_scope_and_sync(st, nested);
@@ -951,11 +1083,44 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             collect_stmt_direct_fnlits(stmt, st, nested);
             ck.process_closure_assign(st, targets, *op, values);
             sync_nested_moves(st, nested);
+            if targets.len() == values.len() {
+                for (t, v) in targets.iter().zip(values.iter()) {
+                    if matches!(t.kind, hy_syntax::PlaceKind::Field { .. }) {
+                        let is_borrow = crate::model::as_addr_of(v).is_some()
+                            || matches!(ck.shape_of_expr(st, v), TypeShape::BorrowHandle(_));
+                        if is_borrow {
+                            ck.emit_a6_field_borrow_error(t);
+                        }
+                    }
+                }
+            } else if values.len() == 1 && targets.len() > 1 {
+                let shapes = ck.multi_value_shapes(st, &values[0], targets.len());
+                for (t, shape) in targets.iter().zip(shapes.iter()) {
+                    if matches!(t.kind, hy_syntax::PlaceKind::Field { .. })
+                        && matches!(shape, TypeShape::BorrowHandle(_))
+                    {
+                        ck.emit_a6_field_borrow_error(t);
+                    }
+                }
+            }
+            for (t, v) in targets.iter().zip(values.iter()) {
+                if Checker::is_nil_literal(v) {
+                    if let Some(shape) = ck.place_shape(st, t) {
+                        if !matches!(shape, TypeShape::Unknown)
+                            && !Checker::is_nilable_shape(&shape)
+                        {
+                            ck.emit_nil_type_error(
+                                &shape,
+                                v.span(),
+                                &format!("the assignment target `{}`", t.render()),
+                            );
+                        }
+                    }
+                }
+                ck.check_composite_nils(st, v);
+            }
         }
         Stmt::Return { values, span } => {
-            for v in values {
-                ck.mark_move_in_value(st, v, format!("the move-return `{}`", v.render()));
-            }
             ck.process_return(st, values, *span);
             sync_nested_moves(st, nested);
             collect_stmt_direct_fnlits(stmt, st, nested);

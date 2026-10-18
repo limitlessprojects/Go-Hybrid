@@ -109,13 +109,28 @@ def checker_rejects(bin_path, hy_path, expected_rule):
         payload = json.loads(out)
     except json.JSONDecodeError:
         return False, "no/invalid checker JSON"
+    # Envelope validation (PR #260): a well-formed JSON scalar/list, a
+    # non-dict summary, non-list diagnostics, or non-dict diagnostic items
+    # used to escape as AttributeError tracebacks; a summary "errors" count
+    # contradicting the diagnostics was silently accepted.
+    if not isinstance(payload, dict):
+        return False, "invalid checker JSON envelope: expected an object"
     summary = payload.get("summary", {})
+    diags = payload.get("diagnostics", [])
+    if not isinstance(summary, dict) or not isinstance(diags, list) or any(
+        not isinstance(d, dict) for d in diags
+    ):
+        return False, "invalid checker JSON envelope: summary/diagnostics"
+    if "errors" in summary:
+        count = summary["errors"]
+        actual = sum(d.get("severity") == "error" for d in diags)
+        if type(count) is not int or count < 0 or count != actual:
+            return False, f"inconsistent summary errors count: {count!r} vs {actual}"
     if proc.returncode != 1:
         return False, (
             f"checker exit/verdict mismatch: exit {proc.returncode}, "
             f"verdict={summary.get('verdict')}"
         )
-    diags = payload.get("diagnostics", [])
     errors = [d for d in diags if d.get("severity") == "error"]
     first_rule = errors[0].get("tier0_rule") if errors else None
     return (
@@ -132,12 +147,32 @@ def documented_runtime_hazard(stderr, hazards):
     Inspect the complete stderr before display truncation: Go stack traces
     may exceed the report's tail limit. Generic panic/fatal output is not
     evidence that the specific pre-registered hazard occurred.
+
+    Go >= 1.26 (swiss-map runtime) reports the same torn concurrent map
+    write under several first-line wordings: the classic
+    "fatal error: concurrent map writes", a self-attributing corruption
+    fatal ("small map with no empty slot (concurrent map writes?)"), and
+    an unattributed "fatal error: unexpected fault address ..." raised
+    from the slot the torn write corrupted. All three carry the Go fatal
+    exit code and are the same pre-registered hazard class, so the
+    matcher (a) recognizes the registered message as a substring of a
+    `fatal error:` first line, and (b) treats the fault-address fatal as
+    the concurrent-map class only when a concurrent-map hazard was
+    registered. A `panic:` line still matches by exact wording only — a
+    panic that merely mentions the hazard phrase is not evidence.
     """
     first_line = next((line.strip().lower() for line in stderr.splitlines()
                        if line.strip()), "")
     for hazard in hazards:
         message = hazard.split("(", 1)[0].strip().lower()
-        if message and first_line in (f"fatal error: {message}", f"panic: {message}"):
+        if not message:
+            continue
+        if first_line in (f"fatal error: {message}", f"panic: {message}"):
+            return True
+        if first_line.startswith("fatal error:") and message in first_line:
+            return True
+        if message.startswith("concurrent map") and first_line.startswith(
+                "fatal error: unexpected fault address"):
             return True
     return False
 

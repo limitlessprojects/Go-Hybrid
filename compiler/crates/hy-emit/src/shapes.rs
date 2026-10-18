@@ -569,6 +569,21 @@ pub fn go_primitive_name(name: &str) -> Option<&'static str> {
         // floats
         "f32" => "float32",
         "f64" => "float64",
+        // Go spellings are the same Hybrid types (the checker's
+        // fixed_width_int_range treats `int8` == `i8`, `byte` == `u8`),
+        // so a conversion call written the Go way must take the SAME
+        // conversion branch: identity-mapped it reaches the SPEC X4
+        // constant fold instead of the generic call path, where
+        // `int8(300)` used to pass through and die as
+        // `constant 300 overflows int8` (issue #228 family C).
+        "byte" => "byte",
+        "rune" => "rune",
+        "int8" => "int8",
+        "int16" => "int16",
+        "int32" => "int32",
+        "uint8" => "uint8",
+        "uint16" => "uint16",
+        "uint32" => "uint32",
         _ => return None,
     })
 }

@@ -63,6 +63,28 @@ class RuntimeHazardTests(unittest.TestCase):
         self.assert_result(self.run_case(
             stderr="fatal error: concurrent map writes\n" + "stack frame\n" * 100), 0)
 
+    def test_swiss_map_attributed_corruption_fatal_is_allowed(self):
+        # Go >= 1.26 swiss-map runtime self-attributes the torn write:
+        # "small map with no empty slot (concurrent map writes?)".
+        self.assert_result(self.run_case(
+            stderr="fatal error: small map with no empty slot (concurrent map writes?)\n"), 0)
+
+    def test_fault_address_fatal_is_concurrent_map_class(self):
+        # The torn write can corrupt a slot pointer; the runtime then raises
+        # an unattributed fault-address fatal from the same race.
+        self.assert_result(self.run_case(
+            stderr="fatal error: unexpected fault address 0x0\n"
+                   "[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x1]\n"), 0)
+
+    def test_fault_address_fatal_is_not_other_hazards(self):
+        self.assert_result(self.run_case(
+            stderr="fatal error: unexpected fault address 0x0\n",
+            hazard="all goroutines are asleep - deadlock!"), 1)
+
+    def test_panic_mentioning_hazard_phrase_is_not_evidence(self):
+        self.assert_result(self.run_case(
+            stderr="panic: unexpected nil pointer mentioning concurrent map writes\n"), 1)
+
     def test_unrelated_panic_fails(self):
         self.assert_result(self.run_case(stderr="panic: runtime error: index out of range\n"), 1)
 

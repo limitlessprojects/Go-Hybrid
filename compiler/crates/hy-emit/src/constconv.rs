@@ -26,16 +26,20 @@
 use hy_syntax::LitKind;
 
 /// `(bits, signed)` for a SPEC fixed-width primitive conversion target.
+/// Go spellings are the same widths (the checker's fixed_width_int_range
+/// treats `int8` == `i8`, `byte` == `u8`, `rune` == `i32`), so they fold
+/// identically — `int8(300)` must truncate like `i8(300)` instead of
+/// passing through and dying as `constant 300 overflows int8` (issue #228).
 pub fn width_of(spec_name: &str) -> Option<(u32, bool)> {
     Some(match spec_name {
-        "u8" => (8, false),
-        "u16" => (16, false),
-        "u32" => (32, false),
-        "u64" => (64, false),
-        "i8" => (8, true),
-        "i16" => (16, true),
-        "i32" => (32, true),
-        "i64" => (64, true),
+        "u8" | "byte" | "uint8" => (8, false),
+        "u16" | "uint16" => (16, false),
+        "u32" | "uint32" => (32, false),
+        "u64" | "uint64" => (64, false),
+        "i8" | "int8" => (8, true),
+        "i16" | "int16" => (16, true),
+        "i32" | "int32" | "rune" => (32, true),
+        "i64" | "int64" => (64, true),
         _ => return None,
     })
 }
@@ -169,5 +173,31 @@ mod tests {
     fn float_targets_are_not_width_folded() {
         assert_eq!(width_of("f32"), None);
         assert_eq!(width_of("f64"), None);
+    }
+
+    #[test]
+    fn go_spelling_conversion_folds_like_spec_spelling() {
+        // issue #228 C1: `int8(300)` is the same Hybrid type as `i8(300)`
+        // (the checker's fixed_width_int_range equates them) and must take
+        // the same SPEC X4 fold instead of emitting `int8(300)` verbatim
+        // (go: `constant 300 overflows int8`).
+        let operand = operand_of("fn main() { b := int8(300) }");
+        assert_eq!(fold_constant(&operand, "int8"), Some(44));
+        let operand = operand_of("fn main() { b := byte(300) }");
+        assert_eq!(fold_constant(&operand, "byte"), Some(44));
+        let operand = operand_of("fn main() { b := rune(99999999999) }");
+        assert_eq!(fold_constant(&operand, "rune"), Some(1215752191));
+    }
+
+    #[test]
+    fn negated_and_parenthesized_operands_fold() {
+        // issue #228 C3: Go rejects `uint8(-1)` exactly like `uint8(300)`,
+        // so the sign has to reach the fold — `-1` truncates to 255.
+        let operand = operand_of("fn main() { b := uint8(-1) }");
+        assert_eq!(fold_constant(&operand, "uint8"), Some(255));
+        let operand = operand_of("fn main() { b := i8(-300) }");
+        assert_eq!(fold_constant(&operand, "i8"), Some(-44));
+        let operand = operand_of("fn main() { b := int8((300)) }");
+        assert_eq!(fold_constant(&operand, "int8"), Some(44));
     }
 }

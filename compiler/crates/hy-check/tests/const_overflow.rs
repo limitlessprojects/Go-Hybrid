@@ -88,6 +88,29 @@ fn main() {
 }
 ";
 
+const OVERFLOW_CHAR_INT8: &str = "\
+fn main() {
+    var n int8 = 'ÿ'
+    fmt.println(\"{n}\")
+}
+";
+
+const OVERFLOW_UNICODE_CHAR_INT8: &str = "\
+fn main() {
+    var n int8 = '世'
+    fmt.println(\"{n}\")
+}
+";
+
+const FITS_CHAR_INT8: &str = "\
+fn main() {
+    var n int8 = 'A'
+    var r rune = 'ÿ'
+    var u rune = '世'
+    fmt.println(\"{n} {r} {u}\")
+}
+";
+
 #[test]
 fn int8_constant_300_is_rejected() {
     let r = check(OVERFLOW_INT8);
@@ -1057,4 +1080,256 @@ fn worker(ch chan int8) {
         error_codes(&r)
     );
     assert_eq!(r.verdict, Verdict::Accept);
+}
+#[test]
+fn char_constant_overflow_is_rejected() {
+    let r = check(OVERFLOW_CHAR_INT8);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for 'ÿ' into int8, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn unicode_char_constant_overflow_is_rejected() {
+    let r = check(OVERFLOW_UNICODE_CHAR_INT8);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for '世' into int8, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn char_constant_fits_accepts() {
+    let r = check(FITS_CHAR_INT8);
+    assert!(
+        error_codes(&r).is_empty(),
+        "'A' into int8, 'ÿ' into rune, and '世' into rune must fit, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+// ---------------------------------------------------------------------------
+// PR #297 (issue #228 family D): default-int overflow at untyped var decls
+// and >i128 literals failing open. Integrated on current main: parse_int_lit
+// keeps main's octal/underscore handling (#518) and gains ConstInt overflow
+// mapping; untyped decls check against target_int_range() via
+// check_default_int_overflow (const-alias aware, matching #539's invariant).
+// ---------------------------------------------------------------------------
+
+const OVERFLOW_UNPARSED_I128_UNTYPED: &str = "\
+fn main() {
+    x := 999999999999999999999999999999999999999999999
+    fmt.println(\"{x}\")
+}
+";
+
+const OVERFLOW_I64_MAX_PLUS_ONE_UNTYPED: &str = "\
+fn main() {
+    x := 9223372036854775808
+    fmt.println(\"{x}\")
+}
+";
+
+const OVERFLOW_I64_MIN_MINUS_ONE_UNTYPED: &str = "\
+fn main() {
+    x := -9223372036854775809
+    fmt.println(\"{x}\")
+}
+";
+
+const OVERFLOW_VAR_UNTYPED: &str = "\
+fn main() {
+    var x = 9223372036854775808
+    fmt.println(\"{x}\")
+}
+";
+
+const OVERFLOW_LET_UNTYPED: &str = "\
+fn main() {
+    let x = 9223372036854775808
+    fmt.println(\"{x}\")
+}
+";
+
+const OVERFLOW_UNPARSED_I128_TYPED: &str = "\
+fn main() {
+    var n int8 = 999999999999999999999999999999999999999999999
+    fmt.println(\"{n}\")
+}
+";
+
+const CONTROLS_DEFAULT_INT_AND_CONST: &str = "\
+const file_big = 9223372036854775808
+
+fn main() {
+    x := 9223372036854775807
+    y := -9223372036854775808
+    var u u64 = 18446744073709551615
+    const local_big = 9223372036854775808
+    const huge_const = 999999999999999999999999999999999999999999999
+    fmt.println(\"{x} {y} {u} {local_big} {huge_const} {file_big}\")
+}
+";
+
+#[test]
+fn untyped_literal_past_i128_is_rejected() {
+    let r = check(OVERFLOW_UNPARSED_I128_UNTYPED);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for huge untyped int literal, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn untyped_literal_i64_max_plus_one_is_rejected() {
+    let r = check(OVERFLOW_I64_MAX_PLUS_ONE_UNTYPED);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for x := 9223372036854775808, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn untyped_literal_i64_min_minus_one_is_rejected() {
+    let r = check(OVERFLOW_I64_MIN_MINUS_ONE_UNTYPED);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for x := -9223372036854775809, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn untyped_var_overflow_is_rejected() {
+    let r = check(OVERFLOW_VAR_UNTYPED);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for var x = 9223372036854775808, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn untyped_let_overflow_is_rejected() {
+    let r = check(OVERFLOW_LET_UNTYPED);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for let x = 9223372036854775808, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn typed_literal_past_i128_is_rejected() {
+    let r = check(OVERFLOW_UNPARSED_I128_TYPED);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for huge literal with declared type, got {:?}",
+        cs
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn controls_default_int_and_untyped_consts_accept() {
+    let r = check(CONTROLS_DEFAULT_INT_AND_CONST);
+    assert!(
+        error_codes(&r).is_empty(),
+        "controls must accept cleanly, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+#[test]
+fn untyped_constant_expression_overflow_is_rejected() {
+    let r = check(
+        "fn main() {\n    x := 9223372036854775807 + 1\n    fmt.println(\"{x}\")\n}\n",
+    );
+    assert!(
+        error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+        "default-int constant expressions must retain the main-branch ConstFold check"
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn landed_constfold_regressions_remain_rejected_after_default_int_port() {
+    for src in [
+        "fn main() {\n    var n int8 = 100 + 100\n    fmt.println(\"{n}\")\n}\n",
+        "fn main() {\n    var x int = 2.5\n    fmt.println(\"{x}\")\n}\n",
+    ] {
+        let r = check(src);
+        assert!(
+            error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+            "landed #224 overflow/truncation behavior must survive #297 integration: {:?}",
+            error_codes(&r)
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+    }
+}
+
+#[test]
+fn folded_default_int_shift_overflows_are_rejected() {
+    for src in [
+        "fn main() {\n    x := 1 << 63\n    fmt.println(\"{x}\")\n}\n",
+        "fn main() {\n    x := 1 << 128\n    fmt.println(\"{x}\")\n}\n",
+    ] {
+        let r = check(src);
+        assert!(
+            error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+            "folded default-int shift overflow must be HYB-E6002: {:?}",
+            error_codes(&r)
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+    }
+}
+
+#[test]
+fn nondecimal_underscore_literal_past_i128_is_rejected() {
+    let r = check(
+        "fn main() {\n    x := 0x1_0000_0000_0000_0000_0000_0000_0000_0000\n    fmt.println(\"{x}\")\n}\n",
+    );
+    assert!(
+        error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+        "radix parsing must retain >i128 overflow instead of failing open: {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn const_alias_into_untyped_decl_is_rejected() {
+    // Main invariant (W10/#539): the default-int check resolves file-level
+    // const aliases like the typed check does — Go rejects
+    // `const big = 9223372036854775808; x := big` with an overflow too.
+    let r = check(
+        "const big = 9223372036854775808\n\nfn main() {\n    x := big\n    fmt.println(\"{x}\")\n}\n",
+    );
+    assert!(
+        error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+        "const alias into an untyped decl must be HYB-E6002: {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
 }

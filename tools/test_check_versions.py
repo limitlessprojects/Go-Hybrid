@@ -92,6 +92,14 @@ class CheckVersionsTests(unittest.TestCase):
         self.edit("compiler/crates/hyb/src/main.rs", '"go1.26.9"', '"go1x26x9"')
         self.assertDrift("hyb default pin (compiler/crates/hyb/src/main.rs) != go1.26.9")
 
+    def test_build_guard_default_pin_dots_are_literal(self):
+        self.edit("compiler/crates/hyb/build.rs", '"1.99.0"', '"1x99x0"')
+        self.assertDrift("hyb build.rs DEFAULT_PIN != rust 1.99.0")
+
+    def test_build_guard_stale_default_pin_is_drift(self):
+        self.edit("compiler/crates/hyb/build.rs", '"1.99.0"', '"1.98.0"')
+        self.assertDrift("hyb build.rs DEFAULT_PIN != rust 1.99.0")
+
 
     def toolchain_check(self, *, go_exit=0, rust_exit=0, silent=False, skip=False):
         # Use real subprocesses but only our two local shell fixtures: neither

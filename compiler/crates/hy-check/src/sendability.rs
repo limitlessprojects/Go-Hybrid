@@ -95,7 +95,9 @@ impl<'a> Checker<'a> {
         match &b.shape {
             TypeShape::Unknown => Outcome::Unproven(UnprovenInfo {
                 value: name.to_string(),
-                reason: "its type did not resolve to a sendability class (no ascription and the initializer's type was unresolvable)".to_string(),
+                reason: unproven_atomic_reason(b).unwrap_or_else(|| {
+                    "its type did not resolve to a sendability class (no ascription and the initializer's type was unresolvable)".to_string()
+                }),
             }),
             TypeShape::Closure => Outcome::Rejected(RejectInfo {
                 value: name.to_string(),

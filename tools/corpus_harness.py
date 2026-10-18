@@ -112,6 +112,13 @@ def run_checker(bin_path, hy_path, report_managed=False):
     # reader thread can otherwise leave stdout/stderr as None.
     try:
         proc = subprocess.run(cmd, capture_output=True, timeout=60)
+    except subprocess.TimeoutExpired as e:
+        # A checker that hangs must not abort the remaining corpus rows:
+        # surface the timeout as a per-case harness-error row and keep
+        # running the rest of the corpus (pr-198, shoujianing).
+        raise RuntimeError(
+            f"checker timed out for {hy_path} after {e.timeout} seconds"
+        ) from e
     except OSError as e:
         # The validated file may still fail to execute (not executable,
         # wrong architecture, vanished between validation and exec).

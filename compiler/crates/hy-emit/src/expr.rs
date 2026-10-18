@@ -701,6 +701,32 @@ impl Emitter {
             }
         }
 
+        // --- a slice type-as-value CALLED = a conversion: `[]byte("abc")`
+        //     parses as SliceLit{elem, items: []} + a postfix call (the
+        //     standing type-as-value encoding) and used to fall into the
+        //     generic path below as `[]byte{}("abc")` — go:
+        //     `invalid operation: cannot call []byte{}` — so even the
+        //     legal Go conversion `[]byte(s)` never built (issue #228
+        //     family C). Emit the conversion form directly. ---
+        if let Expr::SliceLit {
+            elem: Some(t),
+            items,
+            ..
+        } = callee
+        {
+            if items.is_empty() {
+                let mut parts = Vec::new();
+                for a in args {
+                    parts.push(self.emit_call_arg(a)?);
+                }
+                return Ok(format!(
+                    "[]{}({})",
+                    self.type_text(t),
+                    parts.join(", ")
+                ));
+            }
+        }
+
         // --- everything else: callee(args...) ---
         // An addressable argument auto-addresses at a pointer param (Batch
         // I, corpus 09: `scale_then_register(e, …)` with `e *env` — Go's

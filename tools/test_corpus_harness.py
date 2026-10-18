@@ -1,11 +1,17 @@
 """CLI regressions for optional exact diagnostic metadata (stdlib only)."""
 
+import contextlib
+import io
+import json
 from pathlib import Path
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+
+import corpus_harness
 
 HARNESS = Path(__file__).with_name("corpus_harness.py")
 
@@ -505,6 +511,53 @@ class CheckerPathCliTests(unittest.TestCase):
                 capture_output=True, text=True, timeout=10)
             self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
             self.assertIn("checker binary not found", run.stderr)
+
+
+class CheckerProcessFailureCliTests(unittest.TestCase):
+    """A checker process that hangs or cannot launch is a per-case failure
+    row; the remaining corpus fixtures still run (pr-198, shoujianing).
+    Deterministic: corpus_harness.subprocess.run is patched, first call fails,
+    second call returns an accepting payload."""
+
+    def check_failure(self, failure, message):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checker = root / "hyb"
+            checker.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            checker.chmod(0o700)
+            for name in ("01-first.hy", "02-next.hy"):
+                (root / name).write_text(
+                    "// EXPECTED-VERDICT: ACCEPT\nfn main() {}\n", encoding="utf-8"
+                )
+            accepted = subprocess.CompletedProcess(
+                ["hyb"], 0,
+                json.dumps({"summary": {"verdict": "accept"},
+                            "diagnostics": []}).encode("utf-8"),
+                b"",
+            )
+            output = io.StringIO()
+            with patch.object(
+                     sys, "argv",
+                     ["corpus_harness.py", "--bin", str(checker),
+                      "--corpus", str(root)]), \
+                 patch.object(corpus_harness.subprocess, "run",
+                              side_effect=[failure, accepted]) as run, \
+                 contextlib.redirect_stdout(output):
+                status = corpus_harness.main()
+            self.assertEqual(status, 1)
+            self.assertEqual(run.call_count, 2, output.getvalue())
+            self.assertIn(message, output.getvalue())
+            self.assertIn("verdict agreement: 1/2", output.getvalue())
+            self.assertIn("harness-error", output.getvalue())
+
+    def test_timeout_is_a_reported_failure_and_next_case_runs(self):
+        self.check_failure(
+            subprocess.TimeoutExpired(["hyb"], 60), "timed out")
+
+    def test_launch_error_is_a_reported_failure_and_next_case_runs(self):
+        self.check_failure(
+            OSError(2, "No such file or directory"), "could not be executed")
+
 
 if __name__ == "__main__":
     unittest.main()

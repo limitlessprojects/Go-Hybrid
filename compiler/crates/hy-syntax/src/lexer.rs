@@ -127,6 +127,19 @@ const KEYWORDS: &[&str] = &[
     // keeps channels named `default` legal — see SPEC-LANGUAGE LX14's
     // select paragraph.
     "case",
+    // Go-keyword trap words (issue #228): Hybrid's surface never uses
+    // them — its forms are `match` / `for .. in`, and labels don't
+    // parse — so as identifiers they only ever leak into emitted Go
+    // and break the build (`x := switch` → go: `expected operand, found
+    // 'switch'`; `fallthrough` in an if → `fallthrough statement out of
+    // place`). Reserved like `while` (#103/#107) and `case` (#104/#108)
+    // so they fail at parse instead of at go build. (`map` cannot join
+    // this list — `map[K]V` is a legitimate prefix form; it gets the
+    // contextual rule in `lex_ident_or_kw` instead.)
+    "switch",
+    "range",
+    "goto",
+    "fallthrough",
 ];
 
 /// Lex a whole source file. On success the token stream ends with a single
@@ -230,6 +243,42 @@ impl<'a> Lexer<'a> {
             Span::new(start, self.pos()),
             msg,
         ));
+    }
+
+    /// Non-mutating peek: the next non-trivia character after the cursor
+    /// (whitespace and `//` / `/* … */` comments skipped), mirroring
+    /// `skip_trivia` without consuming anything. Used by the contextual
+    /// `map` + `[` rule.
+    fn next_code_char_after_trivia(&self) -> Option<char> {
+        let mut i = self.i;
+        loop {
+            match self.chars.get(i).copied() {
+                Some(c) if c.is_whitespace() => i += 1,
+                Some('/') if self.chars.get(i + 1).copied() == Some('/') => {
+                    i += 2;
+                    while let Some(c) = self.chars.get(i).copied() {
+                        if c == '\n' {
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                Some('/') if self.chars.get(i + 1).copied() == Some('*') => {
+                    i += 2;
+                    loop {
+                        if i + 1 >= self.chars.len() {
+                            return None;
+                        }
+                        if self.chars[i] == '*' && self.chars[i + 1] == '/' {
+                            i += 2;
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                other => return other,
+            }
+        }
     }
 
     // -- main driver ----------------------------------------------------------
@@ -391,6 +440,20 @@ impl<'a> Lexer<'a> {
                     "identifier `{}` is not snake_case (LX2) — Hybrid identifiers are lowercase; write it in snake_case",
                     s
                 ),
+            );
+        }
+        if s == "map" && self.next_code_char_after_trivia() != Some('[') {
+            // `map` is the map type/literal prefix (`map[K]V`, `map{k: v}`),
+            // never a free identifier: bare `map` in any position (expr,
+            // binding, param, field, fn name, type) is emitted verbatim as
+            // Go's `map` keyword, where it cannot parse (`go: expected '['`
+            // / `expected '}', found 'map'`) — issue #228. The `[` must be
+            // the next real token, so trivia (incl. comments) is skipped by
+            // the peek, matching the parser's contextual checks.
+            self.diag(
+                PARSE_ERR_CODE,
+                start,
+                "`map` must be followed by `[` — it is Hybrid's map type/literal prefix, never a free name; a bare `map` would be emitted as Go's `map` keyword and fail `go build` (issue #228)",
             );
         }
         if let Some(kw) = KEYWORDS.iter().find(|k| **k == s) {
@@ -1123,5 +1186,67 @@ mod tests {
     #[test]
     fn unterminated_string_is_error() {
         assert!(lex("t.hy", r#"x := "oops"#).is_err());
+    }
+
+    #[test]
+    fn go_keyword_traps_are_reserved() {
+        // issue #228: these four leak into emitted Go as keywords and
+        // break the build, so they lex as Kw (parser turns that into a
+        // clean parse error naming the word — same shape as `while`).
+        for w in ["switch", "range", "goto", "fallthrough"] {
+            let r = lex("t.hy", &format!("fn main() {{ x := {} }}", w));
+            let t = r.expect("lex ok");
+            assert!(
+                t.iter().any(|t| matches!(&t.tok, Tok::Kw(k) if *k == w)),
+                "`{}` must lex as a keyword",
+                w
+            );
+        }
+    }
+
+    #[test]
+    fn map_needs_bracket_everywhere() {
+        // issue #228 B5–B6 + the declaration positions: bare `map` as an
+        // expr, binding, param, fn name, or freestanding type is emitted
+        // as Go's `map` keyword and cannot parse.
+        for src in [
+            "fn main() { x := map }",
+            "fn main() { map := 3 }",
+            "fn f(map int) {}",
+            "fn map() {}",
+            "fn main() { var x map }",
+            "struct s { map int }",
+        ] {
+            let r = lex("t.hy", src);
+            assert!(r.is_err(), "bare `map` must be a lexical error: {}", src);
+            let diags = r.unwrap_err();
+            assert!(
+                diags.iter().any(|d| d.message.contains("`map`")),
+                "diagnostic must name `map`: {:?}",
+                diags
+            );
+        }
+    }
+
+    #[test]
+    fn map_prefix_forms_stay_lexed() {
+        // controls: map types, map literals, and `[` reached through
+        // trivia must keep working (they are the legitimate `map` uses).
+        let ok = [
+            "m := map[string]int{}",
+            "var x map[int]string",
+            "fn f(m map[bool]u8) {}",
+            "y := map /* c */ [string]int{}",
+            "z := map\n    [string]int{}",
+        ];
+        for src in ok {
+            assert!(
+                lex("t.hy", src).is_ok(),
+                "legitimate map-prefix form must still lex: {}",
+                src
+            );
+        }
+        let t = toks("m := map[string]int{}");
+        assert!(t.iter().any(|t| matches!(t, Tok::Ident(s) if s == "map")));
     }
 }
