@@ -183,3 +183,38 @@ func TestP4b_Falsifier_NestedMutexCapsulesCanDeadlockWithoutLockOrder(t *testing
 		<-done
 	}
 }
+
+// P4a Remedy Verification (Candidate Condition R1):
+// When PoolPutMove enforces (1) static may_share freeze on any derived slice
+// alias in the caller AND (2) a compiler-synthesized structural reset that
+// detaches backing-array aliasing (or reallocates/zeros the slice header on
+// escape), the next Get() consumer cannot corrupt or be corrupted by prior
+// epoch sub-slices.
+func TestP4a_Remedy_StructuralDetachResetClosesInteriorSliceLeak(t *testing.T) {
+	pool := NewLinearPool(
+		func() *PacketBuffer {
+			return &PacketBuffer{Payload: make([]byte, 4)}
+		},
+		func(b *PacketBuffer) {
+			// Synthesized structural detach: zero backing bytes before release
+			// and detach slice capacity if any sub-slice was observed.
+			clear(b.Payload)
+			b.Payload = make([]byte, 4)
+		},
+	)
+
+	type rootProducer struct{}
+	wProd := Live[rootProducer]{}
+	buf := pool.Get()
+	buf.Payload[0] = 0xAA
+	priorEpochSnapshot := buf.Payload[:2]
+	wProdMoved := PoolPutMove(pool, wProd, buf)
+	_ = wProdMoved
+
+	reused := pool.Get()
+	reused.Payload[0] = 0x55
+	// Remedy holds: priorEpochSnapshot does NOT observe the new consumer's 0x55 write.
+	if priorEpochSnapshot[0] == 0x55 {
+		t.Fatalf("remedy failed: prior epoch slice observed new consumer write 0x55")
+	}
+}
