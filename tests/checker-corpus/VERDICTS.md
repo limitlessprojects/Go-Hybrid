@@ -671,3 +671,24 @@ With this addition the registered corpus is **61 programs:
 ACCEPT 15 · ACCEPT-MANAGED 2 · REJECT 44**. The file contains no `managed`
 block; the harness's historical as-written set {01, 03, 04} is unchanged,
 so the tripwire ratios only move with the larger total.
+
+## Additive corpus registration — 2026-10-17: W-015 split fork-join (spike PR #379; renumbered 53 → 62 on the rebase repair)
+
+Corpus #62 added WITH the W-015 spike (`split s at mid into left, right`
+blocks). The checker proves the base is exclusively held (HYB-E3105) and
+split-out for the block (HYB-E3106); the forks are capacity-clipped fresh
+roots whose writable ranges are provably disjoint by Go's full slice
+expression semantics, so each moves into its own task race-free (verified
+under `go run -race`: zero reports, output `1 14` across 3 runs). The
+spike registered this case as #53; numbers 53–61 were taken by the
+sessions-14-18 landings while the branch waited, so the rebase repair
+renumbers it to the next free slot (62) without changing the program.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 62 | 62-split-fork-join | ACCEPT | O5.1 (W-015) | — | exclusive split + capacity-clipped disjoint forks moved into two tasks; race-clean |
+
+With this addition the registered corpus is **62 programs:
+ACCEPT 16 · ACCEPT-MANAGED 2 · REJECT 44**. The split fixture contains no
+`managed` block; the harness's historical as-written set {01, 03, 04} is
+unchanged, so the tripwire ratios only move with the larger total.

@@ -1093,6 +1093,7 @@ impl Emitter {
             Stmt::Defer { call, .. } => self.expr_has_try(call),
             Stmt::Block { block, .. } => self.block_has_try(block),
             Stmt::Managed { body, .. } => self.block_has_try(body),
+            Stmt::Split { body, .. } => self.block_has_try(body),
             Stmt::Task { callee, args, .. } => {
                 self.expr_has_try(callee) || args.iter().any(|a| self.expr_has_try(&a.value))
             }

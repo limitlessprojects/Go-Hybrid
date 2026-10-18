@@ -805,6 +805,54 @@ impl Parser {
     // Statements
     // =========================================================================
 
+    /// W-015 spike: `split s at mid into left, right { ... }`
+    fn parse_split(&mut self, start: usize) -> PResult<Stmt> {
+        // cur = Ident("split"), next = the base ident
+        self.bump(); // split
+        let base_name = self.expect_ident()?;
+        let base = Expr::Ident {
+            name: base_name,
+            span: self.span_to_prev(self.toks[self.pos - 1].span.start),
+        };
+        if let Tok::Ident(kw) = self.cur() {
+            if kw == "at" {
+                self.bump();
+            } else {
+                return self.err(format!("expected `at` in split statement, found `{}`", kw));
+            }
+        } else {
+            return self.err(format!(
+                "expected `at` in split statement, found {}",
+                self.describe_cur()
+            ));
+        }
+        let mid = self.parse_expr(false)?;
+        if let Tok::Ident(kw) = self.cur() {
+            if kw == "into" {
+                self.bump();
+            } else {
+                return self.err(format!("expected `into` in split statement, found `{}`", kw));
+            }
+        } else {
+            return self.err(format!(
+                "expected `into` in split statement, found {}",
+                self.describe_cur()
+            ));
+        }
+        let left = self.expect_ident()?;
+        self.expect_punct(",")?;
+        let right = self.expect_ident()?;
+        let body = self.parse_block()?;
+        Ok(Stmt::Split {
+            base,
+            mid,
+            left,
+            right,
+            body,
+            span: self.span_from(start),
+        })
+    }
+
     fn parse_block(&mut self) -> PResult<Block> {
         let start = self.pos;
         self.expect_punct("{")?;
@@ -894,6 +942,18 @@ impl Parser {
 
     fn parse_stmt(&mut self) -> PResult<Stmt> {
         let start = self.pos;
+        // W-015 spike: `split s at mid into left, right { ... }` — recognized
+        // by IDENT LOOKAHEAD (two idents in a row), NOT a keyword, so
+        // `strings.split(...)` and locals named `split` stay legal.
+        if let Tok::Ident(name) = self.cur() {
+            if name == "split" {
+                if let Tok::Ident(next) = self.nth(1) {
+                    if next != "at" && next != "into" {
+                        return self.parse_split(start);
+                    }
+                }
+            }
+        }
         match self.cur() {
             Tok::Kw("let") => self.parse_local(LocalKind::Let, start),
             Tok::Kw("var") => self.parse_local(LocalKind::Var, start),
@@ -2088,12 +2148,24 @@ impl Parser {
                         } else {
                             Some(Box::new(self.parse_expr(lit)?))
                         };
+                        // W-015: optional third index clips the result's
+                        // capacity — `s[0:mid:mid]` (Go full slice expr).
+                        let cap = if self.eat_punct(":") {
+                            if self.at_punct("]") {
+                                return self
+                                    .err("capacity index required after the third `:`");
+                            }
+                            Some(Box::new(self.parse_expr(lit)?))
+                        } else {
+                            None
+                        };
                         self.expect_punct("]")?;
                         let span = self.span_to_prev(e.span().start);
                         e = Expr::Slice {
                             base: Box::new(e),
                             lo,
                             hi,
+                            cap,
                             span,
                         };
                     } else {

@@ -110,7 +110,7 @@ impl<'a> Checker<'a> {
                     self.check_expr_const_zero_divisor(&a.value);
                 }
             }
-            Stmt::Managed { body, .. } => {
+            Stmt::Managed { body, .. } | Stmt::Split { body, .. } => {
                 if deep {
                     for s in &body.stmts {
                         self.check_stmt_const_zero_divisor_inner(s, true);

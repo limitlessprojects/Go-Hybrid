@@ -207,6 +207,22 @@ impl<'a> Scan<'a> {
                     self.run_expr(&a.value);
                 }
             }
+            Stmt::Split {
+                base,
+                mid,
+                left,
+                right,
+                body,
+                ..
+            } => {
+                // W-015: base and mid are USES; the fork names are fresh
+                // definitions scoped to the split body.
+                self.run_expr(base);
+                self.run_expr(mid);
+                self.define(left);
+                self.define(right);
+                self.run_block(body);
+            }
             Stmt::Managed { body, .. } => self.run_block(body),
             Stmt::Match {
                 subject,

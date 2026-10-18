@@ -327,6 +327,20 @@ pub enum Stmt {
         body: Block,
         span: Span,
     },
+    /// `split s at mid into left, right { ... }` (W-015 spike)
+    /// Lexical split-join via Go full slice expressions: lowers to
+    /// `left := s[0:mid:mid]; right := s[mid:len(s):cap(s)]`. The capacity
+    /// clip proves the forks' writable ranges are disjoint; the checker
+    /// proves the base is exclusively held (HYB-E3105) and split-out for
+    /// the whole block (HYB-E3106).
+    Split {
+        base: Expr,
+        mid: Expr,
+        left: String,
+        right: String,
+        body: Block,
+        span: Span,
+    },
     /// `match x { pattern => body }` (spec §2.5; corpus-stretch)
     Match {
         subject: Expr,
@@ -541,10 +555,13 @@ pub enum Expr {
         span: Span,
     },
     /// `words[a:b]`, `payload[i*32 : i*32+32]` (lo/hi optional)
+    /// `s[0:mid:mid]` (W-015): a third index clips the result's capacity,
+    /// proving the fork can never write past `hi` (disjoint fork-join).
     Slice {
         base: Box<Expr>,
         lo: Option<Box<Expr>>,
         hi: Option<Box<Expr>>,
+        cap: Option<Box<Expr>>,
         span: Span,
     },
     /// `stats.processed`, `doc.array`, `fmt.println`, `serde_json.parse`
@@ -846,6 +863,7 @@ impl Stmt {
             | Stmt::Return { span, .. }
             | Stmt::Task { span, .. }
             | Stmt::Managed { span, .. }
+            | Stmt::Split { span, .. }
             | Stmt::Match { span, .. }
             | Stmt::Defer { span, .. }
             | Stmt::Break { span, .. }

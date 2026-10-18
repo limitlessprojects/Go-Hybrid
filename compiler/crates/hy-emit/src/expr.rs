@@ -157,7 +157,7 @@ impl Emitter {
                 Ok(format!("{}[{}]", b, i))
             }
 
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, cap, .. } => {
                 let b = self.emit_expr(base, ATOM)?;
                 let lo_t = match lo {
                     Some(x) => self.emit_expr(x, 0)?,
@@ -167,7 +167,13 @@ impl Emitter {
                     Some(x) => self.emit_expr(x, 0)?,
                     None => String::new(),
                 };
-                Ok(format!("{}[{}:{}]", b, lo_t, hi_t))
+                match cap {
+                    Some(c) => {
+                        let c_t = self.emit_expr(c, 0)?;
+                        Ok(format!("{}[{}:{}:{}]", b, lo_t, hi_t, c_t))
+                    }
+                    None => Ok(format!("{}[{}:{}]", b, lo_t, hi_t)),
+                }
             }
 
             Expr::Field { base, name, .. } => {

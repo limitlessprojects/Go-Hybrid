@@ -188,6 +188,14 @@ fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt, named_results: &[String]
             scoped_block(out, body, named_results);
             out.managed_end.insert(idx, out.next.saturating_sub(1));
         }
+        Stmt::Split { body, .. } => {
+            // W-015: Push AT the split statement so the fork defines land in
+            // the split's own scope (they die with it); scoped_block adds the
+            // body's layer; the trailing mark closes the split-level scope.
+            out.mark(idx, true, false);
+            scoped_block(out, body, named_results);
+            out.mark(out.next, false, true);
+        }
         Stmt::Match { subject, arms, .. } => {
             for arm in arms {
                 let first = out.next;
@@ -339,6 +347,11 @@ pub(crate) fn own_uses_with_results(stmt: &Stmt, named_results: &[String], out: 
             }
         }
         Stmt::Managed { .. } => {}
+        Stmt::Split { base, mid, .. } => {
+            expr_uses(base, out);
+            expr_uses(mid, out);
+        }
+
         Stmt::Match { subject, arms, .. } => {
             expr_uses(subject, out);
             for arm in arms {
@@ -562,6 +575,11 @@ pub(crate) fn own_calls<'a>(stmt: &'a Stmt, out: &mut Vec<CallRef<'a>>) {
             }
         }
         Stmt::Managed { .. } => {}
+        Stmt::Split { base, mid, .. } => {
+            expr_calls(base, out);
+            expr_calls(mid, out);
+        }
+
         Stmt::Match { subject, arms, .. } => {
             expr_calls(subject, out);
             for arm in arms {
@@ -630,6 +648,11 @@ pub(crate) fn own_fnlits<'a>(stmt: &'a Stmt, out: &mut Vec<&'a Expr>) {
             }
         }
         Stmt::Managed { .. } => {}
+        Stmt::Split { base, mid, .. } => {
+            expr_fnlits(base, out);
+            expr_fnlits(mid, out);
+        }
+
         Stmt::Match { subject, arms, .. } => {
             expr_fnlits(subject, out);
             for arm in arms {

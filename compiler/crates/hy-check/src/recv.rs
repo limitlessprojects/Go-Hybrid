@@ -46,6 +46,12 @@ impl<'a> Checker<'a> {
                     self.check_expr_recv_operands(st, v);
                 }
             }
+            Stmt::Split { base, mid, .. } => {
+                // W-015: flat discipline — only the split statement's own
+                // expressions; body statements are walked separately.
+                self.check_expr_recv_operands(st, base);
+                self.check_expr_recv_operands(st, mid);
+            }
             Stmt::Expr { expr, .. } => self.check_expr_recv_operands(st, expr),
             Stmt::Send { chan, value, .. } => {
                 // The send TARGET is `check_send_target`'s domain (E3007);
