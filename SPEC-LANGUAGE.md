@@ -178,6 +178,11 @@ separators (`1_000_000`). Float: `1.5`, `2.`, `.5`, `1e9`. Rune: `'a'`,
 **LX7 — String literals.** Interpreted `"…"`: Go escape set **plus**
 interpolation `{expr}` (T4); `{{` and `}}` escape literal braces. Raw
 `` `…` ``: no escapes, **no interpolation**. Strings are always UTF-8 (T3).
+Malformed escape sequences — a non-hex digit in `\x`/`\u`/`\U`, the
+`\u{…}` rune form inside a string, a surrogate or a value above U+10FFFF —
+are `HYB-E0002` parse errors (rule `LX7`; the rune-literal forms carry
+`LX6`): the escape set is enforced fail-closed, never silently skipped
+with the remaining characters leaking into the value (corpus 61).
 
 ```hy
 name := "Hybrid"
@@ -430,13 +435,16 @@ length; `s[i]` is the `u8` at byte index `i` (out-of-range panics, X3);
 `for i, c in s` iterates byte index and `rune`; `for c in s` iterates runes.
 Invalid UTF-8 in a string (only possible via byte-slice conversion) iterates
 as `U+FFFD` per Go's rules. Comparison is bytewise; no normalization is
-performed (Go semantics).
+performed (Go semantics). A `rune` is an `i32` code point (T1, §2.1),
+so `fmt.println(c)` and `"{c}"` display its number (T4's Go `%v` shape);
+`string(c)` displays the character.
 
 ```hy
 s := "héllo"
 fmt.println(len(s))        // expect: 6   (é is 2 bytes)
 fmt.println(s[0])          // expect: 104 (byte 'h')
-for c in s { fmt.println(c) }   // expect: h é l l o   (5 lines; é as one rune)
+for c in s { fmt.println(c) }   // expect: 104 233 108 108 111   (5 lines; é is one rune, U+00E9)
+for c in s { fmt.println(string(c)) }   // expect: h é l l o   (5 lines)
 ```
 
 **T4 — Interpolation.** `"{expr}"` inside an interpreted string formats the
@@ -751,7 +759,10 @@ tagged open D3.
 | chan | the **zero channel**: receive and send block forever, `close` panics (Go's nil-channel semantics exactly) |
 
 ```hy
-struct greeting { name string; count int }   // count starts at 0 — example 01
+struct greeting {
+    name  string
+    count int        // count starts at 0 — example 01
+}
 g := greeting{name: "Hybrid"}
 fmt.println(g.count)         // expect: 0
 ```

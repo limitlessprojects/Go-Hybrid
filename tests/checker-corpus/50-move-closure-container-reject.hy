@@ -12,9 +12,17 @@
 // element / field shapes and rejects when any of them is a closure.
 //
 // ---- Expected verdict (registered with the fix, 2026-10-15) ----
-// EXPECTED-VERDICT: REJECT A1c
-//   REJECT - A1c (sendability): the moved value carries closures whose
-//   captured environment stays reachable from the sender.
+// AMENDMENT 2026-10-18 (with pr-496): REJECT A1c -> REJECT A1b, logged
+// decision, not a verdict change. #496's value-precise capture freeze now
+// fires BEFORE the A5 sendability arm on this shape, so the diagnostic
+// names the capture-freeze rule (A1b); the program is still REJECTED, and
+// the A1c reading below remains true of the underlying hazard.
+// EXPECTED-VERDICT: REJECT A1b
+//   REJECT - A1b (capture freeze): the moved binding is captured by a
+//   closure whose environment stays reachable, so the move freezes it
+//   (E3003). Secondary reading unchanged: A1c sendability — the moved
+//   value carries closures whose captured environment stays reachable
+//   from the sender.
 //
 // ---- Annotations / managed ----
 // lifetime annotations: 0. `managed` blocks: 0.

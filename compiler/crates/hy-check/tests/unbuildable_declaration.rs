@@ -511,3 +511,85 @@ fn distinct_define_names_accept() {
     );
     assert_eq!(r.verdict, Verdict::Accept);
 }
+
+// VM6 local var/const buildability regression — verified against emitted Go
+// before changing the checker (HYB-E1002 extension).
+const UNUSED_VAR_DECL: &str = "\
+fn main() {
+    var x int = 7
+    fmt.println(\"done\")
+}
+";
+
+const UNUSED_CONST_LOCAL: &str = "\
+fn main() {
+    const nums = []int{1, 2}
+    fmt.println(\"done\")
+}
+";
+
+const WRITE_ONLY_VAR_DECL: &str = "\
+fn main() {
+    var x int = 7
+    x = 8
+    fmt.println(\"done\")
+}
+";
+
+const USED_VAR_AND_CONST: &str = "\
+fn main() {
+    var x int = 7
+    const nums = []int{1, 2}
+    fmt.println(x + nums[0])
+}
+";
+
+const USED_LOCAL_SHADOWS: &str = "\
+fn main() {
+    var x int = 7
+    if true {
+        var x int = 8
+        fmt.println(x)
+    }
+    fmt.println(x)
+}
+";
+
+const USED_VAR_READ_IN_CLOSURE: &str = "\
+fn main() {
+    var x int = 7
+    f := fn() { fmt.println(x) }
+    f()
+}
+";
+
+#[test]
+fn unused_var_local_rejected_as_unbuildable() {
+    assert_rejects_e1002(&check(UNUSED_VAR_DECL), "unused var local");
+}
+#[test]
+fn unused_const_local_rejected_as_unbuildable() {
+    assert_rejects_e1002(
+        &check(UNUSED_CONST_LOCAL),
+        "unused const local lowered to Go var",
+    );
+}
+#[test]
+fn write_only_var_local_rejected_as_unbuildable() {
+    assert_rejects_e1002(&check(WRITE_ONLY_VAR_DECL), "write-only var local");
+}
+#[test]
+fn used_var_and_const_local_accept() {
+    let r = check(USED_VAR_AND_CONST);
+    assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+}
+#[test]
+fn var_shadowed_local_both_used_accept() {
+    let r = check(USED_LOCAL_SHADOWS);
+    assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+}
+#[test]
+fn var_read_from_closure_counts_as_used() {
+    let r = check(USED_VAR_READ_IN_CLOSURE);
+    assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+}

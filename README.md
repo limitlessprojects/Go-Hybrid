@@ -190,6 +190,10 @@ pitch is literal. CI staleness gate: `hyb generate --check .` fails when a
 `.hy` changed without regenerating, so untranspiled code can never silently
 skip the checker.
 
+Directory discovery recurses through real subdirectories, skipping child directory
+symlinks (including links back to the project). A directory symlink explicitly
+passed as a root and symlinks to individual `.hy` files remain supported.
+
 ## When *not* to use Hybrid
 
 - You need **arbitrary existing Go code to run unmodified** inside the checked

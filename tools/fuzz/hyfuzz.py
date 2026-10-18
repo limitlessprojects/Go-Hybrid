@@ -23,8 +23,15 @@ Strategies (deterministic seed → reproducible job):
                      walk (regression pressure on the recovery path)
 
 Stdlib only (runner discipline). Exit 0 iff all invariants held for all cases.
+
+Optional: --failures-dir PATH preserves complete failing inputs and seed/case
+metadata beneath a unique run directory. Successful runs create no artifacts;
+without the option, the existing console-only behavior is unchanged.
 """
 import argparse
+import hashlib
+import json
+import math
 import os
 import random
 import subprocess
@@ -114,12 +121,36 @@ def check_one(hyb, src, workdir, timeout):
         )
     except subprocess.TimeoutExpired:
         return "HANG", False
+    except OSError as err:
+        return f"EXEC_ERROR: {err}", False
     if r.returncode not in (0, 1):
         return f"UNEXPECTED exit={r.returncode}", False
     blob = (r.stdout + r.stderr).lower()
     if any(b in blob for b in BAD_TEXT):
         return f"ICE: {(r.stdout + r.stderr)[:120]}", False
     return None, r.returncode == 0
+
+
+def save_failure(run_dir, seed, index, kind, failure, src):
+    """Write data-only reproductions using generated names and exclusive creates."""
+    filename = f"case-{index:06d}.hy"
+    source_path = os.path.join(run_dir, filename)
+    encoded = src.encode("utf-8")
+    with open(source_path, "xb") as f:
+        f.write(encoded)
+    metadata = {
+        "version": 1,
+        "seed": seed,
+        "case_index": index,
+        "kind": kind,
+        "failure": failure,
+        "source_file": filename,
+        "source_sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+    with open(os.path.join(run_dir, f"case-{index:06d}.json"), "x", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2, sort_keys=True)
+        f.write("\n")
+    return source_path
 
 
 def main():
@@ -129,6 +160,10 @@ def main():
     ap.add_argument("--cases", type=int, default=1200)
     ap.add_argument("--seed", type=int, default=20261014)
     ap.add_argument("--timeout", type=float, default=10.0)
+    ap.add_argument(
+        "--failures-dir", default=None, metavar="PATH",
+        help="save full failing inputs and metadata in a unique run directory under PATH",
+    )
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
@@ -136,11 +171,20 @@ def main():
     # dir), so a relative --hyb path would resolve THERE (the 0.1s fleet
     # failure of 2026-10-14 — FileNotFoundError, exit 1 before case 1)
     args.hyb = os.path.abspath(args.hyb)
+    if not os.path.isfile(args.hyb):
+        raise SystemExit(f"hyfuzz: --hyb binary not found: {args.hyb}")
+    if not os.path.isdir(args.corpus):
+        raise SystemExit(f"hyfuzz: --corpus directory not found: {args.corpus}")
+    if args.cases <= 0:
+        raise SystemExit("hyfuzz: --cases must be positive")
+    if not (math.isfinite(args.timeout) and args.timeout > 0):
+        raise SystemExit("hyfuzz: --timeout must be positive")
     corpus = load_corpus(args.corpus)
     if not corpus:
         raise SystemExit("fuzz: no corpus programs found")
 
     failures = []
+    failure_run_dir = None
     clean_rejects = ok_accepts = 0
     with tempfile.TemporaryDirectory(prefix="hyfuzz-") as workdir:
         for i in range(args.cases):
@@ -154,6 +198,18 @@ def main():
             bad, accepted = check_one(args.hyb, src, workdir, args.timeout)
             if bad:
                 failures.append((i, kind, bad, src[:200]))
+                if args.failures_dir is not None:
+                    try:
+                        if failure_run_dir is None:
+                            os.makedirs(args.failures_dir, exist_ok=True)
+                            failure_run_dir = tempfile.mkdtemp(
+                                prefix="hyfuzz-", dir=os.path.abspath(args.failures_dir),
+                            )
+                        saved = save_failure(failure_run_dir, args.seed, i, kind, bad, src)
+                    except OSError as exc:
+                        print(f"hyfuzz: cannot save failure artifact: {exc}", file=sys.stderr)
+                        raise SystemExit(2) from exc
+                    print(f"hyfuzz: reproducer saved: {saved}")
                 if len(failures) >= 10:
                     break
             elif accepted:

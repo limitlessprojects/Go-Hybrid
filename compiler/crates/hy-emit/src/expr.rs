@@ -11,8 +11,7 @@
 use hy_syntax::*;
 
 use super::{
-    go_quote, is_package_root, special_member, to_go_name, BindingKind, EmitError, Emitter,
-    MemberSpecial,
+    go_quote, special_member, to_go_name, BindingKind, EmitError, Emitter, MemberSpecial,
 };
 
 use super::shapes::{
@@ -93,6 +92,18 @@ impl Emitter {
     fn top_prec(&self, e: &Expr) -> u8 {
         match e {
             Expr::Binary { op, .. } => bin_prec(*op),
+            Expr::Call { callee, args, .. } if args.len() == 1 => {
+                if let Expr::Field { base, name, .. } = callee.as_ref() {
+                    if let Expr::Ident { name: pkg, .. } = base.as_ref() {
+                        if self.is_unshadowed_pkg_root(pkg)
+                            && matches!(special_member(pkg, name), Some(MemberSpecial::Duration(_)))
+                        {
+                            return bin_prec(BinOp::Mul);
+                        }
+                    }
+                }
+                ATOM
+            }
             _ => ATOM,
         }
     }
@@ -121,7 +132,11 @@ impl Emitter {
 
             Expr::Unary { op, operand, .. } => {
                 let o = self.emit_expr(operand, ATOM)?;
-                Ok(format!("{}{}", op.render(), o))
+                if matches!(op, UnOp::Neg) && o.starts_with('-') {
+                    Ok(format!("-({})", o))
+                } else {
+                    Ok(format!("{}{}", op.render(), o))
+                }
             }
 
             Expr::AddrOf { operand, .. } => {
@@ -174,7 +189,7 @@ impl Emitter {
                 let b = self.emit_expr(base, ATOM)?;
                 // Package-qualified members register the import.
                 if let Expr::Ident { name: root, .. } = base.as_ref() {
-                    if is_package_root(root) {
+                    if self.is_unshadowed_pkg_root(root) {
                         self.use_package(root);
                     }
                 }
@@ -227,7 +242,12 @@ impl Emitter {
                 Ok(format!("{}{{{}}}", head, parts.join(", ")))
             }
 
-            Expr::FnLit { params, results, body, .. } => {
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => {
                 // Conversion target (Batch E): untyped params take the
                 // TARGET's types (`http.handler(fn(w, r) {…})` — the
                 // literal's `w, r` are typed by HandlerFunc's signature).
@@ -283,8 +303,29 @@ impl Emitter {
                 // scoped: removed again when the literal ends. Conv-typed
                 // params bind through the DESCRIPTOR's shape key (the Go
                 // spelling in the signature is not the table's key).
-                let known: Vec<String> = self.bindings.keys().cloned().collect();
+                let saved_scope = self.save_scope();
+                for r in results {
+                    if let Some(n) = &r.name {
+                        if n != "_" {
+                            self.shadow_local_name(n);
+                            if matches!(r.ty, TypeExpr::Pointer { .. }) {
+                                self.pointer_vars.insert(n.clone());
+                            }
+                            if let Some(kind) = self.binding_kind_of_ty(&r.ty) {
+                                self.bindings.insert(n.clone(), kind);
+                            }
+                            self.register_var_ty(n, &r.ty);
+                        }
+                    }
+                }
                 for (i, p) in params.iter().enumerate() {
+                    if p.name != "_" {
+                        self.shadow_local_name(&p.name);
+                        if matches!(p.ty, TypeExpr::Pointer { .. }) {
+                            self.pointer_vars.insert(p.name.clone());
+                        }
+                    }
+                    self.register_var_ty(&p.name, &p.ty);
                     let desc_kind = conv
                         .and_then(|c| c.params.get(i))
                         .filter(|_| untyped_params.contains(&i))
@@ -336,14 +377,15 @@ impl Emitter {
                 // literal renders inline, its body keeps normal indents.
                 let main_body = std::mem::take(&mut self.body);
                 let saved_loans = std::mem::take(&mut self.loan_frames);
-                self.emit_block_body(&body.stmts)?;
+                let body_res = self.emit_block_body(&body.stmts);
                 self.loan_frames = saved_loans;
                 let closure_body = std::mem::take(&mut self.body);
                 self.body = main_body;
                 self.fnlit_depth -= 1;
                 self.for_depth = saved_for_depth;
                 self.handler_writer = saved_writer;
-                self.bindings.retain(|k, _| known.contains(k));
+                self.restore_scope(saved_scope);
+                body_res?;
                 out.push_str(&closure_body);
                 for _ in 0..self.indent {
                     out.push('\t');
@@ -535,7 +577,11 @@ impl Emitter {
         self.member_name(base, name)
     }
 
-    fn emit_call(&mut self, callee: &Expr, args: &[CallArg]) -> Result<String, EmitError> {
+    pub(crate) fn emit_call(
+        &mut self,
+        callee: &Expr,
+        args: &[CallArg],
+    ) -> Result<String, EmitError> {
         // --- make(...): the first argument is a TYPE (bug-#2 fix) ---
         if matches!(callee, Expr::Ident { name, .. } if name == "make") {
             return self.emit_make(args);
@@ -550,10 +596,10 @@ impl Emitter {
                 // package root, so its call used to fall through this whole
                 // block, emit verbatim, and die in the toolchain with
                 // `undefined: flate2`.
-                if lookup_unbound_crate(pkg).is_some() {
+                if !self.local_vars.contains(pkg) && lookup_unbound_crate(pkg).is_some() {
                     return Err(EmitError::unbound_crate(pkg));
                 }
-                if is_package_root(pkg) {
+                if self.is_unshadowed_pkg_root(pkg) {
                     return self.emit_pkg_call(pkg, name, args);
                 }
             }
@@ -608,7 +654,7 @@ impl Emitter {
         //     `lru_cache_new[string, int](2)` (Go has no dotted idents) ---
         if let Expr::Field { base, name, .. } = callee {
             if let Expr::Ident { name: root, .. } = base.as_ref() {
-                if !is_package_root(root) && !self.bindings.contains_key(root) {
+                if !self.is_unshadowed_pkg_root(root) && !self.bindings.contains_key(root) {
                     let (head, type_args) = split_type_args(name);
                     let full = format!("{}.{}", root, head);
                     if self.assoc_fns.contains(&full) {
@@ -647,13 +693,37 @@ impl Emitter {
                 // SPEC-LANGUAGE line 1991 asserts `u8(300) == 44` as an
                 // executable test-claim. The fold computes that same
                 // two's-complement truncation at emit time.
-                if let Some(folded) =
-                    super::constconv::fold_constant(&args[0].value, name)
-                {
+                if let Some(folded) = super::constconv::fold_constant(&args[0].value, name) {
                     return Ok(format!("{}({})", go, folded));
                 }
                 let a = self.emit_call_arg(&args[0])?;
                 return Ok(format!("{}({})", go, a));
+            }
+        }
+
+        // --- a slice type-as-value CALLED = a conversion: `[]byte("abc")`
+        //     parses as SliceLit{elem, items: []} + a postfix call (the
+        //     standing type-as-value encoding) and used to fall into the
+        //     generic path below as `[]byte{}("abc")` — go:
+        //     `invalid operation: cannot call []byte{}` — so even the
+        //     legal Go conversion `[]byte(s)` never built (issue #228
+        //     family C). Emit the conversion form directly. ---
+        if let Expr::SliceLit {
+            elem: Some(t),
+            items,
+            ..
+        } = callee
+        {
+            if items.is_empty() {
+                let mut parts = Vec::new();
+                for a in args {
+                    parts.push(self.emit_call_arg(a)?);
+                }
+                return Ok(format!(
+                    "[]{}({})",
+                    self.type_text(t),
+                    parts.join(", ")
+                ));
             }
         }
 

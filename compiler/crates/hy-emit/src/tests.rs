@@ -209,6 +209,64 @@ fn example02_try_desugar_and_defer() {
     );
 }
 
+    #[test]
+    fn defer_call_argument_try_hoists_before_the_defer() {
+        // P1 (§7): a deferred call's arguments are evaluated at defer time, so a
+        // `?` inside them hoists to a binding BEFORE the `defer` — the call
+        // itself stays deferred. Regression for the check→emit gap where the
+        // hoister never registered the temp and `emit_expr` refused the `?` as
+        // "outside a binding position" on a program the checker accepted.
+        let go = emit(
+            "fn probe() (n int, e error) {\n    return 1, nil\n}\n\nfn sink(n int) {\n    fmt.println(n)\n}\n\nfn main() (code int) {\n    defer sink(probe()?)\n    return 0\n}\n",
+        );
+        let hoist = go
+            .find(":= probe()")
+            .unwrap_or_else(|| panic!("argument `?` must hoist://n{}", go));
+        let defer_at = go
+            .find("defer sink(")
+            .unwrap_or_else(|| panic!("defer stays a deferred call://n{}", go));
+        assert!(hoist < defer_at, "hoist must precede the defer://n{}", go);
+    }
+
+    #[test]
+    fn defer_parenthesized_operand_emits_without_parens() {
+        // Go rejects a parenthesized defer operand ("expression in defer must be
+        // function call"), so a parenthesized call must lower to a bare one:
+        // `defer (fmt.println("done"))` -> `defer fmt.Println("done")`.
+        let go = emit("fn main() {\n    defer (fmt.println(\"done\"))\n}\n");
+        assert!(go.contains("defer fmt.Println(\"done\")"), ":\n{}", go);
+        assert!(
+            !go.contains("defer ("),
+            "the defer operand must not keep its parens://n{}",
+            go
+        );
+    }
+
+    #[test]
+    fn defer_parenthesized_call_argument_try_hoists_before_the_defer() {
+        // Regression (adversarial review): `defer (sink(probe()?))` — the operand
+        // is a `Paren{Call}`, so the hoist gate has to unwrap parens exactly like
+        // the checker's HYB-E2001 test does (a parenthesized call is still a
+        // call). Otherwise the checker accepts the program and the emitter dies
+        // late with "`?` outside a binding position" — the very gap this branch
+        // closes, reintroduced by one set of parens.
+        let go = emit(
+            "fn probe() (n int, e error) {\n    return 1, nil\n}\n\nfn sink(n int) {\n    fmt.println(n)\n}\n\nfn main() (code int) {\n    defer (sink(probe()?))\n    return 0\n}\n",
+        );
+        let hoist = go
+            .find(":= probe()")
+            .unwrap_or_else(|| panic!("parenthesized argument `?` must hoist://n{}", go));
+        let defer_at = go
+            .find("defer sink(")
+            .unwrap_or_else(|| panic!("defer lowered without parens://n{}", go));
+        assert!(hoist < defer_at, "hoist must precede the defer://n{}", go);
+        assert!(
+            !go.contains("defer ("),
+            "no parens in the emitted defer://n{}",
+            go
+        );
+    }
+
 // ---------------------------------------------------------------------------
 // Example 03 — worker pool (structs-first, task→go, send/receive, close)
 // ---------------------------------------------------------------------------
@@ -2194,3 +2252,280 @@ fn slot_loan_parallel_define_assign_and_try_in_place() {
     );
 }
 
+
+#[test]
+fn task_preserves_variadic_spread() {
+    let go = emit(
+        "fn worker(items []string) {}\n\nfn main() {\n    items := []string{\"a\", \"b\"}\n    task worker(items...)\n}\n",
+    );
+    assert!(
+        go.contains("go worker(items...)"),
+        "task must preserve variadic spread `...`:\n{}",
+        go
+    );
+}
+
+#[test]
+fn task_auto_addresses_pointer_params() {
+    let go = emit(
+        "struct env {\n    name string\n}\n\nfn worker(e *env) {}\n\nfn main() {\n    e := env{name: \"prod\"}\n    task worker(e)\n}\n",
+    );
+    assert!(
+        go.contains("go worker(&e)"),
+        "task must auto-address addressable pointer argument:\n{}",
+        go
+    );
+}
+
+#[test]
+fn task_preserves_already_addressed_pointer_param() {
+    let go = emit(
+        "struct env {\n    name string\n}\n\nfn worker(e *env) {}\n\nfn main() {\n    e := env{name: \"prod\"}\n    task worker(&e)\n}\n",
+    );
+    assert!(
+        go.contains("go worker(&e)"),
+        "task must not double-address:\n{}",
+        go
+    );
+}
+
+#[test]
+fn task_package_call_uses_package_and_normalizes_name() {
+    let go = emit(
+        "fn main() {\n    task time.sleep(100)\n}\n",
+    );
+    assert!(
+        go.contains("\"time\""),
+        "package must be imported:\n{}",
+        go
+    );
+    assert!(
+        go.contains("go time.Sleep(100)"),
+        "method name must normalize and emit go:\n{}",
+        go
+    );
+}
+
+#[test]
+fn task_plain_call_still_emits_verbatim() {
+    let go = emit(
+        "fn worker(x int) {}\n\nfn main() {\n    x := 42\n    task worker(x)\n}\n",
+    );
+    assert!(
+        go.contains("go worker(x)"),
+        "plain task call must emit verbatim:\n{}",
+        go
+    );
+}
+
+#[test]
+fn task_with_try_args_hoists_in_order_before_spawn() {
+    let go = emit(
+        "fn worker(a int, b int) {}\nfn first() (int, error) { return 1, nil }\nfn second() (int, error) { return 2, nil }\nfn run() error {\n    task worker(first()?, second()?)\n    return nil\n}\n",
+    );
+    let first_at = go.find("first()").expect("first() present");
+    let second_at = go.find("second()").expect("second() present");
+    let spawn_at = go.find("go worker(").expect("go worker spawn present");
+    assert!(first_at < second_at, "first try must evaluate before second try");
+    assert!(second_at < spawn_at, "tries must evaluate before goroutine spawn");
+    assert!(go.contains("go worker(hyT0, hyT2)"), "arguments substituted with temps:\n{}", go);
+}
+// ---------------------------------------------------------------------------
+// #547 — a shadowing binder must not stretch a slot loan's live range.
+//
+// `n := &m["a"]` opens an O8 slot loan on `n`; the non-lexical flush emits the
+// store-back (`m["a"] = n`) as soon as no later statement reads `n`. A `for` /
+// `select` binder that RE-DECLARES `n` makes the body's `n` a different
+// binding, so those reads must not keep the loan alive. Before the fix the
+// store-back was deferred past `task worker(move m, done)` and raced with the
+// worker on the moved map (`go run -race`: DATA RACE, 3/3 runs).
+// ---------------------------------------------------------------------------
+
+/// The #547 report verbatim: the range binder reuses the loan's name, and the
+/// store-back must land BEFORE the spawn that moves the map.
+#[test]
+fn slot_loan_flushes_before_move_when_range_binder_shadows_the_loan_name_issue_547() {
+    let go = emit(
+        "struct item {\n    x int\n}\n\nfn worker(m map[string]item, done chan bool) {\n    for i in 0..1000 {\n        m[\"w\"] = item{x: i}\n    }\n    done <- true\n}\n\nfn main() {\n    m := map[string]item{\"a\": item{x: 0}}\n    done := make(chan bool, 1)\n    n := &m[\"a\"]\n    n.x = 1\n    task worker(move m, done)\n    total := 0\n    for n in 0..1000 {\n        total += n\n    }\n    <-done\n    fmt.println(total)\n}\n",
+    );
+    let mut_at = go.find("n.x = 1").expect("loan mutation");
+    let flush_at = go.find("m[\"a\"] = n").expect("store-back emitted");
+    let spawn_at = go.find("go worker(m, done)").expect("task spawn emitted");
+    assert!(
+        mut_at < flush_at && flush_at < spawn_at,
+        "a range binder that shadows the loan name must not defer the store-back past the spawn (#547):\n{}",
+        go
+    );
+    assert_eq!(
+        go.matches("m[\"a\"] = n").count(),
+        1,
+        "store-back must be emitted exactly once:/n{}",
+        go
+    );
+}
+
+/// `ForKind::Iterate` binder (`for n in items`) — same class as the range case.
+#[test]
+fn slot_loan_flushes_before_move_when_iterate_binder_shadows_the_loan_name() {
+    let go = emit(
+        "struct service {\n    replicas int\n}\n\nfn worker(m map[string]service, done chan bool) {\n    done <- true\n}\n\nfn main() {\n    m := map[string]service{\"a\": {replicas: 1}}\n    n := &m[\"a\"]\n    n.replicas = 5\n    done := make(chan bool, 1)\n    task worker(move m, done)\n    items := []int{1, 2, 3}\n    total := 0\n    for n in items {\n        total += n\n    }\n    <-done\n    fmt.println(total)\n}\n",
+    );
+    let flush_at = go.find("m[\"a\"] = n").expect("store-back emitted");
+    let spawn_at = go.find("go worker(m, done)").expect("task spawn emitted");
+    assert!(
+        flush_at < spawn_at,
+        "an iterate binder that shadows the loan name must not defer the store-back past the spawn:/n{}",
+        go
+    );
+}
+
+/// `select` receive bindings (`n, ok := <-ch:`) — same class as the loop binder.
+#[test]
+fn slot_loan_flushes_before_move_when_select_recv_shadows_the_loan_name() {
+    let go = emit(
+        "struct service {\n    replicas int\n}\n\nfn worker(m map[string]service, done chan bool) {\n    done <- true\n}\n\nfn main() {\n    m := map[string]service{\"a\": {replicas: 1}}\n    n := &m[\"a\"]\n    n.replicas = 5\n    done := make(chan bool, 1)\n    task worker(move m, done)\n    ch := make(chan int, 1)\n    select {\n        n, ok := <-ch: {\n            fmt.println(n)\n        }\n        default: {\n        }\n    }\n    <-done\n}\n",
+    );
+    let flush_at = go.find("m[\"a\"] = n").expect("store-back emitted");
+    let spawn_at = go.find("go worker(m, done)").expect("task spawn emitted");
+    assert!(
+        flush_at < spawn_at,
+        "a select receive binding that shadows the loan name must not defer the store-back past the spawn:/n{}",
+        go
+    );
+}
+
+/// The other direction: when the OUTER name really is read again after the
+/// shadowing loop, the loan is still live and the store-back must NOT be
+/// flushed early (that would drop the later mutation — a lost update).
+#[test]
+fn slot_loan_stays_live_when_the_outer_name_is_reused_after_a_shadowing_loop() {
+    let go = emit(
+        "struct service {\n    replicas int\n}\n\nfn main() {\n    m := map[string]service{\"a\": {replicas: 1}}\n    n := &m[\"a\"]\n    n.replicas = 5\n    for n in 0..10 {\n        fmt.println(n)\n    }\n    n.replicas = 7\n}\n",
+    );
+    let after_loop_use = go.find("n.replicas = 7").expect("post-loop use emitted");
+    let flush_at = go.find("m[\"a\"] = n").expect("store-back emitted");
+    assert!(
+        after_loop_use < flush_at,
+        "a post-loop read of the outer name keeps the loan live; the store-back must follow it:/n{}",
+        go
+    );
+    assert_eq!(
+        go.matches("m[\"a\"] = n").count(),
+        1,
+        "one store-back, at the real last use:/n{}",
+        go
+    );
+}
+
+/// An `if` INIT that declares the loan's name shadows it for `cond`, both arms
+/// and `else` (Go's if-statement scope) — the same class as the loop binder.
+/// Found by review after the first cut of this fix: the store-back still landed
+/// after the spawn, because `cond`'s `n` was counted as a use of the loan.
+#[test]
+fn slot_loan_flushes_before_move_when_if_init_shadows_the_loan_name() {
+    let go = emit(
+        "struct item {\n    x int\n}\n\nfn worker(m map[string]item, done chan bool) {\n    m[\"w\"] = item{x: 1}\n    done <- true\n}\n\nfn main() {\n    m := map[string]item{\"a\": item{x: 0}}\n    done := make(chan bool, 1)\n    n := &m[\"a\"]\n    n.x = 1\n    task worker(move m, done)\n    total := 0\n    if n := 2; n > 1 {\n        total += n\n    }\n    <-done\n    fmt.println(total)\n}\n",
+    );
+    let flush_at = go.find("m[\"a\"] = n").expect("store-back emitted");
+    let spawn_at = go.find("go worker(m, done)").expect("task spawn emitted");
+    assert!(
+        flush_at < spawn_at,
+        "an `if` init that shadows the loan name must not defer the store-back past the spawn:/n{}",
+        go
+    );
+}
+
+/// A closure's NAMED RESULT is a binder too (`fn() (n int) { n = 5 }`): its
+/// body assigns the result, not an outer loan of the same name (#547, same
+/// class as the loop / if-init binders; found in review after the first cut).
+#[test]
+fn slot_loan_flushes_before_move_when_closure_named_result_shadows_the_loan_name() {
+    let go = emit(
+        "struct item {\n    x int\n}\n\nfn worker(m map[string]item, done chan bool) {\n    m[\"w\"] = item{x: 1}\n    done <- true\n}\n\nfn main() {\n    m := map[string]item{\"a\": item{x: 0}}\n    done := make(chan bool, 1)\n    n := &m[\"a\"]\n    n.x = 1\n    task worker(move m, done)\n    f := fn() (n int) {\n        n = 5\n        return\n    }\n    fmt.println(f())\n    <-done\n}\n",
+    );
+    let flush_at = go.find("m[\"a\"] = n").expect("store-back emitted");
+    let spawn_at = go.find("go worker(m, done)").expect("task spawn emitted");
+    assert!(
+        flush_at < spawn_at,
+        "a closure named result that shadows the loan name must not defer the store-back past the spawn:/n{}",
+        go
+    );
+}
+
+/// `match some(n)` binds `n` for the whole arm (guard included) — the third
+/// binder shape, already handled upstream; this pins it so a refactor cannot
+/// silently drop the `shadowed` filter (#547 review).
+#[test]
+fn slot_loan_flushes_before_move_when_match_binding_shadows_the_loan_name() {
+    let go = emit(
+        "struct service {\n    replicas int\n}\n\nfn worker(m map[string]service, done chan bool) {\n    done <- true\n}\n\nfn maybe() option[int] {\n    return some(1)\n}\n\nfn main() {\n    m := map[string]service{\"a\": {replicas: 1}}\n    n := &m[\"a\"]\n    n.replicas = 5\n    done := make(chan bool, 1)\n    task worker(move m, done)\n    match maybe() {\n        some(n): {\n            fmt.println(n)\n        }\n        none: {\n        }\n    }\n    <-done\n}\n",
+    );
+    let flush_at = go.find("m[\"a\"] = n").expect("store-back emitted");
+    let spawn_at = go.find("go worker(m, done)").expect("task spawn emitted");
+    assert!(
+        flush_at < spawn_at,
+        "a `match some(n)` binding that shadows the loan name must not defer the store-back past the spawn:/n{}",
+        go
+    );
+}
+
+/// A closure PARAM shadowing the loan name (the `results` half is covered by
+/// `..._closure_named_result_...`; this pins the `params` half).
+#[test]
+fn slot_loan_flushes_before_move_when_closure_param_shadows_the_loan_name() {
+    let go = emit(
+        "struct service {\n    replicas int\n}\n\nfn worker(m map[string]service, done chan bool) {\n    done <- true\n}\n\nfn main() {\n    m := map[string]service{\"a\": {replicas: 1}}\n    n := &m[\"a\"]\n    n.replicas = 5\n    done := make(chan bool, 1)\n    task worker(move m, done)\n    f := fn(n int) {\n        fmt.println(n)\n    }\n    f(1)\n    <-done\n}\n",
+    );
+    let flush_at = go.find("m[\"a\"] = n").expect("store-back emitted");
+    let spawn_at = go.find("go worker(m, done)").expect("task spawn emitted");
+    assert!(
+        flush_at < spawn_at,
+        "a closure param that shadows the loan name must not defer the store-back past the spawn:/n{}",
+        go
+    );
+}
+
+/// The OVER-SKIP guard for the `if` arm: when the init does NOT declare the
+/// loan's name, the body's use of it is a real use and the store-back must
+/// stay after it (dropping this would lose the second mutation).
+#[test]
+fn slot_loan_stays_live_when_an_if_init_binds_a_different_name() {
+    let go = emit(
+        "struct service {\n    replicas int\n}\n\nfn main() {\n    m := map[string]service{\"a\": {replicas: 1}}\n    n := &m[\"a\"]\n    n.replicas = 5\n    if k := 2; k > 1 {\n        n.replicas = 7\n    }\n}\n",
+    );
+    let body_use = go.find("n.replicas = 7").expect("body use emitted");
+    let flush_at = go.find("m[\"a\"] = n").expect("store-back emitted");
+    assert!(
+        body_use < flush_at,
+        "an `if` whose init binds a DIFFERENT name must not shadow the loan; the store-back follows the body use:/n{}",
+        go
+    );
+    assert_eq!(
+        go.matches("m[\"a\"] = n").count(),
+        1,
+        "one store-back, at the real last use:/n{}",
+        go
+    );
+}
+
+#[test]
+fn parenthesized_slot_loan_lowers_to_copy_and_storeback() {
+    let go = emit(
+        "struct svc {\n    count int\n}\n\nfn main() {\n    m := map[string]svc{\"a\": svc{count: 1}}\n    s := (&m[\"a\"])\n    s.count = 2\n    s = &(m[\"a\"])\n    s.count = 3\n}\n",
+    );
+    assert!(
+        go.contains("s := m[\"a\"]"),
+        "expected parenthesized slot loan to lower to copy read, got:\n{}",
+        go
+    );
+    assert!(
+        go.contains("m[\"a\"] = s"),
+        "expected parenthesized slot loan to emit store-back, got:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("&m[\"a\"]") && !go.contains("&(m[\"a\"])"),
+        "expected no raw address-of map index in emitted Go, got:\n{}",
+        go
+    );
+}

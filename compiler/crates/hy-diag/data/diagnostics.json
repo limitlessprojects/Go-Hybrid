@@ -231,7 +231,7 @@
         "route updates through a channel instead of sharing the value",
         "copy the data the task needs and send the copy",
         "transfer ownership: `task worker(move counter)` — the binding (and every alias) must be unused afterward",
-        "wrap the shared state in a `managed` block (unchecked: Go DRF-SC applies; audited by --report-managed)"
+        "wrap the shared state in `managed(\"why this bypass is safe\", \"category\") { ... }` (unchecked: Go DRF-SC applies; audited by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)"
       ],
       "example": "task worker(counter)   // reject: HYB-E3001 — `counter` is a mutable map",
       "rule": "O4",
@@ -247,7 +247,7 @@
       "fixits": [
         "send a copy or a fresh literal instead of a live shared value",
         "send ownership with `move` if this task is done with the value (aliases freeze, O5)",
-        "share via channel discipline or `managed` instead"
+        "share via channel discipline or wrap the site in `managed(\"why this bypass is safe\", \"category\") { ... }` (audited by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)"
       ],
       "example": "jobs <- job{input: v, data: shared_map}   // reject: HYB-E3002 — `shared_map` is a live mutable map",
       "rule": "O4.6",
@@ -328,6 +328,38 @@
         "if the `<-expr` line was meant as a RECEIVE, put the channel expression first: `v := <-ch` — a statement starting with `<-` is a receive, and a `<-` on a new line never continues the previous statement"
       ],
       "example": "noop() <- 1   // reject: HYB-E3007 — `noop()` is a void call, not a channel",
+      "rule": "O4",
+      "tier0_rule_id": "A1c"
+    },
+    {
+      "code": "HYB-E3008",
+      "name": "chan-direction-mismatch",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "a send to a receive-only channel, or a receive from a send-only channel, is not valid Go",
+      "summary": "Go's channel direction types (`chan<- T` send-only, `<-chan T` receive-only) constrain what operations the binding allows; the parser and emitter both carry the direction, so sending to a `<-chan T` or receiving from a `chan<- T` (in statements, expressions, select arms, or closure bodies) emits invalid Go that fails `go build` / `go vet` (issue #89).",
+      "fixits": [
+        "declare the parameter/local with the direction the body actually uses (`chan T` for both, `chan<- T` to only send, `<-chan T` to only receive)",
+        "if the body needs the opposite operation, widen the declaration to `chan T` (bidirectional) — or split into two channels, one per direction",
+        "receives are `v := <-ch` / select recv arms; sends are `ch <- v` / select send arms — check which side of the arrow the misdeclared binding sits on"
+      ],
+      "example": "fn worker(ch <-chan int) { ch <- 1 }   // reject: HYB-E3008 — cannot send to a receive-only channel",
+      "rule": "O4",
+      "tier0_rule_id": "A1c"
+    },
+    {
+      "code": "HYB-E3009",
+      "name": "chan-direction-mismatch-op",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "channel direction forbids this operation (close / range)",
+      "summary": "Channel direction is a type contract the emitter preserves in the Go signature: `close()` requires a bidirectional or send-only channel (a `<-chan T` has no send capability), and `for … in` over a channel requires receive capability (a `chan<- T` cannot be ranged over). Both are invalid Go that `hyb build --emit-go` reproduces faithfully, so accepting them breaks the accepted-should-emit-buildable-Go contract (issue #94).",
+      "fixits": [
+        "declare the channel as `chan T` (bidirectional) where the operation happens",
+        "for close: pass a `chan<- T` or `chan T` binding — receive-only channels are closed by their send-side owner",
+        "for range: iterate over a `chan T` or `<-chan T` binding — send-only channels are consumed via receives on the other side"
+      ],
+      "example": "var rc <-chan int = c; close(rc)   // reject: HYB-E3009 — cannot close a receive-only channel",
       "rule": "O4",
       "tier0_rule_id": "A1c"
     },
@@ -536,6 +568,21 @@
         "swap the operands (`1 << n` instead of `n << -1`) when the intent is to shift the other side"
       ],
       "example": "x := 1 << -1   // reject: HYB-E6005 — negative shift count; Go cannot build the emitted module",
+      "rule": "BUILDABLE"
+    },
+    {
+      "code": "HYB-E6006",
+      "name": "invalid-const-conversion",
+      "category": "overflow-bounds",
+      "severity": "error",
+      "title": "constant operand invalid for this type conversion",
+      "summary": "A `Type(const)` conversion whose literal-constant operand Go would refuse is rejected: `int8(300)` on a 64-bit target, `int(\"abc\")`, `string(2.5)`, `float32(1e40)`, `int(10^30)`, `string(true)`, `int8(nil)`, `[]int(3)`, a string constant to a non-byte/rune slice, integer constants of 2^512 or more to `string`, and similar forms fail `go build` on the emitted program (issue #228), so an accepted Hybrid program would emit unbuildable Go. Sub-64 integer overflow (`u8(300)`, SPEC X4) is deliberately accepted — the emitter folds the two's-complement result. Only the literal-constant operand case is in scope; a non-constant operand is a run-time conversion.",
+      "fixits": [
+        "use a constant that fits the target type (e.g. `int8(127)`, `uint8(255)`)",
+        "convert between compatible kinds only (number <-> number, string <-> string, `string(65)`, `[]byte(\"abc\")`)",
+        "if truncation or a run-time conversion is intended, bind the operand to a variable first (SPEC X4 runtime truncation)"
+      ],
+      "example": "x := int8(300)   // reject: HYB-E6006 — constant 300 overflows int8 in Go; the emitted module would not build",
       "rule": "BUILDABLE"
     },
     {

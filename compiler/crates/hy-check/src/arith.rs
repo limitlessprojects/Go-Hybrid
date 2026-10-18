@@ -18,7 +18,16 @@ impl<'a> Checker<'a> {
     /// Pass-B entry: walk the same expression surface as `walk::own_uses`.
     /// Nested block bodies are NOT recursed here — `walk::flatten` already
     /// lists those statements, and a second walk would duplicate diagnostics.
+    pub(crate) fn check_file_const_zero_divisors(&mut self) {
+        for d in &self.file.decls {
+            if let hy_syntax::Decl::Const(c) = d {
+                self.check_expr_const_zero_divisor(&c.value);
+            }
+        }
+    }
+
     pub(crate) fn check_stmt_const_zero_divisor(&mut self, stmt: &Stmt) {
+        self.check_file_close_and_range_directions(stmt);
         self.check_stmt_const_zero_divisor_inner(stmt, /*deep=*/ false);
     }
 
@@ -171,8 +180,12 @@ impl<'a> Checker<'a> {
             Expr::Binary { op, lhs, rhs, span } => {
                 self.check_expr_const_zero_divisor(lhs);
                 self.check_expr_const_zero_divisor(rhs);
-                if matches!(op, BinOp::Div | BinOp::Mod) && is_int_literal_zero(rhs) {
-                    self.emit_const_zero_divisor(*span, bin_op_txt(*op));
+                if matches!(op, BinOp::Div | BinOp::Mod) {
+                    if is_int_literal_zero(rhs) {
+                        self.emit_const_zero_divisor(*span, bin_op_txt(*op));
+                    } else if is_float_literal_zero(rhs) && is_const_expr(lhs) {
+                        self.emit_const_zero_divisor(*span, bin_op_txt(*op));
+                    }
                 }
             }
             Expr::Unary { operand, .. }
@@ -266,25 +279,119 @@ fn assign_op_txt(op: AssignOp) -> &'static str {
     }
 }
 
+pub(crate) fn is_constant_zero(expr: &Expr) -> bool {
+    const_eval_int(expr) == Some(0)
+}
+
 fn is_int_literal_zero(expr: &Expr) -> bool {
+    is_constant_zero(expr)
+}
+
+pub(crate) fn is_float_literal_zero(expr: &Expr) -> bool {
     match unwrap_parens(expr) {
         Expr::Lit {
-            kind: LitKind::Int(raw),
+            kind: LitKind::Float(raw),
             ..
-        } => int_lit_is_zero(raw),
+        } => float_lit_is_zero(raw),
         Expr::Unary {
             op: UnOp::Neg,
             operand,
             ..
-        } => is_int_literal_zero(operand),
+        } => is_float_literal_zero(operand),
         _ => false,
     }
 }
 
-fn int_lit_is_zero(raw: &str) -> bool {
+pub(crate) fn float_lit_is_zero(raw: &str) -> bool {
     let s: String = raw.chars().filter(|c| *c != '_').collect();
     if s.is_empty() {
         return false;
+    }
+    if s.starts_with("0x") || s.starts_with("0X") {
+        let without_prefix = &s[2..];
+        let mantissa = without_prefix.split(['p', 'P']).next().unwrap_or(without_prefix);
+        let mantissa_clean: String = mantissa.chars().filter(|c| *c != '.').collect();
+        return !mantissa_clean.is_empty() && mantissa_clean.chars().all(|c| c == '0');
+    }
+    let mantissa = s.split(['e', 'E']).next().unwrap_or(&s);
+    let mantissa_clean: String = mantissa.chars().filter(|c| *c != '.').collect();
+    !mantissa_clean.is_empty() && mantissa_clean.chars().all(|c| c == '0')
+}
+
+fn is_const_expr(expr: &Expr) -> bool {
+    match unwrap_parens(expr) {
+        Expr::Lit { .. } => true,
+        Expr::Unary { operand, .. } => is_const_expr(operand),
+        Expr::Binary { lhs, rhs, .. } => is_const_expr(lhs) && is_const_expr(rhs),
+        _ => {
+            const_eval_int(expr).is_some()
+                || crate::const_overflow::const_float_value(expr).is_some()
+        }
+    }
+}
+
+pub(crate) fn const_eval_int(expr: &Expr) -> Option<i128> {
+    match unwrap_parens(expr) {
+        Expr::Lit {
+            kind: LitKind::Int(raw),
+            ..
+        } => int_lit_value(raw),
+        Expr::Unary { op, operand, .. } => {
+            let val = const_eval_int(operand)?;
+            match op {
+                UnOp::Neg => val.checked_neg(),
+                _ => None,
+            }
+        }
+        Expr::Binary { op, lhs, rhs, .. } => {
+            let l = const_eval_int(lhs)?;
+            let r = const_eval_int(rhs)?;
+            match op {
+                BinOp::Add => l.checked_add(r),
+                BinOp::Sub => l.checked_sub(r),
+                BinOp::Mul => l.checked_mul(r),
+                BinOp::Div => {
+                    if r != 0 {
+                        l.checked_div(r)
+                    } else {
+                        None
+                    }
+                }
+                BinOp::Mod => {
+                    if r != 0 {
+                        l.checked_rem(r)
+                    } else {
+                        None
+                    }
+                }
+                BinOp::BitAnd => Some(l & r),
+                BinOp::BitOr => Some(l | r),
+                BinOp::BitXor => Some(l ^ r),
+                BinOp::Shl => {
+                    if r >= 0 && r < 128 {
+                        l.checked_shl(r as u32)
+                    } else {
+                        None
+                    }
+                }
+                BinOp::Shr => {
+                    if r >= 0 && r < 128 {
+                        l.checked_shr(r as u32)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn int_lit_value(raw: &str) -> Option<i128> {
+    let s: String = raw.chars().filter(|c| *c != '_').collect();
+    if s.is_empty() {
+        return None;
     }
     let (radix, digits) = if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))
     {
@@ -293,15 +400,23 @@ fn int_lit_is_zero(raw: &str) -> bool {
         (8, rest)
     } else if let Some(rest) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
         (2, rest)
+    } else if s.len() > 1 && s.starts_with('0') {
+        if s.chars().any(|c| c == '8' || c == '9') {
+            return None;
+        }
+        (8, s.as_str())
     } else {
         (10, s.as_str())
     };
     if digits.is_empty() {
-        return false;
+        return None;
     }
-    u128::from_str_radix(digits, radix)
-        .map(|v| v == 0)
-        .unwrap_or(false)
+    i128::from_str_radix(digits, radix).ok()
+}
+
+#[allow(dead_code)]
+fn int_lit_is_zero(raw: &str) -> bool {
+    int_lit_value(raw) == Some(0)
 }
 
 #[cfg(test)]

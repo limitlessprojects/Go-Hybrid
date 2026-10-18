@@ -3452,6 +3452,55 @@ mod tests {
     }
 
     #[test]
+    fn go_keyword_traps_fail_at_parse_naming_keyword() {
+        // issue #228: `switch`/`range`/`goto`/`fallthrough` parsed as
+        // plain identifiers and were emitted verbatim into Go
+        // (`x := switch` → go: `expected operand, found 'switch'`;
+        // `fallthrough` → `fallthrough statement out of place`). Now they
+        // fail at parse naming the word — the `while` (#103) move.
+        for w in ["switch", "range", "goto", "fallthrough"] {
+            let src = format!("fn main() {{ x := {} }}", w);
+            let errs = match parse_file("t.hy", &src) {
+                Ok(_) => panic!("`{}` must fail at parse, not emit broken Go", w),
+                Err(d) => d,
+            };
+            assert!(
+                errs.iter().any(|d| d.message.contains(&format!("`{}`", w))),
+                "error should name `{}`: {:?}",
+                w,
+                errs
+            );
+        }
+    }
+
+    #[test]
+    fn map_prefix_controls_still_parse() {
+        // issue #228 controls: the legitimate `map` forms (type, literal,
+        // generic map, map through trivia) must keep parsing — only a
+        // *bare* `map` is rejected (as a HYB-E0002 lexical diagnostic).
+        let ok = [
+            "fn main() { m := map[string]int{} _ = m }",
+            "fn main() { var x map[int]string _ = x }",
+            "fn f(m map[bool]u8) { _ = m }",
+            "fn main() { y := map /* c */ [string]int{} _ = y }",
+        ];
+        for src in ok {
+            if let Err(diags) = parse_file("t.hy", src) {
+                panic!("map-prefix control must parse: {} -> {:?}", src, diags);
+            }
+        }
+        let errs = match parse_file("t.hy", "fn main() { x := map }") {
+            Ok(_) => panic!("bare `map` must fail at parse"),
+            Err(d) => d,
+        };
+        assert!(
+            errs.iter().any(|d| d.message.contains("`map`")),
+            "error should name `map`: {:?}",
+            errs
+        );
+    }
+
+    #[test]
     fn default_select_arm_parses() {
         // `default` was never in KEYWORDS, so at_kw("default") in
         // parse_select was dead code and a `default:` arm failed to parse

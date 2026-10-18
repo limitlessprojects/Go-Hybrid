@@ -118,6 +118,75 @@ class TestRunnerShaValidation(unittest.TestCase):
             self.assertEqual(steps[0]["exit"], 1)
             self.assertIn("failed to resolve HEAD", steps[0]["out_tail"])
 
+    def test_pinned_sha_without_git_is_not_reported_green(self):
+        # The Kaggle worker can fall back to a codeload tarball, which has no
+        # .git. A job pinned to a real commit must not run (or report ok) when
+        # the pin cannot be verified against anything.
+        with tempfile.TemporaryDirectory(prefix="test-sha-nogit-") as td:
+            root = Path(td)
+            tarball_repo = root / "repo"
+            tarball_repo.mkdir()  # extracted sources, deliberately no .git
+            self.assertFalse((tarball_repo / ".git").exists())
+            setup_marker = root / "setup.ran"
+            cmd_marker = root / "cmd.ran"
+            job = {
+                "job": "test-sha-nogit",
+                "sha": "0" * 40,
+                "tier": "local",
+                "setup": [{"name": "s1", "run": [sys.executable, "-c", f"from pathlib import Path; Path(r'{setup_marker}').write_text('1')"]}],
+                "commands": [{"name": "c1", "run": [sys.executable, "-c", f"from pathlib import Path; Path(r'{cmd_marker}').write_text('1')"]}],
+            }
+            job_file = root / "job.json"
+            job_file.write_text(json.dumps(job), encoding="utf-8")
+            results_dir = root / "results"
+
+            res = subprocess.run(
+                [sys.executable, str(self.runner_py), str(job_file), "--repo-dir", str(tarball_repo), "--results-dir", str(results_dir)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res.returncode, 1)
+            self.assertFalse(setup_marker.exists())
+            self.assertFalse(cmd_marker.exists())
+
+            summary_file = results_dir / "summary.json"
+            self.assertTrue(summary_file.exists())
+            summary = json.loads(summary_file.read_text(encoding="utf-8"))
+            self.assertFalse(summary["ok"])
+            steps = summary.get("steps", [])
+            self.assertEqual(len(steps), 1)
+            self.assertEqual(steps[0]["name"], "sha-check")
+            self.assertEqual(steps[0]["exit"], 1)
+            self.assertIn("cannot verify pinned sha", steps[0]["out_tail"])
+
+    def test_head_pin_without_git_still_runs(self):
+        # A HEAD-pinned job has no commit to verify, so the tarball fallback
+        # must stay usable for it.
+        with tempfile.TemporaryDirectory(prefix="test-sha-nogit-head-") as td:
+            root = Path(td)
+            tarball_repo = root / "repo"
+            tarball_repo.mkdir()  # no .git
+            cmd_marker = root / "cmd.ran"
+            job = {
+                "job": "test-sha-nogit-head",
+                "sha": "HEAD",
+                "tier": "local",
+                "commands": [{"name": "c1", "run": [sys.executable, "-c", f"from pathlib import Path; Path(r'{cmd_marker}').write_text('1')"]}],
+            }
+            job_file = root / "job.json"
+            job_file.write_text(json.dumps(job), encoding="utf-8")
+            results_dir = root / "results"
+
+            res = subprocess.run(
+                [sys.executable, str(self.runner_py), str(job_file), "--repo-dir", str(tarball_repo), "--results-dir", str(results_dir)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res.returncode, 0)
+            self.assertTrue(cmd_marker.exists())
+            summary = json.loads((results_dir / "summary.json").read_text(encoding="utf-8"))
+            self.assertTrue(summary["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()

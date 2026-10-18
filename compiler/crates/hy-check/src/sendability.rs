@@ -21,7 +21,7 @@
 
 use crate::model::{as_addr_of, unwrap_parens, Binding, Checker, FnState, MoveKind, TypeShape};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::{Expr, LitKind};
+use hy_syntax::{Expr, LitKind, TypeExpr};
 
 /// The spawn-callee proof (O4.0): what the checker concluded about the
 /// expression a `task` statement spawns.
@@ -95,7 +95,9 @@ impl<'a> Checker<'a> {
         match &b.shape {
             TypeShape::Unknown => Outcome::Unproven(UnprovenInfo {
                 value: name.to_string(),
-                reason: "its type did not resolve to a sendability class (no ascription and the initializer's type was unresolvable)".to_string(),
+                reason: unproven_atomic_reason(b).unwrap_or_else(|| {
+                    "its type did not resolve to a sendability class (no ascription and the initializer's type was unresolvable)".to_string()
+                }),
             }),
             TypeShape::Closure => Outcome::Rejected(RejectInfo {
                 value: name.to_string(),
@@ -759,6 +761,29 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The element type of a channel expression, when it resolves.
+    pub(crate) fn chan_elem_ty(&self, st: &FnState, chan: &Expr) -> Option<TypeExpr> {
+        let ty = self.ty_of_expr(st, chan)?;
+        let resolved = self.resolve_type_alias(&ty);
+        match resolved {
+            TypeExpr::Chan { elem, .. } => Some(*elem),
+            _ => None,
+        }
+    }
+
+    /// Check for constant overflow or float truncation in a channel send.
+    pub(crate) fn check_chan_send_const_overflow(
+        &mut self,
+        st: &FnState,
+        chan: &Expr,
+        value: &Expr,
+    ) {
+        if let Some(elem_ty) = self.chan_elem_ty(st, chan) {
+            let desc = format!("channel `{}`", chan.render());
+            self.check_const_overflow_init(&desc, &elem_ty, value, Some(st));
+        }
+    }
+
     /// Classify a send's TARGET (#77): a send is only well-typed when the
     /// channel expression resolves to a channel shape. Before this check a
     /// deliberate `noop() <- 1` (void call as target) and the accidental
@@ -773,7 +798,44 @@ impl<'a> Checker<'a> {
     /// check (the site is ill-typed — no cascade).
     pub(crate) fn check_send_target(&mut self, st: &FnState, chan: &Expr, span: Span) -> bool {
         match self.shape_of_expr(st, chan) {
-            TypeShape::Chan(_) => true,
+            TypeShape::Chan(_) => {
+                if let Some(ty) = self.ty_of_expr(st, chan) {
+                    let resolved = self.resolve_type_alias(&ty);
+                    if matches!(
+                        resolved,
+                        hy_syntax::TypeExpr::Chan {
+                            dir: hy_syntax::ChanDir::Recv,
+                            ..
+                        }
+                    ) {
+                        // HYB-E3008 (chan-direction-mismatch) owns directed-channel
+                        // misuse on main; this generic arm only reports when E3008
+                        // has not already diagnosed the same site, so a defect is
+                        // reported once by its precise code.
+                        if !self
+                            .diags
+                            .iter()
+                            .any(|d| d.code == "HYB-E3008" && d.span == span)
+                        {
+                            let msg = format!(
+                                "cannot send to `{}` (`{}`) — channel is receive-only (HYB-E3007)",
+                                chan.render(),
+                                resolved.render()
+                            );
+                            let notes = vec![
+                                "why: Go rejects `ch <- v` on a `<-chan T` receive-only channel (`invalid operation: cannot send to receive-only channel`), so an accepted Hybrid program would emit unbuildable Go".to_string(),
+                                "fix: declare the parameter or binding as a bidirectional (`chan T`) or send-only (`chan<- T`) channel".to_string(),
+                            ];
+                            self.diags.push(
+                                Diagnostic::error("HYB-E3007", self.path.clone(), span, msg)
+                                    .with_notes(notes),
+                            );
+                        }
+                        return false;
+                    }
+                }
+                true
+            }
             TypeShape::Unknown => {
                 let msg = format!(
                     "cannot prove `{}` is a channel — a send target must resolve to `chan T` (O4.9)",
@@ -1230,6 +1292,680 @@ impl<'a> Checker<'a> {
             self.mark_move(st, &name, mspan, site_desc.to_string(), MoveKind::Moved);
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Channel direction enforcement for `close()` and `for … in` (HYB-E3009, #94)
+    // -----------------------------------------------------------------------
+
+    /// Triggered once per file from Pass B (`arith.rs`): walks every declared
+    /// function with lexical type tracking that preserves narrowing channel
+    /// ascriptions (`var rc <-chan int = c`) and enforces:
+    ///   1. `close(ch)` (including `defer close(ch)` and calls inside closures)
+    ///      rejects `<-chan T` (`ChanDir::Recv`) with `HYB-E3009`.
+    ///   2. `for … in ch` rejects `chan<- T` (`ChanDir::Send`) with `HYB-E3009`.
+    pub(crate) fn check_file_close_and_range_directions(&mut self, trigger_stmt: &hy_syntax::Stmt) {
+        let first_span = self
+            .file
+            .fns()
+            .find_map(|f| f.body.as_ref()?.stmts.first().map(|s| s.span()));
+        if first_span != Some(trigger_stmt.span()) {
+            return;
+        }
+        let fns: Vec<&'a hy_syntax::FnDecl> = self.file.fns().collect();
+        for f in fns {
+            self.check_fn_close_and_range_directions(f);
+        }
+    }
+
+    fn check_fn_close_and_range_directions(&mut self, f: &hy_syntax::FnDecl) {
+        let Some(body) = &f.body else {
+            return;
+        };
+        let mut env = ChanDirEnv::new();
+        if let Some(r) = &f.receiver {
+            env.define(&r.name, Some(r.ty.clone()));
+        }
+        for p in &f.params {
+            env.define(&p.name, Some(p.ty.clone()));
+        }
+        for res in &f.results {
+            if let Some(name) = &res.name {
+                env.define(name, Some(res.ty.clone()));
+            }
+        }
+        for stmt in &body.stmts {
+            self.walk_stmt_chan_dir(stmt, &mut env);
+        }
+    }
+
+    fn walk_stmt_chan_dir(&mut self, stmt: &hy_syntax::Stmt, env: &mut ChanDirEnv) {
+        use hy_syntax::{ForKind, SelectArmKind, Stmt, TypeExpr};
+        match stmt {
+            Stmt::Local(l) => {
+                for v in &l.values {
+                    self.walk_expr_chan_dir(v, env);
+                }
+                if let Some(ty) = &l.ty {
+                    for name in &l.names {
+                        if name != "_" {
+                            env.define(name, Some(ty.clone()));
+                        }
+                    }
+                } else if l.values.len() == 1 && l.names.len() > 1 {
+                    let multi = self.dir_multi_ty_of_call(&l.values[0], env);
+                    for (i, name) in l.names.iter().enumerate() {
+                        if name != "_" {
+                            let ty = multi.as_ref().and_then(|ts| ts.get(i).cloned());
+                            env.define(name, ty);
+                        }
+                    }
+                } else {
+                    for (i, name) in l.names.iter().enumerate() {
+                        if name != "_" {
+                            let ty = l.values.get(i).and_then(|v| self.dir_ty_of_expr(v, env));
+                            env.define(name, ty);
+                        }
+                    }
+                }
+            }
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                for t in targets {
+                    self.walk_place_chan_dir(t, env);
+                }
+                for v in values {
+                    self.walk_expr_chan_dir(v, env);
+                }
+            }
+            Stmt::Expr { expr, .. } | Stmt::Defer { call: expr, .. } => {
+                self.walk_expr_chan_dir(expr, env);
+            }
+            Stmt::Send {
+                chan, value, span, ..
+            } => {
+                if matches!(
+                    self.chan_dir_of_expr_env(chan, env),
+                    Some(hy_syntax::ChanDir::Recv)
+                ) {
+                    self.emit_send_recv_only(chan, *span);
+                }
+                self.walk_expr_chan_dir(chan, env);
+                self.walk_expr_chan_dir(value, env);
+            }
+            Stmt::If {
+                init,
+                cond,
+                then,
+                otherwise,
+                ..
+            } => {
+                env.push();
+                if let Some(init) = init {
+                    self.walk_stmt_chan_dir(init, env);
+                }
+                self.walk_expr_chan_dir(cond, env);
+                env.push();
+                for s in &then.stmts {
+                    self.walk_stmt_chan_dir(s, env);
+                }
+                env.pop();
+                if let Some(other) = otherwise {
+                    env.push();
+                    self.walk_stmt_chan_dir(other, env);
+                    env.pop();
+                }
+                env.pop();
+            }
+            Stmt::For { kind, body, .. } => {
+                env.push();
+                match kind {
+                    ForKind::While { cond } => self.walk_expr_chan_dir(cond, env),
+                    ForKind::Range { var, lo, hi, .. } => {
+                        self.walk_expr_chan_dir(lo, env);
+                        self.walk_expr_chan_dir(hi, env);
+                        if var != "_" {
+                            env.define(var, None);
+                        }
+                    }
+                    ForKind::Iterate { vars, expr } => {
+                        self.walk_expr_chan_dir(expr, env);
+                        if matches!(
+                            self.chan_dir_of_expr_env(expr, env),
+                            Some(hy_syntax::ChanDir::Send)
+                        ) {
+                            self.emit_range_send_only(expr);
+                        }
+                        let iter_tys = self.iterate_var_dir_tys(expr, vars.len(), env);
+                        for (name, ty) in vars.iter().zip(iter_tys) {
+                            if name != "_" {
+                                env.define(name, ty);
+                            }
+                        }
+                    }
+                    ForKind::Infinite => {}
+                }
+                for s in &body.stmts {
+                    self.walk_stmt_chan_dir(s, env);
+                }
+                env.pop();
+            }
+            Stmt::Return { values, .. } => {
+                for v in values {
+                    self.walk_expr_chan_dir(v, env);
+                }
+            }
+            Stmt::Task { callee, args, .. } => {
+                self.walk_expr_chan_dir(callee, env);
+                for a in args {
+                    self.walk_expr_chan_dir(&a.value, env);
+                }
+            }
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+                env.push();
+                for s in &body.stmts {
+                    self.walk_stmt_chan_dir(s, env);
+                }
+                env.pop();
+            }
+            Stmt::Match { subject, arms, .. } => {
+                self.walk_expr_chan_dir(subject, env);
+                for arm in arms {
+                    env.push();
+                    if let Some(g) = &arm.guard {
+                        self.walk_expr_chan_dir(g, env);
+                    }
+                    for s in &arm.body.stmts {
+                        self.walk_stmt_chan_dir(s, env);
+                    }
+                    env.pop();
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                for arm in arms {
+                    env.push();
+                    match &arm.kind {
+                        SelectArmKind::Send { chan, value, .. } => {
+                            if matches!(
+                                self.chan_dir_of_expr_env(chan, env),
+                                Some(hy_syntax::ChanDir::Recv)
+                            ) {
+                                self.emit_send_recv_only(chan, chan.span().to(value.span()));
+                            }
+                            self.walk_expr_chan_dir(chan, env);
+                            self.walk_expr_chan_dir(value, env);
+                        }
+                        SelectArmKind::Recv { names, chan, .. } => {
+                            if matches!(
+                                self.chan_dir_of_expr_env(chan, env),
+                                Some(hy_syntax::ChanDir::Send)
+                            ) {
+                                self.emit_recv_send_only(chan, chan.span());
+                            }
+                            self.walk_expr_chan_dir(chan, env);
+                            let elem_ty = self
+                                .dir_ty_of_expr(chan, env)
+                                .map(|t| self.resolve_type_alias(&t))
+                                .and_then(|t| match t {
+                                    TypeExpr::Chan { elem, .. } => Some(*elem),
+                                    _ => None,
+                                });
+                            if let Some(first) = names.first() {
+                                if first != "_" {
+                                    env.define(first, elem_ty);
+                                }
+                            }
+                            for n in names.iter().skip(1) {
+                                if n != "_" {
+                                    env.define(n, None);
+                                }
+                            }
+                        }
+                        SelectArmKind::Default => {}
+                    }
+                    for s in &arm.body.stmts {
+                        self.walk_stmt_chan_dir(s, env);
+                    }
+                    env.pop();
+                }
+            }
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        }
+    }
+
+    fn walk_place_chan_dir(&mut self, place: &hy_syntax::Place, env: &mut ChanDirEnv) {
+        use hy_syntax::PlaceKind;
+        match &place.kind {
+            PlaceKind::Ident(_) => {}
+            PlaceKind::Index { base, index } => {
+                self.walk_place_chan_dir(base, env);
+                self.walk_expr_chan_dir(index, env);
+            }
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                self.walk_place_chan_dir(base, env);
+            }
+        }
+    }
+
+    fn walk_expr_chan_dir(&mut self, expr: &Expr, env: &mut ChanDirEnv) {
+        use hy_syntax::InterpPart;
+        match expr {
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "close"
+                        && !env.is_bound("close")
+                        && !self.fns.contains_key("close")
+                    {
+                        if let Some(first) = args.first() {
+                            if matches!(
+                                self.chan_dir_of_expr_env(&first.value, env),
+                                Some(hy_syntax::ChanDir::Recv)
+                            ) {
+                                self.emit_close_recv_only(&first.value);
+                            }
+                        }
+                    }
+                }
+                self.walk_expr_chan_dir(callee, env);
+                for a in args {
+                    self.walk_expr_chan_dir(&a.value, env);
+                }
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.walk_expr_chan_dir(lhs, env);
+                self.walk_expr_chan_dir(rhs, env);
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Paren { inner: operand, .. }
+            | Expr::Field { base: operand, .. } => {
+                self.walk_expr_chan_dir(operand, env);
+            }
+            Expr::Receive { chan, span } => {
+                if matches!(
+                    self.chan_dir_of_expr_env(chan, env),
+                    Some(hy_syntax::ChanDir::Send)
+                ) {
+                    self.emit_recv_send_only(chan, *span);
+                }
+                self.walk_expr_chan_dir(chan, env);
+            }
+            Expr::Index { base, index, .. } => {
+                self.walk_expr_chan_dir(base, env);
+                self.walk_expr_chan_dir(index, env);
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                self.walk_expr_chan_dir(base, env);
+                if let Some(lo) = lo {
+                    self.walk_expr_chan_dir(lo, env);
+                }
+                if let Some(hi) = hi {
+                    self.walk_expr_chan_dir(hi, env);
+                }
+            }
+            Expr::StructLit { fields, .. } => {
+                for f in fields {
+                    self.walk_expr_chan_dir(&f.value, env);
+                }
+            }
+            Expr::SliceLit { items, .. } => {
+                for i in items {
+                    self.walk_expr_chan_dir(i, env);
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    self.walk_expr_chan_dir(k, env);
+                    self.walk_expr_chan_dir(v, env);
+                }
+            }
+            Expr::Interp { parts, .. } => {
+                for p in parts {
+                    if let InterpPart::Expr(e) = p {
+                        self.walk_expr_chan_dir(e, env);
+                    }
+                }
+            }
+            Expr::FnLit { params, body, .. } => {
+                env.push();
+                for p in params {
+                    env.define(&p.name, Some(p.ty.clone()));
+                }
+                for s in &body.stmts {
+                    self.walk_stmt_chan_dir(s, env);
+                }
+                env.pop();
+            }
+            Expr::Ident { .. } | Expr::Lit { .. } => {}
+        }
+    }
+
+    fn iterate_var_dir_tys(
+        &self,
+        expr: &Expr,
+        n_vars: usize,
+        env: &ChanDirEnv,
+    ) -> Vec<Option<hy_syntax::TypeExpr>> {
+        use hy_syntax::TypeExpr;
+        let Some(ty) = self.dir_ty_of_expr(expr, env) else {
+            return vec![None; n_vars.max(1)];
+        };
+        match self.resolve_type_alias(&ty) {
+            TypeExpr::Chan { elem, .. } => {
+                let e = Some(*elem);
+                if n_vars >= 2 {
+                    vec![None, e]
+                } else {
+                    vec![e]
+                }
+            }
+            TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+                let e = Some(*elem);
+                if n_vars >= 2 {
+                    vec![None, e]
+                } else {
+                    vec![e]
+                }
+            }
+            TypeExpr::Map { key, value, .. } => {
+                if n_vars >= 2 {
+                    vec![Some(*key), Some(*value)]
+                } else {
+                    vec![Some(*value)]
+                }
+            }
+            _ => vec![None; n_vars.max(1)],
+        }
+    }
+
+    fn dir_multi_ty_of_call(
+        &self,
+        expr: &Expr,
+        env: &ChanDirEnv,
+    ) -> Option<Vec<hy_syntax::TypeExpr>> {
+        use hy_syntax::TypeExpr;
+        let Expr::Call { callee, .. } = unwrap_parens(expr) else {
+            return None;
+        };
+        match unwrap_parens(callee) {
+            Expr::FnLit { results, .. } => Some(results.iter().map(|r| r.ty.clone()).collect()),
+            Expr::Ident { name, .. } => {
+                if let Some(Some(bty)) = env.lookup(name) {
+                    if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&bty) {
+                        return Some(results);
+                    }
+                    return None;
+                }
+                let head = Self::base_named_type_str(name);
+                self.fns
+                    .get(name.as_str())
+                    .or_else(|| self.fns.get(head))
+                    .map(|f| f.results.iter().map(|r| r.ty.clone()).collect())
+            }
+            Expr::Field { base, name, .. } => {
+                let head = Self::base_named_type_str(name);
+                let base_ty = self.dir_ty_of_expr(base, env)?;
+                let recv_base = Self::base_named_type(&self.resolve_type_alias(&base_ty))?;
+                self.method_decls
+                    .get(&(recv_base, head.to_string()))
+                    .map(|f| f.results.iter().map(|r| r.ty.clone()).collect())
+            }
+            _ => None,
+        }
+    }
+
+    fn dir_ty_of_expr(&self, expr: &Expr, env: &ChanDirEnv) -> Option<hy_syntax::TypeExpr> {
+        use hy_syntax::TypeExpr;
+        match expr {
+            Expr::Paren { inner, .. }
+            | Expr::Move { operand: inner, .. }
+            | Expr::Try { operand: inner, .. } => self.dir_ty_of_expr(inner, env),
+            Expr::Ident { name, .. } => {
+                if let Some(found) = env.lookup(name) {
+                    return found;
+                }
+                self.consts.get(name).and_then(|b| b.ty.clone())
+            }
+            Expr::Field { base, name, .. } => {
+                let base_ty = self.dir_ty_of_expr(base, env)?;
+                let resolved = self.resolve_type_alias(&base_ty);
+                let sname = Self::base_named_type(&resolved)?;
+                self.structs
+                    .get(&sname)
+                    .and_then(|fs| fs.iter().find(|(n, _)| n == name))
+                    .map(|(_, t)| t.clone())
+            }
+            Expr::Index { base, .. } => {
+                let base_ty = self.dir_ty_of_expr(base, env)?;
+                match self.resolve_type_alias(&base_ty) {
+                    TypeExpr::Slice { elem, .. }
+                    | TypeExpr::Array { elem, .. }
+                    | TypeExpr::Map { value: elem, .. } => Some(*elem),
+                    _ => None,
+                }
+            }
+            Expr::Receive { chan, .. } => {
+                let chan_ty = self.dir_ty_of_expr(chan, env)?;
+                match self.resolve_type_alias(&chan_ty) {
+                    TypeExpr::Chan { elem, .. } => Some(*elem),
+                    _ => None,
+                }
+            }
+            Expr::StructLit { ty, .. } => ty.clone(),
+            Expr::SliceLit {
+                elem: Some(e),
+                span,
+                ..
+            } => Some(TypeExpr::Slice {
+                elem: e.clone(),
+                span: *span,
+            }),
+            Expr::MapLit {
+                key, value, span, ..
+            } => Some(TypeExpr::Map {
+                key: key.clone(),
+                value: value.clone(),
+                span: *span,
+            }),
+            Expr::FnLit {
+                params,
+                results,
+                span,
+                ..
+            } => Some(TypeExpr::Fn {
+                params: params.clone(),
+                results: results.iter().map(|r| r.ty.clone()).collect(),
+                span: *span,
+            }),
+            Expr::AddrOf { operand, span } => self.dir_ty_of_expr(operand, env).map(|t| {
+                TypeExpr::Pointer {
+                    to: Box::new(t),
+                    span: *span,
+                }
+            }),
+            Expr::Call { callee, args, .. } => match unwrap_parens(callee) {
+                Expr::FnLit { results, .. } => results.first().map(|r| r.ty.clone()),
+                Expr::Ident { name, .. } => {
+                    if let Some(bty) = env.lookup(name) {
+                        if let Some(bty) = bty {
+                            if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&bty) {
+                                return results.first().cloned();
+                            }
+                        }
+                        return None;
+                    }
+                    if name == "make" {
+                        return args.first().and_then(|a| match unwrap_parens(&a.value) {
+                            Expr::StructLit { ty, .. } => ty.clone(),
+                            _ => None,
+                        });
+                    }
+                    let head = Self::base_named_type_str(name);
+                    self.fns
+                        .get(name.as_str())
+                        .or_else(|| self.fns.get(head))
+                        .and_then(|f| f.results.first())
+                        .map(|r| r.ty.clone())
+                }
+                Expr::Field { base, name, .. } => {
+                    let head = Self::base_named_type_str(name);
+                    if let Expr::Ident { name: root, .. } = unwrap_parens(base) {
+                        if !env.is_bound(root) {
+                            let full = format!("{}.{}", root, head);
+                            if let Some(f) = self.fns.get(full.as_str()) {
+                                return f.results.first().map(|r| r.ty.clone());
+                            }
+                        }
+                    }
+                    let base_ty = self.dir_ty_of_expr(base, env)?;
+                    let recv_base = Self::base_named_type(&self.resolve_type_alias(&base_ty))?;
+                    self.method_decls
+                        .get(&(recv_base, head.to_string()))
+                        .and_then(|f| f.results.first())
+                        .map(|r| r.ty.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn chan_dir_of_expr_env(&self, expr: &Expr, env: &ChanDirEnv) -> Option<hy_syntax::ChanDir> {
+        let ty = self.dir_ty_of_expr(expr, env)?;
+        match self.resolve_type_alias(&ty) {
+            hy_syntax::TypeExpr::Chan { dir, .. } => Some(dir),
+            _ => None,
+        }
+    }
+
+    fn emit_send_recv_only(&mut self, chan: &Expr, span: Span) {
+        if self
+            .diags
+            .iter()
+            .any(|d| d.code == "HYB-E3008" && d.span == span)
+        {
+            return;
+        }
+        let msg = format!(
+            "cannot send to `{}` — it is a receive-only channel (`<-chan T`)",
+            chan.render()
+        );
+        let notes = vec![
+            "why: a `<-chan T` binding only permits receives; sending to it is invalid Go and the emitted program will not build (issue #89)".to_string(),
+            "fix: declare the channel as `chan T` (bidirectional) or `chan<- T` (send-only) where the send happens".to_string(),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E3008", self.path.clone(), span, msg).with_notes(notes),
+        );
+    }
+
+    fn emit_recv_send_only(&mut self, chan: &Expr, span: Span) {
+        if self
+            .diags
+            .iter()
+            .any(|d| d.code == "HYB-E3008" && d.span == span)
+        {
+            return;
+        }
+        let msg = format!(
+            "cannot receive from `{}` — it is a send-only channel (`chan<- T`)",
+            chan.render()
+        );
+        let notes = vec![
+            "why: a `chan<- T` binding only permits sends; receiving from it is invalid Go and the emitted program will not build (issue #89)".to_string(),
+            "fix: declare the channel as `chan T` (bidirectional) or `<-chan T` (receive-only) where the receive happens".to_string(),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E3008", self.path.clone(), span, msg).with_notes(notes),
+        );
+    }
+
+    fn emit_close_recv_only(&mut self, chan: &Expr) {
+        let span = chan.span();
+        if self
+            .diags
+            .iter()
+            .any(|d| d.code == "HYB-E3009" && d.span == span)
+        {
+            return;
+        }
+        let msg = format!(
+            "cannot close `{}` — it is a receive-only channel (`<-chan T`)",
+            chan.render()
+        );
+        let notes = vec![
+            "why: the Go spec requires close to operate on a bidirectional or send-only channel — a `<-chan T` has no send capability, so closing it is invalid Go and the emitted program will not build (issue #94)".to_string(),
+            "fix: declare this channel as `chan T` (bidirectional) where the close happens, or pass a `chan<- T` / `chan T` binding to close — receive-only channels are closed by their send-side owner".to_string(),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E3009", self.path.clone(), span, msg).with_notes(notes),
+        );
+    }
+
+    fn emit_range_send_only(&mut self, chan: &Expr) {
+        let span = chan.span();
+        if self
+            .diags
+            .iter()
+            .any(|d| d.code == "HYB-E3009" && d.span == span)
+        {
+            return;
+        }
+        let msg = format!(
+            "cannot range over `{}` — it is a send-only channel (`chan<- T`)",
+            chan.render()
+        );
+        let notes = vec![
+            "why: the Go spec requires the range operand to have receive capability — a `chan<- T` can only be sent to, so ranging over it is invalid Go and the emitted program will not build (issue #94)".to_string(),
+            "fix: declare this channel as `chan T` (bidirectional) or `<-chan T` (receive-only) where the range happens — send-only channels are consumed via receives on the other side".to_string(),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E3009", self.path.clone(), span, msg).with_notes(notes),
+        );
+    }
+}
+
+struct ChanDirEnv {
+    scopes: Vec< std::collections::HashMap<String, Option<hy_syntax::TypeExpr>> >,
+}
+
+impl ChanDirEnv {
+    fn new() -> Self {
+        ChanDirEnv {
+            scopes: vec![std::collections::HashMap::new()],
+        }
+    }
+
+    fn push(&mut self) {
+        self.scopes.push(std::collections::HashMap::new());
+    }
+
+    fn pop(&mut self) {
+        if self.scopes.len() > 1 {
+            self.scopes.pop();
+        }
+    }
+
+    fn define(&mut self, name: &str, ty: Option<hy_syntax::TypeExpr>) {
+        if let Some(top) = self.scopes.last_mut() {
+            top.insert(name.to_string(), ty);
+        }
+    }
+
+    fn lookup(&self, name: &str) -> Option<Option<hy_syntax::TypeExpr>> {
+        for layer in self.scopes.iter().rev() {
+            if let Some(found) = layer.get(name) {
+                return Some(found.clone());
+            }
+        }
+        None
+    }
+
+    fn is_bound(&self, name: &str) -> bool {
+        self.lookup(name).is_some()
+    }
 }
 
 fn unproven_atomic_reason(b: &Binding) -> Option<String> {
@@ -1243,4 +1979,5 @@ fn unproven_atomic_reason(b: &Binding) -> Option<String> {
         None
     }
 }
+
 

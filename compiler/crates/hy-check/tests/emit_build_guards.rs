@@ -468,6 +468,7 @@ fn main() {
 const ARRAY_LITERAL_LEN_OK: &str = "\
 fn main() {
     var a [4]int
+    fmt.println(len(a))
 }
 ";
 
@@ -476,6 +477,7 @@ const size = 8
 
 fn main() {
     var a [size]int
+    fmt.println(len(a))
 }
 ";
 

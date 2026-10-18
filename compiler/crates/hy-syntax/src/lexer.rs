@@ -127,6 +127,19 @@ const KEYWORDS: &[&str] = &[
     // keeps channels named `default` legal — see SPEC-LANGUAGE LX14's
     // select paragraph.
     "case",
+    // Go-keyword trap words (issue #228): Hybrid's surface never uses
+    // them — its forms are `match` / `for .. in`, and labels don't
+    // parse — so as identifiers they only ever leak into emitted Go
+    // and break the build (`x := switch` → go: `expected operand, found
+    // 'switch'`; `fallthrough` in an if → `fallthrough statement out of
+    // place`). Reserved like `while` (#103/#107) and `case` (#104/#108)
+    // so they fail at parse instead of at go build. (`map` cannot join
+    // this list — `map[K]V` is a legitimate prefix form; it gets the
+    // contextual rule in `lex_ident_or_kw` instead.)
+    "switch",
+    "range",
+    "goto",
+    "fallthrough",
 ];
 
 /// Lex a whole source file. On success the token stream ends with a single
@@ -230,6 +243,42 @@ impl<'a> Lexer<'a> {
             Span::new(start, self.pos()),
             msg,
         ));
+    }
+
+    /// Non-mutating peek: the next non-trivia character after the cursor
+    /// (whitespace and `//` / `/* … */` comments skipped), mirroring
+    /// `skip_trivia` without consuming anything. Used by the contextual
+    /// `map` + `[` rule.
+    fn next_code_char_after_trivia(&self) -> Option<char> {
+        let mut i = self.i;
+        loop {
+            match self.chars.get(i).copied() {
+                Some(c) if c.is_whitespace() => i += 1,
+                Some('/') if self.chars.get(i + 1).copied() == Some('/') => {
+                    i += 2;
+                    while let Some(c) = self.chars.get(i).copied() {
+                        if c == '\n' {
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                Some('/') if self.chars.get(i + 1).copied() == Some('*') => {
+                    i += 2;
+                    loop {
+                        if i + 1 >= self.chars.len() {
+                            return None;
+                        }
+                        if self.chars[i] == '*' && self.chars[i + 1] == '/' {
+                            i += 2;
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                other => return other,
+            }
+        }
     }
 
     // -- main driver ----------------------------------------------------------
@@ -391,6 +440,20 @@ impl<'a> Lexer<'a> {
                     "identifier `{}` is not snake_case (LX2) — Hybrid identifiers are lowercase; write it in snake_case",
                     s
                 ),
+            );
+        }
+        if s == "map" && self.next_code_char_after_trivia() != Some('[') {
+            // `map` is the map type/literal prefix (`map[K]V`, `map{k: v}`),
+            // never a free identifier: bare `map` in any position (expr,
+            // binding, param, field, fn name, type) is emitted verbatim as
+            // Go's `map` keyword, where it cannot parse (`go: expected '['`
+            // / `expected '}', found 'map'`) — issue #228. The `[` must be
+            // the next real token, so trivia (incl. comments) is skipped by
+            // the peek, matching the parser's contextual checks.
+            self.diag(
+                PARSE_ERR_CODE,
+                start,
+                "`map` must be followed by `[` — it is Hybrid's map type/literal prefix, never a free name; a bare `map` would be emitted as Go's `map` keyword and fail `go build` (issue #228)",
             );
         }
         if let Some(kw) = KEYWORDS.iter().find(|k| **k == s) {
@@ -668,6 +731,13 @@ impl<'a> Lexer<'a> {
 
     /// One escape sequence after `\`. `str_mode` selects the Go string escape
     /// set (`\uNNNN`); char literals use the rune set (`\u{…}`, LX6).
+    ///
+    /// Fail-closed contract (GUARANTEES.md row 4's spirit, extended to the
+    /// lexer): every malformed escape this function can SEE must record a
+    /// diagnostic before returning `None` — both callers assume "diag
+    /// recorded" on `None`. The one silent `None` left is end-of-input
+    /// mid-escape: the literal loop then runs to EOF and the caller emits
+    /// its own `unterminated string/char literal` diagnostic.
     fn escape_char(&mut self, str_mode: bool) -> Option<char> {
         let start = self.pos();
         let c = self.bump()?;
@@ -687,8 +757,19 @@ impl<'a> Lexer<'a> {
                 let mut v: u32 = 0;
                 for _ in 0..2 {
                     let h = self.bump()?;
-                    v = v * 16 + h.to_digit(16)?;
+                    let Some(d) = h.to_digit(16) else {
+                        self.escape_diag(
+                            start,
+                            str_mode,
+                            format!(
+                                "malformed \\x escape: `{h}` is not a hex digit (\\x takes exactly two hex digits, e.g. \\x41)"
+                            ),
+                        );
+                        return None;
+                    };
+                    v = v * 16 + d;
                 }
+                // v <= 0xFF is always a scalar value; from_u32 cannot fail.
                 char::from_u32(v)?
             }
             'u' => {
@@ -696,12 +777,27 @@ impl<'a> Lexer<'a> {
                     let mut v: u32 = 0;
                     for _ in 0..4 {
                         let h = self.bump()?;
-                        v = v * 16 + h.to_digit(16)?;
+                        let Some(d) = h.to_digit(16) else {
+                            self.escape_diag(
+                                start,
+                                str_mode,
+                                format!(
+                                    "malformed \\u escape: `{h}` is not a hex digit (\\u takes exactly four hex digits, e.g. \\u00e9; the \\u{{…}} rune form (LX6) is char-literal syntax only)"
+                                ),
+                            );
+                            return None;
+                        };
+                        v = v * 16 + d;
                     }
-                    char::from_u32(v)?
+                    self.scalar_or_diag(v, start, str_mode, "\\u")?
                 } else {
                     // rune style: \u{1F600}
                     if self.bump() != Some('{') {
+                        self.escape_diag(
+                            start,
+                            str_mode,
+                            "malformed \\u{…} escape: expected `{` after \\u in the rune form",
+                        );
                         return None;
                     }
                     let mut v: u32 = 0;
@@ -715,22 +811,40 @@ impl<'a> Lexer<'a> {
                                 self.bump();
                                 break;
                             }
-                            _ => return None,
+                            _ => {
+                                self.escape_diag(
+                                    start,
+                                    str_mode,
+                                    "malformed \\u{…} escape: expected hex digits then `}`",
+                                );
+                                return None;
+                            }
                         }
                     }
-                    char::from_u32(v)?
+                    self.scalar_or_diag(v, start, str_mode, "\\u{…}")?
                 }
             }
             'U' => {
                 let mut v: u32 = 0;
                 for _ in 0..8 {
                     let h = self.bump()?;
-                    v = v * 16 + h.to_digit(16)?;
+                    let Some(d) = h.to_digit(16) else {
+                        self.escape_diag(
+                            start,
+                            str_mode,
+                            format!(
+                                "malformed \\U escape: `{h}` is not a hex digit (\\U takes exactly eight hex digits, e.g. \\U0001F600)"
+                            ),
+                        );
+                        return None;
+                    };
+                    v = v * 16 + d;
                 }
-                char::from_u32(v)?
+                self.scalar_or_diag(v, start, str_mode, "\\U")?
             }
             '1'..='7' => {
-                // octal \NNN
+                // octal \NNN — at most three digits, so v <= 0o777 and
+                // from_u32 cannot fail here.
                 let mut v: u32 = c.to_digit(8)?;
                 loop {
                     let d = self.at(0).and_then(|c| c.to_digit(8));
@@ -754,6 +868,41 @@ impl<'a> Lexer<'a> {
             }
         };
         Some(out)
+    }
+
+    /// `char::from_u32(v)` or a named fail-closed diagnostic (surrogate
+    /// D800–DFFF or above U+10FFFF). `\u`, `\u{…}` and `\U` share it.
+    fn scalar_or_diag(
+        &mut self,
+        v: u32,
+        start: Pos,
+        str_mode: bool,
+        escape_name: &str,
+    ) -> Option<char> {
+        match char::from_u32(v) {
+            Some(ch) => Some(ch),
+            None => {
+                self.escape_diag(
+                    start,
+                    str_mode,
+                    format!(
+                        "invalid {escape_name} escape: U+{v:X} is not a Unicode scalar value (D800–DFFF surrogates and values above U+10FFFF are invalid)"
+                    ),
+                );
+                None
+            }
+        }
+    }
+
+    /// Record a malformed-escape diagnostic tagged with the lexical rule in
+    /// force (LX6 rune literals / LX7 interpreted strings) so the corpus
+    /// harness can join on it.
+    fn escape_diag(&mut self, start: Pos, str_mode: bool, msg: impl Into<String>) {
+        let rule = if str_mode { "LX7" } else { "LX6" };
+        self.diags.push(
+            Diagnostic::error(PARSE_ERR_CODE, self.path.clone(), Span::new(start, self.pos()), msg)
+                .with_rule(rule),
+        );
     }
 }
 
@@ -905,6 +1054,73 @@ mod tests {
         );
     }
 
+    // -- malformed escapes fail closed (issue: silent value corruption) ------
+    // Regression: `\x`/`\u`/`\U` with a non-hex digit, the rune-style
+    // `\u{…}` inside a STRING, and surrogate/oversized scalars used to
+    // return `None` from escape_char WITHOUT recording the diagnostic both
+    // callers assume ("diag recorded"), so `"\u{41}"` was ACCEPTED with a
+    // silently corrupted value ("41}"). Every malformed escape the lexer
+    // can see must now be named and tagged LX6/LX7.
+
+    fn lex_errs(src: &str) -> Vec<Diagnostic> {
+        match lex("test.hy", src) {
+            Ok(_) => panic!("expected lex failure for: {src}"),
+            Err(d) => d,
+        }
+    }
+
+    #[test]
+    fn malformed_string_u_brace_escape_is_diagnosed() {
+        // The LX6 rune form used in an interpreted string (LX7 = Go escape set).
+        let errs = lex_errs(r#"fn main() { s := "\u{41}" }"#);
+        assert!(errs.iter().any(|d| d.message.contains("malformed \\u escape")
+            && d.tier0_rule.as_deref() == Some("LX7")), "{errs:?}");
+    }
+
+    #[test]
+    fn malformed_string_x_escape_is_diagnosed() {
+        let errs = lex_errs(r#"fn main() { s := "\xG1" }"#);
+        assert!(errs.iter().any(|d| d.message.contains("malformed \\x escape")
+            && d.tier0_rule.as_deref() == Some("LX7")), "{errs:?}");
+    }
+
+    #[test]
+    fn malformed_string_short_u_escape_is_diagnosed() {
+        let errs = lex_errs(r#"fn main() { s := "\u12G4" }"#);
+        assert!(errs.iter().any(|d| d.message.contains("malformed \\u escape")
+            && d.tier0_rule.as_deref() == Some("LX7")), "{errs:?}");
+    }
+
+    #[test]
+    fn surrogate_string_u_escape_is_diagnosed() {
+        let errs = lex_errs(r#"fn main() { s := "\ud800" }"#);
+        assert!(errs.iter().any(|d| d.message.contains("not a Unicode scalar value")
+            && d.tier0_rule.as_deref() == Some("LX7")), "{errs:?}");
+    }
+
+    #[test]
+    fn malformed_rune_u_without_brace_is_diagnosed() {
+        let errs = lex_errs(r#"fn main() { c := '\u12' }"#);
+        assert!(errs.iter().any(|d| d.message.contains("expected `{` after \\u")
+            && d.tier0_rule.as_deref() == Some("LX6")), "{errs:?}");
+    }
+
+    #[test]
+    fn surrogate_rune_u_brace_escape_is_diagnosed() {
+        let errs = lex_errs(r#"fn main() { c := '\u{D800}' }"#);
+        assert!(errs.iter().any(|d| d.message.contains("not a Unicode scalar value")
+            && d.tier0_rule.as_deref() == Some("LX6")), "{errs:?}");
+    }
+
+    #[test]
+    fn valid_escapes_still_lex_clean() {
+        // Over-rejection guard: the full VALID escape surface stays accepted.
+        let t = toks(r#"fn main() { s := "\u00e9\x41\U0001F600\101" c := '\u{1F600}' d := '\x41' }"#);
+        assert!(t.contains(&Tok::StrChunk("\u{e9}A\u{1F600}A".into())));
+        assert!(t.contains(&Tok::CharLit('\u{1F600}')));
+        assert!(t.contains(&Tok::CharLit('A')));
+    }
+
     #[test]
     fn numbers_and_ranges() {
         let t = toks("for i in 0..n { x := 1_000_000 y := 0x1F f := 1.5e3 }");
@@ -970,5 +1186,67 @@ mod tests {
     #[test]
     fn unterminated_string_is_error() {
         assert!(lex("t.hy", r#"x := "oops"#).is_err());
+    }
+
+    #[test]
+    fn go_keyword_traps_are_reserved() {
+        // issue #228: these four leak into emitted Go as keywords and
+        // break the build, so they lex as Kw (parser turns that into a
+        // clean parse error naming the word — same shape as `while`).
+        for w in ["switch", "range", "goto", "fallthrough"] {
+            let r = lex("t.hy", &format!("fn main() {{ x := {} }}", w));
+            let t = r.expect("lex ok");
+            assert!(
+                t.iter().any(|t| matches!(&t.tok, Tok::Kw(k) if *k == w)),
+                "`{}` must lex as a keyword",
+                w
+            );
+        }
+    }
+
+    #[test]
+    fn map_needs_bracket_everywhere() {
+        // issue #228 B5–B6 + the declaration positions: bare `map` as an
+        // expr, binding, param, fn name, or freestanding type is emitted
+        // as Go's `map` keyword and cannot parse.
+        for src in [
+            "fn main() { x := map }",
+            "fn main() { map := 3 }",
+            "fn f(map int) {}",
+            "fn map() {}",
+            "fn main() { var x map }",
+            "struct s { map int }",
+        ] {
+            let r = lex("t.hy", src);
+            assert!(r.is_err(), "bare `map` must be a lexical error: {}", src);
+            let diags = r.unwrap_err();
+            assert!(
+                diags.iter().any(|d| d.message.contains("`map`")),
+                "diagnostic must name `map`: {:?}",
+                diags
+            );
+        }
+    }
+
+    #[test]
+    fn map_prefix_forms_stay_lexed() {
+        // controls: map types, map literals, and `[` reached through
+        // trivia must keep working (they are the legitimate `map` uses).
+        let ok = [
+            "m := map[string]int{}",
+            "var x map[int]string",
+            "fn f(m map[bool]u8) {}",
+            "y := map /* c */ [string]int{}",
+            "z := map\n    [string]int{}",
+        ];
+        for src in ok {
+            assert!(
+                lex("t.hy", src).is_ok(),
+                "legitimate map-prefix form must still lex: {}",
+                src
+            );
+        }
+        let t = toks("m := map[string]int{}");
+        assert!(t.iter().any(|t| matches!(t, Tok::Ident(s) if s == "map")));
     }
 }

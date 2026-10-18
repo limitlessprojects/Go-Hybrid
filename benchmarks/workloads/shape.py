@@ -18,6 +18,7 @@ Run the triplet: ./run.sh (builds Go via the runtime module, Rust via
 cargo, Hybrid via hyb check+build — the checker runs on every .hy workload).
 """
 
+import argparse
 import pathlib
 import sys
 
@@ -307,13 +308,14 @@ fn sum_means(a []int) int {
 
 fn main() {
     means := []int{}
+    alphabet_values := alphabet()
     for w in 0..windows {
         t0 := time.now()
         for b in 0..batches {
             for j in 0..batch {
                 item := []byte{}
                 for k in 0..item_len {
-                    item = append(item, alphabet()[(j+k)%len(alphabet())])
+                    item = append(item, alphabet_values[(j+k)%len(alphabet_values)])
                 }
                 _ = item
             }
@@ -370,7 +372,13 @@ FILES = {
 
 
 def main() -> int:
-    check = "--check" in sys.argv
+    parser = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0], allow_abbrev=False,
+    )
+    parser.add_argument(
+        "--check", action="store_true", help="verify generated files without writing",
+    )
+    check = parser.parse_args().check
     drift = []
     for rel, content in FILES.items():
         p = ROOT / rel

@@ -1,6 +1,12 @@
 # Hybrid Language: Development Plan
 
+- Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
+## Contributor validation — 2026-10-15
+
+- Managed gate now refuses an omitted source list before baseline I/O; empty explicit scans remain valid.
+- Reproduced four false-success CLI cases on `8fb9238`; added regressions and ran all 21 Python tool tests successfully. Rust/compiler suites were not run (Rust is unavailable locally); upstream CI is required before merge.
 ## Status
+- Contributor check (2026-10-15, EricSpencer00): on base `44a08b9`, a successful no-op job declaring a missing `results/measurement.json` returned exit 0 and `summary.ok=true`. The runner now checks declared result files before its final verdict, maps the documented `results/` prefix to the selected output directory, and exempts its own generated summary. Offline runner/SHA tests cover missing files, real outputs, directories, malformed declarations and summary-only jobs; upstream CI remains required.
 - Current phase: **MVP COMPLETE — G3 REVIEWED + PASSED 2026-10-13** (review delegated by the human; every claim re-verified via standard suites + repo harnesses in a fresh sandbox; 4 findings found + repaired — see Decision Log; Post-MVP queue opened below)
 - State: MVP done; post-MVP queue open (rows in priority order)
 - Last session: 2026-10-13, summary: session 8 (G2/G3 review + ratification). Fresh sandbox recovery (clone + toolchain re-pins Go 1.26.9 / Rust 1.99.0, foreground installs). G2 evidence independently reproduced (make bench fast path 3.44 ns ≤ 5 ns, DeepPathCount path-proof). G3 claim-by-claim re-verification: cargo test 194/0, examples 10/10, differential 9/9+11/11, corpus 20/20, go vet/gofmt/clippy. Findings repaired: make bench wired (claimed at Batch J, never landed); Makefile tab regression from Batch I fixed + guards (make check + CI); gofmt over runtime/go + CI hygiene leg; hyrt clippy/unused-import/fmt. Post-MVP queue opened (6 rows). All work committed + pushed.
@@ -45,6 +51,7 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 | 6 ownership usability | 10 programs, annotation count | **PASS**: 0 annotations / 0 managed / 0 outside-model (strictest reading; hand-trace); A1–A8 ambiguities + corpus gap recorded | Tier-0 real for MVP corpus; Polonius-style engine + rustc CI oracle |
 
 ## Task List
+- [ ] Contributor tooling patch: shape.py parses supported options before file operations; invalid flags/positionals and help preserve generated files. Maintainer validated PR #351; main status conflict resolved. Native-Linux focused 9/9, Python tooling 107/107 pass. Compiler/runtime suites not run; merge and any award pending (17 October 2026).
 - [x] Installer checksum download must fail closed | Missing checksum fetch previously installed and executed an unverified archive; now aborts before extraction or replacement. Six offline installer tests added to quick CI; two regression tests fail on base `34525ee`, all six pass locally on Windows/Git Bash. Upstream CI/reward review pending (2026-10-15).
 - [x] Session 1 scaffold | done = files exist, pushed | lead | done
 - [x] Environment detect + pin toolchains | done = this file records versions | lead | done
@@ -251,3 +258,11 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 ## Contributor validation: managed report shape (2026-10-15)
 - Base c09e992: a checker exiting 0 with `{}` is treated as a successful empty audit; `--rebaseline` can erase a previously reviewed inventory. Require an object report, a nonnegative integer managed_blocks count, a list when blocks is present, matching count, and valid block categories. Preserve Rust's omitted-empty-blocks encoding. This is tooling robustness against malformed checker output, not a demonstrated compiler soundness vulnerability.
 - Before fix: 26 failing and 14 erroring subcases in the new malformed-report test; valid empty-report control and 11 existing tests pass. After fix: all 13 managed-gate tests pass, including 40 malformed report/mode combinations. A separate real-subprocess stub returning `{}` reproduces original PASS/baseline erasure and patched exit 2/byte preservation. Existing report fixtures now include the counter emitted by the Rust serializer. `git diff --check` passes. Rust/Go suites were not run locally (pinned toolchains unavailable); upstream CI remains required. Main's existing ci.yml line 35 indentation failure is covered by #172/#199 and outside this change.
+
+## Contributor validation: submit revision lookup (2026-10-16)
+- Base 00610f7: resolve_head ignores failed git rev-parse, allowing an invalid revision/error message into a Kaggle upload and submitted.json. Abort before touching worker files or invoking Kaggle when HEAD lookup fails.
+- Three new offline tests: original two failures/one pass; patched all 11 job-test methods pass. Real temporary Git repositories cover unborn and committed HEAD; a mocked upload boundary verifies no push, payload mutation or submission record after lookup failure. git diff --check passes. No real Kaggle submission or compiler/Rust/Go suite run; maintainer CI remains required, including repair of existing workflow conflict markers (#339).
+
+## Contributor validation: differential timeout reporting (2026-10-18)
+- PR #468: merge main `0ca08c2` while retaining upstream UTF-8 decoding, JSON summary consistency, runtime-hazard checks and all existing tests. Build/run timeouts become fixture failures and the corpus continues; checker timeout details remain stage-specific.
+- Focused Windows/Python 3.12.6 validation: 12 tests passed, two existing POSIX cases skipped. Current upstream reproduces build/run timeout aborts in the negative control. Native Linux quick/compiler CI and maintainer review remain pending at preparation.

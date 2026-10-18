@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import platform
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -122,6 +123,34 @@ class UpgradeTests(unittest.TestCase):
                 capture_output=True, text=True, timeout=5,
             )
             self.assertEqual((probe.returncode, probe.stdout), (0, version + "\n"))
+
+    def test_launcher_cannot_overwrite_payload_through_directory_alias(self):
+        self.package("old")
+        installed = self.install_release()
+        self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+        before = self.snapshot()
+        alias = self.root / "payload bin alias"
+        alias.symlink_to(self.install / "bin", target_is_directory=True)
+        self.package("new")
+        for launcher_dir in (self.install / "bin", self.install / "bin" / ".", alias):
+            with self.subTest(launcher_dir=launcher_dir):
+                # Kill the whole process group on regression: an exec loop
+                # otherwise survives a timeout that only kills the installer.
+                proc = subprocess.Popen(
+                    ["sh", str(ROOT / "install.sh")],
+                    env={**self.env, "HYB_BIN_DIR": str(launcher_dir)},
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    start_new_session=True,
+                )
+                try:
+                    stdout, stderr = proc.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.communicate()
+                    self.fail("installer hung after launcher overwrote its payload")
+                self.assertNotEqual(proc.returncode, 0, stdout + stderr)
+                self.assertIn("HYB_BIN_DIR must differ", stderr)
+                self.assertEqual(self.snapshot(), before)
 
 
 if __name__ == "__main__":

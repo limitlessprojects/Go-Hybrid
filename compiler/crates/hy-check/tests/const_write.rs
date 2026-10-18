@@ -684,3 +684,444 @@ fn closure_interproc_and_method_const_mutations_reject_e3006() {
     );
 }
 
+#[test]
+fn read_const_followed_by_blank_assign_accepted_issue_460() {
+    // Issue #460: assigning to the blank identifier `_` must not link `_` to a
+    // const's share-group or trigger HYB-E3006 on subsequent assignments to `_`.
+    let r = check(
+        "const shared = map[string]int{\"k\": 1}\n\n\
+         fn main() {\n\
+             _ = shared[\"k\"]\n\
+             xs := [1, 2]\n\
+             _ = xs[0]\n\
+         }\n",
+    );
+    assert_eq!(
+        r.verdict,
+        Verdict::Accept,
+        "expected accept for read of const followed by blank index assign (#460), got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn parenthesized_const_reads_to_blank_ident_accepted_issue_460() {
+    // Issue #460 minimal reproducer: parenthesized const composite reads to `_`.
+    let r = check(
+        "const shared_paren = (map[string]int{\"k\": 1})\n\n\
+         fn main() {\n\
+             const local_paren = ([1, 2])\n\
+             _ = shared_paren[\"k\"]\n\
+             _ = local_paren[0]\n\
+         }\n",
+    );
+    assert_eq!(
+        r.verdict,
+        Verdict::Accept,
+        "expected accept for parenthesized const reads (#460), got {:?}",
+        codes(&r)
+    );
+}
+
+#[test]
+fn clear_on_const_map_slice_field_alias_or_closure_rejects_e3006() {
+    let r_file_map = check(
+        "const limits = map[string]int{\"free\": 10, \"pro\": 100}\n\n\
+         fn reset(done chan<- bool) {\n\
+             clear(limits)\n\
+             done <- true\n\
+         }\n\n\
+         fn main() {\n\
+             done := make(chan bool, 1)\n\
+             task reset(done)\n\
+             _ = limits[\"pro\"]\n\
+             <-done\n\
+         }\n",
+    );
+    assert!(
+        codes(&r_file_map).iter().any(|c| c == "HYB-E3006"),
+        "expected HYB-E3006 for clear(limits) on file-level const map, got {:?}",
+        codes(&r_file_map)
+    );
+    assert_eq!(r_file_map.verdict, Verdict::Reject);
+
+    let r_local_slice = check(
+        "fn main() {\n\
+             const cells = [1, 2, 3]\n\
+             clear(cells)\n\
+         }\n",
+    );
+    assert!(
+        codes(&r_local_slice).iter().any(|c| c == "HYB-E3006"),
+        "expected HYB-E3006 for clear(cells) on local const slice, got {:?}",
+        codes(&r_local_slice)
+    );
+    assert_eq!(r_local_slice.verdict, Verdict::Reject);
+
+    let r_closure = check(
+        "const cfg = map[string]int{\"a\": 1}\n\n\
+         fn main() {\n\
+             f := fn() {\n\
+                 clear(cfg)\n\
+             }\n\
+             f()\n\
+         }\n",
+    );
+    assert!(
+        codes(&r_closure).iter().any(|c| c == "HYB-E3006"),
+        "expected HYB-E3006 for clear(cfg) inside closure body, got {:?}",
+        codes(&r_closure)
+    );
+    assert_eq!(r_closure.verdict, Verdict::Reject);
+
+    let r_alias_and_field = check(
+        "struct holder {\n\
+             m map[string]int\n\
+         }\n\n\
+         const h = holder{m: map[string]int{\"a\": 1}}\n\n\
+         fn main() {\n\
+             alias := h.m\n\
+             clear(alias)\n\
+             clear(h.m)\n\
+         }\n",
+    );
+    assert_eq!(
+        codes(&r_alias_and_field)
+            .iter()
+            .filter(|c| *c == "HYB-E3006")
+            .count(),
+        2,
+        "expected 2 HYB-E3006 diagnostics for clear on const alias and field, got {:?}",
+        codes(&r_alias_and_field)
+    );
+    assert_eq!(r_alias_and_field.verdict, Verdict::Reject);
+
+    // Negative control: clear() on a mutable local map/slice remains accepted.
+    let r_ok = check(
+        "fn main() {\n\
+             m := map[string]int{\"a\": 1}\n\
+             s := [1, 2, 3]\n\
+             clear(m)\n\
+             clear(s)\n\
+         }\n",
+    );
+    assert_eq!(r_ok.verdict, Verdict::Accept, "{:?}", codes(&r_ok));
+}
+
+#[test]
+fn inplace_package_sort_on_const_slice_rejects_e3006() {
+    let r_sort_task = check(
+        "const cells = [3, 1, 2]\n\n\
+         fn bump(done chan<- bool) {\n\
+             sort.ints(cells)\n\
+             done <- true\n\
+         }\n\n\
+         fn main() {\n\
+             done := make(chan bool, 2)\n\
+             task bump(done)\n\
+             task bump(done)\n\
+             <-done\n\
+             <-done\n\
+         }\n",
+    );
+    assert!(
+        codes(&r_sort_task).iter().any(|c| c == "HYB-E3006"),
+        "expected HYB-E3006 for sort.ints(cells) on const slice, got {:?}",
+        codes(&r_sort_task)
+    );
+    assert_eq!(r_sort_task.verdict, Verdict::Reject);
+
+    let r_sort_closure = check(
+        "const names = [\"b\", \"a\"]\n\n\
+         fn main() {\n\
+             f := fn() {\n\
+                 sort.strings(names)\n\
+             }\n\
+             f()\n\
+         }\n",
+    );
+    assert!(
+        codes(&r_sort_closure).iter().any(|c| c == "HYB-E3006"),
+        "expected HYB-E3006 for sort.strings(names) in closure, got {:?}",
+        codes(&r_sort_closure)
+    );
+    assert_eq!(r_sort_closure.verdict, Verdict::Reject);
+
+    // Negative control: read-only sort.search_ints on const slice and sort.ints on mutable slice stay accepted.
+    let r_ok = check(
+        "const sorted = [1, 2, 3]\n\n\
+         fn main() {\n\
+             idx := sort.search_ints(sorted, 2)\n\
+             local := [3, 1, 2]\n\
+             sort.ints(local)\n\
+             _ = idx\n\
+         }\n",
+    );
+    assert_eq!(r_ok.verdict, Verdict::Accept, "{:?}", codes(&r_ok));
+}
+
+#[test]
+fn callee_returned_const_composite_rejects_write_and_move() {
+    // 1. Top-level helper returning file-level `const` map directly -> HYB-E3006 on write.
+    let r_direct = check(
+        "const shared = map[string]int{\"a\": 1}\n\n\
+         fn get_shared() map[string]int {\n\
+             return shared\n\
+         }\n\n\
+         fn main() {\n\
+             m := get_shared()\n\
+             m[\"a\"] = 2\n\
+         }\n",
+    );
+    assert_eq!(r_direct.verdict, Verdict::Reject, "{:?}", codes(&r_direct));
+    assert!(
+        codes(&r_direct).iter().any(|c| c == "HYB-E3006"),
+        "expected HYB-E3006 for write through callee-returned const map, got {:?}",
+        codes(&r_direct)
+    );
+
+    // 2. Helper returning file-level `const` via local alias -> HYB-E3006 on delete.
+    let r_alias = check(
+        "const shared = map[string]int{\"a\": 1}\n\n\
+         fn get_shared_alias() map[string]int {\n\
+             alias := shared\n\
+             return alias\n\
+         }\n\n\
+         fn main() {\n\
+             m := get_shared_alias()\n\
+             delete(m, \"a\")\n\
+         }\n",
+    );
+    assert_eq!(r_alias.verdict, Verdict::Reject, "{:?}", codes(&r_alias));
+    assert!(
+        codes(&r_alias).iter().any(|c| c == "HYB-E3006"),
+        "expected HYB-E3006 for delete through callee-returned const alias, got {:?}",
+        codes(&r_alias)
+    );
+
+    // 3. Helper returning file-level `const` via named result + bare `return` -> HYB-E3006.
+    let r_named = check(
+        "const shared = map[string]int{\"a\": 1}\n\n\
+         fn get_named() (out map[string]int) {\n\
+             out = shared\n\
+             return\n\
+         }\n\n\
+         fn main() {\n\
+             m := get_named()\n\
+             m[\"b\"] = 3\n\
+         }\n",
+    );
+    assert_eq!(r_named.verdict, Verdict::Reject, "{:?}", codes(&r_named));
+    assert!(
+        codes(&r_named).iter().any(|c| c == "HYB-E3006"),
+        "expected HYB-E3006 for write through named-return const map, got {:?}",
+        codes(&r_named)
+    );
+
+    // 4. Moving a callee-returned file-level `const` composite -> HYB-E3004 (O5.1).
+    let r_move = check(
+        "const shared = map[string]int{\"a\": 1}\n\n\
+         fn get_shared() map[string]int {\n\
+             return shared\n\
+         }\n\n\
+         fn worker(m map[string]int) {\n\
+             _ = m\n\
+         }\n\n\
+         fn main() {\n\
+             m := get_shared()\n\
+             task worker(move m)\n\
+         }\n",
+    );
+    assert_eq!(r_move.verdict, Verdict::Reject, "{:?}", codes(&r_move));
+    assert!(
+        codes(&r_move).iter().any(|c| c == "HYB-E3004"),
+        "expected HYB-E3004 for moving callee-returned const map, got {:?}",
+        codes(&r_move)
+    );
+
+    // 5. Method and local closure returning file-level `const` -> HYB-E3006.
+    let r_closure = check(
+        "const shared = map[string]int{\"a\": 1}\n\n\
+         fn main() {\n\
+             get := fn() map[string]int { return shared }\n\
+             m := get()\n\
+             m[\"x\"] = 9\n\
+         }\n",
+    );
+    assert_eq!(r_closure.verdict, Verdict::Reject, "{:?}", codes(&r_closure));
+    assert!(
+        codes(&r_closure).iter().any(|c| c == "HYB-E3006"),
+        "expected HYB-E3006 for write through closure-returned const map, got {:?}",
+        codes(&r_closure)
+    );
+
+    // 6. Positive control: helper returning a fresh composite accepts both write and move.
+    let r_fresh = check(
+        "fn get_fresh() map[string]int {\n\
+             return map[string]int{\"a\": 1}\n\
+         }\n\n\
+         fn worker(m map[string]int) {\n\
+             _ = m\n\
+         }\n\n\
+         fn main() {\n\
+             m := get_fresh()\n\
+             m[\"a\"] = 2\n\
+             task worker(move m)\n\
+         }\n",
+    );
+    assert_eq!(r_fresh.verdict, Verdict::Accept, "{:?}", codes(&r_fresh));
+}
+
+#[test]
+fn multi_value_return_intra_callee_sharing_rejects_post_move_and_a3() {
+    // 1. Intra-callee local alias `m2 := m; return m, m2` -> HYB-E3003 on post-move use.
+    let r_alias = check(
+        "fn pair_alias() (map[string]int, map[string]int) {\n\
+             m := map[string]int{\"a\": 1}\n\
+             m2 := m\n\
+             return m, m2\n\
+         }\n\n\
+         fn worker(m map[string]int) { m[\"k\"] = 1 }\n\n\
+         fn main() {\n\
+             a, b := pair_alias()\n\
+             task worker(move a)\n\
+             b[\"x\"] = 2\n\
+         }\n",
+    );
+    assert_eq!(r_alias.verdict, Verdict::Reject, "{:?}", codes(&r_alias));
+    assert!(
+        codes(&r_alias).iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 for intra-callee alias multi-return, got {:?}",
+        codes(&r_alias)
+    );
+
+    // 2. Intra-callee slice projections `return s[0:1], s[1:2]` -> HYB-E3003.
+    let r_slice = check(
+        "fn pair_slice() ([]int, []int) {\n\
+             s := [1, 2, 3]\n\
+             return s[0:1], s[1:2]\n\
+         }\n\n\
+         fn worker(xs []int) { xs[0] = 9 }\n\n\
+         fn main() {\n\
+             a, b := pair_slice()\n\
+             task worker(move a)\n\
+             b[0] = 7\n\
+         }\n",
+    );
+    assert_eq!(r_slice.verdict, Verdict::Reject, "{:?}", codes(&r_slice));
+    assert!(
+        codes(&r_slice).iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 for overlapping slice multi-return, got {:?}",
+        codes(&r_slice)
+    );
+
+    // 3. Composite literal wrapping same storage `return holder{m: m}, m` -> HYB-E3003.
+    let r_holder = check(
+        "struct holder { m map[string]int }\n\n\
+         fn pair_holder() (holder, map[string]int) {\n\
+             m := map[string]int{\"a\": 1}\n\
+             return holder{m: m}, m\n\
+         }\n\n\
+         fn worker(h holder) { h.m[\"k\"] = 1 }\n\n\
+         fn main() {\n\
+             h, m := pair_holder()\n\
+             task worker(move h)\n\
+             m[\"x\"] = 2\n\
+         }\n",
+    );
+    assert_eq!(r_holder.verdict, Verdict::Reject, "{:?}", codes(&r_holder));
+    assert!(
+        codes(&r_holder).iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 for struct-literal + map multi-return, got {:?}",
+        codes(&r_holder)
+    );
+
+    // 4. Named return parameters with bare `return` (`a = m; b = m; return`) -> HYB-E3003.
+    let r_named = check(
+        "fn pair_named() (a map[string]int, b map[string]int) {\n\
+             m := map[string]int{\"a\": 1}\n\
+             a = m\n\
+             b = m\n\
+             return\n\
+         }\n\n\
+         fn worker(m map[string]int) { m[\"k\"] = 1 }\n\n\
+         fn main() {\n\
+             x, y := pair_named()\n\
+             task worker(move x)\n\
+             y[\"x\"] = 2\n\
+         }\n",
+    );
+    assert_eq!(r_named.verdict, Verdict::Reject, "{:?}", codes(&r_named));
+    assert!(
+        codes(&r_named).iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 for named-return bare return sharing, got {:?}",
+        codes(&r_named)
+    );
+
+    // 5. Local closure and closure-body multi-define -> HYB-E3003.
+    let r_closure = check(
+        "fn pair_alias() (map[string]int, map[string]int) {\n\
+             m := map[string]int{\"a\": 1}\n\
+             m2 := m\n\
+             return m, m2\n\
+         }\n\n\
+         fn worker(m map[string]int) { m[\"k\"] = 1 }\n\n\
+         fn main() {\n\
+             run := fn() {\n\
+                 a, b := pair_alias()\n\
+                 task worker(move a)\n\
+                 b[\"x\"] = 2\n\
+             }\n\
+             run()\n\
+         }\n",
+    );
+    assert_eq!(r_closure.verdict, Verdict::Reject, "{:?}", codes(&r_closure));
+    assert!(
+        codes(&r_closure).iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 inside closure body multi-define, got {:?}",
+        codes(&r_closure)
+    );
+
+    // 6. A3 map-slot loan invalidation across multi-value shared return -> HYB-E3102.
+    let r_a3 = check(
+        "import \"fmt\"\n\
+         struct svc { count int }\n\n\
+         fn pair_alias() (map[string]svc, map[string]svc) {\n\
+             m := map[string]svc{\"a\": svc{count: 1}}\n\
+             m2 := m\n\
+             return m, m2\n\
+         }\n\n\
+         fn main() {\n\
+             a, b := pair_alias()\n\
+             s := &a[\"a\"]\n\
+             b[\"b\"] = svc{count: 2}\n\
+             fmt.println(s.count)\n\
+         }\n",
+    );
+    assert_eq!(r_a3.verdict, Verdict::Reject, "{:?}", codes(&r_a3));
+    assert!(
+        codes(&r_a3).iter().any(|c| c == "HYB-E3102"),
+        "expected HYB-E3102 for A3 insert through shared multi-return peer, got {:?}",
+        codes(&r_a3)
+    );
+
+    // 7. Positive control: disjoint maps returned from a helper using a scalar seed accept.
+    let r_disjoint = check(
+        "fn pair_disjoint(seed int) (map[string]int, map[string]int) {\n\
+             return map[string]int{\"a\": seed}, map[string]int{\"b\": seed}\n\
+         }\n\n\
+         fn worker(m map[string]int) { m[\"k\"] = 1 }\n\n\
+         fn main() {\n\
+             a, b := pair_disjoint(1)\n\
+             task worker(move a)\n\
+             b[\"x\"] = 2\n\
+         }\n",
+    );
+    assert_eq!(
+        r_disjoint.verdict,
+        Verdict::Accept,
+        "{:?}",
+        codes(&r_disjoint)
+    );
+}
+
