@@ -35,8 +35,28 @@ use hy_syntax::{Block, Expr, LocalKind, SelectArmKind, Stmt};
 /// function, after the flat Pass B loop — the enclosing env is complete.
 pub(crate) fn check_closure_boundaries(ck: &mut Checker<'_>, st: &FnState, body: &Block) {
     check_deferred_uses(ck, st, body);
-    for (params, results, body) in collect_fnlits(body) {
-        check_one_closure(ck, st, params, results, body);
+    for (params, results, body, pos) in collect_fnlits(body) {
+        let mut scoped_st;
+        let st_ref = if let Some((s_env, s_aliases, s_share)) = st.closure_scoped_envs.get(&pos) {
+            scoped_st = st.clone();
+            for (k, v) in s_env {
+                scoped_st.env.insert(k.clone(), v.clone());
+            }
+            for (k, v) in s_aliases {
+                scoped_st.aliases.insert(k.clone(), v.clone());
+            }
+            for (k, vs) in s_share {
+                scoped_st
+                    .may_share
+                    .entry(k.clone())
+                    .or_default()
+                    .extend(vs.iter().cloned());
+            }
+            &scoped_st
+        } else {
+            st
+        };
+        check_one_closure(ck, st_ref, params, results, body);
     }
 }
 
@@ -245,6 +265,7 @@ fn check_one_closure(
     }
     let mut nested = Vec::new();
     cst.scope_push();
+    check_closure_slot_loans(ck, &mut cst, body);
     check_body_boundaries(ck, &mut cst, body, false, &mut nested);
     sync_nested_moves(&cst, &mut nested);
     for nc in nested {
@@ -1147,6 +1168,90 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
     }
 }
 
+/// Check A3 (`HYB-E3102`) for map-slot loans opened inside a closure body.
+fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block) {
+    use crate::model::{Loan, LoanTarget};
+    use crate::walk;
+    let flat = walk::flatten(body);
+    let saved_last_use = std::mem::replace(&mut st.last_use, flat.last_use.clone());
+    let saved_loop_end = std::mem::replace(&mut st.loop_end, flat.loop_end.clone());
+    let saved_loans = std::mem::take(&mut st.loans);
+    for (stmt, idx) in &flat.stmts {
+        let idx = *idx;
+        let mut calls = Vec::new();
+        walk::own_calls(stmt, &mut calls);
+        for cr in calls {
+            let mut dummy_consumes = Vec::new();
+            ck.process_call(st, &cr, idx, None, &mut dummy_consumes);
+        }
+        match stmt {
+            Stmt::Local(l) => {
+                if l.names.len() == l.values.len() {
+                    for (name, val) in l.names.iter().zip(l.values.iter()) {
+                        if let Some(path) = walk::addr_of_index_base_path(val) {
+                            let binding = name.clone();
+                            let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
+                            st.loans.push(Loan {
+                                target: LoanTarget::MapSlot {
+                                    binding: binding.clone(),
+                                    path,
+                                },
+                                created: idx,
+                                last,
+                                span: val.span(),
+                                desc: format!("`{} := {}`", binding, val.render()),
+                            });
+                        } else {
+                            ck.extend_map_slot_loan_to_alias(st, name, val, idx);
+                        }
+                    }
+                }
+            }
+            Stmt::Assign {
+                targets,
+                op,
+                values,
+                ..
+            } => {
+                if *op == hy_syntax::AssignOp::Assign && targets.len() == values.len() {
+                    for (t, v) in targets.iter().zip(values.iter()) {
+                        if let hy_syntax::PlaceKind::Ident(name) = &t.kind {
+                            if let Some(path) = walk::addr_of_index_base_path(v) {
+                                let binding = name.clone();
+                                let last =
+                                    st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
+                                st.loans.push(Loan {
+                                    target: LoanTarget::MapSlot {
+                                        binding: binding.clone(),
+                                        path,
+                                    },
+                                    created: idx,
+                                    last,
+                                    span: v.span(),
+                                    desc: format!("`{} = {}`", binding, v.render()),
+                                });
+                            } else {
+                                ck.extend_map_slot_loan_to_alias(st, name, v, idx);
+                            }
+                        }
+                    }
+                }
+                for t in targets {
+                    if matches!(t.kind, hy_syntax::PlaceKind::Index { .. }) {
+                        if let Some(path) = walk::place_path(t) {
+                            ck.emit_a3_if_live_pub(st, &path, t.span, idx, "insert");
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    st.loans = saved_loans;
+    st.loop_end = saved_loop_end;
+    st.last_use = saved_last_use;
+}
+
 /// The outermost FnLits reachable from `block`. Closures nested inside other
 /// closures are NOT collected here: check_one_closure finds them while walking
 /// the enclosing closure's body (collect_stmt_direct_fnlits) and checks them
@@ -1158,6 +1263,7 @@ fn collect_fnlits(
     &[hy_syntax::Param],
     &[hy_syntax::FnResult],
     &Block,
+    (usize, usize),
 )> {
     let mut out = Vec::new();
     for s in &block.stmts {
@@ -1172,6 +1278,7 @@ fn collect_stmt<'a>(
         &'a [hy_syntax::Param],
         &'a [hy_syntax::FnResult],
         &'a Block,
+        (usize, usize),
     )>,
 ) {
     match stmt {
@@ -1269,6 +1376,7 @@ fn collect_place<'a>(
         &'a [hy_syntax::Param],
         &'a [hy_syntax::FnResult],
         &'a Block,
+        (usize, usize),
     )>,
 ) {
     match &place.kind {
@@ -1288,6 +1396,7 @@ fn collect_block<'a>(
         &'a [hy_syntax::Param],
         &'a [hy_syntax::FnResult],
         &'a Block,
+        (usize, usize),
     )>,
 ) {
     for s in &block.stmts {
@@ -1301,15 +1410,26 @@ fn collect_expr<'a>(
         &'a [hy_syntax::Param],
         &'a [hy_syntax::FnResult],
         &'a Block,
+        (usize, usize),
     )>,
 ) {
     match expr {
         Expr::Ident { .. } => {}
-        Expr::FnLit { params, results, body, .. } => {
+        Expr::FnLit {
+            params,
+            results,
+            body,
+            span,
+        } => {
             // Only collect outermost closures here; nested closures are
             // checked recursively inside check_one_closure against their
             // enclosing closure's environment (#229).
-            out.push((params, results, body));
+            out.push((
+                params,
+                results,
+                body,
+                (span.start.line as usize, span.start.col as usize),
+            ));
         }
         Expr::Lit { .. } => {}
         Expr::Interp { parts, .. } => {

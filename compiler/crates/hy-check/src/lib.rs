@@ -400,6 +400,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     // Pass A: indices, structural extents, last-use map.
     let flat = walk::flatten_with_results(body, &st.named_results);
     st.last_use = flat.last_use.clone();
+    st.loop_end = flat.loop_end.clone();
 
     let mut active_loops: Vec<(
         usize,
@@ -499,6 +500,17 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         ck.check_uses(&st, &uses);
         // T24: no address-of on a map-slot loan (HYB-E3104).
         ck.check_addr_of_loan(&st, &uses);
+
+        let mut fnlits = Vec::new();
+        walk::own_fnlits(stmt, &mut fnlits);
+        if !fnlits.is_empty() {
+            if let Some(top) = st.fnlit_scopes.last_mut() {
+                for fl in fnlits {
+                    let sp = fl.span();
+                    top.push((sp.start.line as usize, sp.start.col as usize));
+                }
+            }
+        }
 
         // Issue #149: `/` or `%` by a literal 0 must not be accepted —
         // Go refuses to compile the emitted expression.

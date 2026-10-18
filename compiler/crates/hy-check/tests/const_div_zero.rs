@@ -572,3 +572,77 @@ fn file_const_div_by_literal_zero_is_rejected() {
     );
     assert_eq!(r.verdict, Verdict::Reject);
 }
+
+#[test]
+fn file_const_float_zero_divisor_is_rejected() {
+    let cases = [
+        "const c = 1.0 / 0.0\nfn main() {\n    _ = c\n}\n",
+        "const c = 1.0 / -0.0\nfn main() {\n    _ = c\n}\n",
+        "const c = 1.0 / 0.0e0\nfn main() {\n    _ = c\n}\n",
+    ];
+    for src in cases {
+        let r = check(src);
+        let cs = error_codes(&r);
+        assert!(
+            cs.iter().any(|c| c == "HYB-E6001"),
+            "expected HYB-E6001 for `{src}`, got {:?}",
+            cs
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+    }
+}
+
+#[test]
+fn const_expr_float_zero_divisor_is_rejected() {
+    let cases = [
+        "fn main() {\n    _ = 1.0 / 0.0\n}\n",
+        "fn main() {\n    _ = (2.0 + 3.0) / 0.0\n}\n",
+        "fn main() {\n    _ = -5.5 / (-0.0)\n}\n",
+    ];
+    for src in cases {
+        let r = check(src);
+        let cs = error_codes(&r);
+        assert!(
+            cs.iter().any(|c| c == "HYB-E6001"),
+            "expected HYB-E6001 for `{src}`, got {:?}",
+            cs
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+    }
+}
+
+#[test]
+fn runtime_float_zero_divisor_stays_accepted() {
+    let cases = [
+        "fn main() {\n    x := 5.0\n    y := x / 0.0\n    x /= 0.0\n    _ = y\n    _ = x\n}\n",
+        "fn main() {\n    x := -5.0\n    y := x / -0.0\n    x /= -0.0\n    _ = y\n    _ = x\n}\n",
+        "fn main() {\n    var x float64 = 10.5\n    y := x / 0.0\n    _ = y\n}\n",
+    ];
+    for src in cases {
+        let r = check(src);
+        assert_eq!(
+            r.verdict,
+            Verdict::Accept,
+            "expected runtime float zero division to stay accepted per IEEE-754 for `{src}`, diags: {:?}",
+            r.diagnostics
+        );
+    }
+}
+
+#[test]
+fn float_nonzero_divisor_stays_accepted() {
+    let cases = [
+        "const c = 10.0 / 2.0\nfn main() {\n    _ = c\n}\n",
+        "fn main() {\n    x := 10.0 / 2.0\n    x /= 2.0\n    _ = x\n}\n",
+    ];
+    for src in cases {
+        let r = check(src);
+        assert_eq!(
+            r.verdict,
+            Verdict::Accept,
+            "expected non-zero float division to be accepted for `{src}`, diags: {:?}",
+            r.diagnostics
+        );
+    }
+}
+

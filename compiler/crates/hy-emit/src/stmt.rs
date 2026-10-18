@@ -2301,16 +2301,22 @@ impl Emitter {
     // O8 slot-loan helpers (non-lexical last_use flush, rebind flush, key snapshot)
     // -----------------------------------------------------------------------
 
-    /// Returns `Some(operand)` when `expr` is an O8 slot-loan `&m[k]` or `&s.field`.
+    /// Returns `Some(operand)` when `expr` is an O8 slot-loan `&m[k]` or `&s.field`
+    /// (including parenthesized forms `(&m[k])` and `&(m[k])`).
     fn as_slot_loan_operand(expr: &Expr) -> Option<&Expr> {
-        match expr {
+        match Self::peel_parens(expr) {
             Expr::AddrOf { operand, .. }
             | Expr::Unary {
                 op: UnOp::Addr,
                 operand,
                 ..
-            } if matches!(operand.as_ref(), Expr::Index { .. } | Expr::Field { .. }) => {
-                Some(operand.as_ref())
+            } => {
+                let inner = Self::peel_parens(operand);
+                if matches!(inner, Expr::Index { .. } | Expr::Field { .. }) {
+                    Some(inner)
+                } else {
+                    None
+                }
             }
             _ => None,
         }

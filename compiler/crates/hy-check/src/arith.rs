@@ -180,8 +180,12 @@ impl<'a> Checker<'a> {
             Expr::Binary { op, lhs, rhs, span } => {
                 self.check_expr_const_zero_divisor(lhs);
                 self.check_expr_const_zero_divisor(rhs);
-                if matches!(op, BinOp::Div | BinOp::Mod) && is_int_literal_zero(rhs) {
-                    self.emit_const_zero_divisor(*span, bin_op_txt(*op));
+                if matches!(op, BinOp::Div | BinOp::Mod) {
+                    if is_int_literal_zero(rhs) {
+                        self.emit_const_zero_divisor(*span, bin_op_txt(*op));
+                    } else if is_float_literal_zero(rhs) && is_const_expr(lhs) {
+                        self.emit_const_zero_divisor(*span, bin_op_txt(*op));
+                    }
                 }
             }
             Expr::Unary { operand, .. }
@@ -281,6 +285,49 @@ pub(crate) fn is_constant_zero(expr: &Expr) -> bool {
 
 fn is_int_literal_zero(expr: &Expr) -> bool {
     is_constant_zero(expr)
+}
+
+pub(crate) fn is_float_literal_zero(expr: &Expr) -> bool {
+    match unwrap_parens(expr) {
+        Expr::Lit {
+            kind: LitKind::Float(raw),
+            ..
+        } => float_lit_is_zero(raw),
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => is_float_literal_zero(operand),
+        _ => false,
+    }
+}
+
+pub(crate) fn float_lit_is_zero(raw: &str) -> bool {
+    let s: String = raw.chars().filter(|c| *c != '_').collect();
+    if s.is_empty() {
+        return false;
+    }
+    if s.starts_with("0x") || s.starts_with("0X") {
+        let without_prefix = &s[2..];
+        let mantissa = without_prefix.split(['p', 'P']).next().unwrap_or(without_prefix);
+        let mantissa_clean: String = mantissa.chars().filter(|c| *c != '.').collect();
+        return !mantissa_clean.is_empty() && mantissa_clean.chars().all(|c| c == '0');
+    }
+    let mantissa = s.split(['e', 'E']).next().unwrap_or(&s);
+    let mantissa_clean: String = mantissa.chars().filter(|c| *c != '.').collect();
+    !mantissa_clean.is_empty() && mantissa_clean.chars().all(|c| c == '0')
+}
+
+fn is_const_expr(expr: &Expr) -> bool {
+    match unwrap_parens(expr) {
+        Expr::Lit { .. } => true,
+        Expr::Unary { operand, .. } => is_const_expr(operand),
+        Expr::Binary { lhs, rhs, .. } => is_const_expr(lhs) && is_const_expr(rhs),
+        _ => {
+            const_eval_int(expr).is_some()
+                || crate::const_overflow::const_float_value(expr).is_some()
+        }
+    }
 }
 
 pub(crate) fn const_eval_int(expr: &Expr) -> Option<i128> {

@@ -2507,3 +2507,25 @@ fn slot_loan_stays_live_when_an_if_init_binds_a_different_name() {
         go
     );
 }
+
+#[test]
+fn parenthesized_slot_loan_lowers_to_copy_and_storeback() {
+    let go = emit(
+        "struct svc {\n    count int\n}\n\nfn main() {\n    m := map[string]svc{\"a\": svc{count: 1}}\n    s := (&m[\"a\"])\n    s.count = 2\n    s = &(m[\"a\"])\n    s.count = 3\n}\n",
+    );
+    assert!(
+        go.contains("s := m[\"a\"]"),
+        "expected parenthesized slot loan to lower to copy read, got:\n{}",
+        go
+    );
+    assert!(
+        go.contains("m[\"a\"] = s"),
+        "expected parenthesized slot loan to emit store-back, got:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("&m[\"a\"]") && !go.contains("&(m[\"a\"])"),
+        "expected no raw address-of map index in emitted Go, got:\n{}",
+        go
+    );
+}

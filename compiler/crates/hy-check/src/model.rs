@@ -243,6 +243,21 @@ pub(crate) struct FnState {
     pub loans: Vec<Loan>,
     /// name -> last statement index that references it (Pass A result).
     pub last_use: HashMap<String, usize>,
+    /// loop header index -> inclusive last statement index of that loop body.
+    pub loop_end: HashMap<usize, usize>,
+    /// Snapshot of active block-scoped bindings, aliases, and may_share sets
+    /// captured when a block containing a closure literal (`FnLit`) exits.
+    pub closure_scoped_envs: HashMap<
+        (usize, usize),
+        (
+            HashMap<String, Binding>,
+            HashMap<String, String>,
+            HashMap<String, HashSet<String>>,
+        ),
+    >,
+    /// Per-scope list of `FnLit` start `(line, col)` positions declared in
+    /// that scope (used to snapshot block state right before `scope_pop`).
+    pub fnlit_scopes: Vec<Vec<(usize, usize)>>,
     /// #111 form 4: a local closure binding -> the base paths its body may
     /// MUTATE (map insert/delete targets, transitively via calls it makes).
     /// Captured roots only (the closure's own params are excluded — they
@@ -301,10 +316,28 @@ impl FnState {
             .push(self.closure_mutates.clone());
         self.closure_param_scopes
             .push(self.closure_param_mutates.clone());
+        self.fnlit_scopes.push(Vec::new());
     }
 
     /// Exit the innermost block scope (walk.rs's Pop events).
     pub(crate) fn scope_pop(&mut self) {
+        if let Some(fnlits) = self.fnlit_scopes.pop() {
+            if !fnlits.is_empty() {
+                let mut snap_env = self.env.clone();
+                for layer in &self.scopes {
+                    for (k, v) in layer {
+                        snap_env.insert(k.clone(), v.clone());
+                    }
+                }
+                let snap_aliases = self.aliases.clone();
+                let snap_share = self.may_share.clone();
+                for pos in fnlits {
+                    self.closure_scoped_envs.entry(pos).or_insert_with(|| {
+                        (snap_env.clone(), snap_aliases.clone(), snap_share.clone())
+                    });
+                }
+            }
+        }
         let popped_scope = self.scopes.last().cloned().unwrap_or_default();
         let exists_in_outer = |name: &str, env: &HashMap<String, Binding>, scopes: &[HashMap<String, Binding>]| {
             env.contains_key(name) || scopes.iter().rev().skip(1).any(|s| s.contains_key(name))
@@ -369,7 +402,6 @@ impl FnState {
                 }
             }
         }
-
         // Capture any moves on inner aliases or may-share peers before the
         // inner scope and alias/share maps are popped (handles the case where
         // an inner alias/holder was moved while an outer peer was shadowed).
@@ -795,13 +827,13 @@ impl<'a> Checker<'a> {
 
 /// `&x` — both legal AST spellings (`Expr::AddrOf` and `Expr::Unary{Addr}`).
 pub(crate) fn as_addr_of(e: &Expr) -> Option<&Expr> {
-    match e {
-        Expr::AddrOf { operand, .. } => Some(operand),
+    match unwrap_parens(e) {
+        Expr::AddrOf { operand, .. } => Some(unwrap_parens(operand)),
         Expr::Unary {
             op: hy_syntax::UnOp::Addr,
             operand,
             ..
-        } => Some(operand),
+        } => Some(unwrap_parens(operand)),
         _ => None,
     }
 }

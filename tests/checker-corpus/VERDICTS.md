@@ -793,3 +793,10 @@ reproduction line above is the merged tree.
   emitted Go header would fail `imported and not used`.
 - Scope note: LX4 keeps Go lexical scoping — a mention of a shadowed name
   does not count as package use. Case 47 pins the plain unused form.
+
+## Additive corpus registration — 2026-10-18: unproven atomic pointer
+
+- Program: `atomic-pointer-fail-closed-reject.hy` (PR #267, author 1932819331hy-debug; landed via maintainer integration — the checker behavior + unit pin already on main via bc99907, this registers the harness-level corpus pin). Descriptive naming avoids collisions with numbered additions.
+- Verdict: REJECT FC, exact diagnostic HYB-E3005. Pins GUARANTEES.md row 11 at a task-spawn check site; scalar-atomic acceptance remains covered by corpus 17.
+- This registers existing fail-closed behavior; no checker rule or existing verdict changes.
+- Verified on the refreshed tree: 79/79 verdict agreement, tripwire not fired; ACCEPT 21 · ACCEPT-MANAGED 2 · REJECT 56.
