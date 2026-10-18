@@ -38,6 +38,11 @@ pub fn check_cancel(file: &File) -> CancelReport {
         nested_chan: file_has_nested_chan(file) || facts.iter().any(|f| f.nested_chan),
         chan_fields: fields_where(file, |t| matches!(t, TypeExpr::Chan { .. })),
         fn_fields: fields_where(file, |t| matches!(t, TypeExpr::Fn { .. })),
+        bodyless: file
+            .fns()
+            .filter(|f| f.body.is_none() && f.receiver.is_none())
+            .map(|f| f.name.clone())
+            .collect(),
         seen: HashSet::new(),
         queue: VecDeque::new(),
         findings: HashMap::new(),
@@ -378,6 +383,8 @@ struct Analysis<'a> {
     chan_fields: HashSet<String>,
     /// Fn-typed field names: `x.f()` fails closed.
     fn_fields: HashSet<String>,
+    /// Body-less fn decls: their code is not visible, so they are foreign.
+    bodyless: HashSet<String>,
     seen: HashSet<(usize, BTreeSet<String>, bool, bool)>,
     queue: VecDeque<Ctx>,
     findings: HashMap<(u32, u32), Diagnostic>,
@@ -754,6 +761,8 @@ impl<'a> Analysis<'a> {
                     .position(|f| f.receiver.is_none() && &f.name == name)
                 {
                     Callee::Fns(vec![i])
+                } else if self.bodyless.contains(name) {
+                    Callee::Foreign
                 } else {
                     // Builtins, conversions, enum constructors.
                     Callee::Covered

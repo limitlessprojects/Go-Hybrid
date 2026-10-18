@@ -221,7 +221,7 @@ needs a per-channel send-count bound (sends outside loops × spawn count ≤
 
 ### R6 — regression check against upstream (H2): confirmed
 
-- `cargo test --workspace`: 1144 passed, 0 failed (pinned go1.26.9).
+- `cargo test --workspace`: 1150 passed, 0 failed (pinned go1.26.9).
 - Corpus harness 79/79; managed gate PASS; differential loop FULL AGREEMENT
   (23/23 build+run, 56/56 reject); `run_examples.sh` 10/10 PASS.
 - Default output is byte-identical to upstream `main`: 381 runs (127 files ×
@@ -275,6 +275,6 @@ compose with rather than replace.
 ## Reproduce
 
 ```bash
-cd compiler && cargo test -p hy-check --test cancel_cases
+cd compiler && cargo test -p hy-check --test cancel_cases && cargo test -p hyb --test cancel_flags
 cargo build -p hyb && for f in ../spikes/w006-cancel-safety/cases/*.hy; do target/debug/hyb check "$f" --report-cancel; done
 ```

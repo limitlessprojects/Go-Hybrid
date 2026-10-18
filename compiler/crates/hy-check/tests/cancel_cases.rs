@@ -39,3 +39,14 @@ fn cancel_cases_match_preregistered_counts() {
     );
     assert!(bad.is_empty(), "mismatches:\n{}", bad.join("\n"));
 }
+
+#[test]
+fn bodyless_callee_is_foreign_not_covered() {
+    // Its body is not visible, so the call is outside the claim (counted),
+    // never silently certified as non-blocking.
+    let src = "fn worker(done chan bool, jobs chan int) {\n    blocker(jobs)\n    <-done\n}\n\nfn main() {\n    done := make(chan bool)\n    jobs := make(chan int)\n    task worker(done, jobs)\n    close(done)\n}\n\nfn blocker(jobs chan int)\n";
+    let ast = parse_file("bodyless.hy", src).expect("parses");
+    let r = check_cancel(&ast);
+    assert_eq!(r.diagnostics.len(), 0);
+    assert_eq!(r.foreign_calls, 1, "body-less callee must count as foreign");
+}
