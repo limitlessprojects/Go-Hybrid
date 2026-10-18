@@ -2908,3 +2908,138 @@ fn m4_initialism_mapping_for_foreign_go_names_issue_658() {
     assert!(go.contains("strings.ToValidUTF8(\"a\", \"b\")"), "expected strings.ToValidUTF8, got:\n{}", go);
 }
 
+#[test]
+fn slot_loan_flushes_before_plain_value_rebind_and_does_not_overwrite_map_after_move() {
+    let go = emit(
+        "struct item {\n    x int\n}\n\nfn worker(m map[string]item, done chan bool) {\n    m[\"w\"] = item{x: 1}\n    done <- true\n}\n\nfn main() {\n    m := map[string]item{\"a\": item{x: 1}}\n    done := make(chan bool, 1)\n    n := &m[\"a\"]\n    n.x = 42\n    n = item{x: 999}\n    task worker(move m, done)\n    fmt.println(n.x)\n    <-done\n}\n",
+    );
+    let mut_at = go.find("n.x = 42").expect("loan mutation");
+    let flush_at = go.find("m[\"a\"] = n").expect("store-back emitted");
+    let rebind_at = go.find("n = item{x: 999}").expect("plain rebind emitted");
+    let spawn_at = go.find("go worker(m, done)").expect("task spawn emitted");
+    assert!(
+        mut_at < flush_at && flush_at < rebind_at && rebind_at < spawn_at,
+        "store-back must flush before plain-value rebind and before spawn:\n{}",
+        go
+    );
+    assert_eq!(
+        go.matches("m[\"a\"] = n").count(),
+        1,
+        "store-back must be emitted exactly once:\n{}",
+        go
+    );
+}
+
+#[test]
+fn slot_loan_flushes_when_plain_rebind_rhs_reads_loan() {
+    let go = emit(
+        "struct item {\n    x int\n}\n\nfn main() {\n    m := map[string]item{\"a\": item{x: 1}}\n    n := &m[\"a\"]\n    n.x = 42\n    n = item{x: n.x + 10}\n    fmt.println(n.x)\n}\n",
+    );
+    let mut_at = go.find("n.x = 42").expect("loan mutation");
+    let flush_at = go.find("m[\"a\"] = n").expect("store-back emitted");
+    let rebind_at = go
+        .find("n = item{x: n.x + 10}")
+        .expect("plain rebind reading n emitted");
+    assert!(
+        mut_at < flush_at && flush_at < rebind_at,
+        "store-back must flush before plain rebind even when RHS reads the loan:\n{}",
+        go
+    );
+    assert_eq!(
+        go.matches("m[\"a\"] = n").count(),
+        1,
+        "store-back must be emitted exactly once:\n{}",
+        go
+    );
+}
+
+#[test]
+fn slot_loan_flushes_before_comma_ok_rebind() {
+    let go = emit(
+        "struct item {\n    x int\n}\n\nfn main() {\n    m := map[string]item{\"a\": item{x: 1}, \"b\": item{x: 2}}\n    n := &m[\"a\"]\n    n.x = 42\n    ok := false\n    n, ok = m[\"b\"]\n    fmt.println(n.x, ok)\n}\n",
+    );
+    let mut_at = go.find("n.x = 42").expect("loan mutation");
+    let flush_at = go.find("m[\"a\"] = n").expect("store-back emitted");
+    let rebind_at = go.find("n, ok = m[\"b\"]").expect("comma-ok rebind emitted");
+    assert!(
+        mut_at < flush_at && flush_at < rebind_at,
+        "store-back must flush before comma-ok rebind:\n{}",
+        go
+    );
+    assert_eq!(
+        go.matches("m[\"a\"] = n").count(),
+        1,
+        "store-back must be emitted exactly once:\n{}",
+        go
+    );
+}
+
+#[test]
+fn slot_loan_rebind_in_nested_block_flushes_previous_slot_before_rebind() {
+    let go = emit(
+        "struct item {\n    x int\n}\n\nfn main() {\n    m := map[string]item{\"a\": item{x: 1}, \"b\": item{x: 2}}\n    n := &m[\"a\"]\n    n.x = 10\n    {\n        n = &m[\"b\"]\n        n.x = 20\n    }\n}\n",
+    );
+    let mut_a = go.find("n.x = 10").expect("mutation of a");
+    let flush_a = go.find("m[\"a\"] = n").expect("store-back of a");
+    let rebind_b = go.find("n = m[\"b\"]").expect("rebind to b");
+    let mut_b = go.find("n.x = 20").expect("mutation of b");
+    let flush_b = go.find("m[\"b\"] = n").expect("store-back of b");
+    assert!(
+        mut_a < flush_a && flush_a < rebind_b && rebind_b < mut_b && mut_b < flush_b,
+        "nested-block slot-loan rebind must flush `a` before rebinding to `b` and only flush `b` afterwards:\n{}",
+        go
+    );
+    assert_eq!(go.matches("m[\"a\"] = n").count(), 1, "{}", go);
+    assert_eq!(go.matches("m[\"b\"] = n").count(), 1, "{}", go);
+}
+
+#[test]
+fn slot_loan_rebind_in_if_branch_hands_off_cleanly_to_both_branches() {
+    let go = emit(
+        "struct item {\n    x int\n}\n\nfn main() {\n    m := map[string]item{\"a\": item{x: 1}, \"b\": item{x: 2}}\n    n := &m[\"a\"]\n    n.x = 10\n    if true {\n        n.x = 15\n        n = &m[\"b\"]\n        n.x = 20\n    }\n}\n",
+    );
+    let first_flush_a = go.find("m[\"a\"] = n").expect("store-back of a in then");
+    let rebind_b = go.find("n = m[\"b\"]").expect("rebind to b in then");
+    let flush_b = go.find("m[\"b\"] = n").expect("store-back of b in then");
+    let else_branch = go.find("} else {").expect("synthesized else branch");
+    let last_flush_a = go.rfind("m[\"a\"] = n").expect("store-back of a in else");
+    assert!(
+        first_flush_a < rebind_b
+            && rebind_b < flush_b
+            && flush_b < else_branch
+            && else_branch < last_flush_a,
+        "if-branch mutate+rebind must flush `a` before rebind and `b` in then, and synthesize else store-back for `a`:\n{}",
+        go
+    );
+    assert_eq!(go.matches("m[\"a\"] = n").count(), 2, "{}", go);
+    assert_eq!(go.matches("m[\"b\"] = n").count(), 1, "{}", go);
+
+    let go_immediate = emit(
+        "struct item {\n    x int\n}\n\nfn main() {\n    m := map[string]item{\"a\": item{x: 1}, \"b\": item{x: 2}}\n    n := &m[\"a\"]\n    n.x = 10\n    if true {\n        n = &m[\"b\"]\n        n.x = 20\n    }\n}\n",
+    );
+    let flush_a_imm = go_immediate.find("m[\"a\"] = n").expect("early flush of a");
+    let if_head = go_immediate.find("if true {").expect("if head");
+    let flush_b_imm = go_immediate.find("m[\"b\"] = n").expect("flush of b");
+    assert!(
+        flush_a_imm < if_head && if_head < flush_b_imm,
+        "immediate rebind in if-branch flushes `a` before `if` and `b` inside branch:\n{}",
+        go_immediate
+    );
+    assert_eq!(go_immediate.matches("m[\"a\"] = n").count(), 1, "{}", go_immediate);
+    assert_eq!(go_immediate.matches("m[\"b\"] = n").count(), 1, "{}", go_immediate);
+}
+
+#[test]
+fn branch_inherit_not_consumed_by_closure_in_if_condition() {
+    let go = emit(
+        "struct item {\n    x int\n}\n\nfn worker(m map[string]item, done chan bool) {\n    done <- true\n}\n\nfn main() {\n    m := map[string]item{\"a\": item{x: 1}}\n    done := make(chan bool, 1)\n    n := &m[\"a\"]\n    n.x = 10\n    if (fn() bool { return true })() {\n        n.x = 20\n        task worker(move m, done)\n        <-done\n    }\n}\n",
+    );
+    let mut_in_then = go.find("n.x = 20").expect("mutation in then");
+    let flush_in_then = go.find("m[\"a\"] = n").expect("store-back in then");
+    let spawn_in_then = go.find("go worker(m, done)").expect("spawn in then");
+    assert!(
+        mut_in_then < flush_in_then && flush_in_then < spawn_in_then,
+        "closure in if-cond must not steal branch_inherit from the then-block:\n{}",
+        go
+    );
+}

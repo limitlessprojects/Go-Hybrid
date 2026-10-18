@@ -284,3 +284,213 @@ fn clear_in_slot_loan_window_rejects_e3102() {
     assert_e3102(&r_helper, "helper clear in window");
 }
 
+#[test]
+fn map_and_container_rebind_in_slot_loan_window_rejects_e3102() {
+    // Direct map rebind `m = m2` while `p := &m["a"]` is live
+    let r_map_rebind = check(
+        "struct cell { n int }\n\
+         fn main() {\n\
+             m := map[string]cell{\"a\": cell{n: 1}}\n\
+             m2 := map[string]cell{\"a\": cell{n: 2}}\n\
+             p := &m[\"a\"]\n\
+             p.n = 42\n\
+             m = m2\n\
+             _ = p.n\n\
+         }\n",
+    );
+    assert_e3102(&r_map_rebind, "direct map rebind in window");
+
+    // Enclosing struct field rebind `h.m = m2` and whole-struct rebind `h = h2`
+    let r_field_rebind = check(
+        "struct cell { n int }\n\
+         struct holder { m map[string]cell }\n\
+         fn main() {\n\
+             h := holder{m: map[string]cell{\"a\": cell{n: 1}}}\n\
+             p := &h.m[\"a\"]\n\
+             h.m = map[string]cell{\"a\": cell{n: 2}}\n\
+             p.n = 42\n\
+         }\n",
+    );
+    assert_e3102(&r_field_rebind, "struct map-field rebind in window");
+
+    let r_struct_rebind = check(
+        "struct cell { n int }\n\
+         struct holder { m map[string]cell }\n\
+         fn main() {\n\
+             h := holder{m: map[string]cell{\"a\": cell{n: 1}}}\n\
+             h2 := holder{m: map[string]cell{\"a\": cell{n: 2}}}\n\
+             p := &h.m[\"a\"]\n\
+             h = h2\n\
+             p.n = 42\n\
+         }\n",
+    );
+    assert_e3102(&r_struct_rebind, "enclosing struct rebind in window");
+
+    // Closure rebinding `m = m2` called inside the live window
+    let r_closure_rebind = check(
+        "struct cell { n int }\n\
+         fn main() {\n\
+             m := map[string]cell{\"a\": cell{n: 1}}\n\
+             m2 := map[string]cell{\"a\": cell{n: 2}}\n\
+             p := &m[\"a\"]\n\
+             swap := fn() {\n\
+                 m = m2\n\
+             }\n\
+             swap()\n\
+             p.n = 42\n\
+         }\n",
+    );
+    assert_e3102(&r_closure_rebind, "closure map rebind in window");
+
+    // Rebinding after the loan's last use stays accepted
+    let r_after = check(
+        "struct cell { n int }\n\
+         fn main() {\n\
+             m := map[string]cell{\"a\": cell{n: 1}}\n\
+             m2 := map[string]cell{\"a\": cell{n: 2}}\n\
+             p := &m[\"a\"]\n\
+             p.n = 42\n\
+             m = m2\n\
+         }\n",
+    );
+    assert!(codes(&r_after).is_empty(), "{:?}", r_after.diagnostics);
+    assert_eq!(r_after.verdict, Verdict::Accept);
+}
+
+#[test]
+fn user_method_assoc_fn_inline_closure_and_paren_callee_in_window_reject_e3102() {
+    // User method mutating receiver's map
+    let r_method_recv = check(
+        "struct cell { n int }\n\
+         struct holder { m map[string]cell }\n\
+         fn (h *holder) insert_fresh() {\n\
+             h.m[\"fresh\"] = cell{n: 1}\n\
+         }\n\
+         fn main() {\n\
+             h := holder{m: map[string]cell{\"a\": cell{n: 0}}}\n\
+             p := &h.m[\"a\"]\n\
+             h.insert_fresh()\n\
+             p.n = 9\n\
+         }\n",
+    );
+    assert_e3102(&r_method_recv, "user method mutating receiver map in window");
+
+    // User method mutating map argument
+    let r_method_arg = check(
+        "struct cell { n int }\n\
+         struct mutator { tag int }\n\
+         fn (x *mutator) put(m map[string]cell) {\n\
+             m[\"fresh\"] = cell{n: x.tag}\n\
+         }\n\
+         fn main() {\n\
+             m := map[string]cell{\"a\": cell{n: 0}}\n\
+             x := mutator{tag: 7}\n\
+             p := &m[\"a\"]\n\
+             x.put(m)\n\
+             p.n = 9\n\
+         }\n",
+    );
+    assert_e3102(&r_method_arg, "user method mutating map arg in window");
+
+    // Associated function mutating map argument
+    let r_assoc = check(
+        "struct cell { n int }\n\
+         struct holder { m map[string]cell }\n\
+         fn holder.put(h *holder) {\n\
+             h.m[\"fresh\"] = cell{n: 1}\n\
+         }\n\
+         fn main() {\n\
+             h := holder{m: map[string]cell{\"a\": cell{n: 0}}}\n\
+             p := &h.m[\"a\"]\n\
+             holder.put(&h)\n\
+             p.n = 9\n\
+         }\n",
+    );
+    assert_e3102(&r_assoc, "associated fn mutating map in window");
+
+    // Inline closure call `(fn() { m["fresh"] = ... })()`
+    let r_inline_closure = check(
+        "struct cell { n int }\n\
+         fn main() {\n\
+             m := map[string]cell{\"a\": cell{n: 0}}\n\
+             p := &m[\"a\"]\n\
+             if true {\n\
+                 (fn() {\n\
+                     m[\"fresh\"] = cell{n: 1}\n\
+                 })()\n\
+             }\n\
+             p.n = 9\n\
+         }\n",
+    );
+    assert_e3102(&r_inline_closure, "inline closure mutating map in window");
+
+    // Parenthesized callee `(bump)(m)`
+    let r_paren_callee = check(
+        "struct cell { n int }\n\
+         fn bump(m map[string]cell) {\n\
+             m[\"fresh\"] = cell{n: 1}\n\
+         }\n\
+         fn main() {\n\
+             m := map[string]cell{\"a\": cell{n: 0}}\n\
+             p := &m[\"a\"]\n\
+             if true {\n\
+                 (bump)(m)\n\
+             }\n\
+             p.n = 9\n\
+         }\n",
+    );
+    assert_e3102(&r_paren_callee, "parenthesized callee mutating map in window");
+
+    // Read-only user method inside window stays accepted
+    let r_readonly_method = check(
+        "struct cell { n int }\n\
+         struct holder { m map[string]cell }\n\
+         fn (h *holder) size() int {\n\
+             return len(h.m)\n\
+         }\n\
+         fn main() {\n\
+             h := holder{m: map[string]cell{\"a\": cell{n: 0}}}\n\
+             p := &h.m[\"a\"]\n\
+             k := h.size()\n\
+             p.n = k\n\
+         }\n",
+    );
+    assert!(
+        codes(&r_readonly_method).is_empty(),
+        "{:?}",
+        r_readonly_method.diagnostics
+    );
+    assert_eq!(r_readonly_method.verdict, Verdict::Accept);
+}
+
+#[test]
+fn plain_rebind_ends_slot_loan_window_and_clears_t24_flag() {
+    // Once `p` is rebound to a plain value (`p = cell{n: 2}` or `p, ok = m["b"]`),
+    // the slot loan on `m` is closed (so mutating `m` afterwards is legal) and
+    // `&p` is the address of a plain local (not HYB-E3105).
+    let r = check(
+        "struct cell { n int }\n\
+         fn touch(ptr *cell) {\n\
+             ptr.n = 99\n\
+         }\n\
+         fn main() {\n\
+             m := map[string]cell{\"a\": cell{n: 1}, \"b\": cell{n: 2}}\n\
+             p := &m[\"a\"]\n\
+             p.n = 10\n\
+             p = cell{n: 20}\n\
+             m[\"c\"] = cell{n: 30}\n\
+             touch(&p)\n\
+             q := &m[\"a\"]\n\
+             q.n = 11\n\
+             ok := false\n\
+             q, ok = m[\"b\"]\n\
+             _ = ok\n\
+             m[\"d\"] = cell{n: 40}\n\
+             touch(&q)\n\
+         }\n",
+    );
+    assert!(codes(&r).is_empty(), "{:?}", r.diagnostics);
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+

@@ -622,7 +622,19 @@ impl<'a> Collector<'a> {
             return self.multi_value_kinds(&l.values[0]);
         }
         if n == l.values.len() {
-            return l.values.iter().map(|v| self.kind_of_expr(v)).collect();
+            return l
+                .values
+                .iter()
+                .map(|v| {
+                    if let Some(op) = as_addr_of(unwrap_parens(v)) {
+                        let inner = unwrap_parens(op);
+                        if matches!(inner, Expr::Index { .. } | Expr::Field { .. }) {
+                            return self.kind_of_expr(inner);
+                        }
+                    }
+                    self.kind_of_expr(v)
+                })
+                .collect();
         }
         vec![OpKind::Unknown; n]
     }

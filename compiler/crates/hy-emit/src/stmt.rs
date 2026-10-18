@@ -399,10 +399,11 @@ impl Emitter {
                     val_texts.push(self.emit_expr(v, 0)?);
                 }
             }
+            self.flush_current_frame_loans(&l.names);
             self.shadow_local_names(&l.names);
             for (loan_name, _) in &new_loans {
                 self.bindings.insert(loan_name.clone(), BindingKind::Plain);
-                self.flush_loan_for_name(loan_name);
+                self.shadowed_since_loan.remove(loan_name);
             }
             self.push(&format!(
                 "{} := {}",
@@ -420,11 +421,7 @@ impl Emitter {
             .iter()
             .map(|v| self.emit_expr(v, 0))
             .collect::<Result<Vec<_>, _>>()?;
-        for name in &l.names {
-            if name != "_" {
-                self.flush_loan_for_name(name);
-            }
-        }
+        self.flush_current_frame_loans(&l.names);
         let names = l.names.join(", ");
         self.push(&format!("{} := {}", names, values.join(", ")));
         // A struct-literal define carries the receiver's struct name
@@ -915,6 +912,7 @@ impl Emitter {
             self.hoist_tries_expr(call)?;
             let temp = self.next_temp("hyErr");
             let call_text = self.emit_expr(call, 0)?;
+            self.flush_current_frame_loans(&l.names);
             let mut names = l.names.clone();
             names.push(temp.clone());
             self.push(&format!("{} := {}", names.join(", "), call_text));
@@ -940,6 +938,7 @@ impl Emitter {
         self.hoist_tries_expr(call)?;
         let temp = self.next_temp("hyErr");
         let call_text = self.emit_expr(call, 0)?;
+        self.flush_current_frame_loans(&l.names);
         let mut names = l.names.clone();
         names.push(temp.clone());
         self.push(&format!("{} := {}", names.join(", "), call_text));
@@ -1227,9 +1226,12 @@ impl Emitter {
                     _ => unreachable!(),
                 })
                 .collect();
+            let mut target_frames = std::collections::BTreeMap::new();
             for name in &names {
                 if name != "_" {
-                    self.flush_loan_for_name(name);
+                    if let Some(frame_idx) = self.flush_loan_for_name(name) {
+                        target_frames.insert(name.clone(), frame_idx);
+                    }
                 }
             }
             let mut rhs_texts = Vec::with_capacity(values.len());
@@ -1257,8 +1259,17 @@ impl Emitter {
                 }
             }
             self.push(&format!("{} = {}", names.join(", "), rhs_texts.join(", ")));
-            if let Some(frame) = self.loan_frames.last_mut() {
-                frame.extend(new_loans);
+            for (name, place) in new_loans {
+                self.shadowed_since_loan.remove(&name);
+                if let Some(&idx) = target_frames.get(&name) {
+                    if let Some(frame) = self.loan_frames.get_mut(idx) {
+                        frame.push((name, place));
+                        continue;
+                    }
+                }
+                if let Some(frame) = self.loan_frames.last_mut() {
+                    frame.push((name, place));
+                }
             }
             return Ok(());
         }
@@ -1322,6 +1333,15 @@ impl Emitter {
             .iter()
             .map(|v| self.emit_expr(v, 0))
             .collect::<Result<Vec<_>, _>>()?;
+        if op == AssignOp::Assign {
+            for t in targets {
+                if let PlaceKind::Ident(name) = &t.kind {
+                    if name != "_" {
+                        self.flush_loan_for_name(name);
+                    }
+                }
+            }
+        }
         self.push(&format!("{} {} {}", ts.join(", "), op_text, vs.join(", ")));
         Ok(())
     }
@@ -2474,23 +2494,70 @@ impl Emitter {
         Ok((place.clone(), place))
     }
 
-    /// Flushes and removes any active slot-loan entries for `target_name` in
-    /// the current loan frame (used before rebinding `target_name = &...`).
-    fn flush_loan_for_name(&mut self, target_name: &str) {
+    /// Flushes and removes any active slot-loan entries for `names` in the
+    /// current loan frame only (used before emitting a local `:=` declaration).
+    fn flush_current_frame_loans(&mut self, names: &[String]) {
         let mut to_flush = Vec::new();
         if let Some(frame) = self.loan_frames.last_mut() {
-            let mut i = 0;
-            while i < frame.len() {
-                if frame[i].0 == target_name {
-                    to_flush.push(frame.remove(i));
-                } else {
-                    i += 1;
+            for target_name in names {
+                if target_name == "_" {
+                    continue;
+                }
+                let mut i = 0;
+                while i < frame.len() {
+                    if frame[i].0 == *target_name {
+                        to_flush.push(frame.remove(i));
+                    } else {
+                        i += 1;
+                    }
                 }
             }
         }
         for (_, store) in to_flush {
             self.push(&store);
         }
+    }
+
+    /// Flushes and removes any active slot-loan entries for `target_name` in
+    /// the current loan frame or (when `target_name` has not been shadowed by a
+    /// local declaration in an inner block) in enclosing loan frames within the
+    /// same loop/function scope. Returns the frame index where the loan lived.
+    fn flush_loan_for_name(&mut self, target_name: &str) -> Option<usize> {
+        let mut to_flush = Vec::new();
+        let mut found_idx = None;
+        if self.shadowed_since_loan.contains(target_name) {
+            if let Some(last_idx) = self.loan_frames.len().checked_sub(1) {
+                let frame = &mut self.loan_frames[last_idx];
+                let mut i = 0;
+                while i < frame.len() {
+                    if frame[i].0 == target_name {
+                        to_flush.push(frame.remove(i));
+                        found_idx = Some(last_idx);
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+        } else {
+            for (idx, frame) in self.loan_frames.iter_mut().enumerate().rev() {
+                if frame.first().is_some_and(|(n, _)| n.is_empty()) {
+                    break;
+                }
+                let mut i = 0;
+                while i < frame.len() {
+                    if frame[i].0 == target_name {
+                        to_flush.push(frame.remove(i));
+                        found_idx = Some(idx);
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+        }
+        for (_, store) in to_flush {
+            self.push(&store);
+        }
+        found_idx
     }
 
     /// Emits a sequence of statements inside the current loan frame, flushing
@@ -2526,23 +2593,29 @@ impl Emitter {
             let rest = &stmts[idx + 1..];
             // #546: a compound statement (`if`, `match`, `select`, `block`,
             // `managed`, `for`) that is the loan's last user AND spawns, sends,
-            // deletes, clears, or writes using the loan's base map must not get
-            // a single store-back after it: on a path that moved or mutated the
-            // map, that write races the new task or clobbers the branch's write.
-            // Hand the loan down into every branch instead (or pre-flush when
-            // the statement's own header shadows the loan name or sends the
-            // base in a select case clause).
+            // deletes, clears, or writes using the loan's base map (or rebinds
+            // the loan variable inside a branch) must not get a single
+            // store-back after it: on a path that moved or mutated the map or
+            // rebound the variable, that write races the new task or clobbers
+            // the branch's write. Hand the loan down into every branch instead
+            // (or pre-flush when the statement's own header shadows the loan
+            // name or sends the base in a select case clause).
             let mut pre_flush = Vec::new();
             let mut handoff = Vec::new();
             if Self::stmt_supports_loan_handoff(st) {
+                let is_if = matches!(st, Stmt::If { .. });
                 if let Some(frame) = self.loan_frames.last_mut() {
                     let mut i = 0;
                     while i < frame.len() {
                         let (name, place) = &frame[i];
                         let root = Self::place_root(place);
+                        let no_rest_use = !Self::remaining_stmts_use_loan(rest, name);
+                        let rebinds = Self::stmt_rebinds_ident(st, name);
                         if !name.is_empty()
-                            && !Self::remaining_stmts_use_loan(rest, name)
-                            && Self::stmt_has_boundary_using(st, name, root)
+                            && ((no_rest_use
+                                && (Self::stmt_has_boundary_using(st, name, root)
+                                    || rebinds))
+                                || (is_if && rebinds))
                         {
                             if Self::stmt_must_pre_flush_loan(st, name, root) {
                                 pre_flush.push(frame.remove(i));
@@ -2651,6 +2724,68 @@ impl Emitter {
             Stmt::For { kind, .. } => Self::for_binder_shadows(kind, name),
             _ => false,
         }
+    }
+
+    /// Does `st` contain an unshadowed `=` assignment whose target is `PlaceKind::Ident(target)`?
+    fn stmt_rebinds_ident(st: &Stmt, target: &str) -> bool {
+        if target.is_empty() {
+            return false;
+        }
+        match st {
+            Stmt::Assign { targets, op, .. } if *op == AssignOp::Assign => targets
+                .iter()
+                .any(|t| matches!(&t.kind, PlaceKind::Ident(n) if n == target)),
+            Stmt::If {
+                init,
+                then,
+                otherwise,
+                ..
+            } => {
+                if init.as_ref().is_some_and(|i| Self::local_declares(i, target)) {
+                    return false;
+                }
+                Self::block_rebinds_ident(then, target)
+                    || otherwise
+                        .as_deref()
+                        .is_some_and(|o| Self::stmt_rebinds_ident(o, target))
+            }
+            Stmt::For { kind, body, .. } => {
+                !Self::for_binder_shadows(kind, target) && Self::block_rebinds_ident(body, target)
+            }
+            Stmt::Match { arms, .. } => arms.iter().any(|a| {
+                let shadowed = matches!(
+                    &a.pattern,
+                    MatchPattern::Path {
+                        binding: Some(b),
+                        ..
+                    } if b == target
+                );
+                !shadowed && Self::block_rebinds_ident(&a.body, target)
+            }),
+            Stmt::Select { arms, .. } => arms.iter().any(|a| {
+                !Self::select_arm_binds(&a.kind, target)
+                    && Self::block_rebinds_ident(&a.body, target)
+            }),
+            Stmt::Block { block: body, .. } | Stmt::Managed { body, .. } => {
+                Self::block_rebinds_ident(body, target)
+            }
+            _ => false,
+        }
+    }
+
+    fn block_rebinds_ident(b: &Block, target: &str) -> bool {
+        for st in &b.stmts {
+            if let Stmt::Local(l) = st {
+                if l.names.iter().any(|n| n == target) {
+                    return false;
+                }
+                continue;
+            }
+            if Self::stmt_rebinds_ident(st, target) {
+                return true;
+            }
+        }
+        false
     }
 
     /// #546: does `st` (recursively) contain a task spawn, channel send,
@@ -2804,14 +2939,13 @@ impl Emitter {
                     op,
                     values,
                     ..
-                } if *op == AssignOp::Assign
-                    && targets.len() == values.len()
-                    && targets
-                        .iter()
-                        .all(|t| matches!(&t.kind, PlaceKind::Ident(_)))
-                    && values.iter().any(|v| Self::as_slot_loan_operand(v).is_some()) =>
-                {
-                    if values.iter().any(|v| Self::expr_mentions_ident(v, name)) {
+                } if *op == AssignOp::Assign => {
+                    if values.iter().any(|v| Self::expr_mentions_ident(v, name))
+                        || targets.iter().any(|t| {
+                            !matches!(&t.kind, PlaceKind::Ident(_))
+                                && Self::place_mentions_ident(t, name)
+                        })
+                    {
                         return true;
                     }
                     if targets
