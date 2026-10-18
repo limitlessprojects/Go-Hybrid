@@ -457,7 +457,14 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     ck.define_binding(st, name, shape.clone(), ty.clone(), immutable, managed);
                 }
             } else if l.names.len() == l.values.len() {
-                for (name, value) in l.names.iter().zip(l.values.iter()) {
+                let closure_entries: Vec<crate::loans::ClosureMutationEntry> = l
+                    .values
+                    .iter()
+                    .map(|v| ck.compute_closure_mutations(st, v, true))
+                    .collect();
+                for ((name, value), centry) in
+                    l.names.iter().zip(l.values.iter()).zip(closure_entries)
+                {
                     let moved_non_owned = crate::model::move_operand_ident(value)
                         .and_then(|src| ck.lookup_binding(st, &src))
                         .and_then(|b| b.non_owned_origin.clone())
@@ -482,6 +489,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                                 b.non_owned_origin = Some(origin);
                             }
                         }
+                        ck.apply_closure_mutations(st, name, centry, true);
                         continue;
                     }
                     let reads_self = ck.value_reads_storage_of(st, value, name);
@@ -580,7 +588,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     // and cannot bypass O5.1 / O5.4 move restrictions.
                     ck.record_may_share(st, name, value);
                     ck.record_alias(st, name, value);
-                    ck.record_closure_mutations(st, name, value);
+                    ck.apply_closure_mutations(st, name, centry, true);
                     if let Some(origin) = shadowed_origin {
                         if let Some(b) = st.env_lookup_mut(name) {
                             if b.non_owned_origin.is_none() {
