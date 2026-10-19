@@ -158,3 +158,157 @@ fn main() {
         "expected 0 diagnostics for valid multi-value forwarding, got: {c:?}"
     );
 }
+
+#[test]
+fn single_type_arg_generic_fn_and_method_multi_value_calls_reject_e2002() {
+    let cases = [
+        r#"
+fn pair[t](a t, b t) (t, t) {
+    return a, b
+}
+
+fn main() {
+    p := pair[int](3, 9)
+    _ = p
+}
+"#,
+        r#"
+fn pair[t](a t, b t) (t, t) {
+    return a, b
+}
+
+fn main() {
+    a, b, c := pair[int](3, 9)
+    _ = a
+    _ = b
+    _ = c
+}
+"#,
+        r#"
+fn pair[t](a t, b t) (t, t) {
+    return a, b
+}
+
+fn main() {
+    x := pair[int](3, 9) + 1
+    _ = x
+}
+"#,
+        r#"
+struct box {
+    n int
+}
+
+fn (b box) pair[t](x t, y t) (t, t) {
+    return x, y
+}
+
+fn main() {
+    b := box{n: 1}
+    p := b.pair[int](3, 9)
+    _ = p
+}
+"#,
+    ];
+    for src in cases {
+        let c = codes(src);
+        assert!(
+            c.contains(&"HYB-E2002".to_string()),
+            "expected HYB-E2002 for `{src}`, got: {c:?}"
+        );
+    }
+}
+
+#[test]
+fn generic_struct_fn_fields_method_values_chan_recv_and_loop_fn_bindings_reject_e2002() {
+    let cases = [
+        r#"
+type pair_fn = fn(a int, b int) int int
+
+struct holder[t] {
+    f t
+}
+
+fn minmax(a int, b int) (int, int) {
+    return a, b
+}
+
+fn main() {
+    h := holder[pair_fn]{f: minmax}
+    p := h.f(3, 9)
+    _ = p
+}
+"#,
+        r#"
+struct holder[t] {
+    f fn(a t, b t) t t
+}
+
+fn main() {
+    var h holder[int]
+    p := h.f(3, 9)
+    _ = p
+}
+"#,
+        r#"
+struct box {
+    n int
+}
+
+fn (b box) pair(x int, y int) (int, int) {
+    return x, y
+}
+
+fn main() {
+    b := box{n: 1}
+    f := b.pair
+    p := f(3, 9)
+    _ = p
+}
+"#,
+        r#"
+fn pair[t](a t, b t) (t, t) {
+    return a, b
+}
+
+fn main() {
+    f := pair[int]
+    p := f(3, 9)
+    _ = p
+}
+"#,
+        r#"
+type pair_fn = fn(a int, b int) int int
+const _anchor = 0
+
+fn main() {
+    var ch chan pair_fn
+    p := (<-ch)(3, 9)
+    _ = p
+}
+"#,
+        r#"
+type pair_fn = fn(a int, b int) int int
+const _anchor = 0
+
+fn minmax(a int, b int) (int, int) {
+    return a, b
+}
+
+fn main() {
+    fns := []pair_fn{minmax}
+    for _, f in fns {
+        p := f(3, 9)
+        _ = p
+    }
+}
+"#,
+    ];
+    for src in cases {
+        let c = codes(src);
+        assert!(
+            c.contains(&"HYB-E2002".to_string()),
+            "expected HYB-E2002 for `{src}`, got: {c:?}"
+        );
+    }
+}
