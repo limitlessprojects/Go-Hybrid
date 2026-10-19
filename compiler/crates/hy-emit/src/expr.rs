@@ -201,9 +201,14 @@ impl Emitter {
             }
 
             Expr::Field { base, name, .. } => {
+                // `(x).f` is `x.f` in Go: peel a redundant receiver paren so
+                // the member spelling is resolved and the emitted Go is the
+                // same access (issue #618). A non-primary base keeps its
+                // parentheses — `(*p).f` and `(a + b).f` need them.
+                let base = Self::selector_base(base);
                 let b = self.emit_expr(base, ATOM)?;
                 // Package-qualified members register the import.
-                if let Expr::Ident { name: root, .. } = base.as_ref() {
+                if let Expr::Ident { name: root, .. } = base {
                     if self.is_unshadowed_pkg_root(root) {
                         self.use_package(root);
                     }
@@ -442,7 +447,7 @@ impl Emitter {
             LitKind::Bool(b) => b.to_string(),
             LitKind::Str(s) => go_quote(s),
             LitKind::RawStr(s) => format!("`{}`", s),
-            LitKind::Char(c) => format!("{:?}", c),
+            LitKind::Char(c) => format!("'\\U{:08x}'", *c as u32),
             LitKind::Nil => "nil".to_string(),
         }
     }
@@ -567,7 +572,9 @@ impl Emitter {
     /// Returns None the moment a link is unknown — the caller falls back to
     /// the M4 heuristic. Never guesses.
     pub fn type_of_expr(&self, e: &Expr) -> Option<&'static str> {
-        match e {
+        // Parentheses are semantically transparent to a type question:
+        // `(hits).add(1)` must resolve exactly like `hits.add(1)` (#618).
+        match Self::unwrap_parens(e) {
             Expr::Ident { name, .. } => {
                 if let Some(BindingKind::ForeignTy(t)) = self.bindings.get(name) {
                     return Some(t);
@@ -590,7 +597,7 @@ impl Emitter {
                 // Batch I: user-struct field typing — `stats.mu` resolves
                 // through var_struct + struct_fields when the field's
                 // declared type is shape-known (18: sync.mutex).
-                if let Expr::Ident { name: vn, .. } = base.as_ref() {
+                if let Expr::Ident { name: vn, .. } = Self::unwrap_parens(base.as_ref()) {
                     if let Some(sn) = self.var_struct.get(vn) {
                         if let Some(fields) = self.struct_fields.get(sn) {
                             if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
@@ -637,6 +644,23 @@ impl Emitter {
         e
     }
 
+    /// A selector's base never needs parentheses when its inner expression is
+    /// itself a primary expression: `(hits).add(1)` and `(mux).handle(...)`
+    /// are the same accesses as `hits.add(1)` / `mux.Handle(...)`. For
+    /// anything else (`(*p).f`, `(a + b).f`) the parentheses are load-bearing,
+    /// so they are kept. Same whitelist the `.pop()` lowering already uses.
+    fn selector_base(e: &Expr) -> &Expr {
+        let peeled = Self::unwrap_parens(e);
+        if matches!(
+            peeled,
+            Expr::Ident { .. } | Expr::Field { .. } | Expr::Index { .. }
+        ) {
+            peeled
+        } else {
+            e
+        }
+    }
+
     fn is_user_struct_expr(&self, e: &Expr) -> bool {
         match Self::unwrap_parens(e) {
             Expr::Ident { name, .. } => self.var_struct.contains_key(name),
@@ -677,7 +701,7 @@ impl Emitter {
 
         // --- package-qualified calls ---
         if let Expr::Field { base, name, .. } = callee {
-            if let Expr::Ident { name: pkg, .. } = base.as_ref() {
+            if let Expr::Ident { name: pkg, .. } = Self::unwrap_parens(base.as_ref()) {
                 // Known to the checker, unshipped by the runtime (the
                 // audit's flate2 row): the honest refusal must come BEFORE
                 // the package-root gate — an unbound crate is not a Go
@@ -698,6 +722,7 @@ impl Emitter {
         // field-vs-method exactly (`r.url.query.get("a")` →
         // `r.URL.Query().Get("a")`); generic Foreign falls back to M4.
         if let Expr::Field { base, name, .. } = callee {
+            let base = Self::selector_base(base);
             if let Some(bt) = self.type_of_expr(base) {
                 if let Some(m) = lookup_member(bt, name) {
                     if m.kind == MemberKind::Method {
@@ -713,7 +738,7 @@ impl Emitter {
                     // — a clean failure, never a wrong emission.
                 }
             }
-            if let Expr::Ident { name: root, .. } = base.as_ref() {
+            if let Expr::Ident { name: root, .. } = base {
                 if let Some(BindingKind::Foreign) = self.bindings.get(root) {
                     let b = self.emit_expr(base, ATOM)?;
                     let mut parts = Vec::new();
@@ -745,7 +770,7 @@ impl Emitter {
         // --- associated-fn calls: `lru_cache.new[string, int](2)` →
         //     `lru_cache_new[string, int](2)` (Go has no dotted idents) ---
         if let Expr::Field { base, name, .. } = callee {
-            if let Expr::Ident { name: root, .. } = base.as_ref() {
+            if let Expr::Ident { name: root, .. } = Self::unwrap_parens(base.as_ref()) {
                 if !self.is_unshadowed_pkg_root(root) && !self.bindings.contains_key(root) {
                     let (head, type_args) = split_type_args(name);
                     let full = format!("{}.{}", root, head);
@@ -1198,7 +1223,7 @@ impl Emitter {
                 for a in &args[..args.len() - 1] {
                     call_args.push(self.emit_call_arg(a)?);
                 }
-                call_args.push(format!("{:?}", fmt_str));
+                call_args.push(go_quote(&fmt_str));
                 call_args.extend(interp_args);
                 return Ok(format!(
                     "{}.{}({})",

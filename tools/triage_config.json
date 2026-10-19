@@ -1,0 +1,21 @@
+{
+  "repo": "limitlessprojects/Go-Hybrid",
+  "wildcard_holds": [336, 370, 379, 381, 384, 405, 412, 446, 452, 464, 474, 480, 488, 505, 507, 516, 545, 556, 566, 569, 572, 577, 616, 635, 637, 704, 709],
+  "drafts_parked": [465, 531],
+  "behind_threshold": 15,
+  "dup_jaccard": 0.6,
+  "pareto_n": 12,
+  "new_arrival_days": 3,
+  "mega_additions": 2000,
+  "approve_max_per_run": 30,
+  "labels": {
+    "triage:wildcard-hold": {"color": "d93f0b", "description": "M1 wildcard experiment - do NOT merge before verdict window (2026-11-01)"},
+    "triage:conflicts": {"color": "e99695", "description": "Does not merge cleanly against current main"},
+    "triage:behind": {"color": "fef2c0", "description": "Base is far behind main - rebase before review"},
+    "triage:duplicate": {"color": "cccccc", "description": "Overlapping change-set with another open PR"},
+    "triage:tests": {"color": "0e8a16", "description": "Includes test/corpus coverage"},
+    "triage:stale": {"color": "ffffff", "description": "Idle 21+ days (label only - never auto-closed)"},
+    "triage:new": {"color": "bfd4f2", "description": "New arrival (<= 3 days old), awaiting recon"},
+    "triage:pareto": {"color": "5319e7", "description": "Top-ranked land candidate for the next session"}
+  }
+}
