@@ -1366,7 +1366,9 @@ impl Emitter {
     /// Member-name normalization decision for a field/method access whose
     /// base's ROOT binding is `base` (an Ident chain root).
     pub fn member_name(&self, base: &Expr, name: &str) -> String {
-        if let Expr::Ident { name: root, .. } = base {
+        // `(x).f` resolves as `x.f`: a redundant receiver paren must not hide
+        // a package root or a foreign binding from the spelling decision.
+        if let Expr::Ident { name: root, .. } = Self::peel_parens(base) {
             if self.is_unshadowed_pkg_root(root) {
                 return to_go_name(name);
             }

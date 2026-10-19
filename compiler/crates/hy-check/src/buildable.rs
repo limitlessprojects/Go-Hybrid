@@ -177,6 +177,19 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
     }
 }
 
+/// Symmetrical conflict check for equality operators (`==`, `!=`).
+///
+/// Untyped numeric constants adapt between integer and floating types
+/// in Go comparisons (`1 == 1.0` builds), so numeric families do not
+/// conflict. Across different families (e.g. numeric vs string/bool,
+/// pointer vs scalar), Go never permits comparison.
+fn equality_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
+    if a.is_numeric() && b.is_numeric() {
+        return false;
+    }
+    kinds_conflict(a, b) && kinds_conflict(b, a)
+}
+
 /// Is every part of this kind resolved? (#682 U2/U3)
 ///
 /// A "has no field or method" claim is only sound when the checker actually
@@ -261,6 +274,10 @@ struct Collector<'a> {
     /// (`return v` in a `(value, error)` fn emits `return v, nil`, the E3
     /// sugar; corpus 13).
     fn_results_error_tail: bool,
+    /// Lexical nesting depth within loops (`for` / `loop`).
+    loop_depth: usize,
+    /// Lexical nesting depth within `select` statements.
+    select_depth: usize,
     defines: Vec<Define>,
     /// Every identifier mentioned in the file plus every dotted type root —
     /// the import-usage set (the emitter's declared-import header needs it).
@@ -282,6 +299,8 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             fn_results: Vec::new(),
             fn_results_all_named: false,
             fn_results_error_tail: false,
+            loop_depth: 0,
+            select_depth: 0,
             defines: Vec::new(),
             roots: HashSet::new(),
             diags: Vec::new(),
@@ -510,7 +529,11 @@ impl<'a> Collector<'a> {
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
+        let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
+        let outer_select = std::mem::replace(&mut self.select_depth, 0);
         self.block_stmts(body);
+        self.loop_depth = outer_loop;
+        self.select_depth = outer_select;
         self.fn_results = outer;
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
@@ -717,6 +740,7 @@ impl<'a> Collector<'a> {
                 kind, body, span, ..
             } => {
                 self.push_scope();
+                self.loop_depth += 1;
                 match kind {
                     ForKind::While { cond } => {
                         self.expr(cond);
@@ -744,6 +768,7 @@ impl<'a> Collector<'a> {
                     ForKind::Infinite => {}
                 }
                 self.block_scoped(body);
+                self.loop_depth -= 1;
                 self.pop_scope();
             }
             Stmt::Return { values, span } => {
@@ -752,10 +777,22 @@ impl<'a> Collector<'a> {
                 }
                 self.check_return(values, *span);
             }
-            Stmt::Task { callee, args, .. } => {
+            Stmt::Task { callee, args, span } => {
                 self.expr(callee);
                 for a in args {
                     self.expr(&a.value);
+                }
+                match unwrap_parens(callee) {
+                    Expr::Ident { name, .. } => {
+                        self.check_user_fn_arity(name, args, *span);
+                        self.check_user_fn_arg_types(name, args);
+                    }
+                    Expr::Field { base, name, .. } => {
+                        let bk = self.kind_of_expr(base);
+                        self.check_method_arity(&bk, name, args, *span);
+                        self.check_method_arg_types(&bk, name, args);
+                    }
+                    _ => {}
                 }
             }
             Stmt::Managed { body, .. } => self.block_scoped(body),
@@ -786,9 +823,41 @@ impl<'a> Collector<'a> {
                 // call's. `builtins.rs` owns the "must be a call" half.
                 self.check_defer_arity(call, *span);
             }
-            Stmt::Break { .. } | Stmt::Continue { .. } => {}
+            Stmt::Break { span, label } => {
+                if label.is_none() && self.loop_depth == 0 && self.select_depth == 0 {
+                    self.diags.push(
+                        Diagnostic::error(
+                            "HYB-E1002",
+                            self.path.clone(),
+                            *span,
+                            "break is not in a loop or select statement (HYB-E1002)",
+                        )
+                        .with_notes(vec![
+                            "plain `break` can only be used inside a `for` loop or `select` statement".to_string(),
+                            "move this statement inside a loop or select, or remove it".to_string(),
+                        ]),
+                    );
+                }
+            }
+            Stmt::Continue { span, label } => {
+                if label.is_none() && self.loop_depth == 0 {
+                    self.diags.push(
+                        Diagnostic::error(
+                            "HYB-E1002",
+                            self.path.clone(),
+                            *span,
+                            "continue is not in a loop (HYB-E1002)",
+                        )
+                        .with_notes(vec![
+                            "`continue` can only be used inside a `for` loop".to_string(),
+                            "move this statement inside a loop, or remove it".to_string(),
+                        ]),
+                    );
+                }
+            }
             Stmt::Block { block, .. } => self.block_scoped(block),
             Stmt::Select { arms, .. } => {
+                self.select_depth += 1;
                 for arm in arms {
                     self.push_scope();
                     match &arm.kind {
@@ -813,6 +882,7 @@ impl<'a> Collector<'a> {
                     self.block_scoped(&arm.body);
                     self.pop_scope();
                 }
+                self.select_depth -= 1;
             }
         }
     }
@@ -948,6 +1018,7 @@ impl<'a> Collector<'a> {
             // The struct-field lookup below cannot catch it, because an
             // interface is not a struct — so reject the base explicitly.
             Expr::Field { base, name, span } => {
+                self.check_pointer_method_receiver(base, name, *span);
                 if matches!(self.kind_of_expr(base), OpKind::Interface) {
                     self.emit_e1002(
                         *span,
@@ -1061,7 +1132,11 @@ impl<'a> Collector<'a> {
                 let outer = std::mem::replace(&mut self.fn_results, result_kinds);
                 let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
                 let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
+                let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
+                let outer_select = std::mem::replace(&mut self.select_depth, 0);
                 self.block_stmts(body);
+                self.loop_depth = outer_loop;
+                self.select_depth = outer_select;
                 self.fn_results = outer;
                 self.fn_results_all_named = outer_named;
                 self.fn_results_error_tail = outer_err;
@@ -1975,6 +2050,85 @@ impl<'a> Collector<'a> {
         );
     }
 
+    fn check_user_fn_arg_types(&mut self, name: &str, args: &[CallArg]) {
+        let head = Checker::base_named_type_str(name);
+        let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
+            return;
+        };
+        if !f.type_params.is_empty() {
+            return;
+        }
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        if f.params.len() != args.len() {
+            return;
+        }
+        for (p, a) in f.params.iter().zip(args.iter()) {
+            let want = self.kind_of_ty(&p.ty, 0);
+            let got = self.kind_of_expr(&a.value);
+            if let OpKind::Pointer(inner) = &want {
+                if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
+                    continue;
+                }
+            }
+            if kinds_conflict(&want, &got) {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
+                        a.value.render(),
+                        got.label(),
+                        want.label(),
+                        name
+                    ),
+                    "argument types must match declared parameter types",
+                );
+            }
+        }
+    }
+
+    fn check_method_arg_types(&mut self, bk: &OpKind, name: &str, args: &[CallArg]) {
+        let Some(sn) = self.struct_base_name(bk).or_else(|| self.struct_name(bk)) else {
+            return;
+        };
+        let Some(m) = self.ck.method_decls.get(&(sn.clone(), name.to_string())) else {
+            return;
+        };
+        if !m.type_params.is_empty() {
+            return;
+        }
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        if m.params.len() != args.len() {
+            return;
+        }
+        for (p, a) in m.params.iter().zip(args.iter()) {
+            let want = self.kind_of_ty(&p.ty, 0);
+            let got = self.kind_of_expr(&a.value);
+            if let OpKind::Pointer(inner) = &want {
+                if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
+                    continue;
+                }
+            }
+            if kinds_conflict(&want, &got) {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}.{}` — Go refuses mismatched argument types (HYB-E1002)",
+                        a.value.render(),
+                        got.label(),
+                        want.label(),
+                        sn,
+                        name
+                    ),
+                    "argument types must match declared parameter types",
+                );
+            }
+        }
+    }
+
     /// #577 C10 — a `return` must supply the enclosing function's result
     /// list: the same number of values, each assignable to its result type.
     /// Go refuses the emitted statement otherwise (Row 13).
@@ -2229,8 +2383,28 @@ impl<'a> Collector<'a> {
         let lk = self.kind_of_expr(lhs);
         let rk = self.kind_of_expr(rhs);
         match op {
-            // `==` / `!=` are checked by `emit_guard.rs` (HYB-E2006).
-            BinOp::Eq | BinOp::Ne => {}
+            // `==` / `!=`: incomparable shapes (slice, map, func) are rejected
+            // by `emit_guard.rs` (HYB-E2006). Mismatched concrete operand types
+            // are rejected here under HYB-E1002 (rule `BUILDABLE`).
+            BinOp::Eq | BinOp::Ne => {
+                let op_str = if matches!(op, BinOp::Eq) { "==" } else { "!=" };
+                if !Checker::is_nil_literal(lhs)
+                    && !Checker::is_nil_literal(rhs)
+                    && equality_kinds_conflict(&lk, &rk)
+                {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid operation `{}`: operator `{}` requires comparable operands of matching type, found `{}` and `{}` (HYB-E1002)",
+                            span_expr_label(lhs, op_str, rhs),
+                            op_str,
+                            lk.label(),
+                            rk.label()
+                        ),
+                        "equality operators (`==`, `!=`) require operands of matching type",
+                    );
+                }
+            }
             // B4: `&&` and `||` require `bool` operands.
             BinOp::And | BinOp::Or => {
                 let op_str = if matches!(op, BinOp::And) { "&&" } else { "||" };
@@ -2366,6 +2540,16 @@ impl<'a> Collector<'a> {
             return;
         };
         let tk = self.kind_of_place(target);
+        if op != AssignOp::Assign && op != AssignOp::Inc && op != AssignOp::Dec {
+            if targets.len() != 1 || values.len() != 1 {
+                self.emit_e1002(
+                    span,
+                    "compound assignment operator does not support multiple targets or values (HYB-E1002)".to_string(),
+                    "compound assignment operators (`+=`, `-=`, etc.) require exactly one target and one value; write separate statements or use `=` for parallel assignment",
+                );
+                return;
+            }
+        }
         match op {
             // #682 U16: plain `=` requires the value to be assignable to the
             // target. Only the single-target/single-value form is checked
@@ -2425,7 +2609,7 @@ impl<'a> Collector<'a> {
                 let mismatch = tk != OpKind::Unknown
                     && vk != OpKind::Unknown
                     && tk.is_numeric() != vk.is_numeric();
-                if !t_ok || !v_ok || mismatch {
+                if !t_ok || !v_ok || mismatch || kinds_conflict(&tk, &vk) {
                     self.emit_e1002(
                         span,
                         format!(
@@ -2435,26 +2619,33 @@ impl<'a> Collector<'a> {
                             tk.label(),
                             vk.label()
                         ),
-                        "`+=` requires two numeric values or two strings",
+                        "`+=` requires two numeric values or two strings of matching types",
                     );
                 }
             }
             AssignOp::SubAssign | AssignOp::MulAssign | AssignOp::DivAssign => {
                 let Some(val) = values.first() else { return };
                 let vk = self.kind_of_expr(val);
+                let op_sym = match op {
+                    AssignOp::SubAssign => "-=",
+                    AssignOp::MulAssign => "*=",
+                    _ => "/=",
+                };
                 if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float)
+                    || kinds_conflict(&tk, &vk)
                 {
                     self.emit_e1002(
                         span,
                         format!(
-                            "invalid compound assignment on `{}` (type `{}`) and `{}` (type `{}`) (HYB-E1002)",
+                            "invalid compound assignment `{} {} {}` on `{}` and `{}` (HYB-E1002)",
                             target.render(),
-                            tk.label(),
+                            op_sym,
                             val.render(),
+                            tk.label(),
                             vk.label()
                         ),
-                        "`-=`, `*=`, `/=` require numeric operands",
+                        "`-=`, `*=`, `/=` require numeric operands of matching types",
                     );
                 }
             }
@@ -2814,6 +3005,7 @@ impl<'a> Collector<'a> {
                         self.check_append_elements(args);
                     }
                     self.check_user_fn_arity(name, args, span);
+                    self.check_user_fn_arg_types(name, args);
                 }
             }
             Expr::Field { base, name, .. } => {
@@ -2842,30 +3034,6 @@ impl<'a> Collector<'a> {
                 // A method has no field entry, so resolve it before the field
                 // lookup: `x.bump()` must reach the arity check even though
                 // `bump` is not a struct field (#577 C9).
-                let head = Checker::base_named_type_str(name);
-                if let OpKind::Struct(Some(sn)) = &bk {
-                    let base_sn = Checker::base_named_type_str(sn);
-                    if let Some(m) = self
-                        .ck
-                        .method_decls
-                        .get(&(base_sn.to_string(), head.to_string()))
-                    {
-                        let ptr_recv = m.receiver.as_ref().is_some_and(|r| r.is_pointer);
-                        if ptr_recv && !self.is_addressable_value_receiver(base) {
-                            self.emit_e1002(
-                                span,
-                                format!(
-                                    "cannot call pointer method `{}` on `{}` (non-addressable `{}` value) — Go refuses taking the address of `{}` (HYB-E1002)",
-                                    name,
-                                    base.render(),
-                                    sn,
-                                    base.render()
-                                ),
-                                "assign the value to a local variable first (`v := ...; v.method()`), store `*T` pointers, or declare a value receiver `(self T)`",
-                            );
-                        }
-                    }
-                }
                 // pr-678: normalize through `struct_base_name` so a generic
                 // instantiation (`cache[int]`, `*lru_cache[k, v]`) resolves to
                 // the base-name key `method_decls` is indexed by — the same
@@ -2929,6 +3097,7 @@ impl<'a> Collector<'a> {
                 }
                 if has_method {
                     self.check_method_arity(&bk, name, args, span);
+                    self.check_method_arg_types(&bk, name, args);
                 }
             }
             _ => {
@@ -3002,6 +3171,36 @@ impl<'a> Collector<'a> {
                 _ => false,
             },
             _ => false,
+        }
+    }
+
+    /// Check method selection too: task callees and bound method values do
+    /// not pass through the ordinary call-arity checker (#656).
+    fn check_pointer_method_receiver(&mut self, base: &Expr, name: &str, span: Span) {
+        let bk = self.kind_of_expr(base);
+        let head = Checker::base_named_type_str(name);
+        if let OpKind::Struct(Some(sn)) = &bk {
+            let base_sn = Checker::base_named_type_str(sn);
+            if let Some(m) = self
+                .ck
+                .method_decls
+                .get(&(base_sn.to_string(), head.to_string()))
+            {
+                let ptr_recv = m.receiver.as_ref().is_some_and(|r| r.is_pointer);
+                if ptr_recv && !self.is_addressable_value_receiver(base) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "cannot select pointer method `{}` on `{}` (non-addressable `{}` value) — Go refuses taking the address of `{}` (HYB-E1002)",
+                            name,
+                            base.render(),
+                            sn,
+                            base.render()
+                        ),
+                        "assign the value to a local variable first (`v := ...; v.method()`), store `*T` pointers, or declare a value receiver `(self T)`",
+                    );
+                }
+            }
         }
     }
 
