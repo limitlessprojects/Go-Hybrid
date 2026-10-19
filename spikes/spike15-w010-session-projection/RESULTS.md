@@ -137,30 +137,42 @@ results for the supplied finite acyclic graphs only").
 
 ---
 
-## Post-submission correction (2026-10-19, after PR #760 opened)
+---
 
-While preparing the reviewer instructions for `codegen_go`, I inspected its
+## Correction and fix (2026-10-19, after PR #760 opened)
+
+While preparing reviewer instructions for `codegen_go`, I inspected its
 actual output and found a **real bug in the emitted Go**: the hub goroutine
-receives from `hub` and forwards back into the same `hub` channel, which
-cannot work (it self-blocks). The current `codegen_go` output would, if
-compiled and run, print `DEADLOCK` for the request/reply program — the
-exact opposite of the correct behaviour.
+received from `hub` and forwarded back into the same `hub` channel, which
+self-blocks. That output would, if compiled and run, have printed
+`DEADLOCK` for the request/reply program — the opposite of correct.
 
-This does **not** affect the preregistered claims, because:
+**Fixed in the same PR (commit after 10ad50f).** The new `codegen_go`:
 
-- The preregistered bar for codegen (bar 5) was explicitly *"produces
-  non-empty Go (inspected by eye; not run)"* — and that is all it ever was.
-- The correctness claim for the protocol is established by
-  `simulate_locals`, whose 8 tests all pass, not by `codegen_go`.
-- No `work/main.go` has been committed to this PR. There is nothing to
-  `go run`.
+- Emits one inbox channel per role (`inbox_A`, `inbox_B`, …), not a
+  shared hub. Sender writes to `inbox_<to>`; receiver reads from
+  `inbox_<me>`. This matches the projection's Send/Recv exactly.
+- Guards `close(done)` with `sync.Once`, so the timeout goroutine and the
+  `wg.Wait()` goroutine cannot double-close (a race the first fix exposed).
+- Still prints `PROTOCOL OK` on clean termination and `DEADLOCK` on
+  timeout, with a 5 s hard deadline.
 
-But it does mean the original PR description's instruction to a reviewer
-("`cd model/work && go build ./...`") was wrong: that directory does not
-exist in this PR. That instruction has been removed. The codegen remains
-a stub, and the PR description now says so.
+A new binary `src/bin/emit_go.rs` writes the codegen output, and the PR
+now commits a real, buildable `model/work/main.go` + `model/work/go.mod`.
+A reviewer with Go installed can now actually run:
 
-A follow-up commit on this branch may replace `codegen_go` with a per-role
-inbox implementation and commit a `model/work/main.go` + `go.mod` that a
-Go-equipped reviewer can actually build. That is **not** in the current
-commit; if it is added, `RESULTS.md` will be updated again at that time.
+    cd spikes/spike15-w010-session-projection/model/work
+    go build ./...
+    timeout 5 go run .
+
+and should see `PROTOCOL OK`.
+
+This still does not change any preregistered claim. The preregistered
+codegen bar (bar 5) was "non-empty Go inspected by eye"; the correctness
+claim for the protocol was always established by `simulate_locals`, whose
+8 tests still pass unchanged. The fix makes the codegen *also* runnable,
+which is a strict improvement — but the proof was, and remains, the
+exhaustive simulator.
+
+`cargo test --release --offline` after the fix: **8 passed, 0 failed**.
+`emit_go` after the fix: writes **874 bytes** to `work/main.go`.
