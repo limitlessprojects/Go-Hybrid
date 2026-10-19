@@ -88,13 +88,16 @@ impl<'a> Checker<'a> {
                 if st.is_some_and(|s| s.env_lookup(ty_name).is_some()) {
                     return false;
                 }
-                if self.fns.contains_key(ty_name) {
+                if self.fns.contains_key(ty_name) || self.structs.contains_key(ty_name) {
                     return false;
                 }
                 if args.len() != 1 || args[0].spread {
                     return false;
                 }
                 if ty_name == "len" {
+                    if self.type_aliases.contains_key("len") {
+                        return false;
+                    }
                     return self.expr_is_constant_inner(&args[0].value, st, visiting, ref_depth)
                         && self.is_const_string_expr(&args[0].value, st, ref_depth);
                 }
@@ -111,16 +114,33 @@ impl<'a> Checker<'a> {
     }
 
     fn is_const_conversion_target(&self, name: &str) -> bool {
-        if is_conversion_type_name(name) {
-            return true;
-        }
         if let Some(ty) = self.type_aliases.get(name) {
             let resolved = self.resolve_type_alias(ty);
             if let hy_syntax::TypeExpr::Named { name: target, .. } = resolved {
-                return is_conversion_type_name(&target);
+                return !self.structs.contains_key(target.as_str())
+                    && is_conversion_type_name(&target);
             }
+            return false;
         }
-        false
+        is_conversion_type_name(name)
+    }
+
+    fn is_const_string_conversion_target(&self, name: &str, st: Option<&FnState>) -> bool {
+        if st.is_some_and(|s| s.env_lookup(name).is_some())
+            || self.fns.contains_key(name)
+            || self.structs.contains_key(name)
+        {
+            return false;
+        }
+        if let Some(ty) = self.type_aliases.get(name) {
+            let resolved = self.resolve_type_alias(ty);
+            return matches!(
+                resolved,
+                hy_syntax::TypeExpr::Named { name: target, .. }
+                    if target == "string" && !self.structs.contains_key("string")
+            );
+        }
+        name == "string"
     }
 
     fn is_const_string_expr(&self, e: &Expr, st: Option<&FnState>, ref_depth: usize) -> bool {
@@ -148,12 +168,20 @@ impl<'a> Checker<'a> {
                     }
                 }
                 if let Some(cdecl) = self.file_const_decl(name) {
+                    if let Some(ty) = &cdecl.ty {
+                        if !matches!(self.shape_of_type(ty), TypeShape::Str) {
+                            return false;
+                        }
+                    }
                     return self.is_const_string_expr(&cdecl.value, None, ref_depth + 1);
                 }
                 false
             }
             Expr::Call { callee, args, .. } => {
-                conversion_callee_name(callee) == Some("string")
+                let Some(ty_name) = conversion_callee_name(callee) else {
+                    return false;
+                };
+                self.is_const_string_conversion_target(ty_name, st)
                     && args.len() == 1
                     && !args[0].spread
             }
@@ -230,6 +258,7 @@ pub(crate) fn is_conversion_type_name(name: &str) -> bool {
             | "string"
             | "byte"
             | "rune"
+            | "char"
             | "int"
             | "int8"
             | "int16"
@@ -243,6 +272,8 @@ pub(crate) fn is_conversion_type_name(name: &str) -> bool {
             | "uintptr"
             | "float32"
             | "float64"
+            | "f32"
+            | "f64"
             | "i8"
             | "i16"
             | "i32"

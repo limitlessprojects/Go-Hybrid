@@ -377,8 +377,9 @@ fn cmd_generate(args: &[String]) -> ExitCode {
 
     let mut drifted: Vec<String> = Vec::new();
     let mut written: usize = 0;
+    let mut formatters = None;
     for hy in &hy_files {
-        match generate_one(hy, check_only, &binding_prefix) {
+        match generate_one(hy, check_only, &binding_prefix, &mut formatters) {
             Ok(GenOutcome::Wrote(f)) => {
                 written += 1;
                 println!("emitted {}", f);
@@ -420,6 +421,10 @@ enum GenOutcome {
 /// checked-in Go file looks like. Required (not optional): a non-canonical
 /// checked-in file would make --check compare against a moving target.
 fn run_gofmt(src: &str) -> Result<String, String> {
+    run_gofmt_candidates(src, &gofmt_candidates())
+}
+
+fn gofmt_candidates() -> Vec<std::path::PathBuf> {
     // Candidate order: GOROOT/bin/gofmt (works whenever go works — the
     // canonical location), then PATH. `hyb generate` runs inside a Go
     // project, so the toolchain is present by definition.
@@ -435,11 +440,15 @@ fn run_gofmt(src: &str) -> Result<String, String> {
                 Some(std::path::PathBuf::from(root).join("bin/gofmt"))
             }
         });
+    goroot_bin_gofmt
+        .into_iter()
+        .chain(std::iter::once(std::path::PathBuf::from("gofmt")))
+        .collect()
+}
+
+fn run_gofmt_candidates(src: &str, candidates: &[std::path::PathBuf]) -> Result<String, String> {
     let mut last_err: Option<String> = None;
-    for gofmt in goroot_bin_gofmt
-        .iter()
-        .chain(std::iter::once(&std::path::PathBuf::from("gofmt")))
-    {
+    for gofmt in candidates {
         match run_gofmt_with(gofmt, src) {
             Ok(out) => return Ok(out),
             Err(e) => last_err = Some(e),
@@ -488,6 +497,7 @@ fn generate_one(
     hy: &std::path::Path,
     check_only: bool,
     binding_prefix: &str,
+    formatters: &mut Option<Vec<std::path::PathBuf>>,
 ) -> Result<GenOutcome, String> {
     let src = std::fs::read_to_string(hy)
         .map_err(|e| format!("reading {}: {}", hy.display(), e))?;
@@ -584,7 +594,11 @@ fn generate_one(
     // indentation directly — the base-indent sweep landed 2026-10-14 — the
     // pass stays as defense in depth for anything gofmt normalizes beyond
     // indentation.)
-    let out_text = run_gofmt(&unformatted)?;
+    // Discover lazily after source validation, once per generate invocation.
+    let out_text = run_gofmt_candidates(
+        &unformatted,
+        formatters.get_or_insert_with(gofmt_candidates),
+    )?;
 
     let stem = hy
         .file_stem()
@@ -2111,7 +2125,8 @@ mod tests {
         std::fs::write(&main_go, "package oldpkg\n").unwrap();
         std::fs::write(&calc_hy, "fn add(a int, b int) int {\n    return a + b\n}\n").unwrap();
 
-        generate_one(&calc_hy, false, "hybrid.program").expect("initial generate_one succeeds");
+        generate_one(&calc_hy, false, "hybrid.program", &mut None)
+            .expect("initial generate_one succeeds");
         assert!(
             std::fs::read_to_string(&stale_hy_go)
                 .unwrap()
@@ -2123,7 +2138,7 @@ mod tests {
             "/*\npackage commentpkg\n*/\npackage\tnewpkg; // active\n",
         )
         .unwrap();
-        generate_one(&calc_hy, false, "hybrid.program")
+        generate_one(&calc_hy, false, "hybrid.program", &mut None)
             .expect("generate_one succeeds despite stale .hy.go");
         let generated = std::fs::read_to_string(&stale_hy_go).unwrap();
         assert!(

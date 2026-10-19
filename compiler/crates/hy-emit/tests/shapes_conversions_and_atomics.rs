@@ -98,6 +98,45 @@ fn scalar_atomics_and_compare_and_swap_on_locals_and_struct_fields_emit_go_metho
 }
 
 #[test]
+fn parenthesized_receiver_resolves_like_a_bare_selector_and_emits_peeled() {
+    // Issue #618: `(hits).add(1)` keeps its parentheses in the emitted Go
+    // while every spelling decision keys on the receiver's shape, so the
+    // member name was never normalized and `go build` failed on a program
+    // `hyb check` accepted with 0 diagnostics. A postfix receiver never needs
+    // parentheses, so the emitted Go must be the bare selector.
+    let go = emit(
+        "struct counters {\n\
+         \thits atomic.int64\n\
+         \tmu sync.mutex\n\
+         }\n\
+         \n\
+         fn main() {\n\
+         \tvar hits atomic.int64\n\
+         \t(hits).add(1)\n\
+         \ts := counters{}\n\
+         \t(s.hits).add(2)\n\
+         \t(s).mu.lock()\n\
+         \tfmt.println(hits.load())\n\
+         }\n",
+    );
+    assert!(
+        go.contains("hits.Add(1)"),
+        "expected the atomic rename through a parenthesized receiver, got:\n{}",
+        go
+    );
+    assert!(
+        go.contains("s.hits.Add(2)") && go.contains("s.mu.Lock()"),
+        "expected field and struct receivers to resolve through parens, got:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("(hits)") && !go.contains("(s.hits)") && !go.contains("(s)."),
+        "expected redundant receiver parens to be peeled in the emitted Go, got:\n{}",
+        go
+    );
+}
+
+#[test]
 fn url_and_filepath_roots_emit_go_stdlib_import_paths() {
     let go = emit(
         "fn check_url(v url.values) {\n\
