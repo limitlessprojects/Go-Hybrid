@@ -153,10 +153,7 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         // (`var f float64 = 1` builds). The kind model cannot tell an untyped
         // constant from an `int` variable, so this direction must stay allowed
         // or the check would reject buildable programs.
-        // An untyped int constant is assignable to a float result
-        // (`fn f() float64 { return 1 }` builds). The kind model cannot tell
-        // an untyped constant from an `int` variable, so this direction must
-        // stay allowed or the check would reject buildable programs.
+
         (Float, Int) => false,
         // A struct whose name did not resolve is not evidence of a mismatch.
         (Struct(None), _) | (_, Struct(None)) => false,
@@ -230,6 +227,21 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         // Chan target: cannot convert from Int, Float, Bool, Str, Slice, Map, Struct.
         (Chan(_), Int | Float | Bool | Str | Slice(_) | Map(_, _) | Struct(_)) => true,
 
+        _ => false,
+    }
+}
+
+/// Does `e` evaluate to an expression that can never be multi-valued?
+fn is_definitely_single_value(e: &Expr) -> bool {
+    match unwrap_parens(e) {
+        Expr::Lit { .. }
+        | Expr::Binary { .. }
+        | Expr::Unary { .. }
+        | Expr::Interp { .. }
+        | Expr::StructLit { .. }
+        | Expr::SliceLit { .. }
+        | Expr::MapLit { .. }
+        | Expr::FnLit { .. } => true,
         _ => false,
     }
 }
@@ -690,6 +702,52 @@ impl<'a> Collector<'a> {
         // multi-value binding and is handled by `infer_local_kinds`.
         if l.names.len() == 1 && l.values.len() == 1 {
             self.check_single_value_position(&l.values[0], "a binding", /*binding_position=*/ true);
+        }
+        if l.names.len() > 1 && l.values.len() == 1 && is_definitely_single_value(&l.values[0]) {
+            self.emit_e1002(
+                l.span,
+                format!(
+                    "assignment mismatch: {} variables but 1 value — Go refuses `assignment mismatch: {} variables but 1 value` (HYB-E1002)",
+                    l.names.len(),
+                    l.names.len()
+                ),
+                "the number of variables on the left must match the number of expressions on the right",
+            );
+        }
+        if l.values.len() > 1 && l.names.len() != l.values.len() {
+            self.emit_e1002(
+                l.span,
+                format!(
+                    "assignment mismatch: {} variables but {} values — Go refuses `assignment mismatch: {} variables but {} values` (HYB-E1002)",
+                    l.names.len(),
+                    l.values.len(),
+                    l.names.len(),
+                    l.values.len()
+                ),
+                "the number of variables on the left must match the number of expressions on the right",
+            );
+        }
+        if let Some(ty) = &l.ty {
+            let tk = self.kind_of_ty(ty, 0);
+            for (idx, val) in l.values.iter().enumerate() {
+                let is_loan_shape = as_addr_of(val)
+                    .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }));
+                let vk = self.kind_of_expr(val);
+                if !is_loan_shape && kinds_conflict(&tk, &vk) {
+                    let var_name = l.names.get(idx).map(|s| s.as_str()).unwrap_or("variable");
+                    self.emit_e1002(
+                        l.span,
+                        format!(
+                            "cannot initialize `{}` (type `{}`) with value of type `{}` — Go refuses `cannot use ... as {} value in variable declaration` (HYB-E1002)",
+                            var_name,
+                            tk.label(),
+                            vk.label(),
+                            tk.label()
+                        ),
+                        "the variable's declared type does not match the initializer expression type; write an explicit conversion when a conversion is intended",
+                    );
+                }
+            }
         }
         // Composed resolution (pr-430 x landed pr-475): #475's track_read
         // set (Define|Let|Var|Const) drives which locals get unused-read
@@ -2862,37 +2920,61 @@ impl<'a> Collector<'a> {
         }
         match op {
             // #682 U16: plain `=` requires the value to be assignable to the
-            // target. Only the single-target/single-value form is checked
-            // positionally; a multi-value right-hand side (`a, b = f()`) is
-            // left to the call-shape rules.
+            // target. Arity and positional types are checked; a multi-value
+            // right-hand side (`a, b = f()`) is left to the call-shape rules.
             AssignOp::Assign => {
-                if targets.len() == 1 && values.len() == 1 {
-                    // O8 slot-loan (adapted during integration): `q = &m["a"]`
-                    // on a value-typed `q` does NOT emit `q = &m["a"]` — the
-                    // emitter lowers the loan to `q = m["a"]` plus a store-back
-                    // into the slot, so a `Struct` target receiving a
-                    // `Pointer` value here is legal Hybrid, not a mismatch
-                    // (map_element_addressable's
-                    // accepts_slot_loan_into_value_var pins the shape).
-                    // Fail open for exactly that shape: an addr-of whose
-                    // operand is an index or field place. Loans are validated
-                    // for addressability by addressable.rs (HYB-E2010), so
-                    // the non-addressable ones still reject.
-                    let is_loan_shape = as_addr_of(&values[0])
-                        .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }));
-                    let vk = self.kind_of_expr(&values[0]);
-                    if !is_loan_shape && kinds_conflict(&tk, &vk) {
-                        self.emit_e1002(
-                            span,
-                            format!(
-                                "cannot assign a value of type `{}` to `{}` (type `{}`) — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
-                                vk.label(),
-                                target.render(),
-                                tk.label(),
-                                tk.label()
-                            ),
-                            "the target's declared type is fixed; write an explicit conversion when a conversion is intended",
-                        );
+                if targets.len() > 1 && values.len() == 1 && is_definitely_single_value(&values[0]) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "assignment mismatch: {} variables but 1 value — Go refuses `assignment mismatch: {} variables but 1 value` (HYB-E1002)",
+                            targets.len(),
+                            targets.len()
+                        ),
+                        "the number of variables on the left must match the number of expressions on the right",
+                    );
+                } else if values.len() > 1 && targets.len() != values.len() {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "assignment mismatch: {} variables but {} values — Go refuses `assignment mismatch: {} variables but {} values` (HYB-E1002)",
+                            targets.len(),
+                            values.len(),
+                            targets.len(),
+                            values.len()
+                        ),
+                        "the number of variables on the left must match the number of expressions on the right",
+                    );
+                } else if targets.len() == values.len() {
+                    for (target, val) in targets.iter().zip(values.iter()) {
+                        let tk = self.kind_of_place(target);
+                        // O8 slot-loan (adapted during integration): `q = &m["a"]`
+                        // on a value-typed `q` does NOT emit `q = &m["a"]` — the
+                        // emitter lowers the loan to `q = m["a"]` plus a store-back
+                        // into the slot, so a `Struct` target receiving a
+                        // `Pointer` value here is legal Hybrid, not a mismatch
+                        // (map_element_addressable's
+                        // accepts_slot_loan_into_value_var pins the shape).
+                        // Fail open for exactly that shape: an addr-of whose
+                        // operand is an index or field place. Loans are validated
+                        // for addressability by addressable.rs (HYB-E2010), so
+                        // the non-addressable ones still reject.
+                        let is_loan_shape = as_addr_of(val)
+                            .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }));
+                        let vk = self.kind_of_expr(val);
+                        if !is_loan_shape && kinds_conflict(&tk, &vk) {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot assign a value of type `{}` to `{}` (type `{}`) — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
+                                    vk.label(),
+                                    target.render(),
+                                    tk.label(),
+                                    tk.label()
+                                ),
+                                "the target's declared type is fixed; write an explicit conversion when a conversion is intended",
+                            );
+                        }
                     }
                 }
             }
