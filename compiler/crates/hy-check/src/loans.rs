@@ -118,6 +118,13 @@ fn root_ident_span(expr: &Expr) -> Option<Span> {
         Expr::Field { base, .. } | Expr::Index { base, .. } | Expr::Slice { base, .. } => {
             root_ident_span(base)
         }
+        Expr::AddrOf { operand, .. }
+        | Expr::Unary {
+            op: hy_syntax::UnOp::Addr,
+            operand,
+            ..
+        }
+        | Expr::Try { operand, .. } => root_ident_span(operand),
         Expr::Paren { inner, .. } => root_ident_span(inner),
         _ => None,
     }
@@ -125,9 +132,9 @@ fn root_ident_span(expr: &Expr) -> Option<Span> {
 
 impl<'a> Checker<'a> {
     fn resolve_call(&self, st: &FnState, cr: &CallRef) -> Resolved {
-        match cr.callee {
+        match crate::model::unwrap_parens(cr.callee) {
             Expr::Field { base, name, .. } => {
-                if let Expr::Ident { name: b, .. } = &**base {
+                if let Expr::Ident { name: b, .. } = crate::model::unwrap_parens(base) {
                     if self.lookup_binding(st, b).is_none() && self.known_package(b) {
                         return Resolved::Package {
                             pkg: b.clone(),
@@ -977,7 +984,7 @@ impl<'a> Checker<'a> {
             collect_ref_roots(&a.value, &mut roots);
             roots.iter().any(|r| r == param)
         };
-        match cr.callee {
+        match crate::model::unwrap_parens(cr.callee) {
             Expr::Ident { name, .. } => {
                 if name == "delete" || name == "clear" {
                     return cr.args.first().map(&arg_root_is_param).unwrap_or(false);
@@ -1006,7 +1013,7 @@ impl<'a> Checker<'a> {
                 cr.args.iter().any(&arg_root_is_param)
             }
             Expr::Field { base, .. } => {
-                if let Expr::Ident { name: pkg, .. } = &**base {
+                if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) {
                     if A3_PURE_PKGS.contains(&pkg.as_str()) {
                         return false;
                     }
@@ -1296,7 +1303,7 @@ impl<'a> Checker<'a> {
             let mut calls = Vec::new();
             walk::own_calls(stmt, &mut calls);
             for cr in &calls {
-                match cr.callee {
+                match crate::model::unwrap_parens(cr.callee) {
                     Expr::Ident { name, .. } => {
                         if name == "delete" || name == "clear" {
                             if let Some(first) = cr.args.first() {
@@ -1353,7 +1360,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                     Expr::Field { base, .. } => {
-                        if let Expr::Ident { name: pkg, .. } = &**base {
+                        if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) {
                             if A3_PURE_PKGS.contains(&pkg.as_str()) {
                                 continue;
                             }
@@ -2948,10 +2955,22 @@ impl<'a> Checker<'a> {
                 bound.extend(decl.results.iter().filter_map(|r| r.name.clone()));
                 if let Some(r) = &decl.receiver {
                     bound.insert(r.name.clone());
+                    let base_shape = self.shape_of_type(&r.ty);
+                    let (shape, ty) = if r.is_pointer {
+                        (
+                            TypeShape::Pointer(Box::new(base_shape)),
+                            Some(hy_syntax::TypeExpr::Pointer {
+                                to: Box::new(r.ty.clone()),
+                                span: r.ty.span(),
+                            }),
+                        )
+                    } else {
+                        (base_shape, Some(r.ty.clone()))
+                    };
                     slots.push((
                         r.name.clone(),
-                        self.shape_of_type(&r.ty),
-                        Some(r.ty.clone()),
+                        shape,
+                        ty,
                         CalleeSlotSource::Arg(base.as_ref()),
                     ));
                 }
@@ -4228,7 +4247,15 @@ impl<'a> Checker<'a> {
                 let body = decl.body.as_ref()?;
                 let mut params = Vec::new();
                 if let Some(r) = &decl.receiver {
-                    params.push((r.name.clone(), Some(r.ty.clone())));
+                    let ty = if r.is_pointer {
+                        hy_syntax::TypeExpr::Pointer {
+                            to: Box::new(r.ty.clone()),
+                            span: r.ty.span(),
+                        }
+                    } else {
+                        r.ty.clone()
+                    };
+                    params.push((r.name.clone(), Some(ty)));
                 }
                 params.extend(
                     decl.params
@@ -5836,10 +5863,11 @@ impl<'a> Checker<'a> {
                 }
                 None
             }
-            PlaceKind::Field { base, .. } | PlaceKind::Index { base, .. } => {
+            PlaceKind::Field { base, .. }
+            | PlaceKind::Index { base, .. }
+            | PlaceKind::AddrOf { base } => {
                 self.const_write_root(st, base)
             }
-            _ => None,
         }
     }
 
@@ -6484,9 +6512,9 @@ impl<'a> Checker<'a> {
         } = callee
         {
             let recv_base = match self.shape_of_expr(st, base) {
-                TypeShape::Struct(Some(s)) => Some(s),
+                TypeShape::Struct(Some(s)) => Some(Self::base_named_type_str(&s).to_string()),
                 TypeShape::Pointer(inner) => match *inner {
-                    TypeShape::Struct(Some(s)) => Some(s),
+                    TypeShape::Struct(Some(s)) => Some(Self::base_named_type_str(&s).to_string()),
                     _ => None,
                 },
                 _ => None,
@@ -6498,7 +6526,9 @@ impl<'a> Checker<'a> {
                     .copied()
                 {
                     if let Some(r) = &decl.receiver {
-                        let ptr_recv = matches!(r.ty, hy_syntax::TypeExpr::Pointer { .. });
+                        let ptr_recv = r.is_pointer
+                            || matches!(r.ty, hy_syntax::TypeExpr::Pointer { .. })
+                            || matches!(self.shape_of_type(&r.ty), TypeShape::Pointer(_));
                         let recv_const = if ptr_recv {
                             base.root_ident()
                                 .filter(|root| !declared.contains(*root))
@@ -6511,6 +6541,7 @@ impl<'a> Checker<'a> {
                                         },
                                     )
                                 })
+                                .or_else(|| self.const_arg_root(st, base, declared))
                         } else {
                             self.const_arg_root(st, base, declared)
                         };
@@ -6610,9 +6641,13 @@ impl<'a> Checker<'a> {
                         (false, true)
                     } else {
                         let recv_base = match self.shape_of_expr(st, base) {
-                            TypeShape::Struct(Some(s)) => Some(s),
+                            TypeShape::Struct(Some(s)) => {
+                                Some(Self::base_named_type_str(&s).to_string())
+                            }
                             TypeShape::Pointer(inner) => match *inner {
-                                TypeShape::Struct(Some(s)) => Some(s),
+                                TypeShape::Struct(Some(s)) => {
+                                    Some(Self::base_named_type_str(&s).to_string())
+                                }
                                 _ => None,
                             },
                             _ => None,
@@ -7006,7 +7041,13 @@ impl<'a> Checker<'a> {
                     let mut slots: Vec<(&str, TypeShape, Option<&hy_syntax::TypeExpr>)> =
                         Vec::new();
                     let has_recv = if let Some(r) = &decl.receiver {
-                        slots.push((r.name.as_str(), self.shape_of_type(&r.ty), Some(&r.ty)));
+                        let base_shape = self.shape_of_type(&r.ty);
+                        let shape = if r.is_pointer {
+                            TypeShape::Pointer(Box::new(base_shape))
+                        } else {
+                            base_shape
+                        };
+                        slots.push((r.name.as_str(), shape, Some(&r.ty)));
                         true
                     } else {
                         false
