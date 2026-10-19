@@ -5994,14 +5994,38 @@ impl<'a> Checker<'a> {
         shadows_outer: bool,
     ) {
         let peers = self.storage_peers(st, name);
-        if peers.is_empty() {
-            return;
-        }
+        let direct_or_peer_origin = self
+            .non_owned_origin_of(st, name)
+            .or_else(|| {
+                self.binding_const_root(st, name)
+                    .or_else(|| peers.iter().find_map(|p| self.binding_const_root(st, p)))
+                    .map(|c| (format!("`const {}`", c), true))
+            });
         let mut inherited_shadows = st.shadow_links.get(name).cloned().unwrap_or_default();
         if shadows_outer {
-            if let Some(depth) = st.lookup_depth(name) {
-                inherited_shadows.insert((name.to_string(), depth));
+            let depth = st.lookup_depth(name).unwrap_or(0);
+            if let Some((orig, _)) = &direct_or_peer_origin {
+                let chosen = if orig.starts_with("a may-share peer of ") {
+                    orig.clone()
+                } else {
+                    format!("a may-share peer of {}", orig)
+                };
+                if let Some(ob) = st.binding_at_depth_mut(name, depth) {
+                    if ob.non_owned_origin.is_none() {
+                        ob.non_owned_origin = Some(chosen);
+                    }
+                }
             }
+            for (t_name, t_depth) in &inherited_shadows {
+                if (t_name.as_str(), *t_depth) != (name, depth) {
+                    st.shadowed_shares
+                        .insert(((name.to_string(), depth), (t_name.clone(), *t_depth)));
+                }
+            }
+            inherited_shadows.insert((name.to_string(), depth));
+        }
+        if peers.is_empty() {
+            return;
         }
         if !inherited_shadows.is_empty() {
             for peer in &peers {
@@ -6011,12 +6035,6 @@ impl<'a> Checker<'a> {
                     .extend(inherited_shadows.iter().cloned());
             }
         }
-        let direct_or_peer_origin = self
-            .non_owned_origin_of(st, name)
-            .or_else(|| {
-                self.binding_const_root(st, name)
-                    .map(|c| (format!("`const {}`", c), true))
-            });
         if let Some((orig, via_share)) = direct_or_peer_origin {
             let peer_origin = if orig.starts_with("a may-share peer of ") {
                 orig.clone()
