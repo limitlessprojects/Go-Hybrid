@@ -130,8 +130,8 @@ fn main() {
 fn test_enum_option_collides_with_prelude_777() {
     let src = r#"
 enum option {
-    A,
-    B
+    first,
+    second
 }
 
 fn main() {}
