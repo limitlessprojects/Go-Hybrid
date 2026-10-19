@@ -266,8 +266,36 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn is_known_non_spread_builtin(name: &str) -> bool {
+        matches!(
+            name,
+            "make"
+                | "len"
+                | "cap"
+                | "delete"
+                | "copy"
+                | "clear"
+                | "close"
+                | "new"
+                | "panic"
+                | "recover"
+                | "min"
+                | "max"
+                | "complex"
+                | "real"
+                | "imag"
+        )
+    }
+
     fn check_builtin_call(&mut self, name: &str, args: &[hy_syntax::CallArg], span: Span) {
-        if self.fns.contains_key(name) {
+        if self.fns.contains_key(name) || self.consts.contains_key(name) {
+            return;
+        }
+        if Self::is_known_non_spread_builtin(name) && args.iter().any(|a| a.spread) {
+            self.emit_builtin(
+                span,
+                format!("cannot use `...` in call to built-in `{name}` (HYB-E2005)"),
+            );
             return;
         }
         match name {
@@ -366,6 +394,36 @@ impl<'a> Checker<'a> {
                     self.emit_builtin(
                         span,
                         "`new` takes a type — not a value literal (HYB-E2005)".to_string(),
+                    );
+                }
+            }
+            "min" | "max" => {
+                if args.is_empty() {
+                    self.emit_builtin(
+                        span,
+                        format!("`{name}` requires at least 1 argument, found 0 (HYB-E2005)"),
+                    );
+                }
+            }
+            "complex" => {
+                if args.len() != 2 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`complex` requires exactly 2 float arguments (real, imag), found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                }
+            }
+            "real" | "imag" => {
+                if args.len() != 1 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`{name}` requires exactly 1 complex argument, found {} (HYB-E2005)",
+                            args.len()
+                        ),
                     );
                 }
             }

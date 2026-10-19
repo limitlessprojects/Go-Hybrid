@@ -77,6 +77,7 @@ enum OpKind {
     Interface,
     Int,
     Float,
+    Complex,
     Bool,
     Str,
     Slice(Box<OpKind>),
@@ -104,6 +105,7 @@ impl OpKind {
             OpKind::Interface => "any".to_string(),
             OpKind::Int => "int".to_string(),
             OpKind::Float => "float64".to_string(),
+            OpKind::Complex => "complex128".to_string(),
             OpKind::Bool => "bool".to_string(),
             OpKind::Str => "string".to_string(),
             OpKind::Slice(e) => format!("[]{}", e.label()),
@@ -195,7 +197,7 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         // kind model (it may hold anything), so a member lookup on it cannot
         // claim absence — same fail-open as `kinds_conflict`'s Interface arm.
         OpKind::Interface => false,
-        OpKind::Int | OpKind::Float | OpKind::Bool | OpKind::Str => true,
+        OpKind::Int | OpKind::Float | OpKind::Complex | OpKind::Bool | OpKind::Str => true,
         OpKind::Void => false,
         // A struct whose NAME did not resolve cannot have its members looked up.
         OpKind::Struct(None) => false,
@@ -1242,6 +1244,7 @@ impl<'a> Collector<'a> {
             "bool" => OpKind::Bool,
             "string" => OpKind::Str,
             "float32" | "float64" | "f32" | "f64" => OpKind::Float,
+            "complex64" | "complex128" | "c64" | "c128" => OpKind::Complex,
             "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
             | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "usize"
             | "isize" | "uintptr" | "byte" | "rune" | "char" => OpKind::Int,
@@ -1581,6 +1584,15 @@ impl<'a> Collector<'a> {
                     "make" => return Some(vec![self.make_kind(args)]),
                     "new" => return Some(vec![OpKind::Pointer(Box::new(OpKind::Unknown))]),
                     "delete" | "close" => return Some(Vec::new()),
+                    "min" | "max" => {
+                        let k = args
+                            .first()
+                            .map(|a| self.kind_of_expr(&a.value))
+                            .unwrap_or(OpKind::Unknown);
+                        return Some(vec![k]);
+                    }
+                    "complex" => return Some(vec![OpKind::Complex]),
+                    "real" | "imag" => return Some(vec![OpKind::Float]),
                     _ => {}
                 }
                 let conv = self.kind_of_named(name, 0);
@@ -3227,6 +3239,144 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
+            "min" | "max" => {
+                let mut seen_kind: Option<OpKind> = None;
+                for arg in args {
+                    let k = self.kind_of_expr(&arg.value);
+                    if matches!(
+                        k,
+                        OpKind::Bool
+                            | OpKind::Complex
+                            | OpKind::Slice(_)
+                            | OpKind::Array(_)
+                            | OpKind::Map(_, _)
+                            | OpKind::Chan(_)
+                            | OpKind::Struct(_)
+                            | OpKind::Pointer(_)
+                            | OpKind::Fn(..)
+                            | OpKind::Void
+                    ) {
+                        self.emit_e2005(
+                            span,
+                            format!(
+                                "invalid argument to `{name}`: `{}` (type `{}`) is not an ordered type (HYB-E2005)",
+                                arg.value.render(),
+                                k.label()
+                            ),
+                            "arguments to `min` and `max` must be ordered types (int, float, or string)",
+                        );
+                        return;
+                    }
+                    if k != OpKind::Unknown {
+                        if let Some(prev) = &seen_kind {
+                            if (k == OpKind::Str && (prev == &OpKind::Int || prev == &OpKind::Float))
+                                || ((k == OpKind::Int || k == OpKind::Float) && prev == &OpKind::Str)
+                            {
+                                self.emit_e2005(
+                                    span,
+                                    format!(
+                                        "mismatched types in `{name}`: cannot mix string and numeric arguments (HYB-E2005)"
+                                    ),
+                                    "arguments to `min` and `max` must have compatible types",
+                                );
+                                return;
+                            }
+                        } else {
+                            seen_kind = Some(k);
+                        }
+                    }
+                }
+            }
+            "complex" => {
+                if args.len() != 2 {
+                    return;
+                }
+                let r_arg = &args[0].value;
+                let i_arg = &args[1].value;
+                let rk = self.kind_of_expr(r_arg);
+                let ik = self.kind_of_expr(i_arg);
+                let r_is_lit = matches!(
+                    unwrap_parens(r_arg),
+                    Expr::Lit {
+                        kind: LitKind::Int(_) | LitKind::Float(_),
+                        ..
+                    }
+                );
+                let i_is_lit = matches!(
+                    unwrap_parens(i_arg),
+                    Expr::Lit {
+                        kind: LitKind::Int(_) | LitKind::Float(_),
+                        ..
+                    }
+                );
+                if (!r_is_lit && rk == OpKind::Int) || (!i_is_lit && ik == OpKind::Int) {
+                    self.emit_e2005(
+                        span,
+                        "arguments to `complex` must be floating-point; have integer variable (HYB-E2005)".to_string(),
+                        "`complex` requires floating-point arguments (integer constants allowed)",
+                    );
+                    return;
+                }
+                if !matches!(rk, OpKind::Unknown | OpKind::Float | OpKind::Int) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "first argument to `complex` must be floating-point; have `{}` (type `{}`) (HYB-E2005)",
+                            r_arg.render(),
+                            rk.label()
+                        ),
+                        "`complex` requires floating-point arguments",
+                    );
+                    return;
+                }
+                if !matches!(ik, OpKind::Unknown | OpKind::Float | OpKind::Int) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "second argument to `complex` must be floating-point; have `{}` (type `{}`) (HYB-E2005)",
+                            i_arg.render(),
+                            ik.label()
+                        ),
+                        "`complex` requires floating-point arguments",
+                    );
+                }
+            }
+            "real" | "imag" => {
+                if args.len() != 1 {
+                    return;
+                }
+                let c_arg = &args[0].value;
+                let ck = self.kind_of_expr(c_arg);
+                let c_is_lit = matches!(
+                    unwrap_parens(c_arg),
+                    Expr::Lit {
+                        kind: LitKind::Int(_) | LitKind::Float(_),
+                        ..
+                    }
+                );
+                if !c_is_lit && (ck == OpKind::Int || ck == OpKind::Float) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "argument to `{name}` must be a complex number; have variable of type `{}` (HYB-E2005)",
+                            ck.label()
+                        ),
+                        "`real`/`imag` requires a complex argument (numeric constants allowed)",
+                    );
+                    return;
+                }
+                if !matches!(ck, OpKind::Unknown | OpKind::Complex | OpKind::Int | OpKind::Float) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "argument to `{name}` must be a complex number; have `{}` (type `{}`) (HYB-E2005)",
+                            c_arg.render(),
+                            ck.label()
+                        ),
+                        "`real`/`imag` requires a complex argument",
+                    );
+                }
+            }
             _ => {}
         }
     }
@@ -3575,6 +3725,25 @@ mod operand_kind_tests {
             "fn main() {\n    m := map[string]int{}\n    fmt.println(cap(m))\n}\n",
             "fn main() {\n    xs := []int{1}\n    delete(xs, 0)\n    fmt.println(xs)\n}\n",
             "fn main() {\n    x := 5\n    x = append(x, 1)\n    fmt.println(x)\n}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                error_codes(&r).contains(&"HYB-E2005".to_string()),
+                "expected HYB-E2005, got {:?} for:\n{src}",
+                error_codes(&r)
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_min_max_complex_real_imag_misuse() {
+        for src in [
+            "fn main() {\n    _ = min(1, \"foo\")\n}\n",
+            "fn main() {\n    _ = min(true, false)\n}\n",
+            "fn main() {\n    _ = complex(\"a\", \"b\")\n}\n",
+            "fn main() {\n    _ = real(\"abc\")\n}\n",
+            "fn main() {\n    _ = imag(\"abc\")\n}\n",
         ] {
             let r = check(src);
             assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
