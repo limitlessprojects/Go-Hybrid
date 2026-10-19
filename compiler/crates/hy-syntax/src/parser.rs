@@ -1530,15 +1530,43 @@ impl Parser {
             || (self.at_ident("default") && matches!(self.nth(1), Tok::Punct(":" | "=>")))
     }
 
+    fn has_arm_separator_ahead(&self) -> bool {
+        let mut i = 0;
+        let mut depth = 0;
+        loop {
+            match self.nth(i) {
+                Tok::Punct("{" | "(" | "[") => depth += 1,
+                Tok::Punct("}" | ")" | "]") => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                }
+                Tok::Punct(":" | "=>") if depth == 0 => return true,
+                Tok::Punct(";") if depth == 0 => return false,
+                Tok::Eof => return false,
+                _ => {}
+            }
+            i += 1;
+            if i > 32 {
+                return false;
+            }
+        }
+    }
+
     /// Recovery/loop lookahead: does a new select arm start here?
     fn looks_like_select_arm_head(&self) -> bool {
         if self.at_select_default() {
             return true;
         }
+        if !self.has_arm_separator_ahead() {
+            return false;
+        }
         match self.cur() {
             Tok::Punct("<-") => true,
             Tok::Ident(_) => match self.nth(1) {
                 Tok::Punct("<-") => true, // send arm: ch <- v:
+                Tok::Punct(":=") => matches!(self.nth(2), Tok::Punct("<-")), // recv arm: v := <-ch:
                 Tok::Punct(",") => {
                     // recv-define arm: a, b := <-ch:
                     let mut k = 1;
@@ -1548,9 +1576,8 @@ impl Parser {
                             _ => break,
                         }
                     }
-                    matches!(self.nth(k), Tok::Ident(_))
-                        && matches!(self.nth(k + 1), Tok::Punct(":="))
-                        && matches!(self.nth(k + 2), Tok::Punct("<-"))
+                    matches!(self.nth(k), Tok::Punct(":="))
+                        && matches!(self.nth(k + 1), Tok::Punct("<-"))
                 }
                 _ => false,
             },
