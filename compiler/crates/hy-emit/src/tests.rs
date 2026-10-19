@@ -2908,3 +2908,41 @@ fn m4_initialism_mapping_for_foreign_go_names_issue_658() {
     assert!(go.contains("strings.ToValidUTF8(\"a\", \"b\")"), "expected strings.ToValidUTF8, got:\n{}", go);
 }
 
+#[test]
+fn try_bare_error_call_lowering_issue_726() {
+    let go = emit(
+        r#"package main
+
+fn step() error {
+    return nil
+}
+
+fn run() error {
+    step()?
+    return nil
+}
+
+fn main() {
+    run()?
+    fmt.println("ok")
+}
+"#,
+    );
+    assert!(
+        !go.contains("hyT0, hyErr"),
+        "bare error try must not allocate value temp:\n{}",
+        go
+    );
+    assert!(
+        go.contains("hyErr0 := step()\n\tif hyErr0 != nil {\n\t\treturn hyErr0\n\t}"),
+        "expected direct hyErr assignment for step, got:\n{}",
+        go
+    );
+    assert!(
+        go.contains("hyErr0 := run()") && go.contains("hyErr = hyErr0"),
+        "expected direct hyErr assignment for run in main, got:\n{}",
+        go
+    );
+}
+
+

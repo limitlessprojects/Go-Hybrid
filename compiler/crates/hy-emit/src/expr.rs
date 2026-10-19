@@ -1248,7 +1248,7 @@ impl Emitter {
 }
 
 /// `new[string, int]` → ("new", Some("[string, int]")).
-fn split_type_args(name: &str) -> (&str, Option<&str>) {
+pub(crate) fn split_type_args(name: &str) -> (&str, Option<&str>) {
     match name.find('[') {
         Some(i) => (&name[..i], Some(&name[i..])),
         None => (name, None),
