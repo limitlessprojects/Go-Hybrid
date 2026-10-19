@@ -265,6 +265,97 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
     }
 }
 
+fn is_untyped_int_const(e: &Expr) -> bool {
+    match unwrap_parens(e) {
+        Expr::Lit {
+            kind: LitKind::Int(_) | LitKind::Char(_),
+            ..
+        } => true,
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => is_untyped_int_const(operand),
+        Expr::Binary {
+            op:
+                BinOp::Add
+                | BinOp::Sub
+                | BinOp::Mul
+                | BinOp::Div
+                | BinOp::Mod
+                | BinOp::BitOr
+                | BinOp::BitXor
+                | BinOp::BitAnd
+                | BinOp::Shl
+                | BinOp::Shr,
+            lhs,
+            rhs,
+            ..
+        } => is_untyped_int_const(lhs) && is_untyped_int_const(rhs),
+        _ => false,
+    }
+}
+
+fn is_numeric_const(e: &Expr) -> bool {
+    match unwrap_parens(e) {
+        Expr::Lit {
+            kind: LitKind::Int(_) | LitKind::Float(_) | LitKind::Char(_),
+            ..
+        } => true,
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => is_numeric_const(operand),
+        Expr::Binary {
+            op:
+                BinOp::Add
+                | BinOp::Sub
+                | BinOp::Mul
+                | BinOp::Div
+                | BinOp::Mod
+                | BinOp::BitOr
+                | BinOp::BitXor
+                | BinOp::BitAnd
+                | BinOp::Shl
+                | BinOp::Shr,
+            lhs,
+            rhs,
+            ..
+        } => is_numeric_const(lhs) && is_numeric_const(rhs),
+        _ => false,
+    }
+}
+
+/// Symmetrical conflict check for binary arithmetic (`+`, `-`, `*`, `/`) and
+/// relational comparisons (`<`, `<=`, `>`, `>=`).
+///
+/// In Go, untyped numeric constants adapt between integer and floating types
+/// (e.g. `1 + 2.5` evaluates as untyped float, `f + 1` adapts `1` to `float64`).
+/// However, binary operations between typed `int` variables and `float64`
+/// variables (or an `int` variable and a `float` literal) are strictly prohibited
+/// by Go (`mismatched types`).
+fn binary_numeric_conflict(lhs: &Expr, lk: &OpKind, rhs: &Expr, rk: &OpKind) -> bool {
+    if !lk.is_numeric() || !rk.is_numeric() {
+        return false;
+    }
+    if lk == rk {
+        return false;
+    }
+    // Untyped numeric constants adapt to each other in Go constant expressions (e.g. `1 + 2.5`).
+    if is_numeric_const(lhs) && is_numeric_const(rhs) {
+        return false;
+    }
+    // Untyped int constants adapt to float target/operand in Go (`f + 1` or `1 + f`).
+    if *lk == OpKind::Float && *rk == OpKind::Int && is_untyped_int_const(rhs) {
+        return false;
+    }
+    if *lk == OpKind::Int && *rk == OpKind::Float && is_untyped_int_const(lhs) {
+        return false;
+    }
+    true
+}
+
 /// Is every part of this kind resolved? (#682 U2/U3)
 ///
 /// A "has no field or method" claim is only sound when the checker actually
@@ -2885,6 +2976,18 @@ impl<'a> Collector<'a> {
                         ),
                         "ordered comparisons (`<`, `<=`, `>`, `>=`) require two numeric values or two strings",
                     );
+                } else if binary_numeric_conflict(lhs, &lk, rhs, &rk) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid operation `{}`: operator `{}` requires matching numeric types, found `{}` and `{}` (HYB-E1002)",
+                            span_expr_label(lhs, op_str, rhs),
+                            op_str,
+                            lk.label(),
+                            rk.label()
+                        ),
+                        "ordered comparisons require operands of matching types; write an explicit type conversion",
+                    );
                 }
             }
             // B3: `+` accepts numeric+numeric or string+string.
@@ -2904,6 +3007,17 @@ impl<'a> Collector<'a> {
                             rk.label()
                         ),
                         "`+` requires two numeric operands or two strings; use string interpolation `\"{x}{s}\"` to format mixed values",
+                    );
+                } else if binary_numeric_conflict(lhs, &lk, rhs, &rk) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid operation `{}`: operator `+` requires matching numeric types, found `{}` and `{}` (HYB-E1002)",
+                            span_expr_label(lhs, "+", rhs),
+                            lk.label(),
+                            rk.label()
+                        ),
+                        "`+` on numeric values requires operands of matching types; write an explicit type conversion",
                     );
                 }
             }
@@ -2927,6 +3041,18 @@ impl<'a> Collector<'a> {
                             rk.label()
                         ),
                         "arithmetic `-`, `*`, `/` require numeric operands",
+                    );
+                } else if binary_numeric_conflict(lhs, &lk, rhs, &rk) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid operation `{}`: operator `{}` requires matching numeric types, found `{}` and `{}` (HYB-E1002)",
+                            span_expr_label(lhs, op_str, rhs),
+                            op_str,
+                            lk.label(),
+                            rk.label()
+                        ),
+                        "arithmetic operators require operands of matching types; write an explicit type conversion",
                     );
                 }
             }
