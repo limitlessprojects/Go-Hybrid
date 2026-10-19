@@ -286,3 +286,59 @@ fn parenthesized_and_aliased_make_preserves_share_and_closure_checks() {
     assert_has(&alias_make_copy_share, "HYB-E3003");
 }
 
+#[test]
+fn copy_arity_rejected() {
+    for src in [
+        "fn main() {\n    copy()\n}\n",
+        "fn main() {\n    xs := []int{1}\n    copy(xs)\n}\n",
+        "fn main() {\n    xs := []int{1}\n    ys := []int{2}\n    copy(xs, ys, 3)\n}\n",
+    ] {
+        let r = check(src);
+        assert_has(&r, "HYB-E2005");
+    }
+}
+
+#[test]
+fn copy_literal_destination_rejected() {
+    let r = check("fn main() {\n    xs := []int{1}\n    copy(1, xs)\n}\n");
+    assert_has(&r, "HYB-E2005");
+    let r2 = check("fn main() {\n    xs := []int{1}\n    copy(xs, 1)\n}\n");
+    assert_has(&r2, "HYB-E2005");
+}
+
+#[test]
+fn panic_arity_rejected() {
+    for src in [
+        "fn main() {\n    panic()\n}\n",
+        "fn main() {\n    panic(1, 2)\n}\n",
+    ] {
+        let r = check(src);
+        assert_has(&r, "HYB-E2005");
+    }
+}
+
+#[test]
+fn recover_arity_rejected() {
+    let r = check("fn main() {\n    recover(1)\n}\n");
+    assert_has(&r, "HYB-E2005");
+}
+
+#[test]
+fn clear_arity_and_literal_rejected() {
+    for src in [
+        "fn main() {\n    clear()\n}\n",
+        "fn main() {\n    xs := []int{1}\n    clear(xs, 1)\n}\n",
+        "fn main() {\n    clear(1)\n}\n",
+    ] {
+        let r = check(src);
+        assert_has(&r, "HYB-E2005");
+    }
+}
+
+#[test]
+fn copy_panic_recover_clear_ok() {
+    let r = check(
+        "fn main() {\n    xs := []int{1, 2}\n    ys := []int{0, 0}\n    copy(ys, xs)\n    m := map[string]int{\"k\": 1}\n    clear(m)\n    clear(xs)\n    recover()\n    panic(\"err\")\n}\n",
+    );
+    assert_lacks(&r, "HYB-E2005");
+}

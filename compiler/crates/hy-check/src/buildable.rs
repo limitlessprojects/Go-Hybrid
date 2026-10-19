@@ -3227,6 +3227,55 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
+            "copy" => {
+                if args.len() != 2 {
+                    return; // arity handled by builtins.rs
+                }
+                let dst_arg = &args[0].value;
+                let dk = self.kind_of_expr(dst_arg);
+                if !matches!(dk, OpKind::Unknown | OpKind::Slice(_)) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "first argument to `copy` must be a slice; have `{}` (type `{}`) (HYB-E2005)",
+                            dst_arg.render(),
+                            dk.label()
+                        ),
+                        "the first argument to `copy(dst, src)` must be a destination slice",
+                    );
+                }
+                let src_arg = &args[1].value;
+                let sk = self.kind_of_expr(src_arg);
+                if !matches!(sk, OpKind::Unknown | OpKind::Slice(_) | OpKind::Str) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "second argument to `copy` must be a slice or string; have `{}` (type `{}`) (HYB-E2005)",
+                            src_arg.render(),
+                            sk.label()
+                        ),
+                        "the second argument to `copy(dst, src)` must be a source slice or string",
+                    );
+                }
+            }
+            "clear" => {
+                if args.len() != 1 {
+                    return; // arity handled by builtins.rs
+                }
+                let op = &args[0].value;
+                let ak = self.kind_of_expr(op);
+                if !matches!(ak, OpKind::Unknown | OpKind::Slice(_) | OpKind::Map(_, _)) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "cannot clear non-slice/map `{}` (type `{}`) (HYB-E2005)",
+                            op.render(),
+                            ak.label()
+                        ),
+                        "`clear` accepts a slice or map",
+                    );
+                }
+            }
             _ => {}
         }
     }
@@ -3575,6 +3624,9 @@ mod operand_kind_tests {
             "fn main() {\n    m := map[string]int{}\n    fmt.println(cap(m))\n}\n",
             "fn main() {\n    xs := []int{1}\n    delete(xs, 0)\n    fmt.println(xs)\n}\n",
             "fn main() {\n    x := 5\n    x = append(x, 1)\n    fmt.println(x)\n}\n",
+            "fn main() {\n    x := 5\n    y := 5\n    copy(x, y)\n}\n",
+            "fn main() {\n    xs := []int{1}\n    y := 5\n    copy(xs, y)\n}\n",
+            "fn main() {\n    x := 5\n    clear(x)\n}\n",
         ] {
             let r = check(src);
             assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");

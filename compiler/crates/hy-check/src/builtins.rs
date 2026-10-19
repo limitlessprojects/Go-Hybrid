@@ -313,12 +313,34 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
+            "panic" => {
+                if args.len() != 1 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`panic` requires exactly 1 argument, found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                }
+            }
+            "recover" => {
+                if !args.is_empty() {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`recover` takes no arguments, found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                }
+            }
             "clear" => {
                 if args.len() != 1 {
                     self.emit_builtin(
                         span,
                         format!(
-                            "`clear` requires exactly 1 map or slice argument, found {} (HYB-E2005)",
+                            "`clear` requires exactly 1 argument (slice or map), found {} (HYB-E2005)",
                             args.len()
                         ),
                     );
