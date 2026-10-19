@@ -214,3 +214,91 @@ fn main() {
         r3.diagnostics
     );
 }
+
+#[test]
+fn task_spawn_of_ptr_receiver_and_non_sendable_value_receiver_reject_e3001() {
+    let ptr_recv_src = r#"
+import "fmt"
+
+struct counter {
+    n int
+}
+
+fn (c *counter) bump() {
+    c.n = c.n + 1
+}
+
+fn main() {
+    var c = counter{n: 0}
+    task c.bump()
+    c.bump()
+    fmt.println(c.n)
+}
+"#;
+    let r_ptr = check(ptr_recv_src);
+    assert_eq!(r_ptr.verdict, Verdict::Reject, "{:?}", r_ptr.diagnostics);
+    assert!(
+        error_codes(&r_ptr).iter().any(|c| c == "HYB-E3001"),
+        "expected HYB-E3001 on `task c.bump()`, got: {:?}",
+        r_ptr.diagnostics
+    );
+
+    let val_recv_ok_src = r#"
+import "fmt"
+
+struct counter {
+    n int
+}
+
+fn (c counter) show() {
+    fmt.println(c.n)
+}
+
+fn main() {
+    var c = counter{n: 5}
+    task (move c).show()
+}
+"#;
+    let r_ok = check(val_recv_ok_src);
+    assert_eq!(r_ok.verdict, Verdict::Accept, "{:?}", r_ok.diagnostics);
+
+    let val_recv_map_src = r#"
+struct holder {
+    m map[string]int
+}
+
+fn (h holder) work() {}
+
+fn main() {
+    var h = holder{m: map[string]int{"a": 1}}
+    task h.work()
+}
+"#;
+    let r_map = check(val_recv_map_src);
+    assert_eq!(r_map.verdict, Verdict::Reject, "{:?}", r_map.diagnostics);
+    assert!(
+        error_codes(&r_map).iter().any(|c| c == "HYB-E3001"),
+        "expected HYB-E3001 on `task h.work()` without move, got: {:?}",
+        r_map.diagnostics
+    );
+}
+
+#[test]
+fn parenthesized_pure_pkg_call_in_helper_does_not_falsely_reject_const_arg() {
+    let src = r#"
+import "fmt"
+
+const global_m = map[string]int{"a": 1}
+
+fn inspect(m map[string]int) {
+    (fmt).println(m)
+}
+
+fn main() {
+    inspect(global_m)
+}
+"#;
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+}

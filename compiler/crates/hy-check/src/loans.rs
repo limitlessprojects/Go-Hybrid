@@ -7245,7 +7245,7 @@ impl<'a> Checker<'a> {
                 name: method_name,
                 ..
             } => {
-                if let Expr::Ident { name: pkg, .. } = &**base {
+                if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) {
                     if A3_PURE_PKGS.contains(&pkg.as_str()) {
                         return false;
                     }
