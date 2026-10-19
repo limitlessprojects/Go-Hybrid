@@ -650,9 +650,10 @@ impl<'a> Collector<'a> {
                 .iter()
                 .map(|v| {
                     if let Some(op) = as_addr_of(unwrap_parens(v)) {
-                        let inner = unwrap_parens(op);
-                        if matches!(inner, Expr::Index { .. } | Expr::Field { .. }) {
-                            return self.kind_of_expr(inner);
+                        if let Expr::Index { base, .. } = unwrap_parens(op) {
+                            if matches!(self.kind_of_expr(base), OpKind::Map(..)) {
+                                return self.kind_of_expr(unwrap_parens(op));
+                            }
                         }
                     }
                     self.kind_of_expr(v)

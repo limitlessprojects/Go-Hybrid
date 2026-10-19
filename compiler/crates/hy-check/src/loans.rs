@@ -700,12 +700,12 @@ impl<'a> Checker<'a> {
     /// and inline closure calls (`(fn() { m["b"] = ... })()`) inside a live
     /// slot-loan window.
     fn check_a3_method_or_inline_call(&mut self, st: &FnState, cr: &CallRef, idx: usize) {
-        let live: Vec<String> = st
+        let live: Vec<(String, String)> = st
             .loans
             .iter()
             .filter_map(|l| match &l.target {
-                LoanTarget::MapSlot { path, .. } if l.created <= idx && idx <= l.last => {
-                    Some(path.clone())
+                LoanTarget::MapSlot { binding, path, .. } if l.created <= idx && idx <= l.last => {
+                    Some((binding.clone(), path.clone()))
                 }
                 _ => None,
             })
@@ -714,6 +714,19 @@ impl<'a> Checker<'a> {
             return;
         }
         let mut conflict_paths: Vec<String> = Vec::new();
+        let conflicts_with_live = |candidate: &str| -> Option<String> {
+            live.iter().find_map(|(binding, p)| {
+                let is_loan_binding = candidate == binding
+                    || candidate
+                        .strip_prefix(binding.as_str())
+                        .is_some_and(|rest| rest.starts_with('.'));
+                if !is_loan_binding && a3_paths_conflict(st, p, candidate) {
+                    Some(p.clone())
+                } else {
+                    None
+                }
+            })
+        };
         match unwrap_parens(cr.callee) {
             Expr::Field {
                 base,
@@ -749,8 +762,8 @@ impl<'a> Checker<'a> {
                                 collect_ref_roots(base, &mut broots);
                                 let base_path_opt = walk::expr_path(base);
                                 for bpath in base_path_opt.into_iter().chain(broots) {
-                                    if live.iter().any(|p| a3_paths_conflict(st, p, &bpath)) {
-                                        conflict_paths.push(bpath);
+                                    if let Some(p) = conflicts_with_live(&bpath) {
+                                        conflict_paths.push(p);
                                     }
                                 }
                             }
@@ -767,8 +780,8 @@ impl<'a> Checker<'a> {
                             collect_ref_roots(&a.value, &mut aroots);
                             let arg_path_opt = walk::expr_path(&a.value);
                             for arg_path in arg_path_opt.into_iter().chain(aroots) {
-                                if live.iter().any(|p| a3_paths_conflict(st, p, &arg_path)) {
-                                    conflict_paths.push(arg_path);
+                                if let Some(p) = conflicts_with_live(&arg_path) {
+                                    conflict_paths.push(p);
                                 }
                             }
                         }
@@ -781,8 +794,8 @@ impl<'a> Checker<'a> {
                         collect_ref_roots(&a.value, &mut aroots);
                         let arg_path_opt = walk::expr_path(&a.value);
                         for arg_path in arg_path_opt.into_iter().chain(aroots) {
-                            if live.iter().any(|p| a3_paths_conflict(st, p, &arg_path)) {
-                                conflict_paths.push(arg_path);
+                            if let Some(p) = conflicts_with_live(&arg_path) {
+                                conflict_paths.push(p);
                             }
                         }
                     }
@@ -797,9 +810,9 @@ impl<'a> Checker<'a> {
                 let mut bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
                 bound.extend(results.iter().filter_map(|r| r.name.clone()));
                 let roots = self.collect_mutation_roots(st, body, &bound);
-                for p in &live {
-                    if roots.iter().any(|r| a3_paths_conflict(st, p, r)) {
-                        conflict_paths.push(p.clone());
+                for r in &roots {
+                    if let Some(p) = conflicts_with_live(r) {
+                        conflict_paths.push(p);
                     }
                 }
                 for (i, a) in cr.args.iter().enumerate() {
@@ -814,8 +827,8 @@ impl<'a> Checker<'a> {
                     collect_ref_roots(&a.value, &mut aroots);
                     let arg_path_opt = walk::expr_path(&a.value);
                     for arg_path in arg_path_opt.into_iter().chain(aroots) {
-                        if live.iter().any(|p| a3_paths_conflict(st, p, &arg_path)) {
-                            conflict_paths.push(arg_path);
+                        if let Some(p) = conflicts_with_live(&arg_path) {
+                            conflict_paths.push(p);
                         }
                     }
                 }
@@ -875,7 +888,9 @@ impl<'a> Checker<'a> {
             .filter_map(|l| {
                 let eff_last = self.effective_loan_last(st, l);
                 match &l.target {
-                    LoanTarget::MapSlot { path, .. } if l.created <= idx && idx <= eff_last => {
+                    LoanTarget::MapSlot { binding, path, .. }
+                        if binding != root && l.created <= idx && idx <= eff_last =>
+                    {
                         Some(path.clone())
                     }
                     _ => None,
