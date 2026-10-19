@@ -2908,3 +2908,45 @@ fn m4_initialism_mapping_for_foreign_go_names_issue_658() {
     assert!(go.contains("strings.ToValidUTF8(\"a\", \"b\")"), "expected strings.ToValidUTF8, got:\n{}", go);
 }
 
+#[test]
+fn range_bound_eval_once_issue_730() {
+    let go = emit(
+        r#"package main
+
+fn bound() int {
+    return 2
+}
+
+fn main() {
+    n := 3
+    for i in 0..n {
+        fmt.println("exclusive {i}")
+    }
+    for n in 0..n {
+        fmt.println("grow {n}")
+    }
+    for i in 0..bound() {
+        fmt.println("call {i}")
+    }
+}
+"#,
+    );
+    assert!(
+        go.contains("for i := 0; i < n; i++"),
+        "unshadowed ident upper bound stays direct:\n{}",
+        go
+    );
+    assert!(
+        go.contains("hyHi0 := n") && go.contains("for n := 0; n < hyHi0; n++"),
+        "shadowed loop var must compare against pre-evaluated bound:\n{}",
+        go
+    );
+    assert!(
+        go.contains("hyHi1 := bound()") && go.contains("for i := 0; i < hyHi1; i++"),
+        "call bound must evaluate once before loop:\n{}",
+        go
+    );
+}
+
+
+
