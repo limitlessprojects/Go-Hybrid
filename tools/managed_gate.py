@@ -189,8 +189,17 @@ def main():
     for prog in progs:
         current.update(audit(hyb, prog))
 
+    # pr-434: scope the whole decision to the programs actually audited in
+    # this run. Baseline blocks belonging to unaudited programs are neither
+    # evidence of a removal (the informational `removed` list) nor disposable
+    # in --rebaseline — a subset run must not silently rewrite (and drop)
+    # reviewed blocks for programs it never scanned.
+    audited_progs = set(progs)
     new = {k: v for k, v in current.items() if k not in base}
-    removed = {k for k in base if k not in current}
+    removed = {
+        k for k in base
+        if k.rsplit(":", 1)[0] in audited_progs and k not in current
+    }
     changed = {
         k
         for k in current
@@ -198,7 +207,14 @@ def main():
     }
 
     if rebaseline:
-        baseline["blocks"] = current
+        # pr-434 scope rule: keep every reviewed block whose program was not
+        # audited in this run; the audited programs get the fresh inventory.
+        preserved = {
+            k: v for k, v in base.items()
+            if k.rsplit(":", 1)[0] not in audited_progs
+        }
+        preserved.update(current)
+        baseline["blocks"] = preserved
         # Never truncate the reviewed baseline until the complete replacement
         # has been written and closed successfully. Buffered writes can fail
         # at close (e.g. ENOSPC/EFBIG), after json.dump itself has returned.
@@ -225,7 +241,7 @@ def main():
         finally:
             if temporary is not None:
                 os.unlink(temporary)
-        print(f"rebaseline: {len(current)} block(s) recorded in {baseline_path}")
+        print(f"rebaseline: {len(preserved)} block(s) recorded in {baseline_path}")
         return
 
     fail = False

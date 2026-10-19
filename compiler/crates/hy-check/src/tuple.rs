@@ -20,7 +20,18 @@
 use crate::foreign;
 use crate::model::{unwrap_parens, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::{AssignOp, Expr, Stmt, TypeExpr};
+use hy_syntax::{
+    AssignOp, Expr, ForKind, InterpPart, Place, PlaceKind, SelectArmKind, Stmt, TypeExpr,
+};
+
+fn unwrap_parens_and_move(mut e: &Expr) -> &Expr {
+    loop {
+        match e {
+            Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } => e = inner,
+            _ => return e,
+        }
+    }
+}
 
 impl<'a> Checker<'a> {
     /// Pass-B entry (and closure-body entry in `closures.rs`), called once
@@ -29,31 +40,187 @@ impl<'a> Checker<'a> {
         match stmt {
             Stmt::Local(l) if l.values.len() == 1 => {
                 self.check_multi_value_bind(st, &l.values[0], l.names.len(), l.span);
+                self.check_subexprs_single_value(st, &l.values[0]);
             }
             Stmt::Local(l) if l.values.len() > 1 => {
                 for v in &l.values {
-                    self.check_multi_value_bind(st, v, 1, l.span);
+                    self.check_expr_single_value(st, v, l.span);
                 }
             }
             Stmt::Assign {
                 targets,
-                op: AssignOp::Assign,
+                op,
                 values,
                 span,
-            } if values.len() == 1 => {
-                self.check_multi_value_bind(st, &values[0], targets.len(), *span);
+            } => {
+                for t in targets {
+                    self.check_place_single_value(st, t);
+                }
+                if *op == AssignOp::Assign && values.len() == 1 {
+                    self.check_multi_value_bind(st, &values[0], targets.len(), *span);
+                    self.check_subexprs_single_value(st, &values[0]);
+                } else {
+                    for v in values {
+                        self.check_expr_single_value(st, v, *span);
+                    }
+                }
             }
-            Stmt::Assign {
-                op: AssignOp::Assign,
-                values,
-                span,
-                ..
-            } if values.len() > 1 => {
-                for v in values {
-                    self.check_multi_value_bind(st, v, 1, *span);
+            Stmt::Expr { expr, .. } | Stmt::Defer { call: expr, .. } => {
+                self.check_subexprs_single_value(st, expr);
+            }
+            Stmt::Send {
+                chan, value, span, ..
+            } => {
+                self.check_expr_single_value(st, chan, chan.span());
+                self.check_expr_single_value(st, value, *span);
+            }
+            Stmt::If { cond, .. } => {
+                self.check_expr_single_value(st, cond, cond.span());
+            }
+            Stmt::For { kind, .. } => match kind {
+                ForKind::Infinite => {}
+                ForKind::While { cond } => {
+                    self.check_expr_single_value(st, cond, cond.span());
+                }
+                ForKind::Range { lo, hi, .. } => {
+                    self.check_expr_single_value(st, lo, lo.span());
+                    self.check_expr_single_value(st, hi, hi.span());
+                }
+                ForKind::Iterate { expr, .. } => {
+                    self.check_expr_single_value(st, expr, expr.span());
+                }
+            },
+            Stmt::Return { values, .. } => {
+                if values.len() == 1 {
+                    self.check_subexprs_single_value(st, &values[0]);
+                } else {
+                    for v in values {
+                        self.check_expr_single_value(st, v, v.span());
+                    }
+                }
+            }
+            Stmt::Task { callee, args, .. } => {
+                self.check_expr_single_value(st, callee, callee.span());
+                if args.len() == 1 && !args[0].spread {
+                    self.check_subexprs_single_value(st, &args[0].value);
+                } else {
+                    for a in args {
+                        self.check_expr_single_value(st, &a.value, a.span);
+                    }
+                }
+            }
+            Stmt::Match { subject, arms, .. } => {
+                self.check_expr_single_value(st, subject, subject.span());
+                for arm in arms {
+                    if let Some(g) = &arm.guard {
+                        self.check_expr_single_value(st, g, g.span());
+                    }
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                for arm in arms {
+                    match &arm.kind {
+                        SelectArmKind::Send { chan, value, .. } => {
+                            self.check_expr_single_value(st, chan, chan.span());
+                            self.check_expr_single_value(st, value, value.span());
+                        }
+                        SelectArmKind::Recv { chan, .. } => {
+                            self.check_expr_single_value(st, chan, chan.span());
+                        }
+                        SelectArmKind::Default => {}
+                    }
                 }
             }
             _ => {}
+        }
+    }
+
+    fn check_place_single_value(&mut self, st: &FnState, place: &Place) {
+        match &place.kind {
+            PlaceKind::Ident(_) => {}
+            PlaceKind::Index { base, index } => {
+                self.check_place_single_value(st, base);
+                self.check_expr_single_value(st, index, index.span());
+            }
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                self.check_place_single_value(st, base);
+            }
+        }
+    }
+
+    fn check_expr_single_value(&mut self, st: &FnState, expr: &Expr, span: Span) {
+        self.check_multi_value_bind(st, expr, 1, span);
+        self.check_subexprs_single_value(st, expr);
+    }
+
+    fn check_subexprs_single_value(&mut self, st: &FnState, expr: &Expr) {
+        match unwrap_parens_and_move(expr) {
+            Expr::Ident { .. } | Expr::Lit { .. } | Expr::FnLit { .. } => {}
+            Expr::Binary { lhs, rhs, .. } => {
+                self.check_expr_single_value(st, lhs, lhs.span());
+                self.check_expr_single_value(st, rhs, rhs.span());
+            }
+            Expr::Unary { operand, .. } | Expr::AddrOf { operand, .. } => {
+                self.check_expr_single_value(st, operand, operand.span());
+            }
+            Expr::Try { operand, .. } => {
+                self.check_subexprs_single_value(st, operand);
+            }
+            Expr::Receive { chan, .. } => {
+                self.check_expr_single_value(st, chan, chan.span());
+            }
+            Expr::Index { base, index, .. } => {
+                self.check_expr_single_value(st, base, base.span());
+                self.check_expr_single_value(st, index, index.span());
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                self.check_expr_single_value(st, base, base.span());
+                if let Some(l) = lo {
+                    self.check_expr_single_value(st, l, l.span());
+                }
+                if let Some(h) = hi {
+                    self.check_expr_single_value(st, h, h.span());
+                }
+            }
+            Expr::Field { base, .. } => {
+                self.check_expr_single_value(st, base, base.span());
+            }
+            Expr::Call { callee, args, .. } => {
+                self.check_expr_single_value(st, callee, callee.span());
+                if args.len() == 1 && !args[0].spread {
+                    self.check_subexprs_single_value(st, &args[0].value);
+                } else {
+                    for a in args {
+                        self.check_expr_single_value(st, &a.value, a.span);
+                    }
+                }
+            }
+            Expr::StructLit { fields, .. } => {
+                for f in fields {
+                    self.check_expr_single_value(st, &f.value, f.span);
+                }
+            }
+            Expr::SliceLit { items, .. } => {
+                for item in items {
+                    self.check_expr_single_value(st, item, item.span());
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    self.check_expr_single_value(st, k, k.span());
+                    self.check_expr_single_value(st, v, v.span());
+                }
+            }
+            Expr::Interp { parts, .. } => {
+                for p in parts {
+                    if let InterpPart::Expr(x) = p {
+                        self.check_expr_single_value(st, x, x.span());
+                    }
+                }
+            }
+            Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } => {
+                self.check_subexprs_single_value(st, inner);
+            }
         }
     }
 
@@ -78,10 +245,10 @@ impl<'a> Checker<'a> {
     /// `Some((callee, result count))` when `expr` is a direct or indirect call
     /// with a statically known result count (excluding `?`-unwrapped calls).
     fn static_result_count(&self, st: &FnState, expr: &Expr) -> Option<(String, usize)> {
-        let Expr::Call { callee, .. } = unwrap_parens(expr) else {
+        let Expr::Call { callee, .. } = unwrap_parens_and_move(expr) else {
             return None;
         };
-        match unwrap_parens(callee) {
+        match unwrap_parens_and_move(callee) {
             Expr::Ident { name, .. } => {
                 // 1. Local bindings (fn values, closures, parameters, aliases)
                 if let Some(b) = self.lookup_binding(st, name) {

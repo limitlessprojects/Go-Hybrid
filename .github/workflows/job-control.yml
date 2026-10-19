@@ -1,0 +1,21 @@
+name: job-control regressions
+
+on:
+  pull_request:
+    paths:
+      - tools/job.py
+      - tools/test_job*.py
+      - .github/workflows/job-control.yml
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Offline job-control regressions
+        run: python3 -B -m unittest discover -s tools -p 'test_job*.py' -v

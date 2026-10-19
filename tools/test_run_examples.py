@@ -16,6 +16,12 @@ ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = "10-rust-crate-import"
 EXPECTED = (ROOT / "examples" / EXAMPLE / "expected.txt").read_text(encoding="utf-8")
 
+STD_EXAMPLE = "01-hello"
+STD_EXPECTED = (ROOT / "examples" / STD_EXAMPLE / "expected.txt").read_text(encoding="utf-8")
+
+PKG_EXAMPLE = "09-go-imports-hybrid"
+PKG_EXPECTED = (ROOT / "examples" / PKG_EXAMPLE / "expected.txt").read_text(encoding="utf-8")
+
 
 class ExampleExitTests(unittest.TestCase):
     def run_example(self, output=EXPECTED, exit_code=0, build_exit=0,
@@ -115,6 +121,86 @@ class ExampleExitTests(unittest.TestCase):
 
     def test_timing_example_compares_only_stdout(self):
         self.check_streams([EXAMPLE])
+
+
+class StandardExampleExitTests(unittest.TestCase):
+    # Reuse the shared fake-builder fixture without re-running the base
+    # class's example-10 scenarios under this example's name.
+    run_example = ExampleExitTests.run_example
+    assert_result = ExampleExitTests.assert_result
+
+    """PR #258: standard examples report a runtime exit as (run exit N) with
+    the captured output, never as an output diff, and never via a missing
+    .diff file error. Reuses the shared fake-builder fixture."""
+
+    def run_std(self, output=STD_EXPECTED, exit_code=0, build_exit=0):
+        return self.run_example(output=output, exit_code=exit_code,
+                                build_exit=build_exit, example=STD_EXAMPLE)
+
+    def test_matching_output_with_zero_exit_passes(self):
+        self.assert_result(self.run_std(), 0)
+
+    def test_matching_output_with_nonzero_exit_fails_as_run_exit(self):
+        result = self.run_std(exit_code=7)
+        self.assert_result(result, 1)
+        self.assertIn("run exit 7", result.stdout)
+        self.assertNotIn("No such file or directory", result.stderr)
+
+    def test_nonzero_exit_prints_runtime_output(self):
+        result = self.run_std(output="fatal panic: test crash\n", exit_code=134)
+        self.assert_result(result, 1)
+        self.assertIn("run exit 134", result.stdout)
+        self.assertIn("fatal panic: test crash", result.stdout)
+        self.assertNotIn("No such file or directory", result.stderr)
+
+    def test_successful_run_with_wrong_output_fails_as_output_diff(self):
+        result = self.run_std(output="wrong output\n")
+        self.assert_result(result, 1)
+        self.assertIn("output diff", result.stdout)
+
+    def test_builder_failure_fails(self):
+        result = self.run_std(build_exit=3)
+        self.assert_result(result, 1)
+        self.assertIn("FAIL 01-hello (build)", result.stdout)
+
+
+class PackageModeExampleExitTests(unittest.TestCase):
+    # Same shared fixture; the fake `go` in it drives the package-mode leg.
+    run_example = ExampleExitTests.run_example
+    assert_result = ExampleExitTests.assert_result
+
+    """PR #258: package mode (09) applies the same run-exit contract to the
+    `go run .` leg, through the shared fake-`go` fixture."""
+
+    def run_pkg(self, output=PKG_EXPECTED, exit_code=0, build_exit=0):
+        return self.run_example(output=output, exit_code=exit_code,
+                                build_exit=build_exit, example=PKG_EXAMPLE)
+
+    def test_matching_output_with_zero_exit_passes(self):
+        self.assert_result(self.run_pkg(), 0)
+
+    def test_matching_output_with_nonzero_exit_fails_as_run_exit(self):
+        result = self.run_pkg(exit_code=9)
+        self.assert_result(result, 1)
+        self.assertIn("run exit 9", result.stdout)
+        self.assertNotIn("No such file or directory", result.stderr)
+
+    def test_nonzero_exit_prints_runtime_output(self):
+        result = self.run_pkg(output="runtime go panic: boom\n", exit_code=2)
+        self.assert_result(result, 1)
+        self.assertIn("run exit 2", result.stdout)
+        self.assertIn("runtime go panic: boom", result.stdout)
+        self.assertNotIn("No such file or directory", result.stderr)
+
+    def test_successful_run_with_wrong_output_fails_as_output_diff(self):
+        result = self.run_pkg(output="wrong output\n")
+        self.assert_result(result, 1)
+        self.assertIn("output diff", result.stdout)
+
+    def test_builder_failure_fails(self):
+        result = self.run_pkg(build_exit=4)
+        self.assert_result(result, 1)
+        self.assertIn("FAIL 09-go-imports-hybrid (package build)", result.stdout)
 
 
 if __name__ == "__main__":

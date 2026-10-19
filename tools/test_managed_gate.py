@@ -55,7 +55,10 @@ class ManagedGateTests(unittest.TestCase):
                 source = root / 'plain.hy'
                 source.write_text('fn main() {}', encoding='utf-8')
                 baseline = root / 'baseline.json'
-                original = {'version': 1, 'blocks': {'old.hy:1': block('reviewed')}}
+                # The reviewed block belongs to the scanned program, so an
+                # explicit zero-block scan may clear it (pr-434 scope rule:
+                # unaudited programs' blocks would be preserved instead).
+                original = {'version': 1, 'blocks': {f'{source}:1': block('reviewed')}}
                 baseline.write_text(json.dumps(original), encoding='utf-8')
                 args = ['managed_gate.py']
                 if rebaseline:
@@ -322,7 +325,10 @@ class AtomicBaselineTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.baseline = self.root / "baseline.json"
-        self.original = b'{"version": 1, "blocks": {"reviewed.hy:1": {"reason": "reviewed"}}}\n'
+        # The stale reviewed block belongs to the audited program (new.hy),
+        # so the rebaseline below is a full replacement under the pr-434
+        # scope rule (unaudited programs' blocks are preserved instead).
+        self.original = b'{"version": 1, "blocks": {"new.hy:0": {"reason": "reviewed"}}}\n'
         self.baseline.write_bytes(self.original)
         self.baseline.chmod(0o640)
         self.current = {"new.hy:1": {"reason": "new", "category": "other"}}
@@ -391,6 +397,88 @@ gate.main()
         self.assertNotIn("rebaseline:", result.stdout)
         self.assertEqual(list(self.root.iterdir()), [self.baseline])
 
+
+
+    def test_zero_programs_fails_closed_without_modifying_baseline(self):
+        # pr-434: zero program arguments (e.g. an unmatched shell glob) must
+        # not pass the gate or touch the baseline, in either mode. The guard
+        # landed with pr-113 reports on stderr; this pins the fail-closed
+        # contract end to end.
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = pathlib.Path(directory) / 'baseline.json'
+            original = json.dumps({'version': 1, 'blocks': {
+                'unrelated.hy:10': block('reviewed')}}).encode()
+            for rebaseline in (False, True):
+                with self.subTest(rebaseline=rebaseline):
+                    baseline.write_bytes(original)
+                    argv = ['managed_gate.py'] + (['--rebaseline'] if rebaseline else [])
+                    argv += ['hyb', str(baseline)]
+                    output = io.StringIO()
+                    errors = io.StringIO()
+                    with patch.object(gate.sys, 'argv', argv), \
+                         contextlib.redirect_stdout(output), \
+                         contextlib.redirect_stderr(errors):
+                        with self.assertRaises(SystemExit) as error:
+                            gate.main()
+                    self.assertEqual(error.exception.code, 2)
+                    self.assertIn('GATE ERROR', output.getvalue() + errors.getvalue())
+                    self.assertIn('at least one source file', errors.getvalue())
+                    self.assertNotIn('managed gate: PASS', output.getvalue())
+                    self.assertNotIn('rebaseline:', output.getvalue())
+                    self.assertEqual(baseline.read_bytes(), original)
+
+    def test_partial_program_audit_preserves_unrelated_baseline_blocks(self):
+        # pr-434: auditing a subset must not report unrelated baseline blocks
+        # as removed, and must not wipe them in --rebaseline.
+        with tempfile.TemporaryDirectory() as directory:
+            prog_a = pathlib.Path(directory) / 'a.hy'
+            prog_a.write_text('fn main() {}', encoding='utf-8')
+            baseline = pathlib.Path(directory) / 'baseline.json'
+            original = {
+                'version': 1,
+                'blocks': {
+                    f'{prog_a}:1': block('a_old'),
+                    'unrelated.hy:10': block('unrelated_stay'),
+                }
+            }
+            baseline.write_text(json.dumps(original))
+            report = {'summary': {'managed': {'managed_blocks': 0}}}
+            result = subprocess.CompletedProcess([], 0, json.dumps(report), '')
+            output = io.StringIO()
+            argv = ['managed_gate.py', 'hyb', str(baseline), str(prog_a)]
+            with patch.object(gate.sys, 'argv', argv), \
+                 patch.object(gate.subprocess, 'run', return_value=result), \
+                 contextlib.redirect_stdout(output):
+                gate.main()
+            out = output.getvalue()
+            self.assertIn(f'managed block removed (allowed): {prog_a}:1', out)
+            self.assertNotIn('unrelated.hy', out)
+            self.assertIn('managed gate: PASS', out)
+
+    def test_rebaseline_subset_preserves_unrelated_baseline_blocks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prog_a = pathlib.Path(directory) / 'a.hy'
+            prog_a.write_text('fn main() {}', encoding='utf-8')
+            baseline = pathlib.Path(directory) / 'baseline.json'
+            original = {
+                'version': 1,
+                'blocks': {
+                    f'{prog_a}:1': block('a_old'),
+                    'unrelated.hy:10': block('unrelated_stay'),
+                }
+            }
+            baseline.write_text(json.dumps(original))
+            report = {'summary': {'managed': {'managed_blocks': 0}}}
+            result = subprocess.CompletedProcess([], 0, json.dumps(report), '')
+            output = io.StringIO()
+            argv = ['managed_gate.py', '--rebaseline', 'hyb', str(baseline), str(prog_a)]
+            with patch.object(gate.sys, 'argv', argv), \
+                 patch.object(gate.subprocess, 'run', return_value=result), \
+                 contextlib.redirect_stdout(output):
+                gate.main()
+            saved = json.loads(baseline.read_text())['blocks']
+            self.assertNotIn(f'{prog_a}:1', saved)
+            self.assertEqual(saved.get('unrelated.hy:10'), block('unrelated_stay'))
 
 
 if __name__ == '__main__':

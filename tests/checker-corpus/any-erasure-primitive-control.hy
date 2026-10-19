@@ -1,5 +1,5 @@
 // ============================================================================
-// any-erasure-primitive-control ? Checker corpus (bounty track: "grow the adversarial corpus").
+// any-erasure-primitive-control — Checker corpus (bounty track: "grow the adversarial corpus").
 //
 // PURPOSE: the ACCEPT control for any-erasure-shared-map-at-spawn, and the more
 //   important half of the pair: it proves the rejection above is not a blanket
@@ -10,14 +10,14 @@
 //   `any` keyword is not itself the deciding factor.
 //
 // ---- Tier-0 rule set applied ----
-//   Layer 1 (Go-side GC): `v` (any holding an int ? immutable), `done`.
+//   Layer 1 (Go-side GC): `v` (any holding an int — immutable), `done`.
 // ---- Sendability / check sites ----
-//   [S1] `task worker(v, done)` ? the value behind the erasure is immutable,
+//   [S1] `task worker(v, done)` — the value behind the erasure is immutable,
 //        so there is nothing to share.
 // ---- Expected verdict (hand-derived from VERDICTS.md rule key + SPEC O4
 //      BEFORE running the checker) ----
 // EXPECTED-VERDICT: ACCEPT
-//   ACCEPT ? 0 annotations, 0 managed. Pins that the checker classifies the value
+//   ACCEPT — 0 annotations, 0 managed. Pins that the checker classifies the value
 //   behind the erasure, not the erasing type.
 //
 // ---- Annotations / managed ----

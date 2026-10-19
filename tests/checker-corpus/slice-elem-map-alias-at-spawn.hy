@@ -1,5 +1,5 @@
 // ============================================================================
-// slice-elem-map-alias-at-spawn ? Checker corpus (bounty track: "grow the adversarial corpus").
+// slice-elem-map-alias-at-spawn — Checker corpus (bounty track: "grow the adversarial corpus").
 //
 // PURPOSE: the SLICE twin of map-elem-map-alias-at-spawn. Corpus 43 pins `copy` on a
 //   `[]map` element slice, but no program reads a single reference-typed
@@ -15,13 +15,13 @@
 //   Layer 2 (Rust-side owned): none.
 
 // ---- Sendability / check sites ----
-//   [S1] `task worker(move rows, done)` ? legal owned move.
-//   [S2] `inner["a"] = 2` ? write through a live alias of the moved storage.
+//   [S1] `task worker(move rows, done)` — legal owned move.
+//   [S2] `inner["a"] = 2` — write through a live alias of the moved storage.
 
 // ---- Expected verdict (hand-derived from VERDICTS.md rule key + SPEC
 //      O3/O4/O9 BEFORE running the checker) ----
 // EXPECTED-VERDICT: REJECT A1b
-//   REJECT ? A1b. The element read is a copy of a reference (A4), so the
+//   REJECT — A1b. The element read is a copy of a reference (A4), so the
 //   binding aliases the moved slice's element storage.
 //
 // ---- Annotations / managed ----
@@ -35,7 +35,7 @@ fn worker(rows []map[string]int, done chan<- bool) {
 
 fn main() {
     rows := []map[string]int{map[string]int{"a": 1}}
-    inner := rows[0]              // element read: a map-header copy ? an alias
+    inner := rows[0]              // element read: a map-header copy — an alias
     done := make(chan bool, 1)
     task worker(move rows, done)
     inner["a"] = 2                // use-after-move through the alias

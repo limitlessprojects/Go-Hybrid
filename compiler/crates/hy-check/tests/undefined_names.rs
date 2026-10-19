@@ -197,3 +197,35 @@ fn dotted_first_segment_is_package_open_world() {
     accepts_without_e1001("fn main() {\n    x := foo.bar(1)\n    _ = x\n}\n");
     accepts_without_e1001("fn main() {\n    _ = undefined_obj.field\n}\n");
 }
+
+#[test]
+fn m4_m5_foreign_go_name_and_curated_allowlist_resolution_issue_658() {
+    // Known curated package members and initialism constants pass hyb check:
+    accepts_without_e1001(
+        "fn main() {\n    _ = io.eof\n    _ = http.status_ok\n    _ = time.rfc3339\n    _ = strings.to_valid_utf8(\"a\", \"b\")\n}\n",
+    );
+
+    // Non-existent member of curated package is rejected with HYB-E1001:
+    rejects_with_e1001("fn main() {\n    fmt.no_such_function(1)\n}\n");
+
+    // Uncurated Go stdlib root is rejected with HYB-E1001:
+    rejects_with_e1001("fn main() {\n    _ = math.sqrt(2.0)\n}\n");
+
+    // Explicit import outside curated allowlist is rejected with HYB-E1001 naming the allowlist:
+    let r_math = check("import \"math\"\nfn main() {\n    _ = math.sqrt(2.0)\n}\n");
+    assert_eq!(r_math.verdict, Verdict::Reject);
+    assert!(
+        r_math.diagnostics.iter().any(|d| d.code == "HYB-E1001" && d.message.contains("curated allowlist")),
+        "expected HYB-E1001 naming curated allowlist for import \"math\", got: {:?}",
+        r_math.diagnostics
+    );
+
+    let r_third_party = check("import \"github.com/acme/widgets\"\nfn main() {\n    _ = widgets.count()\n}\n");
+    assert_eq!(r_third_party.verdict, Verdict::Reject);
+    assert!(
+        r_third_party.diagnostics.iter().any(|d| d.code == "HYB-E1001" && d.message.contains("curated allowlist")),
+        "expected HYB-E1001 naming curated allowlist for third-party import, got: {:?}",
+        r_third_party.diagnostics
+    );
+}
+

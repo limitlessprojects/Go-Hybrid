@@ -170,16 +170,30 @@ impl<'a> Checker<'a> {
 
     fn check_place_builtin_args(&mut self, place: &Place) {
         match &place.kind {
-            PlaceKind::Index { index, .. } => self.check_expr_builtin_args(index),
-            PlaceKind::Field { .. } | PlaceKind::Ident(_) | PlaceKind::AddrOf { .. } => {}
+            PlaceKind::Index { base, index } => {
+                self.check_place_builtin_args(base);
+                self.check_expr_builtin_args(index);
+            }
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                self.check_place_builtin_args(base);
+            }
+            PlaceKind::Ident(_) => {}
         }
     }
 
-    fn check_expr_builtin_args(&mut self, expr: &Expr) {
+    pub(crate) fn check_expr_builtin_args(&mut self, expr: &Expr) {
         match expr {
             Expr::Call { callee, args, span } => {
                 self.check_expr_builtin_args(callee);
-                for a in args {
+                let is_type_arg_builtin = matches!(
+                    unwrap_parens(callee),
+                    Expr::Ident { name, .. }
+                        if (name == "make" || name == "new") && !self.fns.contains_key(name.as_str())
+                );
+                for (i, a) in args.iter().enumerate() {
+                    if is_type_arg_builtin && i == 0 {
+                        continue;
+                    }
                     self.check_expr_builtin_args(&a.value);
                 }
                 if let Expr::Ident { name, .. } = unwrap_parens(callee) {
@@ -210,7 +224,16 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::Field { base, .. } => self.check_expr_builtin_args(base),
-            Expr::StructLit { fields, .. } => {
+            Expr::StructLit { ty, fields, span } => {
+                if let Some(t @ hy_syntax::TypeExpr::Chan { .. }) = ty {
+                    let ty_str = t.render();
+                    self.emit_builtin(
+                        *span,
+                        format!(
+                            "channel type `{ty_str}` is not a value expression — construct a channel with `make({ty_str})` (HYB-E2005)"
+                        ),
+                    );
+                }
                 for f in fields {
                     self.check_expr_builtin_args(&f.value);
                 }
@@ -233,12 +256,20 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            // FnLit bodies are the A5 perimeter — not walked here.
-            Expr::FnLit { .. } | Expr::Ident { .. } | Expr::Lit { .. } => {}
+            Expr::FnLit { body, .. } => {
+                // Closure bodies are not flattened into Pass B — deep-walk.
+                for stmt in &body.stmts {
+                    self.check_stmt_builtin_args_inner(stmt, /*deep=*/ true);
+                }
+            }
+            Expr::Ident { .. } | Expr::Lit { .. } => {}
         }
     }
 
     fn check_builtin_call(&mut self, name: &str, args: &[hy_syntax::CallArg], span: Span) {
+        if self.fns.contains_key(name) {
+            return;
+        }
         match name {
             "make" => self.check_make_args(args, span),
             "len" => self.check_len_cap_args("len", args, span, /*cap=*/ false),
@@ -251,6 +282,53 @@ impl<'a> Checker<'a> {
                             "`delete` requires exactly 2 arguments (map, key), found {} (HYB-E2005)",
                             args.len()
                         ),
+                    );
+                }
+            }
+            "copy" => {
+                if args.len() != 2 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`copy` requires exactly 2 slice arguments (dst, src), found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                    return;
+                }
+                if is_value_literal(&args[0].value)
+                    || is_numeric_or_bool_or_char_literal(&args[1].value)
+                    || matches!(
+                        unwrap_parens(&args[1].value),
+                        Expr::Lit {
+                            kind: LitKind::Nil,
+                            ..
+                        }
+                    )
+                {
+                    self.emit_builtin(
+                        span,
+                        "`copy(dst, src)` requires a destination slice and a source slice or string (HYB-E2005)"
+                            .to_string(),
+                    );
+                }
+            }
+            "clear" => {
+                if args.len() != 1 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`clear` requires exactly 1 map or slice argument, found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                    return;
+                }
+                if is_value_literal(&args[0].value) {
+                    self.emit_builtin(
+                        span,
+                        "`clear` requires a map or slice value — not a scalar or string literal (HYB-E2005)"
+                            .to_string(),
                     );
                 }
             }
@@ -291,44 +369,190 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
+            "panic" => {
+                if args.len() != 1 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`panic` requires exactly 1 argument, found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                }
+            }
+            "recover" => {
+                if !args.is_empty() {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`recover` takes no arguments, found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                }
+            }
+            "min" => {
+                if args.is_empty() {
+                    self.emit_builtin(
+                        span,
+                        "`min` requires at least 1 argument, found 0 (HYB-E2005)".to_string(),
+                    );
+                }
+            }
+            "max" => {
+                if args.is_empty() {
+                    self.emit_builtin(
+                        span,
+                        "`max` requires at least 1 argument, found 0 (HYB-E2005)".to_string(),
+                    );
+                }
+            }
+            "real" => {
+                if args.len() != 1 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`real` requires exactly 1 complex argument, found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                }
+            }
+            "imag" => {
+                if args.len() != 1 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`imag` requires exactly 1 complex argument, found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                }
+            }
+            "complex" => {
+                if args.len() != 2 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`complex` requires exactly 2 arguments (real, imag), found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                }
+            }
             _ => {}
         }
     }
 
+    fn classify_make_target(&self, e: &Expr) -> MakeTargetKind {
+        match unwrap_parens(e) {
+            Expr::SliceLit {
+                elem: Some(_),
+                items,
+                ..
+            } if items.is_empty() => MakeTargetKind::Slice,
+            Expr::MapLit { entries, .. } if entries.is_empty() => MakeTargetKind::Map,
+            Expr::StructLit {
+                ty: Some(hy_syntax::TypeExpr::Chan { .. }),
+                fields,
+                ..
+            } if fields.is_empty() => MakeTargetKind::Chan,
+            Expr::Ident { name, .. } => {
+                let base = Self::base_named_type_str(name);
+                if let Some(ty) = self.type_aliases.get(base) {
+                    match self.resolve_type_alias(ty) {
+                        hy_syntax::TypeExpr::Slice { .. } => MakeTargetKind::Slice,
+                        hy_syntax::TypeExpr::Map { .. } => MakeTargetKind::Map,
+                        hy_syntax::TypeExpr::Chan { .. } => MakeTargetKind::Chan,
+                        _ => MakeTargetKind::Invalid,
+                    }
+                } else {
+                    MakeTargetKind::Invalid
+                }
+            }
+            _ => MakeTargetKind::Invalid,
+        }
+    }
+
     fn check_make_args(&mut self, args: &[hy_syntax::CallArg], span: Span) {
-        // `make([]T, len, cap)` — the 3-argument form — is valid Go for slices
-        // only (issue #353). The parser encodes a type in expression position
-        // as a literal node (`[]T` → SliceLit with no items); every other
-        // type spelling keeps the 1–2 argument limit.
-        let slice_form = args.len() == 3
-            && matches!(
-                args.first().map(|a| unwrap_parens(&a.value)),
-                Some(Expr::SliceLit { items, .. }) if items.is_empty()
-            );
-        let max_args = if slice_form { 3 } else { 2 };
-        if args.is_empty() || args.len() > max_args {
+        if args.is_empty() {
             self.emit_builtin(
                 span,
-                format!(
-                    "`make` requires 1 or 2 arguments (type[, size]) — or 3 for a slice (type, len, cap) — found {} (HYB-E2005)",
-                    args.len()
-                ),
+                "`make` requires 1 or 2 arguments (type[, size]) — or 3 for a slice (type, len, cap) — found 0 (HYB-E2005)"
+                    .to_string(),
             );
             return;
         }
-        for arg in args.iter().skip(1) {
-            match classify_make_size(&arg.value) {
-                MakeSize::Ok | MakeSize::NonLiteral => {}
-                MakeSize::Negative => self.emit_builtin(
-                    span,
-                    "`make` size must not be a negative constant (HYB-E2005)".to_string(),
-                ),
-                MakeSize::BadLiteral(kind) => self.emit_builtin(
+        let target = self.classify_make_target(&args[0].value);
+        match target {
+            MakeTargetKind::Invalid => {
+                self.emit_builtin(
                     span,
                     format!(
-                        "`make` size must be a non-negative integer constant or a variable — not a {kind} literal (HYB-E2005)"
+                        "`make` first argument `{}` must be a slice, map, or channel type (HYB-E2005)",
+                        args[0].value.render()
                     ),
-                ),
+                );
+                return;
+            }
+            MakeTargetKind::Slice => {
+                if args.len() < 2 || args.len() > 3 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`make` on a slice type requires 2 or 3 arguments (type, len[, cap]), found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                    return;
+                }
+            }
+            MakeTargetKind::Map | MakeTargetKind::Chan => {
+                if args.len() > 2 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`make` requires 1 or 2 arguments (type[, size]) — or 3 for a slice (type, len, cap) — found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                    return;
+                }
+            }
+        }
+        let mut evaluated_sizes = Vec::new();
+        for arg in args.iter().skip(1) {
+            match classify_make_size(&arg.value) {
+                MakeSize::Ok(v) => evaluated_sizes.push(Some(v)),
+                MakeSize::NonLiteral => evaluated_sizes.push(None),
+                MakeSize::Negative => {
+                    self.emit_builtin(
+                        span,
+                        "`make` size must not be a negative constant (HYB-E2005)".to_string(),
+                    );
+                    evaluated_sizes.push(None);
+                }
+                MakeSize::BadLiteral(kind) => {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`make` size must be a non-negative integer constant or a variable — not a {kind} literal (HYB-E2005)"
+                        ),
+                    );
+                    evaluated_sizes.push(None);
+                }
+            }
+        }
+        if matches!(target, MakeTargetKind::Slice) && evaluated_sizes.len() == 2 {
+            if let (Some(len_val), Some(cap_val)) = (evaluated_sizes[0], evaluated_sizes[1]) {
+                if len_val > cap_val {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`make` length ({len_val}) must not be larger than capacity ({cap_val}) (HYB-E2005)"
+                        ),
+                    );
+                }
             }
         }
     }
@@ -376,21 +600,28 @@ impl<'a> Checker<'a> {
     }
 }
 
+enum MakeTargetKind {
+    Slice,
+    Map,
+    Chan,
+    Invalid,
+}
+
 enum MakeSize {
-    Ok,
+    Ok(i128),
     NonLiteral,
     Negative,
     BadLiteral(&'static str),
 }
 
 fn classify_make_size(e: &Expr) -> MakeSize {
-    let e = unwrap_parens(e);
-    match e {
+    let bare = unwrap_parens(e);
+    match bare {
         Expr::Lit { kind, .. } => match kind {
-            LitKind::Int(s) => match s.parse::<i128>() {
-                Ok(n) if n >= 0 => MakeSize::Ok,
-                Ok(_) => MakeSize::Negative,
-                Err(_) => MakeSize::BadLiteral("integer"),
+            LitKind::Int(_) => match crate::const_overflow::const_int_value(bare) {
+                Some(n) if n >= 0 => MakeSize::Ok(n),
+                Some(_) => MakeSize::Negative,
+                None => MakeSize::BadLiteral("integer"),
             },
             LitKind::Float(_) => MakeSize::BadLiteral("float"),
             LitKind::Str(_) | LitKind::RawStr(_) => MakeSize::BadLiteral("string"),
@@ -402,21 +633,21 @@ fn classify_make_size(e: &Expr) -> MakeSize {
             op: UnOp::Neg,
             operand,
             ..
-        } => {
-            // `-1`, `-0` — a negated int literal is a negative constant (or zero).
-            match unwrap_parens(operand) {
-                Expr::Lit {
-                    kind: LitKind::Int(_),
-                    ..
-                } => MakeSize::Negative,
-                Expr::Lit {
-                    kind: LitKind::Float(_),
-                    ..
-                } => MakeSize::BadLiteral("float"),
-                _ => MakeSize::NonLiteral,
+        } if matches!(
+            unwrap_parens(operand),
+            Expr::Lit {
+                kind: LitKind::Float(_),
+                ..
             }
+        ) =>
+        {
+            MakeSize::BadLiteral("float")
         }
-        _ => MakeSize::NonLiteral,
+        _ => match crate::const_overflow::const_int_value(bare) {
+            Some(n) if n >= 0 => MakeSize::Ok(n),
+            Some(_) => MakeSize::Negative,
+            None => MakeSize::NonLiteral,
+        },
     }
 }
 

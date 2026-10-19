@@ -1,7 +1,7 @@
 //! The Hybrid AST — the cross-component contract between `hy-syntax`
 //! (produces), `hy-check` (consumes), and the MVP-0 emitter (consumes).
 //!
-//! Scope: the surface exercised by tests/checker-corpus/*.hy (63 programs),
+//! Scope: the surface exercised by tests/checker-corpus/*.hy (113 programs),
 //! examples/ (ten target programs), and spikes/spike6-ownership/work/*.hy
 //! (ten programs). Anything outside that surface is allowed to be
 //! unimplemented by the parser — it must produce a clean `unsupported`
@@ -759,6 +759,7 @@ impl Expr {
             Expr::Ident { name, .. } => Some(name),
             Expr::Field { base, .. } => base.root_ident(),
             Expr::Index { base, .. } => base.root_ident(),
+            Expr::Slice { base, .. } => base.root_ident(),
             Expr::AddrOf { operand, .. } => operand.root_ident(),
             Expr::Unary {
                 op: UnOp::Addr,
@@ -769,6 +770,31 @@ impl Expr {
             Expr::Try { operand, .. } => operand.root_ident(),
             _ => None,
         }
+    }
+
+    /// If this `SliceLit` represents a typed array composite literal
+    /// (`[N]T{…}` or `[...]T{…}`), returns `(len, inner_elem, array_ty)`.
+    /// Distinguished from a slice-of-arrays literal `[][N]T{…}` by the
+    /// array `TypeExpr` sharing the literal's opening `[` source position.
+    pub fn as_array_lit(&self) -> Option<(Option<&Expr>, &TypeExpr, &TypeExpr)> {
+        if let Expr::SliceLit {
+            elem: Some(t),
+            span,
+            ..
+        } = self
+        {
+            if let TypeExpr::Array {
+                len,
+                elem,
+                span: ty_span,
+            } = t.as_ref()
+            {
+                if ty_span.start == span.start {
+                    return Some((len.as_deref(), elem.as_ref(), t.as_ref()));
+                }
+            }
+        }
+        None
     }
 
     /// Render for diagnostics (short, lossy, never panics).
@@ -799,7 +825,13 @@ impl Expr {
                 Some(t) => format!("{}{{...}}", t.render()),
                 None => "{...}".to_string(),
             },
-            Expr::SliceLit { .. } => "[...]".to_string(),
+            Expr::SliceLit { .. } => {
+                if let Some((_, _, arr_ty)) = self.as_array_lit() {
+                    format!("{}{{...}}", arr_ty.render())
+                } else {
+                    "[...]".to_string()
+                }
+            }
             Expr::MapLit { key, value, .. } => {
                 format!("map[{}]{}{{...}}", key.render(), value.render())
             }

@@ -1,8 +1,8 @@
 // ============================================================================
-// deep-composite-move-fresh-control ? Checker corpus (bounty track: "grow the adversarial corpus").
+// deep-composite-move-fresh-control — Checker corpus (bounty track: "grow the adversarial corpus").
 //
 // PURPOSE: the ACCEPT control for deep-composite-move-shared-at-spawn. Structurally
-//   identical ? same slice, same struct, same `move`, same channel ? with ONE change:
+//   identical — same slice, same struct, same `move`, same channel — with ONE change:
 //   the innermost map is a fresh literal, so nothing outside `xs` names it. A checker
 //   that rejected this would ban nested composite literals from every boundary, which
 //   would make the deep rule unusable.
@@ -11,15 +11,15 @@
 //   fresh literal a binding of its own with no link to any outer name.
 //
 // ---- Tier-0 rule set applied ----
-//   Layer 1 (Go-side GC): `xs` ([]holder ? moved); the innermost map has no other
+//   Layer 1 (Go-side GC): `xs` ([]holder — moved); the innermost map has no other
 //     binding.
 //   Layer 2 (Rust-side owned): none.
 // ---- Sendability / check sites ----
-//   [S1] `task worker(move xs, done)` ? an owned move of a self-contained value.
+//   [S1] `task worker(move xs, done)` — an owned move of a self-contained value.
 // ---- Expected verdict (hand-derived from VERDICTS.md rule key + SPEC O4/O5
 //      BEFORE running the checker) ----
 // EXPECTED-VERDICT: ACCEPT
-//   ACCEPT ? 0 annotations, 0 managed. Pins that the REJECT above tracks the
+//   ACCEPT — 0 annotations, 0 managed. Pins that the REJECT above tracks the
 //   embedded ALIAS at depth 3, not the nesting itself.
 //
 // ---- Annotations / managed ----

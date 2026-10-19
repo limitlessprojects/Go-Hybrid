@@ -3,7 +3,9 @@
 These exercise harness decisions, not Hybrid compiler correctness.
 Run: python3 -m unittest discover -s tools -p test_differential_loop.py -v
 """
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import pathlib
@@ -62,6 +64,28 @@ class RuntimeHazardTests(unittest.TestCase):
     def test_registered_fatal_before_long_stack_is_allowed(self):
         self.assert_result(self.run_case(
             stderr="fatal error: concurrent map writes\n" + "stack frame\n" * 100), 0)
+
+    def test_swiss_map_attributed_corruption_fatal_is_allowed(self):
+        # Go >= 1.26 swiss-map runtime self-attributes the torn write:
+        # "small map with no empty slot (concurrent map writes?)".
+        self.assert_result(self.run_case(
+            stderr="fatal error: small map with no empty slot (concurrent map writes?)\n"), 0)
+
+    def test_fault_address_fatal_is_concurrent_map_class(self):
+        # The torn write can corrupt a slot pointer; the runtime then raises
+        # an unattributed fault-address fatal from the same race.
+        self.assert_result(self.run_case(
+            stderr="fatal error: unexpected fault address 0x0\n"
+                   "[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x1]\n"), 0)
+
+    def test_fault_address_fatal_is_not_other_hazards(self):
+        self.assert_result(self.run_case(
+            stderr="fatal error: unexpected fault address 0x0\n",
+            hazard="all goroutines are asleep - deadlock!"), 1)
+
+    def test_panic_mentioning_hazard_phrase_is_not_evidence(self):
+        self.assert_result(self.run_case(
+            stderr="panic: unexpected nil pointer mentioning concurrent map writes\n"), 1)
 
     def test_unrelated_panic_fails(self):
         self.assert_result(self.run_case(stderr="panic: runtime error: index out of range\n"), 1)
@@ -349,3 +373,77 @@ class CheckerUtf8Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TimeoutCorpusTests(unittest.TestCase):
+    """pr-468: a timed-out checker/build/program is one failed case; the
+    corpus continues and the aggregate report still prints (#463 class)."""
+
+    def run_with_timeout(self, timeout_stage):
+        """The first case times out at `timeout_stage`; the second must still run."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            first_verdict = "REJECT A1" if timeout_stage == "checker" else "ACCEPT"
+            (root / "01-timeout.hy").write_text(
+                f"// EXPECTED-VERDICT: {first_verdict}\nfn main() {{}}\n",
+                encoding="utf-8")
+            (root / "02-ok.hy").write_text(
+                "// EXPECTED-VERDICT: ACCEPT\nfn main() {}\n", encoding="utf-8")
+            first_run_pending = False
+
+            def simulate_process(command, **kwargs):
+                nonlocal first_run_pending
+                if len(command) > 1 and command[1] == "check":
+                    raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+                if len(command) > 1 and command[1] == "build":
+                    is_first = pathlib.Path(command[2]).name == "01-timeout.hy"
+                    if is_first and timeout_stage == "build":
+                        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+                    (pathlib.Path(kwargs["cwd"]) / "a.out").touch()
+                    first_run_pending = is_first
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                if first_run_pending and timeout_stage == "run":
+                    first_run_pending = False
+                    raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            output = io.StringIO()
+            with patch.object(sys, "argv", [
+                    str(HARNESS), "--bin", sys.executable, "--corpus", str(root)]), \
+                 patch.object(HARNESS_MOD.subprocess, "run", side_effect=simulate_process), \
+                 contextlib.redirect_stdout(output):
+                status = HARNESS_MOD.main()
+            return status, output.getvalue()
+
+    def assert_timeout_is_reported_and_corpus_continues(self, stage, seconds):
+        status, output = self.run_with_timeout(stage)
+        self.assertEqual(status, 1, output)
+        self.assertIn("FAIL  01-timeout.hy", output)
+        self.assertIn(f"{stage} timed out after {seconds}s", output)
+        self.assertIn("PASS  02-ok.hy", output)
+        self.assertIn("differential: 1 disagreement(s)", output)
+        self.assertNotIn("FULL AGREEMENT", output)
+        self.assertNotIn("Traceback", output)
+
+    def test_checker_timeout_reports_failure_and_continues(self):
+        # main's checker leg reports the fault through the #492 handler;
+        # the message carries the same "timed out after" wording.
+        status, output = self.run_with_timeout("checker")
+        self.assertEqual(status, 1, output)
+        self.assertIn("FAIL  01-timeout.hy", output)
+        self.assertIn("checker could not be run", output)
+        self.assertIn("timed out after 60 seconds", output)
+        self.assertIn("PASS  02-ok.hy", output)
+        self.assertIn("differential: 1 disagreement(s)", output)
+        self.assertNotIn("FULL AGREEMENT", output)
+
+    def test_build_timeout_reports_failure_and_continues(self):
+        self.assert_timeout_is_reported_and_corpus_continues("build", 300)
+
+    def test_program_timeout_reports_failure_and_continues(self):
+        self.assert_timeout_is_reported_and_corpus_continues("run", 60)
+
+    def test_successful_corpus_still_agrees(self):
+        status, output = self.run_with_timeout(None)
+        self.assertEqual(status, 0, output)
+        self.assertIn("differential: FULL AGREEMENT", output)

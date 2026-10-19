@@ -56,6 +56,15 @@ class FuzzProcessTests(unittest.TestCase):
                     self.assertTrue(bad.startswith("ICE:"))
                     self.assertFalse(accepted)
 
+    def test_oserror_during_check_fails(self):
+        with tempfile.TemporaryDirectory() as workdir, patch.object(
+            hyfuzz.subprocess, "run",
+            side_effect=OSError("exec format error"),
+        ):
+            bad, accepted = hyfuzz.check_one("hyb", "", workdir, 1)
+            self.assertTrue(bad.startswith("EXEC_ERROR:"))
+            self.assertFalse(accepted)
+
     def test_each_case_is_run_once_and_counted_from_that_run(self):
         with tempfile.TemporaryDirectory() as corpus:
             Path(corpus, "case.hy").write_text("fn main() {}", encoding="utf-8")
@@ -187,6 +196,70 @@ class NestGenerationTests(unittest.TestCase):
         self.assertEqual(source.count('else {'), 12)
         self.assertEqual(source.count('fmt.println("deep")'), 1)
         self.assertLess(len(source), 4096)
+class FuzzInputValidationTests(unittest.TestCase):
+    def test_missing_hyb_binary_fails_closed(self):
+        with tempfile.TemporaryDirectory() as corpus:
+            Path(corpus, "case.hy").write_text("fn main() {}", encoding="utf-8")
+            with patch.object(sys, "argv", [
+                "hyfuzz.py", "--hyb", "/nonexistent/path/to/hyb", "--corpus", corpus, "--cases", "1",
+            ]), self.assertRaises(SystemExit) as failure:
+                hyfuzz.main()
+            self.assertTrue(bool(failure.exception.code))
+
+    def test_directory_hyb_fails_closed(self):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as corpus:
+            Path(corpus, "case.hy").write_text("fn main() {}", encoding="utf-8")
+            with patch.object(sys, "argv", [
+                "hyfuzz.py", "--hyb", d, "--corpus", corpus, "--cases", "1",
+            ]), self.assertRaises(SystemExit) as failure:
+                hyfuzz.main()
+            self.assertTrue(bool(failure.exception.code))
+
+    def test_missing_corpus_directory_fails_closed(self):
+        with patch.object(sys, "argv", [
+            "hyfuzz.py", "--hyb", sys.executable, "--corpus", "/nonexistent/corpus", "--cases", "1",
+        ]), self.assertRaises(SystemExit) as failure:
+            hyfuzz.main()
+        self.assertTrue(bool(failure.exception.code))
+
+    def test_file_corpus_fails_closed(self):
+        with tempfile.NamedTemporaryFile() as tf:
+            with patch.object(sys, "argv", [
+                "hyfuzz.py", "--hyb", sys.executable, "--corpus", tf.name, "--cases", "1",
+            ]), self.assertRaises(SystemExit) as failure:
+                hyfuzz.main()
+            self.assertTrue(bool(failure.exception.code))
+
+    def test_non_positive_cases_fails_closed(self):
+        with tempfile.TemporaryDirectory() as corpus:
+            Path(corpus, "case.hy").write_text("fn main() {}", encoding="utf-8")
+            for cases in ("0", "-5"):
+                with self.subTest(cases=cases):
+                    with patch.object(sys, "argv", [
+                        "hyfuzz.py", "--hyb", sys.executable, "--corpus", corpus, "--cases", cases,
+                    ]), self.assertRaises(SystemExit) as failure:
+                        hyfuzz.main()
+                    self.assertTrue(bool(failure.exception.code))
+
+    def test_non_positive_timeout_fails_closed(self):
+        with tempfile.TemporaryDirectory() as corpus:
+            Path(corpus, "case.hy").write_text("fn main() {}", encoding="utf-8")
+            for timeout in ("0", "-1.0", "nan", "inf", "-inf"):
+                with self.subTest(timeout=timeout):
+                    with patch.object(sys, "argv", [
+                        "hyfuzz.py", "--hyb", sys.executable, "--corpus", corpus, "--cases", "1", "--timeout", timeout,
+                    ]), self.assertRaises(SystemExit) as failure:
+                        hyfuzz.main()
+                    self.assertTrue(bool(failure.exception.code))
+
+    def test_finite_positive_timeout_accepted(self):
+        with tempfile.TemporaryDirectory() as corpus:
+            Path(corpus, "case.hy").write_text("fn main() {}", encoding="utf-8")
+            with patch.object(sys, "argv", [
+                "hyfuzz.py", "--hyb", sys.executable, "--corpus", corpus, "--cases", "1", "--timeout", "2.5",
+            ]), patch.object(hyfuzz, "check_one", return_value=(None, True)):
+                # Returns cleanly without exiting with error
+                hyfuzz.main()
 
 
 if __name__ == "__main__":

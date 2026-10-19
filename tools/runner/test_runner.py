@@ -88,6 +88,116 @@ class RunnerFailureTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual([(s['name'], s['exit']) for s in summary['steps']], [('prior', 0), ('required', 7)])
 
+    def test_empty_job_writes_summary_and_fails(self):
+        code, summary = self.run_job([], [])
+        self.assertEqual(code, 1)
+        self.assertFalse(summary['ok'])
+        self.assertEqual(summary['steps'][0]['name'], 'job-spec')
+        self.assertEqual(summary['steps'][0]['exit'], 1)
+
+    def test_missing_job_file_writes_summary_and_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            results = root / 'results'
+            argv = ['runner.py', str(root / 'missing.json'), '--results-dir', str(results),
+                    '--repo-dir', str(root / 'no-checkout')]
+            with patch.object(sys, 'argv', argv), patch.dict(os.environ), \
+                    patch.object(runner, 'env_report', return_value={'test': True}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as stopped:
+                    runner.main()
+            self.assertEqual(stopped.exception.code, 1)
+            summary = json.loads((results / 'summary.json').read_text(encoding='utf-8'))
+            self.assertFalse(summary['ok'])
+            self.assertEqual(summary['steps'][0]['name'], 'job-load')
+            self.assertEqual(summary['steps'][0]['exit'], 1)
+
+    def test_malformed_json_job_writes_summary_and_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            job_path = root / 'job.json'
+            job_path.write_text('{invalid-json', encoding='utf-8')
+            results = root / 'results'
+            argv = ['runner.py', str(job_path), '--results-dir', str(results),
+                    '--repo-dir', str(root / 'no-checkout')]
+            with patch.object(sys, 'argv', argv), patch.dict(os.environ), \
+                    patch.object(runner, 'env_report', return_value={'test': True}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as stopped:
+                    runner.main()
+            self.assertEqual(stopped.exception.code, 1)
+            summary = json.loads((results / 'summary.json').read_text(encoding='utf-8'))
+            self.assertFalse(summary['ok'])
+            self.assertEqual(summary['steps'][0]['name'], 'job-load')
+            self.assertEqual(summary['steps'][0]['exit'], 1)
+
+    def test_non_dict_job_writes_summary_and_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            job_path = root / 'job.json'
+            job_path.write_text('[1, 2, 3]', encoding='utf-8')
+            results = root / 'results'
+            argv = ['runner.py', str(job_path), '--results-dir', str(results),
+                    '--repo-dir', str(root / 'no-checkout')]
+            with patch.object(sys, 'argv', argv), patch.dict(os.environ), \
+                    patch.object(runner, 'env_report', return_value={'test': True}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as stopped:
+                    runner.main()
+            self.assertEqual(stopped.exception.code, 1)
+            summary = json.loads((results / 'summary.json').read_text(encoding='utf-8'))
+            self.assertFalse(summary['ok'])
+            self.assertEqual(summary['steps'][0]['name'], 'job-spec')
+            self.assertEqual(summary['steps'][0]['exit'], 1)
+
+    def test_step_missing_run_command_fails(self):
+        code, summary = self.run_job([], [{'name': 'missing-run'}])
+        self.assertEqual(code, 1)
+        self.assertFalse(summary['ok'])
+        self.assertEqual(summary['steps'][0]['name'], 'missing-run')
+        self.assertEqual(summary['steps'][0]['exit'], 1)
+
+    def test_invalid_run_types_write_failed_summary(self):
+        for command in (42, {'command': 'true'}, [42]):
+            with self.subTest(command=command):
+                code, summary = self.run_job([], [{'name': 'invalid-run', 'run': command}])
+                self.assertEqual(code, 1)
+                self.assertFalse(summary['ok'])
+                self.assertEqual([(s['name'], s['exit']) for s in summary['steps']],
+                                 [('invalid-run', 125)])
+                self.assertIn('runner error', summary['steps'][0]['out_tail'])
+                self.assertIsNotNone(summary['finished'])
+
+    def test_invalid_timeout_types_write_failed_summary(self):
+        for timeout in ('invalid', {'seconds': 1}):
+            with self.subTest(timeout=timeout):
+                code, summary = self.run_job([], [step('invalid-timeout', 'pass', timeout=timeout)])
+                self.assertEqual(code, 1)
+                self.assertFalse(summary['ok'])
+                self.assertEqual([(s['name'], s['exit']) for s in summary['steps']],
+                                 [('invalid-timeout', 125)])
+                self.assertIn('runner error', summary['steps'][0]['out_tail'])
+                self.assertIsNotNone(summary['finished'])
+
+    def test_invalid_commands_type_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            job_path = root / 'job.json'
+            job_path.write_text(json.dumps({'job': 'test', 'commands': 'not-a-list'}), encoding='utf-8')
+            results = root / 'results'
+            argv = ['runner.py', str(job_path), '--results-dir', str(results),
+                    '--repo-dir', str(root / 'no-checkout')]
+            with patch.object(sys, 'argv', argv), patch.dict(os.environ), \
+                    patch.object(runner, 'env_report', return_value={'test': True}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as stopped:
+                    runner.main()
+            self.assertEqual(stopped.exception.code, 1)
+            summary = json.loads((results / 'summary.json').read_text(encoding='utf-8'))
+            self.assertFalse(summary['ok'])
+            self.assertEqual(summary['steps'][0]['name'], 'job-spec')
+            self.assertEqual(summary['steps'][0]['exit'], 1)
+
     def test_successful_command_cannot_hide_missing_result(self):
         code, summary = self.run_job([], [step('noop', 'pass')],
                                      ['results/measurement.json', 'results/summary.json'])

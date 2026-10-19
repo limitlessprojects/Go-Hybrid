@@ -793,3 +793,187 @@ reproduction line above is the merged tree.
   emitted Go header would fail `imported and not used`.
 - Scope note: LX4 keeps Go lexical scoping — a mention of a shadowed name
   does not count as package use. Case 47 pins the plain unused form.
+
+## Additive corpus registration — 2026-10-18: unproven atomic pointer
+
+- Program: `atomic-pointer-fail-closed-reject.hy` (PR #267, author 1932819331hy-debug; landed via maintainer integration — the checker behavior + unit pin already on main via bc99907, this registers the harness-level corpus pin). Descriptive naming avoids collisions with numbered additions.
+- Verdict: REJECT FC, exact diagnostic HYB-E3005. Pins GUARANTEES.md row 11 at a task-spawn check site; scalar-atomic acceptance remains covered by corpus 17.
+- This registers existing fail-closed behavior; no checker rule or existing verdict changes.
+- Verified on the refreshed tree: 79/79 verdict agreement, tripwire not fired; ACCEPT 21 · ACCEPT-MANAGED 2 · REJECT 56.
+
+
+## Additive corpus registration - 2026-10-18: untyped nil declarations
+
+- Program: `untyped-nil-decl-reject.hy` (this change: new HYB-E4003, the N1 untyped leg).
+- Verdict: REJECT N1, exact diagnostic HYB-E4003. `var x = nil` / `x := nil` / `let x = nil` (no ascription) passed the checker with 0 diagnostics and emitted `var x = nil`, which Go rejects outright (`use of untyped nil in variable declaration`) - accepted-but-unbuildable (GUARANTEES row 13, BUILDABLE). nil has exactly two homes (N1): `error` and the foreign-Go perimeter, and both must be visible in a DECLARED type; an untyped nil can never name either.
+- Scope note: distinct from corpus 28 (nils nested in composite literals, which carry their own field/slot type context) and from the ascribed direct-nil E4001 sites (`var s []int = nil` - a declared type exists). Local `const c = nil` is the E6003 constant-expression guard's locus (issue #640; Go: "nil is not constant"), not E4003.
+- Unit pins: `hy-check/tests/untyped_nil_decl.rs` (13 tests: all four spellings, closure/loop/match-arm bodies, blank identifier; controls that stay accepted: ascribed error-nil, bare nil as call argument/compare, zero-value declarations).
+
+## Additive corpus registration — 2026-10-18: N5 zero maps
+
+- Program: `n5-zero-map-first-write.hy` (issue #645), registered with its
+  fix. Descriptive naming, as above.
+- Verdict: ACCEPT. Pins N5 / T8: first writes to a `var` zero map, a map
+  field of a zero-valued struct, a partially keyed literal, a nested
+  struct, an aliased map type, and `new(T)`. Before the fix it was accepted
+  with 0 diagnostics, built, and panicked with `assignment to entry in nil
+  map`.
+- N5 is tagged open D11 (keep vs Go-exact); this registers the spec as
+  written, and a D11 reversal amends this verdict here.
+- The header carries its single stdout line as a `// EXPECTED-OUTPUT:`
+  marker (the pr-441 single-line form); the stdout is diffed byte-exact by
+  the differential loop and by
+  `compiler/crates/hyb/tests/spec_n5_zero_maps.rs`.
+- No checker rule or existing verdict changes. Verified on the fixed tree:
+  81/81 verdict agreement, tripwire not fired; differential FULL 24+57;
+  ACCEPT 22 · ACCEPT-MANAGED 2 · REJECT 57.
+
+## Additive corpus registration — 2026-10-18: negative controls for the accept-side oracle wave (PR #598)
+
+Seven `control-*.hy` fixtures (isHeSatoshi, PR #598): programs that are
+ACCEPT today and **must stay accepted** while the Go-toolchain oracle wave
+(#577; 38% accept-side residual on generated programs) lands its range,
+bounds and shape fixes. Every check added to fix an accepted-but-unbuildable
+class can over-reject; a corpus that only grows the REJECT side cannot see
+that. Each control builds and runs under `go build` before registration
+(GUARANTEES.md Row 13, BUILDABLE); run-time hazards are fenced so the
+program still exits 0 (Row 16 makes no claim about panics).
+
+| program | verdict | rule | diagnostic | rationale |
+|---|---|---|---|---|
+| control-int8-boundaries | ACCEPT | — | — | the exact int8 edges `127` and `-128` in one file — an off-by-one in any new range check rejects a value that is legal by definition |
+| control-uint8-max | ACCEPT | — | — | `var n uint8 = 255`: the unsigned edge; a signed-only range check must not reject the legal maximum |
+| control-const-expr-within-range | ACCEPT | — | — | `var n int8 = 100 + 27`: a constant expression whose folded result fits — the check must test the folded value, not reject the arithmetic |
+| control-composite-literal-in-range | ACCEPT | — | — | `user{age: 127}` / `[]int8{127}`: the in-range twins of the #519 composite-literal overflow, pinning the accept half of that fix |
+| control-large-array-length | ACCEPT | — | — | `var a [300]int8`: an array LENGTH is a count, not a value of the element type; a fix must not bound lengths by the element range |
+| control-negate-variable-wraps | ACCEPT | — | — | `var m int8 = -n` where `n = -128`: Go folds nothing here; a checker must not reject a run-time wrap it never evaluates |
+| control-slice-index-past-length | ACCEPT | — | — | `xs[300]` on a **slice** (access guarded so the program still runs): a slice's length is not part of its type, so the fixed-array compile-time rule must not be written as a blanket index check |
+
+Reproduction (checker built from the merged tree, pinned toolchain):
+`python3 tools/corpus_harness.py` reports **88/88 verdict agreement, tripwire
+not fired**.
+
+## Additive corpus registration — 2026-10-18: composite literal wrapping a shared map at a channel send (#64)
+
+Corpus 45 pins O4.6 at a spawn, and 54 pins the field-store form of the same
+rule, but the SPEC's own example of the claim is a *send* (`jobs <- job{data:
+shared_map}` → HYB-E3002) and no file exercised it. A checker that walks
+composites at a spawn while classifying the send operand by shape alone would
+pass every case in this corpus and still accept this program.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 64 | 64-send-composite-literal-embeds-shared-map | REJECT | A1c | not asserted | `jobs <- []map[string]int{shared}`: a fresh slice literal whose only reference-typed element is a live mutable map still named in main — O4.6 deep sendability, the send half of 45 |
+
+(Registered as 64: PR #451 authored it as 56, but 56-63 were taken by the
+defer/shadowing waves before it landed. Suifeng-2077.)
+
+## Additive corpus registration — 2026-10-17: address-of launder through a call (#435)
+
+`collect_ref_roots` walks `AddrOf` and the `UnOp::Addr` spelling, so `&h`
+now contributes its root. These two fixtures pin the behaviour from the corpus
+side: the escape must reject, and a read-only use of the same address must stay
+accepted so the rule cannot degrade into "never take an address".
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 65 | 65-addr-of-call-alias-at-spawn | REJECT | A1b | `HYB-E3003` | `p := keep(&h)` then `task worker(move h)` then a write through `p` |
+| 66 | 66-addr-of-call-read-control | ACCEPT | — | — | `read(&h)` returns a scalar, so no alias survives the call |
+
+(Registered as 65/66: PR #436 authored them as 61/62, but 61–64 were taken
+by the string-escape/shadowing/send waves before it landed. G0st13.)
+
+## Additive corpus registration — 2026-10-18: task spawn boundary soundness (issue #5)
+
+Corpus 25 pins the spawn-callee proof with a map-capturing closure; this
+fixture pins the scalar-capture twin: a closure that WRITES a captured
+`int` binding, spawned as a task, with main still reading the binding
+after the spawn. A checker that special-cased copyable payloads (or
+ignored the post-spawn read) would pass every row above and still accept
+a real race.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 67 | 67-adversarial-race-spawn | REJECT | A1c | `HYB-E3001` | `x := 42; task fn() { x = 100 }(); fmt.println("{x}")` — the spawned callee is a closure that writes its captured binding while main reads it (A5's spawn-callee proof) |
+
+(Registered as 67: PR #402 authored the adversarial intent in non-Hybrid
+pseudo-syntax — `func main`, `var x: int = 42`, `spawn fn(){}()`,
+`print(x)` — which does not parse on main; the maintainer integration
+translated it to Hybrid's grammar with the intent unchanged.
+KonstantinPythonLab.)
+
+## Additive corpus registration — #682 group C: U2–U5 buildable shapes (pr #707)
+
+- Programs: `undefined-member-call-reject.hy`, `defer-arity-reject.hy`,
+  `append-element-type-reject.hy`,
+  `member-defer-and-append-controls-accept.hy`.
+- Source: issue #682, "accepted-but-unbuildable member-call / defer-arity /
+  append-element bypasses in the buildable operand pass" (pr #707,
+  isHeSatoshi). Four programs `hyb check` accepted with zero diagnostics whose
+  emitted Go failed `go build`. Each was reproduced as a real compiler error
+  before any check was written.
+- Verdicts:
+  - `undefined-member-call-reject` — REJECT BUILDABLE (HYB-E1002).
+    `q.missing()` on a struct (and `x.nope()` on an `int`) is
+    `q.missing undefined (type s has no field or method missing)`. The field
+    branch of the call-operand pass previously reported only a member that
+    EXISTS but is not callable, and stayed silent when nothing was found at
+    all. Fails open on anything unresolved (`*atomic.int64` →
+    `Pointer(Unknown)` keeps its members invisible, not absent) and on
+    `hy-emit`-lowered intrinsics (`stack.pop()` → `hy_pop(&stack)`).
+  - `defer-arity-reject` — REJECT BUILDABLE (HYB-E1002). `defer g()` for a
+    one-parameter `g` is `not enough arguments in call to g`. HYB-E2001 keeps
+    the "defer requires a call" half; this rule owns arity, and fires only for
+    a bare identifier resolving to a declared `fn` (builtins and methods stay
+    alone).
+  - `append-element-type-reject` — REJECT BUILDABLE (HYB-E1002).
+    `append([]int{1}, "str")` is `cannot use "str" (untyped string constant)
+    as int value in argument to append`. Skips a variadic spread
+    (`append(a, b...)` passes the whole slice, not an element) and stays
+    fail-open on an unknown element kind; the legal implicit int→float64
+    constant direction stays allowed.
+- Scope notes (why the ACCEPT control is the load-bearing half):
+  the control's `stack.pop()` and `*atomic.int64` members each caught a real
+  over-rejection during development (spike-6 positive suite; corpus
+  `17-atomic-channel-immutable.hy`).
+- Regression pins: `hy-check/tests/member_defer_and_append_guards.rs` (9 tests).
+- Verified on the merged tree: 109/109 verdict agreement, tripwire not fired;
+  differential reject-side 70/70, accept-side 35/37 (the 2 are the known
+  cgo-bridge programs); cargo test --workspace green.
+## Additive corpus registration — 2026-10-18: the #577 C9/C10 call-and-return rules
+
+The Go-toolchain oracle (#577, implementing wildcard #565) measured a 38.03%
+accept-side residual on generated programs and named `call_and_return` its
+worst family: **63.33%** — 19 of 30 accepted programs failed `go build`. This
+registration pins the two classes it enumerates, **C9** (call arity) and
+**C10** (return statements), on both sides: three reject fixtures, one per
+closed shape, and one ACCEPT control holding the legal neighbours the rule must
+not touch. All three rejects are `HYB-E1002` (`BUILDABLE`, GUARANTEES.md
+Row 13) — accepting the file lets the emitted Go fail `go build`, which is
+exactly what the row forbids.
+
+| program | verdict | rule | diagnostic | rationale |
+|---|---|---|---|---|
+| call-arity-mismatch-reject | REJECT | Row 13 | `HYB-E1002` | `add(1)` for `fn add(a int, b int) int` — Go refuses `not enough arguments in call to add`. The same class covers `add(1, 2, 3)`, `x.bump()` (the receiver is not an argument) and `f(1, 2)` on a closure or `fn`-typed value |
+| return-value-count-reject | REJECT | Row 13 | `HYB-E1002` | `f` declares two unnamed results and `return 1` supplies one: neither legal short form applies (Go's naked `return` needs EVERY result named — corpus 63; the emitter zero-fills only an `error` tail — corpus 13) |
+| return-type-mismatch-reject | REJECT | Row 13 | `HYB-E1002` | `return "not-an-int"` from a function whose result is `int` — Go has no implicit conversion between the string and numeric families. The container forms (a `[]string` returned from a `[]int` function, a map from a slice function, struct `q` from a `p`) are the same rule |
+| call-and-return-controls-accept | ACCEPT | — | — | the legal neighbours: one argument per parameter for a function, a method (receiver not an argument) and a closure; Go's multi-value `return f()`; an untyped int constant returned from a `float64` function — which is why `Int` into a float result must stay allowed; matching container shapes; an interface result |
+
+The ACCEPT control is the reason this batch is safe to land. The rule's first
+draft rejected both legal short-return shapes and the fixture is what pinned
+them: a naked `return` with all-named results (corpus 63) and the emitter's
+zero-filled short return in an `error`-tail signature (corpus 13).
+
+Rules live in `hy-check/tests/call_arity_and_return_types.rs` (11 tests); the
+checker change is `buildable.rs::check_user_fn_arity`, `check_method_arity`,
+`report_local_arity`, `check_return` and `kinds_conflict`. Every reject was
+reproduced as a real `go build` failure against the emitted Go before its
+fixture was committed, and every shape in the ACCEPT control was verified to
+build.
+
+Reproduction (checker built from the branch tree, pinned rustc 1.99.0 /
+go1.26.9): `python3 tools/corpus_harness.py --bin <hyb>` reports **109/109
+verdict agreement, tripwire not fired**.
+
+With this registration the corpus is **113 programs: ACCEPT 35 ·
+ACCEPT-MANAGED 2 · REJECT 76** — main's 105 plus these four.

@@ -1125,3 +1125,95 @@ fn multi_value_return_intra_callee_sharing_rejects_post_move_and_a3() {
     );
 }
 
+#[test]
+fn let_immutability_rejects_all_reassignment_forms_issue_655() {
+    // Repro 1: direct reassignment `=`
+    let r1 = check(
+        "import \"fmt\"\n\nfn main() {\n    let limit = 10\n    limit = 20\n    fmt.println(limit)\n}\n",
+    );
+    assert_eq!(r1.verdict, Verdict::Reject, "{:?}", codes(&r1));
+    assert!(codes(&r1).iter().any(|c| c == "HYB-E3006"), "{:?}", codes(&r1));
+
+    // Repro 2: compound assignment `+=` and increment `++`
+    let r2 = check(
+        "import \"fmt\"\n\nfn main() {\n    let limit = 10\n    limit += 1\n    limit++\n    fmt.println(limit)\n}\n",
+    );
+    assert_eq!(r2.verdict, Verdict::Reject, "{:?}", codes(&r2));
+    assert_eq!(
+        codes(&r2).iter().filter(|c| *c == "HYB-E3006").count(),
+        2,
+        "{:?}",
+        codes(&r2)
+    );
+
+    // Repro 3: reassignment from inside a closure
+    let r3 = check(
+        "import \"fmt\"\n\nfn main() {\n    let limit = 10\n    f := fn() {\n        limit = 99\n    }\n    f()\n    fmt.println(limit)\n}\n",
+    );
+    assert_eq!(r3.verdict, Verdict::Reject, "{:?}", codes(&r3));
+    assert!(codes(&r3).iter().any(|c| c == "HYB-E3006"), "{:?}", codes(&r3));
+
+    // Repro 4: multi-target tuple assignment writing to a `let` binding
+    let r4 = check(
+        "import \"fmt\"\n\nfn two() (int, int) {\n    return 1, 2\n}\n\nfn main() {\n    let limit = 10\n    other := 0\n    limit, other = two()\n    fmt.println(limit, other)\n}\n",
+    );
+    assert_eq!(r4.verdict, Verdict::Reject, "{:?}", codes(&r4));
+    assert!(codes(&r4).iter().any(|c| c == "HYB-E3006"), "{:?}", codes(&r4));
+
+    // Controls: reading a `let`, reassigning `var`/`:=`, and mutating elements
+    // through a `let` slice binding (shallow binding immutability) all accept.
+    for ok_src in [
+        "import \"fmt\"\n\nfn main() {\n    let limit = 10\n    fmt.println(limit)\n}\n",
+        "import \"fmt\"\n\nfn main() {\n    var count = 10\n    count = 20\n    step := 1\n    step += 2\n    fmt.println(count + step)\n}\n",
+        "import \"fmt\"\n\nfn main() {\n    let names = []string{\"a\", \"b\"}\n    names[0] = \"z\"\n    fmt.println(names[0])\n}\n",
+    ] {
+        let r_ok = check(ok_src);
+        assert_eq!(r_ok.verdict, Verdict::Accept, "src:\n{ok_src}\ndiags: {:?}", r_ok.diagnostics);
+    }
+}
+
+#[test]
+fn non_addressable_pointer_receiver_method_call_rejected_issue_656() {
+    // Repro 1: map element receiver
+    let r1 = check(
+        "import \"fmt\"\n\nstruct counter {\n    n int\n}\n\nfn (self *counter) bump() {\n    self.n += 1\n}\n\nfn main() {\n    m := map[string]counter{\"a\": counter{n: 1}}\n    m[\"a\"].bump()\n    fmt.println(m[\"a\"].n)\n}\n",
+    );
+    assert_eq!(r1.verdict, Verdict::Reject, "{:?}", codes(&r1));
+    assert!(codes(&r1).iter().any(|c| c == "HYB-E1002"), "{:?}", codes(&r1));
+
+    // Repro 2: function call result receiver
+    let r2 = check(
+        "struct counter {\n    n int\n}\n\nfn (self *counter) bump() {\n    self.n += 1\n}\n\nfn make_counter() counter {\n    return counter{n: 1}\n}\n\nfn main() {\n    make_counter().bump()\n}\n",
+    );
+    assert_eq!(r2.verdict, Verdict::Reject, "{:?}", codes(&r2));
+    assert!(codes(&r2).iter().any(|c| c == "HYB-E1002"), "{:?}", codes(&r2));
+
+    // Repro 3: struct literal receiver
+    let r3 = check(
+        "struct counter {\n    n int\n}\n\nfn (self *counter) bump() {\n    self.n += 1\n}\n\nfn main() {\n    (counter{n: 1}).bump()\n}\n",
+    );
+    assert_eq!(r3.verdict, Verdict::Reject, "{:?}", codes(&r3));
+    assert!(codes(&r3).iter().any(|c| c == "HYB-E1002"), "{:?}", codes(&r3));
+
+    // Controls: addressable local variable, addressable slice element, and
+    // value-receiver method on a map element or call result all accept.
+    for ok_src in [
+        "import \"fmt\"\n\nstruct counter {\n    n int\n}\n\nfn (self *counter) bump() {\n    self.n += 1\n}\n\nfn main() {\n    c := counter{n: 1}\n    c.bump()\n    s := []counter{counter{n: 1}}\n    s[0].bump()\n    fmt.println(c.n, s[0].n)\n}\n",
+        "import \"fmt\"\n\nstruct counter {\n    n int\n}\n\nfn (self counter) get() int {\n    return self.n\n}\n\nfn main() {\n    m := map[string]counter{\"a\": counter{n: 1}}\n    fmt.println(m[\"a\"].get())\n}\n",
+    ] {
+        let r_ok = check(ok_src);
+        assert_eq!(r_ok.verdict, Verdict::Accept, "src:\n{ok_src}\ndiags: {:?}", r_ok.diagnostics);
+    }
+}
+
+#[test]
+fn trailing_dot_float_and_errors_wrap_check_clean_issues_657_659() {
+    let r659 = check("import \"fmt\"\n\nfn main() {\n    x := 2.\n    fmt.println(x)\n}\n");
+    assert_eq!(r659.verdict, Verdict::Accept, "{:?}", r659.diagnostics);
+
+    let r657 = check(
+        "import \"errors\"\nimport \"fmt\"\n\nfn load() error {\n    err := fmt.errorf(\"disk full\")\n    return errors.wrap(err, \"reading config\")\n}\n\nfn main() {\n    fmt.println(load())\n}\n",
+    );
+    assert_eq!(r657.verdict, Verdict::Accept, "{:?}", r657.diagnostics);
+}
+

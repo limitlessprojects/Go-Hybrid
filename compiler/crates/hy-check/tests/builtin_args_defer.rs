@@ -144,6 +144,14 @@ fn delete_arity_two_ok() {
 }
 
 #[test]
+fn nested_place_builtin_args_rejected_e2005() {
+    let r = check(
+        "fn main() {\n    m := map[string][]int{\"a\": []int{1}}\n    m[string(make([]byte, -1))][0] = 1\n}\n",
+    );
+    assert_has(&r, "HYB-E2005");
+}
+
+#[test]
 fn defer_ident_send_fusion_is_non_call() {
     // Parser yields Defer{Ident(ch)} then a following receive — not a Call.
     let r = check(
@@ -168,3 +176,113 @@ fn defer_close_call_ok() {
     assert_lacks(&r, "HYB-E2001");
     assert_lacks(&r, "HYB-E2005");
 }
+
+#[test]
+fn closure_body_builtin_args_checked() {
+    let r = check(
+        "fn main() {\n    f := fn() {\n        fmt.println(len(5))\n        fmt.println(cap(\"x\"))\n        close(5)\n    }\n    f()\n}\n",
+    );
+    assert_has(&r, "HYB-E2005");
+}
+
+#[test]
+fn place_index_and_field_base_builtin_args_checked() {
+    let r = check(
+        "fn main() {\n    s := []int{1, 2}\n    s[len(5)] = 1\n}\n",
+    );
+    assert_has(&r, "HYB-E2005");
+}
+
+#[test]
+fn bare_chan_literal_value_position_rejected() {
+    let r = check("fn main() {\n    c := chan int\n    fmt.println(c)\n}\n");
+    assert_has(&r, "HYB-E2005");
+}
+
+#[test]
+fn make_slice_one_arg_rejected() {
+    let r = check("fn main() {\n    s := make([]int)\n    fmt.println(len(s))\n}\n");
+    assert_has(&r, "HYB-E2005");
+}
+
+#[test]
+fn make_slice_const_len_exceeds_cap_rejected() {
+    let r = check("fn main() {\n    s := make([]int, 10, 5)\n    fmt.println(len(s))\n}\n");
+    assert_has(&r, "HYB-E2005");
+}
+
+#[test]
+fn make_negative_const_expr_size_rejected() {
+    let r = check("fn main() {\n    s := make([]int, 1 - 5)\n    fmt.println(len(s))\n}\n");
+    assert_has(&r, "HYB-E2005");
+}
+
+#[test]
+fn make_underscored_and_hex_size_accepted() {
+    let r = check("fn main() {\n    s := make([]int, 1_024, 0x800)\n    s[0] = 1\n}\n");
+    assert_lacks(&r, "HYB-E2005");
+}
+
+#[test]
+fn make_non_makeable_type_rejected() {
+    let r = check("fn main() {\n    x := make(int, 1)\n    fmt.println(x)\n}\n");
+    assert_has(&r, "HYB-E2005");
+}
+
+#[test]
+fn make_type_alias_slice_accepted_and_validated() {
+    let ok = check("type int_slice = []int\nfn main() {\n    s := make(int_slice, 2, 4)\n    s[0] = 1\n}\n");
+    assert_lacks(&ok, "HYB-E2005");
+
+    let bad_one_arg = check("type int_slice = []int\nfn main() {\n    s := make(int_slice)\n    fmt.println(len(s))\n}\n");
+    assert_has(&bad_one_arg, "HYB-E2005");
+}
+
+#[test]
+fn copy_and_clear_builtin_args_validated() {
+    let bad_copy_arity = check("fn main() {\n    s := []int{1}\n    copy(s)\n}\n");
+    assert_has(&bad_copy_arity, "HYB-E2005");
+
+    let bad_copy_dst = check("fn main() {\n    s := []int{1}\n    copy(\"abc\", s)\n}\n");
+    assert_has(&bad_copy_dst, "HYB-E2005");
+
+    let bad_clear_lit = check("fn main() {\n    clear(5)\n}\n");
+    assert_has(&bad_clear_lit, "HYB-E2005");
+}
+
+#[test]
+fn parenthesized_and_aliased_new_preserves_sendability_and_unmovable_checks() {
+    let closure_paren = check(
+        "struct holder {\n    f fn()\n}\nfn worker(p *holder) {\n    p.f()\n}\nfn main() {\n    p := new((holder))\n    task worker(move p)\n}\n",
+    );
+    assert_has(&closure_paren, "HYB-E3001");
+
+    let closure_alias = check(
+        "struct holder {\n    f fn()\n}\ntype h_alias = holder\nfn worker(p *h_alias) {\n    p.f()\n}\nfn main() {\n    p := new(h_alias)\n    task worker(move p)\n}\n",
+    );
+    assert_has(&closure_alias, "HYB-E3001");
+
+    let closure_generic = check(
+        "struct box[t] {\n    v t\n    f fn()\n}\nfn worker(p *box[int]) {\n    p.f()\n}\nfn main() {\n    p := new(box[int])\n    task worker(move p)\n}\n",
+    );
+    assert_has(&closure_generic, "HYB-E3001");
+
+    let unmovable_wg = check(
+        "struct wg_holder {\n    wg sync.wait_group\n}\nfn worker(p *wg_holder) {\n    fmt.println(p)\n}\nfn main() {\n    p1 := new((wg_holder))\n    task worker(move p1)\n    p2 := new(sync.wait_group)\n    p2.done()\n}\n",
+    );
+    assert_has(&unmovable_wg, "HYB-E3001");
+}
+
+#[test]
+fn parenthesized_and_aliased_make_preserves_share_and_closure_checks() {
+    let paren_make_closure = check(
+        "struct holder {\n    f fn()\n}\ntype holder_slice = []holder\nfn worker(s holder_slice) {\n    fmt.println(len(s))\n}\nfn main() {\n    s := make((holder_slice), 1)\n    p := &s\n    fmt.println(p)\n    task worker(move s)\n}\n",
+    );
+    assert_has(&paren_make_closure, "HYB-E3001");
+
+    let alias_make_copy_share = check(
+        "type int_slice = []int\nfn worker(s int_slice) {\n    s[0] = 2\n}\nfn main() {\n    s1 := make((int_slice), 1)\n    s2 := s1\n    task worker(move s2)\n    s1[0] = 1\n}\n",
+    );
+    assert_has(&alias_make_copy_share, "HYB-E3003");
+}
+

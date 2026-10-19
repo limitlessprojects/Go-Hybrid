@@ -60,7 +60,7 @@ grep -qF "\"$PINNED_GO\"" compiler/crates/hyb/src/main.rs \
 grep -qF "\"$PINNED_RUST\"" compiler/crates/hyb/src/main.rs \
     && pass "hyb default pin matches (rust $PINNED_RUST)" \
     || fail "hyb default pin (compiler/crates/hyb/src/main.rs) != rust $PINNED_RUST"
-grep -q "const DEFAULT_PIN: &str = \"$PINNED_RUST\"" compiler/crates/hyb/build.rs \
+grep -qF "const DEFAULT_PIN: &str = \"$PINNED_RUST\"" compiler/crates/hyb/build.rs \
     && pass "hyb drift-guard default matches (rust $PINNED_RUST)" \
     || fail "hyb build.rs DEFAULT_PIN != rust $PINNED_RUST (the guard would refuse honest builds)"
 

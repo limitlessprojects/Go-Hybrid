@@ -126,9 +126,6 @@ def main():
     ap.add_argument("--repo-dir", default=None, help="where the repo was cloned (default: $REPO_DIR or ./repo)")
     args = ap.parse_args()
 
-    with open(args.job_json) as f:
-        job = json.load(f)
-
     results_dir = args.results_dir
     os.makedirs(results_dir, exist_ok=True)
     repo_dir = args.repo_dir or os.environ.get("REPO_DIR", "repo")
@@ -136,9 +133,9 @@ def main():
 
     summary = {
         "schema": "go-hybrid-job-summary/1",
-        "job": job.get("job"),
-        "sha": job.get("sha"),
-        "tier": job.get("tier", os.environ.get("JOB_TIER", "unknown")),
+        "job": None,
+        "sha": None,
+        "tier": os.environ.get("JOB_TIER", "unknown"),
         "started": UTC(),
         "hardware": env_report(),
         "steps": [],
@@ -156,14 +153,58 @@ def main():
         )
         print("[{}] {} {}: exit={} {:.1f}s".format(UTC(), kind, name, code, dur), flush=True)
 
+    def write_summary_and_exit():
+        summary["wall_clock_s"] = round(time.monotonic() - t0, 2)
+        summary["ok"] = bool(summary["steps"]) and all(s["exit"] == 0 for s in summary["steps"])
+        summary["finished"] = UTC()
+        path = os.path.join(results_dir, "summary.json")
+        with open(path, "w") as f:
+            json.dump(summary, f, indent=2)
+        print("\n=== summary.json written to {} (ok={}) ===".format(path, summary["ok"]), flush=True)
+        # exit non-zero if any step failed, so CI surfaces it
+        sys.exit(0 if summary["ok"] else 1)
+
+    try:
+        with open(args.job_json, "r", encoding="utf-8") as f:
+            job = json.load(f)
+    except Exception as e:
+        record("job-load", "check", 1, 0.0, "failed to read job file '{}': {}".format(args.job_json, e))
+        write_summary_and_exit()
+
+    if not isinstance(job, dict):
+        record("job-spec", "check", 1, 0.0, "job spec must be a JSON object, got {}".format(type(job).__name__))
+        write_summary_and_exit()
+
+    summary["job"] = job.get("job")
+    summary["sha"] = job.get("sha")
+    summary["tier"] = job.get("tier", os.environ.get("JOB_TIER", "unknown"))
+
+    setup_raw = job.get("setup", [])
+    commands_raw = job.get("commands", [])
+
+    if not isinstance(setup_raw, list):
+        record("job-spec", "check", 1, 0.0, "'setup' must be a list, got {}".format(type(setup_raw).__name__))
+        write_summary_and_exit()
+
+    if not isinstance(commands_raw, list):
+        record("job-spec", "check", 1, 0.0, "'commands' must be a list, got {}".format(type(commands_raw).__name__))
+        write_summary_and_exit()
+
+    if not setup_raw and not commands_raw:
+        record("job-spec", "check", 1, 0.0, "job defines no executable setup or commands")
+        write_summary_and_exit()
+
     # sanity: verify we are at the pinned SHA when a repo checkout exists
     sha_ok = True
     unverifiable_pin = False
     want = job.get("sha")
     # Linked worktrees and submodules use a .git file, not a directory.
-    # Even a broken metadata link must enter the fail-closed SHA check.
+    # Even a broken metadata link or corrupt .git directory inside an ancestor
+    # git repository must enter the fail-closed SHA check without walking up to
+    # an enclosing parent repository.
     if os.path.lexists(os.path.join(repo_dir, ".git")):
-        code, _, out = run_cmd(["git", "rev-parse", "HEAD"], 10, cwd=repo_dir)
+        sha_env = dict(os.environ, GIT_CEILING_DIRECTORIES=os.path.dirname(repo_dir))
+        code, _, out = run_cmd(["git", "rev-parse", "HEAD"], 10, cwd=repo_dir, env=sha_env)
         at = out.strip()
         if code != 0:
             sha_ok = False
@@ -200,19 +241,41 @@ def main():
             flush=True,
         )
     else:
-        for step in job.get("setup", []):
+        for idx, step in enumerate(setup_raw):
+            if not isinstance(step, dict):
+                record("setup-{}".format(idx), "setup", 1, 0.0, "step must be an object, got {}".format(type(step).__name__))
+                hard_setup_failed = True
+                break
+            name = step.get("name") or "setup-{}".format(idx)
+            cmd = step.get("run")
+            if not cmd:
+                record(name, "setup", 1, 0.0, "step missing required 'run' command")
+                if step.get("hard"):
+                    hard_setup_failed = True
+                    break
+                continue
             cwd = repo_dir if step.get("cwd") == "repo" else (step.get("cwd") or None)
-            code, dur, out = run_cmd(step["run"], step.get("timeout", 600), cwd=cwd)
-            record(step["name"], "setup", code, dur, out)
+            code, dur, out = run_cmd(cmd, step.get("timeout", 600), cwd=cwd)
+            record(name, "setup", code, dur, out)
             if code != 0 and step.get("hard"):
                 hard_setup_failed = True
                 break
 
-    commands = [] if (hard_setup_failed or not sha_ok) else job.get("commands", [])
-    for step in commands:
+    commands = [] if (hard_setup_failed or not sha_ok) else commands_raw
+    for idx, step in enumerate(commands):
+        if not isinstance(step, dict):
+            record("cmd-{}".format(idx), "cmd", 1, 0.0, "command step must be an object, got {}".format(type(step).__name__))
+            break
+        name = step.get("name") or "cmd-{}".format(idx)
+        cmd = step.get("run")
+        if not cmd:
+            record(name, "cmd", 1, 0.0, "command step missing required 'run' command")
+            if step.get("hard"):
+                break
+            continue
         cwd = repo_dir if step.get("cwd") == "repo" else (step.get("cwd") or None)
-        code, dur, out = run_cmd(step["run"], step.get("timeout", 600), cwd=cwd)
-        record(step["name"], "cmd", code, dur, out)
+        code, dur, out = run_cmd(cmd, step.get("timeout", 600), cwd=cwd)
+        record(name, "cmd", code, dur, out)
         if code != 0 and step.get("hard"):
             break
 
@@ -237,15 +300,7 @@ def main():
             record("expected-result", "check", 1, 0.0,
                    "missing expected result file: {}".format(expected))
 
-    summary["wall_clock_s"] = round(time.monotonic() - t0, 2)
-    summary["ok"] = all(s["exit"] == 0 for s in summary["steps"])
-    summary["finished"] = UTC()
-
-    with open(path, "w") as f:
-        json.dump(summary, f, indent=2)
-    print("\n=== summary.json written to {} (ok={}) ===".format(path, summary["ok"]), flush=True)
-    # exit non-zero if any step failed, so CI surfaces it
-    sys.exit(0 if summary["ok"] else 1)
+    write_summary_and_exit()
 
 
 if __name__ == "__main__":

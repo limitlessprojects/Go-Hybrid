@@ -1,30 +1,30 @@
 // ============================================================================
-// chan-slice-aliased-at-send ? Checker corpus (bounty track: "grow the adversarial corpus").
+// chan-slice-aliased-at-send — Checker corpus (bounty track: "grow the adversarial corpus").
 //
 // PURPOSE: the SEND-side twin of the spawn-side element work. The corpus pins channel
 //   sends of plain maps (16/17, 32-select-send) and spawns of aliased slices
 //   (45/53), but never a channel whose ELEMENT TYPE is a slice: `chan []int`
-//   is 0/65 today. A slice value carries a backing-array pointer, so sending
+//   is 0/60 today. A slice value carries a backing-array pointer, so sending
 //   one without `move` while the sender keeps writing it is the same
 //   unsynchronized-sharing shape A1c exists to reject.
 //
 // RULE CITATION: A1c, "sendability, safe-by-type" (VERDICTS.md rule key; SPEC-LANGUAGE.md O4,
-//   ?9.3). A slice is not a channel/atomic/immutable value, is not `move`d and
-//   is not inside `managed` ? not sendable.
+//   §9.3). A slice is not a channel/atomic/immutable value, is not `move`d and
+//   is not inside `managed` — not sendable.
 //
 // ---- Tier-0 rule set applied ----
-//   Layer 1 (Go-side GC): `shared` ([]int ? the sent value's backing array),
+//   Layer 1 (Go-side GC): `shared` ([]int — the sent value's backing array),
 //     `ch` (chan []int), `xs` (the receiver's copy of the header).
 //   Layer 2 (Rust-side owned): none.
 // ---- Sendability / check sites ----
-//   [S1] `ch <- shared` ? VIOLATION: `shared` is a live mutable slice and the
+//   [S1] `ch <- shared` — VIOLATION: `shared` is a live mutable slice and the
 //        send is not a `move`. `xs[0]` in the receiver and `shared[0]` in the
-//        sender name the same array element ? a data race on `[]int`.
+//        sender name the same array element — a data race on `[]int`.
 // ---- Expected verdict (hand-derived from VERDICTS.md rule key + SPEC O4
 //      BEFORE running the checker) ----
 // EXPECTED-VERDICT: REJECT A1c
 // EXPECTED-DIAGNOSTIC: HYB-E3002
-//   REJECT ? A1c. The slice's backing array is shared, so the receiver's read and
+//   REJECT — A1c. The slice's backing array is shared, so the receiver's read and
 //   the sender's write are unsynchronized. Legal routes: `ch <- move shared`
 //   when the sender is done, a fresh literal, or a per-task copy merged back.
 //

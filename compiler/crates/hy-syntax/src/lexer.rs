@@ -127,6 +127,19 @@ const KEYWORDS: &[&str] = &[
     // keeps channels named `default` legal — see SPEC-LANGUAGE LX14's
     // select paragraph.
     "case",
+    // Go-keyword trap words (issue #228): Hybrid's surface never uses
+    // them — its forms are `match` / `for .. in`, and labels don't
+    // parse — so as identifiers they only ever leak into emitted Go
+    // and break the build (`x := switch` → go: `expected operand, found
+    // 'switch'`; `fallthrough` in an if → `fallthrough statement out of
+    // place`). Reserved like `while` (#103/#107) and `case` (#104/#108)
+    // so they fail at parse instead of at go build. (`map` cannot join
+    // this list — `map[K]V` is a legitimate prefix form; it gets the
+    // contextual rule in `lex_ident_or_kw` instead.)
+    "switch",
+    "range",
+    "goto",
+    "fallthrough",
 ];
 
 /// Lex a whole source file. On success the token stream ends with a single
@@ -230,6 +243,42 @@ impl<'a> Lexer<'a> {
             Span::new(start, self.pos()),
             msg,
         ));
+    }
+
+    /// Non-mutating peek: the next non-trivia character after the cursor
+    /// (whitespace and `//` / `/* … */` comments skipped), mirroring
+    /// `skip_trivia` without consuming anything. Used by the contextual
+    /// `map` + `[` rule.
+    fn next_code_char_after_trivia(&self) -> Option<char> {
+        let mut i = self.i;
+        loop {
+            match self.chars.get(i).copied() {
+                Some(c) if c.is_whitespace() => i += 1,
+                Some('/') if self.chars.get(i + 1).copied() == Some('/') => {
+                    i += 2;
+                    while let Some(c) = self.chars.get(i).copied() {
+                        if c == '\n' {
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                Some('/') if self.chars.get(i + 1).copied() == Some('*') => {
+                    i += 2;
+                    loop {
+                        if i + 1 >= self.chars.len() {
+                            return None;
+                        }
+                        if self.chars[i] == '*' && self.chars[i + 1] == '/' {
+                            i += 2;
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                other => return other,
+            }
+        }
     }
 
     // -- main driver ----------------------------------------------------------
@@ -393,6 +442,20 @@ impl<'a> Lexer<'a> {
                 ),
             );
         }
+        if s == "map" && self.next_code_char_after_trivia() != Some('[') {
+            // `map` is the map type/literal prefix (`map[K]V`, `map{k: v}`),
+            // never a free identifier: bare `map` in any position (expr,
+            // binding, param, field, fn name, type) is emitted verbatim as
+            // Go's `map` keyword, where it cannot parse (`go: expected '['`
+            // / `expected '}', found 'map'`) — issue #228. The `[` must be
+            // the next real token, so trivia (incl. comments) is skipped by
+            // the peek, matching the parser's contextual checks.
+            self.diag(
+                PARSE_ERR_CODE,
+                start,
+                "`map` must be followed by `[` — it is Hybrid's map type/literal prefix, never a free name; a bare `map` would be emitted as Go's `map` keyword and fail `go build` (issue #228)",
+            );
+        }
         if let Some(kw) = KEYWORDS.iter().find(|k| **k == s) {
             self.tok(start, Tok::Kw(kw))
         } else {
@@ -426,6 +489,29 @@ impl<'a> Lexer<'a> {
                     break;
                 }
             }
+            let digits = &s[2..];
+            if digits.is_empty() {
+                self.escape_diag(
+                    start,
+                    false,
+                    format!(
+                        "malformed 0{base} integer literal: expected at least one digit after `0{base}`"
+                    ),
+                );
+            } else if let Some(bad) = digits.chars().find(|&c| match base {
+                'x' => !c.is_ascii_hexdigit(),
+                'o' => !matches!(c, '0'..='7'),
+                'b' => !matches!(c, '0' | '1'),
+                _ => true,
+            }) {
+                self.escape_diag(
+                    start,
+                    false,
+                    format!(
+                        "malformed 0{base} integer literal: invalid digit `{bad}` for `0{base}` base"
+                    ),
+                );
+            }
             return self.tok(start, Tok::Int(s));
         }
 
@@ -441,20 +527,32 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        // fractional part — only when a digit follows the dot (so `0..n`
-        // lexes as Int(0) + `..` + Int(n), and `1..=8` as Int + `..=` + Int)
-        if self.at(0) == Some('.') && self.at(1).map(|d| d.is_ascii_digit()) == Some(true) {
-            is_float = true;
-            s.push('.');
-            self.bump();
-            while let Some(c) = self.at(0) {
-                if c == '_' || c.is_ascii_digit() {
-                    if c != '_' {
-                        s.push(c);
+        // fractional part — SPEC LX6: `1.5`, `2.`, `.5`, `1e9`.
+        // A dot after digits is part of a float unless:
+        // 1. It is followed by `.` (ranges `0..n`, `1..=8`, ellipsis `...`)
+        // 2. It is followed by an identifier/keyword start (e.g. `2.foo`),
+        //    UNLESS that starts an exponent (`2.e3`, `2.e+3`, `2.e-3`).
+        if self.at(0) == Some('.') {
+            let is_range = self.at(1) == Some('.');
+            let is_exp = matches!(self.at(1), Some('e') | Some('E')) && {
+                let k = if matches!(self.at(2), Some('+') | Some('-')) { 3 } else { 2 };
+                self.at(k).map(|d| d.is_ascii_digit()) == Some(true)
+            };
+            let is_ident_start = self.at(1).map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false);
+
+            if !is_range && (!is_ident_start || is_exp) {
+                is_float = true;
+                s.push('.');
+                self.bump();
+                while let Some(c) = self.at(0) {
+                    if c == '_' || c.is_ascii_digit() {
+                        if c != '_' {
+                            s.push(c);
+                        }
+                        self.bump();
+                    } else {
+                        break;
                     }
-                    self.bump();
-                } else {
-                    break;
                 }
             }
         }
@@ -488,6 +586,17 @@ impl<'a> Lexer<'a> {
         if is_float {
             self.tok(start, Tok::Float(s))
         } else {
+            if s.starts_with('0') && s.len() > 1 {
+                if let Some(bad) = s.chars().find(|&c| !matches!(c, '0'..='7')) {
+                    self.escape_diag(
+                        start,
+                        false,
+                        format!(
+                            "malformed octal integer literal `{s}`: invalid digit `{bad}` in leading-zero octal literal"
+                        ),
+                    );
+                }
+            }
             self.tok(start, Tok::Int(s))
         }
     }
@@ -495,23 +604,37 @@ impl<'a> Lexer<'a> {
     fn lex_char(&mut self) -> Token {
         let start = self.pos();
         self.bump(); // opening quote
+        if self.at(0) == Some('\'') {
+            self.bump();
+            self.escape_diag(start, false, "empty char literal");
+            return self.tok(start, Tok::CharLit('\0'));
+        }
         let ch = match self.at(0) {
             Some('\\') => {
                 let esc_start = self.pos();
                 self.bump();
                 let e = self.escape_char(false);
                 if e.is_none() {
-                    // diagnostic already recorded; keep going with something
+                    // diagnostic already recorded; recover to closing quote on this line
+                    while let Some(c) = self.at(0) {
+                        if c == '\n' {
+                            break;
+                        }
+                        self.bump();
+                        if c == '\'' {
+                            break;
+                        }
+                    }
                     return self.tok(start, Tok::CharLit('\0'));
                 }
                 let _ = esc_start;
                 e.unwrap()
             }
-            Some(c) => {
+            Some(c) if c != '\n' => {
                 self.bump();
                 c
             }
-            None => {
+            _ => {
                 self.diag(PARSE_ERR_CODE, start, "unterminated char literal");
                 return self.tok(start, Tok::CharLit('\0'));
             }
@@ -520,6 +643,15 @@ impl<'a> Lexer<'a> {
             self.bump();
         } else {
             self.diag(PARSE_ERR_CODE, start, "unterminated char literal");
+            while let Some(c) = self.at(0) {
+                if c == '\n' {
+                    break;
+                }
+                self.bump();
+                if c == '\'' {
+                    break;
+                }
+            }
         }
         self.tok(start, Tok::CharLit(ch))
     }
@@ -685,7 +817,6 @@ impl<'a> Lexer<'a> {
             '\\' => '\\',
             '"' => '"',
             '\'' => '\'',
-            '0' => '\0',
             'a' => '\u{7}',
             'b' => '\u{8}',
             'f' => '\u{c}',
@@ -738,14 +869,25 @@ impl<'a> Lexer<'a> {
                         return None;
                     }
                     let mut v: u32 = 0;
+                    let mut digits: usize = 0;
                     loop {
                         match self.at(0) {
                             Some(h) if h.is_ascii_hexdigit() => {
-                                v = v * 16 + h.to_digit(16).unwrap_or(0);
+                                let d = h.to_digit(16).unwrap_or(0);
+                                v = v.saturating_mul(16).saturating_add(d);
+                                digits += 1;
                                 self.bump();
                             }
                             Some('}') => {
                                 self.bump();
+                                if digits == 0 {
+                                    self.escape_diag(
+                                        start,
+                                        str_mode,
+                                        "malformed \\u{…} escape: expected hex digits then `}`",
+                                    );
+                                    return None;
+                                }
                                 break;
                             }
                             _ => {
@@ -779,19 +921,26 @@ impl<'a> Lexer<'a> {
                 }
                 self.scalar_or_diag(v, start, str_mode, "\\U")?
             }
-            '1'..='7' => {
-                // octal \NNN — at most three digits, so v <= 0o777 and
-                // from_u32 cannot fail here.
+            '0'..='7' => {
+                // octal \NNN — at most three digits (c plus up to two more),
+                // representing a byte value 0..=0o377 (0..=255).
                 let mut v: u32 = c.to_digit(8)?;
-                loop {
-                    let d = self.at(0).and_then(|c| c.to_digit(8));
-                    match d {
-                        Some(d) => {
-                            v = v * 8 + d;
-                            self.bump();
-                        }
-                        None => break,
-                    }
+                for _ in 0..2 {
+                    let Some(d) = self.at(0).and_then(|ch| ch.to_digit(8)) else {
+                        break;
+                    };
+                    v = v * 8 + d;
+                    self.bump();
+                }
+                if v > 0xFF {
+                    self.escape_diag(
+                        start,
+                        str_mode,
+                        format!(
+                            "invalid octal escape: \\{v:o} ({v}) exceeds maximum byte value 255 (\\377)"
+                        ),
+                    );
+                    return None;
                 }
                 char::from_u32(v)?
             }
@@ -1069,6 +1218,27 @@ mod tests {
     }
 
     #[test]
+    fn float_trailing_dot_and_ranges_issue_659() {
+        // LX6: Float literals include `2.`, `.5`, `1.5`, `1e9`.
+        let t = toks("var scale f64 = 2.\nx := 2. + 1.0\ny := .5\nz := 2.e3\nw := 2.e+3\nfor i in 0..n {}\nfor j in 1..=8 {}");
+        assert!(t.contains(&Tok::Float("2.".into())));
+        assert!(t.contains(&Tok::Float(".5".into())));
+        assert!(t.contains(&Tok::Float("2.e3".into())));
+        assert!(t.contains(&Tok::Float("2.e+3".into())));
+        assert!(t.contains(&Tok::Punct("..")));
+        assert!(t.contains(&Tok::Punct("..=")));
+
+        // Range operators keep their leading integer intact
+        let r1 = toks("0..n");
+        assert_eq!(r1[0], Tok::Int("0".into()));
+        assert_eq!(r1[1], Tok::Punct(".."));
+
+        let r2 = toks("1..=8");
+        assert_eq!(r2[0], Tok::Int("1".into()));
+        assert_eq!(r2[1], Tok::Punct("..="));
+    }
+
+    #[test]
     fn operators_lex_correctly() {
         let t = toks("a <- b c <-chan d e := f g ..= h i++ j-- k += 1 l ... m");
         assert!(t.contains(&Tok::Punct("<-")));
@@ -1123,5 +1293,67 @@ mod tests {
     #[test]
     fn unterminated_string_is_error() {
         assert!(lex("t.hy", r#"x := "oops"#).is_err());
+    }
+
+    #[test]
+    fn go_keyword_traps_are_reserved() {
+        // issue #228: these four leak into emitted Go as keywords and
+        // break the build, so they lex as Kw (parser turns that into a
+        // clean parse error naming the word — same shape as `while`).
+        for w in ["switch", "range", "goto", "fallthrough"] {
+            let r = lex("t.hy", &format!("fn main() {{ x := {} }}", w));
+            let t = r.expect("lex ok");
+            assert!(
+                t.iter().any(|t| matches!(&t.tok, Tok::Kw(k) if *k == w)),
+                "`{}` must lex as a keyword",
+                w
+            );
+        }
+    }
+
+    #[test]
+    fn map_needs_bracket_everywhere() {
+        // issue #228 B5–B6 + the declaration positions: bare `map` as an
+        // expr, binding, param, fn name, or freestanding type is emitted
+        // as Go's `map` keyword and cannot parse.
+        for src in [
+            "fn main() { x := map }",
+            "fn main() { map := 3 }",
+            "fn f(map int) {}",
+            "fn map() {}",
+            "fn main() { var x map }",
+            "struct s { map int }",
+        ] {
+            let r = lex("t.hy", src);
+            assert!(r.is_err(), "bare `map` must be a lexical error: {}", src);
+            let diags = r.unwrap_err();
+            assert!(
+                diags.iter().any(|d| d.message.contains("`map`")),
+                "diagnostic must name `map`: {:?}",
+                diags
+            );
+        }
+    }
+
+    #[test]
+    fn map_prefix_forms_stay_lexed() {
+        // controls: map types, map literals, and `[` reached through
+        // trivia must keep working (they are the legitimate `map` uses).
+        let ok = [
+            "m := map[string]int{}",
+            "var x map[int]string",
+            "fn f(m map[bool]u8) {}",
+            "y := map /* c */ [string]int{}",
+            "z := map\n    [string]int{}",
+        ];
+        for src in ok {
+            assert!(
+                lex("t.hy", src).is_ok(),
+                "legitimate map-prefix form must still lex: {}",
+                src
+            );
+        }
+        let t = toks("m := map[string]int{}");
+        assert!(t.iter().any(|t| matches!(t, Tok::Ident(s) if s == "map")));
     }
 }

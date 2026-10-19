@@ -1,5 +1,6 @@
 """Tests for tools/check_conflict_markers.py (stdlib only, no network)."""
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -131,6 +132,43 @@ class WorkflowStructureTests(unittest.TestCase):
         root = self._tree({"doc.md": "```\npython3 -m py_compile tools/job.py\n```\n"})
         self.assertEqual(list(MOD.scan(str(root))), [])
 
+    def test_yaml_extension_workflow_is_checked(self):
+        # GitHub Actions also supports .github/workflows/*.yaml. A column-zero
+        # defect in a .yaml file must be caught just like a .yml file.
+        root = self._tree({
+            ".github/workflows/deploy.yaml": (
+                "name: deploy\non:\n  push:\njobs:\n  deploy:\n    steps:\n"
+                "      - run: |\n          set -e\n"
+                "echo unindented shell line\n"
+            ),
+        })
+        hits = [h for h in MOD.scan(str(root)) if h[3] == "workflow"]
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0][0], os.path.join(".github", "workflows", "deploy.yaml"))
+        self.assertEqual(hits[0][1], 9)
+
+    def test_document_end_marker_is_allowed(self):
+        # A valid YAML document terminating with '...' at column zero.
+        root = self._tree({
+            ".github/workflows/ci.yml": "---\nname: ci\non: push\njobs: {}\n...\n",
+        })
+        self.assertEqual(list(MOD.scan(str(root))), [])
+
+    def test_quoted_top_level_keys_are_allowed(self):
+        # Quoted keys such as 'on': or "name": are standard in Actions YAML
+        # to avoid boolean coercion under YAML 1.1 parsers.
+        root = self._tree({
+            ".github/workflows/ci.yml": "'on':\n  push:\n\"name\": ci\njobs: {}\n",
+        })
+        self.assertEqual(list(MOD.scan(str(root))), [])
+
+    def test_yaml_directive_is_allowed(self):
+        # Directives such as %YAML 1.2 are valid column-zero lines in YAML.
+        root = self._tree({
+            ".github/workflows/ci.yml": "%YAML 1.2\n---\nname: ci\non: push\njobs: {}\n",
+        })
+        self.assertEqual(list(MOD.scan(str(root))), [])
+
 
 class CliTests(unittest.TestCase):
     def _run(self, root):
@@ -174,6 +212,20 @@ class CliTests(unittest.TestCase):
             res = self._run(td)
             self.assertEqual(res.returncode, 1, res.stderr)
             self.assertIn("ci.yml", res.stderr)
+            self.assertIn("column zero", res.stderr)
+
+    def test_broken_yaml_workflow_exits_one_and_names_the_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td, ".github", "workflows")
+            d.mkdir(parents=True)
+            Path(d, "release.yaml").write_text(
+                "name: release\non: push\njobs:\n  quick:\n    steps:\n"
+                "      - name: t\n        run: |\n          set -e\n"
+                "python3 -m py_compile tools/job.py\n",
+                encoding="utf-8")
+            res = self._run(td)
+            self.assertEqual(res.returncode, 1, res.stderr)
+            self.assertIn("release.yaml", res.stderr)
             self.assertIn("column zero", res.stderr)
 
     def test_marker_takes_priority_in_the_same_run(self):

@@ -1,5 +1,5 @@
 // ============================================================================
-// struct-field-slice-elem-alias ? Checker corpus (bounty track: "grow the adversarial corpus").
+// struct-field-slice-elem-alias — Checker corpus (bounty track: "grow the adversarial corpus").
 //
 // PURPOSE: a struct FIELD whose type is a slice, read into a binding and then written
 //   after the struct is moved. Corpus 54/55 cover field STORES and 53 covers
@@ -10,18 +10,18 @@
 //   aliases the array `move h` transferred.
 //
 // ---- Tier-0 rule set applied ----
-//   Layer 1 (Go-side GC): `h` (holder ? moved), `d` (the slice header read out
+//   Layer 1 (Go-side GC): `h` (holder — moved), `d` (the slice header read out
 //     of `h.data`), `done` (channel).
 //   Layer 2 (Rust-side owned): none.
 
 // ---- Sendability / check sites ----
-//   [S1] `task worker(move h, done)` ? legal whole-binding owned move.
-//   [S2] `d[0] = 9` ? element write through the aliased backing array.
+//   [S1] `task worker(move h, done)` — legal whole-binding owned move.
+//   [S2] `d[0] = 9` — element write through the aliased backing array.
 
 // ---- Expected verdict (hand-derived from VERDICTS.md rule key + SPEC
 //      O3/O4/O9 BEFORE running the checker) ----
 // EXPECTED-VERDICT: REJECT A1b
-//   REJECT ? A1b. Field reads of reference type are copies of references; the
+//   REJECT — A1b. Field reads of reference type are copies of references; the
 //   write reaches the storage the move transferred.
 //
 // ---- Annotations / managed ----
@@ -39,7 +39,7 @@ fn worker(h holder, done chan<- bool) {
 
 fn main() {
     h := holder{data: []int{1, 2, 3}}
-    d := h.data                  // field read: a slice-header copy ? an alias
+    d := h.data                  // field read: a slice-header copy — an alias
     done := make(chan bool, 1)
     task worker(move h, done)
     d[0] = 9                     // element write through the aliased array

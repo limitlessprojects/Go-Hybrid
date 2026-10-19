@@ -49,7 +49,7 @@ Everything the checker **accepts was proven** sendable; everything it
 | 8 | `managed("reason", "category", tickets...) { ... }` regions | Explicit hatch: linted (`HYB-E8001`), payload REQUIRED (bare block rejects `HYB-E0003`; unknown category rejects `HYB-E0004` — closed set: mutex/atomic/actor/finalizer/interop/other), greppable, counted per category (`--report-managed`), optionally forbidden (`--deny-managed`), and CI-gated for NEW blocks (`tools/managed_gate.py` + baseline) | **No soundness claim inside** — it is a compile-time permit, not a synchronization mechanism. The escape is auditable, never silent | §9.5 (row 14, discussion #4); corpus [02](tests/checker-corpus/02-shared-map-managed.hy), [18](tests/checker-corpus/18-pool-shared-struct-managed.hy); `compiler/crates/hyb/tests/deny_managed.rs` |
 | 9 | Values escaping into Go APIs (net/http handlers, callbacks) | Outside the checked subset — Go's DRF-SC with `-race` as the backstop (scoped claim + lint, [A5](SPEC-LANGUAGE.md)) | **No checker claim**; the boundary is documented, not hidden | §8.5, §9.2; OQ1 open and pinned |
 | 10 | `sync.Pool` | Not in the curated surface today; a value of a foreign/unmodeled type at a check-site is **unproven → rejected** (fail-closed), never silently allowed | **No claim**; fail-closed rejection instead of a false one | §8.4 C8 pattern; O4.9 |
-| 11 | `sync/atomic` (`atomic.Pointer[T]`, …) | **[TBD]** joins the curated surface post-MVP; when it lands, atomic-typed values become sendable-by-type (class 2). Until then: unproven → rejected | **No claim yet**; the growth path is pre-designed, not improvised | §8.4 C8 |
+| 11 | `sync/atomic` (`atomic.Pointer[T]`, …) | **[TBD]** joins the curated surface post-MVP; when it lands, atomic-typed values become sendable-by-type (class 2). Until then: unproven → rejected | **No claim yet**; the growth path is pre-designed, not improvised | §8.4 C8; [atomic pointer fail-closed corpus](tests/checker-corpus/atomic-pointer-fail-closed-reject.hy) |
 | 12 | `context.Context` cancellation trees | Not modeled; the value itself is classified like any other at a check-site | **No claim** about cancellation semantics — the claim is about value sharing, not protocol liveness | §9.2 scope |
 | 13 | Finalizers (`runtime.SetFinalizer`) | Not in the surface; not modeled | **No claim** | §9.2 "foreign code the checker cannot see" |
 | 14 | `unsafe` | **Reserved, not implemented** ([O20](SPEC-LANGUAGE.md)). There is **no memory-unsafe escape at all** in safe mode: raw cross-language pointers are forbidden, period | **No claim** because there is no surface to claim about | §9.9; abi-types.md rules (hazards P7/P8 demonstrated) |
@@ -63,16 +63,16 @@ Everything the checker **accepts was proven** sendable; everything it
 ## Evidence inventory (what backs the ✅ rows)
 
 - **Adversarial corpus** — [tests/checker-corpus/](tests/checker-corpus/):
-  60 programs, each with an `EXPECTED-VERDICT` header. Programs 01–18 were
+  113 programs, each with an `EXPECTED-VERDICT` header. Programs 01–18 were
   **pre-registered before the checker existed** (the checker was built
   against them, not adjusted after); 19–20 were added during integration
   and 21+ after the checker landed, still hand-derived from the rule text
-  first. Current census: **43 REJECT / 15 ACCEPT / 2 ACCEPT-MANAGED**,
+  first. Current census: **67 REJECT / 32 ACCEPT / 2 ACCEPT-MANAGED**,
   pinned to specific diagnostic codes. Verdicts may change only by a logged
   amendment in [VERDICTS.md](tests/checker-corpus/VERDICTS.md).
 - **Differential loop** — [tools/differential_loop.py](tools/differential_loop.py):
-  accept-side programs must build and run byte-exact (17/17); reject-side
-  must be rejected for the pre-registered reason (43/43). Runs in CI on
+  accept-side programs must build and run byte-exact (34/34); reject-side
+  must be rejected for the pre-registered reason (67/67). Runs in CI on
   every push.
 - **Fail-closed tests** — dedicated checker tests (unknown initializer,
   unresolved name, unproven select-recv → `HYB-E3005`; managed escapes →

@@ -383,10 +383,10 @@ def main() -> int:
     for rel, content in FILES.items():
         p = ROOT / rel
         if check:
-            if not p.is_file() or p.read_text() != content:
+            if not p.is_file() or p.read_text(encoding="utf-8") != content:
                 drift.append(rel)
         else:
-            p.write_text(content)
+            p.write_text(content, encoding="utf-8")
             print(f"wrote {rel}")
     if check:
         if drift:

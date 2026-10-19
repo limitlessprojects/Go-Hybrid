@@ -15,7 +15,7 @@ HYB_BIN := $(CARGO_TARGET_DIR)/debug/hyb
 
 .PHONY: help env check test-quick ci corpus workspace examples differential bench spike0-kaggle spike0-kaggle-status spike0-kaggle-fetch \
         spike0-actions-4 spike0-actions-20 spike-1 spike-2 spike-3 kaggle-job kaggle-status kaggle-fetch kaggle-wait \
-        actions-dispatch actions-watch clean
+        actions-dispatch actions-watch census clean
 
 help:
 	@echo "make env              — verify pinned toolchains (source tools/env.sh)"
@@ -23,7 +23,8 @@ help:
 	@echo "make test-quick       — sandbox unit tests (grows with the compiler)"
 	@echo "make ci               — what CI runs on push"
 	@echo "make examples         — the ten target programs, byte-exact acceptance"
-	@echo "make corpus           — Tier-0 corpus verdicts (60/60)"
+	@echo "make corpus           — Tier-0 corpus verdicts (113/113)"
+	@echo "make census           — every stated corpus count matches the corpus"
 	@echo "make differential     — the differential corpus loop (accept + reject)"
 	@echo "make bench            — G2 call-overhead bench on the live bridge (hyb bench-overhead)"
 	@echo "make spike0-kaggle    — submit Spike 0 part A to the Kaggle worker"
@@ -48,6 +49,8 @@ check:
 	@$(PY) -m unittest discover -s tools -p test_package_version.py -v
 	@$(PY) -m unittest discover -s tools/runner -p test_runner.py -v
 	@$(PY) -m unittest discover -s tools -p test_check_test_registration.py -v
+	@$(PY) -m unittest discover -s tools -p test_check_corpus_census.py -v
+	@$(PY) tools/check_corpus_census.py && echo "corpus census OK"
 	@$(PY) tools/check_test_registration.py && echo "test registration OK"
 	@bash tools/check-versions.sh --no-toolchain && echo "versions OK"
 	@$(PY) tools/check_conflict_markers.py && echo "conflict markers OK"
@@ -77,6 +80,9 @@ workspace:
 corpus:
 	@cd compiler && CARGO_TARGET_DIR=$(CARGO_TARGET_DIR) CARGO_BUILD_JOBS=2 $(CARGO) build -p hyb --quiet
 	@$(PY) tools/corpus_harness.py --bin $(HYB_BIN)
+
+census:
+	@$(PY) tools/check_corpus_census.py
 
 # The differential corpus loop (Batch I): accepted corpus programs must
 # survive the full pipeline (hyb build + run, exit 0); rejected programs

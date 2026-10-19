@@ -35,8 +35,28 @@ use hy_syntax::{Block, Expr, LocalKind, SelectArmKind, Stmt};
 /// function, after the flat Pass B loop — the enclosing env is complete.
 pub(crate) fn check_closure_boundaries(ck: &mut Checker<'_>, st: &FnState, body: &Block) {
     check_deferred_uses(ck, st, body);
-    for (params, results, body) in collect_fnlits(body) {
-        check_one_closure(ck, st, params, results, body);
+    for (params, results, body, pos) in collect_fnlits(body) {
+        let mut scoped_st;
+        let st_ref = if let Some((s_env, s_aliases, s_share)) = st.closure_scoped_envs.get(&pos) {
+            scoped_st = st.clone();
+            for (k, v) in s_env {
+                scoped_st.env.insert(k.clone(), v.clone());
+            }
+            for (k, v) in s_aliases {
+                scoped_st.aliases.insert(k.clone(), v.clone());
+            }
+            for (k, vs) in s_share {
+                scoped_st
+                    .may_share
+                    .entry(k.clone())
+                    .or_default()
+                    .extend(vs.iter().cloned());
+            }
+            &scoped_st
+        } else {
+            st
+        };
+        check_one_closure(ck, st_ref, params, results, body);
     }
 }
 
@@ -212,6 +232,7 @@ fn check_one_closure(
                 shape,
                 ty: Some(p.ty.clone()),
                 immutable: false,
+                is_let: false,
                 managed_taint: false,
                 moved: None,
                 slot_loan: false,
@@ -232,6 +253,7 @@ fn check_one_closure(
                         shape: shape.clone(),
                         ty: Some(r.ty.clone()),
                         immutable: false,
+                        is_let: false,
                         managed_taint: false,
                         moved: None,
                         non_owned_origin: None,
@@ -245,6 +267,7 @@ fn check_one_closure(
     }
     let mut nested = Vec::new();
     cst.scope_push();
+    check_closure_slot_loans(ck, &mut cst, body);
     check_body_boundaries(ck, &mut cst, body, false, &mut nested);
     sync_nested_moves(&cst, &mut nested);
     for nc in nested {
@@ -451,7 +474,36 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
 
     match stmt {
         Stmt::Local(l) => {
+            if let Some(t) = &l.ty {
+                let shape = ck.shape_of_type(t);
+                for (name, value) in l.names.iter().zip(l.values.iter()) {
+                    if Checker::is_nil_literal(value)
+                        && !matches!(shape, TypeShape::Unknown)
+                        && !Checker::is_nilable_shape(&shape)
+                    {
+                        ck.emit_nil_type_error_text(
+                            &shape,
+                            t.render(),
+                            value.span(),
+                            &format!("the declared type of `{}`", name),
+                        );
+                    }
+                }
+            } else if l.kind != LocalKind::Const {
+                // N1, untyped leg (HYB-E4003): a closure-body `var x = nil` /
+                // `x := nil` / `let x = nil` — same gap as the flat walk's
+                // process_local (no ascription → Unknown shape → the emitter
+                // emits `var x = nil`, which Go rejects). Local
+                // `const c = nil` is the E6003 constant-expression guard
+                // (issue #640) — different locus, do not double-fire.
+                for (name, value) in l.names.iter().zip(l.values.iter()) {
+                    if Checker::is_nil_literal(value) {
+                        ck.emit_untyped_nil_decl_error(name, value.span());
+                    }
+                }
+            }
             for v in &l.values {
+                ck.check_composite_nils(st, v);
                 ck.mark_move_in_value(st, v, format!("the move-define `{}`", v.render()));
             }
             sync_nested_moves(st, nested);
@@ -460,6 +512,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             // DEEPLY immutable; `let` is a SHALLOW immutable binding, so it
             // must NOT take the class-4 sendability shortcut.
             let immutable = l.kind == LocalKind::Const;
+            let is_let = l.kind == LocalKind::Let;
             if l.values.is_empty() {
                 if let Some(t) = &l.ty {
                     ck.check_zero_value_local(l, t);
@@ -472,42 +525,47 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 let ty = l.ty.clone();
                 for name in &l.names {
                     mark_nested_overwritten(st, name, nested);
-                    ck.define_binding(st, name, shape.clone(), ty.clone(), immutable, managed);
+                    ck.define_binding(st, name, shape.clone(), ty.clone(), immutable, managed, is_let);
                 }
             } else if l.names.len() == l.values.len() {
+                let pre_st = st.clone();
+                let mut overwritten = Vec::new();
                 for (name, value) in l.names.iter().zip(l.values.iter()) {
+                    overwritten.push(name.clone());
                     let moved_non_owned = crate::model::move_operand_ident(value)
-                        .and_then(|src| ck.lookup_binding(st, &src))
+                        .and_then(|src| ck.lookup_binding(&pre_st, &src))
                         .and_then(|b| b.non_owned_origin.clone())
-                        .or_else(|| ck.moved_non_owned_origin_in_expr(st, value));
+                        .or_else(|| ck.moved_non_owned_origin_in_expr(&pre_st, value));
                     // ascription fills gaps (O4.9); inference keeps priority
                     // when it resolves (boundary handles stay precise)
-                    let inferred = ck.shape_of_expr(st, value);
+                    let inferred = ck.shape_of_expr(&pre_st, value);
                     let (shape, ty) = match (&l.ty, inferred) {
                         (Some(t), TypeShape::Unknown) => (ck.shape_of_type(t), Some(t.clone())),
                         (_, inferred) => (
                             inferred,
-                            ck.ty_of_expr(st, value).or_else(|| l.ty.clone()),
+                            ck.ty_of_expr(&pre_st, value).or_else(|| l.ty.clone()),
                         ),
                     };
+                    let is_fresh_copy = ck.call_returns_fresh_copy(&pre_st, value);
                     if crate::model::move_operand_ident(value).is_some()
                         || matches!(crate::model::unwrap_parens(value), Expr::Move { .. })
                     {
                         mark_nested_overwritten(st, name, nested);
-                        ck.define_binding(st, name, shape, ty, immutable, managed);
+                        ck.define_binding(st, name, shape, ty, immutable, managed, is_let);
                         if let Some(origin) = moved_non_owned {
                             if let Some(b) = st.env_lookup_mut(name) {
                                 b.non_owned_origin = Some(origin);
                             }
                         }
+                        ck.record_move_const_and_a3_loans(st, name, value, 0);
                         continue;
                     }
-                    let reads_self = ck.value_reads_storage_of(st, value, name);
+                    let reads_self = !is_fresh_copy && ck.value_reads_storage_of(&pre_st, value, name);
                     if !reads_self {
                         mark_nested_overwritten(st, name, nested);
                     }
                     let shadowed_origin = if ck.shape_may_share(&shape) && reads_self {
-                        ck.non_owned_origin_of(st, name).map(|(o, via_share)| {
+                        ck.non_owned_origin_of(&pre_st, name).map(|(o, via_share)| {
                             if via_share && !o.starts_with("a may-share peer of ") {
                                 format!("a may-share peer of {}", o)
                             } else {
@@ -518,12 +576,13 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         None
                     };
                     let prior_alias = if reads_self {
-                        st.aliases.get(name).cloned()
+                        pre_st.aliases.get(name).cloned()
                     } else {
                         None
                     };
                     let prior_children: Vec<String> = if reads_self {
-                        st.aliases
+                        pre_st
+                            .aliases
                             .iter()
                             .filter_map(|(k, v)| {
                                 if v == name && k != name {
@@ -537,7 +596,8 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         Vec::new()
                     };
                     let prior_shares: Vec<String> = if reads_self {
-                        st.may_share
+                        pre_st
+                            .may_share
                             .get(name)
                             .map(|s| s.iter().cloned().collect())
                             .unwrap_or_default()
@@ -545,20 +605,20 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         Vec::new()
                     };
                     let prior_shadow_links = if reads_self {
-                        st.shadow_links.get(name).cloned().unwrap_or_default()
+                        pre_st.shadow_links.get(name).cloned().unwrap_or_default()
                     } else {
                         std::collections::HashSet::new()
                     };
-                    let outer_depth = if st
+                    let outer_depth = if pre_st
                         .scopes
                         .last()
                         .is_some_and(|top| !top.contains_key(name))
                     {
-                        st.lookup_depth(name)
+                        pre_st.lookup_depth(name)
                     } else {
                         None
                     };
-                    ck.define_binding(st, name, shape, ty, immutable, managed);
+                    ck.define_binding(st, name, shape, ty, immutable, managed, is_let);
                     if let Some(origin) = &moved_non_owned {
                         if let Some(b) = st.env_lookup_mut(name) {
                             if b.non_owned_origin.is_none() {
@@ -596,10 +656,11 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     // issue #137: track may_share edges and aliases inside closures
                     // so local aliases of non-owned captured bindings inherit origin
                     // and cannot bypass O5.1 / O5.4 move restrictions.
-                    ck.record_may_share(st, name, value);
-                    ck.record_alias(st, name, value);
+                    ck.record_storage_from_snapshot(st, &pre_st, name, value, &overwritten, true, false);
+                    ck.record_move_const_and_a3_loans(st, name, value, 0);
+
                     ck.record_closure_mutations(st, name, value);
-                    if let Some(origin) = shadowed_origin {
+                    if let Some(origin) = shadowed_origin.or(moved_non_owned) {
                         if let Some(b) = st.env_lookup_mut(name) {
                             if b.non_owned_origin.is_none() {
                                 b.non_owned_origin = Some(origin);
@@ -610,6 +671,10 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 ck.record_local_borrow_aliases(st, l);
             } else {
                 // multi-name define from one value (`v, ok := m[k]`, `a, b := f()`)
+                let moved_non_owned = l
+                    .values
+                    .first()
+                    .and_then(|v| ck.moved_non_owned_origin_in_expr(st, v));
                 let (shapes, tys) = match l.values.first() {
                     Some(v) => (
                         ck.multi_value_shapes(st, v, l.names.len()),
@@ -620,9 +685,115 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         vec![None; l.names.len()],
                     ),
                 };
-                for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
-                    mark_nested_overwritten(st, name, nested);
-                    ck.define_binding(st, name, shape, ty, immutable, managed);
+                let val_opt = l.values.first();
+                let resolved: Vec<(
+                    String,
+                    TypeShape,
+                    Option<hy_syntax::TypeExpr>,
+                    bool,
+                    Option<String>,
+                    Option<String>,
+                    Vec<String>,
+                )> = l
+                    .names
+                    .iter()
+                    .zip(shapes)
+                    .zip(tys)
+                    .map(|((name, shape), ty)| {
+                        let reads_self = val_opt
+                            .map(|v| ck.value_reads_storage_of(st, v, name))
+                            .unwrap_or(false);
+                        let shadowed_origin = if ck.shape_may_share(&shape) && reads_self {
+                            ck.non_owned_origin_of(st, name).map(|(o, via_share)| {
+                                if via_share && !o.starts_with("a may-share peer of ") {
+                                    format!("a may-share peer of {}", o)
+                                } else {
+                                    o
+                                }
+                            })
+                        } else {
+                            None
+                        };
+                        let outer_exists = ck.lookup_binding(st, name).is_some();
+                        let prior_alias = if reads_self {
+                            st.aliases.get(name).cloned().or_else(|| {
+                                if ck.shape_may_share(&shape)
+                                    && outer_exists
+                                    && !st.scopes.is_empty()
+                                {
+                                    Some(name.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                        } else {
+                            None
+                        };
+                        let prior_shares: Vec<String> = if reads_self {
+                            st.may_share
+                                .get(name)
+                                .map(|s| s.iter().cloned().collect())
+                                .unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
+                        (
+                            name.clone(),
+                            shape,
+                            ty,
+                            reads_self,
+                            shadowed_origin,
+                            prior_alias,
+                            prior_shares,
+                        )
+                    })
+                    .collect();
+                let pre_st = st.clone();
+                let mut overwritten = Vec::new();
+                for (
+                    name,
+                    shape,
+                    ty,
+                    reads_self,
+                    shadowed_origin,
+                    prior_alias,
+                    prior_shares,
+                ) in resolved
+                {
+                    overwritten.push(name.clone());
+                    let carries = ck.shape_may_share(&shape);
+                    mark_nested_overwritten(st, &name, nested);
+                    ck.define_binding(st, &name, shape.clone(), ty, immutable, managed, is_let);
+                    if reads_self {
+                        if let Some(pa) = prior_alias {
+                            st.aliases.insert(name.clone(), pa);
+                        }
+                        for peer in prior_shares {
+                            st.share_edge(&name, &peer);
+                        }
+                    }
+                    if let Some(v) = val_opt {
+                        ck.record_storage_from_snapshot(st, &pre_st, &name, v, &overwritten, true, true);
+                    }
+                    if let Some(origin) = shadowed_origin {
+                        if let Some(b) = st.env_lookup_mut(&name) {
+                            if b.non_owned_origin.is_none() {
+                                b.non_owned_origin = Some(origin);
+                            }
+                        }
+                    }
+                    if carries {
+                        if let Some(origin) = &moved_non_owned {
+                            if let Some(b) = st.env_lookup_mut(&name) {
+                                if b.non_owned_origin.is_none() {
+                                    b.non_owned_origin = Some(origin.clone());
+                                }
+                            }
+                        }
+                        if let Some(v) = val_opt {
+                            ck.record_move_const_and_a3_loans(st, &name, v, 0);
+                        }
+                    }
                 }
                 if let Some(v) = l.values.first() {
                     ck.link_multi_value_return_aliases(st, v, &l.names);
@@ -744,7 +915,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                                 TypeShape::Primitive
                             };
                             mark_nested_overwritten(st, n, nested);
-                            ck.define_binding(st, n, shape, None, false, managed);
+                            ck.define_binding(st, n, shape, None, false, managed, false);
                         }
                         sync_nested_moves(st, nested);
                     }
@@ -754,8 +925,14 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 pop_scope_and_sync(st, nested);
             }
         }
-        Stmt::Managed { body, .. } => {
-            ck.managed_blocks += 1; // O6.3 parity with the flat walk
+        Stmt::Managed {
+            reason,
+            category,
+            tickets,
+            body,
+            span,
+        } => {
+            ck.audit_managed_block(reason, category, tickets, *span);
             st.scope_push();
             check_body_boundaries(ck, st, body, true, nested);
             pop_scope_and_sync(st, nested);
@@ -814,7 +991,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         let is_ref = shape.is_reference_alias();
                         let may_share = ck.shape_may_share(&shape);
                         mark_nested_overwritten(st, name, nested);
-                        ck.define_binding(st, name, shape, None, false, managed);
+                        ck.define_binding(st, name, shape, None, false, managed, false);
                         if !is_chan {
                             if may_share {
                                 ck.record_may_share(st, name, expr);
@@ -852,7 +1029,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     collect_expr_direct_fnlits(lo, st, nested);
                     collect_expr_direct_fnlits(hi, st, nested);
                     mark_nested_overwritten(st, var, nested);
-                    ck.define_binding(st, var, TypeShape::Primitive, None, false, managed);
+                    ck.define_binding(st, var, TypeShape::Primitive, None, false, managed, false);
                     sync_nested_moves(st, nested);
                 }
                 While { cond } => {
@@ -961,11 +1138,44 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             collect_stmt_direct_fnlits(stmt, st, nested);
             ck.process_closure_assign(st, targets, *op, values);
             sync_nested_moves(st, nested);
+            if targets.len() == values.len() {
+                for (t, v) in targets.iter().zip(values.iter()) {
+                    if matches!(t.kind, hy_syntax::PlaceKind::Field { .. }) {
+                        let is_borrow = crate::model::as_addr_of(v).is_some()
+                            || matches!(ck.shape_of_expr(st, v), TypeShape::BorrowHandle(_));
+                        if is_borrow {
+                            ck.emit_a6_field_borrow_error(t);
+                        }
+                    }
+                }
+            } else if values.len() == 1 && targets.len() > 1 {
+                let shapes = ck.multi_value_shapes(st, &values[0], targets.len());
+                for (t, shape) in targets.iter().zip(shapes.iter()) {
+                    if matches!(t.kind, hy_syntax::PlaceKind::Field { .. })
+                        && matches!(shape, TypeShape::BorrowHandle(_))
+                    {
+                        ck.emit_a6_field_borrow_error(t);
+                    }
+                }
+            }
+            for (t, v) in targets.iter().zip(values.iter()) {
+                if Checker::is_nil_literal(v) {
+                    if let Some(shape) = ck.place_shape(st, t) {
+                        if !matches!(shape, TypeShape::Unknown)
+                            && !Checker::is_nilable_shape(&shape)
+                        {
+                            ck.emit_nil_type_error(
+                                &shape,
+                                v.span(),
+                                &format!("the assignment target `{}`", t.render()),
+                            );
+                        }
+                    }
+                }
+                ck.check_composite_nils(st, v);
+            }
         }
         Stmt::Return { values, span } => {
-            for v in values {
-                ck.mark_move_in_value(st, v, format!("the move-return `{}`", v.render()));
-            }
             ck.process_return(st, values, *span);
             sync_nested_moves(st, nested);
             collect_stmt_direct_fnlits(stmt, st, nested);
@@ -992,6 +1202,94 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
     }
 }
 
+/// Check A3 (`HYB-E3102`) for map-slot loans opened inside a closure body.
+fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block) {
+    use crate::model::{Loan, LoanTarget};
+    use crate::walk;
+    let flat = walk::flatten(body);
+    let saved_last_use = std::mem::replace(&mut st.last_use, flat.last_use.clone());
+    let saved_loop_end = std::mem::replace(&mut st.loop_end, flat.loop_end.clone());
+    let saved_loans = std::mem::take(&mut st.loans);
+    for (stmt, idx) in &flat.stmts {
+        let idx = *idx;
+        let mut calls = Vec::new();
+        walk::own_calls(stmt, &mut calls);
+        for cr in calls {
+            let mut dummy_consumes = Vec::new();
+            ck.process_call(st, &cr, idx, None, &mut dummy_consumes);
+        }
+        match stmt {
+            Stmt::Local(l) => {
+                if l.names.len() == l.values.len() {
+                    for (name, val) in l.names.iter().zip(l.values.iter()) {
+                        if let Some(path) = walk::addr_of_index_base_path(val) {
+                            let binding = name.clone();
+                            let key = walk::addr_of_index_slot_key(val);
+                            let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
+                            st.loans.push(Loan {
+                                target: LoanTarget::MapSlot {
+                                    binding: binding.clone(),
+                                    path,
+                                    key,
+                                },
+                                created: idx,
+                                last,
+                                span: val.span(),
+                                desc: format!("`{} := {}`", binding, val.render()),
+                            });
+                        } else {
+                            ck.extend_map_slot_loan_to_alias(st, name, val, idx);
+                        }
+                    }
+                }
+            }
+            Stmt::Assign {
+                targets,
+                op,
+                values,
+                ..
+            } => {
+                if *op == hy_syntax::AssignOp::Assign && targets.len() == values.len() {
+                    for (t, v) in targets.iter().zip(values.iter()) {
+                        if let hy_syntax::PlaceKind::Ident(name) = &t.kind {
+                            if let Some(path) = walk::addr_of_index_base_path(v) {
+                                let binding = name.clone();
+                                let key = walk::addr_of_index_slot_key(v);
+                                let last =
+                                    st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
+                                st.loans.push(Loan {
+                                    target: LoanTarget::MapSlot {
+                                        binding: binding.clone(),
+                                        path,
+                                        key,
+                                    },
+                                    created: idx,
+                                    last,
+                                    span: v.span(),
+                                    desc: format!("`{} = {}`", binding, v.render()),
+                                });
+                            } else {
+                                ck.extend_map_slot_loan_to_alias(st, name, v, idx);
+                            }
+                        }
+                    }
+                }
+                for t in targets {
+                    if matches!(t.kind, hy_syntax::PlaceKind::Index { .. }) {
+                        if let Some(path) = walk::place_path(t) {
+                            ck.emit_a3_if_live_pub(st, &path, t.span, idx, "insert");
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    st.loans = saved_loans;
+    st.loop_end = saved_loop_end;
+    st.last_use = saved_last_use;
+}
+
 /// The outermost FnLits reachable from `block`. Closures nested inside other
 /// closures are NOT collected here: check_one_closure finds them while walking
 /// the enclosing closure's body (collect_stmt_direct_fnlits) and checks them
@@ -1003,6 +1301,7 @@ fn collect_fnlits(
     &[hy_syntax::Param],
     &[hy_syntax::FnResult],
     &Block,
+    (usize, usize),
 )> {
     let mut out = Vec::new();
     for s in &block.stmts {
@@ -1017,6 +1316,7 @@ fn collect_stmt<'a>(
         &'a [hy_syntax::Param],
         &'a [hy_syntax::FnResult],
         &'a Block,
+        (usize, usize),
     )>,
 ) {
     match stmt {
@@ -1114,6 +1414,7 @@ fn collect_place<'a>(
         &'a [hy_syntax::Param],
         &'a [hy_syntax::FnResult],
         &'a Block,
+        (usize, usize),
     )>,
 ) {
     match &place.kind {
@@ -1133,6 +1434,7 @@ fn collect_block<'a>(
         &'a [hy_syntax::Param],
         &'a [hy_syntax::FnResult],
         &'a Block,
+        (usize, usize),
     )>,
 ) {
     for s in &block.stmts {
@@ -1146,15 +1448,26 @@ fn collect_expr<'a>(
         &'a [hy_syntax::Param],
         &'a [hy_syntax::FnResult],
         &'a Block,
+        (usize, usize),
     )>,
 ) {
     match expr {
         Expr::Ident { .. } => {}
-        Expr::FnLit { params, results, body, .. } => {
+        Expr::FnLit {
+            params,
+            results,
+            body,
+            span,
+        } => {
             // Only collect outermost closures here; nested closures are
             // checked recursively inside check_one_closure against their
             // enclosing closure's environment (#229).
-            out.push((params, results, body));
+            out.push((
+                params,
+                results,
+                body,
+                (span.start.line as usize, span.start.col as usize),
+            ));
         }
         Expr::Lit { .. } => {}
         Expr::Interp { parts, .. } => {
@@ -1272,6 +1585,7 @@ fn check_deferred_uses(ck: &mut Checker<'_>, st: &FnState, body: &Block) {
                             shape,
                             ty: None,
                             immutable: false,
+                            is_let: false,
                             managed_taint: false,
                             moved: Some(mv),
                             non_owned_origin: None,
@@ -1417,6 +1731,13 @@ fn update_pre_defer_peers(
                     }
                 }
             }
+            if l.values.len() == 1 && l.names.len() > 1 {
+                for (i, j) in ck.callee_shared_return_pairs(st, &l.values[0]) {
+                    if let (Some(a), Some(b)) = (l.names.get(i), l.names.get(j)) {
+                        link_peer_nodes(peers, a, b);
+                    }
+                }
+            }
         }
         Stmt::Assign {
             targets,
@@ -1445,6 +1766,19 @@ fn update_pre_defer_peers(
                             .unwrap_or(true);
                         if may_share {
                             link_peer_nodes(peers, target, &r);
+                        }
+                    }
+                }
+            }
+            if values.len() == 1 && targets.len() > 1 {
+                for (i, j) in ck.callee_shared_return_pairs(st, &values[0]) {
+                    if let (Some(ta), Some(tb)) = (targets.get(i), targets.get(j)) {
+                        if let (
+                            hy_syntax::PlaceKind::Ident(a),
+                            hy_syntax::PlaceKind::Ident(b),
+                        ) = (&ta.kind, &tb.kind)
+                        {
+                            link_peer_nodes(peers, a, b);
                         }
                     }
                 }

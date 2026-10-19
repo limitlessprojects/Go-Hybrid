@@ -23,17 +23,20 @@ jobs:
         run: |
           set -e
 
-          python3 -m py_compile tools/runner/runner.py tools/job.py worker/script.py tools/corpus_harness.py tools/test_corpus_harness.py tools/test_corpus_utf8.py
+          python3 -m py_compile tools/runner/runner.py tools/job.py worker/script.py tools/corpus_harness.py tools/test_corpus_harness.py tools/test_corpus_utf8.py tools/extract_offsets.py tools/test_extract_offsets.py
           # Fail closed on a committed merge-conflict marker: a marker in a
           # tracked file is invisible to the suites but can make the whole
           # workflow unparseable and take every run (and every PR) down.
           python3 tools/check_conflict_markers.py
           python3 -m unittest discover -s tools -p test_check_conflict_markers.py -v
+          python3 -m unittest discover -s tools -p test_check_corpus_census.py -v
           python3 -m unittest discover -s tools/fuzz -p 'test_hyfuzz.py'
           python3 -m unittest discover -s tools/runner -p test_runner.py -v
           python3 -m unittest discover -s tools -p test_job_cli.py -v
+          python3 -m unittest discover -s tools -p test_job_shell_args.py -v
           python3 -m unittest discover -s tools -p test_managed_gate.py -v
           python3 -m unittest discover -s tools -p test_differential_loop.py -v
+          python3 -m unittest discover -s tools -p test_differential_output.py -v
           python3 -m unittest discover -s tools -p test_run_examples.py -v
           python3 -m unittest discover -s tools -p test_workload_shape.py -v
           python3 -m unittest discover -s tools -p test_workload_run.py -v
@@ -43,6 +46,7 @@ jobs:
           python3 -m unittest discover -s tools -p test_check_versions.py -v
           python3 -m unittest discover -s tools -p test_differential_reject_rule.py -v
           python3 -m unittest discover -s tools -p test_corpus_harness.py -v
+          python3 -m unittest discover -s tools -p test_extract_offsets.py -v
           # Suites that had drifted out of this list: a merged regression test
           # nothing invokes cannot fail the build. Registered here and pinned
           # by the guard below so the drift cannot come back silently.
@@ -135,12 +139,15 @@ jobs:
           # preinstalled rustup shim (which has no default toolchain).
           export PATH="$HOME/.cargo/bin:/usr/local/go/bin:$PATH"
           bash tools/check-versions.sh
+      - name: Check Corpus Census (every stated count matches the corpus)
+        run: make census
       - name: Compiler tests (hy-diag + hy-syntax + hy-check + hy-emit)
         run: |
           set -e
           cd compiler
           cargo test --workspace --quiet
-      - name: Checker corpus verdict agreement (77/77 + tripwire)
+
+      - name: Checker corpus verdict agreement (113/113 + tripwire)
         run: |
           set -e
           cd compiler && cargo build -p hyb --quiet
