@@ -1,0 +1,40 @@
+# Label-only staleness. NEVER auto-closes (days-before-*-close: -1): closing
+# is a deliberate act in this repo (credit-close protocol, M1 wildcard verdict
+# window). Wildcard holds, Pareto picks and anything explicitly kept are
+# exempt from even the stale label.
+name: stale
+
+on:
+  schedule:
+    - cron: "17 4 * * *" # 04:17 UTC daily, before the triage board pass
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Mark stale (label only, never close)
+        uses: actions/stale@b5d41d4e1d5dceea10e7104786b73624c18a190f # v10.2.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          days-before-pr-stale: 21
+          days-before-pr-close: -1
+          days-before-issue-stale: 60
+          days-before-issue-close: -1
+          exempt-pr-labels: triage:wildcard-hold,triage:pareto,triage:keep
+          exempt-issue-labels: soundness,M1,triage:keep
+          stale-pr-label: triage:stale
+          stale-issue-label: triage:stale
+          stale-pr-message: >
+            Marked stale (21 days idle). Label only — nothing auto-closes in
+            this repo. Update, rebase, or comment to refresh the label. If the
+            base is behind main, a rebase is the fastest path to review.
+          stale-issue-message: >
+            Marked stale (60 days idle). Label only — nothing auto-closes in
+            this repo.
+          operations-per-run: 250
