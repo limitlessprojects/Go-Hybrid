@@ -75,6 +75,19 @@ enum OpKind {
     /// any value), and assigning *from* one stays fail-open because type
     /// assertions are not modelled.
     Interface,
+    /// A generic function's declared type parameter, resolved through its
+    /// constraint — #729 / SPEC G3.
+    ///
+    /// Deliberately NOT `Unknown` for the same reason `Interface` is not:
+    /// `Unknown` means "could not resolve", and every operator allowlist
+    /// treats it as fail-open, while a type parameter IS resolved — its
+    /// operator set is exactly what its constraint (`any` / `comparable`,
+    /// the only two G3 allows) provides: no ordering, arithmetic, bitwise,
+    /// or logical operator under either, and `==` / `!=` only under
+    /// `comparable`. The kind exists only while that declaration's body is
+    /// being walked (`Collector::fn_type_params`), so a reference to `t`
+    /// outside the generic body resolves exactly as before.
+    TypeParam { name: String, constraint: String },
     Int,
     Float,
     Bool,
@@ -115,6 +128,9 @@ impl OpKind {
             OpKind::Pointer(inner) => format!("*{}", inner.label()),
             OpKind::Fn(..) => "fn".to_string(),
             OpKind::Void => "void".to_string(),
+            OpKind::TypeParam { name, constraint } => {
+                format!("type parameter `{}` ({})", name, constraint)
+            }
         }
     }
 }
@@ -160,6 +176,12 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         // an untyped constant from an `int` variable, so this direction must
         // stay allowed or the check would reject buildable programs.
         (Float, Int) => false,
+        // #729: a type parameter accepts what its constraint admits, and the
+        // kind model cannot decide that here (`any` takes everything;
+        // `comparable` admits every comparable type). Never a *type* mismatch
+        // — operator legality is decided by the operand checks, which read the
+        // constraint directly.
+        (TypeParam { .. }, _) | (_, TypeParam { .. }) => false,
         // A struct whose name did not resolve is not evidence of a mismatch.
         (Struct(None), _) | (_, Struct(None)) => false,
         (a, b) if a == b => false,
@@ -175,19 +197,6 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         // Everything else is a shape or scalar-family mismatch Go refuses.
         _ => true,
     }
-}
-
-/// Symmetrical conflict check for equality operators (`==`, `!=`).
-///
-/// Untyped numeric constants adapt between integer and floating types
-/// in Go comparisons (`1 == 1.0` builds), so numeric families do not
-/// conflict. Across different families (e.g. numeric vs string/bool,
-/// pointer vs scalar), Go never permits comparison.
-fn equality_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
-    if a.is_numeric() && b.is_numeric() {
-        return false;
-    }
-    kinds_conflict(a, b) && kinds_conflict(b, a)
 }
 
 /// Is every part of this kind resolved? (#682 U2/U3)
@@ -208,6 +217,10 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         // kind model (it may hold anything), so a member lookup on it cannot
         // claim absence — same fail-open as `kinds_conflict`'s Interface arm.
         OpKind::Interface => false,
+        // A type parameter's members are whatever its constraint admits —
+        // `any`'s are invisible and `comparable`'s are just `==` — so no
+        // member claim can be made from the kind alone (#729).
+        OpKind::TypeParam { .. } => false,
         OpKind::Int | OpKind::Float | OpKind::Bool | OpKind::Str => true,
         OpKind::Void => false,
         // A struct whose NAME did not resolve cannot have its members looked up.
@@ -274,9 +287,15 @@ struct Collector<'a> {
     /// (`return v` in a `(value, error)` fn emits `return v, nil`, the E3
     /// sugar; corpus 13).
     fn_results_error_tail: bool,
-    /// Lexical nesting depth within loops (`for` / `loop`).
+    /// Type parameters of the generic declaration whose body is currently
+    /// being walked (#729 / SPEC G3), keyed by name. Seeded at the top of
+    /// `fn_decl` (after its body guard) and restored when the body closes,
+    /// so `kind_of_named` answers `t` with its constraint only inside the
+    /// generic body — outside it a bare `t` resolves exactly as before.
+    fn_type_params: HashMap<String, hy_syntax::TypeParam>,
+    /// Lexical nesting depth within loops (for / loop).
     loop_depth: usize,
-    /// Lexical nesting depth within `select` statements.
+    /// Lexical nesting depth within select statements.
     select_depth: usize,
     defines: Vec<Define>,
     /// Every identifier mentioned in the file plus every dotted type root —
@@ -299,6 +318,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             fn_results: Vec::new(),
             fn_results_all_named: false,
             fn_results_error_tail: false,
+            fn_type_params: HashMap::new(),
             loop_depth: 0,
             select_depth: 0,
             defines: Vec::new(),
@@ -498,6 +518,16 @@ impl<'a> Collector<'a> {
             Some(TypeExpr::Named { name, .. }) if name == "error"
         );
         let Some(body) = &f.body else { return };
+        // #729 / G3: seed THIS declaration's type parameters before the body
+        // walk so `kind_of_named` resolves `t` to its constraint (and to
+        // nothing at all once `outer_fn_type_params` is restored below).
+        let outer_fn_type_params = std::mem::replace(
+            &mut self.fn_type_params,
+            f.type_params
+                .iter()
+                .map(|p| (p.name.clone(), p.clone()))
+                .collect(),
+        );
         self.push_scope();
         if let Some(r) = &f.receiver {
             self.exempt(&r.name);
@@ -529,15 +559,12 @@ impl<'a> Collector<'a> {
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
-        let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
-        let outer_select = std::mem::replace(&mut self.select_depth, 0);
         self.block_stmts(body);
-        self.loop_depth = outer_loop;
-        self.select_depth = outer_select;
         self.fn_results = outer;
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
         self.pop_scope();
+        self.fn_type_params = outer_fn_type_params;
     }
 
     fn local(&mut self, l: &LocalDecl) {
@@ -740,7 +767,6 @@ impl<'a> Collector<'a> {
                 kind, body, span, ..
             } => {
                 self.push_scope();
-                self.loop_depth += 1;
                 match kind {
                     ForKind::While { cond } => {
                         self.expr(cond);
@@ -768,7 +794,6 @@ impl<'a> Collector<'a> {
                     ForKind::Infinite => {}
                 }
                 self.block_scoped(body);
-                self.loop_depth -= 1;
                 self.pop_scope();
             }
             Stmt::Return { values, span } => {
@@ -777,22 +802,10 @@ impl<'a> Collector<'a> {
                 }
                 self.check_return(values, *span);
             }
-            Stmt::Task { callee, args, span } => {
+            Stmt::Task { callee, args, .. } => {
                 self.expr(callee);
                 for a in args {
                     self.expr(&a.value);
-                }
-                match unwrap_parens(callee) {
-                    Expr::Ident { name, .. } => {
-                        self.check_user_fn_arity(name, args, *span);
-                        self.check_user_fn_arg_types(name, args);
-                    }
-                    Expr::Field { base, name, .. } => {
-                        let bk = self.kind_of_expr(base);
-                        self.check_method_arity(&bk, name, args, *span);
-                        self.check_method_arg_types(&bk, name, args);
-                    }
-                    _ => {}
                 }
             }
             Stmt::Managed { body, .. } => self.block_scoped(body),
@@ -823,41 +836,9 @@ impl<'a> Collector<'a> {
                 // call's. `builtins.rs` owns the "must be a call" half.
                 self.check_defer_arity(call, *span);
             }
-            Stmt::Break { span, label } => {
-                if label.is_none() && self.loop_depth == 0 && self.select_depth == 0 {
-                    self.diags.push(
-                        Diagnostic::error(
-                            "HYB-E1002",
-                            self.path.clone(),
-                            *span,
-                            "break is not in a loop or select statement (HYB-E1002)",
-                        )
-                        .with_notes(vec![
-                            "plain `break` can only be used inside a `for` loop or `select` statement".to_string(),
-                            "move this statement inside a loop or select, or remove it".to_string(),
-                        ]),
-                    );
-                }
-            }
-            Stmt::Continue { span, label } => {
-                if label.is_none() && self.loop_depth == 0 {
-                    self.diags.push(
-                        Diagnostic::error(
-                            "HYB-E1002",
-                            self.path.clone(),
-                            *span,
-                            "continue is not in a loop (HYB-E1002)",
-                        )
-                        .with_notes(vec![
-                            "`continue` can only be used inside a `for` loop".to_string(),
-                            "move this statement inside a loop, or remove it".to_string(),
-                        ]),
-                    );
-                }
-            }
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
             Stmt::Block { block, .. } => self.block_scoped(block),
             Stmt::Select { arms, .. } => {
-                self.select_depth += 1;
                 for arm in arms {
                     self.push_scope();
                     match &arm.kind {
@@ -882,7 +863,6 @@ impl<'a> Collector<'a> {
                     self.block_scoped(&arm.body);
                     self.pop_scope();
                 }
-                self.select_depth -= 1;
             }
         }
     }
@@ -1018,7 +998,6 @@ impl<'a> Collector<'a> {
             // The struct-field lookup below cannot catch it, because an
             // interface is not a struct — so reject the base explicitly.
             Expr::Field { base, name, span } => {
-                self.check_pointer_method_receiver(base, name, *span);
                 if matches!(self.kind_of_expr(base), OpKind::Interface) {
                     self.emit_e1002(
                         *span,
@@ -1132,11 +1111,7 @@ impl<'a> Collector<'a> {
                 let outer = std::mem::replace(&mut self.fn_results, result_kinds);
                 let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
                 let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
-                let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
-                let outer_select = std::mem::replace(&mut self.select_depth, 0);
                 self.block_stmts(body);
-                self.loop_depth = outer_loop;
-                self.select_depth = outer_select;
                 self.fn_results = outer;
                 self.fn_results_all_named = outer_named;
                 self.fn_results_error_tail = outer_err;
@@ -1320,7 +1295,23 @@ impl<'a> Collector<'a> {
             "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
             | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "usize"
             | "isize" | "uintptr" | "byte" | "rune" | "char" => OpKind::Int,
-            _ => OpKind::Unknown,
+            _ => {
+                // #729 / SPEC G3: a type parameter of the generic declaration
+                // currently being walked is a RESOLVED type — its constraint
+                // (an omitted constraint is `any`, which is how `hy-emit`
+                // renders it) — and must not fall through to the fail-open
+                // `Unknown` every operator allowlist treats as permissive.
+                if let Some(p) = self.fn_type_params.get(base) {
+                    return OpKind::TypeParam {
+                        name: p.name.clone(),
+                        constraint: p
+                            .constraint
+                            .clone()
+                            .unwrap_or_else(|| "any".to_string()),
+                    };
+                }
+                OpKind::Unknown
+            }
         }
     }
 
@@ -2004,6 +1995,88 @@ impl<'a> Collector<'a> {
         );
     }
 
+    /// #729 / SPEC G5 — a generic call's type argument must satisfy its
+    /// constraint. Go rejects `same(xs, xs)` for `fn same[t comparable]` when
+    /// `xs` is a slice (`[]int does not satisfy comparable`); inference (G5)
+    /// reads the argument's kind, an explicit `same[[]int](...)` reads the
+    /// written type. `any` — including the omitted constraint, which
+    /// `hy-emit` renders as `any` — is satisfied by everything, so only
+    /// `comparable` parameters are checked, and anything undecidable (an
+    /// unresolved argument, a nested position like `map[t]t`, an ambiguous
+    /// explicit list) stays open: this pass never rejects what it cannot
+    /// prove, consistent with `kinds_conflict`'s accept-side rule.
+    fn check_generic_type_args(&mut self, name: &str, args: &[CallArg], span: Span) {
+        let head = Checker::base_named_type_str(name);
+        let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
+            return;
+        };
+        if f.type_params.is_empty() {
+            return;
+        }
+        // Explicit instantiation: `same[[]int](xs, xs)` — the type argument is
+        // written, so satisfaction is decidable without inference.
+        let explicit: Vec<&str> = match name.find('[') {
+            Some(open) if name.ends_with(']') => {
+                split_top_level_type_args(&name[open + 1..name.len() - 1])
+            }
+            _ => Vec::new(),
+        };
+        if explicit.len() == f.type_params.len() {
+            for (p, ta) in f.type_params.iter().zip(explicit) {
+                self.check_one_type_arg(head, p, ta, span);
+            }
+            return;
+        }
+        if !explicit.is_empty() {
+            return; // arity / misuse already reported by check_fn_type_arg_arity
+        }
+        // Inference (G5): one written argument per declared parameter, and the
+        // parameter's declared type must BE the type parameter (`a t`) — a
+        // nested position (`a map[t]t`) is left to the real type checker.
+        if args.len() != f.params.len() || self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        for p in &f.type_params {
+            if p.constraint.as_deref() != Some("comparable") {
+                continue;
+            }
+            let hit = f.params.iter().zip(args).find(|(param, _)| {
+                matches!(&param.ty, TypeExpr::Named { name, .. } if *name == p.name)
+            });
+            let Some((_, arg)) = hit else {
+                continue;
+            };
+            if arg.spread {
+                continue;
+            }
+            let k = self.kind_of_expr(&arg.value);
+            self.check_one_type_arg(head, p, &k.label(), span);
+        }
+    }
+
+    fn check_one_type_arg(
+        &mut self,
+        fn_base: &str,
+        p: &hy_syntax::TypeParam,
+        rendered: &str,
+        span: Span,
+    ) {
+        if p.constraint.as_deref() != Some("comparable") {
+            return; // `any` (written or omitted) is satisfied by every type
+        }
+        if type_arg_comparable_ok(rendered) {
+            return;
+        }
+        self.emit_e1002(
+            span,
+            format!(
+                "type argument `{}` does not satisfy constraint `comparable` for type parameter `{}` in `{}` (HYB-E1002)",
+                rendered, p.name, fn_base
+            ),
+            "Go rejects with `<type> does not satisfy comparable` — slices, maps, functions, and composites carrying them are not comparable (SPEC G3)",
+        );
+    }
+
     /// #577 C9 — method calls (`x.bump(k)`) declare their receiver
     /// separately, so the parameter count is the declared one.
     fn check_method_arity(&mut self, bk: &OpKind, name: &str, args: &[CallArg], span: Span) {
@@ -2048,85 +2121,6 @@ impl<'a> Collector<'a> {
             msg,
             "the receiver is not an argument: pass one argument per declared parameter",
         );
-    }
-
-    fn check_user_fn_arg_types(&mut self, name: &str, args: &[CallArg]) {
-        let head = Checker::base_named_type_str(name);
-        let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
-            return;
-        };
-        if !f.type_params.is_empty() {
-            return;
-        }
-        if self.multi_value_arg_count(args).is_some() {
-            return;
-        }
-        if f.params.len() != args.len() {
-            return;
-        }
-        for (p, a) in f.params.iter().zip(args.iter()) {
-            let want = self.kind_of_ty(&p.ty, 0);
-            let got = self.kind_of_expr(&a.value);
-            if let OpKind::Pointer(inner) = &want {
-                if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
-                    continue;
-                }
-            }
-            if kinds_conflict(&want, &got) {
-                self.emit_e1002(
-                    a.value.span(),
-                    format!(
-                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
-                        a.value.render(),
-                        got.label(),
-                        want.label(),
-                        name
-                    ),
-                    "argument types must match declared parameter types",
-                );
-            }
-        }
-    }
-
-    fn check_method_arg_types(&mut self, bk: &OpKind, name: &str, args: &[CallArg]) {
-        let Some(sn) = self.struct_base_name(bk).or_else(|| self.struct_name(bk)) else {
-            return;
-        };
-        let Some(m) = self.ck.method_decls.get(&(sn.clone(), name.to_string())) else {
-            return;
-        };
-        if !m.type_params.is_empty() {
-            return;
-        }
-        if self.multi_value_arg_count(args).is_some() {
-            return;
-        }
-        if m.params.len() != args.len() {
-            return;
-        }
-        for (p, a) in m.params.iter().zip(args.iter()) {
-            let want = self.kind_of_ty(&p.ty, 0);
-            let got = self.kind_of_expr(&a.value);
-            if let OpKind::Pointer(inner) = &want {
-                if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
-                    continue;
-                }
-            }
-            if kinds_conflict(&want, &got) {
-                self.emit_e1002(
-                    a.value.span(),
-                    format!(
-                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}.{}` — Go refuses mismatched argument types (HYB-E1002)",
-                        a.value.render(),
-                        got.label(),
-                        want.label(),
-                        sn,
-                        name
-                    ),
-                    "argument types must match declared parameter types",
-                );
-            }
-        }
     }
 
     /// #577 C10 — a `return` must supply the enclosing function's result
@@ -2341,6 +2335,26 @@ impl<'a> Collector<'a> {
     /// Family B1/B2 (#425): unary `!` requires `bool`, unary `-` requires a numeric operand.
     fn check_unary_operand(&mut self, op: UnOp, operand: &Expr, span: Span) {
         let k = self.kind_of_expr(operand);
+        // #729 / G3: `!` and unary `-` are no more defined on a type
+        // parameter than the binary operators are; `&x` is legal Go and
+        // stays untouched.
+        if let OpKind::TypeParam { name, constraint } = &k {
+            if !matches!(op, UnOp::Addr) {
+                let op_str = match op {
+                    UnOp::Not => "!",
+                    _ => "-",
+                };
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "unary operator `{}` is not defined on type parameter `{}` (constraint `{}`) in `{}` (HYB-E1002)",
+                        op_str, name, constraint, operand.render()
+                    ),
+                    "SPEC G3: MVP constraints are `comparable` and `any` only; neither brings `!` or unary `-` (Go: `type parameter ... cannot use operator ...`)",
+                );
+                return;
+            }
+        }
         match op {
             UnOp::Not => {
                 if !matches!(k, OpKind::Unknown | OpKind::Bool) {
@@ -2382,29 +2396,42 @@ impl<'a> Collector<'a> {
         self.check_single_value_position(rhs, "a binary operation", /*binding_position=*/ false);
         let lk = self.kind_of_expr(lhs);
         let rk = self.kind_of_expr(rhs);
-        match op {
-            // `==` / `!=`: incomparable shapes (slice, map, func) are rejected
-            // by `emit_guard.rs` (HYB-E2006). Mismatched concrete operand types
-            // are rejected here under HYB-E1002 (rule `BUILDABLE`).
-            BinOp::Eq | BinOp::Ne => {
-                let op_str = if matches!(op, BinOp::Eq) { "==" } else { "!=" };
-                if !Checker::is_nil_literal(lhs)
-                    && !Checker::is_nil_literal(rhs)
-                    && equality_kinds_conflict(&lk, &rk)
-                {
+        // #729 / SPEC G3: the MVP constraint set defines NO operator except
+        // `==` / `!=` under `comparable`, and `Unknown`'s fail-open treatment
+        // must not apply to a resolved type parameter. Go rejects every one
+        // of these with `type parameter ... cannot use operator ...`.
+        for k in [&lk, &rk] {
+            if let OpKind::TypeParam { name, constraint } = k {
+                let allowed = matches!(op, BinOp::Eq | BinOp::Ne) && constraint == "comparable";
+                if !allowed {
+                    let op_str = bin_op_str(op);
+                    let reason = if matches!(op, BinOp::Eq | BinOp::Ne) {
+                        format!(
+                            "`{}` requires a comparable type, but type parameter `{}` has constraint `{}` (SPEC G3)",
+                            op_str, name, constraint
+                        )
+                    } else {
+                        format!(
+                            "operator `{}` is not defined on type parameter `{}` (constraint `{}`): MVP constraints are `comparable` and `any` only, and neither brings ordering, arithmetic, bitwise, or logical operators (SPEC G3)",
+                            op_str, name, constraint
+                        )
+                    };
                     self.emit_e1002(
                         span,
                         format!(
-                            "invalid operation `{}`: operator `{}` requires comparable operands of matching type, found `{}` and `{}` (HYB-E1002)",
-                            span_expr_label(lhs, op_str, rhs),
-                            op_str,
-                            lk.label(),
-                            rk.label()
+                            "{} in `{}` (HYB-E1002)",
+                            reason,
+                            span_expr_label(lhs, op_str, rhs)
                         ),
-                        "equality operators (`==`, `!=`) require operands of matching type",
+                        "Go rejects this with `type parameter ... cannot use operator ...`; operations on generic values belong under a constraint that provides them (SPEC G3)",
                     );
+                    return;
                 }
             }
+        }
+        match op {
+            // `==` / `!=` are checked by `emit_guard.rs` (HYB-E2006).
+            BinOp::Eq | BinOp::Ne => {}
             // B4: `&&` and `||` require `bool` operands.
             BinOp::And | BinOp::Or => {
                 let op_str = if matches!(op, BinOp::And) { "&&" } else { "||" };
@@ -2540,16 +2567,6 @@ impl<'a> Collector<'a> {
             return;
         };
         let tk = self.kind_of_place(target);
-        if op != AssignOp::Assign && op != AssignOp::Inc && op != AssignOp::Dec {
-            if targets.len() != 1 || values.len() != 1 {
-                self.emit_e1002(
-                    span,
-                    "compound assignment operator does not support multiple targets or values (HYB-E1002)".to_string(),
-                    "compound assignment operators (`+=`, `-=`, etc.) require exactly one target and one value; write separate statements or use `=` for parallel assignment",
-                );
-                return;
-            }
-        }
         match op {
             // #682 U16: plain `=` requires the value to be assignable to the
             // target. Only the single-target/single-value form is checked
@@ -2609,7 +2626,7 @@ impl<'a> Collector<'a> {
                 let mismatch = tk != OpKind::Unknown
                     && vk != OpKind::Unknown
                     && tk.is_numeric() != vk.is_numeric();
-                if !t_ok || !v_ok || mismatch || kinds_conflict(&tk, &vk) {
+                if !t_ok || !v_ok || mismatch {
                     self.emit_e1002(
                         span,
                         format!(
@@ -2619,33 +2636,26 @@ impl<'a> Collector<'a> {
                             tk.label(),
                             vk.label()
                         ),
-                        "`+=` requires two numeric values or two strings of matching types",
+                        "`+=` requires two numeric values or two strings",
                     );
                 }
             }
             AssignOp::SubAssign | AssignOp::MulAssign | AssignOp::DivAssign => {
                 let Some(val) = values.first() else { return };
                 let vk = self.kind_of_expr(val);
-                let op_sym = match op {
-                    AssignOp::SubAssign => "-=",
-                    AssignOp::MulAssign => "*=",
-                    _ => "/=",
-                };
                 if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float)
-                    || kinds_conflict(&tk, &vk)
                 {
                     self.emit_e1002(
                         span,
                         format!(
-                            "invalid compound assignment `{} {} {}` on `{}` and `{}` (HYB-E1002)",
+                            "invalid compound assignment on `{}` (type `{}`) and `{}` (type `{}`) (HYB-E1002)",
                             target.render(),
-                            op_sym,
-                            val.render(),
                             tk.label(),
+                            val.render(),
                             vk.label()
                         ),
-                        "`-=`, `*=`, `/=` require numeric operands of matching types",
+                        "`-=`, `*=`, `/=` require numeric operands",
                     );
                 }
             }
@@ -3005,7 +3015,7 @@ impl<'a> Collector<'a> {
                         self.check_append_elements(args);
                     }
                     self.check_user_fn_arity(name, args, span);
-                    self.check_user_fn_arg_types(name, args);
+                    self.check_generic_type_args(name, args, span);
                 }
             }
             Expr::Field { base, name, .. } => {
@@ -3034,6 +3044,30 @@ impl<'a> Collector<'a> {
                 // A method has no field entry, so resolve it before the field
                 // lookup: `x.bump()` must reach the arity check even though
                 // `bump` is not a struct field (#577 C9).
+                let head = Checker::base_named_type_str(name);
+                if let OpKind::Struct(Some(sn)) = &bk {
+                    let base_sn = Checker::base_named_type_str(sn);
+                    if let Some(m) = self
+                        .ck
+                        .method_decls
+                        .get(&(base_sn.to_string(), head.to_string()))
+                    {
+                        let ptr_recv = m.receiver.as_ref().is_some_and(|r| r.is_pointer);
+                        if ptr_recv && !self.is_addressable_value_receiver(base) {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot call pointer method `{}` on `{}` (non-addressable `{}` value) — Go refuses taking the address of `{}` (HYB-E1002)",
+                                    name,
+                                    base.render(),
+                                    sn,
+                                    base.render()
+                                ),
+                                "assign the value to a local variable first (`v := ...; v.method()`), store `*T` pointers, or declare a value receiver `(self T)`",
+                            );
+                        }
+                    }
+                }
                 // pr-678: normalize through `struct_base_name` so a generic
                 // instantiation (`cache[int]`, `*lru_cache[k, v]`) resolves to
                 // the base-name key `method_decls` is indexed by — the same
@@ -3097,7 +3131,6 @@ impl<'a> Collector<'a> {
                 }
                 if has_method {
                     self.check_method_arity(&bk, name, args, span);
-                    self.check_method_arg_types(&bk, name, args);
                 }
             }
             _ => {
@@ -3171,36 +3204,6 @@ impl<'a> Collector<'a> {
                 _ => false,
             },
             _ => false,
-        }
-    }
-
-    /// Check method selection too: task callees and bound method values do
-    /// not pass through the ordinary call-arity checker (#656).
-    fn check_pointer_method_receiver(&mut self, base: &Expr, name: &str, span: Span) {
-        let bk = self.kind_of_expr(base);
-        let head = Checker::base_named_type_str(name);
-        if let OpKind::Struct(Some(sn)) = &bk {
-            let base_sn = Checker::base_named_type_str(sn);
-            if let Some(m) = self
-                .ck
-                .method_decls
-                .get(&(base_sn.to_string(), head.to_string()))
-            {
-                let ptr_recv = m.receiver.as_ref().is_some_and(|r| r.is_pointer);
-                if ptr_recv && !self.is_addressable_value_receiver(base) {
-                    self.emit_e1002(
-                        span,
-                        format!(
-                            "cannot select pointer method `{}` on `{}` (non-addressable `{}` value) — Go refuses taking the address of `{}` (HYB-E1002)",
-                            name,
-                            base.render(),
-                            sn,
-                            base.render()
-                        ),
-                        "assign the value to a local variable first (`v := ...; v.method()`), store `*T` pointers, or declare a value receiver `(self T)`",
-                    );
-                }
-            }
         }
     }
 
@@ -3490,6 +3493,59 @@ impl<'a> Collector<'a> {
             }
         }
     }
+}
+
+/// The operator's Go spelling, for diagnostics that name the operator
+/// (`bin_op_str` — kept exhaustive over `hy_syntax::BinOp`).
+fn bin_op_str(op: BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
+        BinOp::Mod => "%",
+        BinOp::Eq => "==",
+        BinOp::Ne => "!=",
+        BinOp::Lt => "<",
+        BinOp::Gt => ">",
+        BinOp::Le => "<=",
+        BinOp::Ge => ">=",
+        BinOp::And => "&&",
+        BinOp::Or => "||",
+        BinOp::BitOr => "|",
+        BinOp::BitXor => "^",
+        BinOp::BitAnd => "&",
+        BinOp::Shl => "<<",
+        BinOp::Shr => ">>",
+    }
+}
+
+/// Does this rendered type argument satisfy `comparable` (SPEC G3 / Go's
+/// rule)? One-directional by design: `false` = provably non-comparable — a
+/// slice, a map, a function, or an array carrying one — and everything else
+/// (primitives, pointers, channels, named types whose fields this pass
+/// cannot see, qualified names) stays `true`, because rejecting a
+/// comparable argument would break a buildable program while missing an
+/// incomparable one only re-opens a case `go build` still rejects.
+fn type_arg_comparable_ok(s: &str) -> bool {
+    let s = s.trim();
+    if s.starts_with("[]") {
+        return false; // slice
+    }
+    if s.starts_with("map[") || s == "map" {
+        return false; // map
+    }
+    if s.starts_with("fn(") || s == "fn" || s.starts_with("fn ") {
+        return false; // function
+    }
+    if let Some(rest) = s.strip_prefix('[') {
+        // array `[N]T`: comparable iff its element is
+        return match rest.find(']') {
+            Some(i) => type_arg_comparable_ok(&rest[i + 1..]),
+            None => true,
+        };
+    }
+    true
 }
 
 fn span_expr_label(lhs: &Expr, op: &str, rhs: &Expr) -> String {

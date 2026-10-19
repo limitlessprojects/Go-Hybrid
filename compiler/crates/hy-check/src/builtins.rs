@@ -296,20 +296,38 @@ impl<'a> Checker<'a> {
                     );
                     return;
                 }
-                if is_value_literal(&args[0].value)
-                    || is_numeric_or_bool_or_char_literal(&args[1].value)
+                let dst = &args[0].value;
+                let src = &args[1].value;
+                // #720: copy's destination must be a slice, its source a slice
+                // or string. Fail open on Unknown — only reject when we can
+                // prove the shape is wrong.
+                let dst_is_scalar_lit = is_value_literal(dst)
+                    || is_numeric_or_bool_or_char_literal(dst)
                     || matches!(
-                        unwrap_parens(&args[1].value),
-                        Expr::Lit {
-                            kind: LitKind::Nil,
-                            ..
-                        }
-                    )
-                {
+                        unwrap_parens(dst),
+                        Expr::Lit { kind: LitKind::Nil, .. }
+                    );
+                let src_is_number_bool_char = is_numeric_or_bool_or_char_literal(src)
+                    || matches!(
+                        unwrap_parens(src),
+                        Expr::Lit { kind: LitKind::Nil, .. }
+                    );
+                if dst_is_scalar_lit {
                     self.emit_builtin(
                         span,
-                        "`copy(dst, src)` requires a destination slice and a source slice or string (HYB-E2005)"
-                            .to_string(),
+                        format!(
+                            "`copy(dst, src)` requires a destination slice, got `{}` (HYB-E2005)",
+                            dst.render()
+                        ),
+                    );
+                }
+                if src_is_number_bool_char {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`copy(dst, src)` requires a source slice or string, got `{}` (HYB-E2005)",
+                            src.render()
+                        ),
                     );
                 }
             }
@@ -324,11 +342,41 @@ impl<'a> Checker<'a> {
                     );
                     return;
                 }
-                if is_value_literal(&args[0].value) {
+                let arg = &args[0].value;
+                // #720: clear only accepts a slice or map. Fail open on
+                // Unknown — only reject when we can prove the shape is wrong
+                // via literal checks.
+                if is_value_literal(arg) {
                     self.emit_builtin(
                         span,
-                        "`clear` requires a map or slice value — not a scalar or string literal (HYB-E2005)"
-                            .to_string(),
+                        format!(
+                            "`clear` requires a slice or map argument, got `{}` (HYB-E2005)",
+                            arg.render()
+                        ),
+                    );
+                }
+            }
+            "panic" => {
+                // #720: panic takes exactly 1 argument.
+                if args.len() != 1 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`panic` requires exactly 1 argument, found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                }
+            }
+            "recover" => {
+                // #720: recover takes exactly 0 arguments.
+                if args.len() != 0 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`recover` takes no arguments, found {} (HYB-E2005)",
+                            args.len()
+                        ),
                     );
                 }
             }
