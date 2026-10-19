@@ -439,6 +439,60 @@ impl<'a> Collector<'a> {
         self.mention(name);
     }
 
+    /// #778 — a TYPE NAME used where a VALUE is required.
+    ///
+    /// `struct holder { n int }` followed by `x := holder` passes `hyb check`
+    /// and the emitter prints the identifier verbatim, so `go build` fails with
+    /// `holder (type) is not an expression`. Go has no value named `holder`,
+    /// so this is not an `Unknown` fail-open case: the shape IS known and the
+    /// value does not exist.
+    ///
+    /// Deliberately narrow, because a type name is a legal operand in a
+    /// CONVERSION (`holder(x)`, `int(3.7)`). The call arm handles its callee
+    /// separately, so this is only reached for a genuine value position.
+    ///
+    /// Fail-open on anything that could be a value: a local/parameter/closure
+    /// binding shadows the type name (`holder := 5` is a legal variable), and
+    /// an unknown name is another rule's business (unused-binding, O4.9).
+    fn check_type_name_in_value_position(&mut self, name: &str, span: Span) {
+        // A binding in any enclosing scope shadows the type name.
+        if self
+            .scopes
+            .iter()
+            .rev()
+            .any(|layer| layer.contains_key(name))
+        {
+            return;
+        }
+        // A file-level const of the same name is a value, not the type.
+        if self.ck.consts.contains_key(name) {
+            return;
+        }
+        // A top-level fn of the same name is callable, not the type.
+        let head = Checker::base_named_type_str(name);
+        if self.ck.fns.contains_key(name) || self.ck.fns.contains_key(head) {
+            return;
+        }
+        // The name must actually resolve to a declared type — a struct, an
+        // enum, a type alias, or a built-in conversion target. Anything else
+        // stays fail-open.
+        let is_declared_type = self.ck.structs.contains_key(name)
+            || self.ck.enums.contains_key(name)
+            || self.ck.type_aliases.contains_key(name)
+            || crate::const_init::is_conversion_type_name(name);
+        if !is_declared_type {
+            return;
+        }
+        self.emit_e1002(
+            span,
+            format!(
+                "`{}` is a type, not a value — Go refuses `{} (type) is not an expression` (HYB-E1002)",
+                name, name
+            ),
+            "a type name can only be used in a type position or as a conversion callee (`T(x)`)",
+        );
+    }
+
     fn write(&mut self, name: &str) {
         for layer in self.scopes.iter().rev() {
             if let Some(entry) = layer.get(name) {
@@ -965,7 +1019,11 @@ impl<'a> Collector<'a> {
 
     fn expr(&mut self, e: &Expr) {
         match e {
-            Expr::Ident { name, .. } => self.read(name),
+            Expr::Ident { name, span } => {
+                self.read(name);
+                // #778: a value position, so a type name here cannot build.
+                self.check_type_name_in_value_position(name, *span);
+            }
             Expr::Lit { .. } => {}
             Expr::Interp { parts, .. } => {
                 for p in parts {
@@ -1032,13 +1090,46 @@ impl<'a> Collector<'a> {
                         "an `any` value must be asserted to a concrete type before its fields can be read",
                     );
                 }
-                self.expr(base);
+                // #778: a Field BASE is a QUALIFIER position, not a value
+                // position, so the type-name check must not fire on it. Two
+                // legal spellings put a type name there:
+                //   * `color.red`      — an enum variant
+                //   * `greeting.build` — a method call on the type
+                // (and `fmt.println` is a package root, which is not a type
+                // and never reached this check anyway). A bare `x := colour`
+                // IS a value position and still rejects, pinned in the
+                // fixture. An identifier base is read for used-marking; a
+                // deeper base (a call result, an index) recurses normally.
+                match unwrap_parens(base) {
+                    Expr::Ident { name, .. } => self.read(name),
+                    other => self.expr(other),
+                }
             }
             Expr::Call {
                 callee, args, span, ..
             } => {
-                self.expr(callee);
-                for a in args {
+                // #778: a plain identifier CALLEE is a call position, not a
+                // value position — `holder(x)` is a legal conversion and
+                // `int(3.7)` is a legal built-in one, so the type-name check
+                // must not fire there. `read` still runs, because an unused
+                // local closure called as `f()` has been read.
+                match unwrap_parens(callee) {
+                    Expr::Ident { name, .. } => self.read(name),
+                    other => self.expr(other),
+                }
+                // `new(T)` and `make(T, len, cap)` take a TYPE as their FIRST
+                // argument, so that position is a type position and the
+                // #778 value-position check must not fire there — `new(bag)`
+                // and `make(map[string]int)` are both legal. The remaining
+                // `make` arguments (len, cap) ARE values and still walk.
+                let type_first_arg = matches!(
+                    unwrap_parens(callee),
+                    Expr::Ident { name, .. } if name == "new" || name == "make"
+                );
+                for (i, a) in args.iter().enumerate() {
+                    if type_first_arg && i == 0 {
+                        continue;
+                    }
                     self.expr(&a.value);
                 }
                 // #682 U7: every argument must be exactly one value, except

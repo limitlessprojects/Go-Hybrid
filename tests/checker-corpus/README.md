@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 116 programs — ACCEPT 36 · ACCEPT-MANAGED 2 · REJECT 78 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
-**Current registered corpus: 116 programs — ACCEPT 36 · ACCEPT-MANAGED 2 · REJECT 78 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 118 programs — ACCEPT 37 · ACCEPT-MANAGED 2 · REJECT 79 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 118 programs — ACCEPT 37 · ACCEPT-MANAGED 2 · REJECT 79 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -243,3 +243,21 @@ Reproduction (branch tree, pinned rustc 1.99.0 / go1.26.9):
 
 With this registration the corpus is **116 programs: ACCEPT 36 ·
 ACCEPT-MANAGED 2 · REJECT 78** — main's 115 plus this one.
+
+`type-name-in-value-position-reject.hy`,
+`type-name-in-value-position-controls-accept.hy` — issue #778: a **type name
+used where a value is required**. `x := holder` for a `struct holder` passes
+`hyb check` and the emitter prints the identifier verbatim, so `go build` fails
+with `holder (type) is not an expression`. Four value positions, plus a built-in
+type and a type alias. Nothing runs, so this is claim-precision (Row 13), not a
+soundness hole.
+
+The rule has to be narrow, and the accept control carries that weight: a type
+name is legal as a conversion CALLEE (`holder(1)`, `int(3.0)`) and as the FIRST
+argument of `new`/`make` (`new(bag)`), and a local binding shadows it. `new(bag)`
+is the control that matters most — an early version of the check walked that
+argument as a value and broke `n5-zero-map-first-write.hy`. The corpus caught it
+on the first run, which is exactly why the fixture pins it. Regression pins live
+in `hy-check/tests/type_name_in_value_position.rs` (13 tests).
+
+With this registration the corpus is **118 programs: ACCEPT 37 · ACCEPT-MANAGED 2 · REJECT 79** — main's 116 plus these two.
