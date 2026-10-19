@@ -202,6 +202,33 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Does a value of this shape carry an inline `[N]T` array directly or
+    /// inside a struct field? Used by closure-capture sharing (`record_may_share`)
+    /// and `callee_shared_return_pairs` (#798) so slicing a struct-embedded
+    /// primitive array (`b.arr[:]`) tracks `b` as the backing storage owner.
+    pub(crate) fn shape_carries_array(&self, shape: &TypeShape) -> bool {
+        self.shape_carries_array_at(shape, 0)
+    }
+
+    fn shape_carries_array_at(&self, shape: &TypeShape, depth: usize) -> bool {
+        if depth > 16 {
+            return true;
+        }
+        match shape {
+            TypeShape::Array(_) => true,
+            TypeShape::Struct(Some(name)) => self
+                .structs
+                .get(name)
+                .map(|fields| {
+                    fields.iter().any(|(_, ty)| {
+                        self.shape_carries_array_at(&self.shape_of_type(ty), depth + 1)
+                    })
+                })
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
     /// Does this struct decl guard something with a `sync.*` lock? (Used for
     /// the contested-04 note: "Tier 0 does not credit locks at spawn sites".)
     pub(crate) fn struct_has_mutex_field(&self, sname: &str) -> bool {
