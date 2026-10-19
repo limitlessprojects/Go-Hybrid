@@ -245,3 +245,66 @@ fn return_type_controls_stay_accepted() {
     );
     assert_ok("fn f() {\n    return\n}\n\nfn main() {\n    f()\n}\n");
 }
+
+#[test]
+fn top_level_call_argument_type_mismatch_is_rejected() {
+    // Calling with a string when int is declared.
+    assert_code(
+        "fn add(a int, b int) int {\n    return a + b\n}\n\nfn main() {\n    _ = add(\"hello\", 2)\n}\n",
+        "HYB-E1002",
+    );
+    // Calling with a bool when string is declared.
+    assert_code(
+        "fn greet(msg string) {\n}\n\nfn main() {\n    greet(true)\n}\n",
+        "HYB-E1002",
+    );
+    // Passing a slice when a map is declared.
+    assert_code(
+        "fn lookup(m map[string]int) int {\n    return 0\n}\n\nfn main() {\n    _ = lookup([]string{\"a\"})\n}\n",
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn method_call_argument_type_mismatch_is_rejected() {
+    // Method argument type mismatch.
+    assert_code(
+        "struct calc {\n}\n\nfn (c calc) compute(a int) int {\n    return a * 2\n}\n\nfn main() {\n    var c calc\n    _ = c.compute(\"hello\")\n}\n",
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn task_spawn_argument_type_and_arity_mismatch_is_rejected() {
+    // Task argument type mismatch.
+    assert_code(
+        "fn worker(n int) {\n}\n\nfn main() {\n    task worker(\"not_an_int\")\n}\n",
+        "HYB-E1002",
+    );
+    // Task arity mismatch.
+    assert_code(
+        "fn worker(n int) {\n}\n\nfn main() {\n    task worker(1, 2)\n}\n",
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn call_argument_types_stay_accepted() {
+    // Exact types.
+    assert_ok(
+        "fn add(a int, b int) int {\n    return a + b\n}\n\nfn main() {\n    _ = add(1, 2)\n}\n",
+    );
+    // Untyped int to float target is legal.
+    assert_ok(
+        "fn scale(f float64) float64 {\n    return f\n}\n\nfn main() {\n    _ = scale(2)\n}\n",
+    );
+    // Method with matching argument types.
+    assert_ok(
+        "struct calc {\n}\n\nfn (c calc) compute(a int) int {\n    return a * 2\n}\n\nfn main() {\n    var c calc\n    _ = c.compute(10)\n}\n",
+    );
+    // Any interface parameter accepts any value.
+    assert_ok(
+        "fn log_any(v any) {\n}\n\nfn main() {\n    log_any(123)\n    log_any(\"str\")\n}\n",
+    );
+}
+
