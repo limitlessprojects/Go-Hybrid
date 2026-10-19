@@ -480,41 +480,40 @@ fn expr_uses_set(e: &Expr) -> bool {
                 || results.iter().any(type_uses_set)
                 || block_uses_set(body)
         }
+        Expr::Paren { inner, .. } => expr_uses_set(inner),
         Expr::Lit { .. } => false,
     }
 }
 
 fn stmt_uses_set(s: &Stmt) -> bool {
     match s {
-        Stmt::Let { ty, init, .. } | Stmt::Var { ty, init, .. } => {
-            ty.as_ref().map_or(false, type_uses_set)
-                || init.as_ref().map_or(false, |x| expr_uses_set(x))
+        Stmt::Local(l) => {
+            l.ty.as_ref().map_or(false, type_uses_set) || l.values.iter().any(expr_uses_set)
         }
-        Stmt::Assign { lhs, rhs, .. } => expr_uses_set(lhs) || expr_uses_set(rhs),
-        Stmt::Expr { expr, .. } | Stmt::Defer { expr, .. } => expr_uses_set(expr),
+        Stmt::Assign { values, .. } => values.iter().any(expr_uses_set),
+        Stmt::Expr { expr, .. } => expr_uses_set(expr),
+        Stmt::Defer { call, .. } => expr_uses_set(call),
         Stmt::If {
+            init,
             cond,
-            then_branch,
-            else_branch,
+            then,
+            otherwise,
             ..
         } => {
-            expr_uses_set(cond)
-                || block_uses_set(then_branch)
-                || else_branch.as_ref().map_or(false, stmt_uses_set)
+            init.as_ref().map_or(false, |s| stmt_uses_set(s))
+                || expr_uses_set(cond)
+                || block_uses_set(then)
+                || otherwise.as_ref().map_or(false, |s| stmt_uses_set(s))
         }
         Stmt::For { kind, body, .. } => {
             let k = match kind {
-                ForKind::While(e) => expr_uses_set(e),
-                ForKind::Range { iter, .. } => expr_uses_set(iter),
-                ForKind::ThreeClause { init, cond, post } => {
-                    init.as_ref().map_or(false, |s| stmt_uses_set(s))
-                        || cond.as_ref().map_or(false, |e| expr_uses_set(e))
-                        || post.as_ref().map_or(false, |s| stmt_uses_set(s))
-                }
+                ForKind::Infinite => false,
+                ForKind::While { cond } => expr_uses_set(cond),
+                ForKind::Range { lo, hi, .. } => expr_uses_set(lo) || expr_uses_set(hi),
+                ForKind::Iterate { expr, .. } => expr_uses_set(expr),
             };
             k || block_uses_set(body)
         }
-        Stmt::Loop { body, .. } => block_uses_set(body),
         Stmt::Match {
             subject, arms, ..
         } => {
@@ -532,8 +531,11 @@ fn stmt_uses_set(s: &Stmt) -> bool {
             SelectArmKind::Default => block_uses_set(&a.body),
         }),
         Stmt::Return { values, .. } => values.iter().any(expr_uses_set),
-        Stmt::Task { call, .. } => expr_uses_set(call),
-        Stmt::Managed { body, .. } | Stmt::Block(body) => block_uses_set(body),
+        Stmt::Task { callee, args, .. } => {
+            expr_uses_set(callee) || args.iter().any(|a| expr_uses_set(&a.value))
+        }
+        Stmt::Managed { body, .. } => block_uses_set(body),
+        Stmt::Block { block, .. } => block_uses_set(block),
         Stmt::Send { chan, value, .. } => expr_uses_set(chan) || expr_uses_set(value),
         Stmt::Break { .. } | Stmt::Continue { .. } => false,
     }
@@ -592,40 +594,38 @@ fn expr_uses_pop(e: &Expr) -> bool {
         }),
         Expr::Receive { chan, .. } => expr_uses_pop(chan),
         Expr::FnLit { body, .. } => block_uses_pop(body),
+        Expr::Paren { inner, .. } => expr_uses_pop(inner),
         Expr::Ident { .. } | Expr::Lit { .. } => false,
     }
 }
 
 fn stmt_uses_pop(s: &Stmt) -> bool {
     match s {
-        Stmt::Let { init, .. } | Stmt::Var { init, .. } => {
-            init.as_ref().map_or(false, |x| expr_uses_pop(x))
-        }
-        Stmt::Assign { lhs, rhs, .. } => expr_uses_pop(lhs) || expr_uses_pop(rhs),
-        Stmt::Expr { expr, .. } | Stmt::Defer { expr, .. } => expr_uses_pop(expr),
+        Stmt::Local(l) => l.values.iter().any(expr_uses_pop),
+        Stmt::Assign { values, .. } => values.iter().any(expr_uses_pop),
+        Stmt::Expr { expr, .. } => expr_uses_pop(expr),
+        Stmt::Defer { call, .. } => expr_uses_pop(call),
         Stmt::If {
+            init,
             cond,
-            then_branch,
-            else_branch,
+            then,
+            otherwise,
             ..
         } => {
-            expr_uses_pop(cond)
-                || block_uses_pop(then_branch)
-                || else_branch.as_ref().map_or(false, stmt_uses_pop)
+            init.as_ref().map_or(false, |s| stmt_uses_pop(s))
+                || expr_uses_pop(cond)
+                || block_uses_pop(then)
+                || otherwise.as_ref().map_or(false, |s| stmt_uses_pop(s))
         }
         Stmt::For { kind, body, .. } => {
             let k = match kind {
-                ForKind::While(e) => expr_uses_pop(e),
-                ForKind::Range { iter, .. } => expr_uses_pop(iter),
-                ForKind::ThreeClause { init, cond, post } => {
-                    init.as_ref().map_or(false, |s| stmt_uses_pop(s))
-                        || cond.as_ref().map_or(false, |e| expr_uses_pop(e))
-                        || post.as_ref().map_or(false, |s| stmt_uses_pop(s))
-                }
+                ForKind::Infinite => false,
+                ForKind::While { cond } => expr_uses_pop(cond),
+                ForKind::Range { lo, hi, .. } => expr_uses_pop(lo) || expr_uses_pop(hi),
+                ForKind::Iterate { expr, .. } => expr_uses_pop(expr),
             };
             k || block_uses_pop(body)
         }
-        Stmt::Loop { body, .. } => block_uses_pop(body),
         Stmt::Match {
             subject, arms, ..
         } => {
@@ -643,8 +643,11 @@ fn stmt_uses_pop(s: &Stmt) -> bool {
             SelectArmKind::Default => block_uses_pop(&a.body),
         }),
         Stmt::Return { values, .. } => values.iter().any(expr_uses_pop),
-        Stmt::Task { call, .. } => expr_uses_pop(call),
-        Stmt::Managed { body, .. } | Stmt::Block(body) => block_uses_pop(body),
+        Stmt::Task { callee, args, .. } => {
+            expr_uses_pop(callee) || args.iter().any(|a| expr_uses_pop(&a.value))
+        }
+        Stmt::Managed { body, .. } => block_uses_pop(body),
+        Stmt::Block { block, .. } => block_uses_pop(block),
         Stmt::Send { chan, value, .. } => expr_uses_pop(chan) || expr_uses_pop(value),
         Stmt::Break { .. } | Stmt::Continue { .. } => false,
     }
