@@ -1,0 +1,27 @@
+# Daily triage board — rewrites the "Triage Board" issue with a fresh ranked
+# queue (Pareto list, conflicts, stale bases, duplicate clusters, wildcard
+# holds, new arrivals). The bot is review-first: it NEVER merges and NEVER
+# closes. Humans/agents do the final verification per AGENTS.md protocol.
+name: triage-board
+
+on:
+  schedule:
+    - cron: "30 4 * * *" # 04:30 UTC daily, before the stale pass
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  board:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout (pinned v4)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Refresh triage board issue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 tools/triage_bot.py board --post --token-env GITHUB_TOKEN
