@@ -308,3 +308,30 @@ fn call_argument_types_stay_accepted() {
     );
 }
 
+#[test]
+fn generic_struct_method_call_arity_mismatch_is_rejected_issue_880() {
+    // Value receiver, too few arguments.
+    assert_code(
+        "struct cache[k comparable] {\n    n k\n}\n\nfn (c cache[k]) set(v k) {\n    c.n = v\n}\n\nfn main() {\n    c := cache[int]{n: 0}\n    c.set()\n    fmt.println(\"{c.n}\")\n}\n",
+        "HYB-E1002",
+    );
+    // Value receiver, too many arguments.
+    assert_code(
+        "struct cache[k comparable] {\n    n k\n}\n\nfn (c cache[k]) set(v k) {\n    c.n = v\n}\n\nfn main() {\n    c := cache[int]{n: 0}\n    c.set(1, 2)\n    fmt.println(\"{c.n}\")\n}\n",
+        "HYB-E1002",
+    );
+    // Pointer receiver, too few arguments.
+    assert_code(
+        "struct cache[k comparable] {\n    n k\n}\n\nfn (c *cache[k]) set(v k) {\n    c.n = v\n}\n\nfn main() {\n    c := cache[int]{n: 0}\n    p := &c\n    p.set()\n    fmt.println(\"{c.n}\")\n}\n",
+        "HYB-E1002",
+    );
+    // Two type parameters, too few arguments.
+    assert_code(
+        "struct pair2[a comparable, b comparable] {\n    x a\n    y b\n}\n\nfn (p pair2[a, b]) setx(v a) {\n    p.x = v\n}\n\nfn main() {\n    p := pair2[int, string]{x: 0, y: \"a\"}\n    p.setx()\n    fmt.println(\"{p.x}\")\n}\n",
+        "HYB-E1002",
+    );
+    // Correct arity on generic struct method stays accepted.
+    assert_ok(
+        "struct cache[k comparable] {\n    n k\n}\n\nfn (c cache[k]) set(v k) {\n    c.n = v\n}\n\nfn main() {\n    c := cache[int]{n: 0}\n    c.set(42)\n    fmt.println(\"{c.n}\")\n}\n",
+    );
+}

@@ -2007,7 +2007,7 @@ impl<'a> Collector<'a> {
     /// #577 C9 — method calls (`x.bump(k)`) declare their receiver
     /// separately, so the parameter count is the declared one.
     fn check_method_arity(&mut self, bk: &OpKind, name: &str, args: &[CallArg], span: Span) {
-        let Some(sn) = self.struct_name(bk) else {
+        let Some(sn) = self.struct_base_name(bk) else {
             return;
         };
         let Some(m) = self.ck.method_decls.get(&(sn.clone(), name.to_string())) else {
