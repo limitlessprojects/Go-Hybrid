@@ -9,7 +9,7 @@
 //! Literal-only scope mirrors the landed #149 / #148 const-arith checks:
 //! variable operands stay a run-time concern, matching Go.
 
-use crate::model::{unwrap_parens, Checker};
+use crate::model::{unwrap_parens, Checker, OpKind};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{Expr, ForKind, LitKind, Place, PlaceKind, SelectArmKind, Stmt, UnOp};
 
@@ -296,20 +296,44 @@ impl<'a> Checker<'a> {
                     );
                     return;
                 }
-                if is_value_literal(&args[0].value)
-                    || is_numeric_or_bool_or_char_literal(&args[1].value)
-                    || matches!(
-                        unwrap_parens(&args[1].value),
-                        Expr::Lit {
-                            kind: LitKind::Nil,
-                            ..
-                        }
-                    )
-                {
+                let dst = &args[0].value;
+                let src = &args[1].value;
+                // #720: copy's destination must be a slice, its source a slice
+                // or string. Fail open on Unknown — only reject when we can
+                // prove the shape is wrong.
+                let dst_k = self.kind_of_expr(dst);
+                let src_k = self.kind_of_expr(src);
+                let dst_bad = matches!(
+                    dst_k,
+                    OpKind::Int
+                        | OpKind::Float
+                        | OpKind::Bool
+                        | OpKind::Struct(_)
+                        | OpKind::Pointer(_)
+                        | OpKind::Chan(_)
+                        | OpKind::Fn(..)
+                        | OpKind::Void
+                );
+                let src_bad = matches!(
+                    src_k,
+                    OpKind::Int
+                        | OpKind::Float
+                        | OpKind::Bool
+                        | OpKind::Struct(_)
+                        | OpKind::Pointer(_)
+                        | OpKind::Chan(_)
+                        | OpKind::Fn(..)
+                        | OpKind::Void
+                        | OpKind::Map(_, _)
+                );
+                if dst_bad || src_bad {
                     self.emit_builtin(
                         span,
-                        "`copy(dst, src)` requires a destination slice and a source slice or string (HYB-E2005)"
-                            .to_string(),
+                        format!(
+                            "`copy(dst, src)` requires a destination slice and a source slice or string, got `{}` and `{}` (HYB-E2005)",
+                            dst.render(),
+                            src.render()
+                        ),
                     );
                 }
             }
@@ -324,11 +348,54 @@ impl<'a> Checker<'a> {
                     );
                     return;
                 }
-                if is_value_literal(&args[0].value) {
+                let arg = &args[0].value;
+                let k = self.kind_of_expr(arg);
+                // #720: clear only accepts a slice or map. Fail open on
+                // Unknown.
+                let bad = matches!(
+                    k,
+                    OpKind::Int
+                        | OpKind::Float
+                        | OpKind::Bool
+                        | OpKind::Struct(_)
+                        | OpKind::Pointer(_)
+                        | OpKind::Chan(_)
+                        | OpKind::Fn(..)
+                        | OpKind::Void
+                        | OpKind::Interface
+                );
+                if bad {
                     self.emit_builtin(
                         span,
-                        "`clear` requires a map or slice value — not a scalar or string literal (HYB-E2005)"
-                            .to_string(),
+                        format!(
+                            "`clear` requires a slice or map argument, got `{}` (type `{}`) (HYB-E2005)",
+                            arg.render(),
+                            k.label()
+                        ),
+                    );
+                }
+            }
+            "panic" => {
+                // #720: panic takes exactly 1 argument.
+                if args.len() != 1 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`panic` requires exactly 1 argument, found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                }
+            }
+            "recover" => {
+                // #720: recover takes exactly 0 arguments.
+                if args.len() != 0 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`recover` takes no arguments, found {} (HYB-E2005)",
+                            args.len()
+                        ),
                     );
                 }
             }
