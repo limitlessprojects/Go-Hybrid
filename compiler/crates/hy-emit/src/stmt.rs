@@ -341,7 +341,25 @@ impl Emitter {
                     }
                     None => self.push(&format!("{} {} = {}", kw, names, value)),
                 }
+                let const_vals: Vec<Option<i128>> = l
+                    .names
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, _)| {
+                        l.values
+                            .get(idx)
+                            .or(Some(first))
+                            .and_then(|e| self.eval_const_int_expr(e))
+                    })
+                    .collect();
                 self.shadow_local_names(&l.names);
+                for (n, cv) in l.names.iter().zip(const_vals) {
+                    if n != "_" {
+                        if let Some(v) = cv {
+                            self.var_ty.insert(n.clone(), (format!("=const:{}", v), false));
+                        }
+                    }
+                }
                 return Ok(());
             }
             // `:=` and `let` both render as Go's short declaration —
