@@ -345,7 +345,7 @@ fn example03_golden_shape() {
         go
     );
     assert!(
-        go.contains("for i := 0; i < n_workers; i++ {"),
+        go.contains("hyHi0 := n_workers\n\tfor i := 0; i < hyHi0; i++ {"),
         "range-for:\n{}",
         go
     );
@@ -750,7 +750,11 @@ fn nested_labeled_loops_break_their_own_loop() {
 #[test]
 fn exclusive_range_stays_exclusive() {
     let go = emit("fn main() {\n    for i in 0..n {\n    }\n}\n");
-    assert!(go.contains("for i := 0; i < n; i++ {"), ":\n{}", go);
+    assert!(
+        go.contains("hyHi0 := n\n\tfor i := 0; i < hyHi0; i++ {"),
+        ":\n{}",
+        go
+    );
     assert!(
         !go.contains("hyLoop"),
         "no label without a labeled break:\n{}",
@@ -1555,11 +1559,23 @@ fn diff_blank_range_for_uses_fresh_temp() {
     let go =
         emit("fn main() {\n    n := 3\n    for _ in 0..n {\n        fmt.println(\"x\")\n    }\n}");
     assert!(
-        go.contains("for hyBlank0 := 0; hyBlank0 < n; hyBlank0++ {"),
-        "fresh temp carries the count:\n{}",
+        go.contains("hyHi1 := n\n\tfor hyBlank0 := 0; hyBlank0 < hyHi1; hyBlank0++ {"),
+        "fresh temp carries the count with hoisted bound:\n{}",
         go
     );
     assert!(!go.contains("for _ :="), "blank := leaked:\n{}", go);
+}
+
+#[test]
+fn exclusive_range_hoists_upper_bound_once_in_outer_scope() {
+    // Issue #730: `for n in 0..n` must evaluate `n` in the enclosing scope
+    // once before declaring the loop variable `n`, matching `0..=n-1`.
+    let go = emit("fn main() {\n    n := 3\n    for n in 0..n {\n        fmt.println(n)\n    }\n}");
+    assert!(
+        go.contains("hyHi0 := n\n\tfor n := 0; n < hyHi0; n++ {"),
+        "exclusive range must hoist hi before shadowing loop var:\n{}",
+        go
+    );
 }
 
 #[test]

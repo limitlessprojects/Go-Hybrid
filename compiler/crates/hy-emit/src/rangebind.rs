@@ -197,16 +197,13 @@ fn stmt_reads(s: &Stmt, target: &str) -> bool {
                     var,
                     lo,
                     hi,
-                    inclusive,
+                    ..
                 } => {
-                    if expr_reads(lo, target) {
+                    if expr_reads(lo, target) || expr_reads(hi, target) {
                         return true;
                     }
                     if var == target {
-                        return *inclusive && expr_reads(hi, target);
-                    }
-                    if expr_reads(hi, target) {
-                        return true;
+                        return false;
                     }
                 }
                 ForKind::Infinite => {}

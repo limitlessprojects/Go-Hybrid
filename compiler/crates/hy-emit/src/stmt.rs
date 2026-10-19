@@ -1776,7 +1776,9 @@ impl Emitter {
                         v, cont, lo_once, lo_once, hi_once, cont, v
                     )
                 } else {
-                    format!("for {} := {}; {} < {}; {}++ {{", v, lo_t, v, hi_t, v)
+                    let hi_once = self.next_temp("hyHi");
+                    self.push(&format!("{} := {}", hi_once, hi_t));
+                    format!("for {} := {}; {} < {}; {}++ {{", v, lo_t, v, hi_once, v)
                 }
             }
             ForKind::Iterate { vars, expr } => {
