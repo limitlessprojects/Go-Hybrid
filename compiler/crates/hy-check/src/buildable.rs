@@ -477,7 +477,7 @@ fn expr_uses_set(e: &Expr) -> bool {
             ..
         } => {
             params.iter().any(|p| type_uses_set(&p.ty))
-                || results.iter().any(type_uses_set)
+                || results.iter().any(|r| type_uses_set(&r.ty))
                 || block_uses_set(body)
         }
         Expr::Paren { inner, .. } => expr_uses_set(inner),
