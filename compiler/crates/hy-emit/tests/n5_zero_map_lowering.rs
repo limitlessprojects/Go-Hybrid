@@ -78,20 +78,100 @@ fn main() {
 }
 
 #[test]
-fn n5_leaves_generic_structs_alone() {
-    // Generic struct fields need the literal's type arguments substituted;
-    // they keep Go's zero value (a documented limit of this lowering).
+fn n5_generic_structs_substitute_type_args_and_allocate_map_fields() {
     let go = emit_src(
         "\
 struct box[t comparable] {
     m map[t]int
 }
 
+struct table[k, v] {
+    items    map[k]v
+    fallback v
+}
+
+struct holder[t] {
+    val t
+}
+
+struct bag {
+    counts map[string]int
+}
+
 fn main() {
-    b := box[int]{}
-    fmt.println(len(b.m))
+    var b1 box[int]
+    b2 := box[u8]{}
+    p := new(box[u8])
+    var tbl table[string, bag]
+    var h holder[map[string]u8]
+    p_pair := new(table[u8, i16])
+    fmt.println(len(b1.m) + len(b2.m) + len(p.m) + len(tbl.items) + len(tbl.fallback.counts) + len(h.val) + len(p_pair.items))
 }
 ",
     );
-    assert!(go.contains("b := box[int]{}"), ":\n{go}");
+    for want in [
+        "var b1 box[int] = box[int]{m: map[int]int{}}",
+        "b2 := box[uint8]{m: map[uint8]int{}}",
+        "p := &box[uint8]{m: map[uint8]int{}}",
+        "var tbl table[string, bag] = table[string, bag]{items: map[string]bag{}, fallback: bag{counts: map[string]int{}}}",
+        "var h holder[map[string]uint8] = holder[map[string]uint8]{val: map[string]uint8{}}",
+        "p_pair := &table[uint8, int16]{items: map[uint8]int16{}}",
+    ] {
+        assert!(go.contains(want), "missing {want:?} in:\n{go}");
+    }
+}
+
+#[test]
+fn generic_struct_and_fn_infer_transitive_method_and_equality_comparable_722() {
+    let go = emit_src(
+        "\
+struct table[k, v] {
+    items map[k]v
+}
+
+struct wrapper[a, b] {
+    inner table[a, b]
+}
+
+struct set_buf[e] {
+    items []e
+}
+
+fn (s *set_buf[x]) unique() map[x]bool {
+    var m map[x]bool
+    for _, v in s.items {
+        m[v] = true
+    }
+    return m
+}
+
+fn table.new[k, v]() table[k, v] {
+    var t table[k, v]
+    return t
+}
+
+fn same[t](x t, y t) bool {
+    return x == y
+}
+
+fn main() {
+    w := wrapper[string, u8]{}
+    w.inner.items[\"a\"] = 1
+    t := table.new[string, int]()
+    t.items[\"b\"] = 2
+    fmt.println(len(w.inner.items) + len(t.items), same(1, 1))
+}
+",
+    );
+    for want in [
+        "type table[k comparable, v any] struct {",
+        "type wrapper[a comparable, b any] struct {",
+        "type set_buf[e comparable] struct {",
+        "func table_new[k comparable, v any]() table[k, v] {",
+        "var t table[k, v] = table[k, v]{items: map[k]v{}}",
+        "func same[t comparable](x t, y t) bool {",
+        "w := wrapper[string, uint8]{inner: table[string, uint8]{items: map[string]uint8{}}}",
+    ] {
+        assert!(go.contains(want), "missing {want:?} in:\n{go}");
+    }
 }

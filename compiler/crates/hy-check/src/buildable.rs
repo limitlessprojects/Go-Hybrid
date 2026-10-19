@@ -970,6 +970,17 @@ impl<'a> Collector<'a> {
                 for a in args {
                     self.expr(&a.value);
                 }
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "new"
+                        && args.len() == 1
+                        && !self.ck.fns.contains_key("new")
+                        && self.lookup_kind("new").is_none()
+                    {
+                        if let Some(new_ty) = self.new_arg_type_expr(&args[0].value) {
+                            self.ty(&new_ty);
+                        }
+                    }
+                }
                 // #682 U7: every argument must be exactly one value, except
                 // that a lone multi-value call IS the whole argument list when
                 // the callee takes that many parameters (`g(two())` for a
@@ -1579,7 +1590,7 @@ impl<'a> Collector<'a> {
                         return Some(vec![first]);
                     }
                     "make" => return Some(vec![self.make_kind(args)]),
-                    "new" => return Some(vec![OpKind::Pointer(Box::new(OpKind::Unknown))]),
+                    "new" => return Some(vec![OpKind::Pointer(Box::new(self.new_kind(args)))]),
                     "delete" | "close" => return Some(Vec::new()),
                     _ => {}
                 }
@@ -1623,6 +1634,79 @@ impl<'a> Collector<'a> {
             }
             _ => None,
         }
+    }
+
+    fn new_arg_type_expr(&self, mut val: &Expr) -> Option<TypeExpr> {
+        while let Expr::Paren { inner, .. } = val {
+            val = inner;
+        }
+        let ty = match val {
+            Expr::Ident { name, span } => TypeExpr::Named {
+                name: name.clone(),
+                span: *span,
+            },
+            Expr::Field { base, name, span } => {
+                if let TypeExpr::Named { name: b, .. } = self.new_arg_type_expr(base)? {
+                    TypeExpr::Named {
+                        name: format!("{}.{}", b, name),
+                        span: *span,
+                    }
+                } else {
+                    return None;
+                }
+            }
+            Expr::Index { base, index, span } => {
+                let TypeExpr::Named { name: b, .. } = self.new_arg_type_expr(base)? else {
+                    return None;
+                };
+                let idx_ty = self.new_arg_type_expr(index)?;
+                TypeExpr::Named {
+                    name: format!("{}[{}]", b, idx_ty.render()),
+                    span: *span,
+                }
+            }
+            Expr::StructLit {
+                ty: Some(t),
+                fields,
+                ..
+            } if fields.is_empty() => t.clone(),
+            Expr::SliceLit {
+                elem: Some(t),
+                items,
+                span,
+            } if items.is_empty() && val.as_array_lit().is_none() => TypeExpr::Slice {
+                elem: t.clone(),
+                span: *span,
+            },
+            Expr::MapLit {
+                key,
+                value,
+                entries,
+                span,
+            } if entries.is_empty() => TypeExpr::Map {
+                key: key.clone(),
+                value: value.clone(),
+                span: *span,
+            },
+            _ => return None,
+        };
+        if let TypeExpr::Named { name, .. } = &ty {
+            let head = Checker::base_named_type_str(name);
+            if self.lookup_kind(head).is_some() {
+                return None;
+            }
+        }
+        Some(ty)
+    }
+
+    fn new_kind(&self, args: &[CallArg]) -> OpKind {
+        let Some(first) = args.first() else {
+            return OpKind::Unknown;
+        };
+        let Some(ty) = self.new_arg_type_expr(&first.value) else {
+            return OpKind::Unknown;
+        };
+        self.kind_of_ty(&ty, 0)
     }
 
     fn make_kind(&self, args: &[CallArg]) -> OpKind {

@@ -929,32 +929,14 @@ impl Emitter {
     }
 
     fn emit_new(&mut self, arg: &CallArg) -> Result<String, EmitError> {
+        if let Some(ty) = Self::new_arg_type_expr(&arg.value) {
+            return Ok(format!("new({})", self.type_text(&ty)));
+        }
         let mut val = &arg.value;
         while let Expr::Paren { inner, .. } = val {
             val = inner;
         }
-        let ty_text = match val {
-            Expr::StructLit {
-                ty: Some(t),
-                fields,
-                ..
-            } if fields.is_empty() => self.type_text(t),
-            Expr::SliceLit {
-                elem: Some(t),
-                items,
-                ..
-            } if items.is_empty() => format!("[]{}", self.type_text(t)),
-            Expr::MapLit {
-                key,
-                value,
-                entries,
-                ..
-            } if entries.is_empty() => format!("map[{}]{}", self.type_text(key), self.type_text(value)),
-            Expr::Ident { name, .. } => super::shapes::go_primitive_name(name)
-                .unwrap_or(name.as_str())
-                .to_string(),
-            other => self.emit_expr(other, 0)?,
-        };
+        let ty_text = self.emit_expr(val, 0)?;
         Ok(format!("new({})", ty_text))
     }
 
