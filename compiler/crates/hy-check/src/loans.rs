@@ -2572,7 +2572,7 @@ impl<'a> Checker<'a> {
                     if self.binding_may_share(st, &id)
                         || self
                             .lookup_binding(st, &id)
-                            .map(|b| !b.immutable && matches!(b.shape, TypeShape::Array(_)))
+                            .map(|b| !b.immutable && self.shape_carries_array(&b.shape))
                             .unwrap_or(false)
                     {
                         st.share_edge(name, &id);
@@ -5325,7 +5325,8 @@ impl<'a> Checker<'a> {
         let sh = self.shape_of_expr(cst, inner);
         if !is_lit
             && !self.shape_may_share(&sh)
-            && !matches!(sh, TypeShape::Unknown | TypeShape::Array(_))
+            && !matches!(sh, TypeShape::Unknown)
+            && !self.shape_carries_array(&sh)
         {
             return;
         }
@@ -5336,8 +5337,7 @@ impl<'a> Checker<'a> {
                     out.extend(os.iter().cloned());
                 } else if !shadowed.contains(name) {
                     if let Some(b) = self.lookup_binding(cst, name) {
-                        if self.shape_may_share(&b.shape) || matches!(b.shape, TypeShape::Array(_))
-                        {
+                        if self.shape_may_share(&b.shape) || self.shape_carries_array(&b.shape) {
                             out.insert(format!("ident:{name}"));
                         }
                     }
@@ -5371,6 +5371,30 @@ impl<'a> Checker<'a> {
                     self.collect_sharing_origins_expr(cst, it, origins, shadowed, out);
                 }
             }
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => {
+                let mut bound: HashSet<String> =
+                    params.iter().map(|p| p.name.clone()).collect();
+                bound.extend(results.iter().filter_map(|r| r.name.clone()));
+                let mut idents = Vec::new();
+                collect_capture_idents_block(body, &mut bound, &mut idents);
+                for id in idents {
+                    if let Some(os) = origins.get(&id) {
+                        out.extend(os.iter().cloned());
+                    } else if !shadowed.contains(&id) {
+                        if let Some(b) = self.lookup_binding(cst, &id) {
+                            if self.shape_may_share(&b.shape) || self.shape_carries_array(&b.shape)
+                            {
+                                out.insert(format!("ident:{id}"));
+                            }
+                        }
+                    }
+                }
+            }
             Expr::Call { callee, args, .. } => {
                 for a in args {
                     self.collect_sharing_origins_expr(cst, &a.value, origins, shadowed, out);
@@ -5391,6 +5415,18 @@ impl<'a> Checker<'a> {
     /// `m2 := m; return m, m2`, `return s[0:1], s[1:2]`, `return box{m: m}, m`,
     /// or bare `return` with named results).
     pub(crate) fn callee_shared_return_pairs(&self, st: &FnState, value: &Expr) -> Vec<(usize, usize)> {
+        self.callee_shared_return_pairs_at(st, value, 0)
+    }
+
+    fn callee_shared_return_pairs_at(
+        &self,
+        st: &FnState,
+        value: &Expr,
+        depth: usize,
+    ) -> Vec<(usize, usize)> {
+        if depth > 6 {
+            return Vec::new();
+        }
         let call = match unwrap_parens(value) {
             Expr::Try { operand, .. } => unwrap_parens(operand),
             other => other,
@@ -5414,7 +5450,8 @@ impl<'a> Checker<'a> {
                 .unwrap_or(TypeShape::Unknown);
             self.define_binding(&mut cst, p, shape.clone(), pty.clone(), false, false, false);
             if self.shape_may_share(&shape)
-                || matches!(shape, TypeShape::Unknown | TypeShape::Array(_))
+                || matches!(shape, TypeShape::Unknown)
+                || self.shape_carries_array(&shape)
             {
                 origins.insert(p.clone(), HashSet::from([format!("param:{p}")]));
             } else {
@@ -5537,7 +5574,8 @@ impl<'a> Checker<'a> {
                                 is_let,
                             );
                             if self.shape_may_share(&shape)
-                                || matches!(shape, TypeShape::Unknown | TypeShape::Array(_))
+                                || matches!(shape, TypeShape::Unknown)
+                                || self.shape_carries_array(&shape)
                             {
                                 origins.insert(
                                     name.clone(),
@@ -5552,6 +5590,8 @@ impl<'a> Checker<'a> {
                     } else if l.values.len() == 1 && l.names.len() > 1 {
                         let shapes = self.multi_value_shapes(&cst, &l.values[0], l.names.len());
                         let tys = self.multi_value_tys(&cst, &l.values[0], l.names.len());
+                        let shared_pairs =
+                            self.callee_shared_return_pairs_at(&cst, &l.values[0], depth + 1);
                         let mut base_o = HashSet::new();
                         self.collect_sharing_origins_expr(
                             &cst,
@@ -5560,12 +5600,20 @@ impl<'a> Checker<'a> {
                             &shadowed,
                             &mut base_o,
                         );
-                        for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
+                        for (slot_idx, ((name, shape), ty)) in
+                            l.names.iter().zip(shapes).zip(tys).enumerate()
+                        {
                             self.define_binding(&mut cst, name, shape.clone(), ty, false, false, is_let);
                             if self.shape_may_share(&shape)
-                                || matches!(shape, TypeShape::Unknown | TypeShape::Array(_))
+                                || matches!(shape, TypeShape::Unknown)
+                                || self.shape_carries_array(&shape)
                             {
                                 let mut s = base_o.clone();
+                                for (i, j) in &shared_pairs {
+                                    if slot_idx == *i || slot_idx == *j {
+                                        s.insert(format!("call_pair:{idx}:{i}:{j}"));
+                                    }
+                                }
                                 if s.is_empty() {
                                     s.insert(format!("local:{idx}:{name}"));
                                 }
@@ -5605,7 +5653,8 @@ impl<'a> Checker<'a> {
                             self.define_binding(&mut cst, name, shape.clone(), ty, false, false, is_let);
                             self.record_closure_mutations(&mut cst, name, v);
                             if self.shape_may_share(&shape)
-                                || matches!(shape, TypeShape::Unknown | TypeShape::Array(_))
+                                || matches!(shape, TypeShape::Unknown)
+                                || self.shape_carries_array(&shape)
                             {
                                 if s.is_empty() {
                                     s.insert(format!("local:{idx}:{name}"));
@@ -5660,10 +5709,8 @@ impl<'a> Checker<'a> {
                                         .lookup_binding(&cst, name)
                                         .map(|b| {
                                             self.shape_may_share(&b.shape)
-                                                || matches!(
-                                                    b.shape,
-                                                    TypeShape::Unknown | TypeShape::Array(_)
-                                                )
+                                                || matches!(b.shape, TypeShape::Unknown)
+                                                || self.shape_carries_array(&b.shape)
                                         })
                                         .unwrap_or(true);
                                     if target_shares {
@@ -5688,6 +5735,8 @@ impl<'a> Checker<'a> {
                         }
                     } else if values.len() == 1 && targets.len() > 1 {
                         let shapes = self.multi_value_shapes(&cst, &values[0], targets.len());
+                        let shared_pairs =
+                            self.callee_shared_return_pairs_at(&cst, &values[0], depth + 1);
                         let mut base_o = HashSet::new();
                         self.collect_sharing_origins_expr(
                             &cst,
@@ -5696,21 +5745,44 @@ impl<'a> Checker<'a> {
                             &shadowed,
                             &mut base_o,
                         );
-                        for (t, sh) in targets.iter().zip(shapes) {
-                            if let PlaceKind::Ident(name) = &t.kind {
-                                if self.shape_may_share(&sh)
-                                    || matches!(sh, TypeShape::Unknown | TypeShape::Array(_))
-                                {
-                                    let mut s = base_o.clone();
-                                    if s.is_empty() {
-                                        s.insert(format!("rebind:{idx}:{name}"));
+                        for (slot_idx, (t, sh)) in targets.iter().zip(shapes).enumerate() {
+                            match &t.kind {
+                                PlaceKind::Ident(name) => {
+                                    if self.shape_may_share(&sh)
+                                        || matches!(sh, TypeShape::Unknown)
+                                        || self.shape_carries_array(&sh)
+                                    {
+                                        let mut s = base_o.clone();
+                                        for (i, j) in &shared_pairs {
+                                            if slot_idx == *i || slot_idx == *j {
+                                                s.insert(format!("assign_pair:{idx}:{i}:{j}"));
+                                            }
+                                        }
+                                        if s.is_empty() {
+                                            s.insert(format!("rebind:{idx}:{name}"));
+                                        }
+                                        origins.insert(name.clone(), s);
+                                        shadowed.remove(name);
+                                    } else {
+                                        origins.remove(name);
+                                        shadowed.insert(name.clone());
                                     }
-                                    origins.insert(name.clone(), s);
-                                    shadowed.remove(name);
-                                } else {
-                                    origins.remove(name);
-                                    shadowed.insert(name.clone());
                                 }
+                                PlaceKind::Field { .. } | PlaceKind::Index { .. } => {
+                                    let root = t.root();
+                                    if !root.is_empty() {
+                                        let mut s = base_o.clone();
+                                        for (i, j) in &shared_pairs {
+                                            if slot_idx == *i || slot_idx == *j {
+                                                s.insert(format!("assign_pair:{idx}:{i}:{j}"));
+                                            }
+                                        }
+                                        if !s.is_empty() {
+                                            origins.entry(root.to_string()).or_default().extend(s);
+                                        }
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -5730,6 +5802,13 @@ impl<'a> Checker<'a> {
                     defers.push((call, arg_os, idx));
                 }
                 Stmt::Return { values, .. } => {
+                    if values.len() == 1 && (typed_results.is_empty() || defers.is_empty()) {
+                        for pair in self.callee_shared_return_pairs_at(&cst, &values[0], depth + 1)
+                        {
+                            pairs.push(pair);
+                        }
+                        continue;
+                    }
                     let sets: Vec<HashSet<String>> = if !typed_results.is_empty() && !defers.is_empty() {
                         if typed_results.len() < 2 {
                             continue;
