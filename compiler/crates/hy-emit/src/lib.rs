@@ -481,6 +481,41 @@ pub(crate) fn is_package_root(name: &str) -> bool {
     )
 }
 
+/// Is this user-declared identifier a Go predeclared target type or
+/// emitter-synthesized helper/package name that would shadow or collide
+/// with Hybrid's lowered Go code (#728)?
+pub(crate) fn is_emitter_reserved_go_ident(name: &str) -> bool {
+    matches!(
+        name,
+        "int8"
+            | "int16"
+            | "int32"
+            | "int64"
+            | "uint"
+            | "uint8"
+            | "uint16"
+            | "uint32"
+            | "uint64"
+            | "uintptr"
+            | "float32"
+            | "float64"
+            | "complex64"
+            | "complex128"
+            | "filepath"
+            | "hy_pop"
+            | "hyErr"
+            | "hyLoop"
+    )
+}
+
+pub(crate) fn mangle_reserved_ident(name: &str) -> String {
+    if is_emitter_reserved_go_ident(name) {
+        format!("hyUsr_{}", name)
+    } else {
+        name.to_string()
+    }
+}
+
 /// Members Go spells differently than the naive M4 mapping.
 /// Value: `None` = drop the call parens (it is a variable), `Some(text)` =
 /// emit this expression text instead of `pkg.member`.
@@ -642,6 +677,10 @@ pub struct Emitter {
     loan_aliases: BTreeMap<String, BTreeSet<String>>,
     /// Local/parameter/receiver/result names bound in the current function frame.
     local_vars: BTreeSet<String>,
+    /// Top-level user value declarations (functions and constants) in this file.
+    user_top_values: BTreeSet<String>,
+    /// Top-level user type declarations (structs and type aliases) in this file.
+    user_top_types: BTreeSet<String>,
     /// Functions whose first result is a pointer type.
     ptr_returning_fns: BTreeSet<String>,
     /// N5 (zeroinit.rs): non-generic user struct → its declared fields,
@@ -694,6 +733,8 @@ impl Emitter {
             pointer_vars: BTreeSet::new(),
             loan_aliases: BTreeMap::new(),
             local_vars: BTreeSet::new(),
+            user_top_values: BTreeSet::new(),
+            user_top_types: BTreeSet::new(),
             ptr_returning_fns: BTreeSet::new(),
             explicit_imports: BTreeMap::new(),
             n5_structs: BTreeMap::new(),
@@ -702,7 +743,10 @@ impl Emitter {
     }
 
     pub(crate) fn is_unshadowed_pkg_root(&self, name: &str) -> bool {
-        !self.local_vars.contains(name) && is_package_root(name)
+        !self.local_vars.contains(name)
+            && !self.user_top_values.contains(name)
+            && !self.user_top_types.contains(name)
+            && is_package_root(name)
     }
 
     pub(crate) fn save_scope(&self) -> ScopeSnapshot {
@@ -801,6 +845,31 @@ impl Emitter {
         // Eager tables (Batch I): user-struct field types + per-fn result
         // shapes. Both are needed BEFORE pass 1 — calls type-resolve against
         // fns declared later in the file.
+        self.user_top_values = file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Fn(f)
+                    if f.receiver.is_none()
+                        && !f.name.contains('.')
+                        && f.name != "main"
+                        && !(self.export_pub && f.is_pub) =>
+                {
+                    Some(f.name.clone())
+                }
+                Decl::Const(c) => Some(c.name.clone()),
+                _ => None,
+            })
+            .collect();
+        self.user_top_types = file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Struct(s) => Some(s.name.clone()),
+                Decl::TypeAlias(t) => Some(t.name.clone()),
+                _ => None,
+            })
+            .collect();
         self.struct_fields = file
             .decls
             .iter()
@@ -924,7 +993,8 @@ impl Emitter {
                 }
                 Decl::TypeAlias(t) => {
                     let ty = self.type_text(&t.ty);
-                    self.push(&format!("type {} = {}", t.name, ty));
+                    let go_name = mangle_reserved_ident(&t.name);
+                    self.push(&format!("type {} = {}", go_name, ty));
                 }
                 Decl::Fn(f) => self.emit_fn(f)?,
             }
@@ -1012,17 +1082,19 @@ impl Emitter {
             Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
         );
         let kw = if composite { "var" } else { "const" };
+        let go_name = mangle_reserved_ident(&c.name);
         match &c.ty {
             Some(t) => {
                 let ty = self.type_text(t);
-                self.push(&format!("{} {} {} = {}", kw, c.name, ty, value));
+                self.push(&format!("{} {} {} = {}", kw, go_name, ty, value));
             }
-            None => self.push(&format!("{} {} = {}", kw, c.name, value)),
+            None => self.push(&format!("{} {} = {}", kw, go_name, value)),
         }
         Ok(())
     }
 
     fn emit_struct(&mut self, s: &StructDecl) -> Result<(), EmitError> {
+        let go_name = mangle_reserved_ident(&s.name);
         if !s.type_params.is_empty() {
             // Generic struct (example-07 surface): Go requires a constraint on
             // every type parameter (`type box[t any] struct {`). Without a
@@ -1035,9 +1107,9 @@ impl Emitter {
                 Self::collect_comparable_in_ty(&f.ty, &param_names, &mut comparable_params);
             }
             let params = self.format_type_params(&s.type_params, &comparable_params);
-            self.push(&format!("type {}[{}] struct {{", s.name, params));
+            self.push(&format!("type {}[{}] struct {{", go_name, params));
         } else {
-            self.push(&format!("type {} struct {{", s.name));
+            self.push(&format!("type {} struct {{", go_name));
         }
         self.indent += 1;
         // gofmt aligns consecutive field declarations: names padded to the
@@ -1395,6 +1467,8 @@ impl Emitter {
         let go_name =
             if self.export_pub && f.is_pub && f.receiver.is_none() && !f.name.contains('.') {
                 to_go_name(&f.name)
+            } else if f.receiver.is_none() && !f.name.contains('.') && f.name != "main" {
+                mangle_reserved_ident(&f.name)
             } else {
                 f.name.replace('.', "_")
             };
@@ -1483,9 +1557,10 @@ impl Emitter {
             }
             let recv_ty = self.type_text(&recv.ty);
             let star = if recv.is_pointer { "*" } else { "" };
+            let recv_name = mangle_reserved_ident(&recv.name);
             self.push_raw(&format!(
                 "func ({} {}{}) {}(",
-                recv.name, star, recv_ty, go_name
+                recv_name, star, recv_ty, go_name
             ));
         } else {
             // Generic fn: `func lru_cache_new[k comparable, v any](...)`.
@@ -1570,7 +1645,10 @@ impl Emitter {
                 let r = &f.results[0];
                 let ty = self.type_text(&r.ty);
                 match &r.name {
-                    Some(n) => self.push_raw(&format!(" ({} {}) {{\n", n, ty)),
+                    Some(n) => {
+                        let go_n = mangle_reserved_ident(n);
+                        self.push_raw(&format!(" ({} {}) {{\n", go_n, ty));
+                    }
                     None => self.push_raw(&format!(" {} {{\n", ty)),
                 }
             }
@@ -1613,7 +1691,7 @@ impl Emitter {
         for (i, r) in results.iter().enumerate() {
             let ty = self.type_text(&r.ty);
             match &r.name {
-                Some(n) => parts.push(format!("{} {}", n, ty)),
+                Some(n) => parts.push(format!("{} {}", mangle_reserved_ident(n), ty)),
                 None if mixed => {
                     let base = format!("hyR{}", i);
                     let mut name = base.clone();
@@ -1641,7 +1719,12 @@ impl Emitter {
                 .results
                 .iter()
                 .enumerate()
-                .map(|(i, r)| r.name.clone().unwrap_or_else(|| format!("hyR{}", i)))
+                .map(|(i, r)| {
+                    r.name
+                        .as_deref()
+                        .map(mangle_reserved_ident)
+                        .unwrap_or_else(|| format!("hyR{}", i))
+                })
                 .collect();
             names.join(", ") + ", hyErr"
         }
@@ -1652,7 +1735,11 @@ impl Emitter {
     fn main_closure_sig(&mut self, f: &FnDecl) -> String {
         let mut parts: Vec<String> = Vec::new();
         for (i, r) in f.results.iter().enumerate() {
-            let n = r.name.clone().unwrap_or_else(|| format!("hyR{}", i));
+            let n = r
+                .name
+                .as_deref()
+                .map(mangle_reserved_ident)
+                .unwrap_or_else(|| format!("hyR{}", i));
             let ty = self.type_text(&r.ty);
             parts.push(format!("{} {}", n, ty));
         }
@@ -1667,7 +1754,8 @@ impl Emitter {
                 rendered.push_str(", ");
             }
             let ty = self.type_text(&p.ty);
-            rendered.push_str(&format!("{} {}", p.name, ty));
+            let go_name = mangle_reserved_ident(&p.name);
+            rendered.push_str(&format!("{} {}", go_name, ty));
         }
         self.push_raw(&rendered);
     }
@@ -1920,7 +2008,13 @@ impl Emitter {
             } => {
                 let ps = params
                     .iter()
-                    .map(|p| format!("{} {}", p.name, self.type_text(&p.ty)))
+                    .map(|p| {
+                        format!(
+                            "{} {}",
+                            mangle_reserved_ident(&p.name),
+                            self.type_text(&p.ty)
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 let rs = results
@@ -1998,6 +2092,9 @@ impl Emitter {
                 .join(".");
             format!("{}.{}", root, joined)
         } else {
+            if self.user_top_types.contains(name) {
+                return mangle_reserved_ident(name);
+            }
             // A SPEC primitive spelling maps to its Go equivalent
             // (`u16` -> `uint16`); anything else stays verbatim. Issue #147.
             match shapes::go_primitive_name(name) {
@@ -2072,7 +2169,10 @@ impl Emitter {
         match t {
             TypeExpr::Named { name, .. } if !name.contains('.') && !name.contains('[') => {
                 if self.struct_fields.contains_key(name.as_str()) {
-                    return format!("*new({})", name);
+                    return format!("*new({})", mangle_reserved_ident(name));
+                }
+                if self.user_top_types.contains(name.as_str()) {
+                    return format!("*new({})", mangle_reserved_ident(name));
                 }
                 match name.as_str() {
                     "bool" => "false".into(),
