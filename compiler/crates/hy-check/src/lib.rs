@@ -398,6 +398,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         let shape = ck.shape_of_type(&r.ty);
         if let Some(name) = &r.name {
             if name != "_" {
+                ck.check_zero_value_named_result(name, &r.ty, r.ty.span());
                 st.env.insert(
                     name.clone(),
                     Binding {

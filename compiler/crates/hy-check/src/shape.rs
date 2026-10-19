@@ -872,6 +872,34 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// N3 (`HYB-E4002`): named return parameters start zero-initialized at
+    /// function/closure entry, so a type with no zero value cannot be a named
+    /// return parameter.
+    pub(crate) fn check_zero_value_named_result(
+        &mut self,
+        name: &str,
+        ty: &TypeExpr,
+        span: hy_diag::Span,
+    ) {
+        if let Some(reason) = self.no_zero_value_reason(ty, 0) {
+            let msg = format!(
+                "`{}` has no zero value — named return parameter `{}` cannot be zero-initialized (HYB-E4002)",
+                ty.render(),
+                name
+            );
+            self.diags.push(
+                hy_diag::Diagnostic::error("HYB-E4002", self.path.clone(), span, msg)
+                    .with_notes(vec![
+                        format!("why: {}", reason),
+                        format!(
+                            "fix: use an unnamed return type `{}` and return an explicit value, or reorder the enum variants so the first variant is payload-free",
+                            ty.render()
+                        ),
+                    ]),
+            );
+        }
+    }
+
     /// T13/T14/T15 (`HYB-E5001`): check `match` exhaustiveness and `_` arm placement.
     pub(crate) fn check_match(
         &mut self,
