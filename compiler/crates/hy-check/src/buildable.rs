@@ -846,8 +846,10 @@ impl<'a> Collector<'a> {
         if let Some(t) = &l.ty {
             let want = self.kind_of_ty(t, 0);
             if l.values.len() == 1 && l.names.len() == 1 {
+                let is_loan_shape = as_addr_of(&l.values[0])
+                    .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }));
                 let vk = self.kind_of_expr(&l.values[0]);
-                if kinds_conflict(&want, &vk) {
+                if !is_loan_shape && kinds_conflict(&want, &vk) {
                     self.emit_e1002(
                         l.span,
                         format!(
@@ -862,8 +864,10 @@ impl<'a> Collector<'a> {
                 }
             } else if l.values.len() > 1 && l.values.len() == l.names.len() {
                 for (name, v) in l.names.iter().zip(l.values.iter()) {
+                    let is_loan_shape = as_addr_of(v)
+                        .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }));
                     let vk = self.kind_of_expr(v);
-                    if kinds_conflict(&want, &vk) {
+                    if !is_loan_shape && kinds_conflict(&want, &vk) {
                         self.emit_e1002(
                             l.span,
                             format!(
