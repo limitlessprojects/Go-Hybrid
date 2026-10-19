@@ -133,3 +133,34 @@ results for the supplied finite acyclic graphs only").
 
     cargo test --release --offline    # 8/8 pass
     cargo run  --release --offline    # prints the 5-scenario demo above
+
+
+---
+
+## Post-submission correction (2026-10-19, after PR #760 opened)
+
+While preparing the reviewer instructions for `codegen_go`, I inspected its
+actual output and found a **real bug in the emitted Go**: the hub goroutine
+receives from `hub` and forwards back into the same `hub` channel, which
+cannot work (it self-blocks). The current `codegen_go` output would, if
+compiled and run, print `DEADLOCK` for the request/reply program — the
+exact opposite of the correct behaviour.
+
+This does **not** affect the preregistered claims, because:
+
+- The preregistered bar for codegen (bar 5) was explicitly *"produces
+  non-empty Go (inspected by eye; not run)"* — and that is all it ever was.
+- The correctness claim for the protocol is established by
+  `simulate_locals`, whose 8 tests all pass, not by `codegen_go`.
+- No `work/main.go` has been committed to this PR. There is nothing to
+  `go run`.
+
+But it does mean the original PR description's instruction to a reviewer
+("`cd model/work && go build ./...`") was wrong: that directory does not
+exist in this PR. That instruction has been removed. The codegen remains
+a stub, and the PR description now says so.
+
+A follow-up commit on this branch may replace `codegen_go` with a per-role
+inbox implementation and commit a `model/work/main.go` + `go.mod` that a
+Go-equipped reviewer can actually build. That is **not** in the current
+commit; if it is added, `RESULTS.md` will be updated again at that time.
