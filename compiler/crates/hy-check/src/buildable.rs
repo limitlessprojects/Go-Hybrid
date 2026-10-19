@@ -685,11 +685,70 @@ impl<'a> Collector<'a> {
         for v in &l.values {
             self.expr(v);
         }
-        // #682 U8: `a := v()` where `v` produces no value. Only the
-        // single-name/single-value shape is checked; `a, b := f()` is a legal
-        // multi-value binding and is handled by `infer_local_kinds`.
+        // #682 U8: `a := v()` where `v` produces no value.
         if l.names.len() == 1 && l.values.len() == 1 {
             self.check_single_value_position(&l.values[0], "a binding", /*binding_position=*/ true);
+        }
+        if l.values.len() > 1 && l.names.len() != l.values.len() {
+            self.emit_e1002(
+                l.span,
+                format!(
+                    "assignment mismatch: {} variable{} but {} value{} (HYB-E1002)",
+                    l.names.len(),
+                    if l.names.len() == 1 { "" } else { "s" },
+                    l.values.len(),
+                    if l.values.len() == 1 { "" } else { "s" },
+                ),
+                "number of names on left must match number of initializer values",
+            );
+        }
+        if l.names.len() > 1 && l.values.len() == 1 {
+            self.check_multi_target_single_value(l.names.len(), &l.values[0], l.span);
+        }
+        if let Some(ty) = &l.ty {
+            let tk = self.kind_of_ty(ty, 0);
+            if l.names.len() == l.values.len() {
+                for val in &l.values {
+                    let vk = self.kind_of_expr(val);
+                    if kinds_conflict(&tk, &vk) {
+                        self.emit_e1002(
+                            l.span,
+                            format!(
+                                "cannot use `{}` (type `{}`) as `{}` value in variable declaration (HYB-E1002)",
+                                val.render(),
+                                vk.label(),
+                                tk.label(),
+                            ),
+                            "the declared type does not match the initializer value type",
+                        );
+                    }
+                }
+            } else if l.values.len() == 1 {
+                let mut bare = unwrap_parens(&l.values[0]);
+                while let Expr::Move { operand, .. } | Expr::Paren { inner: operand, .. } = bare {
+                    bare = operand;
+                }
+                if let Expr::Call { callee, args, .. } = bare {
+                    if let Some(res) = self.call_result_kinds(callee, args) {
+                        if res.len() == l.names.len() {
+                            for rk in &res {
+                                if kinds_conflict(&tk, rk) {
+                                    self.emit_e1002(
+                                        l.span,
+                                        format!(
+                                            "cannot use `{}` (value of type `{}`) as `{}` value in variable declaration (HYB-E1002)",
+                                            l.values[0].render(),
+                                            rk.label(),
+                                            tk.label(),
+                                        ),
+                                        "the declared type does not match the function return type",
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         // Composed resolution (pr-430 x landed pr-475): #475's track_read
         // set (Define|Let|Var|Const) drives which locals get unused-read
@@ -741,6 +800,19 @@ impl<'a> Collector<'a> {
         }
         if n == 2 && l.values.len() == 1 {
             return self.multi_value_kinds(&l.values[0]);
+        }
+        if n > 2 && l.values.len() == 1 {
+            let mut bare = unwrap_parens(&l.values[0]);
+            while let Expr::Move { operand, .. } | Expr::Paren { inner: operand, .. } = bare {
+                bare = operand;
+            }
+            if let Expr::Call { callee, args, .. } = bare {
+                if let Some(res) = self.call_result_kinds(callee, args) {
+                    if res.len() == n {
+                        return res;
+                    }
+                }
+            }
         }
         if n == l.values.len() {
             return l.values.iter().map(|v| self.kind_of_expr(v)).collect();
@@ -2080,6 +2152,74 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_multi_target_single_value(&mut self, targets: usize, val: &Expr, span: Span) {
+        let mut bare = unwrap_parens(val);
+        while let Expr::Move { operand, .. } | Expr::Paren { inner: operand, .. } = bare {
+            bare = operand;
+        }
+        if matches!(bare, Expr::Try { .. }) {
+            return;
+        }
+        let is_comma_ok_map = match bare {
+            Expr::Index { base, .. } => matches!(self.kind_of_expr(base), OpKind::Map(..)),
+            _ => false,
+        };
+        let is_comma_ok_chan = match bare {
+            Expr::Receive { chan, .. } => matches!(self.kind_of_expr(chan), OpKind::Chan(..)),
+            _ => false,
+        };
+        if is_comma_ok_map || is_comma_ok_chan {
+            if targets != 2 {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "assignment mismatch: {} variables but {} yields 2 values (HYB-E1002)",
+                        targets,
+                        if is_comma_ok_map { "map lookup" } else { "channel receive" },
+                    ),
+                    "comma-ok form yields exactly 2 values",
+                );
+            }
+            return;
+        }
+        if let Expr::Call { callee, args, .. } = bare {
+            if let Some(res) = self.call_result_kinds(callee, args) {
+                if res.is_empty() {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`{}` produces no value and cannot be used in a binding — Go refuses `{} (no value) used as value` (HYB-E1002)",
+                            val.render(),
+                            val.render(),
+                        ),
+                        "a function declared with no results is a statement, not a value",
+                    );
+                } else if res.len() == 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "assignment mismatch: {} variables but `{}` returns 1 value (HYB-E1002)",
+                            targets,
+                            val.render(),
+                        ),
+                        "cannot assign a single-value call to multiple variables",
+                    );
+                }
+                // res.len() >= 2 is owned by T23 (HYB-E2002) in tuple.rs
+            }
+            return;
+        }
+        // Non-call, non-comma-ok: produces exactly 1 value into multiple targets
+        self.emit_e1002(
+            span,
+            format!(
+                "assignment mismatch: {} variables but 1 value (HYB-E1002)",
+                targets,
+            ),
+            "cannot assign a single value to multiple variables",
+        );
+    }
+
     /// #682 U7 — a multi-value call as the whole argument list is legal Go when
     /// the callee takes exactly that many parameters (`g(two())` for a 2-param
     /// `g`), so the arity rule has to accept that case rather than treat it as
@@ -2861,38 +3001,70 @@ impl<'a> Collector<'a> {
             }
         }
         match op {
-            // #682 U16: plain `=` requires the value to be assignable to the
-            // target. Only the single-target/single-value form is checked
-            // positionally; a multi-value right-hand side (`a, b = f()`) is
-            // left to the call-shape rules.
             AssignOp::Assign => {
-                if targets.len() == 1 && values.len() == 1 {
-                    // O8 slot-loan (adapted during integration): `q = &m["a"]`
-                    // on a value-typed `q` does NOT emit `q = &m["a"]` — the
-                    // emitter lowers the loan to `q = m["a"]` plus a store-back
-                    // into the slot, so a `Struct` target receiving a
-                    // `Pointer` value here is legal Hybrid, not a mismatch
-                    // (map_element_addressable's
-                    // accepts_slot_loan_into_value_var pins the shape).
-                    // Fail open for exactly that shape: an addr-of whose
-                    // operand is an index or field place. Loans are validated
-                    // for addressability by addressable.rs (HYB-E2010), so
-                    // the non-addressable ones still reject.
-                    let is_loan_shape = as_addr_of(&values[0])
-                        .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }));
-                    let vk = self.kind_of_expr(&values[0]);
-                    if !is_loan_shape && kinds_conflict(&tk, &vk) {
-                        self.emit_e1002(
-                            span,
-                            format!(
-                                "cannot assign a value of type `{}` to `{}` (type `{}`) — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
-                                vk.label(),
-                                target.render(),
-                                tk.label(),
-                                tk.label()
-                            ),
-                            "the target's declared type is fixed; write an explicit conversion when a conversion is intended",
-                        );
+                if values.len() > 1 && targets.len() != values.len() {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "assignment mismatch: {} variable{} but {} value{} (HYB-E1002)",
+                            targets.len(),
+                            if targets.len() == 1 { "" } else { "s" },
+                            values.len(),
+                            if values.len() == 1 { "" } else { "s" },
+                        ),
+                        "number of targets must match number of values in assignment",
+                    );
+                    return;
+                }
+                if targets.len() > 1 && values.len() == 1 {
+                    self.check_multi_target_single_value(targets.len(), &values[0], span);
+                    let mut bare = unwrap_parens(&values[0]);
+                    while let Expr::Move { operand, .. } | Expr::Paren { inner: operand, .. } = bare {
+                        bare = operand;
+                    }
+                    if let Expr::Call { callee, args, .. } = bare {
+                        if let Some(res) = self.call_result_kinds(callee, args) {
+                            if res.len() == targets.len() {
+                                for (target, rk) in targets.iter().zip(res.iter()) {
+                                    let tk = self.kind_of_place(target);
+                                    if kinds_conflict(&tk, rk) {
+                                        self.emit_e1002(
+                                            span,
+                                            format!(
+                                                "cannot assign a value of type `{}` to `{}` (type `{}`) — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
+                                                rk.label(),
+                                                target.render(),
+                                                tk.label(),
+                                                tk.label()
+                                            ),
+                                            "the target's declared type is fixed; write an explicit conversion when a conversion is intended",
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+                if targets.len() == values.len() {
+                    for (target, val) in targets.iter().zip(values.iter()) {
+                        let tk = self.kind_of_place(target);
+                        let is_loan_shape = as_addr_of(val)
+                            .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }));
+                        let vk = self.kind_of_expr(val);
+                        if !is_loan_shape && kinds_conflict(&tk, &vk) {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot assign a value of type `{}` to `{}` (type `{}`) — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
+                                    vk.label(),
+                                    target.render(),
+                                    tk.label(),
+                                    tk.label()
+                                ),
+                                "the target's declared type is fixed; write an explicit conversion when a conversion is intended",
+                            );
+                        }
                     }
                 }
             }
