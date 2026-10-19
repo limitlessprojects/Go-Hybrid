@@ -903,6 +903,20 @@ impl<'a> Checker<'a> {
                 ]),
             );
         }
+
+        // Method type parameters: Go forbids type parameters on methods (`method must have no type parameters`).
+        if !f.type_params.is_empty() {
+            let msg = format!(
+                "method `{}` declares its own type parameters — Go forbids type parameters on methods (`method must have no type parameters`) (HYB-E1002)",
+                f.name
+            );
+            self.diags.push(
+                Diagnostic::error("HYB-E1002", self.path.clone(), f.span, msg).with_notes(vec![
+                    "a method can use its receiver struct's type parameters, but cannot declare its own type parameters".to_string(),
+                    "move the type parameter to the receiver struct, or rewrite this as a top-level function".to_string(),
+                ]),
+            );
+        }
     }
 
     // ------------------------------------------------------------------
