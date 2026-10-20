@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 113 programs — ACCEPT 35 · ACCEPT-MANAGED 2 · REJECT 76 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
-**Current registered corpus: 113 programs — ACCEPT 35 · ACCEPT-MANAGED 2 · REJECT 76 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 115 programs — ACCEPT 36 · ACCEPT-MANAGED 2 · REJECT 77 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 115 programs — ACCEPT 36 · ACCEPT-MANAGED 2 · REJECT 77 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -186,5 +186,32 @@ generic whose members the kind model cannot see, so the rule must fail open),
 `defer` on a builtin and on a method, and `append` with a variadic spread,
 multiple values, and an untyped int constant into a `[]float64`. Regression
 pins live in `hy-check/tests/member_defer_and_append_guards.rs` (9 tests).
-With this registration the corpus is **113 programs: ACCEPT 35 ·
-ACCEPT-MANAGED 2 · REJECT 76**.
+With this registration the corpus is **115 programs: ACCEPT 36 ·
+ACCEPT-MANAGED 2 · REJECT 77**.
+
+`typed-const-expression-overflow-reject.hy`,
+`typed-const-expression-controls-accept.hy` — issue #725: a **typed constant
+expression whose folded result overflows its type**. Go folds constant
+expressions before the range check, so `u8(255) + 1` is `constant 256 of type
+uint8 overflows uint8`; `hyb check` accepted it with 0 diagnostics and the
+emitted Go failed `go build`. The per-operand check could not see it — 255 fits
+`u8` and 1 fits `u8`, so both passed and the **result** was never computed —
+and shifts took an early return that skipped every range check.
+
+Two halves of the fix are needed together, which is why the reject fixture is a
+single file with eight expressions rather than eight files: (1) the constant
+folder gained an `Expr::Call` arm so `u8(255)` folds to a constant at all, and
+(2) the result is folded and range-checked against the typed operand's type,
+shifts included, plus a negation check. Without (1) a result check sees
+`NotConst` and stays silent, so a fix that skipped it would look correct and
+catch nothing.
+
+The accept control is the load-bearing half: SPEC X1/X2 define run-time
+overflow as **wrapping**, so `var x u8 = 200; var y u8 = 100; x + y` must keep
+building. The control also pins SPEC X4's own example (`u8(300)` is 44), the
+in-range typed forms, and a comparison (which yields a bool, not a `u8`).
+Regression pins live in `hy-check/tests/typed_const_expression_overflow.rs`.
+
+HYB-E6002 gained the `tier0_rule_id: "BUILDABLE"` join key it was missing (it
+already declared `"rule": "BUILDABLE"`, so the corpus could only have said
+`<unclassified-error>` for it before).
