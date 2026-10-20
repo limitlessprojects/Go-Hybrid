@@ -9,3 +9,7 @@ Before measurements, hypotheses:
 Protocol: Go 1.26.9, Windows/amd64, GOMAXPROCS=2. Compare synchronous channel-joined closure and value-receiver spawns, plus a persistent-worker control. Measure AllocsPerRun and benchmem (three runs). Test a negative capability example that copies/reuses its value. These are Go runtime/design probes, not measurements of Hybrid-emitted code, Linux futexes, compiler certificates or p99 latency. No safety guarantee changes or compiler source edits.
 
 #957 needs an agreed effect language and foreign-call boundary; #955 needs a Linux futex/interprocess validation target; #952 needs an agreed checked-effect IR and adversarial translation corpus; #951 needs a checker integration and Go export-data contract. None is a fixed $200/$250 implementation award. BOUNTY.md and MOONSHOT.md require milestone review and preserve the original proposer's credit. Compiler implementation of these four is not completed by this probe.
+
+Protocol amendment before execution: the pinned Go 1.26.9 toolchain download did not finish within the local setup window. Use the already installed Go 1.27.0 windows/amd64 for an exploratory probe only. These results cannot satisfy the project's pinned 1.26.9 acceptance gate; that rerun remains required.
+
+The pinned download subsequently completed before any measurements. The original Go 1.26.9 protocol is used after all; no fallback measurements were taken.
