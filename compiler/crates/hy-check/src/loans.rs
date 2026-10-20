@@ -465,24 +465,64 @@ impl<'a> Checker<'a> {
     /// Shared A3 emitter for index-assign inserts and `delete` calls.
     /// Matching is peer-aware (#111): an event on `alias` conflicts with a
     /// loan on `m` when the roots share storage.
+fn place_has_index(p: &Place) -> bool {
+    match &p.kind {
+        PlaceKind::Index { .. } => true,
+        PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => Self::place_has_index(base),
+        PlaceKind::Ident(_) => false,
+    }
+}
+
     fn emit_a3_if_live(&mut self, st: &FnState, path: &str, span: Span, idx: usize, verb: &str) {
         let Some(loan) = st.loans.iter().find(|l| {
             let eff_last = self.effective_loan_last(st, l);
-            matches!(&l.target, LoanTarget::MapSlot { path: p, .. }
-                if a3_paths_conflict(st, p, path))
+            matches!(&l.target, LoanTarget::MapSlot { binding, path: p, .. }
+                if binding != path
+                    && !path.starts_with(&format!("{binding}."))
+                    && a3_paths_conflict(st, p, path))
                 && l.created <= idx
                 && idx <= eff_last
         }) else {
             return;
         };
         let eff_last = self.effective_loan_last(st, loan);
-        let (binding, loan_desc, loan_span, loan_last) = match &loan.target {
-            LoanTarget::MapSlot { binding, .. } => {
-                (binding.clone(), loan.desc.clone(), loan.span, eff_last)
+        let (binding, loan_desc, loan_span, loan_last, loan_path) = match &loan.target {
+            LoanTarget::MapSlot { binding, path, .. } => {
+                (binding.clone(), loan.desc.clone(), loan.span, eff_last, path.clone())
             }
             _ => unreachable!("filtered above"),
         };
-        let msg = format!("map {} invalidates the live slot loan `{}`", verb, binding);
+        let root = path_root(&loan_path);
+        let is_slice = self.lookup_binding(st, root).map(|b| {
+            if root == loan_path {
+                matches!(b.shape, TypeShape::Slice(_) | TypeShape::Array(_))
+                    || b.ty.as_ref().map_or(false, |t| {
+                        let r = t.render();
+                        r.starts_with("[]") || r.starts_with("[")
+                    })
+            } else if let TypeShape::Struct(Some(sname)) = &b.shape {
+                let field_name = loan_path.strip_prefix(&format!("{root}.")).unwrap_or("");
+                if let Some(fields) = self.structs.get(sname) {
+                    if let Some((_, fty)) = fields.iter().find(|(fname, _)| fname == field_name) {
+                        let fshape = self.shape_of_type(fty);
+                        matches!(fshape, TypeShape::Slice(_) | TypeShape::Array(_))
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        }).unwrap_or(false);
+
+        if is_slice && verb == "insert" {
+            return;
+        }
+
+        let container_str = if is_slice { "slice" } else { "map" };
+        let msg = format!("{} {} invalidates the live slot loan `{}`", container_str, verb, binding);
         // One invalidation, one diagnostic: #549's dedicated detectors
         // (delete/clear/copy) and pr-242's generic mutator scan can both
         // fire for the SAME call site - same loan, same span. The first,
@@ -495,16 +535,21 @@ impl<'a> Checker<'a> {
         }) {
             return;
         }
+        let note_reason = if is_slice {
+            "a slice re-binding may shrink or reallocate the backing array — reorder so the slot mutation finishes before the slice is re-bound, or copy-out / modify / store-back (reads are copies, O9)".to_string()
+        } else {
+            "a rehash may move the slot — reorder so the slot mutation finishes before any insert/delete on the same map (corpus 09 is the legal twin), or copy-out / modify / store-back (reads are copies, O9)".to_string()
+        };
         let notes = vec![
             format!(
                 "{} ({}:{}) is a unique loan on a slot of `{}`, live from creation to its last use (O8, non-lexical window ending at statement {})",
                 loan_desc,
                 self.path,
                 loan_span.start,
-                path,
+                loan_path,
                 loan_last
             ),
-            "a rehash may move the slot — reorder so the slot mutation finishes before any insert/delete on the same map (corpus 09 is the legal twin), or copy-out / modify / store-back (reads are copies, O9)".to_string(),
+            note_reason,
         ];
         self.diags
             .push(Diagnostic::error("HYB-E3102", self.path.clone(), span, msg).with_notes(notes));
@@ -5320,7 +5365,8 @@ impl<'a> Checker<'a> {
             self.mark_move_in_value(st, v, format!("the move-assign `{}`", v.render()));
         }
 
-        // A3: an index-assign on a loaned base path is a potential INSERT
+        // A3: an index-assign on a loaned base path is a potential INSERT,
+        // and a rebind of the loaned container is an invalidating REBIND.
         for (i, t) in targets.iter().enumerate() {
             if is_const_write[i] {
                 continue;
@@ -5328,6 +5374,17 @@ impl<'a> Checker<'a> {
             if matches!(t.kind, PlaceKind::Index { .. }) {
                 if let Some(path) = walk::place_path(t) {
                     self.emit_a3_if_live(st, &path, t.span, idx, "insert");
+                }
+            } else if !Self::place_has_index(t) {
+                if let Some(path) = walk::place_path(t) {
+                    let root = path_root(&path);
+                    let is_loan_binding = st.loans.iter().any(|l| match &l.target {
+                        LoanTarget::MapSlot { binding, .. } => binding == root,
+                        LoanTarget::Handle { handle } => handle == root,
+                    });
+                    if !is_loan_binding {
+                        self.emit_a3_if_live(st, &path, t.span, idx, "rebind");
+                    }
                 }
             }
             if let Some((path, key)) = walk::place_field_store_slot(t) {
