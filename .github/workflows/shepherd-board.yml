@@ -12,9 +12,9 @@ name: shepherd-board
 
 on:
   pull_request:
-    types: [opened, synchronize, labeled, closed]
+    types: [opened, synchronize, closed, reopened]
   issues:
-    types: [opened, closed, labeled, unlabeled]
+    types: [opened, closed]
   schedule:
     - cron: "13 4 * * *" # nightly reconcile (after stale 04:17, before triage-board 04:30)
   workflow_dispatch:
@@ -26,7 +26,7 @@ permissions:
 
 concurrency:
   group: shepherd-board
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 defaults:
   run:
@@ -44,8 +44,10 @@ jobs:
       SHEPHERD_MODE: ${{ vars.SHEPHERD_MODE || 'dry-run' }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Checkout (pinned v4)
+      - name: Checkout (pinned v4, full history for local behind/overlap git checks)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
 
       - name: Gate (W1 is read/comment/label — allowed at dry-run)
         run: python3 tools/shepherd.py gate --require read

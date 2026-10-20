@@ -117,5 +117,29 @@ class ProbeParser(unittest.TestCase):
         self.assertFalse(any("removed line" in ln for ln in added))
 
 
+class LabelSyncDedup(unittest.TestCase):
+    """W1 sync-labels must skip PRs that already carry the target bot:* label
+    so event-driven board refreshes do not exhaust the installation rate limit."""
+
+    MAPPING = {"LAND-CANDIDATE": "bot:land-candidate",
+               "CONFLICTS": "bot:conflict",
+               "STALE-BASE": "bot:stale-base"}
+
+    def test_skips_when_label_already_present(self):
+        it = _item(10, bucket="LAND-CANDIDATE",
+                   existing_labels=["bot:land-candidate", "triage:tests"])
+        self.assertIsNone(sh.needs_label_sync(it, self.MAPPING))
+
+    def test_returns_label_when_missing(self):
+        it = _item(11, bucket="LAND-CANDIDATE", existing_labels=["triage:tests"])
+        self.assertEqual(sh.needs_label_sync(it, self.MAPPING), "bot:land-candidate")
+
+    def test_skips_wildcard_and_draft(self):
+        w = _item(12, bucket="LAND-CANDIDATE", wildcard_hold=True, existing_labels=[])
+        d = _item(13, bucket="LAND-CANDIDATE", draft_parked=True, existing_labels=[])
+        self.assertIsNone(sh.needs_label_sync(w, self.MAPPING))
+        self.assertIsNone(sh.needs_label_sync(d, self.MAPPING))
+
+
 if __name__ == "__main__":
     unittest.main()

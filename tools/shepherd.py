@@ -122,12 +122,22 @@ def cmd_gate(args):
 # ------------------------------------------------------------------ labels
 
 def ensure_palette(gh, cfg, extra=None):
-    """Create any missing bot:* labels (422 = already exists, fine)."""
+    """Create any missing bot:* labels (checks existing palette first to save quota)."""
     labels = dict(cfg["bot_labels"])
     for name in (extra or []):
         labels.setdefault(name, {"color": "cccccc",
                                  "description": "Shepherd W4: superseded by cluster survivor"})
+    existing = set()
+    try:
+        existing = {
+            l["name"] for l in (gh.paginate("/repos/%s/labels?per_page=100" % gh.repo) or [])
+            if isinstance(l, dict) and l.get("name")
+        }
+    except (RuntimeError, tb.RateGuard):
+        pass
     for name, meta in labels.items():
+        if name in existing:
+            continue
         try:
             gh.post("/repos/%s/labels" % gh.repo,
                     {"name": name, "color": meta["color"],
@@ -144,20 +154,40 @@ def cmd_labels(args):
     tb.log("bot palette ensured (%d calls)" % gh.calls)
 
 
+def needs_label_sync(it, mapping):
+    """Pure: return the target structural bot:* label if missing on `it`, else None."""
+    if it.get("wildcard_hold") or it.get("draft_parked"):
+        return None
+    want = mapping.get(it.get("bucket"))
+    if not want:
+        return None
+    if want in set(it.get("existing_labels") or []):
+        return None
+    return want
+
+
 def cmd_sync_labels(args):
     """Structural bot:* labels, straight from classify()'s buckets (plan §2:
-    state lives in labels; the board is a view). Idempotent POST per PR."""
+    state lives in labels; the board is a view). Skips PRs that already carry
+    the target label to avoid burning installation rate limits."""
     cfg = load_cfg()
-    gh = tb.Gh(cfg["repo"], tb.load_token(args))
+    d = json.loads(Path(args.from_scan).read_text())
+    if d.get("skipped"):
+        tb.log("sync-labels skipped (upstream scan hit rate guard)")
+        return
+    gh = tb.Gh(cfg["repo"], tb.load_token(args), min_remaining=50)
     ensure_palette(gh, cfg)
-    items = json.loads(Path(args.from_scan).read_text())["items"]
+    items = d["items"]
     mapping = {"LAND-CANDIDATE": "bot:land-candidate",
                "CONFLICTS": "bot:conflict",
                "STALE-BASE": "bot:stale-base"}
-    n = 0
+    n, skipped = 0, 0
     for it in items:
-        want = mapping.get(it["bucket"])
+        want = mapping.get(it.get("bucket"))
         if not want or it.get("wildcard_hold") or it.get("draft_parked"):
+            continue
+        if not needs_label_sync(it, mapping):
+            skipped += 1
             continue
         n += 1
         if args.dry:
@@ -168,10 +198,10 @@ def cmd_sync_labels(args):
                     {"labels": [want]})
         except (RuntimeError, tb.RateGuard) as e:
             tb.log("  FAIL #%d: %s" % (it["number"], e))
-            if isinstance(e, tb.RateGuard):
+            if isinstance(e, tb.RateGuard) or "403" in str(e):
                 break
-    tb.log("sync-labels: %d candidates, %d calls, %s remaining"
-           % (n, gh.calls, gh.remaining))
+    tb.log("sync-labels: %d updated, %d already synced, %d calls, %s remaining"
+           % (n, skipped, gh.calls, gh.remaining))
 
 
 # ------------------------------------------------------------------ W2 rebase
@@ -180,32 +210,29 @@ def cmd_rebase(args):
     cfg = load_cfg()
     rc = cfg["rebase"]
     gh = tb.Gh(cfg["repo"], tb.load_token(args))
-    main_sha = gh.get("/repos/%s/commits/main" % gh.repo)["sha"]
-    prs = gh.paginate("/repos/%s/pulls?state=open&per_page=100" % gh.repo)
+    items, _ = tb.collect(cfg, gh, args)
     exempt = set(rc["exempt_labels"])
 
     cands = []
-    for pr in prs:
-        labels = {l["name"] for l in pr.get("labels", [])}
-        if pr.get("draft") or (labels & exempt):
+    for it in items:
+        labels = set(it.get("existing_labels") or [])
+        if it.get("draft") or (labels & exempt):
             continue
-        cands.append(pr)
+        cands.append(it)
     # oldest first: the most-behind branches are the most-stale ones
     cands.sort(key=lambda p: p["created_at"])
     tb.log("after label filter: %d candidates (scanning oldest %d)"
            % (len(cands), rc["scan_window"]))
 
     scored = []
-    for pr in cands[:rc["scan_window"]]:
-        n = pr["number"]
-        full = gh.get("/repos/%s/pulls/%d" % (gh.repo, n))
-        if full.get("mergeable") is not True:
+    for it in cands[:rc["scan_window"]]:
+        n = it["number"]
+        if it.get("mergeable") is not True:
             continue  # conflicted PRs go through the W4/W5 human path, not rebase
-        cmp = gh.get("/repos/%s/compare/%s...%s" % (gh.repo, main_sha,
-                                                    full["head"]["sha"]))
-        behind = (cmp or {}).get("behind_by", 0) or 0
-        if behind >= rc["behind_min"]:
-            scored.append((behind, n, full["head"]["sha"]))
+        behind = it.get("behind_by", 0) or 0
+        sha = it.get("full_head_sha") or it.get("head_sha")
+        if behind >= rc["behind_min"] and sha:
+            scored.append((behind, n, sha))
     scored.sort(reverse=True)
     for behind, n, sha in scored:
         tb.log("  candidate: #%d behind by %d (head %s)" % (n, behind, sha[:10]))
@@ -553,11 +580,23 @@ def cmd_comment(args):
                 target = c["id"]
                 break
     if target:
-        gh.patch("/repos/%s/issues/comments/%d" % (gh.repo, target), {"body": body})
-        tb.log("comment updated on #%d (%d)" % (args.pr, target))
+        try:
+            gh.patch("/repos/%s/issues/comments/%d" % (gh.repo, target), {"body": body})
+            tb.log("comment updated on #%d (%d)" % (args.pr, target))
+        except (RuntimeError, tb.RateGuard) as e:
+            if isinstance(e, tb.RateGuard) or "403" in str(e):
+                tb.log("WARN: comment update skipped on #%d: %s" % (args.pr, e))
+                return
+            raise
     else:
-        gh.post("/repos/%s/issues/%d/comments" % (gh.repo, args.pr), {"body": body})
-        tb.log("comment posted on #%d" % args.pr)
+        try:
+            gh.post("/repos/%s/issues/%d/comments" % (gh.repo, args.pr), {"body": body})
+            tb.log("comment posted on #%d" % (args.pr,))
+        except (RuntimeError, tb.RateGuard) as e:
+            if isinstance(e, tb.RateGuard) or "403" in str(e):
+                tb.log("WARN: comment post skipped on #%d: %s" % (args.pr, e))
+                return
+            raise
 
 
 # ------------------------------------------------------------------ W7 log

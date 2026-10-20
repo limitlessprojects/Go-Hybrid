@@ -97,6 +97,14 @@ class Gh:
                     body_txt = e.read().decode()[:400]
                 except Exception:
                     pass
+                if e.code == 403 and (
+                    "rate limit" in body_txt.lower()
+                    or e.headers.get("x-ratelimit-remaining") == "0"
+                ):
+                    raise RateGuard(
+                        "rate limit exceeded (403) on %s %s: %s"
+                        % (method, path, body_txt[:200])
+                    )
                 raise RuntimeError("%s %s -> %s %s" % (method, path, e.code, body_txt))
             except RateGuard:
                 raise
@@ -167,7 +175,187 @@ def age_days(iso, now):
 
 # ---------------------------------------------------------------- scan
 
+GRAPHQL_PRS_QUERY = """
+query($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    defaultBranchRef {
+      target { oid }
+    }
+    pullRequests(states: OPEN, first: 50, after: $cursor, orderBy: {field: CREATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        title
+        author { login }
+        createdAt
+        updatedAt
+        isDraft
+        mergeable
+        mergeStateStatus
+        headRefOid
+        baseRefOid
+        additions
+        deletions
+        changedFiles
+        labels(first: 30) { nodes { name } }
+        files(first: 100) { nodes { path } }
+      }
+    }
+  }
+}
+"""
+
+
+def _resolve_base_behind(repo_dir, gh, main_sha, base_sha, overlap_window):
+    """Return (behind_by, main_paths_set) for a PR merge-base SHA.
+
+    Prefers local git history (0 API calls when checked out with fetch-depth: 0)
+    and falls back to a single REST compare call per unique base_sha.
+    """
+    if not base_sha or base_sha == main_sha:
+        return 0, set()
+    if repo_dir and (repo_dir / ".git").exists():
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(repo_dir), "rev-list", "--count",
+                 "%s..%s" % (base_sha, main_sha)],
+                capture_output=True, text=True, timeout=15)
+            if r.returncode == 0 and r.stdout.strip().isdigit():
+                behind_by = int(r.stdout.strip())
+                main_paths = set()
+                if 0 < behind_by <= overlap_window:
+                    r2 = subprocess.run(
+                        ["git", "-C", str(repo_dir), "diff", "--name-only",
+                         "%s..%s" % (base_sha, main_sha)],
+                        capture_output=True, text=True, timeout=15)
+                    if r2.returncode == 0:
+                        main_paths = {ln.strip() for ln in r2.stdout.splitlines() if ln.strip()}
+                        return behind_by, main_paths
+                else:
+                    return behind_by, main_paths
+        except (OSError, subprocess.SubprocessError):
+            pass
+    cmp = gh.get("/repos/%s/compare/%s...%s?per_page=250" % (gh.repo, base_sha, main_sha))
+    if not cmp:
+        return 0, set()
+    behind_by = cmp.get("ahead_by", 0) or 0
+    main_paths = (
+        {f["filename"] for f in (cmp.get("files") or [])}
+        if 0 < behind_by <= overlap_window else set()
+    )
+    return behind_by, main_paths
+
+
+def collect_graphql(cfg, gh, args):
+    """Batch-collect open PRs via GraphQL + deduplicated base comparisons.
+
+    Reduces a 180-PR scan from ~650 REST calls down to ~4 GraphQL calls (+0 REST
+    calls when local git history is present, or 1 compare per unique base SHA).
+    """
+    now = datetime.now(timezone.utc)
+    owner, name = gh.repo.split("/", 1)
+    raw_prs = []
+    main_sha = None
+    cursor = None
+    for _ in range(20):
+        resp = gh.post("/graphql", {
+            "query": GRAPHQL_PRS_QUERY,
+            "variables": {"owner": owner, "name": name, "cursor": cursor},
+        })
+        if not resp or resp.get("errors") or not (resp.get("data") or {}).get("repository"):
+            raise RuntimeError("graphql failed: %s" % (resp or {}).get("errors"))
+        repo_data = resp["data"]["repository"]
+        if not main_sha:
+            main_sha = ((repo_data.get("defaultBranchRef") or {}).get("target") or {}).get("oid")
+        pr_conn = repo_data["pullRequests"]
+        raw_prs.extend(pr_conn.get("nodes") or [])
+        page_info = pr_conn.get("pageInfo") or {}
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = page_info.get("endCursor")
+
+    if not main_sha:
+        main_sha = gh.get("/repos/%s/commits/main" % gh.repo)["sha"]
+    log("open PRs: %d" % len(raw_prs))
+    log("main: %s" % main_sha[:10])
+
+    overlap_window = 100
+    repo_dir = Path(__file__).resolve().parent.parent
+    unique_bases = sorted({
+        pr.get("baseRefOid") for pr in raw_prs
+        if pr.get("baseRefOid") and pr.get("baseRefOid") != main_sha
+    })
+    base_cache = {main_sha: (0, set())}
+    workers = getattr(args, "jobs", 6)
+    if unique_bases:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = {
+                ex.submit(_resolve_base_behind, repo_dir, gh, main_sha, b, overlap_window): b
+                for b in unique_bases
+            }
+            for fut in as_completed(futs):
+                base_cache[futs[fut]] = fut.result()
+
+    mergeable_map = {"MERGEABLE": True, "CONFLICTING": False}
+    items = []
+    for pr in raw_prs:
+        n = pr["number"]
+        f_nodes = ((pr.get("files") or {}).get("nodes")) or []
+        if (pr.get("changedFiles") or 0) > len(f_nodes):
+            files = gh.paginate("/repos/%s/pulls/%d/files?per_page=100" % (gh.repo, n))
+            paths = [f["filename"] for f in files]
+        else:
+            paths = [f["path"] for f in f_nodes if f and f.get("path")]
+        pset = set(paths)
+        base_sha = pr.get("baseRefOid")
+        behind_by, main_paths = base_cache.get(base_sha, (0, set()))
+        overlap_paths = (pset & main_paths) if 0 < behind_by <= overlap_window else set()
+        existing_labels = sorted({
+            l["name"] for l in (((pr.get("labels") or {}).get("nodes")) or [])
+            if l and l.get("name")
+        })
+        head_full = pr.get("headRefOid") or ""
+        items.append({
+            "number": n,
+            "title": (pr.get("title") or "")[:90],
+            "author": (pr.get("author") or {}).get("login", "unknown"),
+            "created_at": pr["createdAt"],
+            "updated_at": pr["updatedAt"],
+            "age_days": age_days(pr["createdAt"], now),
+            "idle_days": age_days(pr["updatedAt"], now),
+            "draft": bool(pr.get("isDraft")),
+            "mergeable": mergeable_map.get(pr.get("mergeable")),
+            "mergeable_state": (pr.get("mergeStateStatus") or "unknown").lower(),
+            "head_sha": head_full[:12],
+            "full_head_sha": head_full,
+            "existing_labels": existing_labels,
+            "files": len(paths),
+            "paths_sample": sorted(paths)[:12],
+            "additions": pr.get("additions") or 0,
+            "deletions": pr.get("deletions") or 0,
+            "behind_by": behind_by,
+            "overlap_risk": sorted(overlap_paths)[:8],
+            "tests_included": any(
+                "tests/" in p or "/corpus" in p or p.endswith("_reject.hy") or p.endswith("_accept.hy")
+                for p in paths),
+        })
+    items.sort(key=lambda x: -x["number"])
+    log("  ... %d/%d scanned (GraphQL + %d unique bases)" % (
+        len(items), len(raw_prs), len(unique_bases)))
+    for it in items:
+        log("  #%d %s — behind %d, mergeable %s, +%d/%d files %d" % (
+            it["number"], it["mergeable_state"], it["behind_by"], it["mergeable"],
+            it["additions"], it["deletions"], it["files"]))
+    return items, main_sha
+
+
 def collect(cfg, gh, args):
+    try:
+        return collect_graphql(cfg, gh, args)
+    except RateGuard:
+        raise
+    except Exception as e:
+        log("GraphQL collect fallback to REST (%s)" % e)
     now = datetime.now(timezone.utc)
     prs = gh.paginate("/repos/%s/pulls?state=open&sort=created&direction=desc" % gh.repo)
     log("open PRs: %d" % len(prs))
@@ -197,6 +385,10 @@ def collect(cfg, gh, args):
                 cmp2 = gh.get("/repos/%s/compare/%s...%s?per_page=250" % (gh.repo, merge_base, main_sha))
                 main_paths = {f["filename"] for f in (cmp2 or {}).get("files", [])}
                 overlap_paths = pset & main_paths
+        head_full = pr["head"]["sha"]
+        existing_labels = sorted({
+            l["name"] for l in (pr.get("labels") or []) if l and l.get("name")
+        })
         return {
             "number": n,
             "title": pr["title"][:90],
@@ -208,7 +400,9 @@ def collect(cfg, gh, args):
             "draft": bool(pr.get("draft")),
             "mergeable": full.get("mergeable"),
             "mergeable_state": full.get("mergeable_state"),
-            "head_sha": pr["head"]["sha"][:12],
+            "head_sha": head_full[:12],
+            "full_head_sha": head_full,
+            "existing_labels": existing_labels,
             "files": len(paths),
             "paths_sample": sorted(paths)[:12],
             "additions": adds,
@@ -440,9 +634,20 @@ def render_board(cfg, items, clusters, verdicts, now_s):
 
 def cmd_scan(args):
     cfg = load_cfg()
-    gh = Gh(cfg["repo"], load_token(args), min_remaining=150)
-    items, main_sha = collect(cfg, gh, args)
-    items, clusters = classify(cfg, items)
+    gh = Gh(cfg["repo"], load_token(args), min_remaining=50)
+    try:
+        items, main_sha = collect(cfg, gh, args)
+        items, clusters = classify(cfg, items)
+    except RateGuard as e:
+        log("WARN: scan skipped due to rate limit guard: %s" % e)
+        out = Path(args.out)
+        out.mkdir(parents=True, exist_ok=True)
+        now_s = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        (out / "TRIAGE.md").write_text("# Triage Board\n\nSkipped (rate limit guard).\n")
+        (out / "TRIAGE.json").write_text(json.dumps(
+            {"generated": now_s, "main": "unknown", "clusters": [], "items": [], "skipped": True},
+            indent=1, ensure_ascii=False))
+        return
     verdicts = {}
     if args.verify:
         verdicts = merge_gate(items, main_sha, args.verify)
@@ -498,8 +703,17 @@ def cmd_approve(args):
 def cmd_labels(args):
     cfg = load_cfg()
     gh = Gh(cfg["repo"], load_token(args))
+    existing_palette = set()
+    if not args.dry:
+        try:
+            existing_palette = {
+                l["name"] for l in (gh.paginate("/repos/%s/labels?per_page=100" % gh.repo) or [])
+                if isinstance(l, dict) and l.get("name")
+            }
+        except RuntimeError:
+            pass
     for name, meta in cfg["labels"].items():
-        if args.dry:
+        if args.dry or name in existing_palette:
             continue
         try:
             gh.post("/repos/%s/labels" % gh.repo,
@@ -515,11 +729,15 @@ def cmd_labels(args):
         want = it["labels"]
         if not want:
             continue
+        have = set(it.get("existing_labels") or [])
+        missing = [l for l in want if l not in have]
+        if not missing:
+            continue
         if args.dry:
-            log("  #%d -> %s" % (it["number"], ",".join(want)))
+            log("  #%d -> %s" % (it["number"], ",".join(missing)))
             continue
         try:
-            gh.post("/repos/%s/issues/%d/labels" % (gh.repo, it["number"]), {"labels": want})
+            gh.post("/repos/%s/issues/%d/labels" % (gh.repo, it["number"]), {"labels": missing})
         except RuntimeError as e:
             log("  FAIL #%d: %s" % (it["number"], e))
     log("labels applied (%d calls total, %s remaining)" % (gh.calls, gh.remaining))
@@ -534,6 +752,9 @@ def cmd_board(args):
     gh = Gh(cfg["repo"], load_token(args), min_remaining=150)
     if args.from_scan:
         d = json.loads(Path(args.from_scan).read_text())
+        if d.get("skipped"):
+            log("board update skipped (upstream scan hit rate guard)")
+            return
         items, clusters, now_s = d["items"], d["clusters"], d["generated"]
     else:
         items, main_sha = collect(cfg, gh, args)
@@ -547,18 +768,24 @@ def cmd_board(args):
     if not args.post:
         print(md)
         return
-    _, srch = gh.req("GET", "/search/issues?q=%s" % quote(
-        'repo:%s is:issue is:open "%s" in:body' % (cfg["repo"], BOARD_MARKER)))
-    hits = (srch or {}).get("items", [])
-    if hits:
-        n = hits[0]["number"]
-        gh.patch("/repos/%s/issues/%d" % (cfg["repo"], n), {"body": md})
-        log("board updated on #%d (%d calls, %s remaining)" % (n, gh.calls, gh.remaining))
-    else:
-        iss = gh.post("/repos/%s/issues" % cfg["repo"],
-                      {"title": "Triage Board (auto-updated daily — pin me)",
-                       "body": md})
-        log("board created: %s (%d calls)" % (iss.get("html_url"), gh.calls))
+    try:
+        _, srch = gh.req("GET", "/search/issues?q=%s" % quote(
+            'repo:%s is:issue is:open "%s" in:body' % (cfg["repo"], BOARD_MARKER)))
+        hits = (srch or {}).get("items", [])
+        if hits:
+            n = hits[0]["number"]
+            gh.patch("/repos/%s/issues/%d" % (cfg["repo"], n), {"body": md})
+            log("board updated on #%d (%d calls, %s remaining)" % (n, gh.calls, gh.remaining))
+        else:
+            iss = gh.post("/repos/%s/issues" % cfg["repo"],
+                          {"title": "Triage Board (auto-updated daily — pin me)",
+                           "body": md})
+            log("board created: %s (%d calls)" % (iss.get("html_url"), gh.calls))
+    except (RuntimeError, RateGuard) as e:
+        if isinstance(e, RateGuard) or "403" in str(e):
+            log("WARN: board post skipped (read-only token or rate limit): %s" % e)
+            return
+        raise
 
 
 # ---------------------------------------------------------------- main
