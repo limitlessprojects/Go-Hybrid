@@ -574,7 +574,8 @@
         "for a float initializer, drop the fractional part or declare a float type"
       ],
       "example": "var n int8 = 300   // reject: HYB-E6002 — 300 overflows int8; Go cannot build the emitted module",
-      "rule": "BUILDABLE"
+      "rule": "BUILDABLE",
+      "tier0_rule_id": "BUILDABLE"
     },
     {
       "code": "HYB-E6003",
