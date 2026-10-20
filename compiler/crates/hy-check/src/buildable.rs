@@ -439,6 +439,60 @@ impl<'a> Collector<'a> {
         self.mention(name);
     }
 
+    /// #778 — a TYPE NAME used where a VALUE is required.
+    ///
+    /// `struct holder { n int }` followed by `x := holder` passes `hyb check`
+    /// and the emitter prints the identifier verbatim, so `go build` fails with
+    /// `holder (type) is not an expression`. Go has no value named `holder`,
+    /// so this is not an `Unknown` fail-open case: the shape IS known and the
+    /// value does not exist.
+    ///
+    /// Deliberately narrow, because a type name is a legal operand in a
+    /// CONVERSION (`holder(x)`, `int(3.7)`). The call arm handles its callee
+    /// separately, so this is only reached for a genuine value position.
+    ///
+    /// Fail-open on anything that could be a value: a local/parameter/closure
+    /// binding shadows the type name (`holder := 5` is a legal variable), and
+    /// an unknown name is another rule's business (unused-binding, O4.9).
+    fn check_type_name_in_value_position(&mut self, name: &str, span: Span) {
+        // A binding in any enclosing scope shadows the type name.
+        if self
+            .scopes
+            .iter()
+            .rev()
+            .any(|layer| layer.contains_key(name))
+        {
+            return;
+        }
+        // A file-level const of the same name is a value, not the type.
+        if self.ck.consts.contains_key(name) {
+            return;
+        }
+        // A top-level fn of the same name is callable, not the type.
+        let head = Checker::base_named_type_str(name);
+        if self.ck.fns.contains_key(name) || self.ck.fns.contains_key(head) {
+            return;
+        }
+        // The name must actually resolve to a declared type — a struct, an
+        // enum, a type alias, or a built-in conversion target. Anything else
+        // stays fail-open.
+        let is_declared_type = self.ck.structs.contains_key(name)
+            || self.ck.enums.contains_key(name)
+            || self.ck.type_aliases.contains_key(name)
+            || crate::const_init::is_conversion_type_name(name);
+        if !is_declared_type {
+            return;
+        }
+        self.emit_e1002(
+            span,
+            format!(
+                "`{}` is a type, not a value — Go refuses `{} (type) is not an expression` (HYB-E1002)",
+                name, name
+            ),
+            "a type name can only be used in a type position or as a conversion callee (`T(x)`)",
+        );
+    }
+
     fn write(&mut self, name: &str) {
         for layer in self.scopes.iter().rev() {
             if let Some(entry) = layer.get(name) {
@@ -965,7 +1019,11 @@ impl<'a> Collector<'a> {
 
     fn expr(&mut self, e: &Expr) {
         match e {
-            Expr::Ident { name, .. } => self.read(name),
+            Expr::Ident { name, span } => {
+                self.read(name);
+                // #778: a value position, so a type name here cannot build.
+                self.check_type_name_in_value_position(name, *span);
+            }
             Expr::Lit { .. } => {}
             Expr::Interp { parts, .. } => {
                 for p in parts {
@@ -1032,13 +1090,46 @@ impl<'a> Collector<'a> {
                         "an `any` value must be asserted to a concrete type before its fields can be read",
                     );
                 }
-                self.expr(base);
+                // #778: a Field BASE is a QUALIFIER position, not a value
+                // position, so the type-name check must not fire on it. Two
+                // legal spellings put a type name there:
+                //   * `color.red`      — an enum variant
+                //   * `greeting.build` — a method call on the type
+                // (and `fmt.println` is a package root, which is not a type
+                // and never reached this check anyway). A bare `x := colour`
+                // IS a value position and still rejects, pinned in the
+                // fixture. An identifier base is read for used-marking; a
+                // deeper base (a call result, an index) recurses normally.
+                match unwrap_parens(base) {
+                    Expr::Ident { name, .. } => self.read(name),
+                    other => self.expr(other),
+                }
             }
             Expr::Call {
                 callee, args, span, ..
             } => {
-                self.expr(callee);
-                for a in args {
+                // #778: a plain identifier CALLEE is a call position, not a
+                // value position — `holder(x)` is a legal conversion and
+                // `int(3.7)` is a legal built-in one, so the type-name check
+                // must not fire there. `read` still runs, because an unused
+                // local closure called as `f()` has been read.
+                match unwrap_parens(callee) {
+                    Expr::Ident { name, .. } => self.read(name),
+                    other => self.expr(other),
+                }
+                // `new(T)` and `make(T, len, cap)` take a TYPE as their FIRST
+                // argument, so that position is a type position and the
+                // #778 value-position check must not fire there — `new(bag)`
+                // and `make(map[string]int)` are both legal. The remaining
+                // `make` arguments (len, cap) ARE values and still walk.
+                let type_first_arg = matches!(
+                    unwrap_parens(callee),
+                    Expr::Ident { name, .. } if name == "new" || name == "make"
+                );
+                for (i, a) in args.iter().enumerate() {
+                    if type_first_arg && i == 0 {
+                        continue;
+                    }
                     self.expr(&a.value);
                 }
                 // #682 U7: every argument must be exactly one value, except
@@ -2147,6 +2238,42 @@ impl<'a> Collector<'a> {
                         }
                         return;
                     }
+                    if !res.is_empty()
+                        && self.fn_results_error_tail
+                        && res.len() + 1 == want.len()
+                    {
+                        for (r, w) in res.iter().zip(want.iter()) {
+                            self.report_return_conflict(r, w, values[0].span());
+                        }
+                        return;
+                    }
+                    let (nr, nw) = (res.len(), want.len());
+                    let msg = match (nw, nr) {
+                        (0, _) => format!(
+                            "`return` supplies `{}` with {nr} result{} in a function that declares no results — Go refuses `too many return values` (HYB-E1002)",
+                            callee.render(),
+                            if nr == 1 { "" } else { "s" }
+                        ),
+                        (_, 0) => format!(
+                            "`return` supplies `{}` which returns no value (void) but the signature declares {nw} result{} — Go refuses `{} (no value) used as value in return statement` (HYB-E1002)",
+                            callee.render(),
+                            if nw == 1 { "" } else { "s" },
+                            callee.render()
+                        ),
+                        _ => format!(
+                            "`return` supplies `{}` with {nr} result{} but the signature declares {nw} result{} — Go refuses `{} return values` (HYB-E1002)",
+                            callee.render(),
+                            if nr == 1 { "" } else { "s" },
+                            if nw == 1 { "" } else { "s" },
+                            if nr < nw { "not enough" } else { "too many" }
+                        ),
+                    };
+                    self.emit_e1002(
+                        values[0].span(),
+                        msg,
+                        "a return statement must supply exactly the results the signature declares",
+                    );
+                    return;
                 }
             }
         }
@@ -2713,6 +2840,10 @@ impl<'a> Collector<'a> {
         // For slices, arrays, and strings, the index must be an integer.
         let needs_int_idx = matches!(bk, OpKind::Slice(_) | OpKind::Array(_) | OpKind::Str)
             || matches!(bk, OpKind::Pointer(inner) if matches!(**inner, OpKind::Array(_)));
+        // A fixed-size array carries its length in the type, so a constant index
+        // past that length is a compile-time error in Go (`a[3]` on `[2]int`).
+        let is_array = matches!(bk, OpKind::Array(_))
+            || matches!(bk, OpKind::Pointer(inner) if matches!(**inner, OpKind::Array(_)));
         if needs_int_idx && !matches!(ik, OpKind::Unknown | OpKind::Int) {
             self.emit_e1002(
                 index.span(),
@@ -2751,6 +2882,22 @@ impl<'a> Collector<'a> {
                                     base_str
                                 ),
                                 "a constant index on a constant string must satisfy `0 <= index < len(s)`",
+                            );
+                        }
+                    }
+                } else if is_array {
+                    if let Some(arr_len) =
+                        base_expr.and_then(|b| self.eval_const_array_len_at(b, span.start))
+                    {
+                        if v >= arr_len {
+                            self.emit_e1002(
+                                index.span(),
+                                format!(
+                                    "invalid array index `{}` (out of bounds for a {}-element array) (HYB-E1002)",
+                                    index.render(),
+                                    arr_len
+                                ),
+                                "a constant index on a fixed-size array must satisfy `0 <= index < len(a)`",
                             );
                         }
                     }
@@ -2900,6 +3047,15 @@ impl<'a> Collector<'a> {
             return None;
         }
         self.ck.const_string_len_at(e, use_pos, 0)
+    }
+
+    /// Fixed-size array length, when `e` denotes an array whose length is known
+    /// exactly. Unlike the constant folders this deliberately skips
+    /// `expr_has_non_const_local`: an array's length lives in its type, so a
+    /// `var`/`let` binding (`var a = [3]int{}`) is just as certain as a `const`
+    /// one, and the resolver never falls back to a same-named package constant.
+    fn eval_const_array_len_at(&self, e: &Expr, use_pos: hy_diag::Pos) -> Option<i128> {
+        self.ck.const_array_len_at(e, use_pos, 0)
     }
 
     fn check_array_lit_items(&mut self, elem_ty: &TypeExpr, items: &[Expr]) {
