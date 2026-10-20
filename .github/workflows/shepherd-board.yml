@@ -1,0 +1,64 @@
+# W1 — live board (plan §3 W1). Event-driven freshness: classify() runs and
+# the board issue (#940) is edited in place within minutes of a PR opening,
+# updating, gaining a label, or closing — not at the next daily snapshot.
+# Nightly reconcile catches drift (late mergeability, moved branches).
+# The daily triage-board.yml stays as the fallback snapshot.
+#
+# Guard against self-triggering: every board edit and label write is done by
+# github-actions[bot]; the job skips those events. State lives in labels
+# (bot:* structural labels synced from classify()'s buckets); the board is a
+# view of that state, never a separate record.
+name: shepherd-board
+
+on:
+  pull_request:
+    types: [opened, synchronize, labeled, closed]
+  issues:
+    types: [opened, closed, labeled, unlabeled]
+  schedule:
+    - cron: "13 4 * * *" # nightly reconcile (after stale 04:17, before triage-board 04:30)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: shepherd-board
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash # bash => -eo pipefail: never read $? after a pipe
+
+jobs:
+  board:
+    if: >-
+      github.actor != 'github-actions[bot]' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SHEPHERD_MODE: ${{ vars.SHEPHERD_MODE || 'dry-run' }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout (pinned v4)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Gate (W1 is read/comment/label — allowed at dry-run)
+        run: python3 tools/shepherd.py gate --require read
+
+      - name: Scan + classify every open PR
+        run: python3 tools/triage_bot.py --token-env GITHUB_TOKEN scan --out /tmp/triage --jobs 8
+
+      - name: Rewrite the board issue in place
+        run: python3 tools/triage_bot.py --token-env GITHUB_TOKEN board --post --from-scan /tmp/triage/TRIAGE.json
+
+      - name: Sync structural bot:* labels from the buckets
+        run: python3 tools/shepherd.py --token-env GITHUB_TOKEN sync-labels --from-scan /tmp/triage/TRIAGE.json
+
+      - name: W7 session log
+        if: always()
+        run: python3 tools/shepherd.py --token-env GITHUB_TOKEN log --event board-refresh --verdict "ok" --note "board + labels refreshed"

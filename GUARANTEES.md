@@ -63,7 +63,7 @@ Everything the checker **accepts was proven** sendable; everything it
 ## Evidence inventory (what backs the ✅ rows)
 
 - **Adversarial corpus** — [tests/checker-corpus/](tests/checker-corpus/):
-  113 programs, each with an `EXPECTED-VERDICT` header. Programs 01–18 were
+  115 programs, each with an `EXPECTED-VERDICT` header. Programs 01–18 were
   **pre-registered before the checker existed** (the checker was built
   against them, not adjusted after); 19–20 were added during integration
   and 21+ after the checker landed, still hand-derived from the rule text
