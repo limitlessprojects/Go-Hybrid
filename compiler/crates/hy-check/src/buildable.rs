@@ -895,17 +895,44 @@ impl<'a> Collector<'a> {
             }
             Stmt::Managed { body, .. } => self.block_scoped(body),
             Stmt::Match { subject, arms, .. } => {
+                self.check_single_value_position(subject, "a match subject", /*binding_position=*/ false);
                 self.expr(subject);
+                let subj_kind = self.kind_of_expr(subject);
                 for arm in arms {
                     self.push_scope();
-                    if let MatchPattern::Path { segments, binding } = &arm.pattern {
-                        if let Some(root) = segments.first() {
-                            self.mention(root);
+                    match &arm.pattern {
+                        MatchPattern::Lit(lit) => {
+                            if subj_kind != OpKind::Unknown {
+                                let lit_kind = match lit {
+                                    LitKind::Int(_) | LitKind::Char(_) => OpKind::Int,
+                                    LitKind::Float(_) => OpKind::Float,
+                                    LitKind::Bool(_) => OpKind::Bool,
+                                    LitKind::Str(_) | LitKind::RawStr(_) => OpKind::Str,
+                                    LitKind::Nil => OpKind::Unknown,
+                                };
+                                if kinds_conflict(&subj_kind, &lit_kind) {
+                                    self.emit_e1002(
+                                        arm.body.span,
+                                        format!(
+                                            "mismatched types in match: pattern of type `{}` cannot match subject of type `{}` (HYB-E1002)",
+                                            lit_kind.label(),
+                                            subj_kind.label(),
+                                        ),
+                                        "match arm patterns must be assignable to the subject type",
+                                    );
+                                }
+                            }
                         }
-                        if let Some(b) = binding {
-                            self.define_elidable(b, subject.span());
-                            self.bind_kind(b, OpKind::Unknown);
+                        MatchPattern::Path { segments, binding } => {
+                            if let Some(root) = segments.first() {
+                                self.mention(root);
+                            }
+                            if let Some(b) = binding {
+                                self.define_elidable(b, subject.span());
+                                self.bind_kind(b, OpKind::Unknown);
+                            }
                         }
+                        MatchPattern::Wildcard => {}
                     }
                     if let Some(g) = &arm.guard {
                         self.expr(g);
