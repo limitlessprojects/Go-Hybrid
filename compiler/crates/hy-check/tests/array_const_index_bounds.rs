@@ -129,3 +129,25 @@ fn large_array_length_control_accepts() {
     // must stay clean (the bound only fires on a constant index).
     assert_accept("fn main() {\n    var a [300]int8\n    fmt.println(\"{len(a)}\")\n}\n");
 }
+
+
+#[test]
+fn const_index_past_var_array_length_on_assignment_target_is_e1002() {
+    let r = assert_reject_e1002(
+        "fn main() {\n    var a [2]int\n    a[300] = 1\n    fmt.println(\"{a[0]}\")\n}\n",
+    );
+    assert!(
+        r.diagnostics
+            .iter()
+            .any(|d| d.message.contains("out of bounds for a 2-element array")),
+        "message must state the array's length: {:?}",
+        r.diagnostics
+    );
+}
+
+#[test]
+fn const_index_equal_to_var_array_length_on_assignment_target_is_e1002() {
+    assert_reject_e1002(
+        "fn main() {\n    var a [2]int\n    a[2] = 1\n    fmt.println(\"{a[0]}\")\n}\n",
+    );
+}
