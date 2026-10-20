@@ -1100,6 +1100,7 @@ impl<'a> Collector<'a> {
             Expr::Unary {
                 op, operand, span, ..
             } => {
+                self.check_single_value_position(operand, "a unary operation", /*binding_position=*/ false);
                 self.expr(operand);
                 self.check_unary_operand(*op, operand, *span);
             }
@@ -1213,6 +1214,7 @@ impl<'a> Collector<'a> {
                     self.ty(t);
                 }
                 for f in fields {
+                    self.check_single_value_position(&f.value, "a struct literal field", /*binding_position=*/ false);
                     self.expr(&f.value);
                 }
                 self.check_struct_literal(ty.as_ref(), fields, *span);
@@ -1222,6 +1224,7 @@ impl<'a> Collector<'a> {
                     self.ty(t);
                 }
                 for i in items {
+                    self.check_single_value_position(i, "a slice literal item", /*binding_position=*/ false);
                     self.expr(i);
                 }
                 if let Some((_, inner_elem, _)) = e.as_array_lit() {
@@ -1239,6 +1242,8 @@ impl<'a> Collector<'a> {
                 self.ty(key);
                 self.ty(value);
                 for (k, v) in entries {
+                    self.check_single_value_position(k, "a map key", /*binding_position=*/ false);
+                    self.check_single_value_position(v, "a map value", /*binding_position=*/ false);
                     self.expr(k);
                     self.expr(v);
                 }
