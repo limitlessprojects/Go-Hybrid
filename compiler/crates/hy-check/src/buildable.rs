@@ -1103,7 +1103,10 @@ impl<'a> Collector<'a> {
                 self.expr(operand);
                 self.check_unary_operand(*op, operand, *span);
             }
-            Expr::AddrOf { operand, .. } => self.expr(operand),
+            Expr::AddrOf { operand, span, .. } => {
+                self.expr(operand);
+                self.check_addr_of_operand(operand, *span);
+            }
             Expr::Move { operand, .. } => self.expr(operand),
             Expr::Try { operand, .. } => self.expr(operand),
             Expr::Receive { chan, .. } => self.expr(chan),
@@ -1797,7 +1800,7 @@ impl<'a> Collector<'a> {
                     return None;
                 }
                 match name.as_str() {
-                    "len" | "cap" => return Some(vec![OpKind::Int]),
+                    "len" | "cap" | "copy" => return Some(vec![OpKind::Int]),
                     "append" => {
                         let first = args
                             .first()
@@ -1807,7 +1810,8 @@ impl<'a> Collector<'a> {
                     }
                     "make" => return Some(vec![self.make_kind(args)]),
                     "new" => return Some(vec![OpKind::Pointer(Box::new(OpKind::Unknown))]),
-                    "delete" | "close" => return Some(Vec::new()),
+                    "delete" | "close" | "clear" | "panic" => return Some(Vec::new()),
+                    "recover" => return Some(vec![OpKind::Interface]),
                     _ => {}
                 }
                 let conv = self.kind_of_named(name, 0);
@@ -2586,7 +2590,95 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
-            UnOp::Addr => {}
+            UnOp::Addr => {
+                self.check_addr_of_operand(operand, span);
+            }
+        }
+    }
+
+    /// Go spec §Address operators: operand must be addressable or a composite literal.
+    fn check_addr_of_operand(&mut self, operand: &Expr, span: Span) {
+        if !self.is_addressable_expr(operand) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot take the address of `{}` (HYB-E1002)",
+                    operand.render()
+                ),
+                "the operand of `&` must be addressable (a variable, pointer indirection, field, slice/array element, or composite literal)",
+            );
+        }
+    }
+
+    fn is_imported_pkg_root(&self, name: &str) -> bool {
+        for d in &self.ck.file.decls {
+            if let Decl::Import { path, .. } = d {
+                let root = path.rsplit('/').next().unwrap_or(path.as_str());
+                if root == name {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn is_addressable_expr(&self, e: &Expr) -> bool {
+        match unwrap_parens(e) {
+            Expr::StructLit { .. } | Expr::SliceLit { .. } | Expr::MapLit { .. } => true,
+            Expr::Ident { name, .. } => {
+                if name == "_" {
+                    return false;
+                }
+                for layer in self.scopes.iter().rev() {
+                    if let Some(entry) = layer.get(name) {
+                        return match entry {
+                            Some(id) => self.defines[*id].kind != LocalKind::Const,
+                            None => true,
+                        };
+                    }
+                }
+                if self.file_consts.contains_key(name) {
+                    return false;
+                }
+                if self.ck.fns.contains_key(name) || self.ck.file.fns().any(|f| &f.name == name) {
+                    return false;
+                }
+                if self.is_imported_pkg_root(name) {
+                    return false;
+                }
+                true
+            }
+            Expr::Index { base, .. } => {
+                let bk = self.kind_of_expr(base);
+                match bk {
+                    OpKind::Str => false,
+                    OpKind::Map(_, _) => true,
+                    OpKind::Slice(_) => true,
+                    OpKind::Array(_) => self.is_addressable_expr(base),
+                    OpKind::Pointer(inner) if matches!(*inner, OpKind::Array(_) | OpKind::Slice(_)) => true,
+                    OpKind::Unknown => true,
+                    _ => false,
+                }
+            }
+            Expr::Field { base, .. } => {
+                let bk = self.kind_of_expr(base);
+                match bk {
+                    OpKind::Pointer(_) | OpKind::Unknown => true,
+                    _ => self.is_addressable_expr(base),
+                }
+            }
+            Expr::Slice { .. } => false,
+            Expr::Lit { .. }
+            | Expr::Interp { .. }
+            | Expr::Binary { .. }
+            | Expr::Unary { .. }
+            | Expr::AddrOf { .. }
+            | Expr::Call { .. }
+            | Expr::Try { .. }
+            | Expr::Receive { .. }
+            | Expr::Move { .. }
+            | Expr::FnLit { .. } => false,
+            Expr::Paren { inner, .. } => self.is_addressable_expr(inner),
         }
     }
 
@@ -3916,6 +4008,88 @@ impl<'a> Collector<'a> {
                             sk.label()
                         ),
                         "the first argument to `append(xs, ...)` must be a slice (`[]T`)",
+                    );
+                }
+            }
+            "copy" => {
+                if args.len() != 2 {
+                    return; // arity handled by builtins.rs
+                }
+                let dst_arg = &args[0].value;
+                let src_arg = &args[1].value;
+                let dk = self.kind_of_expr(dst_arg);
+                let sk = self.kind_of_expr(src_arg);
+
+                if !matches!(dk, OpKind::Unknown | OpKind::Slice(_)) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "first argument to `copy` must be a slice, found `{}` (type `{}`) (HYB-E2005)",
+                            dst_arg.render(),
+                            dk.label()
+                        ),
+                        "the first argument to `copy(dst, src)` must be a slice (`[]T`)",
+                    );
+                    return;
+                }
+
+                if !matches!(sk, OpKind::Unknown | OpKind::Slice(_) | OpKind::Str) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "second argument to `copy` must be a slice or string, found `{}` (type `{}`) (HYB-E2005)",
+                            src_arg.render(),
+                            sk.label()
+                        ),
+                        "the second argument to `copy(dst, src)` must be a slice (`[]T`) or string",
+                    );
+                    return;
+                }
+
+                match (&dk, &sk) {
+                    (OpKind::Slice(dst_elem), OpKind::Slice(src_elem)) => {
+                        if kinds_conflict(dst_elem, src_elem) {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "arguments to `copy` have different element types: `{}` and `{}` (HYB-E1002)",
+                                    dst_elem.label(),
+                                    src_elem.label()
+                                ),
+                                "arguments to `copy` must have identical element types",
+                            );
+                        }
+                    }
+                    (OpKind::Slice(dst_elem), OpKind::Str) => {
+                        if !matches!(**dst_elem, OpKind::Unknown | OpKind::Int) {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot copy string into slice with element type `{}` (HYB-E1002)",
+                                    dst_elem.label()
+                                ),
+                                "copying from a string requires a byte slice destination (`[]byte`)",
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "clear" => {
+                if args.len() != 1 {
+                    return; // arity handled by builtins.rs
+                }
+                let op = &args[0].value;
+                let ak = self.kind_of_expr(op);
+                if !matches!(ak, OpKind::Unknown | OpKind::Slice(_) | OpKind::Map(_, _)) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "cannot clear non-slice/map `{}` (type `{}`) (HYB-E2005)",
+                            op.render(),
+                            ak.label()
+                        ),
+                        "`clear` requires a slice or map operand",
                     );
                 }
             }
