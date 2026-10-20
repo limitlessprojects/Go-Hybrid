@@ -164,6 +164,38 @@ fn eq_float_and_float_is_accepted() {
 }
 
 // ---------------------------------------------------------------------------
+// Accept: variable + numeric literal — untyped constant adapts
+// ---------------------------------------------------------------------------
+
+#[test]
+fn float_var_plus_int_literal_is_accepted() {
+    assert_ok(
+        "fn main() {\n    var f float64 = 2.5\n    _ = f + 1\n}\n",
+    );
+}
+
+#[test]
+fn int_var_lt_float_literal_is_accepted() {
+    assert_ok(
+        "fn main() {\n    x := 10\n    _ = x < 2.5\n}\n",
+    );
+}
+
+#[test]
+fn float_var_eq_int_literal_is_accepted() {
+    assert_ok(
+        "fn main() {\n    var f float64 = 2.5\n    _ = f == 1\n}\n",
+    );
+}
+
+#[test]
+fn int_var_add_float_literal_is_accepted() {
+    assert_ok(
+        "fn main() {\n    x := 10\n    _ = x + 2.5\n}\n",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Accept: string operations (not affected by this fix)
 // ---------------------------------------------------------------------------
 
