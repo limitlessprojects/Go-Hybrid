@@ -182,8 +182,16 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
 /// conflict. Across different families (e.g. numeric vs string/bool,
 /// pointer vs scalar), Go never permits comparison.
 fn equality_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
-    if a.is_numeric() && b.is_numeric() {
+    // Fail-open: an unresolved side carries no claim.
+    if *a == OpKind::Unknown || *b == OpKind::Unknown {
         return false;
+    }
+    // Mismatched concrete numeric types (int vs float64, etc.).
+    // Go rejects `int_var == float64_var` unless one side is an untyped
+    // constant, but the kind model cannot distinguish literals from variables,
+    // so `1 == 1.5` would also be rejected — a known limitation disclosed in #922.
+    if a.is_numeric() && b.is_numeric() && a != b {
+        return true;
     }
     kinds_conflict(a, b) && kinds_conflict(b, a)
 }
@@ -2777,7 +2785,7 @@ impl<'a> Collector<'a> {
                 let r_ok = matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
                 let mismatch = lk != OpKind::Unknown
                     && rk != OpKind::Unknown
-                    && lk.is_numeric() != rk.is_numeric();
+                    && (lk.is_numeric() != rk.is_numeric() || lk != rk);
                 if !l_ok || !r_ok || mismatch {
                     self.emit_e1002(
                         span,
@@ -2798,7 +2806,7 @@ impl<'a> Collector<'a> {
                 let r_ok = matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
                 let mismatch = lk != OpKind::Unknown
                     && rk != OpKind::Unknown
-                    && lk.is_numeric() != rk.is_numeric();
+                    && (lk.is_numeric() != rk.is_numeric() || lk != rk);
                 if !l_ok || !r_ok || mismatch {
                     self.emit_e1002(
                         span,
@@ -2821,6 +2829,7 @@ impl<'a> Collector<'a> {
                 };
                 if !matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float)
+                    || (lk != OpKind::Unknown && rk != OpKind::Unknown && lk != rk)
                 {
                     self.emit_e1002(
                         span,
