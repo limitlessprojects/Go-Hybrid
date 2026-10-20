@@ -89,10 +89,14 @@ def scan_managed_lines(src: str) -> list[int]:
 
 
 def audit(hyb, prog):
-    r = subprocess.run(
-        [hyb, "check", prog, "--json", "--report-managed"],
-        capture_output=True, text=True, timeout=120,
-    )
+    try:
+        r = subprocess.run(
+            [hyb, "check", prog, "--json", "--report-managed"],
+            capture_output=True, text=True, errors="replace", timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"GATE ERROR: {prog}: hyb check execution failed: {exc}")
+        sys.exit(2)
     # Fail closed on a checker failure (issue #53): a rejected or malformed
     # program has no trustworthy managed-block inventory. Treating that as
     # "zero blocks" reported PASS and — in --rebaseline mode — could replace
@@ -126,12 +130,20 @@ def audit(hyb, prog):
         if not isinstance(category, str) or category not in VALID:
             print(f"GATE ERROR: {prog}: category {category!r} outside the closed set")
             sys.exit(2)
+        reason = b.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            print(f"GATE ERROR: {prog}: missing or empty managed block reason")
+            sys.exit(2)
         blocks.append(b)
     # line numbers: lexically scan the source for `managed (` tokens outside
     # comments and string literals (issue #119; the JSON report is
     # source-ordered, so pairing by lexical order is stable for a single file).
-    with open(prog, encoding="utf-8") as f:
-        lines = scan_managed_lines(f.read())
+    try:
+        with open(prog, encoding="utf-8") as f:
+            lines = scan_managed_lines(f.read())
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"GATE ERROR: {prog}: cannot read source file: {exc}")
+        sys.exit(2)
     # Never guess a location or collapse several reports into a shared `?`
     # key, and reject multiple managed blocks on the same line (file:line keys
     # cannot distinguish them).
@@ -172,7 +184,7 @@ def main():
             baseline = json.load(f)
     except FileNotFoundError:
         baseline = {"version": 1, "blocks": {}}
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
         print(f"GATE ERROR: {baseline_path}: malformed baseline JSON: {e}")
         sys.exit(2)
 

@@ -483,3 +483,74 @@ gate.main()
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class FailClosedProcessAndReasonTests(unittest.TestCase):
+    def test_subprocess_oserror_or_timeout_exits_2_without_modifying_baseline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prog = root / "prog.hy"
+            prog.write_text("fn main() {}\n", encoding="utf-8")
+            baseline = root / "baseline.json"
+            original = b'{"version": 1, "blocks": {"prog.hy:1": {"reason": "keep", "category": "mutex"}}}\n'
+            baseline.write_bytes(original)
+            for exc in (
+                FileNotFoundError("hyb binary missing"),
+                subprocess.TimeoutExpired(cmd=["hyb"], timeout=120),
+            ):
+                with self.subTest(exc=type(exc).__name__):
+                    out = io.StringIO()
+                    with patch.object(gate.sys, "argv", ["managed_gate.py", "--rebaseline", "hyb", str(baseline), str(prog)]), \
+                         patch.object(gate.subprocess, "run", side_effect=exc), \
+                         contextlib.redirect_stdout(out):
+                        with self.assertRaises(SystemExit) as cm:
+                            gate.main()
+                    self.assertEqual(cm.exception.code, 2)
+                    self.assertIn("GATE ERROR:", out.getvalue())
+                    self.assertEqual(baseline.read_bytes(), original)
+
+    def test_missing_or_empty_block_reason_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prog = root / "prog.hy"
+            prog.write_text('fn main() {\n  managed("mutex") {}\n}\n', encoding="utf-8")
+            baseline = root / "baseline.json"
+            for bad_block in (
+                {"category": "mutex"},
+                {"category": "mutex", "reason": ""},
+                {"category": "mutex", "reason": "   "},
+                {"category": "mutex", "reason": 123},
+            ):
+                with self.subTest(bad_block=bad_block):
+                    report = {
+                        "summary": {
+                            "managed": {
+                                "managed_blocks": 1,
+                                "blocks": [bad_block],
+                            }
+                        }
+                    }
+                    proc = subprocess.CompletedProcess([], 0, json.dumps(report), "")
+                    out = io.StringIO()
+                    with patch.object(gate.sys, "argv", ["managed_gate.py", "hyb", str(baseline), str(prog)]), \
+                         patch.object(gate.subprocess, "run", return_value=proc), \
+                         contextlib.redirect_stdout(out):
+                        with self.assertRaises(SystemExit) as cm:
+                            gate.main()
+                    self.assertEqual(cm.exception.code, 2)
+                    self.assertIn("missing or empty managed block reason", out.getvalue())
+
+    def test_baseline_is_directory_exits_2_without_traceback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prog = root / "prog.hy"
+            prog.write_text("fn main() {}\n", encoding="utf-8")
+            baseline_dir = root / "baseline_dir"
+            baseline_dir.mkdir()
+            out = io.StringIO()
+            with patch.object(gate.sys, "argv", ["managed_gate.py", "hyb", str(baseline_dir), str(prog)]), \
+                 contextlib.redirect_stdout(out):
+                with self.assertRaises(SystemExit) as cm:
+                    gate.main()
+            self.assertEqual(cm.exception.code, 2)
+            self.assertIn("GATE ERROR:", out.getvalue())
