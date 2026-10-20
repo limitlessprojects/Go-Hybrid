@@ -561,3 +561,62 @@ class CheckerProcessFailureCliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CorpusDirectoryAndUnclassifiedRuleTests(unittest.TestCase):
+    def test_missing_corpus_directory_exits_with_code_2_without_traceback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checker = root / "hyb"
+            checker.write_text(f"#!{sys.executable}\nraise SystemExit(0)\n", encoding="utf-8")
+            checker.chmod(0o700)
+            missing_corpus = root / "does-not-exist"
+            run = subprocess.run(
+                [sys.executable, str(HARNESS), "--bin", str(checker), "--corpus", str(missing_corpus)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+            self.assertIn("error: corpus directory not readable", run.stderr)
+            self.assertNotIn("Traceback", run.stdout + run.stderr)
+
+    def test_unreadable_or_directory_hy_fixture_exits_with_code_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = root / "corpus"
+            corpus.mkdir()
+            (corpus / "01-subdir.hy").mkdir()
+            checker = root / "hyb"
+            checker.write_text(f"#!{sys.executable}\nraise SystemExit(0)\n", encoding="utf-8")
+            checker.chmod(0o700)
+            run = subprocess.run(
+                [sys.executable, str(HARNESS), "--bin", str(checker), "--corpus", str(corpus)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+            self.assertIn("corpus error: cannot read", run.stderr)
+            self.assertNotIn("Traceback", run.stdout + run.stderr)
+
+    def test_whitespace_or_missing_tier0_rule_never_agrees_with_accept_or_reject(self):
+        for bad_rule in (None, "", "   ", 123):
+            with self.subTest(bad_rule=bad_rule):
+                diags = [{"severity": "error", "code": "HYB-E0002", "tier0_rule": bad_rule}]
+                got_accept = corpus_harness.classify_got({"verdict": "accept"}, diags)
+                self.assertEqual(got_accept[1], "<unclassified-error>")
+                self.assertFalse(corpus_harness.agree(("ACCEPT", None), got_accept)[0])
+                self.assertFalse(
+                    corpus_harness.agree(
+                        ("ACCEPT-MANAGED", None),
+                        corpus_harness.classify_got(
+                            {"verdict": "accept"},
+                            [{"severity": "warning", "code": "HYB-E8001"}, *diags],
+                        ),
+                    )[0]
+                )
+                got_reject = corpus_harness.classify_got({"verdict": "reject"}, diags)
+                self.assertFalse(
+                    corpus_harness.agree(("REJECT", "<unclassified-error>"), got_reject)[0]
+                )
