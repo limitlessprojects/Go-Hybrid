@@ -1,0 +1,36 @@
+=== RUN   TestSpawnAllocations
+    probe_test.go:14: closure: 1.00 allocations per spawn+join
+    probe_test.go:14: named: 1.00 allocations per spawn+join
+--- PASS: TestSpawnAllocations (0.00s)
+=== RUN   TestPhantomDoesNotEnforceConsumption
+--- PASS: TestPhantomDoesNotEnforceConsumption (0.00s)
+=== RUN   TestSpawnAllocations
+    probe_test.go:14: closure: 1.00 allocations per spawn+join
+    probe_test.go:14: named: 1.00 allocations per spawn+join
+--- PASS: TestSpawnAllocations (0.00s)
+=== RUN   TestPhantomDoesNotEnforceConsumption
+--- PASS: TestPhantomDoesNotEnforceConsumption (0.00s)
+=== RUN   TestSpawnAllocations
+    probe_test.go:14: closure: 1.00 allocations per spawn+join
+    probe_test.go:14: named: 1.00 allocations per spawn+join
+--- PASS: TestSpawnAllocations (0.00s)
+=== RUN   TestPhantomDoesNotEnforceConsumption
+--- PASS: TestPhantomDoesNotEnforceConsumption (0.00s)
+goos: windows
+goarch: amd64
+pkg: listedwildcardprobe
+cpu: 12th Gen Intel(R) Core(TM) i7-12700H
+BenchmarkClosure
+BenchmarkClosure-2            	 1514920	       797.6 ns/op	      24 B/op	       1 allocs/op
+BenchmarkClosure-2            	 1518460	       917.2 ns/op	      24 B/op	       1 allocs/op
+BenchmarkClosure-2            	 1000000	      1558 ns/op	      24 B/op	       1 allocs/op
+BenchmarkNamed
+BenchmarkNamed-2              	  607596	      1853 ns/op	      24 B/op	       1 allocs/op
+BenchmarkNamed-2              	  670362	      2042 ns/op	      24 B/op	       1 allocs/op
+BenchmarkNamed-2              	 1000000	      1915 ns/op	      24 B/op	       1 allocs/op
+BenchmarkPersistentWorker
+BenchmarkPersistentWorker-2   	 1000000	      1598 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPersistentWorker-2   	 1000000	      1257 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPersistentWorker-2   	 1000000	      1644 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	listedwildcardprobe	14.856s
