@@ -1,0 +1,185 @@
+# W5+W6 — verify-and-land, the mechanical core (plan §3 W5) with the
+# stale-premise probe (W6) at verify start.
+#
+# Trigger: the bot:ready-to-land label — human-set until Phase 6 (the bot
+# never promotes itself into this label). Merge runs ONLY at
+# SHEPHERD_MODE=live.
+#
+# Sequence:
+#   1. W6 probe: compile the PR's claimed premises against the pinned
+#      toolchain. A stale premise (#804 class) blocks auto-merge, labels
+#      bot:stale-premise, posts the evidence — the human still signs the
+#      close, because over-rejecting valid programs is a regression.
+#   2. Merge main INTO the PR tree. Docs-only conflicts (PLAN.md/STATUS.md)
+#      resolve deterministically: keep main's docs, keep the PR's code
+#      (#870 policy). Any code conflict => bot:human-needed, loud comment.
+#   3. Full battery: cargo test --workspace, corpus harness, census,
+#      differential loop (FULL: cargo AND go in PATH).
+#   4. Merge via API with the credit message (Original-author + Protocol
+#      trailers — hand-formatable, machine-written verbatim).
+#   5. PUSH-AND-ASSERT: origin/main must contain the PR head before anything
+#      is reported landed. Missing => bot:human-needed + loud comment. This
+#      makes the a4a9dab/b84fff6 class of incident structurally impossible.
+name: shepherd-verify
+
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number to verify and land"
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: shepherd-verify-pr-${{ github.event.pull_request.number || github.event.inputs.pr }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  verify:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.label.name == 'bot:ready-to-land'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SHEPHERD_MODE: ${{ vars.SHEPHERD_MODE || 'dry-run' }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PR_NUM: ${{ github.event.pull_request.number || github.event.inputs.pr }}
+    steps:
+      - name: Gate (W5 merges => live only)
+        run: python3 tools/shepherd.py gate --require live
+
+      - name: Checkout PR head (pinned v4, full history)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number || github.event.inputs.pr }}/head
+          fetch-depth: 0
+
+      - name: W0 setup (pinned toolchains + caches)
+        uses: ./.github/actions/shepherd-setup
+
+      - name: Fetch base refs
+        run: |
+          git config user.name "shepherd-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git fetch -q origin main
+          HEAD_SHA=$(git rev-parse HEAD)
+          echo "PR head: $HEAD_SHA"
+          echo "HEAD_SHA=$HEAD_SHA" >> "$GITHUB_ENV"
+
+      # ------------------------------------------------ W6 stale-premise
+      - name: W6 stale-premise probe
+        run: |
+          set -eo pipefail
+          curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3.diff" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/pulls/$PR_NUM" \
+            > /tmp/pr.diff
+          python3 tools/shepherd.py probe --diff-file /tmp/pr.diff | tee /tmp/probe.out
+          # no grep-pipe exit traps: probe always exits 0, we decide here
+          if grep -q "STALE-PREMISE" /tmp/probe.out; then
+            curl -s -X POST \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$PR_NUM/labels" \
+              -d '{"labels": ["bot:stale-premise"]}' > /dev/null
+            python3 tools/shepherd.py --token-env GITHUB_TOKEN comment --pr "$PR_NUM" \
+              --marker shepherd:stale-premise --body-file /tmp/probe.out
+            python3 tools/shepherd.py --token-env GITHUB_TOKEN log --event stale-premise --pr "$PR_NUM" \
+              --verdict "blocked" --note "probe evidence posted; human signs the close" \
+             
+            echo "STALE-PREMISE found — auto-merge blocked; evidence posted for human close."
+            exit 1
+          fi
+
+      # ------------------------------------------------ W5 merge + battery
+      - name: Merge main into the PR tree (docs-only conflicts auto-resolve)
+        run: |
+          set -eo pipefail
+          if git merge --no-commit --no-ff origin/main; then
+            git commit --no-edit -m "merge main into PR tree (battery base)"
+          else
+            python3 tools/shepherd.py docs-resolve --docs-side theirs
+            git commit --no-edit -m "merge main into PR tree (docs-only conflicts auto-resolved per #870 policy)"
+          fi
+
+      - name: Battery — cargo workspace
+        run: cargo test --workspace
+
+      - name: Battery — build hyb
+        run: cargo build -p hyb --quiet
+
+      - name: Battery — corpus harness
+        run: python3 tools/corpus_harness.py
+
+      - name: Battery — census
+        run: python3 tools/check_corpus_census.py
+
+      - name: "Battery — differential loop (FULL: cargo AND go in PATH)"
+        run: python3 tools/differential_loop.py
+
+      # ------------------------------------------------ W5 land
+      - name: Merge the PR with the credit message
+        id: merge
+        run: |
+          set -eo pipefail
+          python3 tools/shepherd.py --token-env GITHUB_TOKEN merge-msg --pr "$PR_NUM" \
+            --subject-file /tmp/merge-subject.txt --body-file /tmp/merge-body.txt \
+           
+          gh pr merge "$PR_NUM" --merge \
+            --subject "$(cat /tmp/merge-subject.txt)" \
+            --body  "$(cat /tmp/merge-body.txt)"
+          python3 tools/shepherd.py --token-env GITHUB_TOKEN log --event merge --pr "$PR_NUM" \
+            --verdict "merged" --sha "$HEAD_SHA"
+
+      - name: Push-and-assert — the SHA must be on origin/main
+        id: assert
+        run: |
+          set -eo pipefail
+          git fetch -q origin
+          python3 tools/shepherd.py verify-assert --head "$HEAD_SHA" --repo .
+
+      - name: Landed — set bot:landed, drop ready-to-land
+        if: steps.assert.outcome == 'success'
+        run: |
+          curl -s -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$PR_NUM/labels" \
+            -d '{"labels": ["bot:landed"]}' > /dev/null
+          python3 tools/shepherd.py --token-env GITHUB_TOKEN log --event landed --pr "$PR_NUM" \
+            --verdict "LAND-CONFIRMED" --sha "$HEAD_SHA"
+
+      - name: Not landed — human-needed, loud
+        if: steps.merge.outcome == 'success' && steps.assert.outcome != 'success'
+        run: |
+          curl -s -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$PR_NUM/labels" \
+            -d '{"labels": ["bot:human-needed"]}' > /dev/null
+          cat > /tmp/notlanded.md <<'EOF'
+          **Shepherd W5: MERGE CLAIMED BUT NOT CONFIRMED ON origin/main.**
+
+          The push-and-assert gate failed: this PR's head is not an ancestor of
+          `origin/main`. Nothing may be reported as landed. This is the
+          a4a9dab/b84fff6 incident class, and it is now a loud failure, not a
+          silent one. A human must inspect the merge and origin/main state.
+
+          <!-- shepherd:not-landed -->
+          EOF
+          python3 tools/shepherd.py --token-env GITHUB_TOKEN comment --pr "$PR_NUM" \
+            --marker shepherd:not-landed --body-file /tmp/notlanded.md
+          python3 tools/shepherd.py --token-env GITHUB_TOKEN log --event landed --pr "$PR_NUM" \
+            --verdict "NOT-LANDED" --sha "$HEAD_SHA"
+          exit 1

@@ -24,4 +24,4 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          python3 tools/triage_bot.py board --post --token-env GITHUB_TOKEN
+          python3 tools/triage_bot.py --token-env GITHUB_TOKEN board --post
