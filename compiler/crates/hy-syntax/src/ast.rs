@@ -760,6 +760,7 @@ impl Expr {
             Expr::Field { base, .. } => base.root_ident(),
             Expr::Index { base, .. } => base.root_ident(),
             Expr::Slice { base, .. } => base.root_ident(),
+            Expr::Slice { base, .. } => base.root_ident(),
             Expr::AddrOf { operand, .. } => operand.root_ident(),
             Expr::Unary {
                 op: UnOp::Addr,
