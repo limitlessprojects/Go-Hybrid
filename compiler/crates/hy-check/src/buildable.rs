@@ -149,14 +149,11 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         (Interface, _) | (_, Interface) => false,
         // No value is involved; a count check owns that case.
         (Void, _) | (_, Void) => false,
-        // An untyped int constant is assignable to a float target
-        // (`var f float64 = 1` builds). The kind model cannot tell an untyped
-        // constant from an `int` variable, so this direction must stay allowed
-        // or the check would reject buildable programs.
-        // An untyped int constant is assignable to a float result
-        // (`fn f() float64 { return 1 }` builds). The kind model cannot tell
-        // an untyped constant from an `int` variable, so this direction must
-        // stay allowed or the check would reject buildable programs.
+        // An untyped int constant is assignable to a float target / result
+        // (`var f float64 = 1` / `fn f() float64 { return 1 }` builds).
+        // The kind model cannot tell an untyped constant from an `int`
+        // variable, so this direction must stay allowed or the check would
+        // reject buildable programs.
         (Float, Int) => false,
         // A struct whose name did not resolve is not evidence of a mismatch.
         (Struct(None), _) | (_, Struct(None)) => false,
@@ -816,8 +813,8 @@ impl<'a> Collector<'a> {
         // `kind_of_expr` resolves binding-shaped operands (issue #425).
         let kinds = self.infer_local_kinds(l);
         for (name, kind) in l.names.iter().zip(kinds) {
-            self.bind_kind(name, kind);
             if !track_read {
+                self.bind_kind(name, kind);
                 self.exempt(name);
                 continue;
             }
@@ -837,7 +834,40 @@ impl<'a> Collector<'a> {
                 continue;
             };
             if top.contains_key(name.as_str()) {
-                // Same-scope re-define: Go keeps the existing variable.
+                if !matches!(l.kind, LocalKind::Define) {
+                    self.emit_e1002(
+                        l.span,
+                        format!(
+                            "`{}` redeclared in this block — Go refuses it (HYB-E1002)",
+                            name
+                        ),
+                        "a local `var`, `let`, or `const` cannot redeclare an existing binding in the same block; only `:=` with at least one new variable may redeclare",
+                    );
+                    continue;
+                }
+                self.write(name);
+                // Same-scope re-define (`:=`): Go keeps the existing variable and type.
+                if let Some(k_top) = self.kind_scopes.last_mut() {
+                    if let Some(ek) = k_top.get(name.as_str()).cloned() {
+                        if ek == OpKind::Unknown && kind != OpKind::Unknown {
+                            k_top.insert(name.clone(), kind);
+                        } else if kinds_conflict(&ek, &kind) {
+                            self.emit_e1002(
+                                l.span,
+                                format!(
+                                    "cannot assign a value of type `{}` to redeclared variable `{}` (type `{}`) — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
+                                    kind.label(),
+                                    name,
+                                    ek.label(),
+                                    ek.label()
+                                ),
+                                "a short declaration (`:=`) that redeclares a variable in the same scope must assign a value matching the variable's original declared type",
+                            );
+                        }
+                    } else {
+                        k_top.insert(name.clone(), kind);
+                    }
+                }
                 continue;
             }
             let id = self.defines.len();
@@ -850,6 +880,7 @@ impl<'a> Collector<'a> {
                 elidable: false,
             });
             top.insert(name.clone(), Some(id));
+            self.bind_kind(name, kind);
         }
     }
 
@@ -858,8 +889,11 @@ impl<'a> Collector<'a> {
         if let Some(ty) = &l.ty {
             return vec![self.kind_of_ty(ty, 0); n];
         }
-        if n == 2 && l.values.len() == 1 {
-            return self.multi_value_kinds(&l.values[0]);
+        if n >= 2 && l.values.len() == 1 {
+            let mvk = self.multi_value_kinds(&l.values[0]);
+            if mvk.len() == n {
+                return mvk;
+            }
         }
         if n == l.values.len() {
             return l.values.iter().map(|v| self.kind_of_expr(v)).collect();
@@ -881,7 +915,7 @@ impl<'a> Collector<'a> {
             Expr::Call { callee, args, .. } => {
                 if let Some(res) = self.call_result_kinds(callee, args) {
                     if res.len() >= 2 {
-                        return vec![res[0].clone(), res[1].clone()];
+                        return res;
                     }
                 }
                 vec![OpKind::Unknown, OpKind::Unknown]
