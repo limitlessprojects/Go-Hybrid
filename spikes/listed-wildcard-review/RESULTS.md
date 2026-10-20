@@ -10,3 +10,5 @@ Go 1.26.9 windows/amd64, GOMAXPROCS=2; `go test -v -bench . -benchmem -count=3`.
 - #951: native Go plugin remains unimplemented; `-toolexec` transport alone cannot implement ownership/sendability checks or certify export-data semantics.
 
 Authorship stays with magomedta (#997/#992) and campbellarchiezh-debug (#957/#955/#952/#951). No M1 award is claimed. None of these six has been completed as a compiler feature. The six issue IDs are absent from the checked main MOONSHOT ledger. Published program terms describe a single Wildcard winner per cycle, with $250 M1 and $250 M2; the issue list's per-item prices are not six assigned payments. Maintainer review is needed for any milestone/credit split.
+
+Escape-analysis follow-up: `go test -run 'TestSpawnAllocations|TestPhantom' -gcflags=-m=2` also passed on Go 1.26.9. Raw compiler output in escape-analysis.log identifies escaping function literals for both source dispatch forms, including Go's implicit goroutine wrapper in the named-method case. It is compiler diagnostic evidence for these fixtures only, not a proof about every Hybrid-accepted program.
