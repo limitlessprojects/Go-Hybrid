@@ -185,3 +185,27 @@ fn in_range_const_declaration_stays_accepted() {
     assert_ok("const top u8 = 255\n\nfn main() {\n    fmt.println(\"{top}\")\n}\n");
     assert_ok("const mid u8 = 100\n\nfn main() {\n    a := mid + 1\n    fmt.println(\"{a}\")\n}\n");
 }
+
+#[test]
+fn typed_const_overflow_via_assignment_into_narrow_var_rejects_e6002() {
+    // Issue #998: `x = k` where `k = 70000` overflows `int16`
+    assert_code(
+        "const k = 70000\n\nfn main() {\n    var x int16 = 1\n    x = k\n    _ = x\n}\n",
+        "HYB-E6002",
+    );
+}
+
+#[test]
+fn typed_const_expr_overflow_via_assignment_rejects_e6002() {
+    assert_code(
+        "const k = 30000\n\nfn main() {\n    var x int16 = 1\n    x = k + 10000\n    _ = x\n}\n",
+        "HYB-E6002",
+    );
+}
+
+#[test]
+fn typed_const_in_bounds_assignment_stays_accepted() {
+    assert_ok(
+        "const k = 1000\n\nfn main() {\n    var x int16 = 1\n    x = k\n    _ = x\n}\n",
+    );
+}
