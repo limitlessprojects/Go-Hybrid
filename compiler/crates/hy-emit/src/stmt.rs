@@ -767,6 +767,11 @@ impl Emitter {
     /// caller skips its re-emit).
     fn hoist_one_try(&mut self, operand: &Expr, key: (u32, u32)) -> Result<(), EmitError> {
         let shape = self.call_results(operand);
+        if let Some((_, false)) = shape {
+            return Err(EmitError::unsupported(
+                "`?` on a call that does not return error",
+            ));
+        }
         let call_text = self.emit_expr(operand, 0)?;
         if shape == Some((0, true)) {
             let errt = self.next_temp("hyErr");
@@ -938,6 +943,12 @@ impl Emitter {
             ));
         }
         self.hoist_tries_expr(call)?;
+        let shape = self.call_results(call);
+        if let Some((_, false)) = shape {
+            return Err(EmitError::unsupported(
+                "`?` on a call that does not return error",
+            ));
+        }
         let temp = self.next_temp("hyErr");
         let call_text = self.emit_expr(call, 0)?;
         let mut names = l.names.clone();

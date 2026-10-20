@@ -127,10 +127,11 @@
       "title": "defer requires a call expression",
       "summary": "`defer` of a non-call expression is a compile error.",
       "fixits": [
-        "defer the call itself: `defer f.close()?` instead of `defer f.close`"
+        "defer the call itself: `defer f.close()` instead of `defer f.close`"
       ],
       "example": "defer f.close   // reject: HYB-E2001 — defer of a non-call",
-      "rule": "P"
+      "rule": "P",
+      "tier0_rule_id": "P"
     },
     {
       "code": "HYB-E2002",
@@ -145,6 +146,36 @@
       "example": "p := minmax(3, 9)   // reject: HYB-E2002 — multi-value is not a tuple",
       "rule": "T23",
       "tier0_rule_id": "BUILDABLE"
+    },
+    {
+      "code": "HYB-E2003",
+      "name": "try-on-non-error",
+      "category": "type",
+      "severity": "error",
+      "title": "`?` operand does not return error",
+      "summary": "`?` requires an error-returning call (E4). Using `?` on an `option` (T20) or a call that does not end in `error` is a type error.",
+      "fixits": [
+        "for option results, handle absence with match or if-ok (T20)",
+        "for non-error calls, remove `?` or call a function returning error (E4)"
+      ],
+      "example": "v := find(\"a\")?   // reject: HYB-E2003 — `?` on non-error result",
+      "rule": "E4",
+      "tier0_rule_id": "E4"
+    },
+    {
+      "code": "HYB-E2004",
+      "name": "try-without-error-return",
+      "category": "type",
+      "severity": "error",
+      "title": "`?` in a function or closure with no error result",
+      "summary": "`?` propagates errors by returning them from the enclosing function or closure (E4). If the enclosing scope does not return error (and is not `main` or an E11 handler), `?` cannot propagate (E3b).",
+      "fixits": [
+        "add `error` to the enclosing function or closure results (E4)",
+        "handle the error explicitly instead of propagating"
+      ],
+      "example": "f := fn() { x := parse()? }   // reject: HYB-E2004 — propagation has nowhere to land",
+      "rule": "E3b",
+      "tier0_rule_id": "E3b"
     },
     {
       "code": "HYB-E2005",
