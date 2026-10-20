@@ -1184,11 +1184,60 @@ pub(crate) fn const_int_fold_with(
             let r = const_int_fold_with(rhs, consts, depth + 1, st);
             fold_bin(*op, l, r)
         }
+        // A fixed-width integer conversion of a constant is ITSELF a
+        // constant, and SPEC X4 gives it the truncated value: `u8(300)` is
+        // 44, not 300 (`hy-emit`'s `constconv` fold already prints
+        // `uint8(44)` for it, so this only teaches the checker what the
+        // emitter was already doing).
+        //
+        // Without this arm a typed constant expression does not fold at all
+        // — `u8(255) + 1` sees a `Call` on the left, gives up, and the
+        // result-range check downstream has no value to range-check
+        // (issue #725).
+        Expr::Call { callee, args, .. } => {
+            if args.len() != 1 {
+                return ConstFold::NotConst;
+            }
+            let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+                return ConstFold::NotConst;
+            };
+            let Some((lo, hi)) = fixed_width_int_range(name) else {
+                return ConstFold::NotConst;
+            };
+            match const_int_fold_with(&args[0].value, consts, depth + 1, st) {
+                ConstFold::Val(v) => ConstFold::Val(wrap_into(v, lo, hi)),
+                ConstFold::TooBig => ConstFold::TooBig,
+                ConstFold::NotConst => ConstFold::NotConst,
+            }
+        }
         _ => ConstFold::NotConst,
     }
 }
 
-fn fold_bin(op: BinOp, l: ConstFold, r: ConstFold) -> ConstFold {
+/// Two's-complement wrap of `v` into the inclusive range `lo..=hi` — the
+/// value SPEC X4 gives a constant conversion (`u8(300)` -> 44) and SPEC
+/// X1/X2 give run-time arithmetic.
+///
+/// The width is recovered from the range itself, so this needs no second
+/// table of type widths: `u8` is `0..=255`, so the span is 255 and the width
+/// is 8 bits; `i64` is `-2^63..=2^63-1`, span `2^64-1`, width 64.
+fn wrap_into(v: i128, lo: i128, hi: i128) -> i128 {
+    let span = hi.wrapping_sub(lo);
+    // `span + 1` is 2^bits; its trailing-zero count IS the width.
+    let bits = (span as u128).wrapping_add(1).trailing_zeros();
+    if bits == 0 || bits > 64 {
+        return v;
+    }
+    let len = 1i128 << bits;
+    let masked = v & (len - 1);
+    if lo < 0 && (masked >> (bits - 1)) & 1 == 1 {
+        masked - len
+    } else {
+        masked
+    }
+}
+
+pub(crate) fn fold_bin(op: BinOp, l: ConstFold, r: ConstFold) -> ConstFold {
     use BinOp::*;
     // Division/shift-by-huge and `TooBig` interactions are handled per-op.
     match op {
