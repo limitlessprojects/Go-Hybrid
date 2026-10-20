@@ -40,13 +40,14 @@ fn sum_means(a []int) int {
 
 fn main() {
     means := []int{}
+    alphabet_values := alphabet()
     for w in 0..windows {
         t0 := time.now()
         for b in 0..batches {
             for j in 0..batch {
                 item := []byte{}
                 for k in 0..item_len {
-                    item = append(item, alphabet()[(j+k)%len(alphabet())])
+                    item = append(item, alphabet_values[(j+k)%len(alphabet_values)])
                 }
                 _ = item
             }

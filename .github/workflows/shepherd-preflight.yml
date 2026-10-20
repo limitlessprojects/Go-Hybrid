@@ -1,0 +1,125 @@
+# W3 — preflight gate (plan §3 W3). Cheap gates only, one living comment,
+# hard timebox: a human should never spend the ~12-minute full-verification
+# budget on a dud. Checks: go build, go vet, the classifier (hyb) builds, and
+# a test-file presence flag (testless PRs can score exactly 6 — flagged
+# explicitly, never silently).
+# Result labels: bot:preflight-pass / bot:preflight-fail. Comment-only —
+# allowed at SHEPHERD_MODE=dry-run.
+name: shepherd-preflight
+
+on:
+  pull_request:
+    types: [labeled, synchronize]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number to preflight"
+        required: true
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: shepherd-preflight-pr-${{ github.event.pull_request.number || github.event.inputs.pr }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  preflight:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.label.name == 'bot:land-candidate' ||
+      contains(github.event.pull_request.labels.*.name, 'bot:land-candidate')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15 # plan: timeboxed so a dud never burns runner hours
+    env:
+      SHEPHERD_MODE: ${{ vars.SHEPHERD_MODE || 'dry-run' }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PR_NUM: ${{ github.event.pull_request.number || github.event.inputs.pr }}
+    steps:
+      - name: Checkout PR head (pinned v4)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number || github.event.inputs.pr }}/head
+          fetch-depth: 0
+
+      - name: Gate
+        run: python3 tools/shepherd.py gate --require dry-run
+
+      - name: W0 setup (pinned toolchains + caches)
+        uses: ./.github/actions/shepherd-setup
+
+      - name: Changed files vs main
+        run: |
+          git fetch -q origin main
+          git diff --name-only origin/main...HEAD > /tmp/changed.txt
+          wc -l /tmp/changed.txt
+
+      - name: Preflight checks
+        id: checks
+        run: |
+          set -eo pipefail
+          {
+            echo "## Shepherd preflight — PR #$PR_NUM"
+            echo "Pinned toolchains: Go $(go version | awk '{print $3}'), $(rustc --version | awk '{print $2}')"
+            echo
+          } > /tmp/preflight.md
+          if go build ./... ; then
+            echo "- go build: **pass**" >> /tmp/preflight.md
+          else
+            echo "- go build: **FAIL**" >> /tmp/preflight.md
+            exit 1
+          fi
+          if go vet ./... ; then
+            echo "- go vet: **pass**" >> /tmp/preflight.md
+          else
+            echo "- go vet: **FAIL**" >> /tmp/preflight.md
+            exit 1
+          fi
+          if cargo build -p hyb --quiet ; then
+            echo "- classifier build (hyb): **pass**" >> /tmp/preflight.md
+          else
+            echo "- classifier build (hyb): **FAIL**" >> /tmp/preflight.md
+            exit 1
+          fi
+          # no head-pipe here: pipefail + early-closing head would eat the
+          # tool's exit code (the exact class of bug this repo logged twice)
+          python3 tools/shepherd.py test-check --files-file /tmp/changed.txt \
+            > /tmp/testcheck.txt || true
+          TESTLINE=$(sed -n 1p /tmp/testcheck.txt)
+          echo "- test-file presence: $TESTLINE" >> /tmp/preflight.md
+          cp /tmp/testcheck.txt /tmp/preflight-warn.txt
+          cat /tmp/preflight.md
+
+      - name: Post the one living preflight comment + label
+        if: always()
+        # Best-effort by design (W7 principle: audit/report failures never
+        # fail the parent). A rate-guard abort (burst of PR events draining
+        # the core bucket) must not paint the PR check red — the verdict is
+        # carried by the Preflight checks step above; the next synchronize
+        # event re-runs this with fresh budget.
+        continue-on-error: true
+        run: |
+          outcome="${{ steps.checks.outcome }}"
+          if [ "$outcome" = "success" ]; then
+            LABEL=bot:preflight-pass
+            VERDICT="preflight pass"
+          else
+            LABEL=bot:preflight-fail
+            VERDICT="preflight fail"
+            { echo; echo "**Result: FAIL** — see the failed step above."; } >> /tmp/preflight.md || true
+          fi
+          cat /tmp/preflight-warn.txt >> /tmp/preflight.md 2>/dev/null || true
+          curl -s -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/issues/$PR_NUM/labels" \
+            -d "{\"labels\": [\"$LABEL\"]}" > /dev/null
+          python3 tools/shepherd.py --token-env GITHUB_TOKEN comment --pr "$PR_NUM" \
+            --marker shepherd:preflight --body-file /tmp/preflight.md
+          python3 tools/shepherd.py --token-env GITHUB_TOKEN log --event preflight --pr "$PR_NUM" \
+            --verdict "$VERDICT"

@@ -19,8 +19,17 @@ import sys
 
 
 def main(binpath):
-    out = subprocess.run(["readelf", "--debug-dump=info", binpath],
-                         capture_output=True, text=True, timeout=600).stdout
+    proc = subprocess.run(["readelf", "--debug-dump=info", binpath],
+                          capture_output=True, text=True, timeout=600)
+    if proc.returncode != 0:
+        err = proc.stderr.strip()
+        msg = f"readelf failed with exit code {proc.returncode}"
+        if err:
+            msg += f": {err}"
+        print(f"FAILED: {msg}", file=sys.stderr)
+        sys.exit(proc.returncode or 1)
+
+    out = proc.stdout
 
     dies = []
     cur = None
@@ -58,7 +67,26 @@ def main(binpath):
     gsize, g = members_of("runtime.g")
     msize, m = members_of("runtime.m")
     if g is None or m is None:
-        print("FAILED: runtime.g / runtime.m not found in DWARF")
+        missing_structs = []
+        if g is None:
+            missing_structs.append("runtime.g")
+        if m is None:
+            missing_structs.append("runtime.m")
+        print(f"FAILED: {' / '.join(missing_structs)} not found in DWARF", file=sys.stderr)
+        sys.exit(1)
+
+    required_g = ("m", "stackguard0", "stack")
+    required_m = ("g0", "curg", "id", "locks")
+    missing = []
+    for f in required_g:
+        if g.get(f) is None:
+            missing.append(f"runtime.g.{f}")
+    for f in required_m:
+        if m.get(f) is None:
+            missing.append(f"runtime.m.{f}")
+
+    if missing:
+        print(f"FAILED: missing required field(s): {', '.join(missing)}", file=sys.stderr)
         sys.exit(1)
 
     print(f"# runtime.g size={gsize}  runtime.m size={msize}  (from {binpath})")
@@ -76,4 +104,7 @@ def main(binpath):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python3 extract_offsets.py <go-binary>", file=sys.stderr)
+        sys.exit(1)
     main(sys.argv[1])

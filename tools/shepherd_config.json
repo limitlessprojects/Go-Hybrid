@@ -1,0 +1,39 @@
+{
+  "repo": "limitlessprojects/Go-Hybrid",
+  "log_branch": "automation/session-log",
+  "log_path": "logs/SESSION.jsonl",
+  "rebase": {
+    "schedule": "*/20 * * * *",
+    "max_per_run": 1,
+    "behind_min": 50,
+    "scan_window": 30,
+    "exempt_labels": [
+      "bot:ready-to-land",
+      "bot:human-needed",
+      "bot:conflict",
+      "bot:landed",
+      "triage:wildcard-hold",
+      "triage:keep",
+      "triage:duplicate"
+    ]
+  },
+  "preflight": {
+    "timeout_minutes": 15
+  },
+  "dup": {
+    "grace_days": 7
+  },
+  "owned_docs": ["PLAN.md", "STATUS.md"],
+  "bot_labels": {
+    "bot:land-candidate": {"color": "0e8a16", "description": "Shepherd: fresh, gate-clean, verifiable (set from classify())"},
+    "bot:conflict": {"color": "e99695", "description": "Shepherd: merge conflicts vs main"},
+    "bot:stale-base": {"color": "fef2c0", "description": "Shepherd: behind main beyond threshold"},
+    "bot:preflight-pass": {"color": "bfe5bf", "description": "Shepherd W3: cheap gates passed"},
+    "bot:preflight-fail": {"color": "d93f0b", "description": "Shepherd W3: cheap gates failed"},
+    "bot:stale-premise": {"color": "f9d0c4", "description": "Shepherd W6: premise contradicts pinned toolchain (probe evidence attached)"},
+    "bot:verified": {"color": "1d76db", "description": "Shepherd W5: full verification protocol green on PR tree"},
+    "bot:ready-to-land": {"color": "5319e7", "description": "Shepherd: merge approved — W5 may run (human-set until Phase 6)"},
+    "bot:human-needed": {"color": "b60205", "description": "Shepherd: judgment call required — do not automate"},
+    "bot:landed": {"color": "006b75", "description": "Shepherd W5: merge SHA confirmed present on origin/main (push-and-assert)"}
+  }
+}

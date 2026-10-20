@@ -142,6 +142,8 @@ pub(crate) struct Binding {
     pub ty: Option<TypeExpr>,
     /// `let`/`const` binding or a file-level `const` (class 4).
     pub immutable: bool,
+    /// `let` binding (T22: shallow immutable binding — no rebinding/reassignment).
+    pub is_let: bool,
     /// Born inside a `managed` block (O6.2 taint): sendable everywhere,
     /// outside the §9.2 guarantee for its whole lifetime.
     pub managed_taint: bool,
@@ -152,6 +154,11 @@ pub(crate) struct Binding {
     /// capture, or non-channel `for ... in` element), so `move x` at a
     /// concurrency boundary cannot freeze all live aliases (O5.1/O5.2/O5.4).
     pub non_owned_origin: Option<String>,
+    /// Defined (or re-assigned) as an O8 map-slot loan `x := &m[k]`.
+    /// T24: a loan is not an addressable value — `&x` on it is
+    /// HYB-E3104. A shadowing redefinition creates a fresh binding with
+    /// this flag off, so the rule stays scope-correct.
+    pub slot_loan: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +177,13 @@ pub(crate) struct MoveInfo {
     /// Self-describing site description, e.g.
     /// "the move-send `results <- move agg`" or "the consuming call `enc.finish()`".
     pub desc: String,
+    /// The binding whose ownership actually left. Diagnostics name THIS, not
+    /// the binding that happened to notice the use: a may-share peer (a
+    /// reference-typed field or element read out earlier) is not in the
+    /// single-parent `aliases` chain, so resolving the USED binding's root
+    /// named the peer itself and produced a self-alias note for a move of a
+    /// different binding.
+    pub moved_name: String,
 }
 
 /// A live loan. `last` is the inclusive end of the non-lexical window, in
@@ -179,8 +193,14 @@ pub(crate) enum LoanTarget {
     /// O7/A2: borrow-mode loan on a boundary handle binding.
     Handle { handle: String },
     /// O8/A3: unique loan on one map slot; `binding` is the defined name
-    /// (for last-use computation), `path` is the base map path ("e.services").
-    MapSlot { binding: String, path: String },
+    /// (for last-use computation), `path` is the base map path ("e.services"),
+    /// `key` the literal index when it provably names one slot (see
+    /// `walk::addr_of_index_slot_key`); `None` may alias any slot of `path`.
+    MapSlot {
+        binding: String,
+        path: String,
+        key: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -205,6 +225,13 @@ pub(crate) struct FnState {
     /// map, pr-35): a shadowing define's `share_clear` must not survive the
     /// block either — the snapshot restores at pop.
     pub share_scopes: Vec<HashMap<String, HashSet<String>>>,
+    /// Current binding -> set of shadowed outer bindings `(outer_name, depth)`
+    /// (`depth == 0` for `env`, `depth == i + 1` for `scopes[i]`) whose backing
+    /// storage this binding may share. When the binding (or any peer in its
+    /// alias/may-share component) is moved, `mark_move` immediately marks the
+    /// shadowed outer binding at `depth` as moved.
+    pub shadow_links: HashMap<String, HashSet<(String, usize)>>,
+    pub shadow_link_scopes: Vec<HashMap<String, HashSet<(String, usize)>>>,
     /// Block scopes, innermost last (issue #14): a define inside a nested
     /// block lands in the top layer and DIES at block exit, so an inner
     /// `m := 1` can no longer overwrite the outer `m`'s binding and launder
@@ -224,6 +251,21 @@ pub(crate) struct FnState {
     pub loans: Vec<Loan>,
     /// name -> last statement index that references it (Pass A result).
     pub last_use: HashMap<String, usize>,
+    /// loop header index -> inclusive last statement index of that loop body.
+    pub loop_end: HashMap<usize, usize>,
+    /// Snapshot of active block-scoped bindings, aliases, and may_share sets
+    /// captured when a block containing a closure literal (`FnLit`) exits.
+    pub closure_scoped_envs: HashMap<
+        (usize, usize),
+        (
+            HashMap<String, Binding>,
+            HashMap<String, String>,
+            HashMap<String, HashSet<String>>,
+        ),
+    >,
+    /// Per-scope list of `FnLit` start `(line, col)` positions declared in
+    /// that scope (used to snapshot block state right before `scope_pop`).
+    pub fnlit_scopes: Vec<Vec<(usize, usize)>>,
     /// #111 form 4: a local closure binding -> the base paths its body may
     /// MUTATE (map insert/delete targets, transitively via calls it makes).
     /// Captured roots only (the closure's own params are excluded — they
@@ -231,10 +273,33 @@ pub(crate) struct FnState {
     /// rebind time; consumed at the CALL site so an insert inside the body
     /// counts as an A3 event when the call sits in a live slot-loan window.
     pub closure_mutates: HashMap<String, HashSet<String>>,
+    /// Local closure binding -> `(params, named_results, body)` for
+    /// interprocedural return-origin and multi-value return sharing analysis.
+    pub closure_fnlits: HashMap<
+        String,
+        (
+            Vec<(String, Option<hy_syntax::TypeExpr>)>,
+            Vec<(String, Option<hy_syntax::TypeExpr>)>,
+            hy_syntax::Block,
+        ),
+    >,
     /// Declared result shapes of the function being checked (rule N1's
     /// return-site nil checks). Empty for closure bodies (fn literals
     /// carry no result types on the AST surface yet).
     pub result_shapes: Vec<TypeShape>,
+    /// Declared result types of the function being checked (for constant overflow checks).
+    pub result_types: Vec<hy_syntax::TypeExpr>,
+    /// Declared named result bindings (`fn f() (out map[string]int)`), in
+    /// signature order. A bare `return` reads and returns each named result.
+    pub named_results: Vec<String>,
+    /// Bindings currently holding a function-local `&...` borrow (or a
+    /// composite literal containing `&...`), for O2 `LOAN-ESCAPE` on
+    /// named-result / variable returns (`out = &x; return` / `return out`).
+    pub borrow_bindings: HashSet<String>,
+    /// Local closure bindings -> `(params, results, body)` recorded at define/rebind
+    /// time so call sites can analyze parameter/capture stores (`record_callee_param_stores`).
+    pub closure_defs:
+        HashMap<String, (Vec<hy_syntax::Param>, Vec<hy_syntax::FnResult>, hy_syntax::Block)>,
 }
 
 impl FnState {
@@ -243,30 +308,161 @@ impl FnState {
         self.scopes.push(HashMap::new());
         self.alias_scopes.push(self.aliases.clone());
         self.share_scopes.push(self.may_share.clone());
+        self.shadow_link_scopes.push(self.shadow_links.clone());
+        self.fnlit_scopes.push(Vec::new());
     }
 
     /// Exit the innermost block scope (walk.rs's Pop events).
     pub(crate) fn scope_pop(&mut self) {
-        // Capture any moves on inner aliases before the inner scope and alias
-        // map are popped (handles the case where an inner alias `m2 := m` was
-        // moved while the outer root `m` was shadowed inside the block).
+        if let Some(fnlits) = self.fnlit_scopes.pop() {
+            if !fnlits.is_empty() {
+                let mut snap_env = self.env.clone();
+                for layer in &self.scopes {
+                    for (k, v) in layer {
+                        snap_env.insert(k.clone(), v.clone());
+                    }
+                }
+                let snap_aliases = self.aliases.clone();
+                let snap_share = self.may_share.clone();
+                for pos in fnlits {
+                    self.closure_scoped_envs.entry(pos).or_insert_with(|| {
+                        (snap_env.clone(), snap_aliases.clone(), snap_share.clone())
+                    });
+                }
+            }
+        }
+        let popped_scope = self.scopes.last().cloned().unwrap_or_default();
+        let exists_in_outer = |name: &str, env: &HashMap<String, Binding>, scopes: &[HashMap<String, Binding>]| {
+            env.contains_key(name) || scopes.iter().rev().skip(1).any(|s| s.contains_key(name))
+        };
+        let survives_as_outer = |r: &str,
+                                 aliases: &HashMap<String, String>,
+                                 env: &HashMap<String, Binding>,
+                                 scopes: &[HashMap<String, Binding>]| {
+            !popped_scope.contains_key(r)
+                || (aliases.get(r).map(|t| t == r).unwrap_or(false)
+                    && exists_in_outer(r, env, scopes))
+        };
+        let to_outer_name = |name: &str,
+                             aliases: &HashMap<String, String>,
+                             env: &HashMap<String, Binding>,
+                             scopes: &[HashMap<String, Binding>]|
+         -> Option<String> {
+            if survives_as_outer(name, aliases, env, scopes) {
+                Some(name.to_string())
+            } else {
+                let r = crate::freeze::resolve_alias(self, name);
+                if survives_as_outer(&r, aliases, env, scopes) {
+                    Some(r)
+                } else {
+                    None
+                }
+            }
+        };
+
+        // Propagate non_owned_origin from popped-scope bindings (e.g. range vars,
+        // match arm bindings, self-shadowed params) to any surviving outer binding
+        // that joined their sharing group or alias chain inside the block.
+        let mut inner_outer_origins: Vec<(String, String)> = Vec::new();
+        for (p, pb) in &popped_scope {
+            if let Some(orig) = &pb.non_owned_origin {
+                let peer_orig = if orig.starts_with("a may-share peer of ") {
+                    orig.clone()
+                } else {
+                    format!("a may-share peer of {}", orig)
+                };
+                let mut group = self.share_group(p);
+                for a in self.aliases.keys() {
+                    if crate::freeze::resolve_alias(self, a) == *p {
+                        group.insert(a.clone());
+                    }
+                }
+                for a in group {
+                    if &a == p {
+                        continue;
+                    }
+                    if let Some(oa) = to_outer_name(&a, &self.aliases, &self.env, &self.scopes) {
+                        let direct_alias = crate::freeze::resolve_alias(self, &a) == *p;
+                        inner_outer_origins.push((
+                            oa,
+                            if direct_alias {
+                                orig.clone()
+                            } else {
+                                peer_orig.clone()
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+        // Capture any moves on inner aliases or may-share peers before the
+        // inner scope and alias/share maps are popped (handles the case where
+        // an inner alias/holder was moved while an outer peer was shadowed).
         let mut inner_root_moves: Vec<(String, MoveInfo)> = Vec::new();
         for (a, target) in &self.aliases {
             let root = crate::freeze::resolve_alias(self, target);
+            if survives_as_outer(&root, &self.aliases, &self.env, &self.scopes) {
+                if let Some(mv) = self.env_lookup(a).and_then(|b| b.moved.clone()) {
+                    inner_root_moves.push((root, mv));
+                }
+            }
+        }
+        for a in self.may_share.keys() {
             if let Some(mv) = self.env_lookup(a).and_then(|b| b.moved.clone()) {
-                inner_root_moves.push((root, mv));
+                for peer in self.share_group(a) {
+                    let root = crate::freeze::resolve_alias(self, &peer);
+                    if survives_as_outer(&peer, &self.aliases, &self.env, &self.scopes) {
+                        inner_root_moves.push((peer, mv.clone()));
+                    }
+                    if survives_as_outer(&root, &self.aliases, &self.env, &self.scopes) {
+                        inner_root_moves.push((root, mv.clone()));
+                    }
+                }
+            }
+        }
+        // Preserve may-share relationships established inside the block between
+        // outer bindings (including through self-shadowed outer bindings).
+        let mut inner_outer_shares: Vec<(String, String)> = Vec::new();
+        for a in self.may_share.keys() {
+            let Some(oa) = to_outer_name(a, &self.aliases, &self.env, &self.scopes) else {
+                continue;
+            };
+            for b in self.share_group(a) {
+                if let Some(ob) = to_outer_name(&b, &self.aliases, &self.env, &self.scopes) {
+                    inner_outer_shares.push((oa.clone(), ob));
+                }
             }
         }
         self.scopes.pop();
+        if let Some(outer_shadows) = self.shadow_link_scopes.pop() {
+            self.shadow_links = outer_shadows;
+        }
         if let Some(outer_aliases) = self.alias_scopes.pop() {
             self.aliases = outer_aliases;
             if let Some(outer_share) = self.share_scopes.pop() {
                 self.may_share = outer_share;
+                for (a, b) in inner_outer_shares {
+                    self.share_edge(&a, &b);
+                }
+            }
+            for (oa, orig) in inner_outer_origins {
+                if let Some(bo) = self.env_lookup_mut(&oa) {
+                    if bo.non_owned_origin.is_none() {
+                        bo.non_owned_origin = Some(orig);
+                    }
+                }
             }
             for (root, mv) in inner_root_moves {
                 if let Some(br) = self.env_lookup_mut(&root) {
                     if br.moved.is_none() {
-                        br.moved = Some(mv);
+                        br.moved = Some(mv.clone());
+                    }
+                }
+                for peer in self.share_group(&root) {
+                    if let Some(bp) = self.env_lookup_mut(&peer) {
+                        if bp.moved.is_none() {
+                            bp.moved = Some(mv.clone());
+                        }
                     }
                 }
             }
@@ -293,6 +489,65 @@ impl FnState {
                     }
                 }
             }
+            // Issue #195: also propagate freeze across the restored outer
+            // `may_share` connected components (and their alias chains) so a
+            // shadowed struct-embedded map or slice peer cannot escape the
+            // move of its holder once the inner shadow scope exits.
+            let share_keys: Vec<String> = self.may_share.keys().cloned().collect();
+            for k in share_keys {
+                let root = crate::freeze::resolve_alias(self, &k);
+                let moved = self
+                    .env_lookup(&k)
+                    .and_then(|b| b.moved.clone())
+                    .or_else(|| self.env_lookup(&root).and_then(|b| b.moved.clone()));
+                if let Some(mv) = moved {
+                    let mut group: Vec<String> = self.share_group(&k).into_iter().collect();
+                    group.push(k.clone());
+                    group.push(root);
+                    let seeded = group.clone();
+                    for member in &seeded {
+                        let mroot = crate::freeze::resolve_alias(self, member);
+                        group.push(mroot.clone());
+                        for a in self.aliases.keys() {
+                            if crate::freeze::resolve_alias(self, a) == mroot {
+                                group.push(a.clone());
+                            }
+                        }
+                    }
+                    for peer in group {
+                        if let Some(bp) = self.env_lookup_mut(&peer) {
+                            if bp.moved.is_none() {
+                                bp.moved = Some(mv.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Return the scope depth of the currently visible binding `name`:
+    /// `Some(0)` for `self.env`, `Some(i + 1)` for `self.scopes[i]`.
+    pub(crate) fn lookup_depth(&self, name: &str) -> Option<usize> {
+        for (i, layer) in self.scopes.iter().enumerate().rev() {
+            if layer.contains_key(name) {
+                return Some(i + 1);
+            }
+        }
+        if self.env.contains_key(name) {
+            Some(0)
+        } else {
+            None
+        }
+    }
+
+    /// Mutable lookup of a binding at an explicit scope depth (`0` for `env`,
+    /// `i + 1` for `scopes[i]`).
+    pub(crate) fn binding_at_depth_mut(&mut self, name: &str, depth: usize) -> Option<&mut Binding> {
+        if depth == 0 {
+            self.env.get_mut(name)
+        } else {
+            self.scopes.get_mut(depth - 1).and_then(|s| s.get_mut(name))
         }
     }
 
@@ -343,15 +598,56 @@ impl FnState {
             .entry(b.to_string())
             .or_default()
             .insert(a.to_string());
+        if let Some(a_links) = self.shadow_links.get(a).cloned() {
+            self.shadow_links
+                .entry(b.to_string())
+                .or_default()
+                .extend(a_links);
+        }
+        if let Some(b_links) = self.shadow_links.get(b).cloned() {
+            self.shadow_links
+                .entry(a.to_string())
+                .or_default()
+                .extend(b_links);
+        }
     }
 
     /// Drop `name`'s may-share edges: a whole-binding rebind re-owns the
-    /// binding, so it leaves the old sharing component.
+    /// binding, so it leaves the old sharing component while preserving
+    /// transitive sharing links among its remaining peers.
     pub(crate) fn share_clear(&mut self, name: &str) {
+        let neighbors: Vec<String> = self
+            .may_share
+            .get(name)
+            .into_iter()
+            .flatten()
+            .cloned()
+            .chain(
+                self.aliases
+                    .iter()
+                    .filter_map(|(k, v)| if v == name { Some(k.clone()) } else { None })
+                    .chain(self.aliases.get(name).cloned()),
+            )
+            .filter(|p| p != name)
+            .collect();
+        if let Some(links) = self.shadow_links.remove(name) {
+            for nb in &neighbors {
+                self.shadow_links
+                    .entry(nb.clone())
+                    .or_default()
+                    .extend(links.iter().cloned());
+            }
+        }
         if let Some(peers) = self.may_share.remove(name) {
-            for p in peers {
-                if let Some(set) = self.may_share.get_mut(&p) {
+            let peer_list: Vec<String> = peers.into_iter().collect();
+            for p in &peer_list {
+                if let Some(set) = self.may_share.get_mut(p) {
                     set.remove(name);
+                }
+            }
+            for i in 0..peer_list.len() {
+                for j in (i + 1)..peer_list.len() {
+                    self.share_edge(&peer_list[i], &peer_list[j]);
                 }
             }
         }
@@ -386,12 +682,34 @@ pub(crate) struct Checker<'a> {
     pub path: String,
     /// struct name -> (field name, field type) — file-level struct decls.
     pub structs: HashMap<String, Vec<(String, TypeExpr)>>,
+    /// struct name -> declared type parameters (including empty-field structs, #722).
+    pub struct_type_params: HashMap<String, Vec<hy_syntax::TypeParam>>,
+    /// enum name -> declared variant names in source order (T13/T14 HYB-E5001).
+    pub enums: HashMap<String, Vec<String>>,
+    /// enum name -> whether the first variant is payload-free (N3 HYB-E4002).
+    pub enum_has_zero_value: HashMap<String, bool>,
+    /// type alias name -> target TypeExpr.
+    pub type_aliases: HashMap<String, TypeExpr>,
     /// fn name -> decl (return-type inference for single-value defines).
     pub fns: HashMap<String, &'a FnDecl>,
+    /// (receiver base type name, method name) -> decl (method return-type inference).
+    pub method_decls: HashMap<(String, String), &'a FnDecl>,
     /// file-level consts (immutable, visible in every fn).
     pub consts: HashMap<String, Binding>,
+    /// File-level const literal values, for constant-folding identifier
+    /// references (`const big = 300; var n int8 = big` must be rejected
+    /// like the literal).
+    pub const_values: HashMap<String, &'a Expr>,
     /// Known foreign package prefixes (imports ∪ the builtin table).
     pub packages: HashSet<String>,
+    /// Package-scope names (issue #201-C): top-level fns / consts / structs
+    /// share one namespace in Go — a second declaration of the same name is
+    /// `X redeclared in this block`. Keyed by name, value = declaring kind.
+    pub pkg_names: HashMap<String, &'static str>,
+    /// Declared methods (issue #201-C): (receiver base type, method name) —
+    /// methods live in the receiver's method set, not package scope, so
+    /// `box.get` twice is an error while `fn get` + `box.get` is legal.
+    pub methods: HashSet<(String, String)>,
     /// Emitted diagnostics (unsorted; check_file sorts by span).
     pub diags: Vec<Diagnostic>,
     // --report-managed counters (O6.3)
@@ -400,6 +718,9 @@ pub(crate) struct Checker<'a> {
     pub total_sites: usize,
     // Row 14 (discussion #4): every managed block's payload, for the audit.
     pub managed_audit: Vec<ManagedBlockAudit>,
+    /// Names each enclosing closure body rebinds, innermost last — the
+    /// emit-guard deep walk skips them (addressable.rs).
+    pub closure_bound: Vec<HashSet<String>>,
 }
 
 /// Row 14 (discussion #4): the CLOSED category set — the invariant a
@@ -420,14 +741,23 @@ impl<'a> Checker<'a> {
             file,
             path: file.path.clone(),
             structs: HashMap::new(),
+            struct_type_params: HashMap::new(),
+            enums: HashMap::new(),
+            enum_has_zero_value: HashMap::new(),
+            type_aliases: HashMap::new(),
             fns: HashMap::new(),
+            method_decls: HashMap::new(),
             consts: HashMap::new(),
+            const_values: HashMap::new(),
             packages: HashSet::new(),
+            pkg_names: HashMap::new(),
+            methods: HashSet::new(),
             diags: Vec::new(),
             managed_blocks: 0,
             sites_via_managed: 0,
             total_sites: 0,
             managed_audit: Vec::new(),
+            closure_bound: Vec::new(),
         }
     }
 
@@ -452,13 +782,13 @@ impl<'a> Checker<'a> {
 
 /// `&x` — both legal AST spellings (`Expr::AddrOf` and `Expr::Unary{Addr}`).
 pub(crate) fn as_addr_of(e: &Expr) -> Option<&Expr> {
-    match e {
-        Expr::AddrOf { operand, .. } => Some(operand),
+    match unwrap_parens(e) {
+        Expr::AddrOf { operand, .. } => Some(unwrap_parens(operand)),
         Expr::Unary {
             op: hy_syntax::UnOp::Addr,
             operand,
             ..
-        } => Some(operand),
+        } => Some(unwrap_parens(operand)),
         _ => None,
     }
 }
@@ -487,7 +817,7 @@ pub(crate) fn move_operand_ident(e: &Expr) -> Option<String> {
 /// Collect the root binding of every reference-carrying sub-expression of
 /// `e` — the generalized form of `Expr::root_ident()`.
 ///
-/// `root_ident()` stops at anything that is not an ident/field/index chain:
+/// `root_ident()` stops at anything that is not an ident/field/index/slice chain:
 /// a CALL result (`same(same(m))`), a view of a call result (`same(m)[0:2]`),
 /// a composite literal (`wrap{items: same(m)}`), a field read out of a
 /// literal (`box{items: m}.items`) or a call that returns a parameter field
@@ -498,7 +828,11 @@ pub(crate) fn move_operand_ident(e: &Expr) -> Option<String> {
 pub(crate) fn collect_ref_roots(e: &Expr, out: &mut Vec<String>) {
     match unwrap_parens(e) {
         Expr::Move { .. } => {}
-        Expr::Ident { name, .. } => out.push(name.clone()),
+        Expr::Ident { name, .. } => {
+            if name != "_" {
+                out.push(name.clone());
+            }
+        }
         Expr::Try { operand, .. } => collect_ref_roots(operand, out),
         Expr::Slice { base, .. } => collect_ref_roots(base, out),
         Expr::Field { base, .. } => collect_ref_roots(base, out),
@@ -507,11 +841,22 @@ pub(crate) fn collect_ref_roots(e: &Expr, out: &mut Vec<String>) {
             for a in args {
                 collect_ref_roots(&a.value, out);
             }
-            // `x := r.method(...)` — the receiver is the callee's base, not a
-            // call argument, and a method can hand back interior storage.
-            if let Expr::Field { base, .. } = unwrap_parens(callee) {
-                collect_ref_roots(base, out);
-            }
+            // `x := r.method(...)` or `x := f(...)` where `f` is a closure
+            // binding or expression holding a closure: the receiver or
+            // captured environment can hand back interior storage. Top-level
+            // function names are not in `st.env`/`self.consts`, so
+            // `lookup_binding` ignores them.
+            collect_ref_roots(callee, out);
+        }
+        Expr::FnLit {
+            params,
+            results,
+            body,
+            ..
+        } => {
+            let mut bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+            bound.extend(results.iter().filter_map(|r| r.name.clone()));
+            crate::loans::collect_capture_idents_block(body, &mut bound, out);
         }
         Expr::StructLit { fields, .. } => {
             for f in fields {
@@ -529,6 +874,59 @@ pub(crate) fn collect_ref_roots(e: &Expr, out: &mut Vec<String>) {
                 collect_ref_roots(it, out);
             }
         }
+        Expr::AddrOf { operand, .. } => collect_ref_roots(operand, out),
+        Expr::Unary {
+            op: hy_syntax::UnOp::Addr,
+            operand,
+            ..
+        } => collect_ref_roots(operand, out),
+        _ => {}
+    }
+}
+
+/// Collect root identifiers that are explicitly borrowed via address-of (`&x`) inside composite literals
+/// (e.g. `[]*T{&x}`, `map[K]*T{"k": &x}`, nested composite literals).
+/// Ordinary calls, binary operations, indexing, and fields do not propagate borrow roots into results.
+pub(crate) fn collect_addr_of_roots(e: &Expr, out: &mut Vec<String>) {
+    match unwrap_parens(e) {
+        Expr::AddrOf { operand, .. } => {
+            if let Some(id) = operand.root_ident() {
+                if id != "_" {
+                    out.push(id.to_string());
+                }
+            }
+            collect_addr_of_roots(operand, out);
+        }
+        Expr::Unary {
+            op: hy_syntax::UnOp::Addr,
+            operand,
+            ..
+        } => {
+            if let Some(id) = operand.root_ident() {
+                if id != "_" {
+                    out.push(id.to_string());
+                }
+            }
+            collect_addr_of_roots(operand, out);
+        }
+        Expr::Try { operand, .. } => collect_addr_of_roots(operand, out),
+        Expr::Move { operand, .. } => collect_addr_of_roots(operand, out),
+        Expr::StructLit { fields, .. } => {
+            for f in fields {
+                collect_addr_of_roots(&f.value, out);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                collect_addr_of_roots(k, out);
+                collect_addr_of_roots(v, out);
+            }
+        }
+        Expr::SliceLit { items, .. } => {
+            for it in items {
+                collect_addr_of_roots(it, out);
+            }
+        }
         _ => {}
     }
 }
@@ -539,7 +937,11 @@ pub(crate) fn collect_ref_roots(e: &Expr, out: &mut Vec<String>) {
 pub(crate) fn collect_move_operands<'e>(e: &'e Expr, out: &mut Vec<(&'e Expr, Span)>) {
     match e {
         Expr::Move { operand, span } => {
-            out.push((unwrap_parens(operand), *span));
+            let inner = unwrap_parens(operand);
+            out.push((inner, *span));
+            if !matches!(inner, Expr::Ident { .. }) {
+                collect_move_operands(inner, out);
+            }
         }
         Expr::Paren { inner, .. } => collect_move_operands(inner, out),
         Expr::StructLit { fields, .. } => {
@@ -556,6 +958,42 @@ pub(crate) fn collect_move_operands<'e>(e: &'e Expr, out: &mut Vec<(&'e Expr, Sp
         Expr::SliceLit { items, .. } => {
             for item in items {
                 collect_move_operands(item, out);
+            }
+        }
+        Expr::Field { base, .. } => collect_move_operands(base, out),
+        Expr::Index { base, index, .. } => {
+            collect_move_operands(base, out);
+            collect_move_operands(index, out);
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            collect_move_operands(base, out);
+            if let Some(l) = lo {
+                collect_move_operands(l, out);
+            }
+            if let Some(h) = hi {
+                collect_move_operands(h, out);
+            }
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_move_operands(callee, out);
+            for a in args {
+                collect_move_operands(&a.value, out);
+            }
+        }
+        Expr::Try { operand, .. } => collect_move_operands(operand, out),
+        Expr::Unary { operand, .. } | Expr::AddrOf { operand, .. } => {
+            collect_move_operands(operand, out);
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_move_operands(lhs, out);
+            collect_move_operands(rhs, out);
+        }
+        Expr::Receive { chan, .. } => collect_move_operands(chan, out),
+        Expr::Interp { parts, .. } => {
+            for p in parts {
+                if let hy_syntax::InterpPart::Expr(exp) = p {
+                    collect_move_operands(exp, out);
+                }
             }
         }
         _ => {}

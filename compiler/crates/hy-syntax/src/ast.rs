@@ -1,7 +1,7 @@
 //! The Hybrid AST — the cross-component contract between `hy-syntax`
 //! (produces), `hy-check` (consumes), and the MVP-0 emitter (consumes).
 //!
-//! Scope: the surface exercised by tests/checker-corpus/*.hy (20 programs),
+//! Scope: the surface exercised by tests/checker-corpus/*.hy (120 programs),
 //! examples/ (ten target programs), and spikes/spike6-ownership/work/*.hy
 //! (ten programs). Anything outside that surface is allowed to be
 //! unimplemented by the parser — it must produce a clean `unsupported`
@@ -707,8 +707,20 @@ pub struct SelectArm {
 
 #[derive(Debug, Clone)]
 pub enum SelectArmKind {
-    Send { chan: Expr, value: Expr },
-    Recv { names: Vec<String>, chan: Expr },
+    /// C5: a select send clause (`ch <- v:`) is a sendability check-site
+    /// exactly like a statement send. `is_move` carries the parser's
+    /// `ch <- move v` marker for the very same reason `Stmt::Send` carries
+    /// it: the owned-move route (O4 class 3) must be available here, and the
+    /// freeze (O5.2) must be recorded for the moved binding.
+    Send {
+        chan: Expr,
+        value: Expr,
+        is_move: bool,
+    },
+    Recv {
+        names: Vec<String>,
+        chan: Expr,
+    },
     Default,
 }
 
@@ -747,10 +759,42 @@ impl Expr {
             Expr::Ident { name, .. } => Some(name),
             Expr::Field { base, .. } => base.root_ident(),
             Expr::Index { base, .. } => base.root_ident(),
+            Expr::Slice { base, .. } => base.root_ident(),
+            Expr::AddrOf { operand, .. } => operand.root_ident(),
+            Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                ..
+            } => operand.root_ident(),
             Expr::Paren { inner, .. } => inner.root_ident(),
             Expr::Try { operand, .. } => operand.root_ident(),
             _ => None,
         }
+    }
+
+    /// If this `SliceLit` represents a typed array composite literal
+    /// (`[N]T{…}` or `[...]T{…}`), returns `(len, inner_elem, array_ty)`.
+    /// Distinguished from a slice-of-arrays literal `[][N]T{…}` by the
+    /// array `TypeExpr` sharing the literal's opening `[` source position.
+    pub fn as_array_lit(&self) -> Option<(Option<&Expr>, &TypeExpr, &TypeExpr)> {
+        if let Expr::SliceLit {
+            elem: Some(t),
+            span,
+            ..
+        } = self
+        {
+            if let TypeExpr::Array {
+                len,
+                elem,
+                span: ty_span,
+            } = t.as_ref()
+            {
+                if ty_span.start == span.start {
+                    return Some((len.as_deref(), elem.as_ref(), t.as_ref()));
+                }
+            }
+        }
+        None
     }
 
     /// Render for diagnostics (short, lossy, never panics).
@@ -781,7 +825,13 @@ impl Expr {
                 Some(t) => format!("{}{{...}}", t.render()),
                 None => "{...}".to_string(),
             },
-            Expr::SliceLit { .. } => "[...]".to_string(),
+            Expr::SliceLit { .. } => {
+                if let Some((_, _, arr_ty)) = self.as_array_lit() {
+                    format!("{}{{...}}", arr_ty.render())
+                } else {
+                    "[...]".to_string()
+                }
+            }
             Expr::MapLit { key, value, .. } => {
                 format!("map[{}]{}{{...}}", key.render(), value.render())
             }

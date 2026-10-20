@@ -81,8 +81,8 @@ fn break_loop_inside_loop_accepted() {
 }
 
 #[test]
-fn break_loop_in_if_inside_while_for_accepted() {
-    // `for cond { }` is the while-form (ForKind::While); the label targets it.
+fn break_loop_in_if_inside_while_for_outside_loop_rejects_e3010() {
+    // `for cond { }` is a ForStmt, not a LoopStmt; break loop outside any `loop` statement has no target (LX14).
     let src = "\
 fn main() {
     x := 1
@@ -94,11 +94,12 @@ fn main() {
 }
 ";
     let r = check(src);
-    assert_eq!(r.verdict, Verdict::Accept);
+    assert_eq!(first_code(&r), Some("HYB-E3010".to_string()));
+    assert_eq!(r.verdict, Verdict::Reject);
 }
 
 #[test]
-fn continue_loop_inside_for_range_accepted() {
+fn continue_loop_inside_for_range_outside_loop_rejects_e3010() {
     let src = "\
 fn main() {
     for v in 0..3 {
@@ -107,7 +108,28 @@ fn main() {
 }
 ";
     let r = check(src);
+    assert_eq!(first_code(&r), Some("HYB-E3010".to_string()));
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn break_loop_and_continue_loop_in_for_inside_loop_accepted() {
+    // Inside an enclosing `loop`, break loop and continue loop inside an inner `for` target the enclosing `loop`.
+    let src = "\
+fn main() {
+    loop {
+        for v in 0..3 {
+            if v == 1 {
+                break loop
+            }
+            continue loop
+        }
+    }
+}
+";
+    let r = check(src);
     assert_eq!(r.verdict, Verdict::Accept);
+    assert!(first_code(&r).is_none(), "no diagnostics: {:?}", r.diagnostics);
 }
 
 #[test]

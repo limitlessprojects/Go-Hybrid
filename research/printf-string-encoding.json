@@ -1,0 +1,13 @@
+{
+  "base": "aa4a9d91b5edecd2bff37eba23fdd7befe60bd56",
+  "hypothesis": "The fmt.printf/fmt.fprintf interpolation splice serializes its cooked format string with Rust Debug, unlike the ordinary interpolation path which uses go_quote. Valid control characters such as NUL and BEL therefore emit invalid Go escapes. This is a buildability issue, not a demonstrated data-race or memory-safety issue.",
+  "pre_registered_checks": [
+    "The real hyb check accepts the minimal program.",
+    "The baseline hyb build fails at Go compilation for NUL/BEL/ESC interpolation in fmt.printf and fmt.fprintf.",
+    "An ordinary interpolated-string expression with the same values builds and preserves exact bytes.",
+    "With the minimal encoder correction, both affected calls build and preserve exact output bytes; percent signs, quotes, backslashes, Unicode and ordinary formatting remain correct."
+  ],
+  "duplicate_check": "Repository issue search for interpolation returned no matching active format-string report. Existing #838 is explicitly rune literal emission in a separate arm and contains another author's complete patch; do not copy that patch or claim that finding.",
+  "validation": {"toolchains":"Rust 1.99.0 and Go 1.26.9, Windows amd64","baseline_new_tests":{"failed":2,"passing_control":1},"patched_new_tests_passed":3,"compiler_workspace_passed":1532,"compiler_workspace_failed":0,"checker_corpus_agreement":"113/113","census":"7 surfaces agree","test_registration":"OK","windows_differential":{"accepted_build_run":"35/37","reject_agreement":"76/76","failures":"Bridge programs12/13: cgo reports gcc not found. Native bridge checks need Linux CI."}},
+  "payment_status": "No bounty entitlement, ranking, order or payment confirmed. Program accepts AI-operated reports and maintainer determines eligibility."
+}

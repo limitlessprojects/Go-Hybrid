@@ -209,6 +209,64 @@ fn example02_try_desugar_and_defer() {
     );
 }
 
+    #[test]
+    fn defer_call_argument_try_hoists_before_the_defer() {
+        // P1 (§7): a deferred call's arguments are evaluated at defer time, so a
+        // `?` inside them hoists to a binding BEFORE the `defer` — the call
+        // itself stays deferred. Regression for the check→emit gap where the
+        // hoister never registered the temp and `emit_expr` refused the `?` as
+        // "outside a binding position" on a program the checker accepted.
+        let go = emit(
+            "fn probe() (n int, e error) {\n    return 1, nil\n}\n\nfn sink(n int) {\n    fmt.println(n)\n}\n\nfn main() (code int) {\n    defer sink(probe()?)\n    return 0\n}\n",
+        );
+        let hoist = go
+            .find(":= probe()")
+            .unwrap_or_else(|| panic!("argument `?` must hoist://n{}", go));
+        let defer_at = go
+            .find("defer sink(")
+            .unwrap_or_else(|| panic!("defer stays a deferred call://n{}", go));
+        assert!(hoist < defer_at, "hoist must precede the defer://n{}", go);
+    }
+
+    #[test]
+    fn defer_parenthesized_operand_emits_without_parens() {
+        // Go rejects a parenthesized defer operand ("expression in defer must be
+        // function call"), so a parenthesized call must lower to a bare one:
+        // `defer (fmt.println("done"))` -> `defer fmt.Println("done")`.
+        let go = emit("fn main() {\n    defer (fmt.println(\"done\"))\n}\n");
+        assert!(go.contains("defer fmt.Println(\"done\")"), ":\n{}", go);
+        assert!(
+            !go.contains("defer ("),
+            "the defer operand must not keep its parens://n{}",
+            go
+        );
+    }
+
+    #[test]
+    fn defer_parenthesized_call_argument_try_hoists_before_the_defer() {
+        // Regression (adversarial review): `defer (sink(probe()?))` — the operand
+        // is a `Paren{Call}`, so the hoist gate has to unwrap parens exactly like
+        // the checker's HYB-E2001 test does (a parenthesized call is still a
+        // call). Otherwise the checker accepts the program and the emitter dies
+        // late with "`?` outside a binding position" — the very gap this branch
+        // closes, reintroduced by one set of parens.
+        let go = emit(
+            "fn probe() (n int, e error) {\n    return 1, nil\n}\n\nfn sink(n int) {\n    fmt.println(n)\n}\n\nfn main() (code int) {\n    defer (sink(probe()?))\n    return 0\n}\n",
+        );
+        let hoist = go
+            .find(":= probe()")
+            .unwrap_or_else(|| panic!("parenthesized argument `?` must hoist://n{}", go));
+        let defer_at = go
+            .find("defer sink(")
+            .unwrap_or_else(|| panic!("defer lowered without parens://n{}", go));
+        assert!(hoist < defer_at, "hoist must precede the defer://n{}", go);
+        assert!(
+            !go.contains("defer ("),
+            "no parens in the emitted defer://n{}",
+            go
+        );
+    }
+
 // ---------------------------------------------------------------------------
 // Example 03 — worker pool (structs-first, task→go, send/receive, close)
 // ---------------------------------------------------------------------------
@@ -403,7 +461,6 @@ fn compound_bit_assigns_emit() {
     assert!(go.contains("x >>= 1"), ":\n{}", go);
 }
 
-
 #[test]
 fn comparison_in_call_arg_parses_clean() {
     let go = emit("fn main() {\n    fmt.printf(\"%v\", 1 < 2)\n}");
@@ -514,7 +571,11 @@ fn managed_block_emits_marker_comment() {
     assert!(go.contains("// managed"), "audit marker greppable:\n{}", go);
     // row 14: the marker carries the category + reason + tickets
     assert!(go.contains("[mutex]"), "category in marker:\n{}", go);
-    assert!(go.contains("shared counter under a lock"), "reason in marker:\n{}", go);
+    assert!(
+        go.contains("shared counter under a lock"),
+        "reason in marker:\n{}",
+        go
+    );
     assert!(go.contains("PROJ-9"), "tickets in marker:\n{}", go);
     assert!(go.contains("go w(counter)"), ":\n{}", go);
 }
@@ -571,7 +632,7 @@ fn match_stmt_errors_cleanly() {
 #[test]
 fn select_emits_go_cases() {
     let go = emit(
-        "fn main() {\n    select {\n        v, ok := <-sq:\n            _ = ok\n        <-deadline:\n            _ = deadline\n    }\n}\n",
+        "fn main() {\n    select {\n        v, ok := <-sq:\n            _ = v\n            _ = ok\n        <-deadline:\n            _ = deadline\n    }\n}\n",
     );
     assert!(go.contains("select {"), ":\n{}", go);
     assert!(go.contains("case v, ok := <-sq:"), ":\n{}", go);
@@ -591,9 +652,47 @@ fn inclusive_range_and_labeled_break() {
         go
     );
     assert!(go.contains("break hyLoop"), ":\n{}", go);
+    // Inclusive ranges use a continue-safe stop flag (#322), not
+    // `i <= 8; i++` (that form wraps at a type maximum). Bounds are
+    // hoisted so the stop check is `i != hyHiN`.
     assert!(
-        go.contains("for i := 1; i <= 8; i++ {"),
-        "inclusive range:\n{}",
+        go.contains("<= ") && go.contains("8"),
+        "inclusive empty-range guard:\n{}",
+        go
+    );
+    assert!(
+        go.contains("i != "),
+        "inclusive last-value stop check:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("for i := 1; i <= 8; i++ {"),
+        "must not emit the wrapping post-increment form:\n{}",
+        go
+    );
+}
+
+#[test]
+fn inclusive_range_at_type_maximum_uses_stop_flag() {
+    // Issue #322: int8 127..=127 must not lower to `value <= high; value++`
+    // (increment wraps to -128 and the loop never ends).
+    let go = emit(
+        "fn main() {\n    var high int8 = 127\n    for value in high..=high {\n        fmt.println(value)\n    }\n}\n",
+    );
+    assert!(
+        !go.contains("value <= high; value++")
+            && !go.contains("for value := high; value <= high; value++"),
+        "wrapping inclusive form must not be emitted:\n{}",
+        go
+    );
+    assert!(
+        go.contains("value !="),
+        "continue-safe stop check present:\n{}",
+        go
+    );
+    assert!(
+        go.contains("<= "),
+        "empty-range guard still present:\n{}",
         go
     );
 }
@@ -605,7 +704,7 @@ fn sibling_labeled_loops_get_distinct_go_labels() {
     // emitted two declarations → `go vet`: "label hyLoop already declared",
     // so an accepted program could never build.
     let go = emit(
-        "fn main() {\n    for i in 0..2 {\n        break loop\n    }\n    for j in 0..2 {\n        break loop\n    }\n}\n",
+        "fn main() {\n    loop {\n        break loop\n    }\n    loop {\n        break loop\n    }\n}\n",
     );
     assert_eq!(
         go.matches("hyLoop:").count(),
@@ -630,7 +729,7 @@ fn nested_labeled_loops_break_their_own_loop() {
     // (LX14), so each level carries its own label and each break must name
     // the one it is lexically inside.
     let go = emit(
-        "fn main() {\n    for i in 0..2 {\n        for j in 0..2 {\n            break loop\n        }\n        break loop\n    }\n}\n",
+        "fn main() {\n    loop {\n        loop {\n            break loop\n        }\n        break loop\n    }\n}\n",
     );
     assert_eq!(go.matches("hyLoop:").count(), 1, ":\n{}", go);
     assert_eq!(go.matches("hyLoop1:").count(), 1, ":\n{}", go);
@@ -712,6 +811,41 @@ fn assoc_fn_call_mangles_dotted_name() {
 }
 
 #[test]
+fn generic_struct_and_fn_infer_missing_constraints_722() {
+    // Issue #722: `struct box[t] { v t }` without an explicit constraint must
+    // emit `type box[t any] struct {` so `gofmt` does not rewrite `box[t] struct`
+    // into the invalid array type `type box [t]struct {`.
+    let go = emit(
+        "struct box[t] {\n    v t\n}\n\nstruct table[k, v] {\n    m map[k]v\n}\n\nfn id[t](x t) t {\n    return x\n}\n\nfn main() {\n    b := box[u8]{ v: 3 }\n    fmt.println(id[u8](b.v))\n}\n",
+    );
+    assert!(
+        go.contains("type box[t any] struct {"),
+        "expected `type box[t any] struct {{` in:\n{}",
+        go
+    );
+    assert!(
+        go.contains("type table[k comparable, v any] struct {"),
+        "expected `k comparable, v any` in:\n{}",
+        go
+    );
+    assert!(
+        go.contains("func id[t any](x t) t {"),
+        "expected `func id[t any](x t) t {{` in:\n{}",
+        go
+    );
+    assert!(
+        go.contains("box[uint8]{v: 3}"),
+        "expected SPEC primitive type arg `u8` to lower to `uint8` in:\n{}",
+        go
+    );
+    assert!(
+        go.contains("id[uint8](b.v)"),
+        "expected generic fn call type arg `u8` to lower to `uint8` in:\n{}",
+        go
+    );
+}
+
+#[test]
 fn option_match_lowes_to_ok_branch() {
     let go = emit(
         "fn get() option[int] {\n    return some(3)\n}\n\nfn main() {\n    match get() {\n        some(v): fmt.println(\"v={v}\")\n        none:     fmt.println(\"none\")\n    }\n}\n",
@@ -742,6 +876,101 @@ fn option_match_lowes_to_ok_branch() {
         ":\n{}",
         go
     );
+}
+
+#[test]
+fn match_multi_some_arms_retains_all_arms() {
+    // Issue #204: match on option with multiple some arms must retain all arms,
+    // not just the last one.
+    let go = emit(
+        "fn main() {\n    opt := some(15)\n    match opt {\n        some(v) if v > 10: {\n            fmt.println(\"big\")\n        }\n        some(v): {\n            fmt.println(\"small\")\n        }\n        none: {\n            fmt.println(\"none\")\n        }\n    }\n}\n",
+    );
+    assert!(go.contains("if hyMatch0.ok {"), ":\n{}", go);
+    assert!(go.contains("v := hyMatch0.val"), ":\n{}", go);
+    assert!(go.contains("if v > 10 {"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"big\")"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"small\")"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"none\")"), ":\n{}", go);
+}
+
+#[test]
+fn match_unguarded_some_first_emits_buildable_go() {
+    // An UNGUARDED `some` arm placed before another `some` arm matches
+    // whenever `ok` is true, so later arms are unreachable. The emitter
+    // must not chain a `} else {` onto a chain that has no preceding `if`
+    // (that produced an orphan `else` and unbuildable Go, while `hyb check`
+    // reported 0 diagnostics).
+    let go = emit(
+        "fn main() {\n    opt := some(3)\n    match opt {\n        some(v): {\n            fmt.println(\"small\")\n        }\n        some(v) if v > 10: {\n            fmt.println(\"big\")\n        }\n        none: {\n            fmt.println(\"none\")\n        }\n    }\n}\n",
+    );
+    let opens = go.matches('{').count();
+    let closes = go.matches('}').count();
+    assert_eq!(opens, closes, "unbalanced braces (orphan else):\n{}", go);
+    assert_eq!(
+        go.matches("} else {").count(),
+        1,
+        "expected exactly one else (the none arm):\n{}",
+        go
+    );
+    let ok = go.find("if hyMatch0.ok {").expect("ok branch");
+    let small = go.find("fmt.Println(\"small\")").expect("small arm body");
+    let els = go.find("} else {").expect("none arm");
+    assert!(
+        ok < small && small < els,
+        "unguarded arm body must be inside the ok branch, before the else:\n{}",
+        go
+    );
+}
+
+#[test]
+fn match_guarded_then_unguarded_some_still_chains() {
+    // Guarded-first ordering must keep working: the guarded arm is an `if`
+    // and the first unguarded arm is its `else`.
+    let go = emit(
+        "fn main() {\n    opt := some(15)\n    match opt {\n        some(v) if v > 10: {\n            fmt.println(\"big\")\n        }\n        some(v): {\n            fmt.println(\"small\")\n        }\n        none: {\n            fmt.println(\"none\")\n        }\n    }\n}\n",
+    );
+    assert_eq!(
+        go.matches('{').count(),
+        go.matches('}').count(),
+        ":\n{}",
+        go
+    );
+    assert!(go.contains("if v > 10 {"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"big\")"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"small\")"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"none\")"), ":\n{}", go);
+}
+
+#[test]
+fn match_guarded_some_with_wildcard_fallback() {
+    // Issue #204: with guarded some arms and wildcard, failed guard must fall through to wildcard.
+    let go = emit(
+        "fn main() {\n    opt := some(3)\n    match opt {\n        some(v) if v > 10: {\n            fmt.println(\"big\")\n        }\n        _: {\n            fmt.println(\"fallback\")\n        }\n    }\n}\n",
+    );
+    assert!(go.contains("hyMatched1 := false"), ":\n{}", go);
+    assert!(go.contains("if hyMatch0.ok {"), ":\n{}", go);
+    assert!(go.contains("if v > 10 {"), ":\n{}", go);
+    assert!(go.contains("hyMatched1 = true"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"big\")"), ":\n{}", go);
+    assert!(go.contains("if !hyMatched1 {"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"fallback\")"), ":\n{}", go);
+}
+
+#[test]
+fn match_guarded_some_with_none_and_wildcard() {
+    // Issue #204: guarded some arm, none arm, and wildcard arm all handled cleanly.
+    let go = emit(
+        "fn main() {\n    opt := some(3)\n    match opt {\n        some(v) if v > 10: {\n            fmt.println(\"big\")\n        }\n        none: {\n            fmt.println(\"none\")\n        }\n        _: {\n            fmt.println(\"fallback\")\n        }\n    }\n}\n",
+    );
+    assert!(go.contains("hyMatched1 := false"), ":\n{}", go);
+    assert!(go.contains("if hyMatch0.ok {"), ":\n{}", go);
+    assert!(go.contains("if v > 10 {"), ":\n{}", go);
+    assert!(go.contains("hyMatched1 = true"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"big\")"), ":\n{}", go);
+    assert!(go.contains("if !hyMatched1 && !hyMatch0.ok {"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"none\")"), ":\n{}", go);
+    assert!(go.contains("if !hyMatched1 {"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"fallback\")"), ":\n{}", go);
 }
 
 #[test]
@@ -795,6 +1024,32 @@ fn assign_slot_loan_copies_and_stores_back() {
 }
 
 #[test]
+fn assign_slot_loan_into_pointer_var_points_at_copy() {
+    // A pointer-typed target cannot hold the copied element itself
+    // (`cannot use g.nodes[from] (variable of struct type node) as *node`):
+    // it points at a fresh copy, and the store-back dereferences it.
+    let go = emit(
+        "struct node {\n    edges []int\n}\n\nstruct graph {\n    nodes map[int]node\n}\n\nfn (g *graph) connect(from int, to int) {\n    var n *node\n    n = &g.nodes[from]\n    n.edges = append(n.edges, to)\n}\n",
+    );
+    assert!(
+        go.contains("hyLoan0 := g.nodes[from]"),
+        "copy into a temp:\n{}",
+        go
+    );
+    assert!(go.contains("n = &hyLoan0"), "pointer at the copy:\n{}", go);
+    assert!(
+        !go.contains("n = g.nodes[from]"),
+        "value copy into a pointer var cannot build:\n{}",
+        go
+    );
+    assert!(
+        go.contains("g.nodes[from] = *n"),
+        "dereferenced store-back:\n{}",
+        go
+    );
+}
+
+#[test]
 fn single_var_iterate_value_semantics() {
     // Slices: `for w in shard` binds the VALUE (Go's range binds the index).
     let go = emit("fn f(shard []int) {\n    for w in shard {\n        _ = w\n    }\n}\n");
@@ -810,6 +1065,123 @@ fn single_var_iterate_over_chan_binds_value() {
         go
     );
 }
+
+#[test]
+fn single_var_iterate_over_chan_typed_var_binds_value() {
+    let go = emit("fn f() {\n    var ch chan int\n    for v in ch {\n        _ = v\n    }\n}\n");
+    assert!(
+        go.contains("for v := range ch {"),
+        "typed chan var direct range:\n{}",
+        go
+    );
+}
+
+#[test]
+fn single_var_iterate_over_chan_call_binds_value() {
+    let go = emit("fn get_chan() chan int {\n    return make(chan int, 1)\n}\n\nfn f() {\n    for v in get_chan() {\n        _ = v\n    }\n}\n");
+    assert!(
+        go.contains("for v := range get_chan() {"),
+        "channel call range binds received value:\n{}",
+        go
+    );
+}
+
+#[test]
+fn single_var_iterate_over_chan_paren_binds_value() {
+    let go = emit("fn f(ch chan int) {\n    for v in (ch) {\n        _ = v\n    }\n}\n");
+    assert!(
+        go.contains("for v := range (ch) {") || go.contains("for v := range ch {"),
+        "channel paren range binds received value:\n{}",
+        go
+    );
+}
+
+#[test]
+fn single_var_iterate_over_chan_make_call_binds_value() {
+    let go = emit("fn f() {\n    for v in make(chan int, 2) {\n        _ = v\n    }\n}\n");
+    assert!(
+        go.contains("for v := range make(chan int, 2) {"),
+        "inline make chan range binds received value:\n{}",
+        go
+    );
+}
+
+#[test]
+fn two_var_iterate_over_chan_is_rejected() {
+    let err = emit_err("fn f(ch chan int) {\n    for a, b in ch {\n        _ = a\n        _ = b\n    }\n}\n");
+    assert!(
+        err.contains("cannot range over channel with two iteration variables"),
+        "expected two-var chan range rejection, got:\n{}",
+        err
+    );
+}
+
+#[test]
+fn single_var_iterate_over_make_slice_binds_element() {
+    let go = emit("fn f() {\n    for x in make([]int, 5) {\n        _ = x\n    }\n}\n");
+    assert!(
+        go.contains("for _, x := range make([]int, 5) {"),
+        "make slice range must bind element (for _, x := range ...):\n{}",
+        go
+    );
+    assert!(
+        !go.contains("for x := range make([]int, 5) {"),
+        "make slice range must not be lowered as channel range:\n{}",
+        go
+    );
+}
+
+#[test]
+fn single_var_iterate_over_make_slice_variable_binds_element() {
+    let go = emit("fn f() {\n    s := make([]int, 5)\n    for x in s {\n        _ = x\n    }\n}\n");
+    assert!(
+        go.contains("for _, x := range s {"),
+        "make slice variable range must bind element (for _, x := range s):\n{}",
+        go
+    );
+    assert!(
+        !go.contains("for x := range s {"),
+        "make slice variable must not be recorded as channel binding:\n{}",
+        go
+    );
+}
+
+#[test]
+fn single_var_iterate_over_map_variable_does_not_lower_as_channel() {
+    let go = emit("fn f() {\n    m := map[string]int{}\n    for k in m {\n        _ = k\n    }\n}\n");
+    assert!(
+        go.contains("for _, k := range m {"),
+        "map variable must not be lowered as channel:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("for k := range m {"),
+        "map variable single-var range must not be lowered as channel range:\n{}",
+        go
+    );
+}
+
+#[test]
+fn single_var_iterate_over_make_map_literal_does_not_lower_as_channel() {
+    let go = emit("fn f() {\n    m := make(map[string]int{})\n    for k in m {\n        _ = k\n    }\n}\n");
+    assert!(
+        go.contains("for _, k := range m {"),
+        "make(map) variable must not be lowered as channel:\n{}",
+        go
+    );
+}
+
+
+#[test]
+fn two_var_iterate_over_make_slice_allowed() {
+    let go = emit("fn f() {\n    for i, x in make([]int, 5) {\n        _ = i\n        _ = x\n    }\n}\n");
+    assert!(
+        go.contains("for i, x := range make([]int, 5) {"),
+        "two-var range over make slice must be allowed:\n{}",
+        go
+    );
+}
+
 
 #[test]
 fn set_insert_uses_prelude() {
@@ -1252,6 +1624,34 @@ fn diff_elided_map_value_struct_literal() {
 }
 
 #[test]
+fn diff_elided_map_value_struct_literal_under_parens() {
+    // Same elision, one redundant paren deeper: `({replicas: 2, tag: "prod"})`
+    // is the same expression, so the expected TYPE must still be applied.
+    // Before the peel this fell through to the "spell the type" refusal — a
+    // check-accepts / emit-rejects gap.
+    let go = emit(
+        "struct service {\n    replicas int\n    tag string\n}\n\nfn main() {\n    e := env{services: map[string]service{\n        \"frontend\": ({replicas: 2, tag: \"prod\"}),\n    }}\n    _ = e\n}\n\nstruct env {\n    services map[string]service\n}",
+    );
+    assert!(
+        go.contains("\"frontend\": service{replicas: 2, tag: \"prod\"}"),
+        "elided head filled through parens:\n{}",
+        go
+    );
+}
+
+#[test]
+fn diff_elided_slice_elem_struct_literal_under_parens() {
+    let go = emit(
+        "struct service {\n    replicas int\n}\n\nfn main() {\n    s := []service{({replicas: 2}), (({replicas: 3}))}\n    _ = s\n}\n",
+    );
+    assert!(
+        go.contains("[]service{service{replicas: 2}, service{replicas: 3}}"),
+        "elided heads filled through (nested) parens:\n{}",
+        go
+    );
+}
+
+#[test]
 fn diff_short_return_fills_error_slot() {
     // corpus 13: `return v` in a (value, error) fn → `return v, nil`.
     let go = emit(
@@ -1275,12 +1675,10 @@ fn diff_composite_const_lands_as_var() {
 
 #[test]
 fn local_composite_const_lands_as_var() {
-    let go = emit("fn main() {\n    const thresholds = [10, 50]\n    fmt.println(\"{thresholds[0]}\")\n}");
-    assert!(
-        go.contains("var thresholds = []int{10, 50}"),
-        ":\n{}",
-        go
+    let go = emit(
+        "fn main() {\n    const thresholds = [10, 50]\n    fmt.println(\"{thresholds[0]}\")\n}",
     );
+    assert!(go.contains("var thresholds = []int{10, 50}"), ":\n{}", go);
     assert!(!go.contains("const thresholds"), ":\n{}", go);
 }
 
@@ -1293,6 +1691,52 @@ fn diff_pointer_param_auto_address() {
         "fn scale(e *env) {\n    _ = e\n}\n\nfn main() {\n    e := env{}\n    scale(e)\n}\n\nstruct env {\n    n int\n}",
     );
     assert!(go.contains("scale(&e)"), ":\n{}", go);
+}
+
+#[test]
+fn pointer_param_forwarded_to_pointer_param_not_double_addressed() {
+    // A parameter already having a pointer type (*env) must NOT be auto-addressed
+    // with '&' when passed to a pointer parameter (*env), which would produce **env.
+    let go = emit(
+        "struct env {\n    n int\n}\n\nfn scale(e *env) {\n    _ = e\n}\n\nfn forward(p *env) {\n    scale(p)\n}\n",
+    );
+    assert!(go.contains("scale(p)"), ":\n{}", go);
+    assert!(
+        !go.contains("scale(&p)"),
+        "must not double-address pointer param:\n{}",
+        go
+    );
+}
+
+#[test]
+fn pointer_var_passed_to_pointer_param_not_double_addressed() {
+    // A variable declared with a pointer type (var p *env) must NOT be auto-addressed
+    // when passed to a pointer parameter.
+    let go = emit(
+        "struct env {\n    n int\n}\n\nfn scale(e *env) {\n    _ = e\n}\n\nfn main() {\n    var p *env\n    scale(p)\n}\n",
+    );
+    assert!(go.contains("scale(p)"), ":\n{}", go);
+    assert!(
+        !go.contains("scale(&p)"),
+        "must not double-address pointer var:\n{}",
+        go
+    );
+}
+
+#[test]
+fn pointer_binding_from_addrof_not_double_addressed() {
+    // A binding initialized from an address-of expression (p := &e) is already a
+    // pointer and must not be auto-addressed when passed to a pointer parameter.
+    let go = emit(
+        "struct env {\n    n int\n}\n\nfn scale(e *env) {\n    _ = e\n}\n\nfn main() {\n    e := env{}\n    p := &e\n    scale(p)\n}\n",
+    );
+    assert!(go.contains("p := &e"), ":\n{}", go);
+    assert!(go.contains("scale(p)"), ":\n{}", go);
+    assert!(
+        !go.contains("scale(&p)"),
+        "must not double-address pointer local:\n{}",
+        go
+    );
 }
 
 #[test]
@@ -1432,6 +1876,29 @@ fn range_binding_mention_inside_a_closure_counts_as_read() {
     );
 }
 
+#[test]
+fn single_range_binding_never_read_drops_to_for_range() {
+    let go = emit("fn main() {\n    xs := []int{1, 2, 3}\n    for x in xs {\n        fmt.println(\"item\")\n    }\n}\n");
+    assert!(
+        go.contains("for range xs {"),
+        "unread single binding must lower to `for range xs`:\n{}",
+        go
+    );
+    assert!(!go.contains("for _, x :="), "must not declare unread variable:\n{}", go);
+}
+
+#[test]
+fn single_range_binding_over_chan_never_read_drops_to_for_range() {
+    let go = emit("fn worker(jobs <-chan int) {\n    for j in jobs {\n        fmt.println(\"item\")\n    }\n}\n");
+    assert!(
+        go.contains("for range jobs {"),
+        "unread single channel binding must lower to `for range jobs`:\n{}",
+        go
+    );
+    assert!(!go.contains("for j :="), "must not declare unread variable:\n{}", go);
+}
+
+
 // Loop-label scope (HYB-E3010 companion; issue: break/continue loop with no
 // enclosing loop / match-arm label propagation)
 // ---------------------------------------------------------------------------
@@ -1450,9 +1917,9 @@ fn match_arm_labeled_break_labels_enclosing_loop() {
 }
 
 #[test]
-fn match_arm_labeled_continue_labels_enclosing_while_for() {
+fn match_arm_labeled_continue_labels_enclosing_loop() {
     let go = emit(
-        "fn main() {\n    o := some(1)\n    x := 1\n    for x > 0 {\n        match o {\n            some(v) => if v > 0 { continue loop }\n            none => {}\n        }\n    }\n}\n",
+        "fn main() {\n    o := some(1)\n    x := 1\n    loop {\n        for x > 0 {\n            match o {\n                some(v) => if v > 0 { continue loop }\n                none => {}\n            }\n        }\n    }\n}\n",
     );
     assert!(go.contains("hyLoop:"), "label missing:\n{}", go);
     assert!(go.contains("continue hyLoop"), ":\n{}", go);
@@ -1505,8 +1972,16 @@ fn e3_short_circuit_and_or_with_try_guards_rhs_evaluation() {
         "|| must guard RHS try evaluation under `if !hyT3`:\n{}",
         go
     );
-    assert!(go.contains("a := hyT0"), "a binds hoisted short-circuit temp:\n{}", go);
-    assert!(go.contains("b := hyT3"), "b binds hoisted short-circuit temp:\n{}", go);
+    assert!(
+        go.contains("a := hyT0"),
+        "a binds hoisted short-circuit temp:\n{}",
+        go
+    );
+    assert!(
+        go.contains("b := hyT3"),
+        "b binds hoisted short-circuit temp:\n{}",
+        go
+    );
 }
 
 #[test]
@@ -1543,3 +2018,893 @@ fn e3_hoist_preserves_preceding_operand_evaluation_order() {
         go
     );
 }
+
+#[test]
+fn non_exhaustive_option_match_rejects_at_check_and_emits_no_garbage() {
+    // AMENDMENT (maintainer, 2026-10-16, logged in the merge message):
+    // this test previously pinned an EMITTER-side EmitError citing E5001.
+    // pr-173 moved exhaustiveness into the CHECKER (HYB-E5001 fires at
+    // hyb check; verified by hy-check's own suite), so the emitter's
+    // no-some-arm path intentionally lowers nothing. What must never come
+    // back is #143 R1/R2's failure mode: an orphan `} else {` or a silent
+    // single-arm branch in the emitted Go. These pins stay:
+    let go_none_only = emit(
+        "fn main() {\n    var x option[int] = some(1)\n    match x {\n        none: fmt.println(\"none\")\n    }\n}\n",
+    );
+    assert!(
+        !go_none_only.contains("} else {"),
+        "orphan else came back:\n{}",
+        go_none_only
+    );
+
+    let go_some_only = emit(
+        "fn main() {\n    var x option[int] = some(1)\n    match x {\n        some(v): fmt.println(v)\n    }\n}\n",
+    );
+    assert!(
+        !go_some_only.contains("} else {"),
+        "orphan else came back:\n{}",
+        go_some_only
+    );
+}
+
+#[test]
+fn user_struct_shadowing_primitive_zero_value_issue_326() {
+    let src = r#"
+struct rune {
+    count int
+}
+fn fail_helper() (int, error) {
+    return 0, nil
+}
+fn test_fn() (rune, error) {
+    fail_helper()?
+    return rune{ count: 1 }, nil
+}
+"#;
+    let go = emit(src);
+    assert!(
+        go.contains("return *new(rune), hyErr1"),
+        "expected return *new(rune), hyErr1, got:\n{}",
+        go
+    );
+}
+
+#[test]
+fn select_recv_single_var_unread_drops_to_bare_receive() {
+    let go = emit("fn main() {\n    select {\n        v := <-ch:\n            fmt.println(\"tick\")\n    }\n}\n");
+    assert!(
+        go.contains("case <-ch:"),
+        "unread single binding must lower to bare receive:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("case v"),
+        "must not declare unread variable in case:\n{}",
+        go
+    );
+    assert!(
+        !go.contains(":="),
+        "must not use := with no new variables:\n{}",
+        go
+    );
+}
+
+#[test]
+fn select_recv_single_var_blank_drops_to_bare_receive() {
+    let go = emit("fn main() {\n    select {\n        _ := <-ch:\n            fmt.println(\"tick\")\n    }\n}\n");
+    assert!(
+        go.contains("case <-ch:"),
+        "blank single binding must lower to bare receive:\n{}",
+        go
+    );
+    assert!(
+        !go.contains(":="),
+        "must not use := with blank variable:\n{}",
+        go
+    );
+}
+
+#[test]
+fn select_recv_two_var_neither_read_drops_to_bare_receive() {
+    let go = emit("fn main() {\n    select {\n        v, ok := <-ch:\n            fmt.println(\"tick\")\n    }\n}\n");
+    assert!(
+        go.contains("case <-ch:"),
+        "two unread bindings must drop to bare receive:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("case v"),
+        "must not declare unread variables in case:\n{}",
+        go
+    );
+    assert!(
+        !go.contains(":="),
+        "must not use := with no new variables:\n{}",
+        go
+    );
+}
+
+#[test]
+fn select_recv_two_var_neither_read_explicit_blank() {
+    let go = emit("fn main() {\n    select {\n        _, _ := <-ch:\n            fmt.println(\"tick\")\n    }\n}\n");
+    assert!(
+        go.contains("case <-ch:"),
+        "two blank bindings must drop to bare receive:\n{}",
+        go
+    );
+    assert!(
+        !go.contains(":="),
+        "must not emit invalid `case _, _ := <-ch:`:\n{}",
+        go
+    );
+}
+
+#[test]
+fn select_recv_two_var_first_only_read_blanks_second() {
+    let go = emit("fn main() {\n    select {\n        v, ok := <-ch:\n            fmt.println(\"{v}\")\n    }\n}\n");
+    assert!(
+        go.contains("case v, _ := <-ch:"),
+        "unread second binding must be blanked:\n{}",
+        go
+    );
+}
+
+#[test]
+fn select_recv_two_var_second_only_read_blanks_first() {
+    let go = emit("fn main() {\n    select {\n        v, ok := <-ch:\n            if ok {\n                fmt.println(\"open\")\n            }\n    }\n}\n");
+    assert!(
+        go.contains("case _, ok := <-ch:"),
+        "unread first binding must be blanked:\n{}",
+        go
+    );
+}
+
+#[test]
+fn select_recv_two_var_both_read_kept_intact() {
+    let go = emit("fn main() {\n    select {\n        v, ok := <-ch:\n            if ok {\n                fmt.println(\"{v}\")\n            }\n    }\n}\n");
+    assert!(
+        go.contains("case v, ok := <-ch:"),
+        "both read bindings must remain intact:\n{}",
+        go
+    );
+}
+
+#[test]
+fn explicit_multi_segment_go_import_emits_full_path() {
+    let go = emit("import \"crypto/sha256\"\n\nfn main() {\n    _ = sha256.new()\n}\n");
+    assert!(
+        go.contains("\"crypto/sha256\""),
+        "must emit full package path, got:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("\n\t\"sha256\"\n"),
+        "must not strip directory prefix to unresolvable root:\n{}",
+        go
+    );
+}
+
+#[test]
+fn explicit_nested_stdlib_and_third_party_imports_preserved() {
+    let go = emit("import \"encoding/json\"\nimport \"net/url\"\n\nfn main() {\n    _ = json.marshal(\"hi\")\n    _ = url.parse(\"http://example.com\")\n}\n");
+    assert!(
+        go.contains("\"encoding/json\""),
+        "must preserve encoding/json import path:\n{}",
+        go
+    );
+    assert!(
+        go.contains("\"net/url\""),
+        "must preserve net/url import path:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("\n\t\"json\"\n") && !go.contains("\n\t\"url\"\n"),
+        "must not emit naked stripped roots:\n{}",
+        go
+    );
+}
+
+#[test]
+fn bare_return_in_void_fn_has_no_trailing_whitespace() {
+    let go = emit("fn main() {\n    return\n}\n");
+    assert!(go.contains("\treturn\n"), "must emit clean return without trailing space:\n{}", go);
+    assert!(!go.contains("\treturn \n"), "must not emit trailing whitespace:\n{}", go);
+}
+
+#[test]
+fn return_blank_in_error_slot_lowers_to_nil() {
+    let go = emit("fn compute() (int, error) {\n    return 42, _\n}\n");
+    assert!(
+        go.contains("return 42, nil"),
+        "return 42, _ must lower error slot to nil:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("return 42, \n"),
+        "must not emit empty slot with trailing comma:\n{}",
+        go
+    );
+}
+
+#[test]
+fn return_all_blanks_lowers_zero_and_nil() {
+    let go = emit("fn compute() (int, error) {\n    return _, _\n}\n");
+    assert!(
+        go.contains("return 0, nil"),
+        "return _, _ must lower to zero value and nil:\n{}",
+        go
+    );
+}
+
+#[test]
+fn slot_loan_flushes_at_nonlexical_last_use_before_same_block_read_delete_or_move() {
+    let go = emit(
+        "struct service {\n    replicas int\n}\n\nfn worker(m map[string]service, done chan<- bool) {\n    done <- true\n}\n\nfn main() {\n    m := map[string]service{\"api\": {replicas: 1}}\n    s := &m[\"api\"]\n    s.replicas = 5\n    fmt.println(m[\"api\"].replicas)\n    delete(m, \"api\")\n    done := make(chan bool, 1)\n    task worker(move m, done)\n    <-done\n}\n",
+    );
+    let mut_at = go.find("s.replicas = 5").expect("loan mutation");
+    let flush_at = go.find("m[\"api\"] = s").expect("store-back emitted");
+    let read_at = go
+        .find("fmt.Println(m[\"api\"].replicas)")
+        .expect("subsequent read emitted");
+    let del_at = go.find("delete(m, \"api\")").expect("delete emitted");
+    let spawn_at = go.find("go worker(m, done)").expect("task spawn emitted");
+    assert!(
+        mut_at < flush_at && flush_at < read_at && read_at < del_at && del_at < spawn_at,
+        "slot loan must flush right after non-lexical last_use before same-block read/delete/move:\n{}",
+        go
+    );
+    assert_eq!(
+        go.matches("m[\"api\"] = s").count(),
+        1,
+        "must not emit duplicate store-back at block end:\n{}",
+        go
+    );
+}
+
+
+#[test]
+fn slot_loan_rebind_flushes_previous_loan_before_overwriting() {
+    let go = emit(
+        "struct service {\n    replicas int\n}\n\nfn main() {\n    m1 := map[string]service{\"a\": {replicas: 1}}\n    m2 := map[string]service{\"b\": {replicas: 2}}\n    s := &m1[\"a\"]\n    s.replicas = 10\n    s = &m2[\"b\"]\n    s.replicas = 20\n}\n",
+    );
+    let mut_a = go.find("s.replicas = 10").expect("first mutation");
+    let flush_a = go.find("m1[\"a\"] = s").expect("first store-back");
+    let rebind_b = go.find("s = m2[\"b\"]").expect("rebind to m2");
+    let mut_b = go.find("s.replicas = 20").expect("second mutation");
+    let flush_b = go.find("m2[\"b\"] = s").expect("second store-back");
+    assert!(
+        mut_a < flush_a && flush_a < rebind_b && rebind_b < mut_b && mut_b < flush_b,
+        "rebind must flush m1[\"a\"] = s before overwriting s with m2[\"b\"]:\n{}",
+        go
+    );
+    assert_eq!(
+        go.matches("m1[\"a\"] = s").count(),
+        1,
+        "m1[\"a\"] flushed once:\n{}",
+        go
+    );
+}
+
+
+#[test]
+fn slot_loan_snapshots_mutated_or_nonidempotent_index_key() {
+    let go = emit(
+        "struct service {\n    replicas int\n}\n\nfn next_key() string {\n    return \"a\"\n}\n\nfn main() {\n    m := map[string]service{\"a\": {replicas: 1}, \"b\": {replicas: 2}}\n    k := \"a\"\n    s := &m[k]\n    k = \"b\"\n    s.replicas = 10\n    m2 := map[string]service{\"a\": {replicas: 1}}\n    s2 := &m2[next_key()]\n    s2.replicas = 30\n}\n",
+    );
+    assert!(
+        go.contains("hyKey0 := k")
+            && go.contains("s := m[hyKey0]")
+            && go.contains("m[hyKey0] = s"),
+        "mutated index variable k must be snapshotted into hyKey0:\n{}",
+        go
+    );
+    assert!(
+        go.contains("hyKey1 := next_key()")
+            && go.contains("s2 := m2[hyKey1]")
+            && go.contains("m2[hyKey1] = s2"),
+        "call index expression next_key() must be evaluated once via hyKey1:\n{}",
+        go
+    );
+}
+
+
+#[test]
+fn slot_loan_in_match_some_arm_flushes_inside_arm_scope() {
+    let go = emit(
+        "struct service {\n    replicas int\n}\n\nfn maybe_key() option[string] {\n    return some(\"a\")\n}\n\nfn main() {\n    m := map[string]service{\"a\": {replicas: 1}}\n    match maybe_key() {\n        some(k): {\n            s := &m[k]\n            s.replicas = 10\n        }\n        none: {\n        }\n    }\n}\n",
+    );
+    let ok_branch = go.find("if hyMatch0.ok {").expect("some arm branch");
+    let flush_at = go.find("m[k] = s").expect("store-back in some arm");
+    let else_branch = go.find("} else {").expect("else branch");
+    assert!(
+        ok_branch < flush_at && flush_at < else_branch,
+        "some(k) arm slot loan must flush inside `if hyMatch0.ok` before `}} else {{`:\n{}",
+        go
+    );
+}
+
+
+#[test]
+fn slot_loan_parallel_define_assign_and_try_in_place() {
+    let go = emit(
+        "struct service {\n    replicas int\n}\n\nfn get_key() (string, error) {\n    return \"a\", nil\n}\n\nfn main() {\n    m1 := map[string]service{\"a\": {replicas: 1}}\n    m2 := map[string]service{\"b\": {replicas: 2}}\n    s1, s2 := &m1[get_key()?], &m2[\"b\"]\n    s1.replicas = 10\n    s2.replicas = 20\n}\n",
+    );
+    assert!(
+        !go.contains("&m1") && !go.contains("&m2"),
+        "parallel slot loans with `?` must strip `&` and lower to copy-read + store-back:\n{}",
+        go
+    );
+    assert!(
+        go.contains("s1.replicas = 10") && go.contains("m2[\"b\"] = s2"),
+        "parallel slot loans must emit store-backs for both bindings:\n{}",
+        go
+    );
+}
+
+
+#[test]
+fn task_preserves_variadic_spread() {
+    let go = emit(
+        "fn worker(items []string) {}\n\nfn main() {\n    items := []string{\"a\", \"b\"}\n    task worker(items...)\n}\n",
+    );
+    assert!(
+        go.contains("go worker(items...)"),
+        "task must preserve variadic spread `...`:\n{}",
+        go
+    );
+}
+
+#[test]
+fn task_auto_addresses_pointer_params() {
+    let go = emit(
+        "struct env {\n    name string\n}\n\nfn worker(e *env) {}\n\nfn main() {\n    e := env{name: \"prod\"}\n    task worker(e)\n}\n",
+    );
+    assert!(
+        go.contains("go worker(&e)"),
+        "task must auto-address addressable pointer argument:\n{}",
+        go
+    );
+}
+
+#[test]
+fn task_preserves_already_addressed_pointer_param() {
+    let go = emit(
+        "struct env {\n    name string\n}\n\nfn worker(e *env) {}\n\nfn main() {\n    e := env{name: \"prod\"}\n    task worker(&e)\n}\n",
+    );
+    assert!(
+        go.contains("go worker(&e)"),
+        "task must not double-address:\n{}",
+        go
+    );
+}
+
+#[test]
+fn task_package_call_uses_package_and_normalizes_name() {
+    let go = emit(
+        "fn main() {\n    task time.sleep(100)\n}\n",
+    );
+    assert!(
+        go.contains("\"time\""),
+        "package must be imported:\n{}",
+        go
+    );
+    assert!(
+        go.contains("go time.Sleep(100)"),
+        "method name must normalize and emit go:\n{}",
+        go
+    );
+}
+
+#[test]
+fn task_plain_call_still_emits_verbatim() {
+    let go = emit(
+        "fn worker(x int) {}\n\nfn main() {\n    x := 42\n    task worker(x)\n}\n",
+    );
+    assert!(
+        go.contains("go worker(x)"),
+        "plain task call must emit verbatim:\n{}",
+        go
+    );
+}
+
+#[test]
+fn task_with_try_args_hoists_in_order_before_spawn() {
+    let go = emit(
+        "fn worker(a int, b int) {}\nfn first() (int, error) { return 1, nil }\nfn second() (int, error) { return 2, nil }\nfn run() error {\n    task worker(first()?, second()?)\n    return nil\n}\n",
+    );
+    let first_at = go.find("first()").expect("first() present");
+    let second_at = go.find("second()").expect("second() present");
+    let spawn_at = go.find("go worker(").expect("go worker spawn present");
+    assert!(first_at < second_at, "first try must evaluate before second try");
+    assert!(second_at < spawn_at, "tries must evaluate before goroutine spawn");
+    assert!(go.contains("go worker(hyT0, hyT2)"), "arguments substituted with temps:\n{}", go);
+}
+// ---------------------------------------------------------------------------
+// #547 — a shadowing binder must not stretch a slot loan's live range.
+//
+// `n := &m["a"]` opens an O8 slot loan on `n`; the non-lexical flush emits the
+// store-back (`m["a"] = n`) as soon as no later statement reads `n`. A `for` /
+// `select` binder that RE-DECLARES `n` makes the body's `n` a different
+// binding, so those reads must not keep the loan alive. Before the fix the
+// store-back was deferred past `task worker(move m, done)` and raced with the
+// worker on the moved map (`go run -race`: DATA RACE, 3/3 runs).
+// ---------------------------------------------------------------------------
+
+/// The #547 report verbatim: the range binder reuses the loan's name, and the
+/// store-back must land BEFORE the spawn that moves the map.
+#[test]
+fn slot_loan_flushes_before_move_when_range_binder_shadows_the_loan_name_issue_547() {
+    let go = emit(
+        "struct item {\n    x int\n}\n\nfn worker(m map[string]item, done chan bool) {\n    for i in 0..1000 {\n        m[\"w\"] = item{x: i}\n    }\n    done <- true\n}\n\nfn main() {\n    m := map[string]item{\"a\": item{x: 0}}\n    done := make(chan bool, 1)\n    n := &m[\"a\"]\n    n.x = 1\n    task worker(move m, done)\n    total := 0\n    for n in 0..1000 {\n        total += n\n    }\n    <-done\n    fmt.println(total)\n}\n",
+    );
+    let mut_at = go.find("n.x = 1").expect("loan mutation");
+    let flush_at = go.find("m[\"a\"] = n").expect("store-back emitted");
+    let spawn_at = go.find("go worker(m, done)").expect("task spawn emitted");
+    assert!(
+        mut_at < flush_at && flush_at < spawn_at,
+        "a range binder that shadows the loan name must not defer the store-back past the spawn (#547):\n{}",
+        go
+    );
+    assert_eq!(
+        go.matches("m[\"a\"] = n").count(),
+        1,
+        "store-back must be emitted exactly once:/n{}",
+        go
+    );
+}
+
+/// `ForKind::Iterate` binder (`for n in items`) — same class as the range case.
+#[test]
+fn slot_loan_flushes_before_move_when_iterate_binder_shadows_the_loan_name() {
+    let go = emit(
+        "struct service {\n    replicas int\n}\n\nfn worker(m map[string]service, done chan bool) {\n    done <- true\n}\n\nfn main() {\n    m := map[string]service{\"a\": {replicas: 1}}\n    n := &m[\"a\"]\n    n.replicas = 5\n    done := make(chan bool, 1)\n    task worker(move m, done)\n    items := []int{1, 2, 3}\n    total := 0\n    for n in items {\n        total += n\n    }\n    <-done\n    fmt.println(total)\n}\n",
+    );
+    let flush_at = go.find("m[\"a\"] = n").expect("store-back emitted");
+    let spawn_at = go.find("go worker(m, done)").expect("task spawn emitted");
+    assert!(
+        flush_at < spawn_at,
+        "an iterate binder that shadows the loan name must not defer the store-back past the spawn:/n{}",
+        go
+    );
+}
+
+/// `select` receive bindings (`n, ok := <-ch:`) — same class as the loop binder.
+#[test]
+fn slot_loan_flushes_before_move_when_select_recv_shadows_the_loan_name() {
+    let go = emit(
+        "struct service {\n    replicas int\n}\n\nfn worker(m map[string]service, done chan bool) {\n    done <- true\n}\n\nfn main() {\n    m := map[string]service{\"a\": {replicas: 1}}\n    n := &m[\"a\"]\n    n.replicas = 5\n    done := make(chan bool, 1)\n    task worker(move m, done)\n    ch := make(chan int, 1)\n    select {\n        n, ok := <-ch: {\n            fmt.println(n)\n        }\n        default: {\n        }\n    }\n    <-done\n}\n",
+    );
+    let flush_at = go.find("m[\"a\"] = n").expect("store-back emitted");
+    let spawn_at = go.find("go worker(m, done)").expect("task spawn emitted");
+    assert!(
+        flush_at < spawn_at,
+        "a select receive binding that shadows the loan name must not defer the store-back past the spawn:/n{}",
+        go
+    );
+}
+
+/// The other direction: when the OUTER name really is read again after the
+/// shadowing loop, the loan is still live and the store-back must NOT be
+/// flushed early (that would drop the later mutation — a lost update).
+#[test]
+fn slot_loan_stays_live_when_the_outer_name_is_reused_after_a_shadowing_loop() {
+    let go = emit(
+        "struct service {\n    replicas int\n}\n\nfn main() {\n    m := map[string]service{\"a\": {replicas: 1}}\n    n := &m[\"a\"]\n    n.replicas = 5\n    for n in 0..10 {\n        fmt.println(n)\n    }\n    n.replicas = 7\n}\n",
+    );
+    let after_loop_use = go.find("n.replicas = 7").expect("post-loop use emitted");
+    let flush_at = go.find("m[\"a\"] = n").expect("store-back emitted");
+    assert!(
+        after_loop_use < flush_at,
+        "a post-loop read of the outer name keeps the loan live; the store-back must follow it:/n{}",
+        go
+    );
+    assert_eq!(
+        go.matches("m[\"a\"] = n").count(),
+        1,
+        "one store-back, at the real last use:/n{}",
+        go
+    );
+}
+
+/// An `if` INIT that declares the loan's name shadows it for `cond`, both arms
+/// and `else` (Go's if-statement scope) — the same class as the loop binder.
+/// Found by review after the first cut of this fix: the store-back still landed
+/// after the spawn, because `cond`'s `n` was counted as a use of the loan.
+#[test]
+fn slot_loan_flushes_before_move_when_if_init_shadows_the_loan_name() {
+    let go = emit(
+        "struct item {\n    x int\n}\n\nfn worker(m map[string]item, done chan bool) {\n    m[\"w\"] = item{x: 1}\n    done <- true\n}\n\nfn main() {\n    m := map[string]item{\"a\": item{x: 0}}\n    done := make(chan bool, 1)\n    n := &m[\"a\"]\n    n.x = 1\n    task worker(move m, done)\n    total := 0\n    if n := 2; n > 1 {\n        total += n\n    }\n    <-done\n    fmt.println(total)\n}\n",
+    );
+    let flush_at = go.find("m[\"a\"] = n").expect("store-back emitted");
+    let spawn_at = go.find("go worker(m, done)").expect("task spawn emitted");
+    assert!(
+        flush_at < spawn_at,
+        "an `if` init that shadows the loan name must not defer the store-back past the spawn:/n{}",
+        go
+    );
+}
+
+/// A closure's NAMED RESULT is a binder too (`fn() (n int) { n = 5 }`): its
+/// body assigns the result, not an outer loan of the same name (#547, same
+/// class as the loop / if-init binders; found in review after the first cut).
+#[test]
+fn slot_loan_flushes_before_move_when_closure_named_result_shadows_the_loan_name() {
+    let go = emit(
+        "struct item {\n    x int\n}\n\nfn worker(m map[string]item, done chan bool) {\n    m[\"w\"] = item{x: 1}\n    done <- true\n}\n\nfn main() {\n    m := map[string]item{\"a\": item{x: 0}}\n    done := make(chan bool, 1)\n    n := &m[\"a\"]\n    n.x = 1\n    task worker(move m, done)\n    f := fn() (n int) {\n        n = 5\n        return\n    }\n    fmt.println(f())\n    <-done\n}\n",
+    );
+    let flush_at = go.find("m[\"a\"] = n").expect("store-back emitted");
+    let spawn_at = go.find("go worker(m, done)").expect("task spawn emitted");
+    assert!(
+        flush_at < spawn_at,
+        "a closure named result that shadows the loan name must not defer the store-back past the spawn:/n{}",
+        go
+    );
+}
+
+/// `match some(n)` binds `n` for the whole arm (guard included) — the third
+/// binder shape, already handled upstream; this pins it so a refactor cannot
+/// silently drop the `shadowed` filter (#547 review).
+#[test]
+fn slot_loan_flushes_before_move_when_match_binding_shadows_the_loan_name() {
+    let go = emit(
+        "struct service {\n    replicas int\n}\n\nfn worker(m map[string]service, done chan bool) {\n    done <- true\n}\n\nfn maybe() option[int] {\n    return some(1)\n}\n\nfn main() {\n    m := map[string]service{\"a\": {replicas: 1}}\n    n := &m[\"a\"]\n    n.replicas = 5\n    done := make(chan bool, 1)\n    task worker(move m, done)\n    match maybe() {\n        some(n): {\n            fmt.println(n)\n        }\n        none: {\n        }\n    }\n    <-done\n}\n",
+    );
+    let flush_at = go.find("m[\"a\"] = n").expect("store-back emitted");
+    let spawn_at = go.find("go worker(m, done)").expect("task spawn emitted");
+    assert!(
+        flush_at < spawn_at,
+        "a `match some(n)` binding that shadows the loan name must not defer the store-back past the spawn:/n{}",
+        go
+    );
+}
+
+/// A closure PARAM shadowing the loan name (the `results` half is covered by
+/// `..._closure_named_result_...`; this pins the `params` half).
+#[test]
+fn slot_loan_flushes_before_move_when_closure_param_shadows_the_loan_name() {
+    let go = emit(
+        "struct service {\n    replicas int\n}\n\nfn worker(m map[string]service, done chan bool) {\n    done <- true\n}\n\nfn main() {\n    m := map[string]service{\"a\": {replicas: 1}}\n    n := &m[\"a\"]\n    n.replicas = 5\n    done := make(chan bool, 1)\n    task worker(move m, done)\n    f := fn(n int) {\n        fmt.println(n)\n    }\n    f(1)\n    <-done\n}\n",
+    );
+    let flush_at = go.find("m[\"a\"] = n").expect("store-back emitted");
+    let spawn_at = go.find("go worker(m, done)").expect("task spawn emitted");
+    assert!(
+        flush_at < spawn_at,
+        "a closure param that shadows the loan name must not defer the store-back past the spawn:/n{}",
+        go
+    );
+}
+
+/// The OVER-SKIP guard for the `if` arm: when the init does NOT declare the
+/// loan's name, the body's use of it is a real use and the store-back must
+/// stay after it (dropping this would lose the second mutation).
+#[test]
+fn slot_loan_stays_live_when_an_if_init_binds_a_different_name() {
+    let go = emit(
+        "struct service {\n    replicas int\n}\n\nfn main() {\n    m := map[string]service{\"a\": {replicas: 1}}\n    n := &m[\"a\"]\n    n.replicas = 5\n    if k := 2; k > 1 {\n        n.replicas = 7\n    }\n}\n",
+    );
+    let body_use = go.find("n.replicas = 7").expect("body use emitted");
+    let flush_at = go.find("m[\"a\"] = n").expect("store-back emitted");
+    assert!(
+        body_use < flush_at,
+        "an `if` whose init binds a DIFFERENT name must not shadow the loan; the store-back follows the body use:/n{}",
+        go
+    );
+    assert_eq!(
+        go.matches("m[\"a\"] = n").count(),
+        1,
+        "one store-back, at the real last use:/n{}",
+        go
+    );
+}
+
+#[test]
+fn parenthesized_slot_loan_lowers_to_copy_and_storeback() {
+    let go = emit(
+        "struct svc {\n    count int\n}\n\nfn main() {\n    m := map[string]svc{\"a\": svc{count: 1}}\n    s := (&m[\"a\"])\n    s.count = 2\n    s = &(m[\"a\"])\n    s.count = 3\n}\n",
+    );
+    assert!(
+        go.contains("s := m[\"a\"]"),
+        "expected parenthesized slot loan to lower to copy read, got:\n{}",
+        go
+    );
+    assert!(
+        go.contains("m[\"a\"] = s"),
+        "expected parenthesized slot loan to emit store-back, got:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("&m[\"a\"]") && !go.contains("&(m[\"a\"])"),
+        "expected no raw address-of map index in emitted Go, got:\n{}",
+        go
+    );
+}
+
+#[test]
+fn array_composite_literals_emit_fixed_and_ellipsis_go_arrays() {
+    let src = r#"
+const n = 2
+
+struct pair {
+    a int
+    b int
+}
+
+struct holder {
+    tags [3]string
+}
+
+fn take(xs [3]string) [3]string {
+    return xs
+}
+
+fn main() {
+    a := [3]int{1, 2, 3}
+    b := [...]int{1, 2, 3}
+    c := [3]int{}
+    d := [3]int{1}
+    e := [n]int{1, 2}
+    f := [n + 1]int{1, 2, 3}
+    g := [2][2]int{{1, 2}, {3, 4}}
+    h := [2]pair{{a: 1, b: 2}, {a: 3, b: 4}}
+    s := take([3]string{"a", "b", "c"})
+    hd := holder{tags: [3]string{"x", "y", "z"}}
+    m := map[string][2]int{"k": [2]int{7, 8}}
+    for i, v in [3]int{10, 20, 30} {
+        fmt.println(i, v)
+    }
+    fmt.println(a[0], b[1], c[2], d[0], e[1], f[2], g[1][0], h[0].b, s[0], hd.tags[1], m["k"][0])
+}
+"#;
+    let go = emit(src);
+    assert!(go.contains("a := [3]int{1, 2, 3}"), ":\n{go}");
+    assert!(go.contains("b := [...]int{1, 2, 3}"), ":\n{go}");
+    assert!(go.contains("c := [3]int{}"), ":\n{go}");
+    assert!(go.contains("d := [3]int{1}"), ":\n{go}");
+    assert!(go.contains("e := [n]int{1, 2}"), ":\n{go}");
+    assert!(go.contains("f := [n + 1]int{1, 2, 3}"), ":\n{go}");
+    assert!(
+        go.contains("g := [2][2]int{[2]int{1, 2}, [2]int{3, 4}}"),
+        ":\n{go}"
+    );
+    assert!(
+        go.contains("h := [2]pair{pair{a: 1, b: 2}, pair{a: 3, b: 4}}"),
+        ":\n{go}"
+    );
+    assert!(
+        go.contains("s := take([3]string{\"a\", \"b\", \"c\"})"),
+        ":\n{go}"
+    );
+    assert!(
+        go.contains("for i, v := range [3]int{10, 20, 30} {"),
+        ":\n{go}"
+    );
+    if std::process::Command::new("go")
+        .arg("version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+    {
+        let tmp = std::env::temp_dir().join(format!("hyb_emit_arr_643_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        std::fs::write(tmp.join("go.mod"), "module arrlit643\n\ngo 1.21\n").expect("write go.mod");
+        std::fs::write(tmp.join("main.go"), &go).expect("write main.go");
+        let out = std::process::Command::new("go")
+            .arg("run")
+            .arg(".")
+            .current_dir(&tmp)
+            .output()
+            .expect("invoke go run");
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            out.status.success(),
+            "go run failed on emitted Go:\n{}\nstderr:\n{}",
+            go,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("1 2 0 1 2 3 3 2 a y 7"),
+            "unexpected runtime stdout:\n{stdout}"
+        );
+    }
+}
+#[test]
+fn test_emit_t9_set_surface() {
+    let go = emit(
+        "fn main() {\n    seen := set[int]{}\n    seen.insert(1)\n    fmt.println(len(seen))\n    delete(seen, 1)\n    for v in seen {\n        fmt.println(v)\n    }\n}\n",
+    );
+    assert!(go.contains("seen.len()"), "len(seen) should lower to seen.len():\n{}", go);
+    assert!(go.contains("seen.remove(1)"), "delete(seen, 1) should lower to seen.remove(1):\n{}", go);
+    assert!(go.contains("for v := range seen.m {"), "for v in seen should lower to for v := range seen.m:\n{}", go);
+    assert!(go.contains("type set[t comparable] struct {"), "SET_PRELUDE should be included:\n{}", go);
+}
+
+#[test]
+fn test_emit_t20_option_surface() {
+    let go = emit(
+        "fn main() {\n    o := some(5)\n    fmt.println(o.unwrap())\n    fmt.println(o.or(0))\n    fmt.println(o.is_some())\n}\n",
+    );
+    assert!(go.contains("func (o option[v]) unwrap() v {"), "unwrap method in prelude:\n{}", go);
+    assert!(go.contains("func (o option[v]) or(defaultVal v) v {"), "or method in prelude:\n{}", go);
+    assert!(go.contains("func (o option[v]) is_some() bool {"), "is_some method in prelude:\n{}", go);
+}
+
+#[test]
+fn break_loop_and_continue_loop_in_nested_for_bind_nearest_loop_issue_654() {
+    let src = r#"
+package main
+
+import "fmt"
+
+fn main() {
+    rounds := 0
+    loop {
+        rounds += 1
+        if rounds == 4 {
+            fmt.println("loop guard hit")
+            break loop
+        }
+        for i in 0..3 {
+            if i == 1 {
+                break loop
+            }
+        }
+        fmt.println("after for")
+    }
+
+    visits := 0
+    passes := 0
+    loop {
+        passes += 1
+        if passes == 3 {
+            break loop
+        }
+        for v in []int{1, 2, 3} {
+            visits += v
+            continue loop
+        }
+        fmt.println("after for (continue)")
+    }
+}
+"#;
+    let go = emit(src);
+    // Outer loop 1 receives hyLoop:
+    assert!(go.contains("hyLoop:\n\tfor {"), "outer loop 1 must have hyLoop label:\n{}", go);
+    // Inner for i in 0..3 must NOT receive a label
+    assert!(!go.contains("hyLoop1:\n\t\tfor i :="), "inner for must not receive a label:\n{}", go);
+    // break loop inside inner for must break hyLoop
+    assert!(go.contains("break hyLoop\n"), "break loop in inner for must target hyLoop:\n{}", go);
+
+    // Outer loop 2 receives hyLoop1:
+    assert!(go.contains("hyLoop1:\n\tfor {"), "outer loop 2 must have hyLoop1 label:\n{}", go);
+    // continue loop inside inner for must continue hyLoop1
+    assert!(go.contains("continue hyLoop1\n"), "continue loop in inner for must target hyLoop1:\n{}", go);
+}
+
+#[test]
+fn break_loop_inside_for_without_loop_statement_refused_emit() {
+    let src = r#"
+fn main() {
+    for i in 0..3 {
+        if i == 1 {
+            break loop
+        }
+    }
+}
+"#;
+    let err = emit_err(src);
+    assert!(
+        err.contains("break loop` with no enclosing loop"),
+        "expected unsupported error for break loop outside loop statement, got: {}",
+        err
+    );
+}
+
+#[test]
+fn errors_wrap_lowers_to_fmt_errorf_and_preserves_errors_is() {
+    let src = r#"
+package main
+
+import "errors"
+import "fmt"
+
+fn main() {
+    not_found := errors.new("not found")
+    err := errors.wrap(not_found, "opening config")
+    fmt.println(err)
+    fmt.println(errors.is(err, not_found))
+}
+"#;
+    let go = emit(src);
+    assert!(
+        go.contains("err := fmt.Errorf(\"%s: %w\", \"opening config\", not_found)"),
+        "expected errors.wrap to lower to fmt.Errorf with msg and err, got:\n{}",
+        go
+    );
+    assert!(
+        go.contains("\"errors\""),
+        "must import errors when errors.New or errors.Is is used, got:\n{}",
+        go
+    );
+    assert!(
+        go.contains("\"fmt\""),
+        "must import fmt for fmt.Errorf and fmt.Println, got:\n{}",
+        go
+    );
+}
+
+#[test]
+fn errors_wrap_alone_omits_unused_errors_import() {
+    let src = r#"
+package main
+
+import "errors"
+
+fn wrap_it(err error) error {
+    return errors.wrap(err, "context")
+}
+"#;
+    let go = emit(src);
+    assert!(
+        go.contains("return fmt.Errorf(\"%s: %w\", \"context\", err)"),
+        "expected errors.wrap to lower to fmt.Errorf, got:\n{}",
+        go
+    );
+    assert!(
+        go.contains("\"fmt\""),
+        "must auto-import fmt for fmt.Errorf, got:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("\"errors\""),
+        "must prune unused errors import when only errors.wrap is used, got:\n{}",
+        go
+    );
+}
+
+#[test]
+fn errors_wrap_named_arguments_and_arg_count_validation() {
+    let src = r#"
+package main
+
+import "errors"
+
+fn wrap_named(err error) error {
+    return errors.wrap(msg="ctx", err=err)
+}
+"#;
+    let go = emit(src);
+    assert!(
+        go.contains("return fmt.Errorf(\"%s: %w\", \"ctx\", err)"),
+        "expected named args to order correctly in fmt.Errorf, got:\n{}",
+        go
+    );
+
+    let err_src = r#"
+package main
+
+import "errors"
+
+fn f(err error) error {
+    return errors.wrap(err)
+}
+"#;
+    let err = emit_err(err_src);
+    assert!(
+        err.contains("errors.wrap takes exactly two arguments"),
+        "expected argument count error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn m4_initialism_mapping_for_foreign_go_names_issue_658() {
+    let go = emit(
+        "fn main() {\n    _ = io.eof\n    _ = http.status_ok\n    _ = time.rfc3339\n    _ = strings.to_valid_utf8(\"a\", \"b\")\n}\n",
+    );
+    assert!(go.contains("io.EOF"), "expected io.EOF, got:\n{}", go);
+    assert!(go.contains("http.StatusOK"), "expected http.StatusOK, got:\n{}", go);
+    assert!(go.contains("time.RFC3339"), "expected time.RFC3339, got:\n{}", go);
+    assert!(go.contains("strings.ToValidUTF8(\"a\", \"b\")"), "expected strings.ToValidUTF8, got:\n{}", go);
+}
+
