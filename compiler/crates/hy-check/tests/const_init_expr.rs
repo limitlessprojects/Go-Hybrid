@@ -197,3 +197,66 @@ fn composite_literal_const_still_accepted() {
         cs
     );
 }
+
+#[test]
+fn nil_const_initializer_is_rejected() {
+    let local_nil = check("fn main() {\n    const c = nil\n    fmt.println(c)\n}\n");
+    let cs = error_codes(&local_nil);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E6003"),
+        "expected HYB-E6003 for const c = nil, got {:?}",
+        cs
+    );
+
+    let file_nil = check("const c = nil\nfn main() {\n    fmt.println(c)\n}\n");
+    let file_cs = error_codes(&file_nil);
+    assert!(
+        file_cs.iter().any(|c| c == "HYB-E6003"),
+        "expected HYB-E6003 for file-level const c = nil, got {:?}",
+        file_cs
+    );
+}
+
+#[test]
+fn file_level_const_forward_type_alias_and_const_overflow_checked() {
+    let ok_forward_alias = check(
+        "const x = my_int(42)\ntype my_int = int8\nfn main() {\n    fmt.println(x)\n}\n",
+    );
+    let ok_cs = error_codes(&ok_forward_alias);
+    assert!(
+        !ok_cs.iter().any(|c| c == "HYB-E6003" || c == "HYB-E6002"),
+        "forward type alias conversion of valid constant must pass, got {:?}",
+        ok_cs
+    );
+
+    let overflow_forward_alias = check(
+        "const x my_int = 300\ntype my_int = int8\nfn main() {\n    fmt.println(x)\n}\n",
+    );
+    let overflow_cs = error_codes(&overflow_forward_alias);
+    assert!(
+        overflow_cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for forward-aliased int8 overflow, got {:?}",
+        overflow_cs
+    );
+
+    let overflow_forward_const = check(
+        "const a int8 = b\nconst b = 300\nfn main() {\n    fmt.println(a)\n}\n",
+    );
+    let forward_const_cs = error_codes(&overflow_forward_const);
+    assert!(
+        forward_const_cs.iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for forward-referenced const overflow, got {:?}",
+        forward_const_cs
+    );
+
+    let shadow_forward_fn = check(
+        "const x = int8(42)\nfn int8(n int) int {\n    return n\n}\nfn main() {\n    fmt.println(x)\n}\n",
+    );
+    let shadow_cs = error_codes(&shadow_forward_fn);
+    assert!(
+        shadow_cs.iter().any(|c| c == "HYB-E6003"),
+        "expected HYB-E6003 when top-level fn shadows primitive conversion in file-level const, got {:?}",
+        shadow_cs
+    );
+}
+

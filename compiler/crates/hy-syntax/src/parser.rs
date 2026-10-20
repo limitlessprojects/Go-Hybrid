@@ -2129,6 +2129,22 @@ impl Parser {
                     };
                 }
                 Tok::Punct("(") => {
+                    // A `(` that OPENS a new source line starts a statement of
+                    // its own — it is never an argument list for the expression
+                    // above. Same newline-sensitivity rule as the `<-` send
+                    // fusion (#77): a continuation that changes how the program
+                    // parses has to sit on the same line as what it continues.
+                    // Without this, `f()` / `(x)` fused into `f()(x)` and
+                    // `x := one` / `(2)` into `x := one(2)` — the second
+                    // statement vanished, and both forms passed `hyb check`
+                    // (the second one also built, silently meaning something
+                    // else). There is no `;` to force a break: the lexer has no
+                    // statement terminator, so the newline is the only signal
+                    // and `(` is the only postfix that can also begin a
+                    // statement.
+                    if !self.same_line_as_prev() {
+                        break;
+                    }
                     let span_start = e.span().start;
                     let args = self.parse_call_args()?;
                     let span = self.span_to_prev(span_start);
@@ -2255,7 +2271,20 @@ impl Parser {
                     depth -= 1;
                 }
                 Tok::Punct(",") if depth == 1 => has_comma = true,
-                Tok::Ident(_) if depth >= 1 => type_shaped = true,
+                Tok::Ident(_) | Tok::Kw("chan") | Tok::Kw("fn") if depth >= 1 => {
+                    type_shaped = true
+                }
+                Tok::Punct("<-") if depth >= 1 => {
+                    let prev_is_chan = k > 0
+                        && matches!(self.toks.get(k - 1).map(|t| &t.tok), Some(Tok::Kw("chan")));
+                    let next_is_chan =
+                        matches!(self.toks.get(k + 1).map(|t| &t.tok), Some(Tok::Kw("chan")));
+                    if prev_is_chan || next_is_chan {
+                        type_shaped = true;
+                    } else if depth == 1 {
+                        index_shaped = true;
+                    }
+                }
                 Tok::Punct(".") if depth >= 1 => {}
                 Tok::Eof => return false,
                 other => {
@@ -3990,6 +4019,104 @@ fn main() {
         assert!(
             matches!(&body.stmts[1], Stmt::Expr { expr: Expr::Receive { .. }, .. }),
             "second statement is a receive expression, not part of a send"
+        );
+    }
+
+    #[test]
+    fn line_leading_paren_starts_a_statement_not_a_call() {
+        // `(` on a new line is a statement of its own, never an argument
+        // list for the expression above. Before the newline guard,
+        // `x := one` / `(2)` parsed as the single statement `x := one(2)`:
+        // the `(2)` statement disappeared, `hyb check` reported 0
+        // diagnostics and `hyb build` produced a working binary that meant
+        // something else. There is no `;` terminator to force the break.
+        let f = parse_src("fn main() {\n    x := one\n    (2)\n}");
+        let body = f.fns().next().unwrap().body.as_ref().unwrap();
+        assert_eq!(
+            body.stmts.len(),
+            2,
+            "expected two statements, got {:?}",
+            body.stmts
+        );
+        let Stmt::Local(l) = &body.stmts[0] else {
+            panic!("first statement is the define")
+        };
+        assert!(
+            matches!(&l.values[0], Expr::Ident { name, .. } if name == "one"),
+            "the define's value must stay `one`, not become a call: {:?}",
+            l.values[0]
+        );
+        assert!(
+            matches!(&body.stmts[1], Stmt::Expr { expr: Expr::Paren { .. }, .. }),
+            "the second statement is the parenthesized expression: {:?}",
+            body.stmts[1]
+        );
+    }
+
+    #[test]
+    fn line_leading_paren_after_a_call_is_two_statements() {
+        // the `<-` send-fusion precedent (#77), for `(`: `f()` then `(x)`
+        // must not fuse into `f()(x)`.
+        let f = parse_src("fn main() {\n    fmt.println(\"hi\")\n    (x)\n}");
+        let body = f.fns().next().unwrap().body.as_ref().unwrap();
+        assert_eq!(body.stmts.len(), 2, "got {:?}", body.stmts);
+        let Stmt::Expr {
+            expr: Expr::Call { args, .. },
+            ..
+        } = &body.stmts[0]
+        else {
+            panic!("first statement is the call")
+        };
+        assert_eq!(args.len(), 1, "the call keeps exactly its own argument");
+        assert!(
+            matches!(&body.stmts[1], Stmt::Expr { expr: Expr::Paren { .. }, .. }),
+            "second statement is the parenthesized expression, not an argument list"
+        );
+    }
+
+    #[test]
+    fn same_line_and_multiline_call_args_still_parse_as_one_call() {
+        // The guard is newline sensitivity, not a ban on `(`: a call whose
+        // argument list opens on the callee's line keeps working, including
+        // the idiomatic multiline spelling.
+        let f = parse_src("fn main() {\n    foo(1)\n}");
+        assert!(
+            matches!(first_stmt(&f), Stmt::Expr { expr: Expr::Call { .. }, .. }),
+            "same-line args must stay a call"
+        );
+        let f = parse_src("fn main() {\n    foo(\n        1,\n        2,\n    )\n}");
+        let stmt = first_stmt(&f);
+        let Stmt::Expr {
+            expr: Expr::Call { args, .. },
+            ..
+        } = stmt
+        else {
+            panic!("multiline argument list is still one call, got {:?}", stmt)
+        };
+        assert_eq!(args.len(), 2);
+    }
+
+    #[test]
+    fn paren_receiver_takes_a_same_line_member_chain() {
+        // The guard only gates `(`; `(recv).member()` on one line must still
+        // parse as a method call on a parenthesized receiver.
+        let f = parse_src("fn main() {\n    (mux).handle(\"/ping\")\n}");
+        let stmt = first_stmt(&f);
+        let Stmt::Expr {
+            expr: Expr::Call { callee, .. },
+            ..
+        } = stmt
+        else {
+            panic!("expected a call, got {:?}", stmt)
+        };
+        assert!(
+            matches!(
+                callee.as_ref(),
+                Expr::Field { base, name, .. }
+                    if name == "handle" && matches!(base.as_ref(), Expr::Paren { .. })
+            ),
+            "callee is `(mux).handle`, got {:?}",
+            callee
         );
     }
 

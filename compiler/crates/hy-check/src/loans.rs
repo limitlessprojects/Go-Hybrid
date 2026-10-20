@@ -1973,8 +1973,7 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::Call { callee, args, .. } => {
-                let sh = self.shape_of_expr(st, e);
-                if field_borrow_kind(&sh).is_some() || matches!(sh, TypeShape::Unknown) {
+                if self.expr_has_borrow_shape(st, e) {
                     if let Expr::Field { base, .. } = unwrap_parens(callee) {
                         self.collect_expr_addr_of_roots(st, base, out);
                     }
@@ -2003,13 +2002,27 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A tuple call can carry a borrow in any result, not just the first.
+    fn expr_has_borrow_shape(&self, st: &FnState, e: &Expr) -> bool {
+        let inner = unwrap_parens(e);
+        if let Expr::Call { callee, .. } = inner {
+            if let Some(results) = self.call_result_tys(st, callee) {
+                return results.iter().any(|ty| {
+                    let shape = self.shape_of_type(ty);
+                    field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown)
+                });
+            }
+        }
+        let shape = self.shape_of_expr(st, inner);
+        field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown)
+    }
+
     pub(crate) fn expr_carries_borrow(&self, st: &FnState, e: &Expr) -> bool {
         let inner = unwrap_parens(e);
         if as_addr_of(inner).is_some() || contains_addr_of_in_literal(inner) {
             return true;
         }
-        let shape = self.shape_of_expr(st, inner);
-        if field_borrow_kind(&shape).is_none() && !matches!(shape, TypeShape::Unknown) {
+        if !self.expr_has_borrow_shape(st, inner) {
             return false;
         }
         let mut addr_roots = Vec::new();
@@ -2149,6 +2162,24 @@ impl<'a> Checker<'a> {
             .is_some_and(|r| r.is_pointer || matches!(r.ty, hy_syntax::TypeExpr::Pointer { .. }))
     }
 
+    /// A projection of a call-produced value has independent storage only
+    /// when the call returns a value copy or a proven fresh slice backing array.
+    fn addr_operand_returns_fresh_copy(&self, st: &FnState, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Index { base, .. } | Expr::Field { base, .. } | Expr::Slice { base, .. } => {
+                self.addr_operand_returns_fresh_copy(st, base)
+            }
+            Expr::Call { callee, .. } => {
+                let shape = self.shape_of_expr(st, expr);
+                (!matches!(shape, TypeShape::Unknown) && !self.shape_may_share(&shape))
+                    || (matches!(unwrap_parens(callee), Expr::Ident { name, .. }
+                        if self.lookup_binding(st, name).is_none())
+                        && self.call_returns_fresh_copy(st, expr))
+            }
+            _ => false,
+        }
+    }
+
     /// Collect root identifiers borrowed in `e` either via explicit address-of
     /// (`&x`, `&m[k]`, `&s.f`) or via `hy-emit` auto-addressing of a value
     /// argument/receiver into a `*T` parameter/receiver (`id_ptr(s)`, `s.ptr()`)
@@ -2163,6 +2194,13 @@ impl<'a> Checker<'a> {
                 operand,
                 ..
             } => {
+                if operand.root_ident().is_none()
+                    && matches!(unwrap_parens(operand), Expr::Index { .. } | Expr::Field { .. })
+                    && !self.addr_operand_returns_fresh_copy(st, operand)
+                {
+                    collect_ref_roots(operand, out);
+                    self.collect_callee_const_return_roots(st, operand, out, 0);
+                }
                 self.collect_borrowed_roots(st, operand, out);
             }
             Expr::Try { operand, .. } | Expr::Move { operand, .. } => {
@@ -2194,7 +2232,7 @@ impl<'a> Checker<'a> {
             }
             Expr::Call { callee, args, .. } => {
                 let call_res = self.shape_of_expr(st, inner);
-                if self.shape_may_share(&call_res) || matches!(call_res, TypeShape::Unknown) {
+                if self.shape_may_share(&call_res) || self.expr_has_borrow_shape(st, inner) {
                     for (idx, a) in args.iter().enumerate() {
                         if !matches!(unwrap_parens(&a.value), Expr::Move { .. }) {
                             let arg_shape = self.shape_of_expr(st, &a.value);
@@ -3652,38 +3690,51 @@ impl<'a> Checker<'a> {
     /// operands and auto-addressed `*T` call arguments/receivers via
     /// `collect_borrowed_roots`, not just the direct `as_addr_of` form.
     pub(crate) fn record_local_borrow_aliases(&self, st: &mut FnState, l: &LocalDecl) {
-        if l.names.len() == l.values.len() {
-            for (name, value) in l.names.iter().zip(l.values.iter()) {
-                if self.expr_carries_borrow(st, value) {
-                    st.borrow_bindings.insert(name.clone());
-                } else {
-                    st.borrow_bindings.remove(name);
+        let values: Vec<_> = if l.names.len() == l.values.len() {
+            l.values
+                .iter()
+                .map(|v| (v, self.shape_of_expr(st, v)))
+                .collect()
+        } else if l.values.len() == 1 && l.names.len() > 1 {
+            self.multi_value_shapes(st, &l.values[0], l.names.len())
+                .into_iter()
+                .map(|shape| (&l.values[0], shape))
+                .collect()
+        } else {
+            return;
+        };
+        for (name, (value, shape)) in l.names.iter().zip(values) {
+            if name == "_" {
+                continue;
+            }
+            let borrow_slot = field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown);
+            if (l.names.len() == l.values.len() || borrow_slot) && self.expr_carries_borrow(st, value) {
+                st.borrow_bindings.insert(name.clone());
+            } else {
+                st.borrow_bindings.remove(name);
+            }
+            if !borrow_slot || move_operand_ident(value).is_some() {
+                continue;
+            }
+            let mut addr_roots = Vec::new();
+            self.collect_borrowed_roots(st, value, &mut addr_roots);
+            for src in addr_roots {
+                if src == *name {
+                    continue;
                 }
-                if move_operand_ident(value).is_none() {
-                    let shape = self.shape_of_expr(st, value);
-                    if field_borrow_kind(&shape).is_none() && !matches!(shape, TypeShape::Unknown) {
-                        continue;
-                    }
-                    let mut addr_roots = Vec::new();
-                    self.collect_borrowed_roots(st, value, &mut addr_roots);
-                    for src in addr_roots {
-                        if src != *name {
-                            let matched = self.lookup_binding(st, &src).map(|b| {
-                                let ok = !b.shape.is_sendable_by_type()
-                                    || b.immutable
-                                    || self.binding_can_be_borrowed(st, &src);
-                                (ok, b.non_owned_origin.clone())
-                            });
-                            if let Some((true, origin)) = matched {
-                                st.aliases.insert(name.clone(), src);
-                                if let Some(origin) = origin {
-                                    if let Some(nb) = st.env_lookup_mut(name) {
-                                        if nb.non_owned_origin.is_none() {
-                                            nb.non_owned_origin = Some(origin);
-                                        }
-                                    }
-                                }
-                                break;
+                let matched = self.lookup_binding(st, &src).map(|b| {
+                    let ok = !b.shape.is_sendable_by_type()
+                        || b.immutable
+                        || self.binding_can_be_borrowed(st, &src);
+                    (ok, b.non_owned_origin.clone())
+                });
+                if let Some((true, origin)) = matched {
+                    st.share_edge(name, &src);
+                    st.aliases.insert(name.clone(), src);
+                    if let Some(origin) = origin {
+                        if let Some(nb) = st.env_lookup_mut(name) {
+                            if nb.non_owned_origin.is_none() {
+                                nb.non_owned_origin = Some(origin);
                             }
                         }
                     }
@@ -3702,27 +3753,39 @@ impl<'a> Checker<'a> {
         op: AssignOp,
         values: &[Expr],
     ) {
-        if op == AssignOp::Assign && values.len() == targets.len() {
-            for (t, v) in targets.iter().zip(values.iter()) {
+        if op == AssignOp::Assign {
+            let shaped_values: Vec<_> = if values.len() == targets.len() {
+                values
+                    .iter()
+                    .map(|v| (v, self.shape_of_expr(st, v)))
+                    .collect()
+            } else if values.len() == 1 && targets.len() > 1 {
+                self.multi_value_shapes(st, &values[0], targets.len())
+                    .into_iter()
+                    .map(|shape| (&values[0], shape))
+                    .collect()
+            } else {
+                return;
+            };
+            for (t, (v, shape)) in targets.iter().zip(shaped_values) {
                 let carries_borrow = self.expr_carries_borrow(st, v);
                 if let PlaceKind::Ident(name) = &t.kind {
                     if name == "_" {
                         continue;
                     }
+                    let borrow_slot =
+                        field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown);
                     let inner = unwrap_parens(v);
                     let is_borrow = as_addr_of(inner).is_some()
                         || contains_addr_of_in_literal(inner)
                         || matches!(inner, Expr::Ident { name: src, .. } if st.borrow_bindings.contains(src));
-                    if is_borrow {
+                    if (values.len() == targets.len() || borrow_slot) && (is_borrow || carries_borrow)
+                    {
                         st.borrow_bindings.insert(name.clone());
                     } else {
                         st.borrow_bindings.remove(name);
                     }
-                    if move_operand_ident(v).is_none() {
-                        let shape = self.shape_of_expr(st, v);
-                        if field_borrow_kind(&shape).is_none() && !matches!(shape, TypeShape::Unknown) {
-                            continue;
-                        }
+                    if borrow_slot && move_operand_ident(v).is_none() {
                         let mut addr_roots = Vec::new();
                         self.collect_borrowed_roots(st, v, &mut addr_roots);
                         for src in addr_roots {
@@ -3734,6 +3797,7 @@ impl<'a> Checker<'a> {
                                     (ok, b.non_owned_origin.clone())
                                 });
                                 if let Some((true, origin)) = matched {
+                                    st.share_edge(name, &src);
                                     st.aliases.insert(name.clone(), src);
                                     if let Some(origin) = origin {
                                         if let Some(nb) = st.env_lookup_mut(name) {
@@ -3742,7 +3806,6 @@ impl<'a> Checker<'a> {
                                             }
                                         }
                                     }
-                                    break;
                                 }
                             }
                         }
@@ -4488,7 +4551,7 @@ impl<'a> Checker<'a> {
     /// a `return` of the called function, method, or closure (`return m, m`,
     /// `m2 := m; return m, m2`, `return s[0:1], s[1:2]`, `return box{m: m}, m`,
     /// or bare `return` with named results).
-    fn callee_shared_return_pairs(&self, st: &FnState, value: &Expr) -> Vec<(usize, usize)> {
+    pub(crate) fn callee_shared_return_pairs(&self, st: &FnState, value: &Expr) -> Vec<(usize, usize)> {
         let call = match unwrap_parens(value) {
             Expr::Try { operand, .. } => unwrap_parens(operand),
             other => other,
@@ -5788,18 +5851,26 @@ impl<'a> Checker<'a> {
         let Some(operand) = as_addr_of(val) else {
             return;
         };
+        let operand = unwrap_parens(operand);
         if !matches!(operand, Expr::Index { .. } | Expr::Field { .. }) {
             return;
         }
-        let Some(root) = operand.root_ident() else {
-            return;
-        };
-        let place = Place {
-            kind: PlaceKind::Ident(root.to_string()),
-            span: val.span(),
-        };
-        if let Some(const_name) = self.const_write_root(st, &place) {
-            self.emit_const_write_error(&const_name, val.span());
+        let mut roots = Vec::new();
+        if let Some(root) = operand.root_ident() {
+            roots.push(root.to_string());
+        } else if !self.addr_operand_returns_fresh_copy(st, operand) {
+            collect_ref_roots(operand, &mut roots);
+            self.collect_callee_const_return_roots(st, operand, &mut roots, 0);
+        }
+        for root in roots {
+            let place = Place {
+                kind: PlaceKind::Ident(root),
+                span: val.span(),
+            };
+            if let Some(const_name) = self.const_write_root(st, &place) {
+                self.emit_const_write_error(&const_name, val.span());
+                break;
+            }
         }
     }
 
@@ -6097,6 +6168,7 @@ impl<'a> Checker<'a> {
                             })
                             .collect();
                         self.link_multi_value_return_aliases(&mut cst, &values[0], &bound);
+                        self.record_assign_borrow_aliases(&mut cst, targets, *op, values);
                     }
                 }
                 Stmt::For { kind, .. } => match kind {
@@ -6325,15 +6397,26 @@ impl<'a> Checker<'a> {
     ) -> Option<String> {
         let inner = crate::model::unwrap_parens(expr);
         if let Some(addr_op) = as_addr_of(inner) {
-            let root = addr_op.root_ident()?;
-            if declared.contains(root) {
-                return None;
+            let mut roots = Vec::new();
+            if let Some(root) = addr_op.root_ident() {
+                roots.push(root.to_string());
+            } else if !self.addr_operand_returns_fresh_copy(st, addr_op) {
+                collect_ref_roots(addr_op, &mut roots);
+                self.collect_callee_const_return_roots(st, addr_op, &mut roots, 0);
             }
-            let place = Place {
-                kind: PlaceKind::Ident(root.to_string()),
-                span: expr.span(),
-            };
-            return self.const_write_root(st, &place);
+            for root in roots {
+                if declared.contains(&root) {
+                    continue;
+                }
+                let place = Place {
+                    kind: PlaceKind::Ident(root),
+                    span: expr.span(),
+                };
+                if let Some(hit) = self.const_write_root(st, &place) {
+                    return Some(hit);
+                }
+            }
+            return None;
         }
         let arg_shape = self.shape_of_expr(st, inner);
         if !(self.shape_may_share(&arg_shape) || matches!(arg_shape, TypeShape::Unknown)) {

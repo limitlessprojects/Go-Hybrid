@@ -882,3 +882,127 @@ accepted so the rule cannot degrade into "never take an address".
 
 (Registered as 65/66: PR #436 authored them as 61/62, but 61–64 were taken
 by the string-escape/shadowing/send waves before it landed. G0st13.)
+
+## Additive corpus registration — 2026-10-18: task spawn boundary soundness (issue #5)
+
+Corpus 25 pins the spawn-callee proof with a map-capturing closure; this
+fixture pins the scalar-capture twin: a closure that WRITES a captured
+`int` binding, spawned as a task, with main still reading the binding
+after the spawn. A checker that special-cased copyable payloads (or
+ignored the post-spawn read) would pass every row above and still accept
+a real race.
+
+| # | program | verdict | rule | diagnostic | rationale |
+|---|---------|---------|------|------------|-----------|
+| 67 | 67-adversarial-race-spawn | REJECT | A1c | `HYB-E3001` | `x := 42; task fn() { x = 100 }(); fmt.println("{x}")` — the spawned callee is a closure that writes its captured binding while main reads it (A5's spawn-callee proof) |
+
+(Registered as 67: PR #402 authored the adversarial intent in non-Hybrid
+pseudo-syntax — `func main`, `var x: int = 42`, `spawn fn(){}()`,
+`print(x)` — which does not parse on main; the maintainer integration
+translated it to Hybrid's grammar with the intent unchanged.
+KonstantinPythonLab.)
+
+## Additive corpus registration — #682 group C: U2–U5 buildable shapes (pr #707)
+
+- Programs: `undefined-member-call-reject.hy`, `defer-arity-reject.hy`,
+  `append-element-type-reject.hy`,
+  `member-defer-and-append-controls-accept.hy`.
+- Source: issue #682, "accepted-but-unbuildable member-call / defer-arity /
+  append-element bypasses in the buildable operand pass" (pr #707,
+  isHeSatoshi). Four programs `hyb check` accepted with zero diagnostics whose
+  emitted Go failed `go build`. Each was reproduced as a real compiler error
+  before any check was written.
+- Verdicts:
+  - `undefined-member-call-reject` — REJECT BUILDABLE (HYB-E1002).
+    `q.missing()` on a struct (and `x.nope()` on an `int`) is
+    `q.missing undefined (type s has no field or method missing)`. The field
+    branch of the call-operand pass previously reported only a member that
+    EXISTS but is not callable, and stayed silent when nothing was found at
+    all. Fails open on anything unresolved (`*atomic.int64` →
+    `Pointer(Unknown)` keeps its members invisible, not absent) and on
+    `hy-emit`-lowered intrinsics (`stack.pop()` → `hy_pop(&stack)`).
+  - `defer-arity-reject` — REJECT BUILDABLE (HYB-E1002). `defer g()` for a
+    one-parameter `g` is `not enough arguments in call to g`. HYB-E2001 keeps
+    the "defer requires a call" half; this rule owns arity, and fires only for
+    a bare identifier resolving to a declared `fn` (builtins and methods stay
+    alone).
+  - `append-element-type-reject` — REJECT BUILDABLE (HYB-E1002).
+    `append([]int{1}, "str")` is `cannot use "str" (untyped string constant)
+    as int value in argument to append`. Skips a variadic spread
+    (`append(a, b...)` passes the whole slice, not an element) and stays
+    fail-open on an unknown element kind; the legal implicit int→float64
+    constant direction stays allowed.
+- Scope notes (why the ACCEPT control is the load-bearing half):
+  the control's `stack.pop()` and `*atomic.int64` members each caught a real
+  over-rejection during development (spike-6 positive suite; corpus
+  `17-atomic-channel-immutable.hy`).
+- Regression pins: `hy-check/tests/member_defer_and_append_guards.rs` (9 tests).
+- Verified on the merged tree: 109/109 verdict agreement, tripwire not fired;
+  differential reject-side 70/70, accept-side 35/37 (the 2 are the known
+  cgo-bridge programs); cargo test --workspace green.
+## Additive corpus registration — 2026-10-18: the #577 C9/C10 call-and-return rules
+
+The Go-toolchain oracle (#577, implementing wildcard #565) measured a 38.03%
+accept-side residual on generated programs and named `call_and_return` its
+worst family: **63.33%** — 19 of 30 accepted programs failed `go build`. This
+registration pins the two classes it enumerates, **C9** (call arity) and
+**C10** (return statements), on both sides: three reject fixtures, one per
+closed shape, and one ACCEPT control holding the legal neighbours the rule must
+not touch. All three rejects are `HYB-E1002` (`BUILDABLE`, GUARANTEES.md
+Row 13) — accepting the file lets the emitted Go fail `go build`, which is
+exactly what the row forbids.
+
+| program | verdict | rule | diagnostic | rationale |
+|---|---|---|---|---|
+| call-arity-mismatch-reject | REJECT | Row 13 | `HYB-E1002` | `add(1)` for `fn add(a int, b int) int` — Go refuses `not enough arguments in call to add`. The same class covers `add(1, 2, 3)`, `x.bump()` (the receiver is not an argument) and `f(1, 2)` on a closure or `fn`-typed value |
+| return-value-count-reject | REJECT | Row 13 | `HYB-E1002` | `f` declares two unnamed results and `return 1` supplies one: neither legal short form applies (Go's naked `return` needs EVERY result named — corpus 63; the emitter zero-fills only an `error` tail — corpus 13) |
+| return-type-mismatch-reject | REJECT | Row 13 | `HYB-E1002` | `return "not-an-int"` from a function whose result is `int` — Go has no implicit conversion between the string and numeric families. The container forms (a `[]string` returned from a `[]int` function, a map from a slice function, struct `q` from a `p`) are the same rule |
+| call-and-return-controls-accept | ACCEPT | — | — | the legal neighbours: one argument per parameter for a function, a method (receiver not an argument) and a closure; Go's multi-value `return f()`; an untyped int constant returned from a `float64` function — which is why `Int` into a float result must stay allowed; matching container shapes; an interface result |
+
+The ACCEPT control is the reason this batch is safe to land. The rule's first
+draft rejected both legal short-return shapes and the fixture is what pinned
+them: a naked `return` with all-named results (corpus 63) and the emitter's
+zero-filled short return in an `error`-tail signature (corpus 13).
+
+Rules live in `hy-check/tests/call_arity_and_return_types.rs` (11 tests); the
+checker change is `buildable.rs::check_user_fn_arity`, `check_method_arity`,
+`report_local_arity`, `check_return` and `kinds_conflict`. Every reject was
+reproduced as a real `go build` failure against the emitted Go before its
+fixture was committed, and every shape in the ACCEPT control was verified to
+build.
+
+Reproduction (checker built from the branch tree, pinned rustc 1.99.0 /
+go1.26.9): `python3 tools/corpus_harness.py --bin <hyb>` reports **109/109
+verdict agreement, tripwire not fired**.
+
+With this registration the corpus is **113 programs: ACCEPT 35 ·
+ACCEPT-MANAGED 2 · REJECT 76** — main's 105 plus these four.
+
+## Bounty-track registration — 2026-10-19: constant index past a fixed array's length (BUILDABLE, Row 13)
+
+`check_index_kind` bounded the constant index of the STRING form (`s[10]` on
+`const s = "abc"`) but not the fixed-array form: `a[5]` on `[3]int` checked
+clean (0 diagnostics) and the emitted Go then failed `go build` with
+`invalid argument: index 5 out of bounds [0:3]`. The rule now reads the array's
+declared length (through alias resolution) and compares the folded constant
+index against it.
+
+| program | verdict | rule | diagnostic | rationale |
+|---|---|---|---|---|
+| array-const-index-past-length-reject | REJECT | BUILDABLE | `HYB-E1002` | `var a [3]int` then `a[5]`: a constant index past a fixed array's length. The length lives in the type, so `var`/`let`/`:=` bindings and `[3]int` parameters are bounded as well; the fixture's own `a[2]` lines stay clean, and `control-slice-index-past-length` keeps the slice form ACCEPT — a slice's length is not part of its type, so no constant bound is decidable there |
+
+The rule lives in the array branch of
+`hy-check/src/buildable.rs::check_index_kind` (over `const_array_len_at`),
+pinned by `hy-check/tests/array_const_index_bounds.rs` (8 tests: the boundary
+`a[3]`, the typed-literal and parameter forms, the string sibling, and the
+in-bounds / slice / long-array controls). The reject was reproduced as a real
+`go build` failure on the pre-fix tree, and `a[2]`, `xs[300]` and `[300]int8`
+were verified ACCEPT, before this fixture was committed.
+
+Reproduction (branch tree, pinned rustc 1.99.0 / go1.26.9):
+`python3 tools/corpus_harness.py --bin compiler/target/debug/hyb` reports
+**114/114 verdict agreement, tripwire not fired**.
+
+With this registration the corpus is **114 programs: ACCEPT 35 ·
+ACCEPT-MANAGED 2 · REJECT 77** — main's 113 plus this one.
+

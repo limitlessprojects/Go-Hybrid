@@ -514,3 +514,57 @@ fn const_array_length_stays_accepted() {
 fn negative_array_length_in_param_is_rejected() {
     rejects_with(ARRAY_PARAM_NEG_LEN, "HYB-E6004");
 }
+
+// ---------------------------------------------------------------------------
+// Method type parameters (HYB-E1002, issue #881)
+// ---------------------------------------------------------------------------
+
+const METHOD_WITH_OWN_TYPE_PARAMS: &str = "\
+struct plain {
+    n int
+}
+
+fn (p *plain) retype[k2 comparable](v k2) k2 {
+    return v
+}
+
+fn main() {
+}
+";
+
+const METHOD_GENERIC_RECEIVER_WITH_OWN_TYPE_PARAMS: &str = "\
+struct cache[k comparable] {
+    n k
+}
+
+fn (c *cache[k]) retype[k2 comparable](v k2) k2 {
+    return v
+}
+
+fn main() {
+}
+";
+
+const METHOD_USING_STRUCT_TYPE_PARAM_OK: &str = "\
+struct cache[k comparable] {
+    n k
+}
+
+fn (c *cache[k]) conv(u k) k {
+    return u
+}
+
+fn main() {
+}
+";
+
+#[test]
+fn method_with_own_type_parameters_is_rejected_issue_881() {
+    rejects_with(METHOD_WITH_OWN_TYPE_PARAMS, "HYB-E1002");
+    rejects_with(METHOD_GENERIC_RECEIVER_WITH_OWN_TYPE_PARAMS, "HYB-E1002");
+}
+
+#[test]
+fn method_using_struct_type_parameters_stays_accepted_issue_881() {
+    accepts_without(METHOD_USING_STRUCT_TYPE_PARAM_OK, "HYB-E1002");
+}

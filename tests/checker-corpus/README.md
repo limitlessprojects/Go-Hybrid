@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 100 programs** — ACCEPT 32 · ACCEPT-MANAGED 2 ·
-REJECT 66 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 120 programs — ACCEPT 38 · ACCEPT-MANAGED 2 · REJECT 80 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 120 programs — ACCEPT 38 · ACCEPT-MANAGED 2 · REJECT 80 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -20,7 +20,7 @@ the new fixtures.
 
 The prose below is the original pre-registration statement, kept as written
 on its date: the corpora sizes it names (18, 20) are what the corpus held
-then, not today's 100. The dated tripwire baseline is preserved as historical
+then, not today's 101. The dated tripwire baseline is preserved as historical
 for the same reason.
 
 18 pseudo-Hybrid (`.hy`) programs written BEFORE the Phase-1 checker exists,
@@ -63,7 +63,6 @@ surface with author credit (tests extracted to
 With this registration the corpus is **78 programs: ACCEPT 21 ·
 ACCEPT-MANAGED 2 · REJECT 55**.
 
-<<<<<<< HEAD
 `control-*.hy` — isHeSatoshi (PR #598): seven **negative controls** for the
 accept-side oracle wave. The Go-toolchain oracle (#577) measured a 38%
 accept-side residual on generated programs and named ten accepted-but-
@@ -131,3 +130,174 @@ field-access check produces. Rules live in
 
 With this registration the corpus is **100 programs: ACCEPT 32 ·
 ACCEPT-MANAGED 2 · REJECT 66**.
+`67-adversarial-race-spawn.hy` — KonstantinPythonLab (PR #402, issue #5):
+the task-spawn-boundary adversarial — a closure that WRITES a captured
+mutable binding, spawned as a task, with main still reading the binding
+after the spawn. The maintainer integration translated the PR's pseudo-
+syntax (`func main`, `var x: int = 42`, `spawn fn(){}()`, `print`) to
+Hybrid's actual grammar (`fn main`, `x := 42`, `task fn() { ... }()`,
+`fmt.println("{x}")`) with the adversarial intent unchanged; the checker
+rejects at [S1] with A1c/HYB-E3001 (the spawn-callee proof: closures share
+every capture with the new task).
+
+With this registration the corpus is **101 programs: ACCEPT 32 ·
+ACCEPT-MANAGED 2 · REJECT 67**.
+
+`multivalue-in-single-value-reject.hy`, `multivalue-arg-arity-reject.hy`,
+`void-as-value-reject.hy`, `multivalue-and-void-controls-accept.hy` —
+isHeSatoshi (issue #682): the U6–U8 value-position classes. All three share one
+root cause — `kind_of_expr` on a call returned the FIRST result kind for a
+multi-value call (silently discarding the rest) and `OpKind::Void` for a
+no-result call, which no operand check rejected. The fix derives the call's
+value count in one place (`non_single_value_count`) and rejects it in the
+positions that need exactly one value. The `void-as-value-reject.hy` header
+records that this class was already latent in the repo: the T22 fixture in
+`hy-check/src/lib.rs` used `is_ok(delete(alias, "k"))` to get a `delete` into an
+`if` condition, and `delete` produces no value either, so that fixture was
+itself accepted-but-unbuildable. The new rule surfaced it; the fixture was
+rewritten to put the `delete` in a closure body with the closure called in the
+condition, and both of its assertions stayed strict. The fourth fixture is the
+ACCEPT half and is the reason this batch is safe: it holds every legal
+multi-value form — `a, b := two()`, `a, b = two()`, `return two()` with matching
+results, `g(two())` where `g` really takes two parameters (which is what makes
+the rule an arity comparison rather than a blanket rejection), a no-result call
+as a statement and as a `defer` operand, the two non-call two-value sources
+(`m[k]` and `<-ch`), and single-value calls in binding, operand, and argument
+positions. On the merged tree the U6 operand fixture's leading diagnostic is
+the landed T23 rule's `HYB-E2002` (pr-599/#669 classifies the containing
+1-name binding first), with the new rule's `HYB-E1002` co-emitted; the fixture
+header records this and the rust test pins E1002's presence. Rules live in
+`hy-check/tests/multivalue_and_void_positions.rs` (8 tests).
+
+With this registration the corpus is **109 programs: ACCEPT 34 ·
+ACCEPT-MANAGED 2 · REJECT 73**.
+
+`undefined-member-call-reject.hy`, `defer-arity-reject.hy`,
+`append-element-type-reject.hy`, `member-defer-and-append-controls-accept.hy`
+— the #682 U2–U5 buildable wave (issue #682 group C, pr #707 by isHeSatoshi).
+Four `hyb check`-accepted programs whose emitted Go failed `go build`: a call
+to a member that does not exist (on a scalar and on a struct), a deferred call
+with the wrong arity, and `append` with an element of the wrong type. Each was
+reproduced as a real `go build` failure before the check was written, and each
+rejection is paired against a legal neighbour inside the single ACCEPT control
+— the ordinary method/field cases, `stack.pop()` (a `hy-emit` intrinsic lowered
+to `hy_pop(&stack)`, not a Go method), `*atomic.int64` members (a foreign
+generic whose members the kind model cannot see, so the rule must fail open),
+`defer` on a builtin and on a method, and `append` with a variadic spread,
+multiple values, and an untyped int constant into a `[]float64`. Regression
+pins live in `hy-check/tests/member_defer_and_append_guards.rs` (9 tests).
+With this registration the corpus is **115 programs: ACCEPT 36 ·
+ACCEPT-MANAGED 2 · REJECT 77**.
+
+`typed-const-expression-overflow-reject.hy`,
+`typed-const-expression-controls-accept.hy` — issue #725: a **typed constant
+expression whose folded result overflows its type**. Go folds constant
+expressions before the range check, so `u8(255) + 1` is `constant 256 of type
+uint8 overflows uint8`; `hyb check` accepted it with 0 diagnostics and the
+emitted Go failed `go build`. The per-operand check could not see it — 255 fits
+`u8` and 1 fits `u8`, so both passed and the **result** was never computed —
+and shifts took an early return that skipped every range check.
+
+Two halves of the fix are needed together, which is why the reject fixture is a
+single file with eight expressions rather than eight files: (1) the constant
+folder gained an `Expr::Call` arm so `u8(255)` folds to a constant at all, and
+(2) the result is folded and range-checked against the typed operand's type,
+shifts included, plus a negation check. Without (1) a result check sees
+`NotConst` and stays silent, so a fix that skipped it would look correct and
+catch nothing.
+
+The accept control is the load-bearing half: SPEC X1/X2 define run-time
+overflow as **wrapping**, so `var x u8 = 200; var y u8 = 100; x + y` must keep
+building. The control also pins SPEC X4's own example (`u8(300)` is 44), the
+in-range typed forms, and a comparison (which yields a bool, not a `u8`).
+Regression pins live in `hy-check/tests/typed_const_expression_overflow.rs`.
+
+HYB-E6002 gained the `tier0_rule_id: "BUILDABLE"` join key it was missing (it
+already declared `"rule": "BUILDABLE"`, so the corpus could only have said
+`<unclassified-error>` for it before).
+
+## Bounty-track registration — 2026-10-19: constant index past a fixed array's length (BUILDABLE, Row 13)
+
+`check_index_kind` bounded the constant index of the STRING form (`s[10]` on
+`const s = "abc"`) but not the fixed-array form: `a[5]` on `[3]int` checked
+clean (0 diagnostics) and the emitted Go then failed `go build` with
+`invalid argument: index 5 out of bounds [0:3]`. The rule now reads the array's
+declared length (through alias resolution) and compares the folded constant
+index against it.
+
+| program | verdict | rule | diagnostic | rationale |
+|---|---|---|---|---|
+| array-const-index-past-length-reject | REJECT | BUILDABLE | `HYB-E1002` | `var a [3]int` then `a[5]`: a constant index past a fixed array's length. The length lives in the type, so `var`/`let`/`:=` bindings and `[3]int` parameters are bounded as well; the fixture's own `a[2]` lines stay clean, and `control-slice-index-past-length` keeps the slice form ACCEPT — a slice's length is not part of its type, so no constant bound is decidable there |
+
+The rule lives in the array branch of
+`hy-check/src/buildable.rs::check_index_kind` (over `const_array_len_at`),
+pinned by `hy-check/tests/array_const_index_bounds.rs` (8 tests: the boundary
+`a[3]`, the typed-literal and parameter forms, the string sibling, and the
+in-bounds / slice / long-array controls). The reject was reproduced as a real
+`go build` failure on the pre-fix tree, and `a[2]`, `xs[300]` and `[300]int8`
+were verified ACCEPT, before this fixture was committed.
+
+Reproduction (branch tree, pinned rustc 1.99.0 / go1.26.9):
+`python3 tools/corpus_harness.py --bin compiler/target/debug/hyb` reports
+**116/116 verdict agreement, tripwire not fired**.
+
+With this registration the corpus is **116 programs: ACCEPT 36 ·
+ACCEPT-MANAGED 2 · REJECT 78** — main's 115 plus this one.
+
+## Bounty-track registration — 2026-10-19: map-slot borrow as a call argument (LOAN-ESCAPE, Row 13)
+
+O3 spells the map slot loan as `n := &m[k]`: the borrow is the whole value of a
+binding, and that is the shape the emitter lowers to a copy-out / store-back.
+In an argument or operand position there is no binding to store back to, so the
+`&m[k]` was emitted as written and `go build` refused the program:
+
+```
+invalid operation: cannot take address of e.services["a"] (map index expression)
+```
+
+The checker accepted it, so the program was an accept with no lowering — the
+differential loop cannot reach a running binary from it. The rule now walks the
+whole expression in every position and reports HYB-E3104 unless the borrow is
+the root of a binding initializer or a re-binding assignment; parentheses are
+position-transparent (`n := (&m[k])` is a loan exactly like `n := &m[k]`).
+
+| program | verdict | rule | diagnostic | rationale |
+|---|---|---|---|---|
+| map-slot-borrow-callarg-reject | REJECT | LOAN-ESCAPE | `HYB-E3104` | `touch(&e.services["a"])`: a map-slot borrow in argument position has no lowering, and the emitted Go does not build. The shape test is on the MAP (an index expression over a map is not addressable in Go) — slice and array elements (`&xs[0]`, `&a[0]`) are addressable and keep their lowering, so the rule cannot widen into those |
+| map-slot-borrow-paths-accept | ACCEPT | — | 0 diagnostics | the legal spellings in one program: `n := &e.services["a"]`, `m := (&e.services["b"])`, their store-backs, and the corrected call-argument pattern `tmp := e.services["a"]; touch(&tmp)`. Built and run (prints `3 4 7`) so the new rule cannot refuse a buildable program |
+
+The rule lives in `hy-check/src/addr_loan.rs` (`walk_addr_of_loan_projections`
+plus `map_slot_borrow_span` / `emit_map_slot_borrow_diag`), pinned by
+`hy-check/tests/slot_loan_callarg_positions.rs` (7 tests: the map-field and
+local-map argument forms, the argument borrow that overlaps a live loan, the
+base-store control, both legal binding positions, the parenthesised binding,
+the corrected copy pattern, and the array-element control). The reject was
+reproduced as a real `go build` failure first, and the accept fixture was
+checked, built and RUN before it was committed.
+
+Reproduction (branch tree, pinned rustc 1.99.0 / go1.26.9):
+`python3 tools/corpus_harness.py --bin compiler/target/debug/hyb` reports
+**118/118 verdict agreement, tripwire not fired**; `tools/differential_loop.py`
+reports **39/39 accept-side (build+run) + 79/79 reject-side**.
+
+With this registration the corpus is **118 programs: ACCEPT 37 ·
+ACCEPT-MANAGED 2 · REJECT 79** — main's 116 plus these two.
+
+`type-name-in-value-position-reject.hy`,
+`type-name-in-value-position-controls-accept.hy` — issue #778: a **type name
+used where a value is required**. `x := holder` for a `struct holder` passes
+`hyb check` and the emitter prints the identifier verbatim, so `go build` fails
+with `holder (type) is not an expression`. Four value positions, plus a built-in
+type and a type alias. Nothing runs, so this is claim-precision (Row 13), not a
+soundness hole.
+
+The rule has to be narrow, and the accept control carries that weight: a type
+name is legal as a conversion CALLEE (`holder(1)`, `int(3.0)`) and as the FIRST
+argument of `new`/`make` (`new(bag)`), and a local binding shadows it. `new(bag)`
+is the control that matters most — an early version of the check walked that
+argument as a value and broke `n5-zero-map-first-write.hy`. The corpus caught it
+on the first run, which is exactly why the fixture pins it. Regression pins live
+in `hy-check/tests/type_name_in_value_position.rs` (13 tests).
+
+With this registration the corpus is **120 programs: ACCEPT 38 ·
+ACCEPT-MANAGED 2 · REJECT 80** — main's 118 plus these two.

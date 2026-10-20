@@ -815,6 +815,7 @@ pub(crate) fn expr_path(expr: &Expr) -> Option<String> {
         Expr::Ident { name, .. } => Some(name.clone()),
         Expr::Field { base, name, .. } => Some(format!("{}.{}", expr_path(base)?, name)),
         Expr::Index { base, .. } => expr_path(base),
+        Expr::Slice { base, .. } => expr_path(base),
         Expr::Paren { inner, .. } => expr_path(inner),
         Expr::Try { operand, .. } => expr_path(operand),
         Expr::Call { callee, args, .. }

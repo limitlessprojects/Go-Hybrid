@@ -180,24 +180,24 @@ fn build_tables(ck: &mut Checker<'_>) {
                 ck.packages.insert(root.to_string());
             }
             Decl::Const(c) => {
-                // Issue #148: a file-level `const n int8 = 300` must not
-                // pass the checker and then fail `go build` (overflow).
-                if let Some(ty) = &c.ty {
-                    ck.check_const_overflow_init(&c.name, ty, &c.value, None);
-                }
                 ck.declare_pkg_name(&c.name, "const", c.span);
                 let b = ck.const_binding(c);
                 ck.consts.insert(c.name.clone(), b);
                 ck.const_values.insert(c.name.clone(), &c.value);
-                // Issue #205: file-level `const c = get_val()` must not pass check then fail go build.
-                // Placed after insert so this hook sits below main's E6002 overflow check and
-                // 3-way-merges cleanly (same pattern as PR #191 relocated hooks).
-                ck.check_const_init_is_constant(&c.name, &c.value, None);
             }
             Decl::Struct(s) => {
                 // Issue #201-C: package-scope names are unique across
                 // fns / consts / structs (Go's single package block).
                 ck.declare_pkg_name(&s.name, "struct", s.span);
+                ck.struct_type_params
+                    .insert(s.name.clone(), s.type_params.clone());
+                ck.check_type_params(
+                    &s.name,
+                    "struct",
+                    &s.type_params,
+                    s.fields.iter().map(|f| &f.ty),
+                    s.span,
+                );
                 // `type X = int` aliases parse as zero-field struct decls;
                 // they are not containers — leave them unresolved (Unknown
                 // is permissive, and alias-of-primitive values must never
@@ -243,6 +243,16 @@ fn build_tables(ck: &mut Checker<'_>) {
                 );
             }
             Decl::Fn(f) => {
+                ck.check_type_params(
+                    &f.name,
+                    "function",
+                    &f.type_params,
+                    f.params
+                        .iter()
+                        .map(|p| &p.ty)
+                        .chain(f.results.iter().map(|r| &r.ty)),
+                    f.span,
+                );
                 // Only top-level functions belong in `ck.fns` (methods have a
                 // receiver and must not overwrite or impersonate top-level fns).
                 if let Some(r) = &f.receiver {
@@ -275,18 +285,21 @@ fn build_tables(ck: &mut Checker<'_>) {
     }
 
     // Issue #201-E pass 2: array-length validity over every DECLARED type,
-    // after all file-level consts are known (`[n]int` where `n` is a const).
+    // after all file-level consts, type aliases, and fns are known.
     for d in &file.decls {
         match d {
             Decl::Const(c) => {
                 if let Some(ty) = &c.ty {
                     ck.check_type_expr(ty);
                     ck.check_local_array_lit_len_match(ty, &c.value);
+                    ck.check_const_overflow_init(&c.name, ty, &c.value, None);
                 }
                 ck.check_expr_emit_guard(&FnState::default(), &c.value);
                 ck.check_composite_nils(&FnState::default(), &c.value);
+                ck.check_expr_builtin_args(&c.value);
                 let b = ck.const_binding(c);
                 ck.consts.insert(c.name.clone(), b);
+                ck.check_const_init_is_constant(&c.name, &c.value, None);
             }
             Decl::Struct(s) => {
                 for f in &s.fields {
@@ -3683,11 +3696,28 @@ mod tests {
             .any(|d| d.code == "HYB-E3102"));
 
         // 6. T22: const alias bound in `if <init>` cannot be mutated via `delete` in `<cond>`.
+        //
+        // FIXTURE NOTE (issue #682): this case used to read
+        //   `if alias := c; is_ok(delete(alias, "k"))`
+        // with a helper `fn is_ok(x any) bool`. `delete` produces no value in
+        // Go, so `is_ok(delete(...))` was itself an accepted-but-unbuildable
+        // program - Go reports `delete(alias, "k") (no value) used as value`.
+        // The new U8 rule correctly flags that, which changed which rule came
+        // first and broke this assertion.
+        //
+        // The delete now sits in a closure BODY (statement position) and the
+        // closure is called in `<cond>` - the same shape the A3 case above
+        // uses. The fixture still tests "a const alias mutated via `delete`
+        // inside `<cond>`" and both assertions below stay strict; only the
+        // incidental second defect is gone.
         let r_t22 = check(
             "const c = map[string]int{\"k\": 1}\n\
-             fn is_ok(x any) bool { return true }\n\
              fn main() {\n\
-               if alias := c; is_ok(delete(alias, \"k\")) {\n\
+               if del := fn() bool {\n\
+                 alias := c\n\
+                 delete(alias, \"k\")\n\
+                 return true\n\
+               }; del() {\n\
                  fmt.println(\"deleted\")\n\
                }\n\
              }",

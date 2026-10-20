@@ -682,6 +682,8 @@ pub(crate) struct Checker<'a> {
     pub path: String,
     /// struct name -> (field name, field type) — file-level struct decls.
     pub structs: HashMap<String, Vec<(String, TypeExpr)>>,
+    /// struct name -> declared type parameters (including empty-field structs, #722).
+    pub struct_type_params: HashMap<String, Vec<hy_syntax::TypeParam>>,
     /// enum name -> declared variant names in source order (T13/T14 HYB-E5001).
     pub enums: HashMap<String, Vec<String>>,
     /// enum name -> whether the first variant is payload-free (N3 HYB-E4002).
@@ -739,6 +741,7 @@ impl<'a> Checker<'a> {
             file,
             path: file.path.clone(),
             structs: HashMap::new(),
+            struct_type_params: HashMap::new(),
             enums: HashMap::new(),
             enum_has_zero_value: HashMap::new(),
             type_aliases: HashMap::new(),
@@ -814,7 +817,7 @@ pub(crate) fn move_operand_ident(e: &Expr) -> Option<String> {
 /// Collect the root binding of every reference-carrying sub-expression of
 /// `e` — the generalized form of `Expr::root_ident()`.
 ///
-/// `root_ident()` stops at anything that is not an ident/field/index chain:
+/// `root_ident()` stops at anything that is not an ident/field/index/slice chain:
 /// a CALL result (`same(same(m))`), a view of a call result (`same(m)[0:2]`),
 /// a composite literal (`wrap{items: same(m)}`), a field read out of a
 /// literal (`box{items: m}.items`) or a call that returns a parameter field

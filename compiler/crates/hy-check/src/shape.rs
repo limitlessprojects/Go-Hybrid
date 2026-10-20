@@ -352,11 +352,30 @@ impl<'a> Checker<'a> {
                     // check-site. The pointee is inferred when the type argument
                     // resolves; otherwise Unknown — still a non-sendable pointer.
                     "new" => {
-                        let pointee = match args.first().map(|a| &a.value) {
-                            // `new(pool_stats)` — the argument is a type name,
-                            // not a value; name a declared struct precisely.
-                            Some(Expr::Ident { name, .. }) if self.structs.contains_key(name) => {
-                                TypeShape::Struct(Some(name.clone()))
+                        let pointee = match args
+                            .first()
+                            .map(|a| crate::model::unwrap_parens(&a.value))
+                        {
+                            // `new(pool_stats)` / `new((pool_stats))` / `new(alias)` — the
+                            // argument is a type name, not a value; resolve structs, type
+                            // aliases, primitives, and foreign types via `named_shape`.
+                            Some(Expr::Ident { name, .. }) => self.named_shape(name),
+                            Some(Expr::Field { base, name, .. }) => {
+                                if let Expr::Ident { name: pkg, .. } =
+                                    crate::model::unwrap_parens(base)
+                                {
+                                    self.named_shape(&format!("{}.{}", pkg, name))
+                                } else {
+                                    TypeShape::Unknown
+                                }
+                            }
+                            Some(Expr::Index { base, .. }) => {
+                                if let Expr::Ident { name, .. } = crate::model::unwrap_parens(base)
+                                {
+                                    self.named_shape(name)
+                                } else {
+                                    TypeShape::Unknown
+                                }
                             }
                             Some(other) => self.shape_of_expr(st, other),
                             None => TypeShape::Unknown,
@@ -459,7 +478,7 @@ impl<'a> Checker<'a> {
         let Some(first) = args.first() else {
             return TypeShape::Unknown;
         };
-        match &first.value {
+        match crate::model::unwrap_parens(&first.value) {
             // The parser renders a type in expression position as a literal
             // node carrying the TypeExpr in `.ty` (`make(chan bool, n)` →
             // StructLit{ty: Chan}); other spellings degrade to Unknown.
@@ -479,6 +498,7 @@ impl<'a> Checker<'a> {
                 Box::new(self.shape_of_type(key)),
                 Box::new(self.shape_of_type(value)),
             ),
+            Expr::Ident { name, .. } => self.named_shape(name),
             _ => TypeShape::Unknown,
         }
     }

@@ -91,13 +91,14 @@
       "category": "resolve",
       "severity": "error",
       "title": "the emitted Go cannot build this declaration",
-      "summary": "Go's front-end rejects declaration shapes that `hyb check` used to accept with 0 diagnostics, so the emitted module could never build (issue #134, extended by #687): (1) an unused `:=` binding — `x := 5` with no read of `x` is `declared and not used`, and `_ := 5` / `_, _ := ...` declares no new variable at all (`no new variables on left side of :=`); (2) an unused import — the emitter carries every declared Go import into the header, and Go rejects `imported and not used`; (3) a repeated name on the left of one `:=` — `x, x := 1, 2` is `x repeated on left side of :=`; (4) duplicate constant keys in map literals — `map[int]string{1: \"a\", 1: \"b\"}` is `duplicate key 1 in map literal` (issue #687). Fail-closed: what the checker accepts must survive `go build`. Out of scope (same Go error family, separate issues): unused `var`/composite-`const` locals, select-receive names, unread `for ... in` bindings (handled at emission, issue #139), and unused `rust/` imports (never emitted as Go imports).",
+      "summary": "Go's front-end rejects five shapes that `hyb check` used to accept with 0 diagnostics, so the emitted module could never build. Issue #134 landed the first three: (1) an unused `:=` binding — `x := 5` with no read of `x` is `declared and not used`, and `_ := 5` / `_, _ := ...` declares no new variable at all (`no new variables on left side of :=`); (2) an unused import — the emitter carries every declared Go import into the header, and Go rejects `imported and not used`; (3) a repeated name on the left of one `:=` — `x, x := 1, 2` is `x repeated on left side of :=`. The #577 accept-side oracle wave added two more call/return shapes: (4) a call whose argument count disagrees with the callee — `add(1)` for `fn add(a int, b int) int` is `not enough arguments`, `add(1, 2, 3)` is `too many arguments`, and the same holds for a method (`x.bump()`) and a closure or `fn`-typed value whose declared parameter count is known; (5) a `return` that does not match the enclosing signature — a value list whose length differs from the declared results (except Go's naked `return` with all-named results, and a short return in a function whose last result is `error`, which the emitter zero-fills as E3's sugar), or a returned value whose type cannot be assigned to its result (`return \"s\"` from a `fn f() int`). Fail-closed: what the checker accepts must survive `go build`. Out of scope (same Go error family, separate issues): unused `var`/composite-`const` locals, select-receive names, unread `for ... in` bindings (handled at emission, issue #139), unused `rust/` imports (never emitted as Go imports), and return-type mismatches that need type-level rather than kind-level information (`int8` variable returned from an `int` function) — those stay fail-open so no buildable program is rejected.",
       "fixits": [
         "read the binding — a mention anywhere in the function counts, including inside a closure, and `x++`, `x += 1`, `x[k] = v`, `x.f = v`, `&x` and `_ = x` all count (a bare `x = v` store does not); or drop the declaration",
         "`_` is not a variable: `_ := 5` can never build — write `_ = 5` to discard the value, or bind a real name",
         "remove the unused import (the emitted header carries it, and an unused import never builds)",
         "give each name on the left of `:=` once: `x, y := 1, 2`",
-        "remove duplicate constant keys from the map literal, or give each entry a distinct key"
+        "pass one argument per declared parameter — the receiver is not an argument, and a `fn`-typed field or closure states its own count",
+        "return exactly the declared results — name them if a naked `return` is intended, or end the signature with `error` to use the short-return sugar the emitter zero-fills"
       ],
       "example": "x := 5   // reject: HYB-E1002 — `x` is never read; Go refuses the emitted `x := 5`",
       "rule": "BUILDABLE",
@@ -142,7 +143,8 @@
         "bind both values: `lo, hi := minmax(3, 9)`"
       ],
       "example": "p := minmax(3, 9)   // reject: HYB-E2002 — multi-value is not a tuple",
-      "rule": "T23"
+      "rule": "T23",
+      "tier0_rule_id": "BUILDABLE"
     },
     {
       "code": "HYB-E2005",
@@ -411,6 +413,21 @@
       "tier0_rule_id": "A1c"
     },
     {
+      "code": "HYB-E3012",
+      "name": "chan-direction-coercion",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "channel value cannot convert to the target channel direction",
+      "summary": "Go's implicit channel conversion is one-way: a bidirectional `chan T` may convert to `chan<- T` or `<-chan T`, but a unidirectional channel (`chan<- T` or `<-chan T`) can never convert to the opposite direction or widen back to `chan T` (issue #623). Passing or assigning a channel with an incompatible direction at a value-flow coercion site (`var`/`const` ascription, assignment, call/task/method/closure argument, return, composite-literal field/element, or channel send/receive of a channel element) emits Go that fails `go vet` / `go build` (`cannot use ... as ... value`). Only certain direction mismatches are rejected — unresolvable shapes fail open.",
+      "fixits": [
+        "declare the source channel as bidirectional (`chan T`) so it can narrow to `chan<- T` or `<-chan T`",
+        "change the destination's declared channel direction (`<-chan T` / `chan<- T` / `chan T`) to match the source channel"
+      ],
+      "example": "var sc chan<- int = make(chan int, 1)\nvar rc <-chan int = sc   // reject: HYB-E3012 — `chan<- int` cannot convert to `<-chan int`",
+      "rule": "O4",
+      "tier0_rule_id": "A1c"
+    },
+    {
       "code": "HYB-E3101",
       "name": "handle-loan-conflict",
       "category": "ownership-loans",
@@ -557,7 +574,8 @@
         "for a float initializer, drop the fractional part or declare a float type"
       ],
       "example": "var n int8 = 300   // reject: HYB-E6002 — 300 overflows int8; Go cannot build the emitted module",
-      "rule": "BUILDABLE"
+      "rule": "BUILDABLE",
+      "tier0_rule_id": "BUILDABLE"
     },
     {
       "code": "HYB-E6003",

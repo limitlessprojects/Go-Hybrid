@@ -163,7 +163,8 @@ impl<'a> Checker<'a> {
         match stmt {
             Stmt::Local(l) => {
                 for v in &l.values {
-                    self.check_expr_addr_of_loan_projections(st, v, include_direct_ident);
+                    // `x := &m[k]` is the O8 slot-loan initializer: legal.
+                    self.walk_addr_of_loan_projections(st, v, include_direct_ident, true);
                 }
             }
             Stmt::Assign {
@@ -173,7 +174,8 @@ impl<'a> Checker<'a> {
                     self.check_place_addr_of_loan_projections(st, t, include_direct_ident);
                 }
                 for v in values {
-                    self.check_expr_addr_of_loan_projections(st, v, include_direct_ident);
+                    // `x = &m[k]` is the slot-loan re-binding: legal.
+                    self.walk_addr_of_loan_projections(st, v, include_direct_ident, true);
                 }
             }
             Stmt::Expr { expr, .. } => {
@@ -201,6 +203,11 @@ impl<'a> Checker<'a> {
             },
             Stmt::Return { values, .. } => {
                 for v in values {
+                    // LOAN-ESCAPE (O2, also HYB-E3104) already owns a
+                    // returned `&m[k]`; recurse for nested borrows only.
+                    if self.map_slot_borrow_span(st, v).is_some() {
+                        continue;
+                    }
                     self.check_expr_addr_of_loan_projections(st, v, include_direct_ident);
                 }
             }
@@ -280,12 +287,40 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Walk a whole expression for address-of-on-a-loan (T24). `Local` and
+    /// `Assign` right-hand sides reach this through
+    /// `walk_addr_of_loan_projections` with `allow_slot_loan_root = true`:
+    /// those are the positions where the emitter lowers an `&m[k]` to the O8
+    /// slot loan, so the root of the expression is exempt there.
     pub(crate) fn check_expr_addr_of_loan_projections(
         &mut self,
         st: &FnState,
         expr: &Expr,
         include_direct_ident: bool,
     ) {
+        self.walk_addr_of_loan_projections(st, expr, include_direct_ident, false);
+    }
+
+    pub(crate) fn walk_addr_of_loan_projections(
+        &mut self,
+        st: &FnState,
+        expr: &Expr,
+        include_direct_ident: bool,
+        allow_slot_loan_root: bool,
+    ) {
+        // Gap 2: `&m[k]` on a MAP is the O8 slot-loan form, and the emitter
+        // lowers it only as the whole value of a binding. Anywhere else the
+        // address-of is written straight into the Go, where a map index
+        // expression is not addressable — the checker accepted those programs
+        // and `go build` refused them ("cannot take address of
+        // e.services[\"a\"]"). Slice and fixed-array elements (`&xs[0]`,
+        // `&a[0]`) ARE addressable in Go and keep their lowering, so the
+        // shape test is on the map, not on the index.
+        if !allow_slot_loan_root {
+            if let Some(span) = self.map_slot_borrow_span(st, expr) {
+                self.emit_map_slot_borrow_diag(span);
+            }
+        }
         if let Expr::AddrOf { operand, span }
         | Expr::Unary {
             op: hy_syntax::UnOp::Addr,
@@ -318,10 +353,16 @@ impl<'a> Checker<'a> {
             | Expr::AddrOf { operand, .. }
             | Expr::Move { operand, .. }
             | Expr::Try { operand, .. }
-            | Expr::Paren { inner: operand, .. }
             | Expr::Field { base: operand, .. }
             | Expr::Receive { chan: operand, .. } => {
                 self.check_expr_addr_of_loan_projections(st, operand, include_direct_ident);
+            }
+            // Parens are position-transparent (`is_slot_loan_expr` already
+            // unwraps them, and the emitter lowers `(&m[k])` as a loan), so
+            // `n := (&m[k])` is a binding position exactly like
+            // `n := &m[k]` — keep the flag instead of clearing it.
+            Expr::Paren { inner, .. } => {
+                self.walk_addr_of_loan_projections(st, inner, include_direct_ident, allow_slot_loan_root);
             }
             Expr::Index { base, index, .. } => {
                 self.check_expr_addr_of_loan_projections(st, base, include_direct_ident);
@@ -344,6 +385,11 @@ impl<'a> Checker<'a> {
             }
             Expr::StructLit { fields, .. } => {
                 for f in fields {
+                    // A6 (`holder{p: &m[k]}`) is already HYB-E3103 —
+                    // borrow-in-field; recurse for nested borrows only.
+                    if self.map_slot_borrow_span(st, &f.value).is_some() {
+                        continue;
+                    }
                     self.check_expr_addr_of_loan_projections(st, &f.value, include_direct_ident);
                 }
             }
@@ -389,6 +435,60 @@ impl<'a> Checker<'a> {
                 "use `{}` directly, or take a fresh loan of the slot (`&m[k]`) where it is needed",
                 name
             ),
+            replacement: None,
+        }];
+        self.diags.push(d);
+    }
+
+    /// The `&m[k]` shape whose base resolves to a map: the address-of a map
+    /// index expression, which Go refuses (`cannot take address of m[k]`).
+    /// Only map bases qualify — slice/array elements are addressable.
+    fn map_slot_borrow_span(&self, st: &FnState, e: &Expr) -> Option<Span> {
+        let (operand, span) = match unwrap_parens(e) {
+            Expr::AddrOf { operand, span } => (operand.as_ref(), *span),
+            Expr::Unary {
+                op: hy_syntax::UnOp::Addr,
+                operand,
+                span,
+            } => (operand.as_ref(), *span),
+            _ => return None,
+        };
+        match unwrap_parens(operand) {
+            Expr::Index { base, .. } if matches!(self.shape_of_expr(st, base), TypeShape::Map(..)) => {
+                Some(span)
+            }
+            _ => None,
+        }
+    }
+
+    /// Gap 2 (T24 extension): `&m[k]` outside a binding value has no
+    /// lowering — the emitter only turns a slot borrow into a copy +
+    /// store-back when the borrow IS the whole value of a binding, so in an
+    /// argument/operand position it emits `&m[k]` verbatim and `go build`
+    /// refuses it (a map index expression is not addressable). One
+    /// diagnostic per site: skip when another guard already reported this
+    /// span (LOAN-ESCAPE O2 on `return &m[k]`, A6 borrow-in-field on
+    /// `holder{p: &m[k]}`).
+    fn emit_map_slot_borrow_diag(&mut self, span: Span) {
+        if self
+            .diags
+            .iter()
+            .any(|d| d.severity == hy_diag::Severity::Error && d.span == span)
+        {
+            return;
+        }
+        let mut d = Diagnostic::error(
+            "HYB-E3104",
+            self.path.clone(),
+            span,
+            "`&m[k]` here has no lowering: a map-slot borrow is only a loan where it is the whole value of a binding (`n := &m[k]`), and Go cannot take the address of a map element".to_string(),
+        )
+        .with_notes(vec![
+            "the emitter lowers a slot loan to a copy of the slot plus a store-back at the binding's last use; in an argument or operand position there is no binding to store back to, so `&m[k]` is emitted as written".to_string(),
+            "the emitted program does not build: `invalid operation: cannot take address of m[k] (map index expression)`".to_string(),
+        ]);
+        d.fixits = vec![FixIt {
+            description: "bind the loan to its own name first (`n := &m[k]`) and pass `n`, or pass the element value and store it back after the call".to_string(),
             replacement: None,
         }];
         self.diags.push(d);

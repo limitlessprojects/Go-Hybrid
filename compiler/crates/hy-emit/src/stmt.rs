@@ -329,7 +329,7 @@ impl Emitter {
                     .ok_or_else(|| EmitError::unsupported("`const` without an initializer"))?;
                 let value = self.emit_expr(first, 0)?;
                 let composite = matches!(
-                    first,
+                    Self::peel_parens(first),
                     Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
                 );
                 let kw = if composite { "var" } else { "const" };
@@ -420,6 +420,11 @@ impl Emitter {
             .iter()
             .map(|v| self.emit_expr(v, 0))
             .collect::<Result<Vec<_>, _>>()?;
+        for name in &l.names {
+            if name != "_" {
+                self.flush_loan_for_name(name);
+            }
+        }
         let names = l.names.join(", ");
         self.push(&format!("{} := {}", names, values.join(", ")));
         // A struct-literal define carries the receiver's struct name
@@ -433,7 +438,7 @@ impl Emitter {
         e as *const Expr as usize
     }
 
-    fn peel_parens(mut e: &Expr) -> &Expr {
+    pub(crate) fn peel_parens(mut e: &Expr) -> &Expr {
         while let Expr::Paren { inner, .. } = e {
             e = inner;
         }
@@ -1361,7 +1366,9 @@ impl Emitter {
     /// Member-name normalization decision for a field/method access whose
     /// base's ROOT binding is `base` (an Ident chain root).
     pub fn member_name(&self, base: &Expr, name: &str) -> String {
-        if let Expr::Ident { name: root, .. } = base {
+        // `(x).f` resolves as `x.f`: a redundant receiver paren must not hide
+        // a package root or a foreign binding from the spelling decision.
+        if let Expr::Ident { name: root, .. } = Self::peel_parens(base) {
             if self.is_unshadowed_pkg_root(root) {
                 return to_go_name(name);
             }
@@ -1478,8 +1485,8 @@ impl Emitter {
                 if let Some(inherited) = self.branch_inherit.clone() {
                     self.push("} else {");
                     self.indent += 1;
-                    for (name, place) in inherited {
-                        self.push(&format!("{} = {}", place, name));
+                    for (_, store) in inherited {
+                        self.push(&store);
                     }
                     self.indent -= 1;
                 }
@@ -1577,14 +1584,22 @@ impl Emitter {
     /// the O8 slot-loan desugar sound: mutations through the loaned copy
     /// persist exactly for the loan's non-lexical live window.
     pub fn emit_block_body(&mut self, stmts: &[Stmt]) -> Result<(), EmitError> {
-        // #546: a branch of a hand-off `if` starts with the inherited loans;
-        // `take` keeps nested blocks inside the branch from inheriting them
-        // again, and the restore hands the same set to the sibling branch.
+        // #546: a branch of a hand-off statement starts with the inherited
+        // loans; `take` keeps nested blocks inside the branch from inheriting
+        // them again, and the restore hands the same set to sibling branches.
         let inherited = self.branch_inherit.take();
         self.loan_frames.push(inherited.clone().unwrap_or_default());
         self.indent += 1;
         let r = self.emit_stmts_with_loans(stmts);
         self.indent -= 1;
+        self.branch_inherit = inherited;
+        r
+    }
+
+    fn emit_arm_stmts_with_loans(&mut self, stmts: &[Stmt]) -> Result<(), EmitError> {
+        let inherited = self.branch_inherit.take();
+        self.loan_frames.push(inherited.clone().unwrap_or_default());
+        let r = self.emit_stmts_with_loans(stmts);
         self.branch_inherit = inherited;
         r
     }
@@ -1692,7 +1707,6 @@ impl Emitter {
         if let ForKind::While { cond } = kind {
             if Self::expr_has_hoistable_try(cond) {
                 self.push("for {");
-                self.loan_frames.push(Vec::new());
                 self.indent += 1;
                 self.hoist_tries_expr(cond)?;
                 let c = self.emit_expr(cond, ATOM)?;
@@ -1701,7 +1715,7 @@ impl Emitter {
                 self.push("break");
                 self.indent -= 1;
                 self.push("}");
-                self.emit_stmts_with_loans(&body.stmts)?;
+                self.emit_arm_stmts_with_loans(&body.stmts)?;
                 self.indent -= 1;
                 self.push("}");
                 if label.is_some() {
@@ -2192,8 +2206,7 @@ impl Emitter {
                             {
                                 self.push(&format!("{} := {}.val", binding, temp));
                             }
-                            self.loan_frames.push(Vec::new());
-                            self.emit_stmts_with_loans(&arm.body.stmts)?;
+                            self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                             self.indent -= 1;
                             chain_opened = true;
                             Ok(false)
@@ -2209,8 +2222,7 @@ impl Emitter {
                             {
                                 self.push(&format!("{} := {}.val", binding, temp));
                             }
-                            self.loan_frames.push(Vec::new());
-                            self.emit_stmts_with_loans(&arm.body.stmts)?;
+                            self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                             if chain_opened {
                                 self.indent -= 1;
                                 self.push("}");
@@ -2232,6 +2244,14 @@ impl Emitter {
                     self.push("}");
                 }
                 None => {
+                    if let Some(inherited) = self.branch_inherit.clone() {
+                        self.push("} else {");
+                        self.indent += 1;
+                        for (_, store) in inherited {
+                            self.push(&store);
+                        }
+                        self.indent -= 1;
+                    }
                     self.push("}");
                 }
             }
@@ -2269,8 +2289,7 @@ impl Emitter {
                             {
                                 self.push(&format!("{} := {}.val", binding, temp));
                             }
-                            self.loan_frames.push(Vec::new());
-                            self.emit_stmts_with_loans(&arm.body.stmts)?;
+                            self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                             self.indent -= 1;
                             self.push("}");
                         }
@@ -2278,8 +2297,7 @@ impl Emitter {
                             if *binding != "_" && crate::rangebind::body_reads(&arm.body, binding) {
                                 self.push(&format!("{} := {}.val", binding, temp));
                             }
-                            self.loan_frames.push(Vec::new());
-                            self.emit_stmts_with_loans(&arm.body.stmts)?;
+                            self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                         }
                     }
                     Ok(())
@@ -2297,6 +2315,14 @@ impl Emitter {
                     self.push("}");
                 }
                 None => {
+                    if let Some(inherited) = self.branch_inherit.clone() {
+                        self.push("} else {");
+                        self.indent += 1;
+                        for (_, store) in inherited {
+                            self.push(&store);
+                        }
+                        self.indent -= 1;
+                    }
                     self.push("}");
                 }
             }
@@ -2335,8 +2361,7 @@ impl Emitter {
                     {
                         self.push(&format!("{} := {}.val", binding, temp));
                     }
-                    self.loan_frames.push(Vec::new());
-                    self.emit_stmts_with_loans(&arm.body.stmts)?;
+                    self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                     self.indent -= 1;
                     self.push("}");
                     Ok(())
@@ -2352,19 +2377,17 @@ impl Emitter {
             self.push("}");
 
             if let Some(arm) = none_arm {
-                if wildcard_arm.is_some() {
+                if wildcard_arm.is_some() || self.branch_inherit.is_some() {
                     self.push(&format!("if !{} && !{}.ok {{", matched_temp, temp));
                     self.indent += 1;
                     self.push(&format!("{} = true", matched_temp));
-                    self.loan_frames.push(Vec::new());
-                    self.emit_stmts_with_loans(&arm.body.stmts)?;
+                    self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                     self.indent -= 1;
                     self.push("}");
                 } else {
                     self.push(&format!("if !{} && !{}.ok {{", matched_temp, temp));
                     self.indent += 1;
-                    self.loan_frames.push(Vec::new());
-                    self.emit_stmts_with_loans(&arm.body.stmts)?;
+                    self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                     self.indent -= 1;
                     self.push("}");
                 }
@@ -2373,8 +2396,15 @@ impl Emitter {
             if let Some(arm) = wildcard_arm {
                 self.push(&format!("if !{} {{", matched_temp));
                 self.indent += 1;
-                self.loan_frames.push(Vec::new());
-                self.emit_stmts_with_loans(&arm.body.stmts)?;
+                self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                self.indent -= 1;
+                self.push("}");
+            } else if let Some(inherited) = self.branch_inherit.clone() {
+                self.push(&format!("if !{} {{", matched_temp));
+                self.indent += 1;
+                for (_, store) in inherited {
+                    self.push(&store);
+                }
                 self.indent -= 1;
                 self.push("}");
             }
@@ -2477,16 +2507,14 @@ impl Emitter {
     }
 
     fn emit_stmts_with_loans_inner(&mut self, stmts: &[Stmt]) -> Result<(), EmitError> {
-        // #546: a loan inherited from an enclosing hand-off `if` that this
+        // #546: a loan inherited from an enclosing hand-off statement that this
         // branch never uses is stored back before the branch's first
-        // statement, i.e. before any spawn/send that moves its base.
+        // statement, i.e. before any spawn/send/delete that touches its base.
         let mut unused = Vec::new();
         if let Some(frame) = self.loan_frames.last_mut() {
             let mut i = 0;
             while i < frame.len() {
-                if !frame[i].0.is_empty()
-                    && !Self::remaining_stmts_use_loan(stmts, &frame[i].0)
-                {
+                if !frame[i].0.is_empty() && !Self::remaining_stmts_use_loan(stmts, &frame[i].0) {
                     unused.push(frame.remove(i));
                 } else {
                     i += 1;
@@ -2498,30 +2526,40 @@ impl Emitter {
         }
         for (idx, st) in stmts.iter().enumerate() {
             let rest = &stmts[idx + 1..];
-            // #546: an `if` that is the loan's last user AND spawns/sends
-            // using the loan's base map must not get a single store-back
-            // after it: on a path that moved the map, that write races the
-            // new task. Hand the loan down into every branch instead.
-            let handoff = if matches!(st, Stmt::If { .. }) {
-                let mut h = Vec::new();
+            // #546: a compound statement (`if`, `match`, `select`, `block`,
+            // `managed`, `for`) that is the loan's last user AND spawns, sends,
+            // deletes, clears, or writes using the loan's base map must not get
+            // a single store-back after it: on a path that moved or mutated the
+            // map, that write races the new task or clobbers the branch's write.
+            // Hand the loan down into every branch instead (or pre-flush when
+            // the statement's own header shadows the loan name or sends the
+            // base in a select case clause).
+            let mut pre_flush = Vec::new();
+            let mut handoff = Vec::new();
+            if Self::stmt_supports_loan_handoff(st) {
                 if let Some(frame) = self.loan_frames.last_mut() {
                     let mut i = 0;
                     while i < frame.len() {
                         let (name, place) = &frame[i];
+                        let root = Self::place_root(place);
                         if !name.is_empty()
                             && !Self::remaining_stmts_use_loan(rest, name)
-                            && Self::stmt_has_boundary_using(st, Self::place_root(place))
+                            && Self::stmt_has_boundary_using(st, name, root)
                         {
-                            h.push(frame.remove(i));
+                            if Self::stmt_must_pre_flush_loan(st, name, root) {
+                                pre_flush.push(frame.remove(i));
+                            } else {
+                                handoff.push(frame.remove(i));
+                            }
                         } else {
                             i += 1;
                         }
                     }
                 }
-                h
-            } else {
-                Vec::new()
-            };
+            }
+            for (_, store) in pre_flush {
+                self.push(&store);
+            }
             let saved_inherit = if handoff.is_empty() {
                 None
             } else {
@@ -2573,10 +2611,6 @@ impl Emitter {
         Ok(())
     }
 
-    /// Returns `true` if `stmts` may still read or mutate the current slot
-    /// loan bound to `name`. A subsequent `name = &other_place` rebind (whose
-    /// RHS does not itself mention `name`) starts a new loan rather than using
-    /// the current loan.
     /// Leading identifier of a rendered loan place (`m["a"]` -> `m`, `h.m[k]` -> `h`).
     fn place_root(place: &str) -> &str {
         let end = place
@@ -2585,36 +2619,87 @@ impl Emitter {
         &place[..end]
     }
 
-    /// #546: does `st` (recursively) contain a task spawn, channel send, or
-    /// select send whose operands mention `root` (a boundary that can move
-    /// the loan's base map to another task), or a `delete(root, ...)`?
-    fn stmt_has_boundary_using(st: &Stmt, root: &str) -> bool {
+    fn stmt_supports_loan_handoff(st: &Stmt) -> bool {
+        matches!(
+            st,
+            Stmt::If { .. }
+                | Stmt::Match { .. }
+                | Stmt::Select { .. }
+                | Stmt::Block { .. }
+                | Stmt::Managed { .. }
+                | Stmt::For { .. }
+        )
+    }
+
+    fn stmt_must_pre_flush_loan(st: &Stmt, name: &str, root: &str) -> bool {
+        match st {
+            Stmt::If { init: Some(i), .. } => Self::local_declares(i, name),
+            Stmt::Match { arms, .. } => arms.iter().any(|a| {
+                matches!(
+                    &a.pattern,
+                    MatchPattern::Path {
+                        binding: Some(b),
+                        ..
+                    } if b == name
+                )
+            }),
+            Stmt::Select { arms, .. } => arms.iter().any(|a| {
+                Self::select_arm_binds(&a.kind, name)
+                    || matches!(
+                        &a.kind,
+                        SelectArmKind::Send { value, .. } if Self::expr_mentions_ident(value, root)
+                    )
+            }),
+            Stmt::For { kind, .. } => Self::for_binder_shadows(kind, name),
+            _ => false,
+        }
+    }
+
+    /// #546: does `st` (recursively) contain a task spawn, channel send,
+    /// select send, `delete`/`clear`, direct write/move touching `root`, or
+    /// a branch block that uses `name` and subsequently reads `root`?
+    fn stmt_has_boundary_using(st: &Stmt, name: &str, root: &str) -> bool {
         if root.is_empty() {
             return false;
         }
         let in_block = |b: &Block| {
-            b.stmts
-                .iter()
-                .any(|s| Self::stmt_has_boundary_using(s, root))
+            let mut seen_loan_use = false;
+            for s in &b.stmts {
+                if seen_loan_use && Self::stmt_mentions_ident(s, root) {
+                    return true;
+                }
+                if Self::stmt_has_boundary_using(s, name, root) {
+                    return true;
+                }
+                if Self::stmt_mentions_ident(s, name) {
+                    seen_loan_use = true;
+                }
+            }
+            false
         };
         match st {
             Stmt::Task { callee, args, .. } => {
                 Self::expr_mentions_ident(callee, root)
-                    || args.iter().any(|a| Self::expr_mentions_ident(&a.value, root))
+                    || args
+                        .iter()
+                        .any(|a| Self::expr_mentions_ident(&a.value, root))
             }
             Stmt::Send { value, .. } => Self::expr_mentions_ident(value, root),
-            // `delete(root, k)` in one branch: a single store-back after the
-            // `if` would resurrect the deleted key on that path.
-            Stmt::Expr {
-                expr: Expr::Call { callee, args, .. },
-                ..
+            Stmt::Defer { call, .. } => Self::expr_mentions_ident(call, root),
+            Stmt::Assign {
+                targets, values, ..
             } => {
-                matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "delete")
-                    && args
-                        .first()
-                        .map(|a| Self::expr_mentions_ident(&a.value, root))
-                        .unwrap_or(false)
+                targets.iter().any(|t| t.root() == root)
+                    || values.iter().any(|v| Self::expr_has_boundary_using(v, root))
             }
+            Stmt::Local(l) => l
+                .values
+                .iter()
+                .any(|v| Self::expr_has_boundary_using(v, root)),
+            Stmt::Return { values, .. } => values
+                .iter()
+                .any(|v| Self::expr_has_boundary_using(v, root)),
+            Stmt::Expr { expr, .. } => Self::expr_has_boundary_using(expr, root),
             Stmt::If {
                 init,
                 then,
@@ -2622,12 +2707,12 @@ impl Emitter {
                 ..
             } => {
                 init.as_deref()
-                    .map(|i| Self::stmt_has_boundary_using(i, root))
+                    .map(|i| Self::stmt_has_boundary_using(i, name, root))
                     .unwrap_or(false)
                     || in_block(then)
                     || otherwise
                         .as_deref()
-                        .map(|o| Self::stmt_has_boundary_using(o, root))
+                        .map(|o| Self::stmt_has_boundary_using(o, name, root))
                         .unwrap_or(false)
             }
             Stmt::For { body, .. } => in_block(body),
@@ -2635,13 +2720,76 @@ impl Emitter {
             Stmt::Managed { body, .. } => in_block(body),
             Stmt::Match { arms, .. } => arms.iter().any(|a| in_block(&a.body)),
             Stmt::Select { arms, .. } => arms.iter().any(|a| {
-                matches!(&a.kind, SelectArmKind::Send { value, .. } if Self::expr_mentions_ident(value, root))
-                    || in_block(&a.body)
+                matches!(
+                    &a.kind,
+                    SelectArmKind::Send { value, .. } if Self::expr_mentions_ident(value, root)
+                ) || in_block(&a.body)
             }),
             _ => false,
         }
     }
 
+    fn expr_has_boundary_using(e: &Expr, root: &str) -> bool {
+        match e {
+            Expr::Move { operand, .. } => Self::expr_mentions_ident(operand, root),
+            Expr::Call { callee, args, .. } => {
+                let is_delete_or_clear = matches!(
+                    callee.as_ref(),
+                    Expr::Ident { name, .. } if name == "delete" || name == "clear"
+                ) && args
+                    .first()
+                    .map(|a| Self::expr_mentions_ident(&a.value, root))
+                    .unwrap_or(false);
+                is_delete_or_clear
+                    || Self::expr_has_boundary_using(callee, root)
+                    || args
+                        .iter()
+                        .any(|a| Self::expr_has_boundary_using(&a.value, root))
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                Self::expr_has_boundary_using(lhs, root)
+                    || Self::expr_has_boundary_using(rhs, root)
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Receive { chan: operand, .. }
+            | Expr::Field { base: operand, .. }
+            | Expr::Paren { inner: operand, .. } => Self::expr_has_boundary_using(operand, root),
+            Expr::Index { base, index, .. } => {
+                Self::expr_has_boundary_using(base, root)
+                    || Self::expr_has_boundary_using(index, root)
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                Self::expr_has_boundary_using(base, root)
+                    || lo
+                        .as_deref()
+                        .is_some_and(|x| Self::expr_has_boundary_using(x, root))
+                    || hi
+                        .as_deref()
+                        .is_some_and(|x| Self::expr_has_boundary_using(x, root))
+            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| Self::expr_has_boundary_using(&f.value, root)),
+            Expr::SliceLit { items, .. } => items
+                .iter()
+                .any(|x| Self::expr_has_boundary_using(x, root)),
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
+                Self::expr_has_boundary_using(k, root) || Self::expr_has_boundary_using(v, root)
+            }),
+            Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                InterpPart::Lit(_) => false,
+                InterpPart::Expr(x) => Self::expr_has_boundary_using(x, root),
+            }),
+            Expr::Ident { .. } | Expr::Lit { .. } | Expr::FnLit { .. } => false,
+        }
+    }
+
+    /// Returns `true` if `stmts` may still read or mutate the current slot
+    /// loan bound to `name`. A subsequent `name = &other_place` rebind (whose
+    /// RHS does not itself mention `name`) starts a new loan rather than using
+    /// the current loan.
     fn remaining_stmts_use_loan(stmts: &[Stmt], name: &str) -> bool {
         for st in stmts {
             match st {
@@ -2839,24 +2987,7 @@ impl Emitter {
     }
 
     fn block_mentions_ident(b: &Block, target: &str) -> bool {
-        for st in &b.stmts {
-            if let Stmt::Local(l) = st {
-                if l.values
-                    .iter()
-                    .any(|v| Self::expr_mentions_ident(v, target))
-                {
-                    return true;
-                }
-                if l.names.iter().any(|n| n == target) {
-                    return false;
-                }
-                continue;
-            }
-            if Self::stmt_mentions_ident(st, target) {
-                return true;
-            }
-        }
-        false
+        Self::remaining_stmts_use_loan(&b.stmts, target)
     }
 
     fn place_mentions_ident(p: &Place, target: &str) -> bool {

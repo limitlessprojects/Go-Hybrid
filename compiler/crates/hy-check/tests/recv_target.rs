@@ -208,6 +208,14 @@ fn recv_nested_in_select_arm_body_rejected_e2008() {
 }
 
 #[test]
+fn recv_nested_in_assign_target_base_rejected_e2008() {
+    let r = check(
+        "fn main() {\n    not_chan := 42\n    grid := [][]int{[]int{1, 2}}\n    grid[<-not_chan][0] = 99\n}\n",
+    );
+    assert_has(&r, "HYB-E2008");
+}
+
+#[test]
 fn closure_select_recv_arm_unknown_fail_closed_e3005() {
     // The closure twin: a select arm inside an FnLit body (outside the
     // flat walk) with an unresolvable channel fails closed (O4.9).

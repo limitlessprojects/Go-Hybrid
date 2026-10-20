@@ -811,6 +811,41 @@ fn assoc_fn_call_mangles_dotted_name() {
 }
 
 #[test]
+fn generic_struct_and_fn_infer_missing_constraints_722() {
+    // Issue #722: `struct box[t] { v t }` without an explicit constraint must
+    // emit `type box[t any] struct {` so `gofmt` does not rewrite `box[t] struct`
+    // into the invalid array type `type box [t]struct {`.
+    let go = emit(
+        "struct box[t] {\n    v t\n}\n\nstruct table[k, v] {\n    m map[k]v\n}\n\nfn id[t](x t) t {\n    return x\n}\n\nfn main() {\n    b := box[u8]{ v: 3 }\n    fmt.println(id[u8](b.v))\n}\n",
+    );
+    assert!(
+        go.contains("type box[t any] struct {"),
+        "expected `type box[t any] struct {{` in:\n{}",
+        go
+    );
+    assert!(
+        go.contains("type table[k comparable, v any] struct {"),
+        "expected `k comparable, v any` in:\n{}",
+        go
+    );
+    assert!(
+        go.contains("func id[t any](x t) t {"),
+        "expected `func id[t any](x t) t {{` in:\n{}",
+        go
+    );
+    assert!(
+        go.contains("box[uint8]{v: 3}"),
+        "expected SPEC primitive type arg `u8` to lower to `uint8` in:\n{}",
+        go
+    );
+    assert!(
+        go.contains("id[uint8](b.v)"),
+        "expected generic fn call type arg `u8` to lower to `uint8` in:\n{}",
+        go
+    );
+}
+
+#[test]
 fn option_match_lowes_to_ok_branch() {
     let go = emit(
         "fn get() option[int] {\n    return some(3)\n}\n\nfn main() {\n    match get() {\n        some(v): fmt.println(\"v={v}\")\n        none:     fmt.println(\"none\")\n    }\n}\n",
@@ -1584,6 +1619,34 @@ fn diff_elided_map_value_struct_literal() {
     assert!(
         go.contains("\"frontend\": service{replicas: 2, tag: \"prod\"}"),
         "elided head filled:\n{}",
+        go
+    );
+}
+
+#[test]
+fn diff_elided_map_value_struct_literal_under_parens() {
+    // Same elision, one redundant paren deeper: `({replicas: 2, tag: "prod"})`
+    // is the same expression, so the expected TYPE must still be applied.
+    // Before the peel this fell through to the "spell the type" refusal — a
+    // check-accepts / emit-rejects gap.
+    let go = emit(
+        "struct service {\n    replicas int\n    tag string\n}\n\nfn main() {\n    e := env{services: map[string]service{\n        \"frontend\": ({replicas: 2, tag: \"prod\"}),\n    }}\n    _ = e\n}\n\nstruct env {\n    services map[string]service\n}",
+    );
+    assert!(
+        go.contains("\"frontend\": service{replicas: 2, tag: \"prod\"}"),
+        "elided head filled through parens:\n{}",
+        go
+    );
+}
+
+#[test]
+fn diff_elided_slice_elem_struct_literal_under_parens() {
+    let go = emit(
+        "struct service {\n    replicas int\n}\n\nfn main() {\n    s := []service{({replicas: 2}), (({replicas: 3}))}\n    _ = s\n}\n",
+    );
+    assert!(
+        go.contains("[]service{service{replicas: 2}, service{replicas: 3}}"),
+        "elided heads filled through (nested) parens:\n{}",
         go
     );
 }
@@ -2832,5 +2895,16 @@ fn f(err error) error {
         "expected argument count error, got: {}",
         err
     );
+}
+
+#[test]
+fn m4_initialism_mapping_for_foreign_go_names_issue_658() {
+    let go = emit(
+        "fn main() {\n    _ = io.eof\n    _ = http.status_ok\n    _ = time.rfc3339\n    _ = strings.to_valid_utf8(\"a\", \"b\")\n}\n",
+    );
+    assert!(go.contains("io.EOF"), "expected io.EOF, got:\n{}", go);
+    assert!(go.contains("http.StatusOK"), "expected http.StatusOK, got:\n{}", go);
+    assert!(go.contains("time.RFC3339"), "expected time.RFC3339, got:\n{}", go);
+    assert!(go.contains("strings.ToValidUTF8(\"a\", \"b\")"), "expected strings.ToValidUTF8, got:\n{}", go);
 }
 

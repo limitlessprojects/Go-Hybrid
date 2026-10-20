@@ -24,10 +24,16 @@ func pinString(s string) (uintptr, uintptr, *runtime.Pinner, []byte) {
 
 // IsMatch reports whether text matches pattern (compile per call — the
 // example surface calls it once; hot loops pin the compiled form post-MVP).
+//
+// Stack class: DEEP (CrossDeep4). Regex::new compiles the pattern on every
+// call: regex_automata::meta::strategy::new allocates a 7,648 B frame (and
+// up to 22,976 B across the acyclic compile chain), and dropping the parsed
+// regex_syntax::ast::Ast / ClassSet recurses on bracket nesting depth. That
+// exceeds the 4,096 B DEFAULT fast-path guard even for a 1-byte pattern.
 func IsMatch(pattern, text string) (bool, error) {
 	pptr, plen, pp, pb := pinString(pattern)
 	tptr, tlen, tp, tb := pinString(text)
-	v := int64(hybridge.Cross4(FnIsMatch, pptr, plen, tptr, tlen))
+	v := int64(hybridge.CrossDeep4(FnIsMatch, pptr, plen, tptr, tlen))
 	pp.Unpin()
 	tp.Unpin()
 	runtime.KeepAlive(pp)
@@ -42,9 +48,12 @@ func IsMatch(pattern, text string) (bool, error) {
 
 // IsValid reports whether the pattern compiles (validity as a bool — no
 // error channel; example 09's simple_pattern surface).
+//
+// Stack class: DEEP (CrossDeep2) — same Regex::new compilation and AST-drop
+// stack profile as IsMatch.
 func IsValid(pattern string) bool {
 	pptr, plen, pp, pb := pinString(pattern)
-	v := hybridge.Cross2(FnIsValid, pptr, plen)
+	v := hybridge.CrossDeep2(FnIsValid, pptr, plen)
 	pp.Unpin()
 	runtime.KeepAlive(pp)
 	runtime.KeepAlive(pb)
