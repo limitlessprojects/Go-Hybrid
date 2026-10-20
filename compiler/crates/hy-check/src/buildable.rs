@@ -278,6 +278,8 @@ struct Collector<'a> {
     loop_depth: usize,
     /// Lexical nesting depth within `select` statements.
     select_depth: usize,
+    /// Type parameters of the function currently being walked (#778).
+    fn_type_params: HashSet<String>,
     defines: Vec<Define>,
     /// Every identifier mentioned in the file plus every dotted type root —
     /// the import-usage set (the emitter's declared-import header needs it).
@@ -301,6 +303,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             fn_results_error_tail: false,
             loop_depth: 0,
             select_depth: 0,
+            fn_type_params: HashSet::new(),
             defines: Vec::new(),
             roots: HashSet::new(),
             diags: Vec::new(),
@@ -531,12 +534,17 @@ impl<'a> Collector<'a> {
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
         let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
         let outer_select = std::mem::replace(&mut self.select_depth, 0);
+        let outer_tp = std::mem::replace(
+            &mut self.fn_type_params,
+            f.type_params.iter().map(|p| p.name.clone()).collect(),
+        );
         self.block_stmts(body);
         self.loop_depth = outer_loop;
         self.select_depth = outer_select;
         self.fn_results = outer;
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
+        self.fn_type_params = outer_tp;
         self.pop_scope();
     }
 
@@ -908,11 +916,99 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #778: whether a name resolves to a known type declaration (struct,
+    /// generic struct, enum, type alias, primitive/built-in type, or function
+    /// type parameter).
+    fn is_type_name(&self, name: &str) -> bool {
+        let base = Checker::base_named_type_str(name);
+        self.fn_type_params.contains(base)
+            || self.ck.structs.contains_key(base)
+            || self.ck.struct_type_params.contains_key(base)
+            || self.ck.type_aliases.contains_key(base)
+            || self.ck.enums.contains_key(base)
+            || matches!(
+                base,
+                "int"
+                    | "i8"
+                    | "int8"
+                    | "i16"
+                    | "int16"
+                    | "i32"
+                    | "int32"
+                    | "i64"
+                    | "int64"
+                    | "u8"
+                    | "uint8"
+                    | "u16"
+                    | "uint16"
+                    | "u32"
+                    | "uint32"
+                    | "u64"
+                    | "uint64"
+                    | "usize"
+                    | "isize"
+                    | "uintptr"
+                    | "byte"
+                    | "rune"
+                    | "char"
+                    | "float32"
+                    | "float64"
+                    | "f32"
+                    | "f64"
+                    | "complex64"
+                    | "complex128"
+                    | "bool"
+                    | "string"
+                    | "error"
+                    | "any"
+                    | "interface{}"
+            )
+    }
+
+    /// Whether a name is shadowed as a value in the current scope (by a
+    /// local variable, parameter, receiver, file-level const, or function).
+    fn is_shadowed_as_value(&self, name: &str) -> bool {
+        self.scopes.iter().rev().any(|layer| layer.contains_key(name))
+            || self.ck.consts.contains_key(name)
+            || self.file_consts.contains_key(name)
+            || self.ck.fns.contains_key(name)
+    }
+
+    /// #778: a TYPE NAME used where a VALUE is required.
+    ///
+    /// `struct holder { n int }` followed by `x := holder` passes `hyb check`
+    /// and the emitter prints the identifier verbatim, so `go build` fails with
+    /// `holder (type) is not an expression`. Go has no value named `holder`,
+    /// so this is not an `Unknown` fail-open case: the shape IS known and the
+    /// value does not exist.
+    fn check_type_name_in_value_position(&mut self, name: &str, span: Span) {
+        if self.is_shadowed_as_value(name) {
+            return;
+        }
+        if self.is_type_name(name) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "`{}` is a type, not a value — Go refuses `{} (type) is not an expression` (HYB-E1002)",
+                    name, name
+                ),
+                "a type name can only be used in a type position or as a conversion callee (`T(x)`)",
+            );
+        }
+    }
+
     // -- places (assignment targets) ----------------------------------------
 
     fn place(&mut self, p: &Place, op: AssignOp) {
         match &p.kind {
             PlaceKind::Ident(n) => {
+                if self.is_type_name(n) && !self.is_shadowed_as_value(n) {
+                    self.emit_e1002(
+                        p.span,
+                        format!("cannot assign to `{}`: `{}` is a type, not a variable (HYB-E1002)", n, n),
+                        "type names cannot be used as assignment targets",
+                    );
+                }
                 // A bare `x = v` store is the ONE target form Go does not
                 // count as a read; `x++`, `x += 1` and every non-ident
                 // target (`x[k] = v`, `x.f = v`, `&x`) read the root.
@@ -948,7 +1044,10 @@ impl<'a> Collector<'a> {
 
     fn place_read(&mut self, p: &Place) {
         match &p.kind {
-            PlaceKind::Ident(n) => self.read(n),
+            PlaceKind::Ident(n) => {
+                self.check_type_name_in_value_position(n, p.span);
+                self.read(n);
+            }
             PlaceKind::Index { base, index } => {
                 self.place_read(base);
                 self.expr(index);
@@ -965,7 +1064,10 @@ impl<'a> Collector<'a> {
 
     fn expr(&mut self, e: &Expr) {
         match e {
-            Expr::Ident { name, .. } => self.read(name),
+            Expr::Ident { name, span } => {
+                self.check_type_name_in_value_position(name, *span);
+                self.read(name);
+            }
             Expr::Lit { .. } => {}
             Expr::Interp { parts, .. } => {
                 for p in parts {
@@ -1032,13 +1134,43 @@ impl<'a> Collector<'a> {
                         "an `any` value must be asserted to a concrete type before its fields can be read",
                     );
                 }
-                self.expr(base);
+                let is_type_member = match unwrap_parens(base) {
+                    Expr::Ident { name: bname, .. } if self.is_type_name(bname) && !self.is_shadowed_as_value(bname) => {
+                        let bname_base = Checker::base_named_type_str(bname);
+                        let member_head = name.split('[').next().unwrap_or(name);
+                        self.ck.enums.get(bname_base).is_some_and(|vs| vs.iter().any(|v| v == name))
+                            || self.ck.fns.contains_key(&format!("{bname_base}.{member_head}"))
+                            || self.ck.method_decls.contains_key(&(bname_base.to_string(), member_head.to_string()))
+                    }
+                    _ => false,
+                };
+                if is_type_member {
+                    if let Expr::Ident { name: bname, .. } = unwrap_parens(base) {
+                        self.read(bname);
+                    }
+                } else {
+                    self.expr(base);
+                }
             }
             Expr::Call {
                 callee, args, span, ..
             } => {
-                self.expr(callee);
-                for a in args {
+                match unwrap_parens(callee) {
+                    Expr::Ident { name, .. } => self.read(name),
+                    other => self.expr(other),
+                }
+                let is_type_arg_builtin = matches!(
+                    unwrap_parens(callee),
+                    Expr::Ident { name, .. }
+                        if (name == "make" || name == "new") && !self.ck.fns.contains_key(name.as_str())
+                );
+                for (i, a) in args.iter().enumerate() {
+                    if is_type_arg_builtin && i == 0 {
+                        if let Expr::Ident { name, .. } = unwrap_parens(&a.value) {
+                            self.read(name);
+                        }
+                        continue;
+                    }
                     self.expr(&a.value);
                 }
                 // #682 U7: every argument must be exactly one value, except
