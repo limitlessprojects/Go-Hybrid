@@ -18,8 +18,11 @@
 //! walk stays shallow (`deep = false`) and closure bodies are recursed
 //! exactly once via `Expr::FnLit`.
 
-use crate::const_overflow::{const_float_value, const_int_value, parse_int_lit, ConstInt};
-use crate::model::{unwrap_parens, Checker, FnState, TypeShape};
+use crate::const_overflow::{
+    const_float_value, const_int_fold_with, const_int_value, fixed_width_int_range, fold_bin,
+    parse_int_lit, ConstFold, ConstInt,
+};
+use crate::model::{as_addr_of, unwrap_parens, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
     AssignOp, BinOp, CallArg, Expr, FnDecl, ForKind, InterpPart, LitKind, Place, PlaceKind,
@@ -46,6 +49,34 @@ impl ConstKeyVal {
                 format!("{f}")
             }
             ConstKeyVal::Nil => "nil".to_string(),
+        }
+    }
+}
+
+/// One name binding that the enclosing-function walk saw before a use site:
+/// the declaration's type ascription (when written), its initializer (when one
+/// was given), where it was declared, and whether it is a `const`.
+///
+/// Two readers share this walk. The constant folders only trust `const`
+/// bindings, so they go through `constant_initializer`. The fixed-size-array
+/// length resolver must also see `var`/`let`/`:=` bindings, because an array's
+/// length lives in its *type* whether or not the binding is constant.
+#[derive(Debug, Clone, Copy)]
+struct BindingSight<'b> {
+    ty: &'b Option<TypeExpr>,
+    value: Option<&'b Expr>,
+    pos: hy_diag::Pos,
+    is_const: bool,
+}
+
+impl<'b> BindingSight<'b> {
+    /// The initializer the constant folders may fold: only a `const` binding
+    /// has one, exactly as the pre-split walk behaved.
+    fn constant_initializer(&self) -> Option<&'b Expr> {
+        if self.is_const {
+            self.value
+        } else {
+            None
         }
     }
 }
@@ -370,6 +401,18 @@ impl<'a> Checker<'a> {
                     _ => {}
                 }
                 self.check_binary_const_overflow(st, *op, lhs, rhs);
+                self.check_typed_const_result(st, expr, *op, lhs, rhs, *span);
+            }
+            // `-u8(1)` is `constant -1 of type uint8 overflows uint8` in Go;
+            // the combined operand-recursing arm below would only walk into
+            // the operand and never range-check the negation (#725).
+            Expr::Unary {
+                op: hy_syntax::UnOp::Neg,
+                operand,
+                span,
+            } => {
+                self.check_expr_emit_guard(st, operand);
+                self.check_negated_const_result(st, operand, *span);
             }
             Expr::Unary { operand, .. }
             | Expr::AddrOf { operand, .. }
@@ -1201,12 +1244,13 @@ impl<'a> Checker<'a> {
                         return;
                     }
                     let folded = self
-                        .resolve_local_const_decl_at(name, span.start)
-                        .and_then(|(decl_ty, init_expr, decl_pos)| {
-                            if decl_ty.as_ref().is_some_and(is_non_int_primitive_type) {
+                        .resolve_local_binding_at(name, span.start)
+                        .and_then(|sight| {
+                            let init_expr = sight.constant_initializer()?;
+                            if sight.ty.as_ref().is_some_and(is_non_int_primitive_type) {
                                 return None;
                             }
-                            self.const_int_value_at(init_expr, decl_pos, 0)
+                            self.const_int_value_at(init_expr, sight.pos, 0)
                         });
                     let Some(v) = folded else {
                         let msg = format!(
@@ -1362,16 +1406,16 @@ impl<'a> Checker<'a> {
                 name,
                 span: id_span,
             } => {
-                if let Some((decl_ty, next_val, next_pos)) =
-                    self.resolve_local_const_decl_at(name, id_span.start)
-                {
-                    if decl_ty.as_ref().is_some_and(is_non_int_primitive_type) {
+                if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
+                    if let Some(next_val) = sight.constant_initializer() {
+                        if sight.ty.as_ref().is_some_and(is_non_int_primitive_type) {
+                            return None;
+                        }
+                        if (sight.pos.line, sight.pos.col) != (use_pos.line, use_pos.col) {
+                            return self.const_int_value_at(next_val, sight.pos, depth + 1);
+                        }
                         return None;
                     }
-                    if (next_pos.line, next_pos.col) != (use_pos.line, use_pos.col) {
-                        return self.const_int_value_at(next_val, next_pos, depth + 1);
-                    }
-                    return None;
                 }
                 if self.consts.contains_key(name.as_str()) {
                     return self.const_value_of_depth(name, depth + 1);
@@ -1444,13 +1488,13 @@ impl<'a> Checker<'a> {
                 name,
                 span: id_span,
             } => {
-                if let Some((_, next_val, next_pos)) =
-                    self.resolve_local_const_decl_at(name, id_span.start)
-                {
-                    if (next_pos.line, next_pos.col) != (use_pos.line, use_pos.col) {
-                        return self.const_string_len_at(next_val, next_pos, depth + 1);
+                if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
+                    if let Some(next_val) = sight.constant_initializer() {
+                        if (sight.pos.line, sight.pos.col) != (use_pos.line, use_pos.col) {
+                            return self.const_string_len_at(next_val, sight.pos, depth + 1);
+                        }
+                        return None;
                     }
-                    return None;
                 }
                 let d = self.file.decls.iter().find_map(|d| match d {
                     hy_syntax::Decl::Const(c) if c.name == *name => Some(c),
@@ -1475,11 +1519,18 @@ impl<'a> Checker<'a> {
         false
     }
 
-    fn resolve_local_const_decl_at(
+    /// The binding `name` has at `use_pos`, when it is a local of the enclosing
+    /// function declared before the use site.
+    ///
+    /// `is_const` separates a `const` (whose initializer the constant folders
+    /// may fold) from a `var`/`let`/`:=` binding; the type ascription is
+    /// reported for every local, because a fixed-size array carries its length
+    /// in its type.
+    fn resolve_local_binding_at(
         &self,
         name: &str,
         use_pos: hy_diag::Pos,
-    ) -> Option<(&'a Option<TypeExpr>, &'a Expr, hy_diag::Pos)> {
+    ) -> Option<BindingSight<'a>> {
         for decl in &self.file.decls {
             if let hy_syntax::Decl::Fn(f) = decl {
                 if span_contains(f.span, use_pos) {
@@ -1494,11 +1545,110 @@ impl<'a> Checker<'a> {
         None
     }
 
+    /// Length of the fixed-size array that `expr` denotes, when it is known
+    /// exactly.
+    ///
+    /// Mirrors `const_string_len_at`: `None` means "not known here", never "not
+    /// an array", so an unknown length can never turn a legal program into a
+    /// diagnostic. An array's length is part of its type, so `var`/`let`/`:=`
+    /// bindings and parameters count too, not only `const`.
+    pub(crate) fn const_array_len_at(
+        &self,
+        expr: &Expr,
+        use_pos: hy_diag::Pos,
+        depth: usize,
+    ) -> Option<i128> {
+        if depth > 32 {
+            return None;
+        }
+        let bare = unwrap_parens(expr);
+        if let Some(operand) = as_addr_of(bare) {
+            return self.const_array_len_at(operand, use_pos, depth + 1);
+        }
+        match bare {
+            Expr::Ident { name, span: id_span, .. } => {
+                if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
+                    if (sight.pos.line, sight.pos.col) != (use_pos.line, use_pos.col) {
+                        if let Some(ty) = sight.ty {
+                            if let Some(len) = self.array_len_of_ty(ty) {
+                                return Some(len);
+                            }
+                        }
+                        if let Some(value) = sight.value {
+                            if let Some(len) = self.const_array_len_at(value, use_pos, depth + 1) {
+                                return Some(len);
+                            }
+                        }
+                    }
+                    return None;
+                }
+                self.param_array_len_at(name, id_span.start)
+            }
+            other => self.array_lit_len(other, depth + 1),
+        }
+    }
+
+    /// The length carried by an array type (`[3]int`, `*[3]int`, aliases), or
+    /// `None` when the type is not a fixed-size array or its length is not an
+    /// integer constant. A pointer to an array indexes the same elements, so the
+    /// length survives `*`.
+    fn array_len_of_ty(&self, ty: &TypeExpr) -> Option<i128> {
+        match self.resolve_type_alias(ty) {
+            TypeExpr::Array {
+                len: Some(len), ..
+            } => self.const_int_value_at(&len, len.span().start, 0),
+            TypeExpr::Pointer { to, .. } => self.array_len_of_ty(&to),
+            _ => None,
+        }
+    }
+
+    /// Element count of an array literal (`[3]int{1, 2, 3}` or `[...]int{1, 2, 3}`).
+    /// Literal elements are positional in this AST, so the item count is the
+    /// length when the type leaves it to be inferred.
+    fn array_lit_len(&self, expr: &Expr, depth: usize) -> Option<i128> {
+        if depth > 32 {
+            return None;
+        }
+        let Expr::SliceLit {
+            elem: Some(elem),
+            items,
+            ..
+        } = unwrap_parens(expr)
+        else {
+            return None;
+        };
+        match self.resolve_type_alias(elem) {
+            TypeExpr::Array {
+                len: Some(len), ..
+            } => self.const_int_value_at(&len, len.span().start, depth + 1),
+            TypeExpr::Array { len: None, .. } => Some(items.len() as i128),
+            _ => None,
+        }
+    }
+
+    /// Declared length of the fixed-size array parameter `name`, when the use
+    /// site sits inside that function.
+    fn param_array_len_at(&self, name: &str, use_pos: hy_diag::Pos) -> Option<i128> {
+        for decl in &self.file.decls {
+            if let hy_syntax::Decl::Fn(f) = decl {
+                if span_contains(f.span, use_pos) {
+                    for p in &f.params {
+                        if p.name == name {
+                            return self.array_len_of_ty(&p.ty);
+                        }
+                    }
+                    return None;
+                }
+            }
+        }
+        None
+    }
+
     fn scan_block_for_local_const<'b>(
         block: &'b hy_syntax::Block,
         name: &str,
         use_pos: hy_diag::Pos,
-        found: &mut Option<(&'b Option<TypeExpr>, &'b Expr, hy_diag::Pos)>,
+        found: &mut Option<BindingSight<'b>>,
     ) {
         if !span_contains(block.span, use_pos) {
             return;
@@ -1517,19 +1667,21 @@ impl<'a> Checker<'a> {
     fn apply_local_stmt_binding<'b>(
         stmt: &'b Stmt,
         name: &str,
-        found: &mut Option<(&'b Option<TypeExpr>, &'b Expr, hy_diag::Pos)>,
+        found: &mut Option<BindingSight<'b>>,
     ) {
         if let Stmt::Local(l) = stmt {
             if let Some(idx) = l.names.iter().position(|n| n == name) {
-                if matches!(l.kind, hy_syntax::LocalKind::Const) {
-                    if let Some(val) = l.values.get(idx) {
-                        *found = Some((&l.ty, val, l.span.start));
-                    } else {
-                        *found = None;
-                    }
-                } else {
-                    *found = None;
-                }
+                // Non-const locals and `const` declarations without a value are
+                // not constants, but the binding is still recorded: the
+                // fixed-size-array length resolver reads the declared type even
+                // when the initializer is not foldable. The constant folders go
+                // through `constant_initializer`, which stops here anyway.
+                *found = Some(BindingSight {
+                    ty: &l.ty,
+                    value: l.values.get(idx),
+                    pos: l.span.start,
+                    is_const: matches!(l.kind, hy_syntax::LocalKind::Const),
+                });
             }
         }
     }
@@ -1538,7 +1690,7 @@ impl<'a> Checker<'a> {
         stmt: &'b Stmt,
         name: &str,
         use_pos: hy_diag::Pos,
-        found: &mut Option<(&'b Option<TypeExpr>, &'b Expr, hy_diag::Pos)>,
+        found: &mut Option<BindingSight<'b>>,
     ) {
         match stmt {
             Stmt::Local(l) => {
@@ -1723,7 +1875,7 @@ impl<'a> Checker<'a> {
         expr: &'b Expr,
         name: &str,
         use_pos: hy_diag::Pos,
-        found: &mut Option<(&'b Option<TypeExpr>, &'b Expr, hy_diag::Pos)>,
+        found: &mut Option<BindingSight<'b>>,
     ) {
         if !span_contains(expr.span(), use_pos) {
             return;
@@ -1859,6 +2011,177 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The fixed-width integer type an expression's VALUE has, when the
+    /// checker can name it: a conversion (`u8(x)` -> `u8`) or a file-level
+    /// `const` with a declared fixed-width type (`const top u8 = 255`).
+    ///
+    /// `None` means "not provably a fixed-width integer". This predicate
+    /// gates a diagnostic, so an unknown shape must fail open.
+    fn fixed_width_int_ty_of(&self, st: &FnState, e: &Expr) -> Option<(String, i128, i128)> {
+        let e = unwrap_parens(e);
+        if let Some(ty) = self.ty_of_expr(st, e) {
+            if let TypeExpr::Named { name, .. } = self.resolve_type_alias(&ty) {
+                if let Some((lo, hi)) = fixed_width_int_range(&name) {
+                    return Some((name, lo, hi));
+                }
+            }
+        }
+        // A file-level `const` is not a local binding, so `ty_of_expr` has no
+        // entry for it; read the declaration's own type annotation instead.
+        // `const top u8 = 255; top + 1` is the shape this exists for.
+        if let Expr::Ident { name, .. } = e {
+            let decl = self.file.decls.iter().find_map(|d| match d {
+                hy_syntax::Decl::Const(c) if c.name == *name => Some(c),
+                _ => None,
+            });
+            if let Some(ty) = decl.and_then(|c| c.ty.as_ref()) {
+                if let TypeExpr::Named { name: tn, .. } = self.resolve_type_alias(ty) {
+                    if let Some((lo, hi)) = fixed_width_int_range(&tn) {
+                        return Some((tn, lo, hi));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// #725 — the folded result of a TYPED constant expression must stay
+    /// inside its type's range.
+    ///
+    /// Go folds constant expressions *before* the range check, so
+    /// `u8(255) + 1` is `constant 256 of type uint8 overflows uint8`. The
+    /// per-operand checks in `check_binary_const_overflow` cannot see that:
+    /// 255 fits `u8` and 1 fits `u8`, so both pass and the sum is never
+    /// computed.
+    ///
+    /// Fail-open by construction — `const_int_fold_with` answers `NotConst`
+    /// for any operand that is not a constant, which is exactly what keeps
+    /// `var x u8 = 200; x + 1` (a run-time wrap, SPEC X1/X2) accepted. Only a
+    /// genuinely folded constant can reach the range check.
+    fn check_typed_const_result(
+        &mut self,
+        st: &FnState,
+        expr: &Expr,
+        op: BinOp,
+        lhs: &Expr,
+        rhs: &Expr,
+        span: Span,
+    ) {
+        // A comparison yields a bool, not the operand's type.
+        if matches!(
+            op,
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+        ) {
+            return;
+        }
+        let lhs_ty = self.fixed_width_int_ty_of(st, lhs);
+        let rhs_ty = self.fixed_width_int_ty_of(st, rhs);
+        // Go's shift rule: the result takes the LEFT operand's type, and an
+        // untyped left operand STAYS untyped — so the right operand's type
+        // says nothing about a shift's range (`1 << u8(20)` builds).
+        let want = if matches!(op, BinOp::Shl | BinOp::Shr) {
+            lhs_ty
+        } else {
+            match (lhs_ty, rhs_ty) {
+                // Mismatched operand types are a different rule's business.
+                (Some(a), Some(b)) if a.0 != b.0 => return,
+                (Some(a), _) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => return,
+            }
+        };
+        let Some((ty_name, lo, hi)) = want else {
+            return;
+        };
+
+        let l = const_int_fold_with(lhs, &self.const_values, 0, Some(st));
+        let r = const_int_fold_with(rhs, &self.const_values, 0, Some(st));
+        match fold_bin(op, l, r) {
+            ConstFold::Val(v) if v < lo || v > hi => {
+                self.emit_typed_const_overflow(&ty_name, Some(v), lo, hi, span, expr);
+            }
+            ConstFold::TooBig => {
+                self.emit_typed_const_overflow(&ty_name, None, lo, hi, span, expr);
+            }
+            _ => {}
+        }
+    }
+
+    /// `-u8(1)` is `constant -1 of type uint8 overflows uint8` in Go. The
+    /// negation's own type is the operand's, so the range check applies to the
+    /// negated value (#725).
+    fn check_negated_const_result(&mut self, st: &FnState, operand: &Expr, span: Span) {
+        let Some((ty_name, lo, hi)) = self.fixed_width_int_ty_of(st, operand) else {
+            return;
+        };
+        let ConstFold::Val(v) = const_int_fold_with(operand, &self.const_values, 0, Some(st))
+        else {
+            return;
+        };
+        let Some(neg) = v.checked_neg() else {
+            return;
+        };
+        if neg < lo || neg > hi {
+            let rendered = format!("-{}", operand.render());
+            let msg = format!(
+                "constant expression `{}` overflows declared type `{}` ({} is outside [{}, {}]) (HYB-E6002)",
+                rendered, ty_name, neg, lo, hi
+            );
+            let notes = vec![
+                format!(
+                    "why: Go folds the constant and rejects a result outside `{}` (`constant {} of type {} overflows {}`), so an accepted Hybrid program would emit unbuildable Go (issue #725)",
+                    ty_name, neg, ty_name, ty_name
+                ),
+                format!(
+                    "fix: keep the result in [{}, {}]. A run-time value wraps instead (SPEC X1/X2), but a CONSTANT negation is folded by Go and refused",
+                    lo, hi
+                ),
+            ];
+            self.diags.push(
+                Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
+            );
+        }
+    }
+
+    /// Shared HYB-E6002 emission for a typed constant expression whose folded
+    /// result is outside its type's range. `value` is `None` when the fold was
+    /// provably larger than `i128` (`TooBig`).
+    fn emit_typed_const_overflow(
+        &mut self,
+        ty_name: &str,
+        value: Option<i128>,
+        lo: i128,
+        hi: i128,
+        span: Span,
+        expr: &Expr,
+    ) {
+        let shown = match value {
+            Some(v) => v.to_string(),
+            None => "a value beyond i128".to_string(),
+        };
+        let msg = format!(
+            "constant expression `{}` overflows declared type `{}` ({} is outside [{}, {}]) (HYB-E6002)",
+            expr.render(),
+            ty_name,
+            shown,
+            lo,
+            hi
+        );
+        let notes = vec![
+            format!(
+                "why: Go folds a constant expression before the range check and rejects a result outside `{}` (`constant {} of type {} overflows {}`), so an accepted Hybrid program would emit unbuildable Go (issue #725)",
+                ty_name, shown, ty_name, ty_name
+            ),
+            format!(
+                "fix: keep the result in [{}, {}], or widen the operand's type. A run-time value wraps (SPEC X1/X2), but a constant expression is folded by Go and refused",
+                lo, hi
+            ),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
+        );
+    }
+
     pub(crate) fn check_file_map_literal_duplicate_keys(&mut self) {
         for d in &self.file.decls {
             if let hy_syntax::Decl::Const(c) = d {
@@ -1966,7 +2289,10 @@ impl<'a> Checker<'a> {
                 if name == "false" {
                     return Some(ConstKeyVal::Bool(false));
                 }
-                if let Some((_, val, _)) = self.resolve_local_const_decl_at(name, span.start) {
+                if let Some(val) = self
+                    .resolve_local_binding_at(name, span.start)
+                    .and_then(|sight| sight.constant_initializer())
+                {
                     return self.fold_const_key(val, st, depth + 1);
                 }
                 if let Some(st) = st {
