@@ -752,11 +752,21 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             check_body_boundaries(ck, st, body, true, nested);
             pop_scope_and_sync(st, nested);
         }
-        Stmt::Split { body, .. } => {
+        Stmt::Split {
+            base,
+            mid,
+            left,
+            right,
+            body,
+            span,
+        } => {
             // W-015: the split body is a boundary scope (forks are fresh
-            // roots that die with the block); same shape as the managed arm.
+            // roots that die with the block); preserve the surrounding
+            // `managed` state and run E3105/E3106 + fork definitions.
             st.scope_push();
-            check_body_boundaries(ck, st, body, true, nested);
+            check_stmt_own_uses(ck, st, stmt, managed);
+            ck.process_split(st, base, mid, left, right, body, *span, 0, managed);
+            check_body_boundaries(ck, st, body, managed, nested);
             pop_scope_and_sync(st, nested);
         }
         Stmt::If {

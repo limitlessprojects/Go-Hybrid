@@ -134,3 +134,157 @@ fn split_forks_die_at_block_edge_and_base_is_usable_after() {
     );
     assert_eq!(r.verdict, Verdict::Accept, "got {:?}", r.diagnostics);
 }
+
+#[test]
+fn split_nested_split_in_split_accepts() {
+    let r = check(
+        "fn worker(part []int, done chan int) {\n\
+         \x20   for i in 0..len(part) {\n\
+         \x20       part[i] = part[i] + 1\n\
+         \x20   }\n\
+         \x20   done <- 1\n\
+         }\n\
+         \n\
+         fn main() {\n\
+         \x20   s := make([]int, 8)\n\
+         \x20   done := make(chan int, 3)\n\
+         \x20   split s at 4 into a, b {\n\
+         \x20       split a at 2 into ll, lr {\n\
+         \x20           task worker(move ll, done)\n\
+         \x20           task worker(move lr, done)\n\
+         \x20       }\n\
+         \x20       task worker(move b, done)\n\
+         \x20   }\n\
+         \x20   <-done\n\
+         \x20   <-done\n\
+         \x20   <-done\n\
+         \x20   fmt.println(s[0], s[7])\n\
+         }\n",
+    );
+    assert_eq!(r.verdict, Verdict::Accept, "got {:?}", r.diagnostics);
+}
+
+#[test]
+fn split_two_index_subslice_of_fork_tracks_intra_fork_may_share() {
+    let r = check(
+        "fn worker(part []int, done chan int) {\n\
+         \x20   part[0] = 99\n\
+         \x20   done <- 1\n\
+         }\n\
+         \n\
+         fn main() {\n\
+         \x20   s := make([]int, 8)\n\
+         \x20   done := make(chan int, 2)\n\
+         \x20   split s at 4 into a, b {\n\
+         \x20       sub := a[1:3]\n\
+         \x20       task worker(move a, done)\n\
+         \x20       task worker(move b, done)\n\
+         \x20       fmt.println(sub[0])\n\
+         \x20   }\n\
+         }\n",
+    );
+    assert_eq!(r.verdict, Verdict::Reject, "got {:?}", r.diagnostics);
+    assert_eq!(codes(&r), vec!["HYB-E3003"]);
+}
+
+#[test]
+fn split_fork_used_after_block_rejects_e1001() {
+    let r = check(
+        "fn main() {\n\
+         \x20   s := make([]int, 8)\n\
+         \x20   split s at 4 into a, b {\n\
+         \x20       a[0] = 1\n\
+         \x20       b[0] = 2\n\
+         \x20   }\n\
+         \x20   fmt.println(a[0])\n\
+         }\n",
+    );
+    assert_eq!(r.verdict, Verdict::Reject, "got {:?}", r.diagnostics);
+    assert_eq!(codes(&r), vec!["HYB-E1001"]);
+}
+
+#[test]
+fn split_non_owned_param_slice_rejects_e3105() {
+    let r = check(
+        "fn worker(a []int, done chan int) {\n\
+         \x20   a[0] = 1\n\
+         \x20   done <- 1\n\
+         }\n\
+         \n\
+         fn bad(s []int, done chan int) {\n\
+         \x20   split s at 2 into a, b {\n\
+         \x20       task worker(move a, done)\n\
+         \x20       fmt.println(b[0])\n\
+         \x20   }\n\
+         }\n",
+    );
+    assert_eq!(r.verdict, Verdict::Reject, "got {:?}", r.diagnostics);
+    assert_eq!(codes(&r), vec!["HYB-E3105"]);
+    assert!(
+        r.diagnostics[0]
+            .message
+            .contains("not an owned local slice"),
+        "expected non-owned origin note, got {:?}",
+        r.diagnostics[0].message
+    );
+}
+
+#[test]
+fn split_const_slice_rejects_e3105() {
+    let r = check(
+        "fn main() {\n\
+         \x20   const s = []int{1, 2, 3, 4}\n\
+         \x20   split s at 2 into a, b {\n\
+         \x20       a[0] = 9\n\
+         \x20       fmt.println(a[0], b[0])\n\
+         \x20   }\n\
+         }\n",
+    );
+    assert_eq!(r.verdict, Verdict::Reject, "got {:?}", r.diagnostics);
+    assert_eq!(codes(&r), vec!["HYB-E3105"]);
+    assert!(
+        r.diagnostics[0].message.contains("deeply immutable"),
+        "expected const slice rejection, got {:?}",
+        r.diagnostics[0].message
+    );
+}
+
+#[test]
+fn split_nested_reference_element_slice_rejects_e3105() {
+    let r = check(
+        "fn main() {\n\
+         \x20   s := make([][]int, 4)\n\
+         \x20   split s at 2 into a, b {\n\
+         \x20       fmt.println(len(a), len(b))\n\
+         \x20   }\n\
+         }\n",
+    );
+    assert_eq!(r.verdict, Verdict::Reject, "got {:?}", r.diagnostics);
+    assert_eq!(codes(&r), vec!["HYB-E3105"]);
+    assert!(
+        r.diagnostics[0]
+            .message
+            .contains("element type carries shared heap references"),
+        "expected nested reference element note, got {:?}",
+        r.diagnostics[0].message
+    );
+}
+
+#[test]
+fn split_inside_closure_enforces_e3106_and_does_not_enable_managed_mode() {
+    let r = check(
+        "fn main() {\n\
+         \x20   f := fn() {\n\
+         \x20       s := make([]int, 8)\n\
+         \x20       split s at 4 into a, b {\n\
+         \x20           s[0] = 1\n\
+         \x20           fmt.println(a[0], b[0])\n\
+         \x20       }\n\
+         \x20   }\n\
+         \x20   f()\n\
+         }\n",
+    );
+    assert_eq!(r.verdict, Verdict::Reject, "got {:?}", r.diagnostics);
+    assert_eq!(codes(&r), vec!["HYB-E3106"]);
+}
+

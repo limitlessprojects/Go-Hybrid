@@ -215,13 +215,27 @@ impl<'a> Scan<'a> {
                 body,
                 ..
             } => {
-                // W-015: base and mid are USES; the fork names are fresh
-                // definitions scoped to the split body.
+                // W-015: base and mid are USES in the outer scope; the fork
+                // names are fresh definitions strictly scoped to the split
+                // body (so a post-block use of `left`/`right` rejects with
+                // HYB-E1001 unless an outer declaration also provides it).
                 self.run_expr(base);
                 self.run_expr(mid);
-                self.define(left);
-                self.define(right);
+                let had_left = self.allowed.contains(left.as_str());
+                let had_right = self.allowed.contains(right.as_str());
+                if self.mode == Mode::Check {
+                    self.allowed.insert(left.clone());
+                    self.allowed.insert(right.clone());
+                }
                 self.run_block(body);
+                if self.mode == Mode::Check {
+                    if !had_left {
+                        self.allowed.remove(left.as_str());
+                    }
+                    if !had_right {
+                        self.allowed.remove(right.as_str());
+                    }
+                }
             }
             Stmt::Managed { body, .. } => self.run_block(body),
             Stmt::Match {

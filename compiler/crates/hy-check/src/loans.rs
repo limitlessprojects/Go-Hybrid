@@ -3947,10 +3947,46 @@ impl<'a> Checker<'a> {
             ));
             return;
         };
-        if !matches!(base_binding.shape, TypeShape::Slice(_)) {
+        let TypeShape::Slice(ref elem_shape) = base_binding.shape else {
             self.push_split_diag(st, span, "HYB-E3105", format!(
                 "cannot split `{}` — it is not a slice (W-015 splits slices via Go's full slice expression)",
                 base_name
+            ));
+            return;
+        };
+        let elem_shape = (**elem_shape).clone();
+        let fork_shape = base_binding.shape.clone();
+        // Define the forks up-front once we know `base` is a slice so that
+        // any E3105/E3106 rejection below does not cascade into a spurious
+        // E3005 (`move a` on an unbound name) when walking the split body.
+        self.define_binding(st, left, fork_shape.clone(), None, false, managed);
+        self.define_binding(st, right, fork_shape, None, false, managed);
+
+        if base_binding.immutable {
+            self.push_split_diag(st, span, "HYB-E3105", format!(
+                "cannot split `{}` — `const` slice bindings are deeply immutable (W-015 splits owned mutable local slices only)",
+                base_name
+            ));
+            return;
+        }
+        if let Some((origin, _)) = self.non_owned_origin_of(st, &base_name) {
+            self.push_split_diag(st, span, "HYB-E3105", format!(
+                "cannot split `{}` — it is not an owned local slice (origin: {}; W-015 splits owned local slices only so forks can move across task boundaries)",
+                base_name, origin
+            ));
+            return;
+        }
+        if !elem_shape.is_sendable_by_type() {
+            self.push_split_diag(st, span, "HYB-E3105", format!(
+                "cannot split `{}` — element type carries shared heap references (Go's 3-index capacity clip `s[0:mid:mid]` proves disjointness of outer slice slots only, not inner reference elements)",
+                base_name
+            ));
+            return;
+        }
+        if left == right && left != "_" {
+            self.push_split_diag(st, span, "HYB-E3105", format!(
+                "cannot split `{}` into identical fork names `{}` and `{}` — left and right forks must name distinct bindings",
+                base_name, left, right
             ));
             return;
         }
@@ -3959,11 +3995,17 @@ impl<'a> Checker<'a> {
         for (k, set) in st.may_share.iter() {
             if k == &base_name {
                 for p in set {
-                    if self.lookup_binding(st, p).is_some() && !sharers.contains(p) {
+                    if p != left
+                        && p != right
+                        && self.lookup_binding(st, p).is_some()
+                        && !sharers.contains(p)
+                    {
                         sharers.push(p.clone());
                     }
                 }
-            } else if set.contains(&base_name)
+            } else if k != left
+                && k != right
+                && set.contains(&base_name)
                 && self.lookup_binding(st, k).is_some()
                 && !sharers.contains(k)
             {
@@ -3972,6 +4014,8 @@ impl<'a> Checker<'a> {
         }
         for (k, tgt) in st.aliases.iter() {
             if k != &base_name
+                && k != left
+                && k != right
                 && tgt == &base_name
                 && self.lookup_binding(st, k).is_some()
                 && !sharers.contains(k)
@@ -3999,11 +4043,6 @@ impl<'a> Checker<'a> {
             ));
             return;
         }
-        // The forks: fresh roots, deliberately NO record_may_share /
-        // record_alias — no edge is exactly the point (the capability grant).
-        let fork_shape = base_binding.shape.clone();
-        self.define_binding(st, left, fork_shape.clone(), None, false, managed);
-        self.define_binding(st, right, fork_shape, None, false, managed);
     }
 
     fn push_split_diag(
