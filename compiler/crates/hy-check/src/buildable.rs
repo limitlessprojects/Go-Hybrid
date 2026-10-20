@@ -1137,6 +1137,7 @@ impl<'a> Collector<'a> {
             // The struct-field lookup below cannot catch it, because an
             // interface is not a struct — so reject the base explicitly.
             Expr::Field { base, name, span } => {
+                self.check_single_value_position(base, "a field or method selection", /*binding_position=*/ false);
                 self.check_pointer_method_receiver(base, name, *span);
                 if matches!(self.kind_of_expr(base), OpKind::Interface) {
                     self.emit_e1002(
