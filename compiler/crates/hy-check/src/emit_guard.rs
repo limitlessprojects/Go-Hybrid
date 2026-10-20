@@ -53,6 +53,34 @@ impl ConstKeyVal {
     }
 }
 
+/// One name binding that the enclosing-function walk saw before a use site:
+/// the declaration's type ascription (when written), its initializer (when one
+/// was given), where it was declared, and whether it is a `const`.
+///
+/// Two readers share this walk. The constant folders only trust `const`
+/// bindings, so they go through `constant_initializer`. The fixed-size-array
+/// length resolver must also see `var`/`let`/`:=` bindings, because an array's
+/// length lives in its *type* whether or not the binding is constant.
+#[derive(Debug, Clone, Copy)]
+struct BindingSight<'b> {
+    ty: &'b Option<TypeExpr>,
+    value: Option<&'b Expr>,
+    pos: hy_diag::Pos,
+    is_const: bool,
+}
+
+impl<'b> BindingSight<'b> {
+    /// The initializer the constant folders may fold: only a `const` binding
+    /// has one, exactly as the pre-split walk behaved.
+    fn constant_initializer(&self) -> Option<&'b Expr> {
+        if self.is_const {
+            self.value
+        } else {
+            None
+        }
+    }
+}
+
 impl<'a> Checker<'a> {
     /// Pass-B entry: mirror `arith::check_stmt_const_zero_divisor`.
     pub(crate) fn check_stmt_emit_guard(&mut self, st: &FnState, stmt: &Stmt) {
@@ -1216,12 +1244,13 @@ impl<'a> Checker<'a> {
                         return;
                     }
                     let folded = self
-                        .resolve_local_const_decl_at(name, span.start)
-                        .and_then(|(decl_ty, init_expr, decl_pos)| {
-                            if decl_ty.as_ref().is_some_and(is_non_int_primitive_type) {
+                        .resolve_local_binding_at(name, span.start)
+                        .and_then(|sight| {
+                            let init_expr = sight.constant_initializer()?;
+                            if sight.ty.as_ref().is_some_and(is_non_int_primitive_type) {
                                 return None;
                             }
-                            self.const_int_value_at(init_expr, decl_pos, 0)
+                            self.const_int_value_at(init_expr, sight.pos, 0)
                         });
                     let Some(v) = folded else {
                         let msg = format!(
@@ -1377,16 +1406,16 @@ impl<'a> Checker<'a> {
                 name,
                 span: id_span,
             } => {
-                if let Some((decl_ty, next_val, next_pos)) =
-                    self.resolve_local_const_decl_at(name, id_span.start)
-                {
-                    if decl_ty.as_ref().is_some_and(is_non_int_primitive_type) {
+                if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
+                    if let Some(next_val) = sight.constant_initializer() {
+                        if sight.ty.as_ref().is_some_and(is_non_int_primitive_type) {
+                            return None;
+                        }
+                        if (sight.pos.line, sight.pos.col) != (use_pos.line, use_pos.col) {
+                            return self.const_int_value_at(next_val, sight.pos, depth + 1);
+                        }
                         return None;
                     }
-                    if (next_pos.line, next_pos.col) != (use_pos.line, use_pos.col) {
-                        return self.const_int_value_at(next_val, next_pos, depth + 1);
-                    }
-                    return None;
                 }
                 if self.consts.contains_key(name.as_str()) {
                     return self.const_value_of_depth(name, depth + 1);
@@ -1459,13 +1488,13 @@ impl<'a> Checker<'a> {
                 name,
                 span: id_span,
             } => {
-                if let Some((_, next_val, next_pos)) =
-                    self.resolve_local_const_decl_at(name, id_span.start)
-                {
-                    if (next_pos.line, next_pos.col) != (use_pos.line, use_pos.col) {
-                        return self.const_string_len_at(next_val, next_pos, depth + 1);
+                if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
+                    if let Some(next_val) = sight.constant_initializer() {
+                        if (sight.pos.line, sight.pos.col) != (use_pos.line, use_pos.col) {
+                            return self.const_string_len_at(next_val, sight.pos, depth + 1);
+                        }
+                        return None;
                     }
-                    return None;
                 }
                 let d = self.file.decls.iter().find_map(|d| match d {
                     hy_syntax::Decl::Const(c) if c.name == *name => Some(c),
@@ -1490,11 +1519,18 @@ impl<'a> Checker<'a> {
         false
     }
 
-    fn resolve_local_const_decl_at(
+    /// The binding `name` has at `use_pos`, when it is a local of the enclosing
+    /// function declared before the use site.
+    ///
+    /// `is_const` separates a `const` (whose initializer the constant folders
+    /// may fold) from a `var`/`let`/`:=` binding; the type ascription is
+    /// reported for every local, because a fixed-size array carries its length
+    /// in its type.
+    fn resolve_local_binding_at(
         &self,
         name: &str,
         use_pos: hy_diag::Pos,
-    ) -> Option<(&'a Option<TypeExpr>, &'a Expr, hy_diag::Pos)> {
+    ) -> Option<BindingSight<'a>> {
         for decl in &self.file.decls {
             if let hy_syntax::Decl::Fn(f) = decl {
                 if span_contains(f.span, use_pos) {
@@ -1509,11 +1545,104 @@ impl<'a> Checker<'a> {
         None
     }
 
+    /// Length of the fixed-size array that `expr` denotes, when it is known
+    /// exactly.
+    ///
+    /// Mirrors `const_string_len_at`: `None` means "not known here", never "not
+    /// an array", so an unknown length can never turn a legal program into a
+    /// diagnostic. An array's length is part of its type, so `var`/`let`/`:=`
+    /// bindings and parameters count too, not only `const`.
+    pub(crate) fn const_array_len_at(
+        &self,
+        expr: &Expr,
+        use_pos: hy_diag::Pos,
+        depth: usize,
+    ) -> Option<i128> {
+        if depth > 32 {
+            return None;
+        }
+        match unwrap_parens(expr) {
+            Expr::Ident { name, span: id_span, .. } => {
+                if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
+                    if (sight.pos.line, sight.pos.col) != (use_pos.line, use_pos.col) {
+                        if let Some(ty) = sight.ty {
+                            if let Some(len) = self.array_len_of_ty(ty) {
+                                return Some(len);
+                            }
+                        }
+                        if let Some(value) = sight.value {
+                            return self.array_lit_len(value, depth + 1);
+                        }
+                    }
+                    return None;
+                }
+                self.param_array_len_at(name, id_span.start)
+            }
+            _ => None,
+        }
+    }
+
+    /// The length carried by an array type (`[3]int`, `*[3]int`, aliases), or
+    /// `None` when the type is not a fixed-size array or its length is not an
+    /// integer constant. A pointer to an array indexes the same elements, so the
+    /// length survives `*`.
+    fn array_len_of_ty(&self, ty: &TypeExpr) -> Option<i128> {
+        match self.resolve_type_alias(ty) {
+            TypeExpr::Array {
+                len: Some(len), ..
+            } => self.const_int_value_at(&len, len.span().start, 0),
+            TypeExpr::Pointer { to, .. } => self.array_len_of_ty(&to),
+            _ => None,
+        }
+    }
+
+    /// Element count of an array literal (`[3]int{1, 2, 3}` or `[...]int{1, 2, 3}`).
+    /// Literal elements are positional in this AST, so the item count is the
+    /// length when the type leaves it to be inferred.
+    fn array_lit_len(&self, expr: &Expr, depth: usize) -> Option<i128> {
+        if depth > 32 {
+            return None;
+        }
+        let Expr::SliceLit {
+            elem: Some(elem),
+            items,
+            ..
+        } = unwrap_parens(expr)
+        else {
+            return None;
+        };
+        match self.resolve_type_alias(elem) {
+            TypeExpr::Array {
+                len: Some(len), ..
+            } => self.const_int_value_at(&len, len.span().start, depth + 1),
+            TypeExpr::Array { len: None, .. } => Some(items.len() as i128),
+            _ => None,
+        }
+    }
+
+    /// Declared length of the fixed-size array parameter `name`, when the use
+    /// site sits inside that function.
+    fn param_array_len_at(&self, name: &str, use_pos: hy_diag::Pos) -> Option<i128> {
+        for decl in &self.file.decls {
+            if let hy_syntax::Decl::Fn(f) = decl {
+                if span_contains(f.span, use_pos) {
+                    for p in &f.params {
+                        if p.name == name {
+                            return self.array_len_of_ty(&p.ty);
+                        }
+                    }
+                    return None;
+                }
+            }
+        }
+        None
+    }
+
     fn scan_block_for_local_const<'b>(
         block: &'b hy_syntax::Block,
         name: &str,
         use_pos: hy_diag::Pos,
-        found: &mut Option<(&'b Option<TypeExpr>, &'b Expr, hy_diag::Pos)>,
+        found: &mut Option<BindingSight<'b>>,
     ) {
         if !span_contains(block.span, use_pos) {
             return;
@@ -1532,19 +1661,21 @@ impl<'a> Checker<'a> {
     fn apply_local_stmt_binding<'b>(
         stmt: &'b Stmt,
         name: &str,
-        found: &mut Option<(&'b Option<TypeExpr>, &'b Expr, hy_diag::Pos)>,
+        found: &mut Option<BindingSight<'b>>,
     ) {
         if let Stmt::Local(l) = stmt {
             if let Some(idx) = l.names.iter().position(|n| n == name) {
-                if matches!(l.kind, hy_syntax::LocalKind::Const) {
-                    if let Some(val) = l.values.get(idx) {
-                        *found = Some((&l.ty, val, l.span.start));
-                    } else {
-                        *found = None;
-                    }
-                } else {
-                    *found = None;
-                }
+                // Non-const locals and `const` declarations without a value are
+                // not constants, but the binding is still recorded: the
+                // fixed-size-array length resolver reads the declared type even
+                // when the initializer is not foldable. The constant folders go
+                // through `constant_initializer`, which stops here anyway.
+                *found = Some(BindingSight {
+                    ty: &l.ty,
+                    value: l.values.get(idx),
+                    pos: l.span.start,
+                    is_const: matches!(l.kind, hy_syntax::LocalKind::Const),
+                });
             }
         }
     }
@@ -1553,7 +1684,7 @@ impl<'a> Checker<'a> {
         stmt: &'b Stmt,
         name: &str,
         use_pos: hy_diag::Pos,
-        found: &mut Option<(&'b Option<TypeExpr>, &'b Expr, hy_diag::Pos)>,
+        found: &mut Option<BindingSight<'b>>,
     ) {
         match stmt {
             Stmt::Local(l) => {
@@ -1738,7 +1869,7 @@ impl<'a> Checker<'a> {
         expr: &'b Expr,
         name: &str,
         use_pos: hy_diag::Pos,
-        found: &mut Option<(&'b Option<TypeExpr>, &'b Expr, hy_diag::Pos)>,
+        found: &mut Option<BindingSight<'b>>,
     ) {
         if !span_contains(expr.span(), use_pos) {
             return;
@@ -2152,7 +2283,10 @@ impl<'a> Checker<'a> {
                 if name == "false" {
                     return Some(ConstKeyVal::Bool(false));
                 }
-                if let Some((_, val, _)) = self.resolve_local_const_decl_at(name, span.start) {
+                if let Some(val) = self
+                    .resolve_local_binding_at(name, span.start)
+                    .and_then(|sight| sight.constant_initializer())
+                {
                     return self.fold_const_key(val, st, depth + 1);
                 }
                 if let Some(st) = st {
