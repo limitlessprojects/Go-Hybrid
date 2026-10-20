@@ -809,7 +809,10 @@ impl<'a> Collector<'a> {
                 }
                 self.check_assign_operands(targets, *op, values, *span);
             }
-            Stmt::Expr { expr, .. } => self.expr(expr),
+            Stmt::Expr { expr, span } => {
+                self.check_expr_statement(expr, *span);
+                self.expr(expr);
+            }
             Stmt::Send { chan, value, .. } => {
                 self.expr(chan);
                 self.expr(value);
@@ -2983,6 +2986,151 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
+        }
+    }
+
+    /// Go requires expression statements to have side-effects (function/method
+    /// calls or channel receives). Bare values, literals, variables, operators,
+    /// value-producing builtins (`len`, `cap`, `make`, `new`, `append`, etc.),
+    /// and type conversions are rejected by Go with `evaluated but not used`
+    /// or `(value of type ...) is not used` (HYB-E1002).
+    fn check_expr_statement(&mut self, expr: &Expr, span: Span) {
+        let mut e = unwrap_parens(expr);
+        if let Expr::Try { operand, .. } = e {
+            e = unwrap_parens(operand);
+        }
+        match e {
+            Expr::Receive { .. } => {}
+            Expr::Call { callee, .. } => {
+                let bare_callee = unwrap_parens(callee);
+                if let Expr::Ident { name, .. } = bare_callee {
+                    if crate::builtins::VALUE_ONLY_BUILTINS.contains(&name.as_str()) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`{}(...)` evaluated but not used — Go refuses `{}(...) is not used` (HYB-E1002)",
+                                name, name
+                            ),
+                            "builtins that produce values must be assigned or used; they cannot be expression statements",
+                        );
+                        return;
+                    }
+                    if (crate::const_init::is_conversion_type_name(name)
+                        || self.ck.structs.contains_key(name.as_str())
+                        || self.ck.type_aliases.contains_key(name.as_str()))
+                        && !self.ck.fns.contains_key(name.as_str())
+                        && self.lookup_kind(name).is_none()
+                    {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "type conversion `{}(...)` evaluated but not used — Go refuses `conversion to {} is not used` (HYB-E1002)",
+                                name, name
+                            ),
+                            "type conversions produce values that must be assigned, passed, or returned; a conversion cannot appear as an expression statement",
+                        );
+                        return;
+                    }
+                } else if let Expr::SliceLit { elem: Some(_), items, .. } = bare_callee {
+                    if items.is_empty() {
+                        self.emit_e1002(
+                            span,
+                            "slice type conversion evaluated but not used — Go refuses conversions as expression statements (HYB-E1002)".to_string(),
+                            "type conversions produce values that must be assigned, passed, or returned; a conversion cannot appear as an expression statement",
+                        );
+                        return;
+                    }
+                }
+            }
+            Expr::Lit { .. } | Expr::Interp { .. } => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`{}` evaluated but not used — literals cannot appear as expression statements (HYB-E1002)",
+                        expr.render()
+                    ),
+                    "an expression statement must have side-effects: a function call, method call, or channel receive",
+                );
+            }
+            Expr::Ident { name, .. } => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`{}` evaluated but not used — variables cannot appear as expression statements (HYB-E1002)",
+                        name
+                    ),
+                    "an expression statement must have side-effects: a function call, method call, or channel receive; to discard a value, write `_ = x`",
+                );
+            }
+            Expr::Binary { .. } => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`{}` evaluated but not used — binary operations cannot appear as expression statements (HYB-E1002)",
+                        expr.render()
+                    ),
+                    "an expression statement must have side-effects: a function call, method call, or channel receive",
+                );
+            }
+            Expr::Unary { .. } | Expr::AddrOf { .. } => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`{}` evaluated but not used — unary operations cannot appear as expression statements (HYB-E1002)",
+                        expr.render()
+                    ),
+                    "an expression statement must have side-effects: a function call, method call, or channel receive",
+                );
+            }
+            Expr::Index { .. } | Expr::Slice { .. } => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`{}` evaluated but not used — indexing and slicing cannot appear as expression statements (HYB-E1002)",
+                        expr.render()
+                    ),
+                    "an expression statement must have side-effects: a function call, method call, or channel receive; to discard a value, write `_ = x[i]`",
+                );
+            }
+            Expr::Field { base, name, .. } => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`{}.{}` evaluated but not used — field selections cannot appear as expression statements (HYB-E1002)",
+                        base.render(),
+                        name
+                    ),
+                    "an expression statement must have side-effects: a function call, method call, or channel receive; to discard a value, write `_ = x.f`",
+                );
+            }
+            Expr::StructLit { .. } | Expr::SliceLit { .. } | Expr::MapLit { .. } => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`{}` evaluated but not used — composite literals cannot appear as expression statements (HYB-E1002)",
+                        expr.render()
+                    ),
+                    "an expression statement must have side-effects: a function call, method call, or channel receive",
+                );
+            }
+            Expr::FnLit { .. } => {
+                self.emit_e1002(
+                    span,
+                    "function literal evaluated but not used — closure literals cannot appear as expression statements without being called (HYB-E1002)".to_string(),
+                    "invoke the closure immediately with `(...)` or bind it with `:=`",
+                );
+            }
+            Expr::Move { .. } => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`{}` evaluated but not used — `move` cannot appear as an expression statement (HYB-E1002)",
+                        expr.render()
+                    ),
+                    "`move` transfers ownership to a task spawn, channel send, or assignment",
+                );
+            }
+            Expr::Paren { .. } | Expr::Try { .. } => {}
         }
     }
 

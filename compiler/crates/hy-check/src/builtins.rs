@@ -13,6 +13,10 @@ use crate::model::{unwrap_parens, Checker};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{Expr, ForKind, LitKind, Place, PlaceKind, SelectArmKind, Stmt, UnOp};
 
+pub(crate) const VALUE_ONLY_BUILTINS: &[&str] = &[
+    "append", "cap", "complex", "imag", "len", "make", "max", "min", "new", "real",
+];
+
 impl<'a> Checker<'a> {
     /// Pass-B entry: HYB-E2001 on `defer` + HYB-E2005 on builtin calls.
     /// Nested block bodies are NOT recursed — `walk::flatten` already lists
@@ -31,21 +35,67 @@ impl<'a> Checker<'a> {
         if let Expr::Try { operand, .. } = e {
             e = unwrap_parens(operand);
         }
-        if matches!(e, Expr::Call { .. }) {
+        let Expr::Call { callee, .. } = e else {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E2001",
+                    self.path.clone(),
+                    *span,
+                    "defer requires a call expression (HYB-E2001)",
+                )
+                .with_notes(vec![
+                    "Go's defer operand must be a function call; Hybrid matches that contract so accepted programs emit buildable Go".to_string(),
+                    "defer the call itself: `defer f.close()?` / `defer close(ch)` — not a bare ident, receive, or send".to_string(),
+                ]),
+            );
             return;
+        };
+        let bare_callee = unwrap_parens(callee);
+        if let Expr::Ident { name, .. } = bare_callee {
+            if VALUE_ONLY_BUILTINS.contains(&name.as_str()) {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E2001",
+                        self.path.clone(),
+                        *span,
+                        format!("cannot defer `{name}`: defer discards result of `{name}` (HYB-E2001)"),
+                    )
+                    .with_notes(vec![
+                        "in Go, builtins that produce values without side-effects cannot be deferred; call a function or method that performs clean-up actions".to_string(),
+                    ]),
+                );
+            } else if (crate::const_init::is_conversion_type_name(name)
+                || self.structs.contains_key(name.as_str())
+                || self.type_aliases.contains_key(name.as_str()))
+                && !self.fns.contains_key(name.as_str())
+            {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E2001",
+                        self.path.clone(),
+                        *span,
+                        format!("cannot defer type conversion `{name}`: defer discards result of conversion (HYB-E2001)"),
+                    )
+                    .with_notes(vec![
+                        "a type conversion is not a function call and produces a value that cannot be discarded in defer".to_string(),
+                    ]),
+                );
+            }
+        } else if let Expr::SliceLit { elem: Some(_), items, .. } = bare_callee {
+            if items.is_empty() {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E2001",
+                        self.path.clone(),
+                        *span,
+                        "cannot defer type conversion: defer discards result of conversion (HYB-E2001)".to_string(),
+                    )
+                    .with_notes(vec![
+                        "a type conversion is not a function call and produces a value that cannot be discarded in defer".to_string(),
+                    ]),
+                );
+            }
         }
-        self.diags.push(
-            Diagnostic::error(
-                "HYB-E2001",
-                self.path.clone(),
-                *span,
-                "defer requires a call expression (HYB-E2001)",
-            )
-            .with_notes(vec![
-                "Go's defer operand must be a function call; Hybrid matches that contract so accepted programs emit buildable Go".to_string(),
-                "defer the call itself: `defer f.close()?` / `defer close(ch)` — not a bare ident, receive, or send".to_string(),
-            ]),
-        );
     }
 
     fn check_stmt_builtin_args_inner(&mut self, stmt: &Stmt, deep: bool) {
