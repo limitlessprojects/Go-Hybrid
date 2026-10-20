@@ -1,4 +1,5 @@
 """Regression tests for fail-closed CLI argument validation (no network)."""
+import contextlib
 import importlib.util
 import io
 import json
