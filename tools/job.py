@@ -85,8 +85,13 @@ def kaggle_slug():
 # ---------------------------------------------------------------- kaggle tier
 def kaggle_submit(jobdir):
     head = resolve_head()
-    with open(os.path.join(jobdir, "job.json")) as f:
-        job = json.load(f)
+    try:
+        with open(os.path.join(jobdir, "job.json"), encoding="utf-8") as f:
+            job = json.load(f)
+    except (OSError, ValueError) as exc:
+        sys.exit("REFUSING to push: invalid job.json: {}".format(exc))
+    if not isinstance(job, dict) or not isinstance(job.get("job"), str) or not job["job"].strip():
+        sys.exit("REFUSING to push: job.json must be an object with a non-empty 'job' name")
     job["sha"] = head  # run the code we just pushed
     payload = json.dumps(job, indent=2)
 
@@ -201,8 +206,8 @@ def kaggle_fetch(jobdir, slug=None):
     """
     slug = slug or kaggle_slug()
     raw = os.path.join(jobdir, "result", "raw")
-    os.makedirs(raw, exist_ok=True)
     try:
+        os.makedirs(raw, exist_ok=True)
         staging = tempfile.mkdtemp(prefix=".staging-", dir=raw)
     except OSError as e:
         print("WARNING: cannot stage download under {}: {}".format(raw, e), file=sys.stderr)
@@ -335,10 +340,25 @@ def actions_fetch(run_id, jobdir):
     if not arts:
         print("actions fetch: run {} has no artifacts to download".format(run_id), file=sys.stderr)
         return 1
-    os.makedirs(os.path.join(jobdir, "result"), exist_ok=True)
+    try:
+        os.makedirs(os.path.join(jobdir, "result"), exist_ok=True)
+    except OSError as exc:
+        print("actions fetch: cannot create result directory: {}".format(exc), file=sys.stderr)
+        return 1
     for a in arts:
+        name = a.get("name") if isinstance(a, dict) else None
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or name in (".", "..")
+            or os.path.basename(name) != name
+            or "/" in name
+            or "\\" in name
+        ):
+            print("actions fetch: refusing unsafe artifact name {!r}".format(name), file=sys.stderr)
+            return 1
         url = a["archive_download_url"]
-        dest = os.path.join(jobdir, "result", a["name"] + ".zip")
+        dest = os.path.join(jobdir, "result", name + ".zip")
         req = urllib.request.Request(url)
         # GitHub redirects archive downloads to a signed storage URL. urllib
         # forwards normal headers across hosts; do not send our token there.
