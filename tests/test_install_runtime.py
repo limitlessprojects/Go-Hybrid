@@ -134,14 +134,14 @@ class LauncherRuntimeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("==> sha256 verified", result.stdout)
 
-    def probe(self, *args, **overrides):
+    def probe(self, *args, cwd=None, **overrides):
         env = dict(self.env)
         # Exercise the baked-in installation location, as a fresh shell does.
         env.pop("HYB_INSTALL_DIR", None)
         env.update(overrides)
         result = subprocess.run(
             [str(self.bin_dir / "hyb"), *args], env=env,
-            cwd=self.root,
+            cwd=self.root if cwd is None else cwd,
             capture_output=True, text=True, timeout=15, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -154,6 +154,30 @@ class LauncherRuntimeTests(unittest.TestCase):
     def test_empty_runtime_uses_packaged_default(self):
         self.install_fixture()
         self.assertEqual(self.probe(HYB_RUNTIME_DIR="")["runtime"], str(self.install / "runtime"))
+
+    def test_relative_install_paths_work_from_another_directory(self):
+        for name in ("relative install", "$literal 'quoted'", "trailing-newline\n"):
+            with self.subTest(install=name):
+                self.install_fixture(HYB_INSTALL_DIR=name)
+                result = self.probe(*PROBE_ARGS, cwd=self.root / "home")
+                installed = (self.root / name).resolve()
+                self.assertTrue(Path(result["runtime"]).is_absolute())
+                self.assertEqual(Path(result["runtime"]).resolve(), installed / "runtime")
+                self.assertEqual(result["executable"], str(installed / "bin" / "hyb"))
+                self.assertEqual(result["args"], PROBE_ARGS)
+
+    def test_relative_install_preserves_runtime_and_install_overrides(self):
+        self.install_fixture(HYB_INSTALL_DIR="relative install")
+        relocated = self.root / "relocated hybrid"
+        shutil.copytree(self.root / "relative install", relocated)
+        runtime = str(self.root / "custom runtime $literal 'quoted'")
+        result = self.probe(
+            *PROBE_ARGS, cwd=self.root / "home",
+            HYB_INSTALL_DIR=str(relocated), HYB_RUNTIME_DIR=runtime,
+        )
+        self.assertEqual(result["runtime"], runtime)
+        self.assertEqual(result["executable"], str((relocated / "bin" / "hyb").resolve()))
+        self.assertEqual(result["args"], PROBE_ARGS)
 
     def test_explicit_runtime_is_preserved_verbatim(self):
         self.install_fixture()

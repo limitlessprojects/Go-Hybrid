@@ -35,7 +35,11 @@ DEFAULT_CORPUS = os.path.join(REPO_ROOT, "tests", "checker-corpus")
 DEFAULT_BIN = os.path.join(os.environ.get("CARGO_TARGET_DIR", "/home/z/go-hybrid-target"), "debug", "hyb")
 
 VERDICT_RE = re.compile(
-    r"^//\s*EXPECTED-VERDICT:\s*(ACCEPT-MANAGED|ACCEPT|REJECT)\b\s*(\S*)", re.M
+    r"^//[ \t]*EXPECTED-VERDICT:[ \t]*(ACCEPT-MANAGED|ACCEPT|REJECT)"
+    r"(?![-\w])(?:[ \t]+([^\s()]+))?(?:[ \t]+\([^)]*\))?[ \t]*$", re.M
+)
+VERDICT_HEADER_RE = re.compile(
+    r"^[ \t]*//[ \t]*EXPECTED-VERDICT\b[^\n]*$", re.M
 )
 DIAGNOSTIC_HEADER_RE = re.compile(
     r"^[ \t]*//[ \t]*EXPECTED-DIAGNOSTIC\b[^\n]*$", re.M
@@ -53,12 +57,19 @@ def read_expected(path):
     """Return (verdict, rule_id) or None if no EXPECTED-VERDICT line."""
     with open(path, encoding="utf-8") as f:
         src = f.read()
-    m = VERDICT_RE.search(src)
-    if not m:
+    headers = VERDICT_HEADER_RE.findall(src)
+    if not headers:
         return None
+    if len(headers) != 1:
+        raise ValueError(f"corpus error: {path} has multiple EXPECTED-VERDICT headers")
+    m = VERDICT_RE.search(headers[0].strip())
+    if m is None:
+        raise ValueError(f"corpus error: {path} has malformed EXPECTED-VERDICT header")
     verdict, rule = m.group(1), m.group(2)
     if verdict == "REJECT" and not rule:
-        raise SystemExit(f"corpus error: {path} has REJECT without a rule id")
+        raise ValueError(f"corpus error: {path} has REJECT without a rule id")
+    if verdict != "REJECT" and rule:
+        raise ValueError(f"corpus error: {path} has unexpected rule after {verdict}")
     return verdict, (rule or None)
 
 
@@ -96,18 +107,39 @@ def run_checker(bin_path, hy_path, report_managed=False):
     cmd = [bin_path, "check", hy_path, "--json"]
     if report_managed:
         cmd.append("--report-managed")
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    # The checker emits UTF-8 JSON, not text in the caller's locale. Decode
+    # after communicate(): on Windows, a TextIOWrapper decoding error in a
+    # reader thread can otherwise leave stdout/stderr as None.
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=60)
+    except subprocess.TimeoutExpired as e:
+        # A checker that hangs must not abort the remaining corpus rows:
+        # surface the timeout as a per-case harness-error row and keep
+        # running the rest of the corpus (pr-198, shoujianing).
+        raise RuntimeError(
+            f"checker timed out for {hy_path} after {e.timeout} seconds"
+        ) from e
+    except OSError as e:
+        # The validated file may still fail to execute (not executable,
+        # wrong architecture, vanished between validation and exec).
+        # Surface it as a harness-error row, never a traceback.
+        raise RuntimeError(f"checker could not be executed for {hy_path}: {e}")
+    try:
+        stdout = proc.stdout.decode("utf-8")
+        stderr = proc.stderr.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError(f"checker output is not valid UTF-8 for {hy_path}: {exc}") from exc
     # Exit 0 means accepted and exit 1 means rejected. Any other status
     # indicates a checker failure, even if it already emitted valid JSON.
     if proc.returncode not in (0, 1):
         raise RuntimeError(
             f"checker exited unexpectedly for {hy_path} "
-            f"(exit {proc.returncode}): {proc.stderr[:400]}"
+            f"(exit {proc.returncode}): {stderr[:400]}"
         )
-    out = proc.stdout.strip()
+    out = stdout.strip()
     if not out:
         raise RuntimeError(
-            f"checker produced no JSON for {hy_path} (exit {proc.returncode}): {proc.stderr[:400]}"
+            f"checker produced no JSON for {hy_path} (exit {proc.returncode}): {stderr[:400]}"
         )
     try:
         payload = json.loads(out)
@@ -139,6 +171,26 @@ def run_checker(bin_path, hy_path, report_managed=False):
             f"checker exit/verdict mismatch for {hy_path}: "
             f"exit {proc.returncode}, verdict {verdict}"
         )
+    if report_managed:
+        managed = summary.get("managed")
+        # Parse failures have no managed report. A report that is present
+        # must carry the usize counters emitted by hy_diag::ManagedReport;
+        # silently defaulting malformed counters to zero hides audit drift.
+        if managed is not None:
+            if not isinstance(managed, dict):
+                raise RuntimeError(f"checker managed report invalid for {hy_path}: expected an object")
+            for field in ("managed_blocks", "sites_via_managed", "total_sites"):
+                count = managed.get(field)
+                if type(count) is not int or count < 0:
+                    raise RuntimeError(
+                        f"checker managed report invalid for {hy_path}: "
+                        f"{field} must be a nonnegative integer"
+                    )
+            if managed["sites_via_managed"] > managed["total_sites"]:
+                raise RuntimeError(
+                    f"checker managed report inconsistent for {hy_path}: "
+                    "sites_via_managed exceeds total_sites"
+                )
     return summary, diags
 
 
@@ -184,6 +236,13 @@ def main():
         print("build it first: cd compiler && cargo build -p hyb", file=sys.stderr)
         return 2
 
+    # The validated local file must be the binary that actually runs. An
+    # unresolved name (a bare `hyb`, a relative `./hyb`) would let
+    # subprocess's PATH lookup silently substitute a different installed
+    # checker — a false agreement or a false disagreement — and raise
+    # FileNotFoundError when PATH carries no such binary at all.
+    args.bin = os.path.abspath(args.bin)
+
     files = sorted(
         f for f in os.listdir(args.corpus) if f.endswith(".hy")
     )
@@ -203,8 +262,8 @@ def main():
 
     for fname in files:
         path = os.path.join(args.corpus, fname)
-        expected = read_expected(path)
         try:
+            expected = read_expected(path)
             expected_code = read_expected_diagnostic(path, expected)
         except ValueError as e:
             print(str(e), file=sys.stderr)

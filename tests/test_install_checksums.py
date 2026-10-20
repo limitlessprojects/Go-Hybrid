@@ -127,6 +127,13 @@ class InstallerChecksumTests(unittest.TestCase):
         self.checksum.write_text("", encoding="utf-8")
         self.assert_rejected_without_installing(self.run_installer())
 
+    def test_checksum_without_archive_record_aborts(self):
+        for manifest in (" \n\t\n", "not a checksum\n",
+                         f"{'0' * 64}  another-archive.tar.gz\n"):
+            with self.subTest(manifest=manifest):
+                self.checksum.write_text(manifest, encoding="utf-8")
+                self.assert_rejected_without_installing(self.run_installer())
+
     def test_archive_download_failure_aborts(self):
         self.assert_rejected_without_installing(self.run_installer(HYB_TEST_FAIL_ARCHIVE="1"))
 

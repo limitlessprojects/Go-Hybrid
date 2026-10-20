@@ -19,6 +19,15 @@
 set -eu
 
 VER="${1:?usage: package_release.sh <version-tag, e.g. v0.1.0>}"
+# The version is a single path component in both the staging directory
+# (removed with rm -rf below) and the archive name. Reject path separators
+# and other non-filename characters before starting any build or write.
+case "$VER" in
+    *[!a-zA-Z0-9._+-]*)
+        echo "invalid version: use only ASCII letters, digits, '.', '_', '+', or '-'" >&2
+        exit 2
+        ;;
+esac
 VERNUM="${VER#v}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Cross-compile overrides (fleet release-matrix): HYB_RUST_TARGET (e.g.

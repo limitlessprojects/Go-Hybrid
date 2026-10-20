@@ -102,3 +102,267 @@ fn bare_filename_generate_writes_too() {
         "bare-filename generate must write beside the source"
     );
 }
+
+// Recursive discovery does not follow child directory symlinks. Keep explicit
+// root links and file links usable, and keep walking real nested directories.
+#[cfg(unix)]
+mod directory_links {
+    use super::*;
+    use std::os::unix::fs::symlink;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    // A bounded subprocess makes a traversal regression fail rather than leave
+    // the integration suite hanging. File output avoids a full pipe blocking it.
+    fn generate(m: &SampleModule, args: &[&str]) -> (i32, String, String) {
+        let stdout_path = m.root.join("test.stdout");
+        let stderr_path = m.root.join("test.stderr");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_hyb"))
+            .args(args)
+            .current_dir(&m.root)
+            .stdout(Stdio::from(fs::File::create(&stdout_path).unwrap()))
+            .stderr(Stdio::from(fs::File::create(&stderr_path).unwrap()))
+            .spawn()
+            .expect("spawn hyb");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let code = loop {
+            if let Some(status) = child.try_wait().expect("poll hyb") {
+                break status.code().unwrap_or(-1);
+            }
+            if Instant::now() >= deadline {
+                child.kill().expect("stop traversal regression");
+                child.wait().expect("reap hyb");
+                panic!("hyb generate exceeded the traversal test deadline");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        (
+            code,
+            fs::read_to_string(stdout_path).unwrap(),
+            fs::read_to_string(stderr_path).unwrap(),
+        )
+    }
+
+    #[test]
+    fn recursive_directory_link_is_not_walked_repeatedly() {
+        let m = SampleModule::new("directory-cycle");
+        symlink(".", m.root.join("loop")).unwrap();
+        let (code, out, err) = generate(&m, &["generate", "."]);
+        assert_eq!(code, 0, "{} {}", out, err);
+        assert!(
+            out.contains("generate: 1 file(s) written, 1 total"),
+            "{}",
+            out
+        );
+        assert!(
+            !out.contains("loop/"),
+            "directory link was traversed: {}",
+            out
+        );
+        let (code, out, err) = generate(&m, &["generate", "--check", "."]);
+        assert_eq!(code, 0, "{} {}", out, err);
+        assert!(out.contains("generate --check: 1 file(s) fresh"), "{}", out);
+    }
+
+    #[test]
+    fn child_directory_links_do_not_generate_in_another_tree() {
+        let m = SampleModule::new("directory-link-owner");
+        let other = SampleModule::new("directory-link-other");
+        for name in ["linked", "linked.hy"] {
+            symlink(&other.root, m.root.join(name)).unwrap();
+        }
+        let (code, out, err) = generate(&m, &["generate", "."]);
+        assert_eq!(code, 0, "{} {}", out, err);
+        assert!(
+            out.contains("generate: 1 file(s) written, 1 total"),
+            "{}",
+            out
+        );
+        assert!(m.root.join("calc.hy.go").exists());
+        assert!(
+            !other.root.join("calc.hy.go").exists(),
+            "walk wrote through a child directory link"
+        );
+    }
+
+    #[test]
+    fn explicitly_selected_directory_link_still_works() {
+        let m = SampleModule::new("explicit-directory-link");
+        let other = SampleModule::new("explicit-directory-target");
+        symlink(&other.root, m.root.join("chosen")).unwrap();
+        let (code, out, err) = generate(&m, &["generate", "chosen"]);
+        assert_eq!(code, 0, "{} {}", out, err);
+        assert!(other.root.join("calc.hy.go").exists());
+        let (code, out, err) = generate(&m, &["generate", "--check", "chosen"]);
+        assert_eq!(code, 0, "{} {}", out, err);
+        assert!(out.contains("generate --check: 1 file(s) fresh"), "{}", out);
+    }
+
+    #[test]
+    fn linked_hy_file_is_still_a_source() {
+        let m = SampleModule::new("linked-source-file");
+        symlink("calc.hy", m.root.join("alias.hy")).unwrap();
+        let (code, out, err) = generate(&m, &["generate", "."]);
+        assert_eq!(code, 0, "{} {}", out, err);
+        assert!(
+            out.contains("generate: 2 file(s) written, 2 total"),
+            "{}",
+            out
+        );
+        assert!(m.root.join("alias.hy.go").exists());
+        let (code, out, err) = generate(&m, &["generate", "--check", "alias.hy"]);
+        assert_eq!(code, 0, "{} {}", out, err);
+    }
+
+    #[test]
+    fn real_nested_directory_is_still_walked() {
+        let m = SampleModule::new("real-nested-directory");
+        let nested = m.root.join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::copy(m.root.join("app.go"), nested.join("app.go")).unwrap();
+        fs::copy(m.root.join("calc.hy"), nested.join("calc.hy")).unwrap();
+        let (code, out, err) = generate(&m, &["generate", "."]);
+        assert_eq!(code, 0, "{} {}", out, err);
+        assert!(
+            out.contains("generate: 2 file(s) written, 2 total"),
+            "{}",
+            out
+        );
+        assert!(nested.join("calc.hy.go").exists());
+        let (code, out, err) = generate(&m, &["generate", "--check", "."]);
+        assert_eq!(code, 0, "{} {}", out, err);
+        assert!(out.contains("generate --check: 2 file(s) fresh"), "{}", out);
+    }
+}
+
+const STALE_GENERATED: &str =
+    "// Code generated by hyb from calc.hy. DO NOT EDIT.\n\npackage demo\n// stale\n";
+
+fn assert_invalid_without_writes(m: &SampleModule, args: &[&str], message: &str, existing: bool) {
+    let generated = m.root.join("calc.hy.go");
+    if existing {
+        fs::write(&generated, STALE_GENERATED).expect("write stale generated file");
+    }
+    let before = fs::read(&generated).ok();
+    let modified = fs::metadata(&generated)
+        .ok()
+        .and_then(|meta| meta.modified().ok());
+    let (code, stdout, stderr) = m.hyb(args);
+    assert_eq!(code, 2, "invalid invocation: {} {}", stdout, stderr);
+    assert!(stderr.contains(message), "{}", stderr);
+    assert!(stdout.is_empty(), "no files should be processed: {}", stdout);
+    assert_eq!(fs::read(&generated).ok(), before, "generated bytes changed");
+    assert_eq!(
+        fs::metadata(&generated)
+            .ok()
+            .and_then(|meta| meta.modified().ok()),
+        modified,
+        "generated file was touched"
+    );
+}
+
+#[test]
+fn unknown_options_fail_before_any_generated_file_is_written() {
+    for (i, option) in ["--chekc", "--check=true", "--unknown", "-x"]
+        .iter()
+        .enumerate()
+    {
+        for existing in [false, true] {
+            for after_path in [false, true] {
+                let m = SampleModule::new(&format!("unknown-{}-{}-{}", i, existing, after_path));
+                let args = if after_path {
+                    vec!["generate", "calc.hy", *option]
+                } else {
+                    vec!["generate", *option, "calc.hy"]
+                };
+                assert_invalid_without_writes(&m, &args, "unknown generate option", existing);
+            }
+        }
+    }
+}
+
+#[test]
+fn missing_or_option_shaped_binding_prefix_fails_before_writes() {
+    let cases = [
+        vec!["generate", "calc.hy", "--binding-prefix"],
+        vec!["generate", "calc.hy", "--binding-prefix", "--check"],
+        vec!["generate", "calc.hy", "--binding-prefix", ""],
+    ];
+    for (i, args) in cases.iter().enumerate() {
+        for existing in [false, true] {
+            let m = SampleModule::new(&format!("missing-prefix-{}-{}", i, existing));
+            assert_invalid_without_writes(&m, args, "--binding-prefix requires a value", existing);
+        }
+    }
+}
+
+#[test]
+fn repeated_binding_prefix_fails_before_writes() {
+    for existing in [false, true] {
+        let m = SampleModule::new(&format!("repeated-prefix-{}", existing));
+        assert_invalid_without_writes(
+            &m,
+            &[
+                "generate",
+                "calc.hy",
+                "--binding-prefix",
+                "first",
+                "--binding-prefix",
+                "second",
+            ],
+            "--binding-prefix may only be supplied once",
+            existing,
+        );
+    }
+}
+
+#[test]
+fn prefix_value_does_not_consume_a_path_with_the_same_spelling() {
+    let m = SampleModule::new("prefix-equals-path");
+    let (code, stdout, stderr) = m.hyb(&["generate", "--binding-prefix", "calc.hy", "calc.hy"]);
+    assert_eq!(code, 0, "generate failed: {} {}", stdout, stderr);
+    assert!(m.root.join("calc.hy.go").exists());
+    // Recognized options still work after a positional path.
+    let (code, stdout, stderr) = m.hyb(&[
+        "generate",
+        "calc.hy",
+        "--binding-prefix",
+        "calc.hy",
+        "--check",
+    ]);
+    assert_eq!(code, 0, "--check failed: {} {}", stdout, stderr);
+}
+
+#[test]
+fn option_terminator_allows_a_dash_prefixed_source_path() {
+    let m = SampleModule::new("option-terminator");
+    fs::rename(m.root.join("calc.hy"), m.root.join("--calc.hy")).unwrap();
+    let (code, stdout, stderr) = m.hyb(&["generate", "--", "--calc.hy"]);
+    assert_eq!(code, 0, "generate failed: {} {}", stdout, stderr);
+    assert!(m.root.join("--calc.hy.go").exists());
+    let (code, stdout, stderr) = m.hyb(&["generate", "--check", "--", "--calc.hy"]);
+    assert_eq!(code, 0, "--check failed: {} {}", stdout, stderr);
+}
+
+#[test]
+fn valid_check_detects_drift_without_rewriting() {
+    let m = SampleModule::new("check-drift");
+    let (code, stdout, stderr) = m.hyb(&["generate", "calc.hy"]);
+    assert_eq!(code, 0, "generate failed: {} {}", stdout, stderr);
+    let generated = m.root.join("calc.hy.go");
+    let before = fs::read(&generated).unwrap();
+    let modified = fs::metadata(&generated).unwrap().modified().unwrap();
+    fs::write(
+        m.root.join("calc.hy"),
+        "fn add(a int, b int) int { return a - b }\n",
+    )
+    .unwrap();
+    let (code, stdout, stderr) = m.hyb(&["generate", "calc.hy", "--check"]);
+    assert_eq!(code, 1, "drift must fail: {} {}", stdout, stderr);
+    assert!(stderr.contains("STALE or missing"), "{}", stderr);
+    assert_eq!(fs::read(&generated).unwrap(), before);
+    assert_eq!(
+        fs::metadata(&generated).unwrap().modified().unwrap(),
+        modified
+    );
+}
