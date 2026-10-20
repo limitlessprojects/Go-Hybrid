@@ -2,7 +2,7 @@
 
 use hy_syntax::*;
 
-use super::{to_go_name, BindingKind, EmitError, Emitter};
+use super::{is_pointer_element_type, to_go_name, BindingKind, EmitError, Emitter};
 
 use super::expr::ATOM;
 use super::shapes::lookup_conversion;
@@ -306,6 +306,13 @@ impl Emitter {
                         for n in &l.names {
                             if n != "_" {
                                 self.pointer_vars.insert(n.clone());
+                            }
+                        }
+                    }
+                    if is_pointer_element_type(t) {
+                        for n in &l.names {
+                            if n != "_" {
+                                self.ptr_elem_vars.insert(n.clone());
                             }
                         }
                     }
@@ -1029,6 +1036,11 @@ impl Emitter {
         } else {
             Vec::new()
         };
+        let elem_ptr_flags: Vec<bool> = if names.len() == values.len() {
+            values.iter().map(|v| self.expr_is_pointer_elem(v)).collect()
+        } else {
+            Vec::new()
+        };
         self.shadow_local_names(names);
         if let Some(kind) = single_hint {
             if kind != BindingKind::Plain {
@@ -1041,6 +1053,11 @@ impl Emitter {
         for (name, is_ptr) in names.iter().zip(ptr_flags) {
             if name != "_" && is_ptr {
                 self.pointer_vars.insert(name.clone());
+            }
+        }
+        for (name, is_elem_ptr) in names.iter().zip(elem_ptr_flags) {
+            if name != "_" && is_elem_ptr {
+                self.ptr_elem_vars.insert(name.clone());
             }
         }
     }
