@@ -19,22 +19,34 @@ import sys
 
 
 def main(binpath):
-    proc = subprocess.run(["readelf", "--debug-dump=info", binpath],
-                          capture_output=True, text=True, timeout=600)
+    if not isinstance(binpath, str) or not binpath.strip():
+        print("FAILED: binary path must be a non-empty string", file=sys.stderr)
+        sys.exit(1)
+    try:
+        proc = subprocess.run(
+            ["readelf", "--debug-dump=info", binpath],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=600,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"FAILED: readelf execution failed: {exc}", file=sys.stderr)
+        sys.exit(1)
     if proc.returncode != 0:
-        err = proc.stderr.strip()
+        err = (proc.stderr or "").strip()
         msg = f"readelf failed with exit code {proc.returncode}"
         if err:
             msg += f": {err}"
         print(f"FAILED: {msg}", file=sys.stderr)
-        sys.exit(proc.returncode or 1)
+        sys.exit(proc.returncode if proc.returncode > 0 else 1)
 
-    out = proc.stdout
+    out = proc.stdout or ""
 
     dies = []
     cur = None
     for line in out.splitlines():
-        h = re.match(r"\s*<(\d+)><[0-9a-f]+>: Abbrev Number: \d+ \((DW_TAG_\w+)\)", line)
+        h = re.match(r"\s*<(\d+)><[0-9a-fA-F]+>: Abbrev Number: \d+ \((DW_TAG_\w+)\)", line)
         if h:
             cur = {"depth": int(h.group(1)), "tag": h.group(2)}
             dies.append(cur)
@@ -45,13 +57,14 @@ def main(binpath):
         off = re.search(r"DW_AT_data_member_location\s*:\s*(\d+)", line)
         sz = re.search(r"DW_AT_byte_size\s*:\s*(\d+)", line)
         if nm is not None:
-            cur["name"] = nm.group(1)
+            cur["name"] = nm.group(1).split(":")[-1].strip()
         if off is not None:
             cur["off"] = int(off.group(1))
         if sz is not None:
             cur["size"] = int(sz.group(1))
 
     def members_of(struct_name):
+        fallback = (None, None)
         for i, d in enumerate(dies):
             if d["tag"] == "DW_TAG_structure_type" and d.get("name") == struct_name:
                 base = d["depth"]
@@ -61,8 +74,11 @@ def main(binpath):
                         break
                     if e["tag"] == "DW_TAG_member" and "name" in e:
                         mem[e["name"]] = e.get("off")
-                return d.get("size"), mem
-        return None, None
+                if mem and d.get("size") is not None:
+                    return d.get("size"), mem
+                if fallback == (None, None):
+                    fallback = (d.get("size"), mem)
+        return fallback
 
     gsize, g = members_of("runtime.g")
     msize, m = members_of("runtime.m")
@@ -73,6 +89,18 @@ def main(binpath):
         if m is None:
             missing_structs.append("runtime.m")
         print(f"FAILED: {' / '.join(missing_structs)} not found in DWARF", file=sys.stderr)
+        sys.exit(1)
+
+    missing_sizes = []
+    if gsize is None:
+        missing_sizes.append("runtime.g")
+    if msize is None:
+        missing_sizes.append("runtime.m")
+    if missing_sizes:
+        print(
+            f"FAILED: missing DW_AT_byte_size for {', '.join(missing_sizes)}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     required_g = ("m", "stackguard0", "stack")
