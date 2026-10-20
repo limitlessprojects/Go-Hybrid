@@ -1,0 +1,55 @@
+=== RUN   TestSharedRingAndUnixMillionMessages
+=== RUN   TestSharedRingAndUnixMillionMessages/ring
+    ipc_linux_test.go:149: ring: 1000000 intact 64-byte messages in 1.12109496s = 891985 msg/sec
+        === RUN   TestRingPeer
+        IPC_RESULT {"count":1000000,"mode":"ring","p50_ns":216593,"p99_ns":9730812}
+        --- PASS: TestRingPeer (1.12s)
+        PASS
+=== RUN   TestSharedRingAndUnixMillionMessages/unix
+    ipc_linux_test.go:149: unix: 1000000 intact 64-byte messages in 5.716623177s = 174928 msg/sec
+        === RUN   TestRingPeer
+        IPC_RESULT {"count":1000000,"mode":"unix","p50_ns":138147,"p99_ns":9327816}
+        --- PASS: TestRingPeer (5.71s)
+        PASS
+--- PASS: TestSharedRingAndUnixMillionMessages (6.84s)
+    --- PASS: TestSharedRingAndUnixMillionMessages/ring (1.12s)
+    --- PASS: TestSharedRingAndUnixMillionMessages/unix (5.72s)
+=== RUN   TestSequenceWrapAndPeerTimeout
+--- PASS: TestSequenceWrapAndPeerTimeout (0.04s)
+=== RUN   TestSharedRingAndUnixMillionMessages
+=== RUN   TestSharedRingAndUnixMillionMessages/ring
+    ipc_linux_test.go:149: ring: 1000000 intact 64-byte messages in 1.381356775s = 723926 msg/sec
+        === RUN   TestRingPeer
+        IPC_RESULT {"count":1000000,"mode":"ring","p50_ns":105742,"p99_ns":8746565}
+        --- PASS: TestRingPeer (1.38s)
+        PASS
+=== RUN   TestSharedRingAndUnixMillionMessages/unix
+    ipc_linux_test.go:149: unix: 1000000 intact 64-byte messages in 4.415654197s = 226467 msg/sec
+        === RUN   TestRingPeer
+        IPC_RESULT {"count":1000000,"mode":"unix","p50_ns":105501,"p99_ns":8994789}
+        --- PASS: TestRingPeer (4.40s)
+        PASS
+--- PASS: TestSharedRingAndUnixMillionMessages (5.80s)
+    --- PASS: TestSharedRingAndUnixMillionMessages/ring (1.38s)
+    --- PASS: TestSharedRingAndUnixMillionMessages/unix (4.42s)
+=== RUN   TestSequenceWrapAndPeerTimeout
+--- PASS: TestSequenceWrapAndPeerTimeout (0.04s)
+=== RUN   TestSharedRingAndUnixMillionMessages
+=== RUN   TestSharedRingAndUnixMillionMessages/ring
+    ipc_linux_test.go:149: ring: 1000000 intact 64-byte messages in 1.168257217s = 855976 msg/sec
+        === RUN   TestRingPeer
+        IPC_RESULT {"count":1000000,"mode":"ring","p50_ns":207596,"p99_ns":9424375}
+        --- PASS: TestRingPeer (1.16s)
+        PASS
+=== RUN   TestSharedRingAndUnixMillionMessages/unix
+    ipc_linux_test.go:149: unix: 1000000 intact 64-byte messages in 5.986062577s = 167055 msg/sec
+        === RUN   TestRingPeer
+        IPC_RESULT {"count":1000000,"mode":"unix","p50_ns":84416,"p99_ns":9939845}
+        --- PASS: TestRingPeer (5.98s)
+        PASS
+--- PASS: TestSharedRingAndUnixMillionMessages (7.16s)
+    --- PASS: TestSharedRingAndUnixMillionMessages/ring (1.17s)
+    --- PASS: TestSharedRingAndUnixMillionMessages/unix (5.99s)
+=== RUN   TestSequenceWrapAndPeerTimeout
+--- PASS: TestSequenceWrapAndPeerTimeout (0.03s)
+PASS

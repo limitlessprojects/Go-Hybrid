@@ -1,0 +1,22 @@
+# Follow-up checkpoint — full implementations cancelled
+
+The operator stopped further long-running development on 2026-10-20. The six full Hybrid compiler features (#997/#992/#957/#955/#952/#951) are out of scope from this point. Existing research code is preserved here for review. None is declared a completed compiler feature, formal proof, accepted milestone or earned bounty.
+
+| Proposal | Work preserved | Outcome / limit |
+| --- | --- | --- |
+| #997 | Closure/named task allocation and escape diagnostics | Both spawned fixtures allocate 24 B/op and 1 alloc/op. The persistent worker is a different workload. No heap-free compiler certificate. |
+| #992 | Generic phantom-witness repeat-consumption control | Plain Go accepts repeated use. No affine proof, founding corpus transcription, or deletion of the existing loan checker. |
+| #952 | 50 compile-only emission mutations in five families, each retaining detached zero-sized witnesses | All 50 compiled. Thus the detached witnesses alone did not reject semantic mutations. Fixtures are not run; they are bounded negative controls, not an exhaustive emitter validator. Full proof-carrying emission cancelled. |
+| #957 | `deterministic/`: closed effect scheduler, replay fingerprint validation, rejection of foreign/unadmitted effects, step budgets, duplicate IDs, deadlock and clock overflow checks | 10,000 replays, one million events matched under background load. The certificate is a recomputation fingerprint, not a formal proof. Timed batches measured 0.333–0.817 ms for certified model vs 0.332–0.358 ms for Go control; no general 2.5x bound established. No Hybrid syntax/compiler integration. |
+| #955 | `ipc/`: real two-process Linux/amd64 SPSC mmap/futex ring with fixed 64-byte inline messages; nonce wrap and missing-peer deadline checks; Unix socket control | Three completed monotonic-clock runs each transferred one million messages per transport intact. Ring throughput 0.724–0.892 M/s, socket 0.167–0.226 M/s; ratios 3.20x–5.12x. Ring p99 8.75–9.73 ms, far over 500 ns. No general Tier-0 pointer-layout proof, MPMC correctness, crash recovery or zero-cost timing claim. |
+| #951 | `nativehook/`: real Go `-toolexec` wrapper, type/export-data analysis, strict opt-in scalar/channel admission, diagnostics and cache identity | Real toolchain test builds and executes the positive fixture (42), rejects reference-bearing negative fixture, verifies version/cache signature and unchanged compiler exit codes. Seven test functions pass. This is a small fail-closed experiment, not a complete port of the Rust ownership engine, go/analysis plugin, or a Kubernetes/etcd parity/performance result. |
+
+## Evidence and reproduction
+
+Pinned Go 1.26.9 was used. `certificate-mutations.log`, `deterministic-results.log` and `nativehook-results.log` contain the Windows runs. The wrapper's positive integration test genuinely imports fmt through the compiler's export-data map. The map is not a substitute for a full checker.
+
+IPC used a Linux test executable cross-compiled with CGO_ENABLED=0 and executed in Ubuntu-24.04 WSL, with producer and consumer in separate processes and GOMAXPROCS=2. `run-ipc-linux.cjs` transfers the binary and checks its SHA-256 before execution. `ipc-linux-results.log` contains all three final runs, all passing. An earlier wall-clock measurement failed due to a negative cross-process timestamp delta; `ipc-linux-wall-clock-results.log` preserves that failure. Final timing uses the system-wide Linux CLOCK_MONOTONIC via clock_gettime, adding direct-syscall overhead to both transports. The final numbers therefore describe this instrumented WSL workload only, not an intrinsic minimum ring latency. Linux clock contract: https://man7.org/linux/man-pages/man2/clock_gettime.2.html .
+
+Run the mutation probe with `go test -run TestWitnessMutationMatrix -v`, scheduler with `go test -v ./deterministic`, and actual native-toolchain integration with `go test -v ./nativehook`. For IPC, cross-compile `GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go test -c -o ipc-linux.test ./ipc`, then run the resulting binary on Linux. Go's process-local race detector does not establish interprocess shared-memory correctness.
+
+All original proposal authorship remains unchanged. No more full compiler implementation is planned under this request. The existing research PR stays available for its measured findings; this checkpoint is not a request to merge unfinished features.

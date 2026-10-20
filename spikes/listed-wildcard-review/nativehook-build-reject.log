@@ -1,0 +1,2 @@
+# listedwildcardprobe/nativehook/testdata/reject
+HYB-NATIVE-E001: nativehook\testdata\reject\main.go:3:1: worker: only scalar values and scalar channels are admitted

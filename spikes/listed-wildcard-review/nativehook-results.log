@@ -1,0 +1,16 @@
+=== RUN   TestRealGoToolchainIntegration
+--- PASS: TestRealGoToolchainIntegration (19.35s)
+=== RUN   TestAdmittedNativeSubset
+--- PASS: TestAdmittedNativeSubset (0.02s)
+=== RUN   TestRejectUnprovedOwnershipAndEffects
+--- PASS: TestRejectUnprovedOwnershipAndEffects (0.13s)
+=== RUN   TestMalformedMarkerFailsClosed
+--- PASS: TestMalformedMarkerFailsClosed (0.02s)
+=== RUN   TestOrdinaryGoIsPassthrough
+--- PASS: TestOrdinaryGoIsPassthrough (0.01s)
+=== RUN   TestMarkerInsideStringDoesNotOptIn
+--- PASS: TestMarkerInsideStringDoesNotOptIn (0.02s)
+=== RUN   TestRPCFailureIsNotNativeApproval
+--- PASS: TestRPCFailureIsNotNativeApproval (0.02s)
+PASS
+ok  	listedwildcardprobe/nativehook	21.780s

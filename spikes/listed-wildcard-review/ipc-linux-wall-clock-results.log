@@ -1,0 +1,55 @@
+=== RUN   TestSharedRingAndUnixMillionMessages
+=== RUN   TestSharedRingAndUnixMillionMessages/ring
+    ipc_linux_test.go:149: ring: 1000000 intact 64-byte messages in 266.467146ms = 3752808 msg/sec
+        === RUN   TestRingPeer
+        IPC_RESULT {"count":1000000,"mode":"ring","p50_ns":98283,"p99_ns":266051}
+        --- PASS: TestRingPeer (0.26s)
+        PASS
+=== RUN   TestSharedRingAndUnixMillionMessages/unix
+    ipc_linux_test.go:149: unix: 1000000 intact 64-byte messages in 1.05463976s = 948191 msg/sec
+        === RUN   TestRingPeer
+        IPC_RESULT {"count":1000000,"mode":"unix","p50_ns":64300,"p99_ns":223157}
+        --- PASS: TestRingPeer (1.05s)
+        PASS
+--- PASS: TestSharedRingAndUnixMillionMessages (1.32s)
+    --- PASS: TestSharedRingAndUnixMillionMessages/ring (0.27s)
+    --- PASS: TestSharedRingAndUnixMillionMessages/unix (1.06s)
+=== RUN   TestSequenceWrapAndPeerTimeout
+--- PASS: TestSequenceWrapAndPeerTimeout (0.04s)
+=== RUN   TestSharedRingAndUnixMillionMessages
+=== RUN   TestSharedRingAndUnixMillionMessages/ring
+    ipc_linux_test.go:149: ring: 1000000 intact 64-byte messages in 222.644234ms = 4491470 msg/sec
+        === RUN   TestRingPeer
+        IPC_RESULT {"count":1000000,"mode":"ring","p50_ns":103956,"p99_ns":238832}
+        --- PASS: TestRingPeer (0.22s)
+        PASS
+=== RUN   TestSharedRingAndUnixMillionMessages/unix
+    ipc_linux_test.go:149: unix: 1000000 intact 64-byte messages in 1.044331098s = 957551 msg/sec
+        === RUN   TestRingPeer
+        IPC_RESULT {"count":1000000,"mode":"unix","p50_ns":64543,"p99_ns":170503}
+        --- PASS: TestRingPeer (1.04s)
+        PASS
+--- PASS: TestSharedRingAndUnixMillionMessages (1.27s)
+    --- PASS: TestSharedRingAndUnixMillionMessages/ring (0.22s)
+    --- PASS: TestSharedRingAndUnixMillionMessages/unix (1.04s)
+=== RUN   TestSequenceWrapAndPeerTimeout
+--- PASS: TestSequenceWrapAndPeerTimeout (0.04s)
+=== RUN   TestSharedRingAndUnixMillionMessages
+=== RUN   TestSharedRingAndUnixMillionMessages/ring
+    ipc_linux_test.go:143: peer: exit status 1
+        === RUN   TestRingPeer
+            ipc_linux_test.go:71: host wall clock moved backwards; latency evidence invalid
+        --- FAIL: TestRingPeer (0.22s)
+        FAIL
+=== RUN   TestSharedRingAndUnixMillionMessages/unix
+    ipc_linux_test.go:149: unix: 1000000 intact 64-byte messages in 996.447008ms = 1003566 msg/sec
+        === RUN   TestRingPeer
+        IPC_RESULT {"count":1000000,"mode":"unix","p50_ns":65115,"p99_ns":175161}
+        --- PASS: TestRingPeer (0.99s)
+        PASS
+--- FAIL: TestSharedRingAndUnixMillionMessages (1.22s)
+    --- FAIL: TestSharedRingAndUnixMillionMessages/ring (0.22s)
+    --- PASS: TestSharedRingAndUnixMillionMessages/unix (1.00s)
+=== RUN   TestSequenceWrapAndPeerTimeout
+--- PASS: TestSequenceWrapAndPeerTimeout (0.04s)
+FAIL

@@ -1,0 +1,35 @@
+=== RUN   TestClosedEffectBoundaries
+--- PASS: TestClosedEffectBoundaries (0.00s)
+=== RUN   TestMillionScheduledEventsInTenThousandReplays
+    schedule_test.go:70: 10,000 replays and 1,000,000 scheduled effects matched under background CPU contention
+--- PASS: TestMillionScheduledEventsInTenThousandReplays (0.40s)
+=== RUN   TestBlockedReceiveCannotTravelBackInLogicalTime
+--- PASS: TestBlockedReceiveCannotTravelBackInLogicalTime (0.00s)
+=== RUN   TestClosedEffectBoundaries
+--- PASS: TestClosedEffectBoundaries (0.00s)
+=== RUN   TestMillionScheduledEventsInTenThousandReplays
+    schedule_test.go:70: 10,000 replays and 1,000,000 scheduled effects matched under background CPU contention
+--- PASS: TestMillionScheduledEventsInTenThousandReplays (0.42s)
+=== RUN   TestBlockedReceiveCannotTravelBackInLogicalTime
+--- PASS: TestBlockedReceiveCannotTravelBackInLogicalTime (0.00s)
+=== RUN   TestClosedEffectBoundaries
+--- PASS: TestClosedEffectBoundaries (0.00s)
+=== RUN   TestMillionScheduledEventsInTenThousandReplays
+    schedule_test.go:70: 10,000 replays and 1,000,000 scheduled effects matched under background CPU contention
+--- PASS: TestMillionScheduledEventsInTenThousandReplays (0.38s)
+=== RUN   TestBlockedReceiveCannotTravelBackInLogicalTime
+--- PASS: TestBlockedReceiveCannotTravelBackInLogicalTime (0.00s)
+goos: windows
+goarch: amd64
+pkg: listedwildcardprobe/deterministic
+cpu: 12th Gen Intel(R) Core(TM) i7-12700H
+BenchmarkCertifiedEmit1000
+BenchmarkCertifiedEmit1000-2   	    3537	    332637 ns/op	  174716 B/op	      23 allocs/op
+BenchmarkCertifiedEmit1000-2   	    3625	    817186 ns/op	  175075 B/op	      23 allocs/op
+BenchmarkCertifiedEmit1000-2   	    1578	    757489 ns/op	  175070 B/op	      23 allocs/op
+BenchmarkGoEmit1000
+BenchmarkGoEmit1000-2          	    3878	    358139 ns/op	   91208 B/op	      28 allocs/op
+BenchmarkGoEmit1000-2          	    3310	    331639 ns/op	   91053 B/op	      28 allocs/op
+BenchmarkGoEmit1000-2          	    3492	    345867 ns/op	   91120 B/op	      28 allocs/op
+PASS
+ok  	listedwildcardprobe/deterministic	11.193s

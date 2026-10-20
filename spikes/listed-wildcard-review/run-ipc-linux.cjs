@@ -1,0 +1,5 @@
+const fs=require('node:fs'),crypto=require('node:crypto'),{spawnSync}=require('node:child_process');
+const input=fs.readFileSync('ipc-linux.test');const target='/tmp/hybrid-bounty-20261020-ipc/ipc-linux.test';
+let r=spawnSync('wsl.exe',['-d','Ubuntu-24.04','--exec','sh','-c','mkdir -p /tmp/hybrid-bounty-20261020-ipc && cat > '+target+' && chmod 700 '+target],{input,maxBuffer:1000000});if(r.status!==0)throw Error(r.stderr.toString());
+const sha=crypto.createHash('sha256').update(input).digest('hex');r=spawnSync('wsl.exe',['-d','Ubuntu-24.04','--exec','sha256sum',target],{encoding:'utf8'});if(r.status!==0||!r.stdout.startsWith(sha))throw Error('Binary SHA mismatch: '+r.stderr);console.log('Linux binary transfer SHA-256 verified: '+sha);
+r=spawnSync('wsl.exe',['-d','Ubuntu-24.04','--exec','env','GOMAXPROCS=2',target,'-test.count=3','-test.v','-test.run=TestSharedRingAndUnixMillionMessages|TestSequenceWrapAndPeerTimeout','-test.timeout=180s'],{encoding:'utf8',timeout:190000,maxBuffer:1000000});fs.writeFileSync('ipc-linux-results.log',r.stdout+r.stderr);console.log(r.stdout+r.stderr);if(r.error)throw r.error;process.exitCode=r.status;
