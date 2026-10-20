@@ -185,3 +185,19 @@ fn in_range_const_declaration_stays_accepted() {
     assert_ok("const top u8 = 255\n\nfn main() {\n    fmt.println(\"{top}\")\n}\n");
     assert_ok("const mid u8 = 100\n\nfn main() {\n    a := mid + 1\n    fmt.println(\"{a}\")\n}\n");
 }
+
+
+#[test]
+fn typed_const_overflow_via_assignment_is_e6002() {
+    assert_code(
+        "const k = 70000\n\nfn main() {\n    var x int16 = 1\n    x = k\n    _ = x\n}\n",
+        "HYB-E6002",
+    );
+}
+
+#[test]
+fn in_range_const_assignment_stays_accepted() {
+    assert_ok(
+        "const k = 30000\n\nfn main() {\n    var x int16 = 1\n    x = k\n    _ = x\n}\n",
+    );
+}
