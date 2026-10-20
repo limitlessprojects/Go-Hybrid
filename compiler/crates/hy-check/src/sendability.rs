@@ -239,9 +239,10 @@ impl<'a> Checker<'a> {
     }
 
     pub(crate) fn classify_value(&self, st: &FnState, expr: &Expr) -> Outcome {
+        let expr = unwrap_parens(expr);
         // `move x` — class 3; validate that `x` resolves to a movable shape
         // (never Unknown, Closure, BorrowHandle, or ForeignOpaque).
-        if let Expr::Move { operand, .. } = unwrap_parens(expr) {
+        if let Expr::Move { operand, .. } = expr {
             if let Expr::Ident { name, .. } = unwrap_parens(operand) {
                 return self.classify_move_ident(st, name);
             }
@@ -1062,6 +1063,33 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            Expr::Move { operand, .. } | Expr::Try { operand, .. } => {
+                self.check_composite_nils(st, operand);
+            }
+            Expr::Field { base, .. } => {
+                self.check_composite_nils(st, base);
+            }
+            Expr::Index { base, index, .. } => {
+                self.check_composite_nils(st, base);
+                self.check_composite_nils(st, index);
+            }
+            Expr::Slice {
+                base, lo, hi, ..
+            } => {
+                self.check_composite_nils(st, base);
+                if let Some(e) = lo {
+                    self.check_composite_nils(st, e);
+                }
+                if let Some(e) = hi {
+                    self.check_composite_nils(st, e);
+                }
+            }
+            Expr::Call { callee, args, .. } => {
+                self.check_composite_nils(st, callee);
+                for a in args {
+                    self.check_composite_nils(st, &a.value);
+                }
+            }
             _ => {}
         }
     }
@@ -1175,83 +1203,6 @@ impl<'a> Checker<'a> {
                 }
                 continue;
             }
-            // class-3 owned moves first: `move x` (Expr form, top-level or
-            // nested inside a composite literal / parens) and the parser's
-            // flagged-Ident form (`Send{is_move: true, value: x}`).
-            if implicit_move {
-                let op = crate::model::unwrap_parens(v);
-                if let Expr::Ident { name, span: ispan } = op {
-                    if self.lookup_binding(st, name).is_some() {
-                        if !managed {
-                            self.check_non_owned_move(st, name, *ispan);
-                        }
-                        moves.push((name.clone(), *ispan));
-                    } else {
-                        unprovens.push(UnprovenInfo {
-                            value: name.clone(),
-                            reason: "the name did not resolve in this scope".to_string(),
-                        });
-                    }
-                } else if matches!(op, Expr::Field { .. })
-                    && matches!(self.shape_of_expr(st, op), TypeShape::OwnHandle(_))
-                {
-                    if let Some(root) = op.root_ident() {
-                        if self.lookup_binding(st, root).is_some() {
-                            if !managed {
-                                self.check_non_owned_move(st, root, v.span());
-                            }
-                            moves.push((root.to_string(), v.span()));
-                        }
-                    }
-                } else if !managed {
-                    self.check_o54_non_ident_move(st, op, v.span());
-                }
-                if let Expr::Ident { name, .. } = op {
-                    match self.classify_move_ident(st, name) {
-                        Outcome::Ok => {}
-                        Outcome::Managed { desc, risky } => {
-                            if risky {
-                                managed_descs.push(desc);
-                            }
-                        }
-                        Outcome::Rejected(info) => rejects.push(info),
-                        Outcome::Unproven(info) => unprovens.push(info),
-                    }
-                }
-                continue;
-            }
-
-            let mut v_moves = Vec::new();
-            crate::model::collect_move_operands(v, &mut v_moves);
-            for (op, mspan) in v_moves {
-                if let Expr::Ident { name, .. } = op {
-                    if self.lookup_binding(st, name).is_some() {
-                        if !managed {
-                            self.check_non_owned_move(st, name, mspan);
-                        }
-                        moves.push((name.clone(), mspan));
-                    } else {
-                        unprovens.push(UnprovenInfo {
-                            value: name.clone(),
-                            reason: "the name did not resolve in this scope".to_string(),
-                        });
-                    }
-                } else if matches!(op, Expr::Field { .. })
-                    && matches!(self.shape_of_expr(st, op), TypeShape::OwnHandle(_))
-                {
-                    if let Some(root) = op.root_ident() {
-                        if self.lookup_binding(st, root).is_some() {
-                            if !managed {
-                                self.check_non_owned_move(st, root, mspan);
-                            }
-                            moves.push((root.to_string(), mspan));
-                        }
-                    }
-                } else if !managed {
-                    self.check_o54_non_ident_move(st, op, mspan);
-                }
-            }
-
             // Issue #146: once sendability accepts the value, still reject a
             // CERTAIN channel-element type mismatch (send only — spawn has
             // no element type). Reported only on Outcome::Ok so a value
@@ -1274,6 +1225,103 @@ impl<'a> Checker<'a> {
             } else {
                 None
             };
+
+            // class-3 owned moves first: `move x` (Expr form, top-level or
+            // nested inside a composite literal / parens) and the parser's
+            // flagged-Ident form (`Send{is_move: true, value: x}`).
+            if implicit_move {
+                let op = crate::model::unwrap_parens(v);
+                if let Expr::Ident { name, span: ispan } = op {
+                    if self.lookup_binding(st, name).is_some() {
+                        if !managed {
+                            self.check_non_owned_move(st, name, *ispan);
+                        }
+                        moves.push((name.clone(), *ispan));
+                    } else {
+                        unprovens.push(UnprovenInfo {
+                            value: name.clone(),
+                            reason: "the name did not resolve in this scope".to_string(),
+                        });
+                    }
+                } else if matches!(op, Expr::Field { .. })
+                    && matches!(self.shape_of_expr(st, op), TypeShape::OwnHandle(_))
+                {
+                    if let Some(root) = crate::model::field_chain_root_ident(op) {
+                        if self.lookup_binding(st, root).is_some() {
+                            if !managed {
+                                self.check_non_owned_move(st, root, v.span());
+                            }
+                            moves.push((root.to_string(), v.span()));
+                        }
+                    } else if !managed {
+                        self.check_o54_non_ident_move(st, op, v.span());
+                    }
+                } else if !managed {
+                    self.check_o54_non_ident_move(st, op, v.span());
+                }
+                if let Expr::Ident { name, .. } = op {
+                    match self.classify_move_ident(st, name) {
+                        Outcome::Ok => {
+                            if let Some((got, want)) = send_elem_mismatch {
+                                self.emit_chan_elem_mismatch_send(
+                                    &got,
+                                    &want,
+                                    v.span(),
+                                    &format!("`move {}`", v.render()),
+                                );
+                            }
+                        }
+                        Outcome::Managed { desc, risky } => {
+                            if risky {
+                                managed_descs.push(desc);
+                            }
+                        }
+                        Outcome::Rejected(info) => rejects.push(info),
+                        Outcome::Unproven(info) => unprovens.push(info),
+                    }
+                } else if let Some((got, want)) = send_elem_mismatch {
+                    self.emit_chan_elem_mismatch_send(
+                        &got,
+                        &want,
+                        v.span(),
+                        &format!("`move {}`", v.render()),
+                    );
+                }
+                continue;
+            }
+
+            let mut v_moves = Vec::new();
+            crate::model::collect_move_operands(v, &mut v_moves);
+            for (op, mspan) in v_moves {
+                if let Expr::Ident { name, .. } = op {
+                    if self.lookup_binding(st, name).is_some() {
+                        if !managed {
+                            self.check_non_owned_move(st, name, mspan);
+                        }
+                        moves.push((name.clone(), mspan));
+                    } else {
+                        unprovens.push(UnprovenInfo {
+                            value: name.clone(),
+                            reason: "the name did not resolve in this scope".to_string(),
+                        });
+                    }
+                } else if matches!(op, Expr::Field { .. })
+                    && matches!(self.shape_of_expr(st, op), TypeShape::OwnHandle(_))
+                {
+                    if let Some(root) = crate::model::field_chain_root_ident(op) {
+                        if self.lookup_binding(st, root).is_some() {
+                            if !managed {
+                                self.check_non_owned_move(st, root, mspan);
+                            }
+                            moves.push((root.to_string(), mspan));
+                        }
+                    } else if !managed {
+                        self.check_o54_non_ident_move(st, op, mspan);
+                    }
+                } else if !managed {
+                    self.check_o54_non_ident_move(st, op, mspan);
+                }
+            }
 
             let is_auto_addressed = code == "HYB-E3001"
                 && matches!(target_shapes.and_then(|ts| ts.get(vi)), Some(TypeShape::Pointer(_)))

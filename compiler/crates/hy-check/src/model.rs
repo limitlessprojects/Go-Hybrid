@@ -300,6 +300,9 @@ pub(crate) struct FnState {
     /// time so call sites can analyze parameter/capture stores (`record_callee_param_stores`).
     pub closure_defs:
         HashMap<String, (Vec<hy_syntax::Param>, Vec<hy_syntax::FnResult>, hy_syntax::Block)>,
+    /// Current flattened statement index during Pass B (used to detect moves
+    /// of handles that have a loop-wide borrow loan active across the loop).
+    pub current_idx: Option<usize>,
 }
 
 impl FnState {
@@ -811,6 +814,20 @@ pub(crate) fn move_operand_ident(e: &Expr) -> Option<String> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// Root binding of a pure field-access chain (`s.conn`, `(s).inner.conn`).
+/// Unlike `Expr::root_ident()`, this rejects index chains (`xs[0].conn`),
+/// which read a slice/map element rather than a struct field chain on a
+/// whole binding (O5.4).
+pub(crate) fn field_chain_root_ident(mut e: &Expr) -> Option<&str> {
+    loop {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => return Some(name.as_str()),
+            Expr::Field { base, .. } => e = base,
+            _ => return None,
+        }
     }
 }
 

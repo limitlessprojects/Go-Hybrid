@@ -437,6 +437,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     for (stmt, idx) in &flat.stmts {
         let stmt: &Stmt = stmt;
         let idx = *idx;
+        st.current_idx = Some(idx);
         let managed = flat.in_managed(idx);
         // Issue #14: apply the statement's scope events BEFORE processing, in
         // exact order so multiple Pop/Push events at the same index never

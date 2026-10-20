@@ -552,6 +552,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     {
                         mark_nested_overwritten(st, name, nested);
                         ck.define_binding(st, name, shape, ty, immutable, managed, is_let);
+                        ck.clone_moved_handle_loans(st, value, name);
                         if let Some(origin) = moved_non_owned {
                             if let Some(b) = st.env_lookup_mut(name) {
                                 b.non_owned_origin = Some(origin);
@@ -619,6 +620,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         None
                     };
                     ck.define_binding(st, name, shape, ty, immutable, managed, is_let);
+                    ck.clone_moved_handle_loans(st, value, name);
                     if let Some(origin) = &moved_non_owned {
                         if let Some(b) = st.env_lookup_mut(name) {
                             if b.non_owned_origin.is_none() {
@@ -694,6 +696,9 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     Option<String>,
                     Option<String>,
                     Vec<String>,
+                    Vec<String>,
+                    std::collections::HashSet<(String, usize)>,
+                    Option<usize>,
                 )> = l
                     .names
                     .iter()
@@ -729,6 +734,20 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         } else {
                             None
                         };
+                        let prior_children: Vec<String> = if reads_self {
+                            st.aliases
+                                .iter()
+                                .filter_map(|(k, v)| {
+                                    if v == name && k != name {
+                                        Some(k.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
                         let prior_shares: Vec<String> = if reads_self {
                             st.may_share
                                 .get(name)
@@ -737,6 +756,20 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         } else {
                             Vec::new()
                         };
+                        let prior_shadow_links = if reads_self {
+                            st.shadow_links.get(name).cloned().unwrap_or_default()
+                        } else {
+                            std::collections::HashSet::new()
+                        };
+                        let outer_depth = if st
+                            .scopes
+                            .last()
+                            .is_some_and(|top| !top.contains_key(name))
+                        {
+                            st.lookup_depth(name)
+                        } else {
+                            None
+                        };
                         (
                             name.clone(),
                             shape,
@@ -744,7 +777,10 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                             reads_self,
                             shadowed_origin,
                             prior_alias,
+                            prior_children,
                             prior_shares,
+                            prior_shadow_links,
+                            outer_depth,
                         )
                     })
                     .collect();
@@ -757,16 +793,43 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     reads_self,
                     shadowed_origin,
                     prior_alias,
+                    prior_children,
                     prior_shares,
+                    prior_shadow_links,
+                    outer_depth,
                 ) in resolved
                 {
                     overwritten.push(name.clone());
-                    let carries = ck.shape_may_share(&shape);
-                    mark_nested_overwritten(st, &name, nested);
+                    let carries = ck.shape_may_share(&shape) || matches!(shape, TypeShape::Unknown);
+                    if !reads_self {
+                        mark_nested_overwritten(st, &name, nested);
+                    }
                     ck.define_binding(st, &name, shape.clone(), ty, immutable, managed, is_let);
+                    if let Some(v) = val_opt {
+                        ck.clone_moved_handle_loans(st, v, &name);
+                    }
                     if reads_self {
+                        if !prior_shadow_links.is_empty() {
+                            st.shadow_links
+                                .entry(name.clone())
+                                .or_default()
+                                .extend(prior_shadow_links);
+                        }
+                        if let Some(depth) = outer_depth {
+                            st.shadow_links
+                                .entry(name.clone())
+                                .or_default()
+                                .insert((name.clone(), depth));
+                        }
                         if let Some(pa) = prior_alias {
-                            st.aliases.insert(name.clone(), pa);
+                            if pa != name {
+                                st.aliases.insert(name.clone(), pa);
+                            }
+                        }
+                        for child in prior_children {
+                            if child != name {
+                                st.aliases.insert(child, name.clone());
+                            }
                         }
                         for peer in prior_shares {
                             st.share_edge(&name, &peer);
@@ -798,6 +861,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 if let Some(v) = l.values.first() {
                     ck.link_multi_value_return_aliases(st, v, &l.names);
                 }
+                ck.record_local_borrow_aliases(st, l);
             }
             sync_nested_moves(st, nested);
         }
