@@ -4093,3 +4093,36 @@ fn main() {
         );
     }
 }
+
+impl<'a> Checker<'a> {
+    /// Compute the constant byte length of a string expression, if provable (issue #708).
+    fn const_str_byte_len(&self, e: &Expr) -> Option<usize> {
+        match unwrap_parens(e) {
+            Expr::Lit { kind: LitKind::Str(s), .. } => Some(s.len()),
+            Expr::Ident { name, .. } => {
+                if let Some(c) = self.const_values.get(name) {
+                    return self.const_str_byte_len(c);
+                }
+                None
+            }
+            Expr::Binary { op: BinOp::Add, lhs, rhs, .. } => {
+                let l = self.const_str_byte_len(lhs)?;
+                let r = self.const_str_byte_len(rhs)?;
+                Some(l + r)
+            }
+            _ => None,
+        }
+    }
+}
+#[test]
+fn const_string_bounds_validated() {
+    let reject_cases = [
+        "fn main() { _ = \"hello\"[-1] }",
+    ];
+    for src in reject_cases {
+        let r = crate::check(src);
+        assert_eq!(r.verdict, crate::model::Verdict::Reject, "expected reject for:\n{src}");
+    }
+}
+
+}
