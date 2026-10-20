@@ -95,11 +95,21 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::For {
-                kind: ForKind::Range { var, lo, hi, .. },
+                kind:
+                    ForKind::Range {
+                        var,
+                        lo,
+                        hi,
+                        inclusive,
+                    },
                 ..
             } => {
+                let before = self.diags.len();
                 self.check_integer_range_bound(st, var, lo);
                 self.check_integer_range_bound(st, var, hi);
+                if self.diags.len() == before {
+                    self.check_integer_range_pair(st, var, lo, hi, *inclusive);
+                }
             }
             _ => {}
         }
@@ -135,16 +145,62 @@ impl<'a> Checker<'a> {
                 ..
             } => return Some("bool".to_string()),
             Expr::Lit {
+                kind: LitKind::Nil,
+                ..
+            } => return Some("nil".to_string()),
+            Expr::Lit {
                 kind: LitKind::Str(_) | LitKind::RawStr(_),
                 ..
             }
             | Expr::Interp { .. } => return Some("string".to_string()),
-            Expr::Unary { operand, .. } => {
+            Expr::AddrOf { .. } => return Some("pointer".to_string()),
+            Expr::Ident { name, span } => {
+                if let Some(b) = st.env_lookup(name) {
+                    if b.immutable && !b.is_let && b.ty.is_none() {
+                        if let Some(val) = find_local_const_init(self.file, name, span.start) {
+                            if let Some(k) = self.non_integer_bound_kind(st, val) {
+                                return Some(k);
+                            }
+                        }
+                    }
+                } else {
+                    if name == "nil" {
+                        return Some("nil".to_string());
+                    }
+                    if matches!(name.as_str(), "true" | "false") {
+                        return Some("bool".to_string());
+                    }
+                    if let Some(cval) = self.const_values.get(name.as_str()) {
+                        if let Some(k) = self.non_integer_bound_kind(st, cval) {
+                            return Some(k);
+                        }
+                    }
+                }
+            }
+            Expr::Unary { op, operand, .. } => {
+                match op {
+                    hy_syntax::UnOp::Not => return Some("bool".to_string()),
+                    hy_syntax::UnOp::Addr => return Some("pointer".to_string()),
+                    hy_syntax::UnOp::Neg => {}
+                }
                 if let Some(k) = self.non_integer_bound_kind(st, operand) {
                     return Some(k);
                 }
             }
-            Expr::Binary { lhs, rhs, .. } => {
+            Expr::Binary { op, lhs, rhs, .. } => {
+                if matches!(
+                    op,
+                    hy_syntax::BinOp::Eq
+                        | hy_syntax::BinOp::Ne
+                        | hy_syntax::BinOp::Lt
+                        | hy_syntax::BinOp::Le
+                        | hy_syntax::BinOp::Gt
+                        | hy_syntax::BinOp::Ge
+                        | hy_syntax::BinOp::And
+                        | hy_syntax::BinOp::Or
+                ) {
+                    return Some("bool".to_string());
+                }
                 if let Some(k) = self
                     .non_integer_bound_kind(st, lhs)
                     .or_else(|| self.non_integer_bound_kind(st, rhs))
@@ -275,5 +331,161 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+    }
+
+    fn check_integer_range_pair(
+        &mut self,
+        st: &FnState,
+        var: &str,
+        lo: &Expr,
+        hi: &Expr,
+        inclusive: bool,
+    ) {
+        let lo_is_const = !matches!(
+            crate::const_overflow::const_int_fold_with(lo, &self.const_values, 0, Some(st)),
+            crate::const_overflow::ConstFold::NotConst
+        );
+        let hi_is_const = !matches!(
+            crate::const_overflow::const_int_fold_with(hi, &self.const_values, 0, Some(st)),
+            crate::const_overflow::ConstFold::NotConst
+        );
+        let lo_ty = self
+            .bound_int_type_name(st, lo)
+            .or_else(|| lo_is_const.then(|| "int".to_string()));
+        let hi_ty = self
+            .bound_int_type_name(st, hi)
+            .or_else(|| (inclusive && hi_is_const).then(|| "int".to_string()));
+        let counter_ty = lo_ty.as_deref().unwrap_or("int");
+        let mismatch = match (&lo_ty, &hi_ty) {
+            (Some(l_ty), Some(h_ty)) if l_ty != h_ty => Some((l_ty.clone(), h_ty.clone())),
+            _ => None,
+        };
+        if let Some((l_name, h_name)) = mismatch {
+            let op_s = if inclusive { "..=" } else { ".." };
+            let msg = format!(
+                "`for {var} in {}{op_s}{}` mixes integer bound types `{l_name}` and `{h_name}` (HYB-E2009)",
+                lo.render(),
+                hi.render()
+            );
+            let notes = vec![
+                "why: Go rejects comparing loop bounds of distinct integer types without an explicit conversion (LX13)".to_string(),
+                format!("fix: convert both bounds to the same integer type (e.g. `{h_name}({})`)", lo.render()),
+            ];
+            self.diags.push(
+                Diagnostic::error("HYB-E2009", self.path.clone(), hi.span(), msg).with_notes(notes),
+            );
+            return;
+        }
+        let hi_target = hi_ty.as_deref().unwrap_or(if inclusive { "int" } else { counter_ty });
+        self.check_range_bound_overflow(st, var, lo, counter_ty);
+        self.check_range_bound_overflow(st, var, hi, hi_target);
+    }
+
+    fn check_range_bound_overflow(&mut self, st: &FnState, var: &str, bound: &Expr, target_ty: &str) {
+        let Some((min_v, max_v)) = crate::const_overflow::fixed_width_int_range(target_ty) else {
+            return;
+        };
+        let overflows = match crate::const_overflow::const_int_fold_with(bound, &self.const_values, 0, Some(st)) {
+            crate::const_overflow::ConstFold::TooBig => true,
+            crate::const_overflow::ConstFold::Val(v) => v < min_v || v > max_v,
+            crate::const_overflow::ConstFold::NotConst => false,
+        };
+        if overflows {
+            let msg = format!(
+                "constant range bound `{}` overflows `{target_ty}` in `for {var} in …` (HYB-E2009)",
+                bound.render()
+            );
+            let notes = vec![
+                format!("why: Go folds constant range bounds and rejects values outside `{target_ty}` ([{min_v}, {max_v}])"),
+                format!("fix: use a bound within [{min_v}, {max_v}] or widen the loop bound type"),
+            ];
+            self.diags.push(
+                Diagnostic::error("HYB-E2009", self.path.clone(), bound.span(), msg).with_notes(notes),
+            );
+        }
+    }
+
+    fn bound_int_type_name(&self, st: &FnState, expr: &Expr) -> Option<String> {
+        let ty = self.ty_of_expr(st, expr)?;
+        let resolved = self.resolve_type_alias(&ty);
+        if let TypeExpr::Named { name, .. } = resolved {
+            canonical_int_type(&name).map(|s| s.to_string())
+        } else {
+            None
+        }
+    }
+}
+
+fn canonical_int_type(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "i8" | "int8" => "int8",
+        "u8" | "uint8" | "byte" => "uint8",
+        "i16" | "int16" => "int16",
+        "u16" | "uint16" => "uint16",
+        "i32" | "int32" | "rune" => "int32",
+        "u32" | "uint32" => "uint32",
+        "i64" | "int64" => "int64",
+        "u64" | "uint64" => "uint64",
+        "int" | "isize" => "int",
+        "uint" | "usize" | "uintptr" => "uint",
+        _ => return None,
+    })
+}
+
+fn find_local_const_init<'a>(
+    file: &'a hy_syntax::File,
+    target: &str,
+    use_pos: hy_diag::Pos,
+) -> Option<&'a Expr> {
+    let mut best: Option<(hy_diag::Pos, &'a Expr)> = None;
+    for d in &file.decls {
+        if let hy_syntax::Decl::Fn(f) = d {
+            scan_block_const(&f.body, target, use_pos, &mut best);
+        }
+    }
+    best.map(|(_, e)| e)
+}
+
+fn scan_block_const<'a>(
+    b: &'a hy_syntax::Block,
+    target: &str,
+    use_pos: hy_diag::Pos,
+    best: &mut Option<(hy_diag::Pos, &'a Expr)>,
+) {
+    for s in &b.stmts {
+        scan_stmt_const(s, target, use_pos, best);
+    }
+}
+
+fn scan_stmt_const<'a>(
+    s: &'a Stmt,
+    target: &str,
+    use_pos: hy_diag::Pos,
+    best: &mut Option<(hy_diag::Pos, &'a Expr)>,
+) {
+    match s {
+        Stmt::Local(l) if l.kind == hy_syntax::LocalKind::Const => {
+            if (l.span.start.line, l.span.start.col) <= (use_pos.line, use_pos.col) {
+                for (n, v) in l.names.iter().zip(l.values.iter()) {
+                    if n == target {
+                        *best = Some((l.span.start, v));
+                    }
+                }
+            }
+        }
+        Stmt::If { init, then, otherwise, .. } => {
+            if let Some(i) = init {
+                scan_stmt_const(i, target, use_pos, best);
+            }
+            scan_block_const(then, target, use_pos, best);
+            if let Some(o) = otherwise {
+                scan_stmt_const(o, target, use_pos, best);
+            }
+        }
+        Stmt::For { body, .. } | Stmt::Managed { body, .. } => {
+            scan_block_const(body, target, use_pos, best);
+        }
+        Stmt::Block { block, .. } => scan_block_const(block, target, use_pos, best),
+        _ => {}
     }
 }
