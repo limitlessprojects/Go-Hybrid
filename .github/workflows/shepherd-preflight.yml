@@ -97,6 +97,12 @@ jobs:
 
       - name: Post the one living preflight comment + label
         if: always()
+        # Best-effort by design (W7 principle: audit/report failures never
+        # fail the parent). A rate-guard abort (burst of PR events draining
+        # the core bucket) must not paint the PR check red — the verdict is
+        # carried by the Preflight checks step above; the next synchronize
+        # event re-runs this with fresh budget.
+        continue-on-error: true
         run: |
           outcome="${{ steps.checks.outcome }}"
           if [ "$outcome" = "success" ]; then

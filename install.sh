@@ -22,6 +22,11 @@ REPO="limitlessprojects/Go-Hybrid"
 VERSION="${HYB_VERSION:-}"           # pin a version, else latest
 INSTALL_DIR="${HYB_INSTALL_DIR:-$HOME/.hybrid}"
 BIN_DIR="${HYB_BIN_DIR:-$HOME/.local/bin}"
+# The launcher must keep finding this installation after the caller changes cwd.
+case "$INSTALL_DIR" in
+    /*) ;;
+    *) INSTALL_DIR="$PWD/$INSTALL_DIR" ;;
+esac
 
 # --- platform ---
 OS="$(uname -s)"
