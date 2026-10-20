@@ -2220,6 +2220,27 @@ impl<'a> Collector<'a> {
         }
     }
 
+
+    /// #1015 — result kinds of a lone multi-value call used as the whole
+    /// argument list, in positional order. `None` when the argument list is not
+    /// exactly one multi-value call.
+    fn multi_value_arg_kinds(&self, args: &[CallArg]) -> Option<Vec<OpKind>> {
+        if args.len() != 1 {
+            return None;
+        }
+        match unwrap_parens(&args[0].value) {
+            Expr::Call { callee, args: inner, .. } => {
+                let res = self.call_result_kinds(callee, inner)?;
+                if res.len() >= 2 {
+                    Some(res)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// #577 C9 — a closure or `fn`-typed value whose declared parameter count
     /// is known (`f := fn(x int) int {...}; f(1, 2)`).
     fn report_local_arity(&mut self, name: &str, want: usize, got: usize, span: Span) {
@@ -2276,7 +2297,10 @@ impl<'a> Collector<'a> {
         if self.multi_value_arg_count(args).is_some() {
             return;
         }
-        let (want, got) = (f.params.len(), args.len());
+        // #1015: a lone multi-value call expands to one argument per result, so
+        // it counts as that many arguments, not one.
+        let got = self.multi_value_arg_count(args).unwrap_or(args.len());
+        let (want, got) = (f.params.len(), got);
         if want == got {
             return;
         }
@@ -2328,7 +2352,12 @@ impl<'a> Collector<'a> {
         if !m.type_params.is_empty() {
             return;
         }
-        let (want, got) = (m.params.len(), args.len());
+        // #1015: a lone multi-value call expands to one argument per result —
+        // `s.takes_two(two())` is two arguments, not one, and used to be
+        // falsely rejected here because multi-value was only counted for
+        // `Expr::Ident` callees.
+        let got = self.multi_value_arg_count(args).unwrap_or(args.len());
+        let (want, got) = (m.params.len(), got);
         if want == got {
             return;
         }
@@ -2370,14 +2399,40 @@ impl<'a> Collector<'a> {
         if !f.type_params.is_empty() {
             return;
         }
-        if self.multi_value_arg_count(args).is_some() {
+        let param_kinds: Vec<OpKind> =
+            f.params.iter().map(|p| self.kind_of_ty(&p.ty, 0)).collect();
+        let params_len = f.params.len();
+        // #1015: a lone multi-value call IS the whole argument list (#682 U7),
+        // but its results are positional arguments and must still match the
+        // parameters. Returning early here let `takes_ints(returns_strings())`
+        // through with 0 diagnostics and produced Go that does not build.
+        if let Some(results) = self.multi_value_arg_kinds(args) {
+            if results.len() == params_len {
+                let span = args[0].value.span();
+                let rendered = args[0].value.render();
+                for (want, got) in param_kinds.iter().zip(results.iter()) {
+                    if kinds_conflict(want, got) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
+                                rendered,
+                                got.label(),
+                                want.label(),
+                                name
+                            ),
+                            "argument types must match declared parameter types",
+                        );
+                        break;
+                    }
+                }
+            }
             return;
         }
-        if f.params.len() != args.len() {
+        if params_len != args.len() {
             return;
         }
-        for (p, a) in f.params.iter().zip(args.iter()) {
-            let want = self.kind_of_ty(&p.ty, 0);
+        for (want, a) in param_kinds.iter().zip(args.iter()) {
             let got = self.kind_of_expr(&a.value);
             if let OpKind::Pointer(inner) = &want {
                 if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
@@ -2410,14 +2465,39 @@ impl<'a> Collector<'a> {
         if !m.type_params.is_empty() {
             return;
         }
-        if self.multi_value_arg_count(args).is_some() {
+        let param_kinds: Vec<OpKind> =
+            m.params.iter().map(|p| self.kind_of_ty(&p.ty, 0)).collect();
+        let params_len = m.params.len();
+        // #1015: same positional rule as `check_user_fn_arg_types`, for method
+        // calls whose single argument is a multi-value call.
+        if let Some(results) = self.multi_value_arg_kinds(args) {
+            if results.len() == params_len {
+                let span = args[0].value.span();
+                let rendered = args[0].value.render();
+                for (want, got) in param_kinds.iter().zip(results.iter()) {
+                    if kinds_conflict(want, got) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}.{}` — Go refuses mismatched argument types (HYB-E1002)",
+                                rendered,
+                                got.label(),
+                                want.label(),
+                                sn,
+                                name
+                            ),
+                            "argument types must match declared parameter types",
+                        );
+                        break;
+                    }
+                }
+            }
             return;
         }
-        if m.params.len() != args.len() {
+        if params_len != args.len() {
             return;
         }
-        for (p, a) in m.params.iter().zip(args.iter()) {
-            let want = self.kind_of_ty(&p.ty, 0);
+        for (want, a) in param_kinds.iter().zip(args.iter()) {
             let got = self.kind_of_expr(&a.value);
             if let OpKind::Pointer(inner) = &want {
                 if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
@@ -3745,8 +3825,13 @@ impl<'a> Collector<'a> {
                         // A local bound to a closure or fn-typed value carries
                         // its declared parameter count, so the call's arity is
                         // checkable (#577 C9).
-                        OpKind::Fn(_, Some(want)) if want != args.len() => {
-                            self.report_local_arity(name, want, args.len(), span)
+                        // #1015: a lone multi-value call expands to one
+                        // argument per result, so it is not "1 argument".
+                        OpKind::Fn(_, Some(want))
+                            if want != self.multi_value_arg_count(args).unwrap_or(args.len()) =>
+                        {
+                            let call_got = self.multi_value_arg_count(args).unwrap_or(args.len());
+                            self.report_local_arity(name, want, call_got, span)
                         }
                         OpKind::Fn(..) | OpKind::Unknown => {}
                         _ => self.emit_e1002(
@@ -3823,8 +3908,10 @@ impl<'a> Collector<'a> {
                     // states the count.
                     if !has_method {
                         if let OpKind::Fn(_, Some(want)) = fk {
-                            if want != args.len() {
-                                self.report_local_arity(&callee.render(), want, args.len(), span);
+                            // #1015: same multi-value expansion rule as above.
+                            let call_got = self.multi_value_arg_count(args).unwrap_or(args.len());
+                            if want != call_got {
+                                self.report_local_arity(&callee.render(), want, call_got, span);
                             }
                         }
                     }
