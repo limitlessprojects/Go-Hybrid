@@ -3423,7 +3423,21 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
-                self.walk_block_param_stores(body, cst, aliases, param_names, depth, out);
+                let mut block_cst = cst.clone();
+                let mut block_aliases = aliases.clone();
+                self.walk_block_param_stores(
+                    body,
+                    &mut block_cst,
+                    &mut block_aliases,
+                    param_names,
+                    depth,
+                    out,
+                );
+                for (k, v) in block_aliases {
+                    if aliases.contains_key(&k) {
+                        aliases.entry(k).or_default().extend(v);
+                    }
+                }
             }
             Stmt::Match { subject, arms, .. } => {
                 let subj_origins = self.expr_slot_origins(cst, subject, aliases);
@@ -4140,7 +4154,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Resolve a call expression's callee to `(typed_params, typed_results, body)`
+    /// Resolve a call expression's callee to `(typed_params, typed_results, body, is_closure)`
     /// across top-level functions (`self.fns`), user-defined struct methods
     /// (`self.method_decls`), inline function literals (`Expr::FnLit`), and
     /// local closure bindings (`st.closure_fnlits`).
@@ -4152,6 +4166,7 @@ impl<'a> Checker<'a> {
         Vec<(String, Option<hy_syntax::TypeExpr>)>,
         Vec<(String, Option<hy_syntax::TypeExpr>)>,
         &'c Block,
+        bool,
     )>
     where
         'a: 'c,
@@ -4159,7 +4174,7 @@ impl<'a> Checker<'a> {
         match unwrap_parens(callee) {
             Expr::Ident { name, .. } => {
                 if let Some((params, results, body)) = st.closure_fnlits.get(name.as_str()) {
-                    return Some((params.clone(), results.clone(), body));
+                    return Some((params.clone(), results.clone(), body, true));
                 }
                 if self.lookup_binding(st, name).is_some() {
                     return None;
@@ -4181,7 +4196,7 @@ impl<'a> Checker<'a> {
                     .iter()
                     .filter_map(|r| r.name.as_ref().map(|n| (n.clone(), Some(r.ty.clone()))))
                     .collect();
-                Some((params, results, body))
+                Some((params, results, body, false))
             }
             Expr::Field {
                 base,
@@ -4240,7 +4255,7 @@ impl<'a> Checker<'a> {
                     .iter()
                     .filter_map(|r| r.name.as_ref().map(|n| (n.clone(), Some(r.ty.clone()))))
                     .collect();
-                Some((params, results, body))
+                Some((params, results, body, false))
             }
             Expr::FnLit {
                 params,
@@ -4256,9 +4271,595 @@ impl<'a> Checker<'a> {
                     .iter()
                     .filter_map(|r| r.name.as_ref().map(|n| (n.clone(), Some(r.ty.clone()))))
                     .collect();
-                Some((p, r, body))
+                Some((p, r, body, true))
             }
             _ => None,
+        }
+    }
+
+    fn expr_const_origins_in_state(
+        &self,
+        cst: &FnState,
+        e: &Expr,
+        aliases: &HashMap<String, HashSet<String>>,
+        shadowed: &HashSet<String>,
+        depth: usize,
+    ) -> HashSet<String> {
+        let mut roots = Vec::new();
+        collect_ref_roots(e, &mut roots);
+        self.collect_callee_const_return_roots(cst, e, &mut roots, depth + 1);
+        let mut set = HashSet::new();
+        for r in roots {
+            if let Some(cs) = aliases.get(&r) {
+                set.extend(cs.iter().cloned());
+            } else if !shadowed.contains(&r) {
+                if let Some(cb) = self.consts.get(&r) {
+                    if self.shape_may_share(&cb.shape) {
+                        set.insert(r);
+                    }
+                }
+            }
+        }
+        set
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn walk_block_const_return_roots(
+        &self,
+        block: &Block,
+        cst: &mut FnState,
+        aliases: &mut HashMap<String, HashSet<String>>,
+        shadowed: &mut HashSet<String>,
+        typed_results: &[(String, Option<hy_syntax::TypeExpr>)],
+        depth: usize,
+        out: &mut Vec<String>,
+    ) {
+        for stmt in &block.stmts {
+            self.walk_stmt_const_return_roots(
+                stmt,
+                cst,
+                aliases,
+                shadowed,
+                typed_results,
+                depth,
+                out,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn walk_stmt_const_return_roots(
+        &self,
+        stmt: &Stmt,
+        cst: &mut FnState,
+        aliases: &mut HashMap<String, HashSet<String>>,
+        shadowed: &mut HashSet<String>,
+        typed_results: &[(String, Option<hy_syntax::TypeExpr>)],
+        depth: usize,
+        out: &mut Vec<String>,
+    ) {
+        let mut calls = Vec::new();
+        if let Stmt::For {
+            kind: hy_syntax::ForKind::Iterate { expr, .. },
+            ..
+        } = stmt
+        {
+            walk::expr_calls(expr, &mut calls);
+        } else {
+            walk::own_calls(stmt, &mut calls);
+        }
+        for cr in &calls {
+            if let Expr::Ident { name, .. } = unwrap_parens(cr.callee) {
+                if name == "copy" && cr.args.len() >= 2 {
+                    let src_cs = self.expr_const_origins_in_state(
+                        cst,
+                        &cr.args[1].value,
+                        aliases,
+                        shadowed,
+                        depth,
+                    );
+                    if !src_cs.is_empty() {
+                        let mut dst_roots = Vec::new();
+                        collect_ref_roots(&cr.args[0].value, &mut dst_roots);
+                        for dr in dst_roots {
+                            shadowed.remove(&dr);
+                            aliases.entry(dr).or_default().extend(src_cs.iter().cloned());
+                        }
+                    }
+                }
+            }
+            if let Some((slots, cbody)) = self.resolve_callee_slots_and_body(cst, cr) {
+                if slots.len() >= 2 {
+                    let slots_meta: Vec<(&str, TypeShape, Option<&hy_syntax::TypeExpr>)> = slots
+                        .iter()
+                        .map(|(n, sh, ty, _)| (n.as_str(), sh.clone(), ty.as_ref()))
+                        .collect();
+                    for (dst_idx, src_idx) in
+                        self.collect_callee_param_stores(&slots_meta, &cbody, depth + 1)
+                    {
+                        if let (Some((_, _, _, dst_src)), Some((_, _, _, src_src))) =
+                            (slots.get(dst_idx), slots.get(src_idx))
+                        {
+                            let src_cs = match src_src {
+                                CalleeSlotSource::Arg(src_e) => self.expr_const_origins_in_state(
+                                    cst, src_e, aliases, shadowed, depth,
+                                ),
+                                CalleeSlotSource::OuterBinding(bname) => {
+                                    aliases.get(bname).cloned().unwrap_or_default()
+                                }
+                            };
+                            if !src_cs.is_empty() {
+                                let mut dst_roots = Vec::new();
+                                match dst_src {
+                                    CalleeSlotSource::Arg(dst_e) => {
+                                        collect_ref_roots(dst_e, &mut dst_roots);
+                                        collect_addr_of_roots(dst_e, &mut dst_roots);
+                                    }
+                                    CalleeSlotSource::OuterBinding(bname) => {
+                                        dst_roots.push(bname.clone());
+                                    }
+                                }
+                                for dr in dst_roots {
+                                    shadowed.remove(&dr);
+                                    aliases.entry(dr).or_default().extend(src_cs.iter().cloned());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        match stmt {
+            Stmt::Local(l) => {
+                let is_let = matches!(l.kind, LocalKind::Let);
+                if l.values.is_empty() {
+                    let shape = l
+                        .ty
+                        .as_ref()
+                        .map(|t| self.shape_of_type(t))
+                        .unwrap_or(TypeShape::Unknown);
+                    for n in &l.names {
+                        self.define_binding(
+                            cst,
+                            n,
+                            shape.clone(),
+                            l.ty.clone(),
+                            false,
+                            false,
+                            is_let,
+                        );
+                        aliases.remove(n);
+                        shadowed.insert(n.clone());
+                    }
+                } else if l.values.len() == 1 && l.names.len() > 1 {
+                    let shapes = self.multi_value_shapes(cst, &l.values[0], l.names.len());
+                    let tys = self.multi_value_tys(cst, &l.values[0], l.names.len());
+                    let cs = self.expr_const_origins_in_state(
+                        cst,
+                        &l.values[0],
+                        aliases,
+                        shadowed,
+                        depth,
+                    );
+                    for ((n, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
+                        self.define_binding(cst, n, shape.clone(), ty, false, false, is_let);
+                        if cs.is_empty() || !self.shape_may_share(&shape) {
+                            aliases.remove(n);
+                            shadowed.insert(n.clone());
+                        } else {
+                            shadowed.remove(n);
+                            aliases.insert(n.clone(), cs.clone());
+                        }
+                    }
+                } else {
+                    let rhs_info: Vec<(
+                        TypeShape,
+                        Option<hy_syntax::TypeExpr>,
+                        HashSet<String>,
+                    )> = l
+                        .values
+                        .iter()
+                        .map(|v| {
+                            if let Expr::FnLit {
+                                params,
+                                results,
+                                body,
+                                ..
+                            } = unwrap_parens(v)
+                            {
+                                let p: Vec<(String, Option<hy_syntax::TypeExpr>)> = params
+                                    .iter()
+                                    .map(|p| (p.name.clone(), Some(p.ty.clone())))
+                                    .collect();
+                                let r: Vec<(String, Option<hy_syntax::TypeExpr>)> = results
+                                    .iter()
+                                    .filter_map(|r| {
+                                        r.name.as_ref().map(|n| (n.clone(), Some(r.ty.clone())))
+                                    })
+                                    .collect();
+                                for name in &l.names {
+                                    cst.closure_fnlits
+                                        .insert(name.clone(), (p.clone(), r.clone(), body.clone()));
+                                }
+                            }
+                            let inf = self.shape_of_expr(cst, v);
+                            let (sh, ty) = match (&l.ty, inf) {
+                                (Some(t), TypeShape::Unknown) => {
+                                    (self.shape_of_type(t), Some(t.clone()))
+                                }
+                                (_, s) => (s, self.ty_of_expr(cst, v).or_else(|| l.ty.clone())),
+                            };
+                            let cs = self.expr_const_origins_in_state(
+                                cst, v, aliases, shadowed, depth,
+                            );
+                            (sh, ty, cs)
+                        })
+                        .collect();
+                    for (n, (shape, ty, cs)) in l.names.iter().zip(rhs_info) {
+                        self.define_binding(cst, n, shape.clone(), ty, false, false, is_let);
+                        if cs.is_empty()
+                            || (!self.shape_may_share(&shape)
+                                && !matches!(shape, TypeShape::Unknown | TypeShape::Array(_)))
+                        {
+                            aliases.remove(n);
+                            shadowed.insert(n.clone());
+                        } else {
+                            shadowed.remove(n);
+                            aliases.insert(n.clone(), cs);
+                        }
+                    }
+                }
+            }
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                if targets.len() == values.len() {
+                    let rhs_cs: Vec<HashSet<String>> = values
+                        .iter()
+                        .map(|v| {
+                            self.expr_const_origins_in_state(cst, v, aliases, shadowed, depth)
+                        })
+                        .collect();
+                    for (t, cs) in targets.iter().zip(rhs_cs) {
+                        match &t.kind {
+                            PlaceKind::Ident(n) => {
+                                if cs.is_empty() {
+                                    aliases.remove(n);
+                                    shadowed.insert(n.clone());
+                                } else {
+                                    shadowed.remove(n);
+                                    aliases.insert(n.clone(), cs);
+                                }
+                            }
+                            PlaceKind::Field { .. } | PlaceKind::Index { .. } => {
+                                let root = t.root();
+                                if !root.is_empty() && !cs.is_empty() {
+                                    shadowed.remove(root);
+                                    aliases.entry(root.to_string()).or_default().extend(cs);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                } else if values.len() == 1 && targets.len() > 1 {
+                    let cs = self.expr_const_origins_in_state(
+                        cst,
+                        &values[0],
+                        aliases,
+                        shadowed,
+                        depth,
+                    );
+                    for t in targets {
+                        if let PlaceKind::Ident(n) = &t.kind {
+                            if cs.is_empty() {
+                                aliases.remove(n);
+                                shadowed.insert(n.clone());
+                            } else {
+                                shadowed.remove(n);
+                                aliases.insert(n.clone(), cs.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            Stmt::Return { values, .. } => {
+                if values.is_empty() {
+                    for (nr, _) in typed_results {
+                        if let Some(cs) = aliases.get(nr) {
+                            for c in cs {
+                                if !out.contains(c) {
+                                    out.push(c.clone());
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    for v in values {
+                        for c in
+                            self.expr_const_origins_in_state(cst, v, aliases, shadowed, depth)
+                        {
+                            if !out.contains(&c) {
+                                out.push(c);
+                            }
+                        }
+                    }
+                }
+            }
+            Stmt::If {
+                init,
+                then,
+                otherwise,
+                ..
+            } => {
+                let mut branch_cst = cst.clone();
+                let mut pre_aliases = aliases.clone();
+                let mut pre_shadowed = shadowed.clone();
+                if let Some(init_stmt) = init {
+                    self.walk_stmt_const_return_roots(
+                        init_stmt,
+                        &mut branch_cst,
+                        &mut pre_aliases,
+                        &mut pre_shadowed,
+                        typed_results,
+                        depth,
+                        out,
+                    );
+                }
+                let mut then_cst = branch_cst.clone();
+                let mut then_aliases = pre_aliases.clone();
+                let mut then_shadowed = pre_shadowed.clone();
+                self.walk_block_const_return_roots(
+                    then,
+                    &mut then_cst,
+                    &mut then_aliases,
+                    &mut then_shadowed,
+                    typed_results,
+                    depth,
+                    out,
+                );
+                for (k, v) in then_aliases {
+                    if aliases.contains_key(&k) || shadowed.contains(&k) {
+                        shadowed.remove(&k);
+                        aliases.entry(k).or_default().extend(v);
+                    }
+                }
+                if let Some(o) = otherwise {
+                    let mut else_cst = branch_cst;
+                    let mut else_aliases = pre_aliases;
+                    let mut else_shadowed = pre_shadowed;
+                    self.walk_stmt_const_return_roots(
+                        o,
+                        &mut else_cst,
+                        &mut else_aliases,
+                        &mut else_shadowed,
+                        typed_results,
+                        depth,
+                        out,
+                    );
+                    for (k, v) in else_aliases {
+                        if aliases.contains_key(&k) || shadowed.contains(&k) {
+                            shadowed.remove(&k);
+                            aliases.entry(k).or_default().extend(v);
+                        }
+                    }
+                }
+            }
+            Stmt::For { kind, body, .. } => {
+                let mut loop_cst = cst.clone();
+                let mut loop_aliases = aliases.clone();
+                let mut loop_shadowed = shadowed.clone();
+                match kind {
+                    hy_syntax::ForKind::Range { var, .. } => {
+                        if var != "_" {
+                            self.define_binding(
+                                &mut loop_cst,
+                                var,
+                                TypeShape::Primitive,
+                                None,
+                                false,
+                                false,
+                                false,
+                            );
+                            loop_aliases.remove(var);
+                            loop_shadowed.insert(var.clone());
+                        }
+                    }
+                    hy_syntax::ForKind::Iterate { vars, expr } => {
+                        let iter_cs = self.expr_const_origins_in_state(
+                            &loop_cst,
+                            expr,
+                            &loop_aliases,
+                            &loop_shadowed,
+                            depth,
+                        );
+                        let shapes = self.iterate_var_shapes(&loop_cst, expr, vars.len());
+                        for (b, b_sh) in vars.iter().zip(shapes) {
+                            if b == "_" {
+                                continue;
+                            }
+                            self.define_binding(
+                                &mut loop_cst,
+                                b,
+                                b_sh.clone(),
+                                None,
+                                false,
+                                false,
+                                false,
+                            );
+                            if !iter_cs.is_empty()
+                                && (self.shape_may_share(&b_sh)
+                                    || matches!(b_sh, TypeShape::Unknown | TypeShape::Array(_)))
+                            {
+                                loop_shadowed.remove(b);
+                                loop_aliases.insert(b.clone(), iter_cs.clone());
+                            } else {
+                                loop_aliases.remove(b);
+                                loop_shadowed.insert(b.clone());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                self.walk_block_const_return_roots(
+                    body,
+                    &mut loop_cst,
+                    &mut loop_aliases,
+                    &mut loop_shadowed,
+                    typed_results,
+                    depth,
+                    out,
+                );
+                for (k, v) in loop_aliases {
+                    if aliases.contains_key(&k) || shadowed.contains(&k) {
+                        shadowed.remove(&k);
+                        aliases.entry(k).or_default().extend(v);
+                    }
+                }
+            }
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+                let mut block_cst = cst.clone();
+                let mut block_aliases = aliases.clone();
+                let mut block_shadowed = shadowed.clone();
+                self.walk_block_const_return_roots(
+                    body,
+                    &mut block_cst,
+                    &mut block_aliases,
+                    &mut block_shadowed,
+                    typed_results,
+                    depth,
+                    out,
+                );
+                for (k, v) in block_aliases {
+                    if aliases.contains_key(&k) || shadowed.contains(&k) {
+                        shadowed.remove(&k);
+                        aliases.entry(k).or_default().extend(v);
+                    }
+                }
+            }
+            Stmt::Match { subject, arms, .. } => {
+                let subj_cs = self.expr_const_origins_in_state(
+                    cst, subject, aliases, shadowed, depth,
+                );
+                let subj_shape = self.shape_of_expr(cst, subject);
+                for arm in arms {
+                    let mut arm_cst = cst.clone();
+                    let mut arm_aliases = aliases.clone();
+                    let mut arm_shadowed = shadowed.clone();
+                    if let hy_syntax::MatchPattern::Path {
+                        binding: Some(bname),
+                        ..
+                    } = &arm.pattern
+                    {
+                        self.define_binding(
+                            &mut arm_cst,
+                            bname,
+                            subj_shape.clone(),
+                            None,
+                            false,
+                            false,
+                            false,
+                        );
+                        if !subj_cs.is_empty()
+                            && (self.shape_may_share(&subj_shape)
+                                || matches!(
+                                    subj_shape,
+                                    TypeShape::Unknown | TypeShape::Array(_)
+                                ))
+                        {
+                            arm_shadowed.remove(bname);
+                            arm_aliases.insert(bname.clone(), subj_cs.clone());
+                        } else {
+                            arm_aliases.remove(bname);
+                            arm_shadowed.insert(bname.clone());
+                        }
+                    }
+                    self.walk_block_const_return_roots(
+                        &arm.body,
+                        &mut arm_cst,
+                        &mut arm_aliases,
+                        &mut arm_shadowed,
+                        typed_results,
+                        depth,
+                        out,
+                    );
+                    for (k, v) in arm_aliases {
+                        if aliases.contains_key(&k) || shadowed.contains(&k) {
+                            shadowed.remove(&k);
+                            aliases.entry(k).or_default().extend(v);
+                        }
+                    }
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                for c in arms {
+                    let mut case_cst = cst.clone();
+                    let mut case_aliases = aliases.clone();
+                    let mut case_shadowed = shadowed.clone();
+                    if let hy_syntax::SelectArmKind::Recv { names, chan } = &c.kind {
+                        let chan_cs = self.expr_const_origins_in_state(
+                            &case_cst,
+                            chan,
+                            &case_aliases,
+                            &case_shadowed,
+                            depth,
+                        );
+                        let elem_sh = match self.shape_of_expr(&case_cst, chan) {
+                            TypeShape::Chan(inner) => (*inner).clone(),
+                            _ => TypeShape::Unknown,
+                        };
+                        for (i, n) in names.iter().enumerate() {
+                            if n == "_" {
+                                continue;
+                            }
+                            let sh = if i == 0 {
+                                elem_sh.clone()
+                            } else {
+                                TypeShape::Primitive
+                            };
+                            self.define_binding(&mut case_cst, n, sh.clone(), None, false, false, false);
+                            if i == 0 && !chan_cs.is_empty() && self.shape_may_share(&sh) {
+                                case_shadowed.remove(n);
+                                case_aliases.insert(n.clone(), chan_cs.clone());
+                            } else {
+                                case_aliases.remove(n);
+                                case_shadowed.insert(n.clone());
+                            }
+                        }
+                    }
+                    self.walk_block_const_return_roots(
+                        &c.body,
+                        &mut case_cst,
+                        &mut case_aliases,
+                        &mut case_shadowed,
+                        typed_results,
+                        depth,
+                        out,
+                    );
+                    for (k, v) in case_aliases {
+                        if aliases.contains_key(&k) || shadowed.contains(&k) {
+                            shadowed.remove(&k);
+                            aliases.entry(k).or_default().extend(v);
+                        }
+                    }
+                }
+            }
+            Stmt::Defer { call, .. } => {
+                let fake_stmt = Stmt::Expr {
+                    expr: call.clone(),
+                    span: call.span(),
+                };
+                self.walk_stmt_const_return_roots(
+                    &fake_stmt,
+                    cst,
+                    aliases,
+                    shadowed,
+                    typed_results,
+                    depth,
+                    out,
+                );
+            }
+            _ => {}
         }
     }
 
@@ -4311,160 +4912,72 @@ impl<'a> Checker<'a> {
                     self.collect_callee_const_return_roots(st, &a.value, out, depth);
                 }
                 self.collect_callee_const_return_roots(st, callee, out, depth);
-                let Some((typed_params, typed_results, body)) =
+                let Some((typed_params, typed_results, body, is_closure)) =
                     self.resolve_call_expr_decl_or_fnlit(st, callee)
                 else {
                     return;
                 };
-                let mut shadowed: HashSet<String> =
-                    typed_params.iter().map(|(n, _)| n.clone()).collect();
-                shadowed.extend(typed_results.iter().map(|(n, _)| n.clone()));
+                let mut cst = if is_closure {
+                    let mut c = st.clone();
+                    c.scope_push();
+                    c
+                } else {
+                    FnState::default()
+                };
+                let mut shadowed: HashSet<String> = HashSet::new();
                 let mut aliases: HashMap<String, HashSet<String>> = HashMap::new();
+                for (p, pty) in &typed_params {
+                    let shape = pty
+                        .as_ref()
+                        .map(|t| self.shape_of_type(t))
+                        .unwrap_or(TypeShape::Unknown);
+                    self.define_binding(&mut cst, p, shape, pty.clone(), false, false, false);
+                    shadowed.insert(p.clone());
+                }
+                for (nr, rty) in &typed_results {
+                    if nr == "_" {
+                        continue;
+                    }
+                    let shape = rty
+                        .as_ref()
+                        .map(|t| self.shape_of_type(t))
+                        .unwrap_or(TypeShape::Unknown);
+                    self.define_binding(&mut cst, nr, shape, rty.clone(), false, false, false);
+                    shadowed.insert(nr.clone());
+                }
                 for (cname, cb) in &self.consts {
                     if self.shape_may_share(&cb.shape) && !shadowed.contains(cname) {
                         aliases.insert(cname.clone(), HashSet::from([cname.clone()]));
                     }
                 }
-                for (local_name, lb) in &st.env {
-                    if !shadowed.contains(local_name) {
-                        if let Some(croot) = self.const_write_root(
-                            st,
-                            &Place {
-                                kind: PlaceKind::Ident(local_name.clone()),
-                                span: value.span(),
-                            },
-                        ) {
-                            if self.shape_may_share(&lb.shape) {
-                                aliases.insert(local_name.clone(), HashSet::from([croot]));
+                if is_closure {
+                    for (local_name, lb) in &st.env {
+                        if !shadowed.contains(local_name) {
+                            if let Some(croot) = self.const_write_root(
+                                st,
+                                &Place {
+                                    kind: PlaceKind::Ident(local_name.clone()),
+                                    span: value.span(),
+                                },
+                            ) {
+                                if self.shape_may_share(&lb.shape) {
+                                    aliases.insert(local_name.clone(), HashSet::from([croot]));
+                                }
+                            } else {
+                                shadowed.insert(local_name.clone());
                             }
                         }
                     }
                 }
-                let expr_const_origins =
-                    |e: &Expr,
-                     aliases: &HashMap<String, HashSet<String>>,
-                     shadowed: &HashSet<String>|
-                     -> HashSet<String> {
-                        let mut roots = Vec::new();
-                        collect_ref_roots(e, &mut roots);
-                        self.collect_callee_const_return_roots(st, e, &mut roots, depth + 1);
-                        let mut set = HashSet::new();
-                        for r in roots {
-                            if let Some(cs) = aliases.get(&r) {
-                                set.extend(cs.iter().cloned());
-                            } else if !shadowed.contains(&r) {
-                                if let Some(cb) = self.consts.get(&r) {
-                                    if self.shape_may_share(&cb.shape) {
-                                        set.insert(r);
-                                    }
-                                }
-                            }
-                        }
-                        set
-                    };
-                let flat = walk::flatten(body);
-                for (stmt, _) in &flat.stmts {
-                    match stmt {
-                        Stmt::Local(l) => {
-                            if l.values.is_empty() {
-                                for n in &l.names {
-                                    aliases.remove(n);
-                                    shadowed.insert(n.clone());
-                                }
-                            } else if l.values.len() == 1 && l.names.len() > 1 {
-                                let cs = expr_const_origins(&l.values[0], &aliases, &shadowed);
-                                for n in &l.names {
-                                    if cs.is_empty() {
-                                        aliases.remove(n);
-                                        shadowed.insert(n.clone());
-                                    } else {
-                                        shadowed.remove(n);
-                                        aliases.insert(n.clone(), cs.clone());
-                                    }
-                                }
-                            } else {
-                                for (n, v) in l.names.iter().zip(l.values.iter()) {
-                                    let cs = expr_const_origins(v, &aliases, &shadowed);
-                                    if cs.is_empty() {
-                                        aliases.remove(n);
-                                        shadowed.insert(n.clone());
-                                    } else {
-                                        shadowed.remove(n);
-                                        aliases.insert(n.clone(), cs);
-                                    }
-                                }
-                            }
-                        }
-                        Stmt::Assign {
-                            targets, values, ..
-                        } => {
-                            if targets.len() == values.len() {
-                                let rhs_cs: Vec<HashSet<String>> = values
-                                    .iter()
-                                    .map(|v| expr_const_origins(v, &aliases, &shadowed))
-                                    .collect();
-                                for (t, cs) in targets.iter().zip(rhs_cs) {
-                                    match &t.kind {
-                                        PlaceKind::Ident(n) => {
-                                            if cs.is_empty() {
-                                                aliases.remove(n);
-                                                shadowed.insert(n.clone());
-                                            } else {
-                                                shadowed.remove(n);
-                                                aliases.insert(n.clone(), cs);
-                                            }
-                                        }
-                                        PlaceKind::Field { .. } | PlaceKind::Index { .. } => {
-                                            let root = t.root();
-                                            if !root.is_empty() && !cs.is_empty() {
-                                                aliases
-                                                    .entry(root.to_string())
-                                                    .or_default()
-                                                    .extend(cs);
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            } else if values.len() == 1 && targets.len() > 1 {
-                                let cs = expr_const_origins(&values[0], &aliases, &shadowed);
-                                for t in targets {
-                                    if let PlaceKind::Ident(n) = &t.kind {
-                                        if cs.is_empty() {
-                                            aliases.remove(n);
-                                            shadowed.insert(n.clone());
-                                        } else {
-                                            shadowed.remove(n);
-                                            aliases.insert(n.clone(), cs.clone());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Stmt::Return { values, .. } => {
-                            if values.is_empty() {
-                                for (nr, _) in &typed_results {
-                                    if let Some(cs) = aliases.get(nr) {
-                                        for c in cs {
-                                            if !out.contains(c) {
-                                                out.push(c.clone());
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                for v in values {
-                                    for c in expr_const_origins(v, &aliases, &shadowed) {
-                                        if !out.contains(&c) {
-                                            out.push(c);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
+                self.walk_block_const_return_roots(
+                    body,
+                    &mut cst,
+                    &mut aliases,
+                    &mut shadowed,
+                    &typed_results,
+                    depth,
+                    out,
+                );
             }
             _ => {}
         }
@@ -4547,11 +5060,720 @@ impl<'a> Checker<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn walk_block_shared_return_pairs(
+        &self,
+        block: &Block,
+        cst: &mut FnState,
+        origins: &mut HashMap<String, HashSet<String>>,
+        shadowed: &mut HashSet<String>,
+        typed_results: &[(String, Option<hy_syntax::TypeExpr>)],
+        counter: &mut usize,
+        depth: usize,
+        pairs: &mut Vec<(usize, usize)>,
+    ) {
+        for stmt in &block.stmts {
+            self.walk_stmt_shared_return_pairs(
+                stmt,
+                cst,
+                origins,
+                shadowed,
+                typed_results,
+                counter,
+                depth,
+                pairs,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn walk_stmt_shared_return_pairs(
+        &self,
+        stmt: &Stmt,
+        cst: &mut FnState,
+        origins: &mut HashMap<String, HashSet<String>>,
+        shadowed: &mut HashSet<String>,
+        typed_results: &[(String, Option<hy_syntax::TypeExpr>)],
+        counter: &mut usize,
+        depth: usize,
+        pairs: &mut Vec<(usize, usize)>,
+    ) {
+        let idx = *counter;
+        *counter += 1;
+
+        let mut calls = Vec::new();
+        if let Stmt::For {
+            kind: hy_syntax::ForKind::Iterate { expr, .. },
+            ..
+        } = stmt
+        {
+            walk::expr_calls(expr, &mut calls);
+        } else {
+            walk::own_calls(stmt, &mut calls);
+        }
+        for cr in &calls {
+            if let Expr::Ident { name, .. } = unwrap_parens(cr.callee) {
+                if name == "copy" && cr.args.len() >= 2 {
+                    let mut src_o = HashSet::new();
+                    self.collect_sharing_origins_expr(
+                        cst,
+                        &cr.args[1].value,
+                        origins,
+                        shadowed,
+                        &mut src_o,
+                    );
+                    let mut dst_roots = Vec::new();
+                    collect_ref_roots(&cr.args[0].value, &mut dst_roots);
+                    for dr in dst_roots {
+                        if !src_o.is_empty() {
+                            shadowed.remove(&dr);
+                            origins.entry(dr).or_default().extend(src_o.iter().cloned());
+                        }
+                    }
+                }
+            }
+            if let Some((slots, cbody)) = self.resolve_callee_slots_and_body(cst, cr) {
+                if slots.len() >= 2 {
+                    let slots_meta: Vec<(&str, TypeShape, Option<&hy_syntax::TypeExpr>)> = slots
+                        .iter()
+                        .map(|(n, sh, ty, _)| (n.as_str(), sh.clone(), ty.as_ref()))
+                        .collect();
+                    for (dst_idx, src_idx) in
+                        self.collect_callee_param_stores(&slots_meta, &cbody, 0)
+                    {
+                        if let (Some((_, _, _, dst_src)), Some((_, _, _, src_src))) =
+                            (slots.get(dst_idx), slots.get(src_idx))
+                        {
+                            let mut src_o = HashSet::new();
+                            match src_src {
+                                CalleeSlotSource::Arg(src_e) => {
+                                    self.collect_sharing_origins_expr(
+                                        cst, src_e, origins, shadowed, &mut src_o,
+                                    );
+                                }
+                                CalleeSlotSource::OuterBinding(bname) => {
+                                    if let Some(os) = origins.get(bname) {
+                                        src_o.extend(os.iter().cloned());
+                                    }
+                                }
+                            }
+                            let mut dst_roots = Vec::new();
+                            match dst_src {
+                                CalleeSlotSource::Arg(dst_e) => {
+                                    collect_ref_roots(dst_e, &mut dst_roots);
+                                    collect_addr_of_roots(dst_e, &mut dst_roots);
+                                }
+                                CalleeSlotSource::OuterBinding(bname) => {
+                                    dst_roots.push(bname.clone());
+                                }
+                            }
+                            for dr in dst_roots {
+                                if !src_o.is_empty() {
+                                    shadowed.remove(&dr);
+                                    origins
+                                        .entry(dr)
+                                        .or_default()
+                                        .extend(src_o.iter().cloned());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        match stmt {
+            Stmt::Local(l) => {
+                let is_let = matches!(l.kind, LocalKind::Let);
+                if l.values.is_empty() {
+                    let shape = l
+                        .ty
+                        .as_ref()
+                        .map(|t| self.shape_of_type(t))
+                        .unwrap_or(TypeShape::Unknown);
+                    for name in &l.names {
+                        self.define_binding(
+                            cst,
+                            name,
+                            shape.clone(),
+                            l.ty.clone(),
+                            false,
+                            false,
+                            is_let,
+                        );
+                        if self.shape_may_share(&shape)
+                            || matches!(shape, TypeShape::Unknown | TypeShape::Array(_))
+                        {
+                            origins.insert(
+                                name.clone(),
+                                HashSet::from([format!("local:{idx}:{name}")]),
+                            );
+                            shadowed.remove(name);
+                        } else {
+                            origins.remove(name);
+                            shadowed.insert(name.clone());
+                        }
+                    }
+                } else if l.values.len() == 1 && l.names.len() > 1 {
+                    let shapes = self.multi_value_shapes(cst, &l.values[0], l.names.len());
+                    let tys = self.multi_value_tys(cst, &l.values[0], l.names.len());
+                    let mut base_o = HashSet::new();
+                    self.collect_sharing_origins_expr(
+                        cst,
+                        &l.values[0],
+                        origins,
+                        shadowed,
+                        &mut base_o,
+                    );
+                    let shared_pairs =
+                        self.callee_shared_return_pairs_with_depth(cst, &l.values[0], depth + 1);
+                    for (pos, ((name, shape), ty)) in
+                        l.names.iter().zip(shapes).zip(tys).enumerate()
+                    {
+                        self.define_binding(cst, name, shape.clone(), ty, false, false, is_let);
+                        if self.shape_may_share(&shape)
+                            || matches!(shape, TypeShape::Unknown | TypeShape::Array(_))
+                        {
+                            let mut s = base_o.clone();
+                            for (pi, pj) in &shared_pairs {
+                                if *pi == pos || *pj == pos {
+                                    s.insert(format!("pair:{idx}:{pi}:{pj}"));
+                                }
+                            }
+                            if s.is_empty() {
+                                s.insert(format!("local:{idx}:{name}"));
+                            }
+                            origins.insert(name.clone(), s);
+                            shadowed.remove(name);
+                        } else {
+                            origins.remove(name);
+                            shadowed.insert(name.clone());
+                        }
+                    }
+                } else {
+                    let rhs_info: Vec<(
+                        TypeShape,
+                        Option<hy_syntax::TypeExpr>,
+                        HashSet<String>,
+                    )> = l
+                        .values
+                        .iter()
+                        .map(|v| {
+                            if let Expr::FnLit {
+                                params,
+                                results,
+                                body,
+                                ..
+                            } = unwrap_parens(v)
+                            {
+                                let p: Vec<(String, Option<hy_syntax::TypeExpr>)> = params
+                                    .iter()
+                                    .map(|p| (p.name.clone(), Some(p.ty.clone())))
+                                    .collect();
+                                let r: Vec<(String, Option<hy_syntax::TypeExpr>)> = results
+                                    .iter()
+                                    .filter_map(|r| {
+                                        r.name.as_ref().map(|n| (n.clone(), Some(r.ty.clone())))
+                                    })
+                                    .collect();
+                                for name in &l.names {
+                                    cst.closure_fnlits
+                                        .insert(name.clone(), (p.clone(), r.clone(), body.clone()));
+                                }
+                            }
+                            let inf = self.shape_of_expr(cst, v);
+                            let (sh, ty) = match (&l.ty, inf) {
+                                (Some(t), TypeShape::Unknown) => {
+                                    (self.shape_of_type(t), Some(t.clone()))
+                                }
+                                (_, s) => (s, self.ty_of_expr(cst, v).or_else(|| l.ty.clone())),
+                            };
+                            let mut os = HashSet::new();
+                            self.collect_sharing_origins_expr(cst, v, origins, shadowed, &mut os);
+                            (sh, ty, os)
+                        })
+                        .collect();
+                    for (name, (shape, ty, mut s)) in l.names.iter().zip(rhs_info) {
+                        self.define_binding(cst, name, shape.clone(), ty, false, false, is_let);
+                        if self.shape_may_share(&shape)
+                            || matches!(shape, TypeShape::Unknown | TypeShape::Array(_))
+                        {
+                            if s.is_empty() {
+                                s.insert(format!("local:{idx}:{name}"));
+                            }
+                            origins.insert(name.clone(), s);
+                            shadowed.remove(name);
+                        } else {
+                            origins.remove(name);
+                            shadowed.insert(name.clone());
+                        }
+                    }
+                }
+            }
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                if targets.len() == values.len() {
+                    let rhs_sets: Vec<(
+                        TypeShape,
+                        Option<hy_syntax::TypeExpr>,
+                        HashSet<String>,
+                    )> = values
+                        .iter()
+                        .map(|v| {
+                            let sh = self.shape_of_expr(cst, v);
+                            let ty = self.ty_of_expr(cst, v);
+                            let mut os = HashSet::new();
+                            self.collect_sharing_origins_expr(cst, v, origins, shadowed, &mut os);
+                            (sh, ty, os)
+                        })
+                        .collect();
+                    for (t, (sh, ty, mut s)) in targets.iter().zip(rhs_sets) {
+                        match &t.kind {
+                            PlaceKind::Ident(name) => {
+                                if let Some(b) = cst.env_lookup_mut(name) {
+                                    if !matches!(sh, TypeShape::Unknown) || b.ty.is_none() {
+                                        b.shape = sh.clone();
+                                    }
+                                    if ty.is_some() || b.ty.is_none() {
+                                        b.ty = ty;
+                                    }
+                                }
+                                let target_shares = self
+                                    .lookup_binding(cst, name)
+                                    .map(|b| {
+                                        self.shape_may_share(&b.shape)
+                                            || matches!(
+                                                b.shape,
+                                                TypeShape::Unknown | TypeShape::Array(_)
+                                            )
+                                    })
+                                    .unwrap_or(true);
+                                if target_shares {
+                                    if s.is_empty() {
+                                        s.insert(format!("rebind:{idx}:{name}"));
+                                    }
+                                    origins.insert(name.clone(), s);
+                                    shadowed.remove(name);
+                                } else {
+                                    origins.remove(name);
+                                    shadowed.insert(name.clone());
+                                }
+                            }
+                            PlaceKind::Field { .. } | PlaceKind::Index { .. } => {
+                                let root = t.root();
+                                if !root.is_empty() && !s.is_empty() {
+                                    shadowed.remove(root);
+                                    origins.entry(root.to_string()).or_default().extend(s);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                } else if values.len() == 1 && targets.len() > 1 {
+                    let shapes = self.multi_value_shapes(cst, &values[0], targets.len());
+                    let mut base_o = HashSet::new();
+                    self.collect_sharing_origins_expr(
+                        cst,
+                        &values[0],
+                        origins,
+                        shadowed,
+                        &mut base_o,
+                    );
+                    let shared_pairs =
+                        self.callee_shared_return_pairs_with_depth(cst, &values[0], depth + 1);
+                    for (pos, (t, sh)) in targets.iter().zip(shapes).enumerate() {
+                        if let PlaceKind::Ident(name) = &t.kind {
+                            if self.shape_may_share(&sh)
+                                || matches!(sh, TypeShape::Unknown | TypeShape::Array(_))
+                            {
+                                let mut s = base_o.clone();
+                                for (pi, pj) in &shared_pairs {
+                                    if *pi == pos || *pj == pos {
+                                        s.insert(format!("pair:{idx}:{pi}:{pj}"));
+                                    }
+                                }
+                                if s.is_empty() {
+                                    s.insert(format!("rebind:{idx}:{name}"));
+                                }
+                                origins.insert(name.clone(), s);
+                                shadowed.remove(name);
+                            } else {
+                                origins.remove(name);
+                                shadowed.insert(name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            Stmt::Return { values, .. } => {
+                if values.len() == 1 {
+                    for p in self.callee_shared_return_pairs_with_depth(cst, &values[0], depth + 1)
+                    {
+                        pairs.push(p);
+                    }
+                    let mut os = HashSet::new();
+                    self.collect_sharing_origins_expr(cst, &values[0], origins, shadowed, &mut os);
+                    if !os.is_empty() {
+                        let n_ret = self.multi_value_shapes(cst, &values[0], 2).len();
+                        if n_ret >= 2 {
+                            for i in 0..n_ret {
+                                for j in (i + 1)..n_ret {
+                                    pairs.push((i, j));
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+                let sets: Vec<HashSet<String>> = if values.is_empty() {
+                    if typed_results.len() < 2 {
+                        return;
+                    }
+                    typed_results
+                        .iter()
+                        .map(|(nr, _)| origins.get(nr).cloned().unwrap_or_default())
+                        .collect()
+                } else {
+                    if values.len() < 2 {
+                        return;
+                    }
+                    values
+                        .iter()
+                        .map(|v| {
+                            if matches!(unwrap_parens(v), Expr::Move { .. }) {
+                                HashSet::new()
+                            } else {
+                                let mut os = HashSet::new();
+                                self.collect_sharing_origins_expr(
+                                    cst, v, origins, shadowed, &mut os,
+                                );
+                                os
+                            }
+                        })
+                        .collect()
+                };
+                for i in 0..sets.len() {
+                    for j in (i + 1)..sets.len() {
+                        if !sets[i].is_empty() && !sets[i].is_disjoint(&sets[j]) {
+                            pairs.push((i, j));
+                        }
+                    }
+                }
+            }
+            Stmt::If {
+                init,
+                then,
+                otherwise,
+                ..
+            } => {
+                let mut branch_cst = cst.clone();
+                let mut pre_origins = origins.clone();
+                let mut pre_shadowed = shadowed.clone();
+                if let Some(init_stmt) = init {
+                    self.walk_stmt_shared_return_pairs(
+                        init_stmt,
+                        &mut branch_cst,
+                        &mut pre_origins,
+                        &mut pre_shadowed,
+                        typed_results,
+                        counter,
+                        depth,
+                        pairs,
+                    );
+                }
+                let mut then_cst = branch_cst.clone();
+                let mut then_origins = pre_origins.clone();
+                let mut then_shadowed = pre_shadowed.clone();
+                self.walk_block_shared_return_pairs(
+                    then,
+                    &mut then_cst,
+                    &mut then_origins,
+                    &mut then_shadowed,
+                    typed_results,
+                    counter,
+                    depth,
+                    pairs,
+                );
+                for (k, v) in then_origins {
+                    if origins.contains_key(&k) || shadowed.contains(&k) {
+                        shadowed.remove(&k);
+                        origins.entry(k).or_default().extend(v);
+                    }
+                }
+                if let Some(o) = otherwise {
+                    let mut else_cst = branch_cst;
+                    let mut else_origins = pre_origins;
+                    let mut else_shadowed = pre_shadowed;
+                    self.walk_stmt_shared_return_pairs(
+                        o,
+                        &mut else_cst,
+                        &mut else_origins,
+                        &mut else_shadowed,
+                        typed_results,
+                        counter,
+                        depth,
+                        pairs,
+                    );
+                    for (k, v) in else_origins {
+                        if origins.contains_key(&k) || shadowed.contains(&k) {
+                            shadowed.remove(&k);
+                            origins.entry(k).or_default().extend(v);
+                        }
+                    }
+                }
+            }
+            Stmt::For { kind, body, .. } => {
+                let mut loop_cst = cst.clone();
+                let mut loop_origins = origins.clone();
+                let mut loop_shadowed = shadowed.clone();
+                match kind {
+                    hy_syntax::ForKind::Range { var, .. } => {
+                        if var != "_" {
+                            self.define_binding(
+                                &mut loop_cst,
+                                var,
+                                TypeShape::Primitive,
+                                None,
+                                false,
+                                false,
+                                false,
+                            );
+                            loop_origins.remove(var);
+                            loop_shadowed.insert(var.clone());
+                        }
+                    }
+                    hy_syntax::ForKind::Iterate { vars, expr } => {
+                        let mut iter_o = HashSet::new();
+                        self.collect_sharing_origins_expr(
+                            &loop_cst,
+                            expr,
+                            &loop_origins,
+                            &loop_shadowed,
+                            &mut iter_o,
+                        );
+                        let shapes = self.iterate_var_shapes(&loop_cst, expr, vars.len());
+                        for (b, b_sh) in vars.iter().zip(shapes) {
+                            if b == "_" {
+                                continue;
+                            }
+                            self.define_binding(
+                                &mut loop_cst,
+                                b,
+                                b_sh.clone(),
+                                None,
+                                false,
+                                false,
+                                false,
+                            );
+                            if self.shape_may_share(&b_sh)
+                                || matches!(b_sh, TypeShape::Unknown | TypeShape::Array(_))
+                            {
+                                let mut s = iter_o.clone();
+                                if s.is_empty() {
+                                    s.insert(format!("local:{idx}:{b}"));
+                                }
+                                loop_origins.insert(b.clone(), s);
+                                loop_shadowed.remove(b);
+                            } else {
+                                loop_origins.remove(b);
+                                loop_shadowed.insert(b.clone());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                self.walk_block_shared_return_pairs(
+                    body,
+                    &mut loop_cst,
+                    &mut loop_origins,
+                    &mut loop_shadowed,
+                    typed_results,
+                    counter,
+                    depth,
+                    pairs,
+                );
+                for (k, v) in loop_origins {
+                    if origins.contains_key(&k) || shadowed.contains(&k) {
+                        shadowed.remove(&k);
+                        origins.entry(k).or_default().extend(v);
+                    }
+                }
+            }
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+                let mut block_cst = cst.clone();
+                let mut block_origins = origins.clone();
+                let mut block_shadowed = shadowed.clone();
+                self.walk_block_shared_return_pairs(
+                    body,
+                    &mut block_cst,
+                    &mut block_origins,
+                    &mut block_shadowed,
+                    typed_results,
+                    counter,
+                    depth,
+                    pairs,
+                );
+                for (k, v) in block_origins {
+                    if origins.contains_key(&k) || shadowed.contains(&k) {
+                        shadowed.remove(&k);
+                        origins.entry(k).or_default().extend(v);
+                    }
+                }
+            }
+            Stmt::Match { subject, arms, .. } => {
+                let mut subj_o = HashSet::new();
+                self.collect_sharing_origins_expr(cst, subject, origins, shadowed, &mut subj_o);
+                let subj_shape = self.shape_of_expr(cst, subject);
+                for arm in arms {
+                    let mut arm_cst = cst.clone();
+                    let mut arm_origins = origins.clone();
+                    let mut arm_shadowed = shadowed.clone();
+                    if let hy_syntax::MatchPattern::Path {
+                        binding: Some(bname),
+                        ..
+                    } = &arm.pattern
+                    {
+                        self.define_binding(
+                            &mut arm_cst,
+                            bname,
+                            subj_shape.clone(),
+                            None,
+                            false,
+                            false,
+                            false,
+                        );
+                        if self.shape_may_share(&subj_shape)
+                            || matches!(subj_shape, TypeShape::Unknown | TypeShape::Array(_))
+                        {
+                            let mut s = subj_o.clone();
+                            if s.is_empty() {
+                                s.insert(format!("local:{idx}:{bname}"));
+                            }
+                            arm_origins.insert(bname.clone(), s);
+                            arm_shadowed.remove(bname);
+                        } else {
+                            arm_origins.remove(bname);
+                            arm_shadowed.insert(bname.clone());
+                        }
+                    }
+                    self.walk_block_shared_return_pairs(
+                        &arm.body,
+                        &mut arm_cst,
+                        &mut arm_origins,
+                        &mut arm_shadowed,
+                        typed_results,
+                        counter,
+                        depth,
+                        pairs,
+                    );
+                    for (k, v) in arm_origins {
+                        if origins.contains_key(&k) || shadowed.contains(&k) {
+                            shadowed.remove(&k);
+                            origins.entry(k).or_default().extend(v);
+                        }
+                    }
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                for c in arms {
+                    let mut case_cst = cst.clone();
+                    let mut case_origins = origins.clone();
+                    let mut case_shadowed = shadowed.clone();
+                    if let hy_syntax::SelectArmKind::Recv { names, chan } = &c.kind {
+                        let mut chan_o = HashSet::new();
+                        self.collect_sharing_origins_expr(
+                            &case_cst,
+                            chan,
+                            &case_origins,
+                            &case_shadowed,
+                            &mut chan_o,
+                        );
+                        let elem_sh = match self.shape_of_expr(&case_cst, chan) {
+                            TypeShape::Chan(inner) => (*inner).clone(),
+                            _ => TypeShape::Unknown,
+                        };
+                        for (i, n) in names.iter().enumerate() {
+                            if n == "_" {
+                                continue;
+                            }
+                            let sh = if i == 0 {
+                                elem_sh.clone()
+                            } else {
+                                TypeShape::Primitive
+                            };
+                            self.define_binding(&mut case_cst, n, sh.clone(), None, false, false, false);
+                            if i == 0
+                                && (self.shape_may_share(&sh)
+                                    || matches!(sh, TypeShape::Unknown | TypeShape::Array(_)))
+                            {
+                                let mut s = chan_o.clone();
+                                if s.is_empty() {
+                                    s.insert(format!("local:{idx}:{n}"));
+                                }
+                                case_origins.insert(n.clone(), s);
+                                case_shadowed.remove(n);
+                            } else {
+                                case_origins.remove(n);
+                                case_shadowed.insert(n.clone());
+                            }
+                        }
+                    }
+                    self.walk_block_shared_return_pairs(
+                        &c.body,
+                        &mut case_cst,
+                        &mut case_origins,
+                        &mut case_shadowed,
+                        typed_results,
+                        counter,
+                        depth,
+                        pairs,
+                    );
+                    for (k, v) in case_origins {
+                        if origins.contains_key(&k) || shadowed.contains(&k) {
+                            shadowed.remove(&k);
+                            origins.entry(k).or_default().extend(v);
+                        }
+                    }
+                }
+            }
+            Stmt::Defer { call, .. } => {
+                let fake_stmt = Stmt::Expr {
+                    expr: call.clone(),
+                    span: call.span(),
+                };
+                self.walk_stmt_shared_return_pairs(
+                    &fake_stmt,
+                    cst,
+                    origins,
+                    shadowed,
+                    typed_results,
+                    counter,
+                    depth,
+                    pairs,
+                );
+            }
+            _ => {}
+        }
+    }
+
     /// Return-position pairs `(i, j)` whose values may share backing storage in
     /// a `return` of the called function, method, or closure (`return m, m`,
     /// `m2 := m; return m, m2`, `return s[0:1], s[1:2]`, `return box{m: m}, m`,
     /// or bare `return` with named results).
     pub(crate) fn callee_shared_return_pairs(&self, st: &FnState, value: &Expr) -> Vec<(usize, usize)> {
+        self.callee_shared_return_pairs_with_depth(st, value, 0)
+    }
+
+    fn callee_shared_return_pairs_with_depth(
+        &self,
+        st: &FnState,
+        value: &Expr,
+        depth: usize,
+    ) -> Vec<(usize, usize)> {
+        if depth > 4 {
+            return Vec::new();
+        }
         let call = match unwrap_parens(value) {
             Expr::Try { operand, .. } => unwrap_parens(operand),
             other => other,
@@ -4559,13 +5781,18 @@ impl<'a> Checker<'a> {
         let Expr::Call { callee, .. } = call else {
             return Vec::new();
         };
-        let Some((typed_params, typed_results, body)) =
+        let Some((typed_params, typed_results, body, is_closure)) =
             self.resolve_call_expr_decl_or_fnlit(st, callee)
         else {
             return Vec::new();
         };
-        let mut cst = st.clone();
-        cst.scope_push();
+        let mut cst = if is_closure {
+            let mut c = st.clone();
+            c.scope_push();
+            c
+        } else {
+            FnState::default()
+        };
         let mut origins: HashMap<String, HashSet<String>> = HashMap::new();
         let mut shadowed: HashSet<String> = HashSet::new();
         for (p, pty) in &typed_params {
@@ -4595,307 +5822,18 @@ impl<'a> Checker<'a> {
             shadowed.insert(nr.clone());
         }
 
-        let flat = walk::flatten(body);
         let mut pairs: Vec<(usize, usize)> = Vec::new();
-        for (stmt, idx) in flat.stmts.iter().copied() {
-            let mut calls = Vec::new();
-            walk::own_calls(stmt, &mut calls);
-            for cr in &calls {
-                if let Expr::Ident { name, .. } = unwrap_parens(cr.callee) {
-                    if name == "copy" && cr.args.len() >= 2 {
-                        let mut src_o = HashSet::new();
-                        self.collect_sharing_origins_expr(
-                            &cst,
-                            &cr.args[1].value,
-                            &origins,
-                            &shadowed,
-                            &mut src_o,
-                        );
-                        let mut dst_roots = Vec::new();
-                        collect_ref_roots(&cr.args[0].value, &mut dst_roots);
-                        for dr in dst_roots {
-                            if !src_o.is_empty() {
-                                origins.entry(dr).or_default().extend(src_o.iter().cloned());
-                            }
-                        }
-                    }
-                }
-                if let Some((slots, cbody)) = self.resolve_callee_slots_and_body(&cst, cr) {
-                    if slots.len() >= 2 {
-                        let slots_meta: Vec<(&str, TypeShape, Option<&hy_syntax::TypeExpr>)> = slots
-                            .iter()
-                            .map(|(n, sh, ty, _)| (n.as_str(), sh.clone(), ty.as_ref()))
-                            .collect();
-                        for (dst_idx, src_idx) in
-                            self.collect_callee_param_stores(&slots_meta, &cbody, 0)
-                        {
-                            if let (Some((_, _, _, dst_src)), Some((_, _, _, src_src))) =
-                                (slots.get(dst_idx), slots.get(src_idx))
-                            {
-                                let mut src_o = HashSet::new();
-                                match src_src {
-                                    CalleeSlotSource::Arg(src_e) => {
-                                        self.collect_sharing_origins_expr(
-                                            &cst, src_e, &origins, &shadowed, &mut src_o,
-                                        );
-                                    }
-                                    CalleeSlotSource::OuterBinding(bname) => {
-                                        if let Some(os) = origins.get(bname) {
-                                            src_o.extend(os.iter().cloned());
-                                        }
-                                    }
-                                }
-                                let mut dst_roots = Vec::new();
-                                match dst_src {
-                                    CalleeSlotSource::Arg(dst_e) => {
-                                        collect_ref_roots(dst_e, &mut dst_roots);
-                                        collect_addr_of_roots(dst_e, &mut dst_roots);
-                                    }
-                                    CalleeSlotSource::OuterBinding(bname) => {
-                                        dst_roots.push(bname.clone());
-                                    }
-                                }
-                                for dr in dst_roots {
-                                    if !src_o.is_empty() {
-                                        origins
-                                            .entry(dr)
-                                            .or_default()
-                                            .extend(src_o.iter().cloned());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            match stmt {
-                Stmt::Local(l) => {
-                    let is_let = matches!(l.kind, LocalKind::Let);
-                    if l.values.is_empty() {
-                        let shape = l
-                            .ty
-                            .as_ref()
-                            .map(|t| self.shape_of_type(t))
-                            .unwrap_or(TypeShape::Unknown);
-                        for name in &l.names {
-                            self.define_binding(
-                                &mut cst,
-                                name,
-                                shape.clone(),
-                                l.ty.clone(),
-                                false,
-                                false,
-                                is_let,
-                            );
-                            if self.shape_may_share(&shape)
-                                || matches!(shape, TypeShape::Unknown | TypeShape::Array(_))
-                            {
-                                origins.insert(
-                                    name.clone(),
-                                    HashSet::from([format!("local:{idx}:{name}")]),
-                                );
-                                shadowed.remove(name);
-                            } else {
-                                origins.remove(name);
-                                shadowed.insert(name.clone());
-                            }
-                        }
-                    } else if l.values.len() == 1 && l.names.len() > 1 {
-                        let shapes = self.multi_value_shapes(&cst, &l.values[0], l.names.len());
-                        let tys = self.multi_value_tys(&cst, &l.values[0], l.names.len());
-                        let mut base_o = HashSet::new();
-                        self.collect_sharing_origins_expr(
-                            &cst,
-                            &l.values[0],
-                            &origins,
-                            &shadowed,
-                            &mut base_o,
-                        );
-                        for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
-                            self.define_binding(&mut cst, name, shape.clone(), ty, false, false, is_let);
-                            if self.shape_may_share(&shape)
-                                || matches!(shape, TypeShape::Unknown | TypeShape::Array(_))
-                            {
-                                let mut s = base_o.clone();
-                                if s.is_empty() {
-                                    s.insert(format!("local:{idx}:{name}"));
-                                }
-                                origins.insert(name.clone(), s);
-                                shadowed.remove(name);
-                            } else {
-                                origins.remove(name);
-                                shadowed.insert(name.clone());
-                            }
-                        }
-                    } else {
-                        let rhs_info: Vec<(
-                            TypeShape,
-                            Option<hy_syntax::TypeExpr>,
-                            HashSet<String>,
-                        )> = l
-                            .values
-                            .iter()
-                            .map(|v| {
-                                let inf = self.shape_of_expr(&cst, v);
-                                let (sh, ty) = match (&l.ty, inf) {
-                                    (Some(t), TypeShape::Unknown) => {
-                                        (self.shape_of_type(t), Some(t.clone()))
-                                    }
-                                    (_, s) => (s, self.ty_of_expr(&cst, v).or_else(|| l.ty.clone())),
-                                };
-                                let mut os = HashSet::new();
-                                self.collect_sharing_origins_expr(
-                                    &cst, v, &origins, &shadowed, &mut os,
-                                );
-                                (sh, ty, os)
-                            })
-                            .collect();
-                        for (name, (shape, ty, mut s)) in l.names.iter().zip(rhs_info) {
-                            self.define_binding(&mut cst, name, shape.clone(), ty, false, false, is_let);
-                            if self.shape_may_share(&shape)
-                                || matches!(shape, TypeShape::Unknown | TypeShape::Array(_))
-                            {
-                                if s.is_empty() {
-                                    s.insert(format!("local:{idx}:{name}"));
-                                }
-                                origins.insert(name.clone(), s);
-                                shadowed.remove(name);
-                            } else {
-                                origins.remove(name);
-                                shadowed.insert(name.clone());
-                            }
-                        }
-                    }
-                }
-                Stmt::Assign {
-                    targets, values, ..
-                } => {
-                    if targets.len() == values.len() {
-                        let rhs_sets: Vec<(
-                            TypeShape,
-                            Option<hy_syntax::TypeExpr>,
-                            HashSet<String>,
-                        )> = values
-                            .iter()
-                            .map(|v| {
-                                let sh = self.shape_of_expr(&cst, v);
-                                let ty = self.ty_of_expr(&cst, v);
-                                let mut os = HashSet::new();
-                                self.collect_sharing_origins_expr(
-                                    &cst, v, &origins, &shadowed, &mut os,
-                                );
-                                (sh, ty, os)
-                            })
-                            .collect();
-                        for (t, (sh, ty, mut s)) in targets.iter().zip(rhs_sets) {
-                            match &t.kind {
-                                PlaceKind::Ident(name) => {
-                                    if let Some(b) = cst.env_lookup_mut(name) {
-                                        if !matches!(sh, TypeShape::Unknown) || b.ty.is_none() {
-                                            b.shape = sh.clone();
-                                        }
-                                        if ty.is_some() || b.ty.is_none() {
-                                            b.ty = ty;
-                                        }
-                                    }
-                                    let target_shares = self
-                                        .lookup_binding(&cst, name)
-                                        .map(|b| {
-                                            self.shape_may_share(&b.shape)
-                                                || matches!(
-                                                    b.shape,
-                                                    TypeShape::Unknown | TypeShape::Array(_)
-                                                )
-                                        })
-                                        .unwrap_or(true);
-                                    if target_shares {
-                                        if s.is_empty() {
-                                            s.insert(format!("rebind:{idx}:{name}"));
-                                        }
-                                        origins.insert(name.clone(), s);
-                                        shadowed.remove(name);
-                                    } else {
-                                        origins.remove(name);
-                                        shadowed.insert(name.clone());
-                                    }
-                                }
-                                PlaceKind::Field { .. } | PlaceKind::Index { .. } => {
-                                    let root = t.root();
-                                    if !root.is_empty() && !s.is_empty() {
-                                        origins.entry(root.to_string()).or_default().extend(s);
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    } else if values.len() == 1 && targets.len() > 1 {
-                        let shapes = self.multi_value_shapes(&cst, &values[0], targets.len());
-                        let mut base_o = HashSet::new();
-                        self.collect_sharing_origins_expr(
-                            &cst,
-                            &values[0],
-                            &origins,
-                            &shadowed,
-                            &mut base_o,
-                        );
-                        for (t, sh) in targets.iter().zip(shapes) {
-                            if let PlaceKind::Ident(name) = &t.kind {
-                                if self.shape_may_share(&sh)
-                                    || matches!(sh, TypeShape::Unknown | TypeShape::Array(_))
-                                {
-                                    let mut s = base_o.clone();
-                                    if s.is_empty() {
-                                        s.insert(format!("rebind:{idx}:{name}"));
-                                    }
-                                    origins.insert(name.clone(), s);
-                                    shadowed.remove(name);
-                                } else {
-                                    origins.remove(name);
-                                    shadowed.insert(name.clone());
-                                }
-                            }
-                        }
-                    }
-                }
-                Stmt::Return { values, .. } => {
-                    let sets: Vec<HashSet<String>> = if values.is_empty() {
-                        if typed_results.len() < 2 {
-                            continue;
-                        }
-                        typed_results
-                            .iter()
-                            .map(|(nr, _)| origins.get(nr).cloned().unwrap_or_default())
-                            .collect()
-                    } else {
-                        if values.len() < 2 {
-                            continue;
-                        }
-                        values
-                            .iter()
-                            .map(|v| {
-                                if matches!(unwrap_parens(v), Expr::Move { .. }) {
-                                    HashSet::new()
-                                } else {
-                                    let mut os = HashSet::new();
-                                    self.collect_sharing_origins_expr(
-                                        &cst, v, &origins, &shadowed, &mut os,
-                                    );
-                                    os
-                                }
-                            })
-                            .collect()
-                    };
-                    for i in 0..sets.len() {
-                        for j in (i + 1)..sets.len() {
-                            if !sets[i].is_empty() && !sets[i].is_disjoint(&sets[j]) {
-                                pairs.push((i, j));
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
+        let mut counter = 0usize;
+        self.walk_block_shared_return_pairs(
+            body,
+            &mut cst,
+            &mut origins,
+            &mut shadowed,
+            &typed_results,
+            &mut counter,
+            depth,
+            &mut pairs,
+        );
         pairs.sort_unstable();
         pairs.dedup();
         pairs
@@ -6841,7 +7779,15 @@ impl<'a> Checker<'a> {
             _ => {}
         }
         let mut calls = Vec::new();
-        walk::own_calls(stmt, &mut calls);
+        if let Stmt::For {
+            kind: hy_syntax::ForKind::Iterate { expr, .. },
+            ..
+        } = stmt
+        {
+            walk::expr_calls(expr, &mut calls);
+        } else {
+            walk::own_calls(stmt, &mut calls);
+        }
         for cr in &calls {
             if self.call_mutates_const_param(cr, aliases, depth) {
                 return true;

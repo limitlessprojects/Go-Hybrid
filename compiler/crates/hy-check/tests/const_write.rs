@@ -1217,3 +1217,288 @@ fn trailing_dot_float_and_errors_wrap_check_clean_issues_657_659() {
     assert_eq!(r657.verdict, Verdict::Accept, "{:?}", r657.diagnostics);
 }
 
+#[test]
+fn callee_return_origin_and_multi_return_branch_scope_soundness() {
+    // 1. Multi-return callee with conditional branch reassignment (`if flag { m2 = fresh }`)
+    // must preserve pre-branch sharing origins when the branch is not taken.
+    let r_cond_pair = check(
+        "fn pair(flag bool) (map[string]int, map[string]int) {\n\
+             m := map[string]int{\"a\": 1}\n\
+             m2 := m\n\
+             if flag {\n\
+                 m2 = map[string]int{\"b\": 2}\n\
+             }\n\
+             return m, m2\n\
+         }\n\n\
+         fn worker(m map[string]int) {\n\
+             m[\"a\"] = 2\n\
+         }\n\n\
+         fn main() {\n\
+             a, b := pair(false)\n\
+             task worker(move a)\n\
+             b[\"a\"] = 3\n\
+         }\n",
+    );
+    assert_eq!(r_cond_pair.verdict, Verdict::Reject, "{:?}", codes(&r_cond_pair));
+    assert!(
+        codes(&r_cond_pair).iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 for conditional branch reassignment in multi-return callee, got {:?}",
+        codes(&r_cond_pair)
+    );
+
+    // 2. Named return parameters with conditional branch reassignment (`if flag { b = fresh }`).
+    let r_named_cond = check(
+        "fn pair_named(flag bool) (a map[string]int, b map[string]int) {\n\
+             m := map[string]int{\"a\": 1}\n\
+             a = m\n\
+             b = m\n\
+             if flag {\n\
+                 b = map[string]int{\"b\": 2}\n\
+             }\n\
+             return\n\
+         }\n\n\
+         fn worker(m map[string]int) { m[\"a\"] = 2 }\n\n\
+         fn main() {\n\
+             x, y := pair_named(false)\n\
+             task worker(move x)\n\
+             y[\"a\"] = 3\n\
+         }\n",
+    );
+    assert_eq!(r_named_cond.verdict, Verdict::Reject, "{:?}", codes(&r_named_cond));
+    assert!(
+        codes(&r_named_cond).iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 for named return conditional reassignment, got {:?}",
+        codes(&r_named_cond)
+    );
+
+    // 3. Inner-block lexical shadowing (`if flag { m := 0 }`) must not clobber outer `m` origins.
+    let r_shadow_pair = check(
+        "fn pair_shadow(flag bool) (map[string]int, map[string]int) {\n\
+             m := map[string]int{\"a\": 1}\n\
+             if flag {\n\
+                 m := 0\n\
+                 _ = m\n\
+             }\n\
+             return m, m\n\
+         }\n\n\
+         fn worker(m map[string]int) { m[\"a\"] = 2 }\n\n\
+         fn main() {\n\
+             a, b := pair_shadow(false)\n\
+             task worker(move a)\n\
+             b[\"a\"] = 3\n\
+         }\n",
+    );
+    assert_eq!(r_shadow_pair.verdict, Verdict::Reject, "{:?}", codes(&r_shadow_pair));
+    assert!(
+        codes(&r_shadow_pair).iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 after inner-block shadow in multi-return callee, got {:?}",
+        codes(&r_shadow_pair)
+    );
+
+    // 4. Transitive multi-return forwarding (`p, q := pair1(); return p, q` and `return pair1()`)
+    // and `for _, v in xs` iterate binding sharing.
+    for (label, src) in [
+        (
+            "transitive multi-return local destructure",
+            "fn pair1() (map[string]int, map[string]int) {\n\
+                 m := map[string]int{\"a\": 1}\n\
+                 return m, m\n\
+             }\n\
+             fn pair2() (map[string]int, map[string]int) {\n\
+                 p, q := pair1()\n\
+                 return p, q\n\
+             }\n\
+             fn worker(m map[string]int) { m[\"a\"] = 2 }\n\
+             fn main() {\n\
+                 a, b := pair2()\n\
+                 task worker(move a)\n\
+                 b[\"a\"] = 3\n\
+             }\n",
+        ),
+        (
+            "transitive bare call return pair1()",
+            "fn pair1() (map[string]int, map[string]int) {\n\
+                 m := map[string]int{\"a\": 1}\n\
+                 return m, m\n\
+             }\n\
+             fn pair2() (map[string]int, map[string]int) {\n\
+                 return pair1()\n\
+             }\n\
+             fn worker(m map[string]int) { m[\"a\"] = 2 }\n\
+             fn main() {\n\
+                 a, b := pair2()\n\
+                 task worker(move a)\n\
+                 b[\"a\"] = 3\n\
+             }\n",
+        ),
+        (
+            "for-iterate element sharing with slice element",
+            "fn first_two(xs []map[string]int) (map[string]int, map[string]int) {\n\
+                 for _, v in xs {\n\
+                     return xs[0], v\n\
+                 }\n\
+                 return map[string]int{}, map[string]int{}\n\
+             }\n\
+             fn worker(m map[string]int) { m[\"a\"] = 2 }\n\
+             fn main() {\n\
+                 s := []map[string]int{map[string]int{\"a\": 1}}\n\
+                 a, b := first_two(s)\n\
+                 task worker(move a)\n\
+                 b[\"a\"] = 3\n\
+             }\n",
+        ),
+    ] {
+        let r = check(src);
+        assert_eq!(r.verdict, Verdict::Reject, "{label}: {:?}", codes(&r));
+        assert!(
+            codes(&r).iter().any(|c| c == "HYB-E3003"),
+            "{label}: expected HYB-E3003, got {:?}",
+            codes(&r)
+        );
+    }
+
+    // 5. Const-return callee with inner-block lexical shadowing (`if flag { shared := 0 }`),
+    // `for _, v in shared_list` iterate binding, or caller-local shadowing (`shared := 0`
+    // in `main()`) must still reject mutation (HYB-E3006) and move (HYB-E3004).
+    for (label, expected_code, src) in [
+        (
+            "const return inner-block shadow write",
+            "HYB-E3006",
+            "const shared = map[string]int{\"a\": 1}\n\
+             fn get_shared(flag bool) map[string]int {\n\
+                 if flag {\n\
+                     shared := 0\n\
+                     _ = shared\n\
+                 }\n\
+                 return shared\n\
+             }\n\
+             fn main() {\n\
+                 m := get_shared(false)\n\
+                 m[\"a\"] = 2\n\
+             }\n",
+        ),
+        (
+            "const return inner-block shadow move across spawn",
+            "HYB-E3004",
+            "const shared = map[string]int{\"a\": 1}\n\
+             fn get_shared(flag bool) map[string]int {\n\
+                 if flag {\n\
+                     shared := 0\n\
+                     _ = shared\n\
+                 }\n\
+                 return shared\n\
+             }\n\
+             fn worker(m map[string]int) { _ = m }\n\
+             fn main() {\n\
+                 m := get_shared(false)\n\
+                 task worker(move m)\n\
+             }\n",
+        ),
+        (
+            "const return via for-iterate over const slice of maps",
+            "HYB-E3006",
+            "const shared_list = []map[string]int{map[string]int{\"a\": 1}}\n\
+             fn first_shared() map[string]int {\n\
+                 for _, v in shared_list {\n\
+                     return v\n\
+                 }\n\
+                 return map[string]int{}\n\
+             }\n\
+             fn main() {\n\
+                 m := first_shared()\n\
+                 m[\"a\"] = 2\n\
+             }\n",
+        ),
+        (
+            "const return top-level callee not shadowed by caller local",
+            "HYB-E3003",
+            "const shared = map[string]int{\"a\": 1}\n\
+             fn pair_const() (map[string]int, map[string]int) {\n\
+                 return shared, shared\n\
+             }\n\
+             fn worker(m map[string]int) { _ = m }\n\
+             fn main() {\n\
+                 shared := 0\n\
+                 _ = shared\n\
+                 a, b := pair_const()\n\
+                 task worker(move a)\n\
+                 _ = b\n\
+             }\n",
+        ),
+    ] {
+        let r = check(src);
+        assert_eq!(r.verdict, Verdict::Reject, "{label}: {:?}", codes(&r));
+        assert!(
+            codes(&r).iter().any(|c| c == expected_code),
+            "{label}: expected {expected_code}, got {:?}",
+            codes(&r)
+        );
+    }
+
+    // 6. Inner-block lexical shadowing in `walk_stmt_param_stores` (`{ src := 0; _ = src }`)
+    // must not erase parameter alias tracking for subsequent `dst["k"] = src`.
+    let r_param_store_block = check(
+        "fn link(dst map[string]map[string]int, src map[string]int) {\n\
+             {\n\
+                 src := 0\n\
+                 _ = src\n\
+             }\n\
+             dst[\"k\"] = src\n\
+         }\n\
+         fn worker(m map[string]map[string]int) {\n\
+             m[\"k\"][\"a\"] = 2\n\
+         }\n\
+         fn main() {\n\
+             d := map[string]map[string]int{}\n\
+             s := map[string]int{\"a\": 1}\n\
+             link(d, s)\n\
+             task worker(move d)\n\
+             s[\"a\"] = 3\n\
+         }\n",
+    );
+    assert_eq!(
+        r_param_store_block.verdict,
+        Verdict::Reject,
+        "{:?}",
+        codes(&r_param_store_block)
+    );
+    assert!(
+        codes(&r_param_store_block).iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 for post-block param store, got {:?}",
+        codes(&r_param_store_block)
+    );
+
+    // 7. Positive controls: unconditional rebind to a fresh composite before return accepts.
+    for ok_src in [
+        "fn pair_uncond() (map[string]int, map[string]int) {\n\
+             m := map[string]int{\"a\": 1}\n\
+             m2 := m\n\
+             m2 = map[string]int{\"b\": 2}\n\
+             return m, m2\n\
+         }\n\
+         fn worker(m map[string]int) { m[\"a\"] = 2 }\n\
+         fn main() {\n\
+             a, b := pair_uncond()\n\
+             task worker(move a)\n\
+             b[\"b\"] = 3\n\
+         }\n",
+        "const shared = map[string]int{\"a\": 1}\n\
+         fn get_fresh() map[string]int {\n\
+             shared := map[string]int{\"b\": 2}\n\
+             return shared\n\
+         }\n\
+         fn main() {\n\
+             m := get_fresh()\n\
+             m[\"b\"] = 3\n\
+         }\n",
+    ] {
+        let r_ok = check(ok_src);
+        assert_eq!(
+            r_ok.verdict,
+            Verdict::Accept,
+            "src:\n{ok_src}\ndiags: {:?}",
+            r_ok.diagnostics
+        );
+    }
+}
+
