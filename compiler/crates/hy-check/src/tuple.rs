@@ -273,6 +273,11 @@ impl<'a> Checker<'a> {
                             return Some((name.clone(), decl.results.len()));
                         }
                     }
+                    if let Some(ty) = self.infer_local_fn_binding_ty(st, name, expr.span().start) {
+                        if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&ty) {
+                            return Some((name.clone(), results.len()));
+                        }
+                    }
                     return None;
                 }
                 // 2. Direct call to a file-local top-level function
@@ -322,20 +327,318 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // 3. Struct field holding a fn value (`h.mm(3, 9)`)
-                let callee_ty = self.ty_of_expr(st, callee)?;
+                let callee_ty = self
+                    .tuple_callee_ty(st, callee)
+                    .or_else(|| self.ty_of_expr(st, callee))?;
                 if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&callee_ty) {
                     return Some((callee.render(), results.len()));
                 }
                 None
             }
             other => {
-                let callee_ty = self.ty_of_expr(st, other)?;
+                let callee_ty = self
+                    .tuple_callee_ty(st, other)
+                    .or_else(|| self.ty_of_expr(st, other))?;
                 if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&callee_ty) {
                     return Some((callee.render(), results.len()));
                 }
                 None
             }
         }
+    }
+
+    fn tuple_callee_ty(&self, st: &FnState, expr: &Expr) -> Option<TypeExpr> {
+        match unwrap_parens_and_move(expr) {
+            Expr::Ident { name, span } => {
+                if let Some(b) = self.lookup_binding(st, name) {
+                    if let Some(ty) = &b.ty {
+                        return Some(ty.clone());
+                    }
+                    return self.infer_local_fn_binding_ty(st, name, span.start);
+                }
+                let head = Self::base_named_type_str(name);
+                let decl = self.fns.get(name.as_str()).or_else(|| self.fns.get(head))?;
+                Some(TypeExpr::Fn {
+                    params: decl.params.clone(),
+                    results: decl.results.iter().map(|r| r.ty.clone()).collect(),
+                    span: *span,
+                })
+            }
+            Expr::Receive { chan, .. } => {
+                let cty = self
+                    .tuple_callee_ty(st, chan)
+                    .or_else(|| self.ty_of_expr(st, chan))?;
+                match self.resolve_type_alias(&cty) {
+                    TypeExpr::Chan { elem, .. } => Some(*elem),
+                    _ => None,
+                }
+            }
+            Expr::Index { base, span, .. } => {
+                match unwrap_parens_and_move(base) {
+                    Expr::Ident { name, .. } if self.lookup_binding(st, name).is_none() => {
+                        let head = Self::base_named_type_str(name);
+                        if let Some(decl) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
+                            return Some(TypeExpr::Fn {
+                                params: decl.params.clone(),
+                                results: decl.results.iter().map(|r| r.ty.clone()).collect(),
+                                span: *span,
+                            });
+                        }
+                    }
+                    Expr::Field {
+                        base: fbase,
+                        name: method_name,
+                        ..
+                    } => {
+                        let head = Self::base_named_type_str(method_name);
+                        if let Some(rb) = self.receiver_base_name(st, fbase) {
+                            if let Some(decl) = self.method_decls.get(&(rb, head.to_string())) {
+                                return Some(TypeExpr::Fn {
+                                    params: decl.params.clone(),
+                                    results: decl.results.iter().map(|r| r.ty.clone()).collect(),
+                                    span: *span,
+                                });
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                let bty = self
+                    .tuple_callee_ty(st, base)
+                    .or_else(|| self.ty_of_expr(st, base))?;
+                match self.resolve_type_alias(&bty) {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => Some(*elem),
+                    TypeExpr::Map { value, .. } => Some(*value),
+                    _ => None,
+                }
+            }
+            Expr::Field { base, name, span } => {
+                let head = Self::base_named_type_str(name);
+                if let Some(rb) = self.receiver_base_name(st, base) {
+                    if let Some(decl) = self.method_decls.get(&(rb.clone(), head.to_string())) {
+                        return Some(TypeExpr::Fn {
+                            params: decl.params.clone(),
+                            results: decl.results.iter().map(|r| r.ty.clone()).collect(),
+                            span: *span,
+                        });
+                    }
+                }
+                let base_ty = self
+                    .tuple_callee_ty(st, base)
+                    .or_else(|| self.ty_of_expr(st, base))?;
+                let resolved = self.resolve_type_alias(&base_ty);
+                let target = match resolved {
+                    TypeExpr::Pointer { to, .. } => self.resolve_type_alias(&to),
+                    other => other,
+                };
+                if let TypeExpr::Named { name: raw_s, span: s_span } = target {
+                    let s_head = Self::base_named_type_str(&raw_s);
+                    let (_, field_ty) = self
+                        .structs
+                        .get(s_head)?
+                        .iter()
+                        .find(|(n, _)| n == name)?;
+                    if let (Some(tparams), Some(i)) = (self.struct_type_params.get(s_head), raw_s.find('[')) {
+                        if raw_s.ends_with(']') {
+                            let inner = &raw_s[i + 1..raw_s.len() - 1];
+                            let args: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+                            if args.len() == tparams.len() {
+                                return Some(subst_fn_field_ty(field_ty, tparams, &args, s_span));
+                            }
+                        }
+                    }
+                    return Some(field_ty.clone());
+                }
+                self.ty_of_expr(st, expr)
+            }
+            other => self.ty_of_expr(st, other),
+        }
+    }
+
+    fn receiver_base_name(&self, st: &FnState, base: &Expr) -> Option<String> {
+        self.ty_of_expr(st, base)
+            .map(|t| self.resolve_type_alias(&t))
+            .and_then(|t| Self::base_named_type(&t))
+            .or_else(|| match self.shape_of_expr(st, base) {
+                TypeShape::Struct(Some(s)) => Some(Self::base_named_type_str(&s).to_string()),
+                TypeShape::Pointer(inner) => match *inner {
+                    TypeShape::Struct(Some(s)) => Some(Self::base_named_type_str(&s).to_string()),
+                    _ => None,
+                },
+                _ => None,
+            })
+    }
+
+    fn infer_local_fn_binding_ty(
+        &self,
+        st: &FnState,
+        target: &str,
+        use_pos: hy_diag::Pos,
+    ) -> Option<TypeExpr> {
+        for d in &self.file.decls {
+            if let hy_syntax::Decl::Fn(f) = d {
+                if let Some(ty) = self.scan_block_fn_binding(&f.body, st, target, use_pos) {
+                    return Some(ty);
+                }
+            }
+        }
+        None
+    }
+
+    fn scan_block_fn_binding(
+        &self,
+        b: &hy_syntax::Block,
+        st: &FnState,
+        target: &str,
+        use_pos: hy_diag::Pos,
+    ) -> Option<TypeExpr> {
+        let mut found = None;
+        for s in &b.stmts {
+            if let Some(ty) = self.scan_stmt_fn_binding(s, st, target, use_pos) {
+                found = Some(ty);
+            }
+        }
+        found
+    }
+
+    fn scan_stmt_fn_binding(
+        &self,
+        s: &Stmt,
+        st: &FnState,
+        target: &str,
+        use_pos: hy_diag::Pos,
+    ) -> Option<TypeExpr> {
+        match s {
+            Stmt::Local(l) => {
+                if (l.span.start.line, l.span.start.col) <= (use_pos.line, use_pos.col)
+                    && l.names.len() == l.values.len()
+                {
+                    for (n, v) in l.names.iter().zip(l.values.iter()) {
+                        if n == target {
+                            return self.tuple_callee_ty(st, v);
+                        }
+                    }
+                }
+                None
+            }
+            Stmt::For { kind, body, span, .. } => {
+                let mut res = None;
+                if (span.start.line, span.start.col) <= (use_pos.line, use_pos.col) {
+                    if let hy_syntax::ForKind::Iterate { vars, expr } = kind {
+                        let cty = self
+                            .tuple_callee_ty(st, expr)
+                            .or_else(|| self.ty_of_expr(st, expr));
+                        if let Some(cty) = cty {
+                            let resolved = self.resolve_type_alias(&cty);
+                            if vars.len() == 1 && vars[0] == target {
+                                if let TypeExpr::Chan { elem, .. }
+                                | TypeExpr::Slice { elem, .. }
+                                | TypeExpr::Array { elem, .. } = resolved
+                                {
+                                    res = Some(*elem);
+                                }
+                            } else if vars.len() == 2 && vars[1] == target {
+                                match resolved {
+                                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+                                        res = Some(*elem);
+                                    }
+                                    TypeExpr::Map { value, .. } => {
+                                        res = Some(*value);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                self.scan_block_fn_binding(body, st, target, use_pos).or(res)
+            }
+            Stmt::Select { arms, .. } => {
+                let mut res = None;
+                for arm in arms {
+                    if let hy_syntax::SelectArmKind::Recv { names, chan } = &arm.kind {
+                        if names.first().is_some_and(|n| n == target) {
+                            if let Some(cty) = self
+                                .tuple_callee_ty(st, chan)
+                                .or_else(|| self.ty_of_expr(st, chan))
+                            {
+                                if let TypeExpr::Chan { elem, .. } = self.resolve_type_alias(&cty) {
+                                    res = Some(*elem);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(inner) = self.scan_block_fn_binding(&arm.body, st, target, use_pos)
+                    {
+                        res = Some(inner);
+                    }
+                }
+                res
+            }
+            Stmt::If { init, then, otherwise, .. } => {
+                let mut res = init
+                    .as_deref()
+                    .and_then(|i| self.scan_stmt_fn_binding(i, st, target, use_pos));
+                if let Some(t) = self.scan_block_fn_binding(then, st, target, use_pos) {
+                    res = Some(t);
+                }
+                if let Some(o) = otherwise
+                    .as_deref()
+                    .and_then(|o| self.scan_stmt_fn_binding(o, st, target, use_pos))
+                {
+                    res = Some(t_or(o));
+                }
+                res
+            }
+            Stmt::Managed { body, .. } => self.scan_block_fn_binding(body, st, target, use_pos),
+            Stmt::Block { block, .. } => self.scan_block_fn_binding(block, st, target, use_pos),
+            _ => None,
+        }
+    }
+}
+
+fn t_or(t: TypeExpr) -> TypeExpr {
+    t
+}
+
+fn subst_fn_field_ty(
+    ty: &TypeExpr,
+    tparams: &[hy_syntax::TypeParam],
+    args: &[&str],
+    span: Span,
+) -> TypeExpr {
+    match ty {
+        TypeExpr::Named { name, .. } => {
+            for (tp, arg) in tparams.iter().zip(args.iter()) {
+                if tp.name == *name {
+                    return TypeExpr::Named {
+                        name: (*arg).to_string(),
+                        span,
+                    };
+                }
+            }
+            ty.clone()
+        }
+        TypeExpr::Fn {
+            params,
+            results,
+            span: fspan,
+        } => TypeExpr::Fn {
+            params: params
+                .iter()
+                .map(|p| hy_syntax::Param {
+                    name: p.name.clone(),
+                    ty: subst_fn_field_ty(&p.ty, tparams, args, span),
+                    span: p.span,
+                })
+                .collect(),
+            results: results
+                .iter()
+                .map(|r| subst_fn_field_ty(r, tparams, args, span))
+                .collect(),
+            span: *fspan,
+        },
+        other => other.clone(),
     }
 }
 
