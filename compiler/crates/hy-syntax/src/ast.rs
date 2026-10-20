@@ -1,7 +1,7 @@
 //! The Hybrid AST — the cross-component contract between `hy-syntax`
 //! (produces), `hy-check` (consumes), and the MVP-0 emitter (consumes).
 //!
-//! Scope: the surface exercised by tests/checker-corpus/*.hy (113 programs),
+//! Scope: the surface exercised by tests/checker-corpus/*.hy (115 programs),
 //! examples/ (ten target programs), and spikes/spike6-ownership/work/*.hy
 //! (ten programs). Anything outside that surface is allowed to be
 //! unimplemented by the parser — it must produce a clean `unsupported`
