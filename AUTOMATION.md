@@ -50,3 +50,14 @@ Treat every bot verdict as a *prior*, not a decision.
 `tools/triage_config.json`: wildcard holds (M1 experiment, verdicts due
 2026-11-01), parked drafts, thresholds, label palette. Keep
 `wildcard_holds` sorted; the loader asserts it.
+
+## Shepherd (session-25): the automation layer on top of this bot
+
+`tools/shepherd.py` + the `shepherd-*` workflows (W0–W7) absorb the
+repetitive steps: live board refresh (W1), CAS-guarded rebase (W2), cheap
+preflight gates (W3), duplicate-cluster proposals (W4), verify-and-land
+mechanics with push-and-assert (W5), stale-premise probe (W6), structured
+JSONL session log (W7). Kill switch: the `SHEPHERD_MODE` repo variable —
+unset means **dry-run** (read/comment/label only); mutations unlock at
+`live`. The two judgment calls stay human by design: stale-premise closes
+and real-conflict extraction. Full manual: **SHEPHERD.md**.

@@ -1,0 +1,45 @@
+name: 'Shepherd setup (W0)'
+description: >-
+  Pinned toolchains + caches for every Shepherd workflow (plan §3 W0).
+  Pins are the tools/env.sh pins: Go 1.26.9, Rust 1.99.0 — never float.
+  Cache covers the cargo registry/git, the cargo target dir, and the Go
+  build cache. Concurrency groups are per-workflow/per-PR in the callers
+  so two workflows never race the same tree.
+inputs:
+  go-version:
+    description: 'Pinned Go (tools/env.sh PINNED_GO)'
+    required: false
+    default: '1.26.9'
+  rust-version:
+    description: 'Pinned Rust (tools/env.sh PINNED_RUST)'
+    required: false
+    default: '1.99.0'
+runs:
+  using: composite
+  steps:
+    - name: Pinned Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      with:
+        go-version: ${{ inputs.go-version }}
+        cache: false # cached explicitly below, alongside cargo/target
+    - name: Pinned Rust
+      shell: bash
+      run: |
+        set -eo pipefail
+        rustup toolchain install "$RUST_VER" --profile minimal --no-self-update
+        rustup default "$RUST_VER"
+        rustc --version
+      env:
+        RUST_VER: ${{ inputs.rust-version }}
+    - name: Toolchain + build caches
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          ~/.cache/go-build
+          target
+        key: shepherd-${{ runner.os }}-go${{ inputs.go-version }}-rust${{ inputs.rust-version }}-${{ hashFiles('Cargo.lock', '**/go.sum') }}
+        restore-keys: |
+          shepherd-${{ runner.os }}-go${{ inputs.go-version }}-rust${{ inputs.rust-version }}-
+          shepherd-${{ runner.os }}-
