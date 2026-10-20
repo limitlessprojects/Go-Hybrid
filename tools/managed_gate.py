@@ -13,9 +13,11 @@ Baseline shape: {"version": 1, "blocks": {"<file>:<line>": {"reason": ...,
 count as new (deliberate: moving a hatch is a review event too).
 """
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 
 VALID = {"mutex", "atomic", "actor", "finalizer", "interop", "other"}
 
@@ -153,20 +155,51 @@ def main():
     if args and args[0] == "--rebaseline":
         rebaseline = True
         args = args[1:]
+
+    # An empty source list is a missing scan, not evidence that all managed
+    # blocks were removed. Reject it before reading or replacing the baseline.
+    if len(args) < 3:
+        print(
+            "GATE ERROR: supply a checker, a baseline, and at least one source file\n"
+            "usage: managed_gate.py [--rebaseline] <hyb> <baseline.json> <prog.hy> [more.hy ...]",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     hyb, baseline_path, progs = args[0], args[1], args[2:]
 
     try:
-        baseline = json.load(open(baseline_path))
+        with open(baseline_path, encoding="utf-8") as f:
+            baseline = json.load(f)
     except FileNotFoundError:
         baseline = {"version": 1, "blocks": {}}
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        print(f"GATE ERROR: {baseline_path}: malformed baseline JSON: {e}")
+        sys.exit(2)
+
+    if not isinstance(baseline, dict):
+        print(f"GATE ERROR: {baseline_path}: baseline must be a JSON object, got {type(baseline).__name__}")
+        sys.exit(2)
+
     base = baseline.setdefault("blocks", {})
+    if not isinstance(base, dict):
+        print(f"GATE ERROR: {baseline_path}: baseline blocks must be a JSON object, got {type(base).__name__}")
+        sys.exit(2)
 
     current = {}
     for prog in progs:
         current.update(audit(hyb, prog))
 
+    # pr-434: scope the whole decision to the programs actually audited in
+    # this run. Baseline blocks belonging to unaudited programs are neither
+    # evidence of a removal (the informational `removed` list) nor disposable
+    # in --rebaseline — a subset run must not silently rewrite (and drop)
+    # reviewed blocks for programs it never scanned.
+    audited_progs = set(progs)
     new = {k: v for k, v in current.items() if k not in base}
-    removed = {k for k in base if k not in current}
+    removed = {
+        k for k in base
+        if k.rsplit(":", 1)[0] in audited_progs and k not in current
+    }
     changed = {
         k
         for k in current
@@ -174,10 +207,41 @@ def main():
     }
 
     if rebaseline:
-        baseline["blocks"] = current
-        json.dump(baseline, open(baseline_path, "w"), indent=1, sort_keys=True)
-        open(baseline_path, "a").write("\n")
-        print(f"rebaseline: {len(current)} block(s) recorded in {baseline_path}")
+        # pr-434 scope rule: keep every reviewed block whose program was not
+        # audited in this run; the audited programs get the fresh inventory.
+        preserved = {
+            k: v for k, v in base.items()
+            if k.rsplit(":", 1)[0] not in audited_progs
+        }
+        preserved.update(current)
+        baseline["blocks"] = preserved
+        # Never truncate the reviewed baseline until the complete replacement
+        # has been written and closed successfully. Buffered writes can fail
+        # at close (e.g. ENOSPC/EFBIG), after json.dump itself has returned.
+        # Resolve symlinks so rebaselining keeps updating their target.
+        target = os.path.realpath(baseline_path)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=os.path.dirname(target),
+                prefix="." + os.path.basename(target) + ".", delete=False,
+            ) as output:
+                temporary = output.name
+                if os.path.exists(target):
+                    os.chmod(temporary, os.stat(target).st_mode & 0o777)
+                json.dump(baseline, output, indent=1, sort_keys=True)
+                output.write("\n")
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, target)
+            temporary = None
+        except OSError as error:
+            print(f"GATE ERROR: cannot replace baseline {baseline_path}: {error}")
+            sys.exit(2)
+        finally:
+            if temporary is not None:
+                os.unlink(temporary)
+        print(f"rebaseline: {len(preserved)} block(s) recorded in {baseline_path}")
         return
 
     fail = False

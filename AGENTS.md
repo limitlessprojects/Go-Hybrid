@@ -64,8 +64,9 @@ Nothing here is aspirational filler: if a target does not exist yet, PLAN.md say
 
 ## Current phase
 
-**Phase 0 — research, claims check, build-vs-extend, feasibility spikes.**
-Not started: compiler code. Do not write compiler code before the spike gate (G0).
+Read [PLAN.md](PLAN.md) for the current phase, work queue, and review gates,
+and [STATUS.md](STATUS.md) for the latest status, blockers, and next steps.
+The verify-before-build directive still applies to new compiler work.
 
 ## Sub-agent rules (SPEC.md §9)
 

@@ -232,3 +232,55 @@ fn shadowing_closure_param_is_not_a_mutation_of_the_outer_map() {
     );
     assert_eq!(r.verdict, Verdict::Accept);
 }
+
+#[test]
+fn clear_in_slot_loan_window_rejects_e3102() {
+    let r_direct = check(
+        "struct cell { n int }\n\
+         fn main() {\n\
+             m := map[string]cell{\"a\": cell{n: 1}}\n\
+             p := &m[\"a\"]\n\
+             clear(m)\n\
+             p.n = 5\n\
+         }\n",
+    );
+    assert_eq!(codes(&r_direct), vec!["HYB-E3102"]);
+    assert!(
+        r_direct.diagnostics[0]
+            .message
+            .contains("map clear invalidates the live slot loan `p`"),
+        "unexpected message: {}",
+        r_direct.diagnostics[0].message
+    );
+    assert_eq!(r_direct.verdict, Verdict::Reject);
+
+    let r_closure = check(
+        "struct cell { n int }\n\
+         fn main() {\n\
+             m := map[string]cell{\"a\": cell{n: 1}}\n\
+             p := &m[\"a\"]\n\
+             wipe := fn() {\n\
+                 clear(m)\n\
+             }\n\
+             wipe()\n\
+             p.n = 5\n\
+         }\n",
+    );
+    assert_eq!(codes(&r_closure), vec!["HYB-E3102"]);
+    assert_eq!(r_closure.verdict, Verdict::Reject);
+
+    let r_helper = check(
+        "struct cell { n int }\n\
+         fn wipe(m map[string]cell) {\n\
+             clear(m)\n\
+         }\n\n\
+         fn main() {\n\
+             m := map[string]cell{\"a\": cell{n: 1}}\n\
+             p := &m[\"a\"]\n\
+             wipe(m)\n\
+             p.n = 5\n\
+         }\n",
+    );
+    assert_e3102(&r_helper, "helper clear in window");
+}
+

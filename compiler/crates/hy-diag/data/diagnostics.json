@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated": "2026-10-15",
+  "updated": "2026-10-18",
   "format": "HYB-Exxxx registry (SPEC-LANGUAGE.md §9.6; append-only, never renumbered, never reused)",
   "categories": {
     "E0": "parse / lexical",
@@ -86,6 +86,40 @@
       "rule": "M"
     },
     {
+      "code": "HYB-E1002",
+      "name": "unbuildable-declaration",
+      "category": "resolve",
+      "severity": "error",
+      "title": "the emitted Go cannot build this declaration",
+      "summary": "Go's front-end rejects five shapes that `hyb check` used to accept with 0 diagnostics, so the emitted module could never build. Issue #134 landed the first three: (1) an unused `:=` binding — `x := 5` with no read of `x` is `declared and not used`, and `_ := 5` / `_, _ := ...` declares no new variable at all (`no new variables on left side of :=`); (2) an unused import — the emitter carries every declared Go import into the header, and Go rejects `imported and not used`; (3) a repeated name on the left of one `:=` — `x, x := 1, 2` is `x repeated on left side of :=`. The #577 accept-side oracle wave added two more call/return shapes: (4) a call whose argument count disagrees with the callee — `add(1)` for `fn add(a int, b int) int` is `not enough arguments`, `add(1, 2, 3)` is `too many arguments`, and the same holds for a method (`x.bump()`) and a closure or `fn`-typed value whose declared parameter count is known; (5) a `return` that does not match the enclosing signature — a value list whose length differs from the declared results (except Go's naked `return` with all-named results, and a short return in a function whose last result is `error`, which the emitter zero-fills as E3's sugar), or a returned value whose type cannot be assigned to its result (`return \"s\"` from a `fn f() int`). Fail-closed: what the checker accepts must survive `go build`. Out of scope (same Go error family, separate issues): unused `var`/composite-`const` locals, select-receive names, unread `for ... in` bindings (handled at emission, issue #139), unused `rust/` imports (never emitted as Go imports), and return-type mismatches that need type-level rather than kind-level information (`int8` variable returned from an `int` function) — those stay fail-open so no buildable program is rejected.",
+      "fixits": [
+        "read the binding — a mention anywhere in the function counts, including inside a closure, and `x++`, `x += 1`, `x[k] = v`, `x.f = v`, `&x` and `_ = x` all count (a bare `x = v` store does not); or drop the declaration",
+        "`_` is not a variable: `_ := 5` can never build — write `_ = 5` to discard the value, or bind a real name",
+        "remove the unused import (the emitted header carries it, and an unused import never builds)",
+        "give each name on the left of `:=` once: `x, y := 1, 2`",
+        "pass one argument per declared parameter — the receiver is not an argument, and a `fn`-typed field or closure states its own count",
+        "return exactly the declared results — name them if a naked `return` is intended, or end the signature with `error` to use the short-return sugar the emitter zero-fills"
+      ],
+      "example": "x := 5   // reject: HYB-E1002 — `x` is never read; Go refuses the emitted `x := 5`",
+      "rule": "BUILDABLE",
+      "tier0_rule_id": "BUILDABLE"
+    },
+    {
+      "code": "HYB-E1003",
+      "name": "redeclaration",
+      "category": "resolve",
+      "severity": "error",
+      "title": "name is already declared in this block",
+      "summary": "Go keeps a single package block: top-level fns, consts, structs, enums, and types share one namespace, so a second declaration of the same name is `X redeclared in this block`. Struct fields must be unique within their struct, and a receiver type may declare each method name only once. Methods on DIFFERENT receiver types may share a name (they live in the receiver's method set, not package scope).",
+      "fixits": [
+        "rename the second declaration",
+        "for a duplicate method, rename it or move it onto a second receiver type",
+        "for duplicate struct fields, rename one field"
+      ],
+      "example": "fn main() {}  fn main() {}  // reject: HYB-E1003 — `main` redeclared in this block",
+      "rule": "BUILDABLE"
+    },
+    {
       "code": "HYB-E2001",
       "name": "defer-non-call",
       "category": "type",
@@ -109,7 +143,100 @@
         "bind both values: `lo, hi := minmax(3, 9)`"
       ],
       "example": "p := minmax(3, 9)   // reject: HYB-E2002 — multi-value is not a tuple",
-      "rule": "T23"
+      "rule": "T23",
+      "tier0_rule_id": "BUILDABLE"
+    },
+    {
+      "code": "HYB-E2005",
+      "name": "builtin-argument-invalid",
+      "category": "type",
+      "severity": "error",
+      "title": "invalid argument to a builtin",
+      "summary": "A builtin call (`make`, `len`, `cap`, `delete`, `close`, `new`) with a compile-time-detectable bad arity or literal argument is rejected: Go refuses to compile the emitted call, so an accepted Hybrid program would emit unbuildable Go (issue #187). Only literal / arity misuse is in scope — variable operands stay a run-time concern, matching Go.",
+      "fixits": [
+        "for `make`, pass a non-negative integer size (or omit size / use a variable); slices may also use the 3-argument form `make([]T, len, cap)`",
+        "for `len`/`cap`, pass a string, slice, map, array, or channel — not a number or bool literal",
+        "for `delete`, pass both the map and the key: `delete(m, k)`",
+        "for `close`, pass a channel value — not a literal",
+        "for `new`, pass a type name — not a value literal"
+      ],
+      "example": "c := make(chan int, -1)   // reject: HYB-E2005 — make size must be a non-negative int",
+      "rule": "P"
+    },
+    {
+      "code": "HYB-E2006",
+      "name": "equality-incomparable",
+      "category": "type",
+      "severity": "error",
+      "title": "equality on a type Go cannot compare",
+      "summary": "Maps, slices, and function values have no `==`/`!=` in Go (`invalid operation: … can only be compared to nil`), and a struct is comparable only when every field is. Comparing such values passes `hyb check` but the emitted Go fails `go vet`/`go build`, violating the accepted-should-emit-buildable-Go contract (issue #201). Comparisons against `nil` are the nilable surface and are checked elsewhere (E4001).",
+      "fixits": [
+        "for maps/slices: compare lengths or specific elements instead of whole-value equality",
+        "for function values: only `f == nil` is legal — compare behaviour by calling both",
+        "for structs: compare the comparable fields individually"
+      ],
+      "example": "if m1 == m2 { … }  // reject: HYB-E2006 — maps cannot be compared",
+      "rule": "BUILDABLE"
+    },
+    {
+      "code": "HYB-E2007",
+      "name": "invalid-receiver",
+      "category": "type",
+      "severity": "error",
+      "title": "invalid method receiver type",
+      "summary": "A method receiver must be a defined (named) type or a single pointer to one — not a primitive (`int`), not an interface (`error`), not an anonymous type (slice/map/array/chan/fn), and never a double pointer (`**T`). Go rejects such declarations with `invalid receiver type`, so an accepted Hybrid program would emit unbuildable Go (issue #201).",
+      "fixits": [
+        "declare the method on a struct (`struct box { … }` + `fn (b box) m()`)",
+        "or make it a plain fn (`fn m(x int)`)",
+        "for `**T`: use a single pointer receiver (`*T`)"
+      ],
+      "example": "fn (c int) m() int { return c }  // reject: HYB-E2007 — primitive receiver",
+      "rule": "BUILDABLE"
+    },
+    {
+      "code": "HYB-E2008",
+      "name": "receive-non-channel",
+      "category": "type",
+      "severity": "error",
+      "title": "receive from a non-channel",
+      "summary": "`<-expr` where `expr` resolves to a concrete non-channel shape is rejected: a receive is only well-typed against a `chan T`, and the accepted-subset contract is that every accepted program emits buildable Go (issue #409 — the receive-side mirror of the send rule HYB-E3007, issue #77). `<-5`, `<-x` with `x` an int/map, and a receive from a non-channel call result used to pass with 0 diagnostics and then fail `go build` with `cannot receive from non-channel`. An UNRESOLVABLE source stays fail-closed under HYB-E3005 (O4.9), exactly as the send side treats an unknown target.",
+      "fixits": [
+        "receive from a `chan T` binding (`ch := make(chan T, n)` or a `chan T` parameter)",
+        "bind the value first if it is a call result: `ch := make_call()` — then `<-ch`",
+        "a statement STARTING with `<-expr` is a receive — check the operand's type"
+      ],
+      "example": "x := 5; <-x   // reject: HYB-E2008 — x is an int, not a channel",
+      "rule": "BUILDABLE"
+    },
+    {
+      "code": "HYB-E2009",
+      "name": "non-iterable-range",
+      "category": "type",
+      "severity": "error",
+      "title": "range over a non-iterable",
+      "summary": "`for x in e` where `e` resolves to a concrete non-iterable shape (int, bool, struct, pointer to a struct/slice/string, ...) is rejected: SPEC-LANGUAGE LX13 allows slices, arrays, strings (runes), maps (keys), and channels, and Go refuses `range` over anything else (a pointer TO AN ARRAY stays rangeable, mirroring Go's range rule), so an accepted Hybrid program would emit unbuildable Go (issue #411). The integer-range form `for i in 0..n` is a different statement kind and is not affected. An UNRESOLVABLE iterable stays fail-closed under HYB-E3005 (O4.9), exactly as the send (#77) and receive (#409) sides treat an unknown operand.",
+      "fixits": [
+        "iterate a slice, array, string, map, or channel binding",
+        "for a number sequence use the integer-range form: `for i in 0..n`",
+        "for a function or method call result that resolves to an iterable, bind it to a local first so the checker can classify it"
+      ],
+      "example": "x := 5; for v in x { }   // reject: HYB-E2009 — x is an int, not an iterable",
+      "rule": "BUILDABLE"
+    },
+    {
+      "code": "HYB-E2010",
+      "name": "map-element-not-addressable",
+      "category": "type",
+      "severity": "error",
+      "title": "store into part of a map element",
+      "summary": "A Go map element is not addressable: `m[k] = v` is legal, but a store into part of the element — `m[k].f = v`, `m[k].f += 1`, `m[k].f++`, `m[k][i] = v` on an array element, `m[k].arr[i] = v` — and an O8 loan whose store-back place is part of one (`n := &m[k].f`) emit Go that fails `go build` (`cannot assign to struct field m[k].f in map` / `neither addressable nor a map index expression`), violating the accepted-should-emit-buildable-Go contract. Only proven shapes reject: a pointer-typed or unresolved element stays legal.",
+      "fixits": [
+        "take the whole slot as an O8 loan and store through it: `n := &m[k]; n.f = v`",
+        "copy the element out, modify it, and assign it back: `e := m[k]; e.f = v; m[k] = e`"
+      ],
+      "example": "m[\"a\"].bal = 9   // reject: HYB-E2010 — write `n := &m[\"a\"]; n.bal = 9`",
+      "rule": "BUILDABLE",
+      "tier0_rule_id": "BUILDABLE"
     },
     {
       "code": "HYB-E3001",
@@ -122,7 +249,7 @@
         "route updates through a channel instead of sharing the value",
         "copy the data the task needs and send the copy",
         "transfer ownership: `task worker(move counter)` — the binding (and every alias) must be unused afterward",
-        "wrap the shared state in a `managed` block (unchecked: Go DRF-SC applies; audited by --report-managed)"
+        "wrap the shared state in `managed(\"why this bypass is safe\", \"category\") { ... }` (unchecked: Go DRF-SC applies; audited by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)"
       ],
       "example": "task worker(counter)   // reject: HYB-E3001 — `counter` is a mutable map",
       "rule": "O4",
@@ -138,7 +265,7 @@
       "fixits": [
         "send a copy or a fresh literal instead of a live shared value",
         "send ownership with `move` if this task is done with the value (aliases freeze, O5)",
-        "share via channel discipline or `managed` instead"
+        "share via channel discipline or wrap the site in `managed(\"why this bypass is safe\", \"category\") { ... }` (audited by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)"
       ],
       "example": "jobs <- job{input: v, data: shared_map}   // reject: HYB-E3002 — `shared_map` is a live mutable map",
       "rule": "O4.6",
@@ -208,7 +335,6 @@
       "tier0_rule_id": "IMMUT"
     },
     {
-
       "code": "HYB-E3007",
       "name": "send-target-not-channel",
       "category": "ownership-sendability",
@@ -223,7 +349,38 @@
       "rule": "O4",
       "tier0_rule_id": "A1c"
     },
-
+    {
+      "code": "HYB-E3008",
+      "name": "chan-direction-mismatch",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "a send to a receive-only channel, or a receive from a send-only channel, is not valid Go",
+      "summary": "Go's channel direction types (`chan<- T` send-only, `<-chan T` receive-only) constrain what operations the binding allows; the parser and emitter both carry the direction, so sending to a `<-chan T` or receiving from a `chan<- T` (in statements, expressions, select arms, or closure bodies) emits invalid Go that fails `go build` / `go vet` (issue #89).",
+      "fixits": [
+        "declare the parameter/local with the direction the body actually uses (`chan T` for both, `chan<- T` to only send, `<-chan T` to only receive)",
+        "if the body needs the opposite operation, widen the declaration to `chan T` (bidirectional) — or split into two channels, one per direction",
+        "receives are `v := <-ch` / select recv arms; sends are `ch <- v` / select send arms — check which side of the arrow the misdeclared binding sits on"
+      ],
+      "example": "fn worker(ch <-chan int) { ch <- 1 }   // reject: HYB-E3008 — cannot send to a receive-only channel",
+      "rule": "O4",
+      "tier0_rule_id": "A1c"
+    },
+    {
+      "code": "HYB-E3009",
+      "name": "chan-direction-mismatch-op",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "channel direction forbids this operation (close / range)",
+      "summary": "Channel direction is a type contract the emitter preserves in the Go signature: `close()` requires a bidirectional or send-only channel (a `<-chan T` has no send capability), and `for … in` over a channel requires receive capability (a `chan<- T` cannot be ranged over). Both are invalid Go that `hyb build --emit-go` reproduces faithfully, so accepting them breaks the accepted-should-emit-buildable-Go contract (issue #94).",
+      "fixits": [
+        "declare the channel as `chan T` (bidirectional) where the operation happens",
+        "for close: pass a `chan<- T` or `chan T` binding — receive-only channels are closed by their send-side owner",
+        "for range: iterate over a `chan T` or `<-chan T` binding — send-only channels are consumed via receives on the other side"
+      ],
+      "example": "var rc <-chan int = c; close(rc)   // reject: HYB-E3009 — cannot close a receive-only channel",
+      "rule": "O4",
+      "tier0_rule_id": "A1c"
+    },
     {
       "code": "HYB-E3010",
       "name": "loop-label-out-of-scope",
@@ -252,6 +409,21 @@
         "on receive, ascribe the channel's element type (`var n job = <-ch`) or let inference pick it up (`n := <-ch`)"
       ],
       "example": "struct job { cost int }\nch := make(chan job, 1)\nch <- 7   // reject: HYB-E3011 — `7` is not a `job`",
+      "rule": "O4",
+      "tier0_rule_id": "A1c"
+    },
+    {
+      "code": "HYB-E3012",
+      "name": "chan-direction-coercion",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "channel value cannot convert to the target channel direction",
+      "summary": "Go's implicit channel conversion is one-way: a bidirectional `chan T` may convert to `chan<- T` or `<-chan T`, but a unidirectional channel (`chan<- T` or `<-chan T`) can never convert to the opposite direction or widen back to `chan T` (issue #623). Passing or assigning a channel with an incompatible direction at a value-flow coercion site (`var`/`const` ascription, assignment, call/task/method/closure argument, return, composite-literal field/element, or channel send/receive of a channel element) emits Go that fails `go vet` / `go build` (`cannot use ... as ... value`). Only certain direction mismatches are rejected — unresolvable shapes fail open.",
+      "fixits": [
+        "declare the source channel as bidirectional (`chan T`) so it can narrow to `chan<- T` or `<-chan T`",
+        "change the destination's declared channel direction (`<-chan T` / `chan<- T` / `chan T`) to match the source channel"
+      ],
+      "example": "var sc chan<- int = make(chan int, 1)\nvar rc <-chan int = sc   // reject: HYB-E3012 — `chan<- int` cannot convert to `<-chan int`",
       "rule": "O4",
       "tier0_rule_id": "A1c"
     },
@@ -346,6 +518,22 @@
       "rule": "N"
     },
     {
+      "code": "HYB-E4003",
+      "name": "untyped-nil-declaration",
+      "category": "nil-safety",
+      "severity": "error",
+      "title": "an untyped nil cannot declare a binding",
+      "summary": "`var x = nil` / `x := nil` / `let x = nil` leave the binding with no type at all — Go rejects the emitted declaration outright (`use of untyped nil in variable declaration`), so an accepted program would fail `go build`. nil has exactly two homes (N1): `error` and the foreign-Go perimeter, and both must be visible in a declared type.",
+      "fixits": [
+        "declare the nil home explicitly: `var e error = nil` (error's zero value) or `var h Foreign.handle = nil` at the foreign perimeter (N1/N2)",
+        "declare the binding without an initializer — the zero value of the intended type is the value (N3): `var ch chan int`, `var s []int`, `var m map[string]int`",
+        "if absence is the meaning, use `option[T]` — its zero value is `none` (N3)"
+      ],
+      "example": "var x = nil   // reject: HYB-E4003 — Go: use of untyped nil in variable declaration",
+      "rule": "N",
+      "tier0_rule_id": "N1"
+    },
+    {
       "code": "HYB-E5001",
       "name": "match-not-exhaustive",
       "category": "match",
@@ -360,7 +548,6 @@
       "rule": "T"
     },
     {
-
       "code": "HYB-E6001",
       "name": "div-by-const-zero",
       "category": "overflow-bounds",
@@ -379,13 +566,73 @@
       "category": "overflow-bounds",
       "severity": "error",
       "title": "constant overflows its declared fixed-width type",
-      "summary": "A local or file-level binding whose declared type is a fixed-width integer and whose initializer is an integer constant outside that type's range is rejected: Go refuses to compile the emitted declaration (`cannot use N as T value (overflows)`), so an accepted Hybrid program would emit unbuildable Go (issue #148). Only the constant-initializer case is in scope — a variable operand stays a runtime truncation / conversion path (SPEC-LANGUAGE X4).",
+      "summary": "A local or file-level binding whose declared type is a fixed-width integer and whose initializer is an integer constant outside that type's range is rejected: Go refuses to compile the emitted declaration (`cannot use N as T value (overflows)`), so an accepted Hybrid program would emit unbuildable Go (issue #148). The check folds constant EXPRESSIONS too (`100 + 100`, `1 << 10` — Go folds before the range check) and rejects a float constant assigned to an integer type (`var x int = 2.5` → `(truncated)`) (issue #201). Only the constant case is in scope — a variable operand stays a runtime truncation / conversion path (SPEC-LANGUAGE X4).",
       "fixits": [
         "use a constant that fits the declared type (e.g. `127` for `int8`, `255` for `uint8`/`byte`)",
         "widen the declared type (e.g. `int16` / `int`) so the constant is representable",
-        "if truncation is intentional, convert from a variable (`x := 300; y := int8(x)`) — SPEC X4 defines runtime truncation for non-constant operands"
+        "if truncation is intentional, convert from a variable (`x := 300; y := int8(x)`) — SPEC X4 defines runtime truncation for non-constant operands",
+        "for a float initializer, drop the fractional part or declare a float type"
       ],
       "example": "var n int8 = 300   // reject: HYB-E6002 — 300 overflows int8; Go cannot build the emitted module",
+      "rule": "BUILDABLE",
+      "tier0_rule_id": "BUILDABLE"
+    },
+    {
+      "code": "HYB-E6003",
+      "name": "const-init-not-constant",
+      "category": "overflow-bounds",
+      "severity": "error",
+      "title": "const initializer is not a constant expression",
+      "summary": "A `const` binding whose initializer is not a compile-time constant expression is rejected: the emitter keeps the Go `const` keyword for non-composite initializers, so `const c = get_val()` becomes unbuildable Go (`get_val() (value of type T) is not constant`). Composite literals already lower to `var` and are out of scope here (issue #188). Literals, constant arithmetic, references to other `const` bindings, and typed conversions of constant arguments remain accepted (issue #205).",
+      "fixits": [
+        "use a literal or a constant expression (`const c = 42`, `const c = 1 + 2`)",
+        "reference another `const` binding instead of a function call or variable",
+        "if the value is computed at run time, bind it with `:=` / `let` / `var` instead of `const`"
+      ],
+      "example": "const c = get_val()   // reject: HYB-E6003 — call is not a constant expression; Go cannot build the emitted module",
+      "rule": "BUILDABLE"
+    },
+    {
+      "code": "HYB-E6004",
+      "name": "invalid-array-length",
+      "category": "overflow-bounds",
+      "severity": "error",
+      "title": "array length is not a valid constant",
+      "summary": "An array length must be a non-negative constant in Go: a negative literal (`[-1]int`), a non-integer constant (`[2.5]int`), or a non-constant name (`[n]int` where `n` is a variable) fails `go build` with `invalid array length`, so an accepted Hybrid program would emit unbuildable Go (issue #201). A file-level `const` is a valid length; unknown/computed expressions fail open (they can be legal constant expressions in Go).",
+      "fixits": [
+        "use a non-negative literal or file-level `const` length",
+        "declare a slice (`[]T`) when the size is dynamic"
+      ],
+      "example": "var a [-1]int  // reject: HYB-E6004 — negative array length; Go cannot build the emitted module",
+      "rule": "BUILDABLE"
+    },
+    {
+      "code": "HYB-E6005",
+      "name": "negative-shift-count",
+      "category": "overflow-bounds",
+      "severity": "error",
+      "title": "shift by a constant negative count",
+      "summary": "A `<<` or `>>` (including `<<=` / `>>=`) whose shift count is a constant negative integer is rejected: Go refuses to compile it (`invalid operation: negative shift count`), so an accepted Hybrid program would emit unbuildable Go (issue #201). Only the constant case is in scope — a negative VARIABLE shift count is a run-time panic in Go, matching the compile-error/panic split used for division by zero (E6001).",
+      "fixits": [
+        "shift by a non-negative constant",
+        "swap the operands (`1 << n` instead of `n << -1`) when the intent is to shift the other side"
+      ],
+      "example": "x := 1 << -1   // reject: HYB-E6005 — negative shift count; Go cannot build the emitted module",
+      "rule": "BUILDABLE"
+    },
+    {
+      "code": "HYB-E6006",
+      "name": "invalid-const-conversion",
+      "category": "overflow-bounds",
+      "severity": "error",
+      "title": "constant operand invalid for this type conversion",
+      "summary": "A `Type(const)` conversion whose literal-constant operand Go would refuse is rejected: `int8(300)` on a 64-bit target, `int(\"abc\")`, `string(2.5)`, `float32(1e40)`, `int(10^30)`, `string(true)`, `int8(nil)`, `[]int(3)`, a string constant to a non-byte/rune slice, integer constants of 2^512 or more to `string`, and similar forms fail `go build` on the emitted program (issue #228), so an accepted Hybrid program would emit unbuildable Go. Sub-64 integer overflow (`u8(300)`, SPEC X4) is deliberately accepted — the emitter folds the two's-complement result. Only the literal-constant operand case is in scope; a non-constant operand is a run-time conversion.",
+      "fixits": [
+        "use a constant that fits the target type (e.g. `int8(127)`, `uint8(255)`)",
+        "convert between compatible kinds only (number <-> number, string <-> string, `string(65)`, `[]byte(\"abc\")`)",
+        "if truncation or a run-time conversion is intended, bind the operand to a variable first (SPEC X4 runtime truncation)"
+      ],
+      "example": "x := int8(300)   // reject: HYB-E6006 — constant 300 overflows int8 in Go; the emitted module would not build",
       "rule": "BUILDABLE"
     },
     {

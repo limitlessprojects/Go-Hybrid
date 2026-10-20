@@ -1,0 +1,60 @@
+# W2 — rebase shepherd (plan §3 W2). Fleet-Shepherd pattern: self-limiting,
+# compare-and-swap guarded, resumable.
+#   - Candidates: open, mergeable, behind main by >= rebase.behind_min, no
+#     exempt labels (never touches ready-to-land / human-needed / conflicts /
+#     wildcard holds / dups).
+#   - CAS: update-branch with expected_head_sha — a branch that moved under us
+#     is skipped, never force-pushed over.
+#   - On conflict: label bot:conflict + one evidence comment; W5 owns the
+#     docs-only policy, humans own real conflicts.
+#   - Cap: max_per_run=1 at */20 => at most 3 rebases/hour.
+# Mutations (update-branch, labels) require SHEPHERD_MODE=live; in dry-run the
+# job reports candidates only.
+name: shepherd-rebase
+
+on:
+  schedule:
+    - cron: "*/20 * * * *" # 3/hour cap enforced in-code (max_per_run=1)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: shepherd-rebase
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  rebase:
+    if: >-
+      github.actor != 'github-actions[bot]' ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SHEPHERD_MODE: ${{ vars.SHEPHERD_MODE || 'dry-run' }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout (pinned v4)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Gate
+        run: python3 tools/shepherd.py gate --require read
+
+      - name: Rebase candidates (mutations only in live mode)
+        run: |
+          if [ "$(python3 tools/shepherd.py gate --require live >/dev/null 2>&1; echo $?)" = "0" ]; then
+            python3 tools/shepherd.py --token-env GITHUB_TOKEN rebase
+          else
+            python3 tools/shepherd.py --token-env GITHUB_TOKEN rebase --dry
+          fi
+
+      - name: W7 session log
+        if: always()
+        run: python3 tools/shepherd.py --token-env GITHUB_TOKEN log --event rebase-tick --note "rebase shepherd tick"

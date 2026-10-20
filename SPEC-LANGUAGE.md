@@ -178,6 +178,11 @@ separators (`1_000_000`). Float: `1.5`, `2.`, `.5`, `1e9`. Rune: `'a'`,
 **LX7 — String literals.** Interpreted `"…"`: Go escape set **plus**
 interpolation `{expr}` (T4); `{{` and `}}` escape literal braces. Raw
 `` `…` ``: no escapes, **no interpolation**. Strings are always UTF-8 (T3).
+Malformed escape sequences — a non-hex digit in `\x`/`\u`/`\U`, the
+`\u{…}` rune form inside a string, a surrogate or a value above U+10FFFF —
+are `HYB-E0002` parse errors (rule `LX7`; the rune-literal forms carry
+`LX6`): the escape set is enforced fail-closed, never silently skipped
+with the remaining characters leaking into the value (corpus 61).
 
 ```hy
 name := "Hybrid"
@@ -311,6 +316,16 @@ index/element for slices/arrays/strings, key/value for maps; `for v in ch`
 yields received values. Two-variable channel receive is the comma-ok
 clause inside `select` (`v, ok := <-sq:`).
 
+**LX13a — the iterable is TYPE-checked (HYB-E2009/E3005).** LX13's iterable
+set is a closed contract: since issue #411, the checker rejects `for x in e`
+when `e` resolves to a concrete non-iterable shape (an int, bool, struct, a
+pointer to a struct/slice/string — anything outside the set above; a pointer
+to an ARRAY stays rangeable, mirroring Go's range rule) with `HYB-E2009`; an
+unresolvable operand fails closed under `HYB-E3005` (O4.9), exactly as the
+send (#77) and receive (#409) sides treat an unknown operand. The
+integer-range form `for i in 0..n` is a separate statement kind and carries
+no iterable check.
+
 **LX14 — `break`/`continue` scope.** They bind to the innermost `for`,
 `loop`, or `select`; `break loop` exits the nearest enclosing `loop`
 statement. General labels (Go's `L:`) are `[TBD]` — the corpus needs none
@@ -420,13 +435,16 @@ length; `s[i]` is the `u8` at byte index `i` (out-of-range panics, X3);
 `for i, c in s` iterates byte index and `rune`; `for c in s` iterates runes.
 Invalid UTF-8 in a string (only possible via byte-slice conversion) iterates
 as `U+FFFD` per Go's rules. Comparison is bytewise; no normalization is
-performed (Go semantics).
+performed (Go semantics). A `rune` is an `i32` code point (T1, §2.1),
+so `fmt.println(c)` and `"{c}"` display its number (T4's Go `%v` shape);
+`string(c)` displays the character.
 
 ```hy
 s := "héllo"
 fmt.println(len(s))        // expect: 6   (é is 2 bytes)
 fmt.println(s[0])          // expect: 104 (byte 'h')
-for c in s { fmt.println(c) }   // expect: h é l l o   (5 lines; é as one rune)
+for c in s { fmt.println(c) }   // expect: 104 233 108 108 111   (5 lines; é is one rune, U+00E9)
+for c in s { fmt.println(string(c)) }   // expect: h é l l o   (5 lines)
 ```
 
 **T4 — Interpolation.** `"{expr}"` inside an interpreted string formats the
@@ -492,6 +510,9 @@ interop in example 05's Go-side surface).
 copy; `*T` receivers take a unique-write loan on the receiver for the call
 (O3). Method sets follow Go: a type's method set determines interface
 satisfaction (I2).
+Selecting a `*T` method, including a bound method value or a `task` callee,
+requires a pointer or an addressable value; a map read, call result, or
+struct literal cannot supply the implicit address-of.
 
 ### 2.5 Enums and sum types — the #1 r/golang request
 
@@ -741,7 +762,10 @@ tagged open D3.
 | chan | the **zero channel**: receive and send block forever, `close` panics (Go's nil-channel semantics exactly) |
 
 ```hy
-struct greeting { name string; count int }   // count starts at 0 — example 01
+struct greeting {
+    name  string
+    count int        // count starts at 0 — example 01
+}
 g := greeting{name: "Hybrid"}
 fmt.println(g.count)         // expect: 0
 ```
@@ -1242,6 +1266,21 @@ No other construct moves a value to another task in MVP Hybrid; therefore
 no other construct is checked. The rules applied at these sites are O4–O6
 (§9). Receiving (`<-ch`) is never a check-site — the receiver owns what it
 receives.
+
+**C5a — Receive operands are TYPE-checked, not sendability-checked
+(HYB-E2008/E3005).** C5's "never a check-site" is about ownership: the
+receiver owns what it receives, so no sendability rule fires. The operand's
+*type* is a different contract — the accepted-subset rule that every
+accepted program emits buildable Go. Since issue #77, a send to a
+non-channel is rejected (`HYB-E3007`; unresolvable targets fail closed
+under `HYB-E3005`, O4.9). The receive direction is symmetric: `<-expr`
+where `expr` resolves to a concrete non-channel is `HYB-E2008`
+(`x := 5; <-x` used to pass with 0 diagnostics and emit Go that fails
+`go build` with `cannot receive from non-channel`); an unresolvable
+operand fails closed under `HYB-E3005`, exactly as the send side does.
+Fires at every syntactic position a receive can occupy — statement,
+binding, nested in an expression, `select` receive clause, and closure
+bodies (the A5 perimeter).
 
 **C6 — Blocking Rust calls are ordinary calls.** A `rust/` crate function
 flagged `blocking` in its descriptor crosses via Spike 4's two-tier path

@@ -4,7 +4,7 @@
     "sha": "HEAD",
     "repo": "https://github.com/limitlessprojects/Go-Hybrid.git",
     "gpu": false,
-    "note": "Post-MVP row 2: sanitizers + fuzzing against the release SHA. ASan leg = go test -asan over the bridge packages \u2014 ASan's malloc interception is global at link time, so the Rust staticlib's heap operations ARE instrumented through it (stable-Rust -Zsanitizer needs nightly; this is the honest stable-toolchain equivalent). TSan-equivalent leg = go test -race over all five runtime packages (cross-task detector on the same paths spike 3 proved). Fuzz leg = tools/fuzz/hyfuzz.py \u2014 crash-class invariants (no hang / no crash / no ICE) over token salad, corpus mutations, and nest bombs; coverage-guided cargo-fuzz needs nightly rust, documented cut. THRESHOLDS PRE-REGISTERED: every command exits 0. Fail-soft on purpose: one leg failing must not hide the others.",
+    "note": "Post-MVP row 2: sanitizers + fuzzing against the release SHA. ASan leg = go test -asan over the bridge packages \u2014 ASan's malloc interception is global at link time, so the Rust staticlib's heap operations ARE instrumented through it (stable-Rust -Zsanitizer needs nightly; this is the honest stable-toolchain equivalent). TSan-equivalent leg = go test -race over all six runtime packages (cross-task detector on the same paths spike 3 proved). Fuzz leg = tools/fuzz/hyfuzz.py \u2014 crash-class invariants (no hang / no crash / no ICE) over token salad, corpus mutations, and nest bombs; coverage-guided cargo-fuzz needs nightly rust, documented cut. THRESHOLDS PRE-REGISTERED: every command exits 0. Fail-soft on purpose: one leg failing must not hide the others.",
     "setup": [
         {
             "name": "install-go",
