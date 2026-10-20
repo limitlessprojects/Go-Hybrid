@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 115 programs — ACCEPT 36 · ACCEPT-MANAGED 2 · REJECT 77 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
-**Current registered corpus: 115 programs — ACCEPT 36 · ACCEPT-MANAGED 2 · REJECT 77 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 116 programs — ACCEPT 36 · ACCEPT-MANAGED 2 · REJECT 78 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 116 programs — ACCEPT 36 · ACCEPT-MANAGED 2 · REJECT 78 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -215,3 +215,31 @@ Regression pins live in `hy-check/tests/typed_const_expression_overflow.rs`.
 HYB-E6002 gained the `tier0_rule_id: "BUILDABLE"` join key it was missing (it
 already declared `"rule": "BUILDABLE"`, so the corpus could only have said
 `<unclassified-error>` for it before).
+
+## Bounty-track registration — 2026-10-19: constant index past a fixed array's length (BUILDABLE, Row 13)
+
+`check_index_kind` bounded the constant index of the STRING form (`s[10]` on
+`const s = "abc"`) but not the fixed-array form: `a[5]` on `[3]int` checked
+clean (0 diagnostics) and the emitted Go then failed `go build` with
+`invalid argument: index 5 out of bounds [0:3]`. The rule now reads the array's
+declared length (through alias resolution) and compares the folded constant
+index against it.
+
+| program | verdict | rule | diagnostic | rationale |
+|---|---|---|---|---|
+| array-const-index-past-length-reject | REJECT | BUILDABLE | `HYB-E1002` | `var a [3]int` then `a[5]`: a constant index past a fixed array's length. The length lives in the type, so `var`/`let`/`:=` bindings and `[3]int` parameters are bounded as well; the fixture's own `a[2]` lines stay clean, and `control-slice-index-past-length` keeps the slice form ACCEPT — a slice's length is not part of its type, so no constant bound is decidable there |
+
+The rule lives in the array branch of
+`hy-check/src/buildable.rs::check_index_kind` (over `const_array_len_at`),
+pinned by `hy-check/tests/array_const_index_bounds.rs` (8 tests: the boundary
+`a[3]`, the typed-literal and parameter forms, the string sibling, and the
+in-bounds / slice / long-array controls). The reject was reproduced as a real
+`go build` failure on the pre-fix tree, and `a[2]`, `xs[300]` and `[300]int8`
+were verified ACCEPT, before this fixture was committed.
+
+Reproduction (branch tree, pinned rustc 1.99.0 / go1.26.9):
+`python3 tools/corpus_harness.py --bin compiler/target/debug/hyb` reports
+**116/116 verdict agreement, tripwire not fired**.
+
+With this registration the corpus is **116 programs: ACCEPT 36 ·
+ACCEPT-MANAGED 2 · REJECT 78** — main's 115 plus this one.

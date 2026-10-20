@@ -2713,6 +2713,10 @@ impl<'a> Collector<'a> {
         // For slices, arrays, and strings, the index must be an integer.
         let needs_int_idx = matches!(bk, OpKind::Slice(_) | OpKind::Array(_) | OpKind::Str)
             || matches!(bk, OpKind::Pointer(inner) if matches!(**inner, OpKind::Array(_)));
+        // A fixed-size array carries its length in the type, so a constant index
+        // past that length is a compile-time error in Go (`a[3]` on `[2]int`).
+        let is_array = matches!(bk, OpKind::Array(_))
+            || matches!(bk, OpKind::Pointer(inner) if matches!(**inner, OpKind::Array(_)));
         if needs_int_idx && !matches!(ik, OpKind::Unknown | OpKind::Int) {
             self.emit_e1002(
                 index.span(),
@@ -2751,6 +2755,22 @@ impl<'a> Collector<'a> {
                                     base_str
                                 ),
                                 "a constant index on a constant string must satisfy `0 <= index < len(s)`",
+                            );
+                        }
+                    }
+                } else if is_array {
+                    if let Some(arr_len) =
+                        base_expr.and_then(|b| self.eval_const_array_len_at(b, span.start))
+                    {
+                        if v >= arr_len {
+                            self.emit_e1002(
+                                index.span(),
+                                format!(
+                                    "invalid array index `{}` (out of bounds for a {}-element array) (HYB-E1002)",
+                                    index.render(),
+                                    arr_len
+                                ),
+                                "a constant index on a fixed-size array must satisfy `0 <= index < len(a)`",
                             );
                         }
                     }
@@ -2900,6 +2920,15 @@ impl<'a> Collector<'a> {
             return None;
         }
         self.ck.const_string_len_at(e, use_pos, 0)
+    }
+
+    /// Fixed-size array length, when `e` denotes an array whose length is known
+    /// exactly. Unlike the constant folders this deliberately skips
+    /// `expr_has_non_const_local`: an array's length lives in its type, so a
+    /// `var`/`let` binding (`var a = [3]int{}`) is just as certain as a `const`
+    /// one, and the resolver never falls back to a same-named package constant.
+    fn eval_const_array_len_at(&self, e: &Expr, use_pos: hy_diag::Pos) -> Option<i128> {
+        self.ck.const_array_len_at(e, use_pos, 0)
     }
 
     fn check_array_lit_items(&mut self, elem_ty: &TypeExpr, items: &[Expr]) {
