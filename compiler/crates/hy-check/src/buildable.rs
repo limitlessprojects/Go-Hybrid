@@ -1066,7 +1066,8 @@ impl<'a> Collector<'a> {
                 self.expr(index);
                 let bk = self.kind_of_place(base);
                 let ik = self.kind_of_expr(index);
-                self.check_index_kind(&base.render(), None, &bk, index, &ik, p.span);
+                let base_expr = place_to_expr(base);
+                self.check_index_kind(&base.render(), Some(&base_expr), &bk, index, &ik, p.span);
             }
             PlaceKind::Field { base, .. } => self.place_read(base),
             PlaceKind::AddrOf { base } => self.place_read(base),
@@ -4206,6 +4207,30 @@ fn builtins_already_flags_len_cap(e: &Expr, is_cap: bool) -> bool {
                 ..
             }
         )
+}
+
+fn place_to_expr(p: &Place) -> Expr {
+    match &p.kind {
+        PlaceKind::Ident(n) => Expr::Ident {
+            name: n.clone(),
+            span: p.span,
+        },
+        PlaceKind::Index { base, index } => Expr::Index {
+            base: Box::new(place_to_expr(base)),
+            index: Box::new(index.clone()),
+            span: p.span,
+        },
+        PlaceKind::Field { base, name } => Expr::Field {
+            base: Box::new(place_to_expr(base)),
+            name: name.clone(),
+            span: p.span,
+        },
+        PlaceKind::AddrOf { base } => Expr::Unary {
+            op: hy_syntax::UnOp::Addr,
+            operand: Box::new(place_to_expr(base)),
+            span: p.span,
+        },
+    }
 }
 
 impl<'a> Checker<'a> {

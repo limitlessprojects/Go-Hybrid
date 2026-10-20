@@ -129,3 +129,55 @@ fn large_array_length_control_accepts() {
     // must stay clean (the bound only fires on a constant index).
     assert_accept("fn main() {\n    var a [300]int8\n    fmt.println(\"{len(a)}\")\n}\n");
 }
+
+
+#[test]
+fn const_index_oob_on_assignment_target_is_e1002() {
+    // Issue #999: `a[300] = 1` on `var a [2]int` in assignment target position
+    // must reject with HYB-E1002.
+    let r = assert_reject_e1002(
+        "fn main() {\n    var a [2]int\n    a[300] = 1\n    fmt.println(\"{a[0]}\")\n}\n",
+    );
+    assert!(
+        r.diagnostics
+            .iter()
+            .any(|d| d.message.contains("out of bounds for a 2-element array")),
+        "expected message for 2-element array, got: {:?}",
+        r.diagnostics
+    );
+}
+
+#[test]
+fn const_index_oob_on_compound_assignment_target_is_e1002() {
+    let r = assert_reject_e1002(
+        "fn main() {\n    var a [2]int\n    a[5] += 1\n    fmt.println(\"{a[0]}\")\n}\n",
+    );
+    assert!(
+        r.diagnostics
+            .iter()
+            .any(|d| d.message.contains("out of bounds for a 2-element array")),
+        "expected message for 2-element array, got: {:?}",
+        r.diagnostics
+    );
+}
+
+#[test]
+fn const_index_oob_on_pointer_array_assignment_target_is_e1002() {
+    assert_reject_e1002(
+        "fn mutate(p *[2]int) {\n    p[4] = 9\n}\n\nfn main() {\n    var a [2]int\n    mutate(&a)\n}\n",
+    );
+}
+
+#[test]
+fn const_index_oob_on_struct_field_array_assignment_target_is_e1002() {
+    assert_reject_e1002(
+        "struct holder {\n    arr [3]int\n}\n\nfn main() {\n    var h holder\n    h.arr[10] = 42\n    fmt.println(\"{h.arr[0]}\")\n}\n",
+    );
+}
+
+#[test]
+fn const_index_in_bounds_assignment_target_accepts() {
+    assert_accept(
+        "fn main() {\n    var a [2]int\n    a[0] = 1\n    a[1] = 2\n    fmt.println(\"{a[0]}, {a[1]}\")\n}\n",
+    );
+}

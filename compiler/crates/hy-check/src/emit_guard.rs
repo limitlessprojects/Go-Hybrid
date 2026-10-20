@@ -1584,6 +1584,32 @@ impl<'a> Checker<'a> {
                 }
                 self.param_array_len_at(name, id_span.start)
             }
+            Expr::Field { base, name: field_name, .. } => {
+                let bare_base = unwrap_parens(base);
+                if let Expr::Ident { name, span: id_span, .. } = bare_base {
+                    if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
+                        if let Some(ty) = sight.ty {
+                            let resolved = self.resolve_type_alias(ty);
+                            let struct_name: Option<String> = match &resolved {
+                                TypeExpr::Named { name: sname, .. } => Some(sname.clone()),
+                                TypeExpr::Pointer { to, .. } => match self.resolve_type_alias(to) {
+                                    TypeExpr::Named { name: sname, .. } => Some(sname),
+                                    _ => None,
+                                },
+                                _ => None,
+                            };
+                            if let Some(sname) = struct_name {
+                                if let Some(fields) = self.structs.get(sname.as_str()) {
+                                    if let Some((_, f_ty)) = fields.iter().find(|(f, _)| f == field_name) {
+                                        return self.array_len_of_ty(f_ty);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
             other => self.array_lit_len(other, depth + 1),
         }
     }
