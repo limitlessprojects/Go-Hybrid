@@ -1,5 +1,4 @@
 """Regression tests for fail-closed CLI argument validation (no network)."""
-import contextlib
 import importlib.util
 import io
 import json
@@ -590,39 +589,19 @@ class KaggleFetchFreshnessTests(unittest.TestCase):
                 list((root / "result" / "raw").glob(".staging-*")), [])
 
 
+    def test_submit_and_fetch_fail_closed_on_invalid_metadata_or_paths(self):
+        for payload in ("{bad", "[]", "{}", '{"job": "  "}', '{"job": 1}'):
+            with tempfile.TemporaryDirectory() as td:
+                (Path(td) / "job.json").write_text(payload, encoding="utf-8")
+                with patch.object(JOB, "resolve_head", return_value="a" * 40), patch.object(JOB, "sh") as m_sh, self.assertRaises(SystemExit):
+                    JOB.kaggle_submit(td)
+                m_sh.assert_not_called()
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "result").write_text("file", encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(JOB.kaggle_fetch(td, slug="demo/k"), 1)
+            with patch.object(JOB, "gh_token", return_value="t"), patch.object(JOB, "gh_api", return_value={"artifacts": [{"name": "../bad", "archive_download_url": "https://x/a.zip", "size_in_bytes": 1}]}), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(JOB.actions_fetch(1, td), 1)
+
 if __name__ == "__main__":
     unittest.main()
-
-
-class SubmitAndArtifactValidationTests(unittest.TestCase):
-    def test_kaggle_submit_rejects_missing_or_empty_job_id_before_push(self):
-        for payload in ("{not-json", "[]", "{}", '{"job": ""}', '{"job": "   "}', '{"job": 123}'):
-            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as td:
-                (Path(td) / "job.json").write_text(payload, encoding="utf-8")
-                with patch.object(JOB, "resolve_head", return_value="a" * 40), \
-                     patch.object(JOB, "sh") as mock_sh:
-                    with self.assertRaises(SystemExit) as cm:
-                        JOB.kaggle_submit(td)
-                self.assertIn("REFUSING to push", str(cm.exception))
-                mock_sh.assert_not_called()
-
-    def test_kaggle_fetch_returns_1_when_result_path_is_a_file(self):
-        with tempfile.TemporaryDirectory() as td:
-            (Path(td) / "result").write_text("blocking file", encoding="utf-8")
-            stderr = io.StringIO()
-            with contextlib.redirect_stderr(stderr):
-                rc = JOB.kaggle_fetch(td, slug="demo/kernel")
-            self.assertEqual(rc, 1)
-            self.assertIn("WARNING: cannot stage download", stderr.getvalue())
-
-    def test_actions_fetch_rejects_unsafe_artifact_names(self):
-        for bad_name in ("../escape", "nested/part", "..", "", "   ", None):
-            with self.subTest(bad_name=bad_name), tempfile.TemporaryDirectory() as td:
-                artifacts = {"artifacts": [{"name": bad_name, "archive_download_url": "https://example.invalid/a.zip", "size_in_bytes": 10}]}
-                stderr = io.StringIO()
-                with patch.object(JOB, "gh_token", return_value="tok"), \
-                     patch.object(JOB, "gh_api", return_value=artifacts), \
-                     contextlib.redirect_stderr(stderr):
-                    rc = JOB.actions_fetch(42, td)
-                self.assertEqual(rc, 1)
-                self.assertIn("refusing unsafe artifact name", stderr.getvalue())

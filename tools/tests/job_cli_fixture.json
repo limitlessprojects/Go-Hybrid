@@ -1,12 +1,1 @@
-{"suite": "fix-job-cli-fail-closed", "fail_closed": true}
-", "fail_closed": true}
-", "fail_closed": true}
-", "fail_closed": true}
-", "fail_closed": true}
-", "fail_closed": true}
-", "fail_closed": true}
-", "fail_closed": true}
-", "fail_closed": true}
-", "fail_closed": true}
-", "fail_closed": true}
-", "fail_closed": true}
+{"tool": "tools/job.py"}
