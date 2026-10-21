@@ -1,3 +1,4 @@
+import contextlib
 """Regression tests for fail-closed CLI argument validation (no network)."""
 import importlib.util
 import io
