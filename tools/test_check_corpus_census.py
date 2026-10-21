@@ -181,5 +181,14 @@ class FailClosedTests(_ProblemsMixin, unittest.TestCase):
         self.assertIn("no corpus count found", hits[0])
 
 
+    def test_duplicate_or_ruleless_reject_verdict_is_flagged(self):
+        for bad in ("// EXPECTED-VERDICT: REJECT\n", "// EXPECTED-VERDICT: ACCEPT\n// EXPECTED-VERDICT: REJECT A1\n"):
+            files = consistent_tree()
+            files["tests/checker-corpus/f01.hy"] = bad
+            tmp, root = make_tree(files)
+            self.addCleanup(tmp.cleanup)
+            problems, _, _ = MOD.collect_problems(root)
+            self.assertTrue(any("EXPECTED-VERDICT" in p for p in problems))
+
 if __name__ == "__main__":
     unittest.main()

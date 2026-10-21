@@ -37,7 +37,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CORPUS_REL = Path("tests") / "checker-corpus"
 
 VERDICT_RE = re.compile(
-    r"^//\s*EXPECTED-VERDICT:\s*(ACCEPT-MANAGED|ACCEPT|REJECT)\b", re.M
+    r"^//\s*EXPECTED-VERDICT:[ \t]*([^\r\n]*)", re.M
 )
 
 # (path, regex with one capture group holding the claimed total, what it is)
@@ -89,8 +89,9 @@ def census(corpus_dir: Path) -> tuple[int, Counter]:
     counts: Counter = Counter()
     for path in files:
         text = path.read_text(encoding="utf-8")
-        match = VERDICT_RE.search(text)
-        counts[match.group(1) if match else "NO-VERDICT"] += 1
+        ms = [m.split() for m in VERDICT_RE.findall(text)]
+        v = ms[0][0] if len(ms) == 1 and ms[0] and ms[0][0] in ("ACCEPT", "ACCEPT-MANAGED", "REJECT") and (ms[0][0] != "REJECT" or len(ms[0]) > 1) else "NO-VERDICT"
+        counts[v] += 1
     return len(files), counts
 
 
