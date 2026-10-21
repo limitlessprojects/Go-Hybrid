@@ -170,11 +170,17 @@ impl<'a> Checker<'a> {
 
     /// When `ty` is a fixed-width integer and `value` assigned to `target`
     /// is an integer constant outside that type's range, or a float constant, emit HYB-E6002.
+    ///
+    /// Issue #998: the RHS may be a *named* file-level `const` (`x = k`), so
+    /// the fold must resolve identifiers through the file const map exactly
+    /// like the declaration path does — a bare syntactic fold sees `k` as
+    /// `NotConst` and the accepted-but-unbuildable shape slips through.
     pub(crate) fn check_const_overflow_assign(
         &mut self,
         target: &str,
         ty: &TypeExpr,
         value: &Expr,
+        st: Option<&FnState>,
     ) {
         let resolved = self.resolve_type_alias(ty);
         let TypeExpr::Named {
@@ -185,7 +191,7 @@ impl<'a> Checker<'a> {
             return;
         };
         if let Some(is_f32) = is_float_type(ty_name) {
-            if let Some(f) = self.const_float_fold(value, None) {
+            if let Some(f) = self.const_float_fold(value, st) {
                 let overflows = if is_f32 {
                     (f as f32).is_infinite()
                 } else {
@@ -223,7 +229,7 @@ impl<'a> Checker<'a> {
         let Some((lo, hi)) = fixed_width_int_range(ty_name) else {
             return;
         };
-        match const_int_fold(value) {
+        match const_int_fold_with(value, &self.const_values, 0, st) {
             ConstFold::NotConst => {}
             ConstFold::TooBig => {
                 let span = value.span();
