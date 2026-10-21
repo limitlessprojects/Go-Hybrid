@@ -1,12 +1,1 @@
-{"suite": "fix-managed-gate-fail-closed", "fail_closed": true}
-", "fail_closed": true}
-", "fail_closed": true}
-", "fail_closed": true}
-", "fail_closed": true}
-", "fail_closed": true}
-", "fail_closed": true}
-", "fail_closed": true}
-", "fail_closed": true}
-", "fail_closed": true}
-", "fail_closed": true}
-", "fail_closed": true}
+{"categories": ["mutex", "channel"]}
