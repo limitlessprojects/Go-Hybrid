@@ -1,2 +1,0 @@
-from tools.test_corpus_harness import CorpusDirectoryAndUnclassifiedRuleTests
-assert CorpusDirectoryAndUnclassifiedRuleTests is not None
