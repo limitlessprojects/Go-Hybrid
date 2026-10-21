@@ -813,17 +813,16 @@ pub(crate) fn place_path(place: &Place) -> Option<String> {
 pub(crate) fn expr_path(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Ident { name, .. } => Some(name.clone()),
-        Expr::Field { base, name, .. } => Some(format!("{}.{}", expr_path(base)?, name)),
+        Expr::Field { base, name, .. } => if name == "val" { expr_path(base) } else { Some(format!("{}.{}", expr_path(base)?, name)) },
         Expr::Index { base, .. } => expr_path(base),
         Expr::Slice { base, .. } => expr_path(base),
         Expr::Paren { inner, .. } => expr_path(inner),
         Expr::Try { operand, .. } => expr_path(operand),
-        Expr::Call { callee, args, .. }
-            if matches!(crate::model::unwrap_parens(callee), Expr::Ident { name, .. } if name == "some")
-                && args.len() == 1 =>
-        {
-            expr_path(&args[0].value)
-        }
+        Expr::Call { callee, args, .. } => match crate::model::unwrap_parens(callee) {
+            Expr::Ident { name, .. } if matches!(name.as_str(), "some" | "unwrap" | "or") => args.first().and_then(|a| expr_path(&a.value)),
+            Expr::Field { base, name, .. } if matches!(name.as_str(), "unwrap" | "unwrap_or" | "or") => expr_path(base),
+            _ => None,
+        },
         _ => None,
     }
 }
