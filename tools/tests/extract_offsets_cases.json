@@ -1,0 +1,4 @@
+{
+  "suite": "extract_offsets_edge_cases",
+  "cases": ["readelf_nonzero", "missing_byte_size", "indirect_dwarf_name"]
+}
