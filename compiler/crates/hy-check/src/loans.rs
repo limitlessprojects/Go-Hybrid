@@ -1703,7 +1703,9 @@ impl<'a> Checker<'a> {
                 );
                 // `x := move y` — y is moved; x takes ownership (no alias);
                 // non-ident moves (`x := move s.data`) trigger HYB-E3004 (O5.4).
-                let moved_non_owned = self.moved_non_owned_origin_in_expr(&pre_st, value);
+                let moved_non_owned = self
+                    .moved_non_owned_origin_in_expr(&pre_st, value)
+                    .or_else(|| self.moved_non_owned_origin(&pre_st, value));
                 if move_operand_ident(value).is_some()
                     || matches!(unwrap_parens(value), Expr::Move { .. })
                 {
@@ -1774,6 +1776,7 @@ impl<'a> Checker<'a> {
                     HashSet::new()
                 };
                 let is_view = matches!(shape, TypeShape::BorrowHandle(_));
+                let may_share = self.shape_may_share(&shape);
                 let outer_depth = if pre_st
                     .scopes
                     .last()
@@ -1784,10 +1787,12 @@ impl<'a> Checker<'a> {
                     None
                 };
                 self.define_binding(st, name, shape, ty, immutable, managed, is_let);
-                if let Some(origin) = &moved_non_owned {
-                    if let Some(b) = st.env_lookup_mut(name) {
-                        if b.non_owned_origin.is_none() {
-                            b.non_owned_origin = Some(origin.clone());
+                if may_share {
+                    if let Some(origin) = &moved_non_owned {
+                        if let Some(b) = st.env_lookup_mut(name) {
+                            if b.non_owned_origin.is_none() {
+                                b.non_owned_origin = Some(origin.clone());
+                            }
                         }
                     }
                 }
@@ -2041,6 +2046,19 @@ impl<'a> Checker<'a> {
         })
     }
 
+
+    /// Find the first `non_owned_origin` among any bindings moved inside
+    /// `expr` (covering direct `move x` and composite literals such as
+    /// `holder{m: move m}` or `[move m]`).
+    fn moved_non_owned_origin(&self, st: &FnState, expr: &Expr) -> Option<String> {
+        let mut move_ops = Vec::new();
+        crate::model::collect_move_operands(expr, &mut move_ops);
+        move_ops.into_iter().find_map(|(op, _)| {
+            op.root_ident()
+                .and_then(|src| self.lookup_binding(st, src))
+                .and_then(|b| b.non_owned_origin.clone())
+        })
+    }
 
     /// Does the binding `name` denote a value that a shallow Go copy
     /// would share mutable GC storage with? Includes file-level `const`
@@ -2365,6 +2383,9 @@ impl<'a> Checker<'a> {
                 if self.binding_may_share(st, src) {
                     st.share_edge(name, src);
                 }
+            }
+            Expr::Move { operand, .. } => {
+                self.record_may_share(st, name, operand);
             }
             // `s2 := s1[:]` — the result shares s1's backing array
             // `m2 := h1.m` / `m2 := arr[i]` — projecting a reference-bearing
@@ -3617,10 +3638,16 @@ impl<'a> Checker<'a> {
                 if let Some(b) = self.lookup_binding(st, src) {
                     let src_origin = b.non_owned_origin.clone();
                     if b.shape.is_reference_alias() || b.shape.is_handle() {
-                        st.aliases.insert(name.to_string(), src.clone());
+                        let src_name = src.clone();
+                        st.share_edge(name, &src_name);
+                        if !st.aliases.contains_key(name) {
+                            st.aliases.insert(name.to_string(), src_name);
+                        }
                         if let Some(origin) = src_origin {
                             if let Some(nb) = st.env_lookup_mut(name) {
-                                nb.non_owned_origin = Some(origin);
+                                if nb.non_owned_origin.is_none() {
+                                    nb.non_owned_origin = Some(origin);
+                                }
                             }
                         }
                     }
@@ -3670,10 +3697,15 @@ impl<'a> Checker<'a> {
                             (ok, b.non_owned_origin.clone())
                         });
                         if let Some((true, origin)) = matched {
-                            st.aliases.insert(name.to_string(), src.clone());
+                            st.share_edge(name, &src);
+                            if !st.aliases.contains_key(name) {
+                                st.aliases.insert(name.to_string(), src.clone());
+                            }
                             if let Some(origin) = origin {
                                 if let Some(nb) = st.env_lookup_mut(name) {
-                                    nb.non_owned_origin = Some(origin);
+                                    if nb.non_owned_origin.is_none() {
+                                        nb.non_owned_origin = Some(origin);
+                                    }
                                 }
                             }
                             break;
@@ -5478,7 +5510,8 @@ impl<'a> Checker<'a> {
                         other => move_operand_ident(other)
                             .and_then(|src| self.lookup_binding(st, &src))
                             .and_then(|b| b.non_owned_origin.clone())
-                            .or_else(|| self.moved_non_owned_origin_in_expr(st, other)),
+                            .or_else(|| self.moved_non_owned_origin_in_expr(st, other))
+                            .or_else(|| self.moved_non_owned_origin(st, other)),
                     };
                     let (reads_self, shadowed_origin, prior_alias, prior_shares, prior_shadows) =
                         match &t.kind {
@@ -5545,7 +5578,9 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                     overwritten.push(name.clone());
-                    if !info.reads_self {
+                    let is_local_scope = st.defined_in_current_scope(name);
+                    let keep_non_owned = self.shape_may_share(&info.shape);
+                    if is_local_scope && !info.reads_self {
                         self.preserve_peers_before_sever(st, name, false);
                     }
 
@@ -5562,27 +5597,32 @@ impl<'a> Checker<'a> {
                         {
                             b.ty = info.ty;
                         }
-                        b.moved = None; // a fresh value re-owns the binding
-                        b.non_owned_origin = info.non_owned;
+                        if is_local_scope {
+                            b.moved = None; // a fresh value re-owns the binding
+                            b.non_owned_origin =
+                                if keep_non_owned { info.non_owned } else { None };
+                        } else if keep_non_owned && b.non_owned_origin.is_none() {
+                            b.non_owned_origin = info.non_owned;
+                        }
                     }
-                    // a rebind re-owns the binding: drop the old alias and
-                    // may-share edges, then re-record from the new value (#27)
-                    st.aliases.remove(name);
-                    st.share_clear(name);
-                    if info.reads_self {
-                        if !info.prior_shadows.is_empty() {
-                            st.shadow_links
-                                .entry(name.clone())
-                                .or_default()
-                                .extend(info.prior_shadows);
-                        }
-                        if let Some(pa) = info.prior_alias {
-                            if &pa != name {
-                                st.aliases.insert(name.clone(), pa);
+                    if is_local_scope {
+                        st.aliases.remove(name);
+                        st.share_clear(name);
+                        if info.reads_self {
+                            if !info.prior_shadows.is_empty() {
+                                st.shadow_links
+                                    .entry(name.clone())
+                                    .or_default()
+                                    .extend(info.prior_shadows);
                             }
-                        }
-                        for peer in info.prior_shares {
-                            st.share_edge(name, &peer);
+                            if let Some(pa) = info.prior_alias {
+                                if &pa != name {
+                                    st.aliases.insert(name.clone(), pa);
+                                }
+                            }
+                            for peer in info.prior_shares {
+                                st.share_edge(name, &peer);
+                            }
                         }
                     }
                     if !info.is_fresh_copy { self.record_storage_from_snapshot(st, &pre_st, name, v, &overwritten, false, false); }
@@ -5599,9 +5639,11 @@ impl<'a> Checker<'a> {
                     }
                     // #111: a closure rebind replaces the old body's
                     // mutation set (or clears it for non-closure values)
-                    st.closure_mutates.remove(name);
-                    st.closure_defs.remove(name);
-                    st.closure_fnlits.remove(name);
+                    if is_local_scope {
+                        st.closure_mutates.remove(name);
+                        st.closure_defs.remove(name);
+                        st.closure_fnlits.remove(name);
+                    }
                     self.record_closure_mutations(st, name, v);
                 } else {
                     let root = t.root();

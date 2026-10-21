@@ -433,12 +433,22 @@ impl FnState {
                 }
             }
         }
+        let inner_aliases = self.aliases.clone();
         self.scopes.pop();
         if let Some(outer_shadows) = self.shadow_link_scopes.pop() {
             self.shadow_links = outer_shadows;
         }
         if let Some(outer_aliases) = self.alias_scopes.pop() {
             self.aliases = outer_aliases;
+            for (k, v) in inner_aliases {
+                if !popped_scope.contains_key(&k)
+                    && !popped_scope.contains_key(&v)
+                    && self.env_lookup(&k).is_some()
+                    && self.env_lookup(&v).is_some()
+                {
+                    self.aliases.entry(k).or_insert(v);
+                }
+            }
             if let Some(outer_share) = self.share_scopes.pop() {
                 self.may_share = outer_share;
                 for (a, b) in inner_outer_shares {
@@ -548,6 +558,14 @@ impl FnState {
             self.env.get_mut(name)
         } else {
             self.scopes.get_mut(depth - 1).and_then(|s| s.get_mut(name))
+        }
+    }
+
+    /// Is `name` defined in the current (innermost) lexical scope?
+    pub(crate) fn defined_in_current_scope(&self, name: &str) -> bool {
+        match self.scopes.last() {
+            Some(top) => top.contains_key(name),
+            None => self.env.contains_key(name),
         }
     }
 
