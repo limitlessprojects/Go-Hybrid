@@ -2869,6 +2869,38 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// Integer constants can adapt to float targets, but typed integer
+    /// variables and parameters cannot. The operand classifier represents
+    /// both as Int, so inspect the lexical binding when checking assignments.
+    /// File and local constants stay fail-open here: their explicit vs
+    /// implicit types are not recorded in the binding table.
+    fn is_typed_int_binding(&self, value: &Expr) -> bool {
+        let Expr::Ident { name, .. } = unwrap_parens(value) else {
+            return false;
+        };
+        if self.lookup_kind(name) != Some(OpKind::Int) {
+            return false;
+        }
+        for scope in self.scopes.iter().rev() {
+            if let Some(binding) = scope.get(name.as_str()) {
+                return match binding {
+                    Some(id) => matches!(
+                        self.defines[*id].kind,
+                        LocalKind::Define | LocalKind::Let | LocalKind::Var
+                    ),
+                    // Function parameters, named returns, and loop bindings
+                    // are tracked as exempt bindings, but remain typed.
+                    None => true,
+                };
+            }
+        }
+        false
+    }
+
+    fn typed_int_to_float(&self, target: &OpKind, value: &Expr) -> bool {
+        *target == OpKind::Float && self.is_typed_int_binding(value)
+    }
+
     /// Family B6 (#425): `s++`, `s--`, and compound assignment operand checks.
     fn check_assign_operands(
         &mut self,
@@ -2912,7 +2944,10 @@ impl<'a> Collector<'a> {
                     let is_loan_shape = as_addr_of(&values[0])
                         .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }));
                     let vk = self.kind_of_expr(&values[0]);
-                    if !is_loan_shape && kinds_conflict(&tk, &vk) {
+                    if !is_loan_shape
+                        && (kinds_conflict(&tk, &vk)
+                            || self.typed_int_to_float(&tk, &values[0]))
+                    {
                         self.emit_e1002(
                             span,
                             format!(
@@ -2950,7 +2985,12 @@ impl<'a> Collector<'a> {
                 let mismatch = tk != OpKind::Unknown
                     && vk != OpKind::Unknown
                     && tk.is_numeric() != vk.is_numeric();
-                if !t_ok || !v_ok || mismatch || kinds_conflict(&tk, &vk) {
+                if !t_ok
+                    || !v_ok
+                    || mismatch
+                    || kinds_conflict(&tk, &vk)
+                    || self.typed_int_to_float(&tk, val)
+                {
                     self.emit_e1002(
                         span,
                         format!(
@@ -2975,6 +3015,7 @@ impl<'a> Collector<'a> {
                 if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || kinds_conflict(&tk, &vk)
+                    || self.typed_int_to_float(&tk, val)
                 {
                     self.emit_e1002(
                         span,
