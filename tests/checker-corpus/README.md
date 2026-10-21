@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 120 programs — ACCEPT 38 · ACCEPT-MANAGED 2 · REJECT 80 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
-**Current registered corpus: 120 programs — ACCEPT 38 · ACCEPT-MANAGED 2 · REJECT 80 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 122 programs — ACCEPT 38 · ACCEPT-MANAGED 2 · REJECT 82 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 122 programs — ACCEPT 38 · ACCEPT-MANAGED 2 · REJECT 82 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added

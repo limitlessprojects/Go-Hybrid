@@ -149,7 +149,7 @@ impl<'a> Checker<'a> {
                     for (t, v) in targets.iter().zip(values.iter()) {
                         if !matches!(op, AssignOp::ShlAssign | AssignOp::ShrAssign) {
                             if let Some(target_ty) = self.place_target_ty(st, t) {
-                                self.check_const_overflow_assign(&t.render(), &target_ty, v);
+                                self.check_const_overflow_assign(&t.render(), &target_ty, v, Some(st));
                             }
                         }
                     }
