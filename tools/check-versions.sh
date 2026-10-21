@@ -15,6 +15,11 @@
 #                                             for CI runners without the pins)
 set -uo pipefail
 
+if [ $# -gt 1 ] || { [ $# -eq 1 ] && [ "$1" != "--no-toolchain" ]; }; then
+    echo "FAIL: unsupported argument(s): $*"
+    exit 1
+fi
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
@@ -23,6 +28,14 @@ cd "$ROOT"
 source tools/env.sh >/dev/null 2>&1 || { echo "FAIL: cannot source tools/env.sh"; exit 1; }
 : "${PINNED_GO:?PINNED_GO missing from tools/env.sh}"
 : "${PINNED_RUST:?PINNED_RUST missing from tools/env.sh}"
+case "$PINNED_GO" in
+    go[0-9]*.[0-9]*.[0-9]*) ;;
+    *) echo "FAIL: malformed PINNED_GO in tools/env.sh: $PINNED_GO"; exit 1 ;;
+esac
+case "$PINNED_RUST" in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) echo "FAIL: malformed PINNED_RUST in tools/env.sh: $PINNED_RUST"; exit 1 ;;
+esac
 GO_VER="${PINNED_GO#go}"   # 1.26.9 (README spells it without the leading `go`)
 
 DRIFT=0
