@@ -124,8 +124,20 @@ impl<'a> Checker<'a> {
                             self.check_expr_single_value(st, chan, chan.span());
                             self.check_expr_single_value(st, value, value.span());
                         }
-                        SelectArmKind::Recv { chan, .. } => {
+                        SelectArmKind::Recv { names, chan } => {
                             self.check_expr_single_value(st, chan, chan.span());
+                            if names.len() > 2 {
+                                let msg = format!(
+                                    "select receive on `{}` binds {} variables, but a channel receive yields at most 2 values: a multi-value result is not a tuple (T23)",
+                                    chan.render(),
+                                    names.len()
+                                );
+                                self.diags.push(
+                                    Diagnostic::error("HYB-E2002", self.path.clone(), chan.span(), msg).with_notes(vec![
+                                        "why: Go select receive statements permit at most 2 variables (`v := <-ch` or `v, ok := <-ch`), so the program would not build".to_string(),
+                                    ]),
+                                );
+                            }
                         }
                         SelectArmKind::Default => {}
                     }
@@ -225,6 +237,63 @@ impl<'a> Checker<'a> {
     }
 
     fn check_multi_value_bind(&mut self, st: &FnState, value: &Expr, targets: usize, span: Span) {
+        let bare = unwrap_parens_and_move(value);
+        if let Expr::Receive { .. } = bare {
+            if targets > 2 {
+                let msg = format!(
+                    "channel receive `{}` yields at most 2 values, but {targets} names are bound: a multi-value result is not a tuple (T23)",
+                    value.render()
+                );
+                self.diags.push(
+                    Diagnostic::error("HYB-E2002", self.path.clone(), span, msg).with_notes(vec![
+                        "why: Go channel receive operations yield at most 2 values (`v` and optional `ok`), so the emitted binding fails with `assignment mismatch`".to_string(),
+                    ]),
+                );
+            }
+            return;
+        }
+        if let Expr::Index { base, .. } = bare {
+            let is_map = matches!(self.shape_of_expr(st, base), TypeShape::Map(..))
+                || self.ty_of_expr(st, base).is_some_and(|ty| {
+                    matches!(self.resolve_type_alias(&ty), TypeExpr::Map { .. })
+                });
+            if is_map {
+                if targets > 2 {
+                    let msg = format!(
+                        "map index `{}` yields at most 2 values, but {targets} names are bound: a multi-value result is not a tuple (T23)",
+                        value.render()
+                    );
+                    self.diags.push(
+                        Diagnostic::error("HYB-E2002", self.path.clone(), span, msg).with_notes(vec![
+                            "why: Go map index operations yield at most 2 values (`v` and optional `ok`), so the emitted binding fails with `assignment mismatch`".to_string(),
+                        ]),
+                    );
+                }
+                return;
+            }
+            let is_seq = matches!(
+                self.shape_of_expr(st, base),
+                TypeShape::Slice(..) | TypeShape::Array(..) | TypeShape::Str
+            ) || self.ty_of_expr(st, base).is_some_and(|ty| {
+                let resolved = self.resolve_type_alias(&ty);
+                matches!(resolved, TypeExpr::Slice { .. } | TypeExpr::Array { .. })
+                    || matches!(resolved, TypeExpr::Named { ref name, .. } if name == "string")
+            });
+            if is_seq {
+                if targets > 1 {
+                    let msg = format!(
+                        "index expression `{}` yields 1 value, but {targets} names are bound: a multi-value result is not a tuple (T23)",
+                        value.render()
+                    );
+                    self.diags.push(
+                        Diagnostic::error("HYB-E2002", self.path.clone(), span, msg).with_notes(vec![
+                            "why: slice, array, and string index operations yield exactly 1 value (no comma-ok), so the emitted binding fails with `assignment mismatch`".to_string(),
+                        ]),
+                    );
+                }
+                return;
+            }
+        }
         let Some((name, results)) = self.static_result_count(st, value) else {
             return;
         };
