@@ -1327,6 +1327,86 @@ impl<'a> Checker<'a> {
         }
         // 4) Anything else (calls, `pkg.CONST`, arithmetic over idents) —
         // fail open: those can be legal constant expressions in Go.
+        //
+        // Issue #1133: EXCEPT where the expression provably contains a
+        // `len`/`cap` call over a non-constant argument. Go's constant
+        // rules: `len(s)` is constant only for a string constant, and
+        // `len`/`cap` are constant only for arrays (or pointers to them) —
+        // so a channel/slice/map/variable-string operand can never make an
+        // array length, even under arithmetic (`cap(ch)-1`).
+        if self.array_len_provably_non_const(len, st, 0) {
+            let msg = format!(
+                "array length `{}` is not a constant — Go requires a constant array length (`invalid array length {}`), so the emitted module would not build (HYB-E6004)",
+                len.render(),
+                len.render()
+            );
+            self.diags.push(
+                Diagnostic::error("HYB-E6004", self.path.clone(), span, msg).with_notes(vec![
+                    "why: `len`/`cap` of a channel, slice, map, or variable string is never a constant in Go (only `len` of a string constant and `len`/`cap` of arrays are constant) (issue #1133)".to_string(),
+                    "fix: use a literal or `const` length, or declare a slice (`[]T`) for a dynamic size".to_string(),
+                ]),
+            );
+        }
+    }
+
+    /// Issue #1133: prove an array-length expression contains a `len`/`cap`
+    /// call whose argument is a local binding that can never yield a
+    /// constant (`chan`, `slice`, `map`, non-`const` string, primitive).
+    /// Conservative by design — unknown shapes, file-level consts, array
+    /// bindings, composite/string literals, and function results stay
+    /// fail-open (the step-1 fold already accepts every constant spelling).
+    fn array_len_provably_non_const(
+        &self,
+        expr: &Expr,
+        st: Option<&FnState>,
+        depth: usize,
+    ) -> bool {
+        if depth > 32 {
+            return false;
+        }
+        match unwrap_parens(expr) {
+            Expr::Unary { operand, .. } => {
+                self.array_len_provably_non_const(operand, st, depth + 1)
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.array_len_provably_non_const(lhs, st, depth + 1)
+                    || self.array_len_provably_non_const(rhs, st, depth + 1)
+            }
+            Expr::Call { callee, args, .. } if args.len() == 1 && !args[0].spread => {
+                let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+                    return false;
+                };
+                if name != "len" && name != "cap" {
+                    return false;
+                }
+                let Some(st) = st else {
+                    return false;
+                };
+                let Expr::Ident { name: arg, .. } = unwrap_parens(&args[0].value) else {
+                    return false;
+                };
+                let Some(b) = st.env_lookup(arg) else {
+                    // File-level const / unknown name: the fold already ran;
+                    // stay fail-open.
+                    return false;
+                };
+                match b.shape {
+                    TypeShape::Chan(_) | TypeShape::Map(..) | TypeShape::Slice(_) => true,
+                    // Only a `const` string has a constant `len`; a
+                    // `let`/`:=`/`var` string binding never does (both
+                    // `let` and `:=` emit Go short declarations — stmt.rs
+                    // "checker-level contract" — so `len` is runtime).
+                    TypeShape::Str => !b.immutable,
+                    // Primitive/handle shapes reaching `len`/`cap` are
+                    // already rejected by the E2005 builtin-argument-kind
+                    // rule (issue #187 family) — fail open here so the
+                    // same root never reports twice. Arrays (constant
+                    // len/cap), pointers, structs: fail open.
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
     }
 
     fn file_const_is_valid_array_len(&self, name: &str, depth: usize) -> bool {
