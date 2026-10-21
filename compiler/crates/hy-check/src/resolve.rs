@@ -417,6 +417,45 @@ impl<'a> Scan<'a> {
                                     ),
                                 ]),
                             );
+                        } else if !self.allowed.contains(root)
+                            && !self.packages.contains(root)
+                            && !crate::foreign::BUILTIN_PACKAGES.contains(&root.as_str())
+                            && !crate::foreign::is_curated_package_root(root)
+                        {
+                            // Issue #1131: a dotted access whose ident base
+                            // declares nothing and is not on the curated
+                            // package surface. The emitter cannot collect an
+                            // import for it (usage-driven import collection
+                            // only maps curated roots), so the emitted Go
+                            // names an undefined identifier and `go build`
+                            // fails — the ident-base exemption that #228 left
+                            // open for "unknown roots" only holds for roots
+                            // the emitter actually maps.
+                            self.diags.push(
+                                hy_diag::Diagnostic::error(
+                                    "HYB-E1001",
+                                    self.path.to_string(),
+                                    *span,
+                                    format!(
+                                        "`{}` cannot be resolved — nothing declares this name, and it is not a package root on the M5 curated allowlist (HYB-E1001)",
+                                        root
+                                    ),
+                                )
+                                .with_notes(vec![
+                                    format!(
+                                        "the curated Go surface is: {}",
+                                        crate::foreign::CURATED_ALLOWLIST_DISPLAY
+                                    ),
+                                    "the emitter collects imports only for curated roots — an \
+                                     unknown root emits a bare identifier that fails `go build`"
+                                        .to_string(),
+                                    format!(
+                                        "if `{}` is a local value rather than a package, declare \
+                                         it in this file or scope before the access",
+                                        root
+                                    ),
+                                ]),
+                            );
                         }
                     }
                 } else {

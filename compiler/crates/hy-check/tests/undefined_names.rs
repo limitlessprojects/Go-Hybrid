@@ -186,16 +186,23 @@ fn imported_package_prefix_allowed() {
 }
 
 #[test]
-fn dotted_first_segment_is_package_open_world() {
-    // The emitter's contract: "unknown roots still work — they emit verbatim
-    // and get an import" (hy-emit is_package_root). Spike-10's `hex.encode`
-    // is a root the checker's foreign table never listed but that builds, so
-    // a direct ident base under `.` is exempt from E1001 on purpose — the
-    // checker cannot tell a real std/binding root from a typo'd one, and the
-    // go toolchain reports the difference exactly (`undefined: foo` vs a
-    // working import). Everything BARE stays checked.
-    accepts_without_e1001("fn main() {\n    x := foo.bar(1)\n    _ = x\n}\n");
-    accepts_without_e1001("fn main() {\n    _ = undefined_obj.field\n}\n");
+fn dotted_first_segment_unknown_root_rejects_issue_1131() {
+    // Issue #1131 (was: "open world" — the emitter's comment "unknown roots
+    // still work — they emit verbatim and get an import" is only true for
+    // CURATED roots, whose imports the emitter collects usage-driven; for a
+    // non-curated root the emitted Go names a bare undefined identifier
+    // (`fmt.Println(widgets.count)` with only `import "fmt"` →
+    // `undefined: widgets` at `go build`). Unknown roots now reject at
+    // check time like every other unresolved value-position name; curated
+    // roots stay open (see m4_m5 test below).
+    rejects_with_e1001("fn main() {\n    x := foo.bar(1)\n    _ = x\n}\n");
+    rejects_with_e1001("fn main() {\n    _ = undefined_obj.field\n}\n");
+    // Curated roots (importless, emitter maps the import) stay accepted:
+    accepts_without_e1001("fn main() {\n    _ = hex.encode(\"ab\")\n}\n");
+    // Declared bindings under `.` stay accepted:
+    accepts_without_e1001(
+        "struct req { url string }\nfn main() {\n    var widgets req\n    _ = widgets.url\n}\n",
+    );
 }
 
 #[test]
