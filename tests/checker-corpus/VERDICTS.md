@@ -1038,3 +1038,22 @@ agreement, tripwire not fired**.
 
 With this registration the corpus is **122 programs: ACCEPT 38 ·
 ACCEPT-MANAGED 2 · REJECT 82** — main's 120 plus these two.
+
+-------------------------------------------------------------------------------
+
+### tests/checker-corpus/const-zero-divisor-const-forms-reject.hy (issue #758) — REJECT
+
+// The divisor predicate only inspected inline literals (`is_int_literal_zero`,
+
+
+-------------------------------------------------------------------------------
+
+### range-bound-type-forms-reject (issue #827) — REJECT
+
+// `non_integer_bound_kind` missed nil / bool-result operators / AddrOf,
+
+With this registration the corpus is **124 programs: ACCEPT 38 ·
+ACCEPT-MANAGED 2 · REJECT 84** — main's 122 plus these two, landed
+by the autonomous pipeline (bundles author-758 / author-827, landings
+0107658 / d0a2db5). Sibling-take credit: sonson0910's stale-base
+companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.

@@ -121,8 +121,36 @@ patch cannot weaken them.
 Scope: **3 unclaimed `soundness(hy-check)` issues from the top-2 classes**
 (no `[wildcard]`/`[tooling]` prefixes; smallest self-contained bodies;
 the final pick is recorded in the run log BEFORE any brain is invoked).
-Brains: `ornith-1.0-9B@kaggle` · `ornith-1.5-9B@kaggle` · one cloud model
-via the same OpenAI-compatible seam.
+Brains: `specialized` · `ornith-1.0-9B@kaggle` · `ornith-1.5-9B@kaggle` ·
+one cloud model via the same OpenAI-compatible seam.
+
+**Amendment (2026-10-22, recorded BEFORE any brain ran):** a fourth arm,
+`specialized` — a deterministic per-class template fitter (`tools/
+specialized_brain.py`, stdlib-only, $0, no LLM) whose template families
+are transplants of already-landed fix patterns (#998 const-map resolution,
+#999 place-base propagation, #926/#928 void-position guards). Rationale:
+the user's thesis "autoland + specialized functions could beat any LLM"
+is testable under the same frozen judge, and the fix shape of the top-2
+classes (guard extensions onto existing rules) favors it. Anti-Goodhart
+binding: templates stay CLASS-LEVEL — an issue whose fix cannot be
+expressed by a class template must BLOCK, never be hand-tailored. The
+judge metrics below are unchanged.
+
+**Amendment 2 (2026-10-22, still pre-run):** claim rule refined on
+evidence — a strict scan (`reports/assets/bakeoff-r1-claims.json`,
+ghost-fork repo) found ZERO unclaimed issues in the whole 63-issue top-2
+pool: the community companions every soundness issue within ~a day, then
+the PRs rot (`bot:stale-base`, 600+ commits behind). The bottleneck is
+stale-base decay, not authoring. Rule: a companion PR is a LIVE claim
+iff open AND not `bot:stale-base` AND not `bot:dup-of:*`; a stale-base
+companion is the repo's established revival lane — the issue may be
+harvested and the stale companion's author MUST be credited in the bundle
+meta + landing message (sibling takes, the #856/#960 precedent). Round-1
+pick (pre-run, in `reports/assets/bakeoff-r1-pick.json`): **#758 #823
+#827** — each a harvest-with-credit of a sonson0910 stale-base companion
+(#759/#824/#828). #1013 is OUT (live claim: #1014, no stale label);
+#817 rejected (premise partially stale — its gap 1 was landed by #998,
+whole-file baseline now REJECTs at HEAD).
 
 Judge (all pre-declared; anti-Goodhart: **no gate, harness scoring, or
 battery change during the bake-off**; results recorded even when ugly):
@@ -146,6 +174,48 @@ so in those words if it happens.
 - **over-reach escapes** (accept-corpus breakage) = hard negative
 - **Ghost-Fork P1/P2** recorded per landing (a dimension humans never measured)
 - **cost per landed fix** (Kaggle = $0 compute; cloud = $/bundle)
+
+## 6b. Round-1 result (2026-10-22) — the specialized arm landed two fixes
+
+**Arm A0 `specialized` (deterministic class-template fitter, no LLM, $0):
+2/2 issues authored READY in round 1 and LANDED through the unchanged
+autoland gates.**
+
+| judge metric (frozen §5) | #758 (T-E6001) | #827 (T-E2009) |
+|---|---|---|
+| bundle→READY rate (≤4 rounds) | 1 round | 1 round |
+| autoland gates | baseline ACCEPT → patched REJECT (HYB-E6001) ✓ | ACCEPT → REJECT (HYB-E2009) ✓ |
+| full battery | green (LAND-CONFIRMED 0107658) | green (LAND-CONFIRMED d0a2db5) |
+| over-reach escapes | 0 (accept controls clean) | 0 |
+| Ghost-Fork P1 seed before authoring | **NOT RUN** (protocol miss, recorded) | **NOT RUN** |
+| cost per landed fix | $0 compute, CPU-only | $0 |
+
+Latency: authoring ~minutes per issue (deterministic, no tokens); the two
+landings closed issues #758/#827 the same hour. Human baseline (last 10
+landings: 10/10 green, 0 reverts) is MET on this slice — 2/2 green, 0
+reverts, corpus 124/124, differential FULL 40/40+84/84, census clean.
+
+Honest record of the round: (a) #823 was dropped pre-run — its premise is
+partially stale (later-landed E1002 rules already cover 3 of its 6 repro
+cases at HEAD; whole-file baseline REJECTs); (b) #1013 was dropped — LIVE
+claim (companion PR #1014, not stale-base; contributor credit is
+non-negotiable); (c) the third pick could not exist: the strict claim scan
+found the whole 63-issue top-2 pool companioned, and only 2 had clean
+premises + stale-base-only companions; (d) the census was already drifting
+at HEAD (ci.yml + Makefile said 120, corpus held 122 — a #998/#999-landing
+miss) — repaired session-side before the author run; (e) the harness had
+pre-run bugs (cargo cwd in author_stage + autoland, difflib lineterm,
+import paths) — fixed and committed before any bundle was judged; (f)
+corpus-fixture registration is OUT of the author arm's scope by design —
+done session-side post-landing with sibling-take credit (sonson0910,
+#759/#828).
+
+Thesis status (user, 2026-10-22: "autoland plus specialized functions
+could beat any llm"): **supported on the measured slice** — the two classes
+holding 63.4% of the open bug mass are exactly where deterministic
+templates clear every gate at $0. The LLM arms (Ornith-1.0/1.5-9B, cloud)
+remain UNRUN and now target the RESIDUAL (issues outside the families),
+not the head classes.
 
 ## 7. Shipped today / not shipped
 
