@@ -281,6 +281,30 @@ fn is_fully_resolved(k: &OpKind) -> bool {
 /// callees and never reach this check.
 const LOWERED_METHOD_INTRINSICS: &[&str] = &["pop"];
 
+/// Mirror an assignment-target place back into expression form so the shared
+/// index/slice checks can resolve declared lengths of the base (issue #999).
+/// `None` means "cannot mirror" (address-of bases) — every caller stays
+/// fail-open exactly as before the mirror existed.
+fn place_as_expr(p: &Place) -> Option<Expr> {
+    Some(match &p.kind {
+        PlaceKind::Ident(name) => Expr::Ident {
+            name: name.clone(),
+            span: p.span,
+        },
+        PlaceKind::Index { base, index } => Expr::Index {
+            base: Box::new(place_as_expr(base)?),
+            index: Box::new(index.clone()),
+            span: p.span,
+        },
+        PlaceKind::Field { base, name } => Expr::Field {
+            base: Box::new(place_as_expr(base)?),
+            name: name.clone(),
+            span: p.span,
+        },
+        PlaceKind::AddrOf { .. } => return None,
+    })
+}
+
 /// One function-local binding that Go requires to be read: `:=`/`let`
 /// (checked since #185), `var`/`const` (PR #475), and the elidable
 /// `for`/`select` bindings (PR #536 — only diagnosed when written).
@@ -1066,7 +1090,14 @@ impl<'a> Collector<'a> {
                 self.expr(index);
                 let bk = self.kind_of_place(base);
                 let ik = self.kind_of_expr(index);
-                self.check_index_kind(&base.render(), None, &bk, index, &ik, p.span);
+                // Issue #999: pass the base as an expression so the constant
+                // index-bounds rule (fixed-size arrays, constant strings) can
+                // resolve the base's declared length on assignment places —
+                // the read path (`a[i]` in expression position) already does;
+                // the `None` here silently disabled the array-length lookup
+                // for `a[300] = 1` on a var-declared array.
+                let base_expr = place_as_expr(base);
+                self.check_index_kind(&base.render(), base_expr.as_ref(), &bk, index, &ik, p.span);
             }
             PlaceKind::Field { base, .. } => self.place_read(base),
             PlaceKind::AddrOf { base } => self.place_read(base),
