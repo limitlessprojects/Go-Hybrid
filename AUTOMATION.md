@@ -61,3 +61,17 @@ JSONL session log (W7). Kill switch: the `SHEPHERD_MODE` repo variable —
 unset means **dry-run** (read/comment/label only); mutations unlock at
 `live`. The two judgment calls stay human by design: stale-premise closes
 and real-conflict extraction. Full manual: **SHEPHERD.md**.
+
+## Autoland (session-31) — prepared fix bundles land themselves
+
+`tools/autoland.py` + the `autoland` workflow close the loop for the landing
+queue: a fix bundle at `automation/land-queue/<slug>/` (meta.json + fix.patch
++ repro.hy) is verified end-to-end and landed with no human awake — baseline
+ACCEPT → patch → patched REJECT with the expected code → full battery →
+commit (`Fixes #N`) → push-and-assert LAND-CONFIRMED → bundle consumed →
+shepherd log. Any gate failure records BLOCKED with evidence and lands
+nothing. Same kill switch as the shepherd: `SHEPHERD_MODE=live` unlocks
+landing; the default `dry-run` runs baseline checks only. Format, gates, and
+trust boundaries: `automation/land-queue/README.md`. The judgment work
+(authoring the fix + its tests + the corpus registration) stays with the
+agent sessions; everything mechanical after that is the machine's.
