@@ -161,5 +161,51 @@ class KagglePayloadTests(unittest.TestCase):
         self.submit("python3 -c \"print('''hello''')\"", push_exit=1)
 
 
+
+
+class EnvPinScriptTests(unittest.TestCase):
+    def _run_env_sh(self, go_ver, rust_ver, args=(), include_rg=False):
+        with tempfile.TemporaryDirectory() as tmp:
+            bindir = Path(tmp)
+            go_bin = bindir / "go"
+            go_bin.write_text(f"#!/usr/bin/env bash\necho '{go_ver}'\n", encoding="utf-8")
+            go_bin.chmod(0o755)
+            rust_bin = bindir / "rustc"
+            rust_bin.write_text(f"#!/usr/bin/env bash\necho '{rust_ver}'\n", encoding="utf-8")
+            rust_bin.chmod(0o755)
+            for tool in ("bash", "df", "free", "tail", "head", "awk", "nproc"):
+                for sysdir in ("/usr/bin", "/bin"):
+                    cand = Path(sysdir) / tool
+                    if cand.exists():
+                        (bindir / tool).symlink_to(cand)
+                        break
+            env = {"PATH": str(bindir), "HOME": tmp}
+            script = str(ROOT / "tools/env.sh")
+            cmd = f"export PATH='{bindir}'; " + " ".join([f"'{script}'"] + [f"'{a}'" for a in args])
+            return subprocess.run(["/bin/bash", "-c", f"set -e; source '{script}'; PATH='{bindir}'; " + (
+                "check" if args == ("--source-check",) else f"exec '{script}' " + " ".join(f"'{a}'" for a in args)
+            )], env=env, capture_output=True, text=True)
+
+    def test_env_sh_check_passes_without_rg_when_pins_match(self):
+        cases = json.loads((ROOT / "tools/tests/env_pin_cases.json").read_text(encoding="utf-8"))
+        res = self._run_env_sh(cases["valid"]["go"], cases["valid"]["rustc"], args=("--check",))
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertNotIn("WARN:", res.stdout)
+
+    def test_env_sh_check_rejects_suffix_prerelease_and_regex_dot_collisions(self):
+        cases = json.loads((ROOT / "tools/tests/env_pin_cases.json").read_text(encoding="utf-8"))
+        for bad in cases["invalid"]:
+            with self.subTest(case=bad["name"]):
+                res = self._run_env_sh(bad["go"], bad["rustc"], args=("--check",))
+                self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+                self.assertIn("WARN:", res.stdout)
+
+    def test_env_sh_rejects_unknown_flags(self):
+        cases = json.loads((ROOT / "tools/tests/env_pin_cases.json").read_text(encoding="utf-8"))
+        res = self._run_env_sh(cases["valid"]["go"], cases["valid"]["rustc"], args=("--bad-flag",))
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("usage: tools/env.sh [--check]", res.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

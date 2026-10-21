@@ -1,0 +1,25 @@
+{
+  "pinned_go": "go1.26.9",
+  "pinned_rust": "1.99.0",
+  "valid": {
+    "go": "go version go1.26.9 linux/amd64",
+    "rustc": "rustc 1.99.0 (stable 2026-09-28)"
+  },
+  "invalid": [
+    {
+      "name": "go_suffix_collision",
+      "go": "go version go1.26.90 linux/amd64",
+      "rustc": "rustc 1.99.0 (stable)"
+    },
+    {
+      "name": "rust_prerelease_collision",
+      "go": "go version go1.26.9 linux/amd64",
+      "rustc": "rustc 1.99.0-nightly (abc)"
+    },
+    {
+      "name": "go_regex_dot_collision",
+      "go": "go version go1X26.9 linux/amd64",
+      "rustc": "rustc 1.99.0 (stable)"
+    }
+  ]
+}

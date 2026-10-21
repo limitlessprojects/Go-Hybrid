@@ -1,0 +1,14 @@
+{
+  "required_exports": [
+    "PINNED_GO",
+    "PINNED_RUST",
+    "CARGO_BUILD_JOBS",
+    "GOFLAGS",
+    "MAKEFLAGS"
+  ],
+  "exit_codes": {
+    "ok": 0,
+    "mismatch": 1,
+    "usage": 2
+  }
+}

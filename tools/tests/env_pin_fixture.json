@@ -1,0 +1,10 @@
+{
+  "script": "tools/env.sh",
+  "supported_flags": [
+    "--check"
+  ],
+  "rejected_flags": [
+    "--unknown",
+    "--check --extra"
+  ]
+}

@@ -27,16 +27,51 @@ export KAGGLE_CLI="/home/z/.venv/bin/kaggle"
 #   flock /tmp/heavy.lock nice -n10 timeout <secs> <command>
 export HEAVY_LOCK="/tmp/heavy.lock"
 
+_match_token() {
+  local text="$1"
+  local token="$2"
+  case " $text " in
+    *" $token "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Verify pins quickly: `source tools/env.sh && tools/env.sh --check`
 check() {
-  go version 2>/dev/null | rg -q "$PINNED_GO" || echo "WARN: go != $PINNED_GO"
-  rustc --version 2>/dev/null | rg -q "$PINNED_RUST" || echo "WARN: rustc != $PINNED_RUST"
+  local status=0
+  local go_out rust_out
+  go_out="$(go version 2>/dev/null || true)"
+  rust_out="$(rustc --version 2>/dev/null || true)"
+  if ! _match_token "$go_out" "$PINNED_GO"; then
+    echo "WARN: go != $PINNED_GO"
+    status=1
+  fi
+  if ! _match_token "$rust_out" "$PINNED_RUST"; then
+    echo "WARN: rustc != $PINNED_RUST"
+    status=1
+  fi
   df -h / | tail -1
   free -m | head -2
+  return "$status"
 }
 
 # ==== inline check when invoked directly ====
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  if [[ $# -gt 1 ]]; then
+    echo "usage: tools/env.sh [--check]" >&2
+    exit 2
+  elif [[ $# -eq 1 ]]; then
+    case "$1" in
+      --check)
+        check
+        exit $?
+        ;;
+      *)
+        echo "usage: tools/env.sh [--check]" >&2
+        exit 2
+        ;;
+    esac
+  fi
   echo "Go:      $(go version 2>/dev/null || echo MISSING)"
   echo "Rust:    $(rustc --version 2>/dev/null || echo MISSING)"
   echo "Cargo:   $(cargo --version 2>/dev/null || echo MISSING)"
