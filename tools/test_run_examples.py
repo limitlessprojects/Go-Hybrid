@@ -203,5 +203,15 @@ class PackageModeExampleExitTests(unittest.TestCase):
         self.assertIn("FAIL 09-go-imports-hybrid (package build)", result.stdout)
 
 
+    def test_02_cli_cat_builds_once_and_rejects_error_path_stdout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r, cnt, hyb, mkt = Path(tmp), Path(tmp) / "c", Path(tmp) / "hyb", Path(tmp) / "mktemp"
+            cat_py = f"#!{sys.executable}\nimport os,pathlib,sys\np=pathlib.Path(sys.argv[1])\nif p.is_file(): sys.stdout.write(p.read_text()); sys.exit(0)\nif os.environ.get('LEAK')=='1': sys.stdout.write('leak\\n')\nsys.stderr.write(f'cat: open {{p}}: no such file or directory\\n'); sys.exit(1)\n"
+            hyb.write_text(f"#!{sys.executable}\nfrom pathlib import Path\nimport sys\nc=Path({str(cnt)!r}); c.write_text(str((int(c.read_text()) if c.exists() else 0)+1))\nt=Path(sys.argv[sys.argv.index('-o')+1]); t.write_text({cat_py!r}); t.chmod(0o755)\n", encoding="utf-8"); hyb.chmod(0o755)
+            mkt.write_text(f"#!{sys.executable}\nimport tempfile\nprint(tempfile.mkdtemp(dir={str(r)!r}))\n", encoding="utf-8"); mkt.chmod(0o755)
+            env = {**os.environ, "HYB_BIN": str(hyb), "TMPDIR": str(r), "PATH": str(r) + os.pathsep + os.environ.get("PATH", "")}
+            self.assertEqual((subprocess.run(["bash", str(ROOT / "tools/run_examples.sh"), "02-cli-cat"], env=env, capture_output=True, text=True).returncode, cnt.read_text()), (0, "1"))
+            self.assertEqual(subprocess.run(["bash", str(ROOT / "tools/run_examples.sh"), "02-cli-cat"], env={**env, "LEAK": "1"}, capture_output=True, text=True).returncode, 1)
+
 if __name__ == "__main__":
     unittest.main()

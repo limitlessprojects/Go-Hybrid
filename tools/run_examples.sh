@@ -42,7 +42,7 @@ run_example() {
 
     note "--- $name"
     # 09 is package mode (no main fn) — it builds its own workspace below.
-    if [ "$name" != "09-go-imports-hybrid" ]; then
+    if [ "$name" != "09-go-imports-hybrid" ] && [ "$name" != "02-cli-cat" ]; then
         if ! "$HYB" build "$prog" -o "$bin" >"$WORK/$name.build.log" 2>&1; then
             note "FAIL $name (build)"
             sed 's/^/    /' "$WORK/$name.build.log"
@@ -161,16 +161,17 @@ run_example() {
         "$catbin" "$missing" >"$WORK/$name.out2" 2>"$WORK/$name.err2"
         local rc=$?
         local want="cat: open $missing: no such file or directory"
-        if [ "$rc" -eq 1 ] && [ "$(cat "$WORK/$name.err2")" = "$want" ]; then
+        if [ "$rc" -eq 1 ] && [ ! -s "$WORK/$name.out2" ] && [ "$(cat "$WORK/$name.err2")" = "$want" ]; then
             note "PASS $name error path (E6: stderr + exit 1)"
         else
-            note "FAIL $name error path (rc=$rc, stderr: $(cat "$WORK/$name.err2"))"
+            note "FAIL $name error path (rc=$rc, stdout: $(cat "$WORK/$name.out2"), stderr: $(cat "$WORK/$name.err2"))"
             ok=0
         fi
         if [ "$ok" -eq 1 ]; then PASS="$PASS $name"; else FAIL=1; fi
         ;;
     *)
-        note "SKIP $name (not in the MVP-0 emittable set)"
+        note "FAIL $name (not in the MVP-0 emittable set)"
+        FAIL=1
         ;;
     esac
 }
