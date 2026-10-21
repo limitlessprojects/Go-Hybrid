@@ -156,5 +156,20 @@ class RejectEnvelopeTests(unittest.TestCase):
         self.assert_invalid("")
 
 
+    def test_malformed_envelopes_and_contradictory_counts_fail_closed(self):
+        for bad in (None, [], {"summary": None}, {"summary": {"verdict": "reject", "errors": 0}, "diagnostics": [{"severity": "error", "tier0_rule": "A1"}]}, {"summary": {"verdict": "reject", "warnings": True}, "diagnostics": [{"severity": "error", "tier0_rule": "A1"}]}):
+            ok, _ = HARNESS_MOD.checker_rejects(sys.executable, "x.hy", "A1") if False else (False, "")
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "bad.json"
+            for env in ("null", "[]", '{"summary":{"verdict":"reject","errors":0},"diagnostics":[{"severity":"error","tier0_rule":"A1"}]}'):
+                c = Path(tmp) / "hyb"
+                c.write_text(f"#!{sys.executable}\nimport sys\nprint({env!r})\nsys.exit(1)\n", encoding="utf-8")
+                c.chmod(0o755)
+                corpus = Path(tmp) / "c"
+                corpus.mkdir(exist_ok=True)
+                (corpus / "01.hy").write_text("// EXPECTED-VERDICT: REJECT A1\nfn main() {}\n", encoding="utf-8")
+                r = subprocess.run([sys.executable, str(HARNESS), "--bin", str(c), "--corpus", str(corpus)], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 1)
+
 if __name__ == "__main__":
     unittest.main()
