@@ -646,3 +646,101 @@ fn float_nonzero_divisor_stays_accepted() {
     }
 }
 
+#[test]
+fn named_const_integer_zero_divisor_is_rejected() {
+    let cases = [
+        "const zero = 0\nfn main() {\n    x := 10\n    y := x / zero\n    _ = y\n}\n",
+        "const zero = 0\nfn main() {\n    x := 10\n    x %= zero\n    _ = x\n}\n",
+        "const a = 3\nconst b = a - 3\nfn main() {\n    x := 10\n    x /= b\n    _ = x\n}\n",
+        "fn main() {\n    const z = 1 - 1\n    x := 10\n    y := x / z\n    _ = y\n}\n",
+    ];
+    for src in cases {
+        let r = check(src);
+        let cs = error_codes(&r);
+        assert!(
+            cs.iter().any(|c| c == "HYB-E6001"),
+            "expected HYB-E6001 for `{src}`, got {:?}",
+            cs
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+    }
+}
+
+#[test]
+fn shadowed_const_zero_by_runtime_binding_stays_accepted() {
+    let cases = [
+        "const zero = 0\nfn main() {\n    zero := 2\n    x := 10 / zero\n    _ = x\n}\n",
+        "const zero = 0\nfn f(zero int) int {\n    return 10 / zero\n}\nfn main() {\n    _ = f(2)\n}\n",
+    ];
+    for src in cases {
+        let r = check(src);
+        assert_eq!(
+            r.verdict,
+            Verdict::Accept,
+            "shadowed const must not trigger HYB-E6001 for `{src}`, diags: {:?}",
+            r.diagnostics
+        );
+    }
+}
+
+#[test]
+fn folded_float_and_named_const_float_zero_divisor_is_rejected() {
+    let cases = [
+        "fn main() {\n    _ = 1.0 / (1.0 - 1.0)\n}\n",
+        "fn main() {\n    _ = 1.0 / (0.0 * 5.0)\n}\n",
+        "fn main() {\n    _ = 1.0 / float64(0)\n}\n",
+        "fn main() {\n    _ = 1.0 / f64(1 - 1)\n}\n",
+        "const f_val = 1.0\nconst fz = 0.0\nfn main() {\n    _ = f_val / fz\n}\n",
+    ];
+    for src in cases {
+        let r = check(src);
+        let cs = error_codes(&r);
+        assert!(
+            cs.iter().any(|c| c == "HYB-E6001"),
+            "expected HYB-E6001 for `{src}`, got {:?}",
+            cs
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+    }
+}
+
+#[test]
+fn const_int_conversion_and_len_string_zero_divisor_is_rejected() {
+    let cases = [
+        "fn main() {\n    x := 10 / int(0)\n    _ = x\n}\n",
+        "fn main() {\n    x := 10 % int64(1 - 1)\n    _ = x\n}\n",
+        "fn main() {\n    x := 10 / (len(\"abc\") - 3)\n    _ = x\n}\n",
+        "const s_val = \"abc\"\nfn main() {\n    x := 10 % (len(s_val) - 3)\n    _ = x\n}\n",
+    ];
+    for src in cases {
+        let r = check(src);
+        let cs = error_codes(&r);
+        assert!(
+            cs.iter().any(|c| c == "HYB-E6001"),
+            "expected HYB-E6001 for `{src}`, got {:?}",
+            cs
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+    }
+}
+
+#[test]
+fn array_len_type_expr_div_by_zero_is_rejected() {
+    let cases = [
+        "fn main() {\n    var a [1 / 0]int\n    _ = a\n}\n",
+        "type arr = [1 / 0]int\nfn main() {}\n",
+        "struct s {\n    a [1 % 0]int\n}\nfn main() {}\n",
+        "fn f(a [1 / 0]int) {\n    _ = a\n}\nfn main() {}\n",
+        "fn main() {\n    _ = [1 / 0]int{}\n}\n",
+    ];
+    for src in cases {
+        let r = check(src);
+        let cs = error_codes(&r);
+        assert!(
+            cs.iter().any(|c| c == "HYB-E6001"),
+            "expected HYB-E6001 for `{src}`, got {:?}",
+            cs
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+    }
+}
