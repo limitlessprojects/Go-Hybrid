@@ -19,7 +19,9 @@ and to the workflow artifacts — as loud as success, outside the queue.
 
 Brain: any OpenAI-compatible chat endpoint (AUTHOR_API_BASE / AUTHOR_MODEL
 / AUTHOR_API_KEY) — e.g. a llama.cpp server hosting Ornith-1.0-9B GGUF on
-a Kaggle GPU kernel, or a cloud model. No brain configured = honest
+a Kaggle GPU kernel, or a cloud model — OR the deterministic arm
+`--brain specialized` (tools/specialized_brain.py: class-template fitter,
+no LLM, $0; AUTHOR-STAGE.md §5 amendment 1). No brain configured = honest
 BLOCKED before anything runs.
 
 Honesty rules (binding, mirror AUTOMATION.md):
@@ -59,6 +61,7 @@ import time
 import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+COMPILER = ROOT / "compiler"
 QUEUE = ROOT / "automation" / "land-queue"
 HYB = ROOT / "compiler" / "target" / "debug" / "hyb"
 BLOCKED_DIR = ROOT / "target" / "author-blocked"
@@ -192,7 +195,8 @@ def write_blocked(issue_no: int, trace: pathlib.Path, note: str) -> int:
     return 3
 
 
-def run_author(issue_no: int, out: pathlib.Path, max_rounds: int) -> int:
+def run_author(issue_no: int, out: pathlib.Path, max_rounds: int,
+               brain: str = "api") -> int:
     trace = pathlib.Path(tempfile.mkdtemp(prefix="author-stage-")) / "trace.log"
     if not QUEUE.resolve() in out.resolve().parents and out.resolve() != QUEUE.resolve():
         if not str(out).startswith(str(ROOT)):
@@ -201,9 +205,13 @@ def run_author(issue_no: int, out: pathlib.Path, max_rounds: int) -> int:
     if dirty():
         print("AUTHOR-STAGE-ERROR: working tree dirty — refusing to run (clean it first)")
         return 2
-    if not os.environ.get("AUTHOR_API_BASE") or not os.environ.get("AUTHOR_MODEL"):
+    if brain == "api" and not (
+        os.environ.get("AUTHOR_API_BASE") and os.environ.get("AUTHOR_MODEL")
+    ):
         return write_blocked(issue_no, trace,
                              "no brain configured (AUTHOR_API_BASE/AUTHOR_MODEL unset) — nothing authored")
+    if brain == "specialized":
+        os.environ.setdefault("AUTHOR_MODEL", "specialized")
     try:
         issue = api_get(f"/repos/{REPO}/issues/{issue_no}")
     except Exception as e:
@@ -235,7 +243,20 @@ def run_author(issue_no: int, out: pathlib.Path, max_rounds: int) -> int:
     for rnd in range(1, max_rounds + 1):
         tr(trace, "round", round=rnd)
         try:
-            resp = chat(render_messages(issue, feedback, files))
+            if brain == "specialized":
+                # Arm A0: the deterministic class-template fitter. It returns
+                # a completion-shaped response (```diff + rationale) or a
+                # no-diff rationale; the gates below are IDENTICAL for
+                # every arm (AUTHOR-STAGE.md §5).
+                try:
+                    from tools.specialized_brain import propose as sp_propose
+                except ImportError:
+                    from specialized_brain import propose as sp_propose
+                resp = sp_propose(issue_no, rnd, repro_src, expected, feedback)
+                if resp is None:
+                    resp = ""
+            else:
+                resp = chat(render_messages(issue, feedback, files))
         except Exception as e:
             tr(trace, "brain-error", round=rnd, error=str(e)[:300])
             feedback = f"brain call failed: {e}"
@@ -264,10 +285,13 @@ def run_author(issue_no: int, out: pathlib.Path, max_rounds: int) -> int:
                 applied = False
                 break
         if not applied:
+            tr(trace, "gate-apply-failed", round=rnd,
+               note=feedback[:200])
             revert_tree()
             continue
 
-        b = sh(["cargo", "build", "-p", "hyb", "--quiet"], timeout=1800)
+        b = sh(["cargo", "build", "-p", "hyb", "--quiet"], cwd=str(COMPILER),
+               timeout=1800)
         if b.returncode != 0:
             feedback = "cargo build -p hyb failed:\n" + (b.stderr or "")[-1500:]
             tr(trace, "gate-build-failed", round=rnd)
@@ -383,13 +407,16 @@ def main() -> int:
     pa.add_argument("--out", default=None,
                     help="bundle dir (default automation/land-queue/author-<N>)")
     pa.add_argument("--max-rounds", type=int, default=4)
+    pa.add_argument("--brain", choices=("api", "specialized"), default="api",
+                    help="api = OpenAI-compatible endpoint; specialized = "
+                         "the deterministic class-template fitter (arm A0)")
     sub.add_parser("selftest", help="plumbing self-test (no LLM, no repo mutation)")
     args = ap.parse_args()
     if args.cmd == "selftest":
         return selftest()
     out = pathlib.Path(args.out) if args.out else QUEUE / f"author-{args.issue}"
     try:
-        return run_author(args.issue, out, args.max_rounds)
+        return run_author(args.issue, out, args.max_rounds, brain=args.brain)
     except Exception as e:  # noqa: BLE001 — the honest-record path
         print(f"AUTHOR-STAGE-ERROR: {e}")
         return 1
