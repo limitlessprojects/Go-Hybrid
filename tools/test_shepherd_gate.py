@@ -117,5 +117,18 @@ class ProbeParser(unittest.TestCase):
         self.assertFalse(any("removed line" in ln for ln in added))
 
 
+    def test_merge_msg_recognizes_closes_and_resolves_keywords(self):
+        import tempfile, types
+        with tempfile.TemporaryDirectory() as td:
+            sf, bf = Path(td) / "s.txt", Path(td) / "b.txt"
+            orig_gh = sh.tb.Gh
+            sh.tb.Gh = lambda r, t: types.SimpleNamespace(repo=r, req=lambda m, p: (200, {"title": "fix x", "user": {"login": "u"}, "body": "Closes #582"}))
+            try:
+                sh.cmd_merge_msg(types.SimpleNamespace(pr=1088, subject_file=str(sf), body_file=str(bf), token_file=__file__, token_env=None))
+            finally:
+                sh.tb.Gh = orig_gh
+            self.assertIn("fixes #582", sf.read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -469,7 +469,7 @@ def cmd_merge_msg(args):
     title = (pr.get("title") or "")[:120]
     author = (pr.get("user") or {}).get("login", "unknown")
     body = pr.get("body") or ""
-    fixes = re.findall(r"[fF]ix(?:e[sd]?|ing)?\s+#(\d+)", body)
+    fixes = re.findall(r"(?:[fF]ix(?:e[sd]?|ing)?|[cC]los(?:e[sd]?|ing)|[rR]esolv(?:e[sd]?|ing))\s+#(\d+)", body)
     fixpart = ("fixes #%s" % fixes[0]) if fixes else "refs #%d" % args.pr
     subject = "Merge pr-%d (%s, %s): %s" % (args.pr, author, fixpart, title)
     trailer = ("Original-author: @%s\nVerified-by: Shepherd W5 (%s)\n"
