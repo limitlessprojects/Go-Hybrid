@@ -518,6 +518,7 @@ impl<'a> Checker<'a> {
                 entries,
                 ..
             } => {
+                self.check_map_key_type(key);
                 self.check_type_expr_with_state(Some(st), key);
                 self.check_type_expr_with_state(Some(st), value);
                 let key_ty = *key.clone();
@@ -811,6 +812,33 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// A map key type must be comparable: Go rejects `map[[]int]V`,
+    /// `map[map[K]V]V2`, `map[fn()]V`, and arrays/structs carrying one with
+    /// `invalid map key type …` (HYB-E2006). Same proven-incomparable
+    /// shapes as `==` above; unknown and type-parameter keys stay accepted.
+    pub(crate) fn check_map_key_type(&mut self, key: &TypeExpr) {
+        let shape = self.shape_of_type(key);
+        let Some(noun) = self.incomparable_noun(&shape) else {
+            return;
+        };
+        let msg = format!(
+            "invalid map key type `{}` ({} is not comparable) — Go rejects the emitted map type at compile time (HYB-E2006)",
+            key.render(),
+            noun
+        );
+        self.diags.push(
+            Diagnostic::error("HYB-E2006", self.path.clone(), key.span(), msg).with_notes(vec![
+                "why: Go map keys must support `==` (`invalid map key type`); slices, maps, and function values, and arrays or structs carrying one, do not".to_string(),
+                match noun {
+                    "slice" => "fix: key by a comparable form — a fixed-size array (`[N]T`), a joined string, or an index".to_string(),
+                    "map" => "fix: key by a comparable identifier for the inner map (a name or id), not the map itself".to_string(),
+                    "function value" => "fix: key by a name or id for the function, not the function value".to_string(),
+                    _ => "fix: key by a struct whose fields are all comparable (drop or replace the slice/map/func field)".to_string(),
+                },
+            ]),
+        );
+    }
+
     // ------------------------------------------------------------------
     // B4 — constant negative shift counts (HYB-E6005)
     // ------------------------------------------------------------------
@@ -1001,6 +1029,7 @@ impl<'a> Checker<'a> {
             | TypeExpr::Option { elem: to, .. }
             | TypeExpr::Chan { elem: to, .. } => self.check_type_expr_with_state(st, to),
             TypeExpr::Map { key, value, .. } => {
+                self.check_map_key_type(key);
                 self.check_type_expr_with_state(st, key);
                 self.check_type_expr_with_state(st, value);
             }
