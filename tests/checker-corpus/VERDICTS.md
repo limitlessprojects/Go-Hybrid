@@ -1006,3 +1006,35 @@ Reproduction (branch tree, pinned rustc 1.99.0 / go1.26.9):
 With this registration the corpus is **114 programs: ACCEPT 35 ·
 ACCEPT-MANAGED 2 · REJECT 77** — main's 113 plus this one.
 
+
+## Additive corpus registration — 2026-10-21: named-const assignment overflow + var-array assignment index bound (issues #998/#999)
+
+Two REJECT fixtures, both oracle-found (W-023, INVARIANT-4) and both landing in
+the same round as their fixes:
+
+1. **`typed-const-assign-overflow-reject.hy`** (issue #998, HYB-E6002): the
+   assignment twin of the W10 declaration fold — `x = k` with
+   `const k = 70000` on `var x int16` passed `hyb check` with 0 diagnostics
+   while the literal form (`n = 300`) rejected; the assign-side fold saw the
+   named const as `NotConst`. The fix shares the declaration path's
+   const-map fold (`const_int_fold_with`). Local controls: `x = 5` (fits)
+   and `y = k` into `int32` (fits) stay clean in-fixture.
+2. **`array-const-index-assign-reject.hy`** (issue #999, HYB-E1002): the
+   write-path twin of the #910 read-path rule — `a[300] = 1` on
+   `var a [2]int` passed clean because `place_read` passed no base
+   expression to `check_index_kind`, silently disabling the length lookup
+   for every store form. The fix mirrors the base place into expression
+   form. Local control: `a[1] = 1` stays clean in-fixture; the slice fence
+   stays `control-slice-index-past-length.hy`.
+
+Both rejects were reproduced as real `go build` failures by the oracle runs
+pre-fix (accepted on main d7ab63a and ec3fe0b), and both flip to REJECT on
+the fixed tree (pinned rustc 1.99.0 / go1.26.9). The Ghost-Fork counterfactual
+experiment additionally applied both fix patches to a disposable worktree at
+the pre-fix tip and observed the repro flip (reports 12-scoring, session-31).
+
+`python3 tools/corpus_harness.py --bin <fixed hyb>` reports **122/122 verdict
+agreement, tripwire not fired**.
+
+With this registration the corpus is **122 programs: ACCEPT 38 ·
+ACCEPT-MANAGED 2 · REJECT 82** — main's 120 plus these two.
