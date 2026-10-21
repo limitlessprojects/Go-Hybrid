@@ -80,6 +80,8 @@ def scan_file(path):
             for n, line in enumerate(f, 1):
                 stripped = line.rstrip("\n")
                 if START_RE.match(stripped):
+                    if open_start is not None:
+                        hits.append(open_start)
                     open_start = (n, stripped)
                 elif END_RE.match(stripped) and open_start is not None:
                     hits.append(open_start)
@@ -120,8 +122,8 @@ def scan_workflow_file(path):
                 if TOP_LEVEL_KEY_RE.match(stripped):
                     continue
                 hits.append((n, stripped))
-    except (UnicodeDecodeError, OSError):
-        return []
+    except (UnicodeDecodeError, OSError) as exc:
+        return [(1, f"<unreadable workflow: {exc}>")]
     return hits
 
 

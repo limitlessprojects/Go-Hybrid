@@ -237,5 +237,16 @@ class CliTests(unittest.TestCase):
             self.assertIn("conflict marker", res.stderr.lower())
 
 
+    def test_nested_start_markers_and_unreadable_workflow_are_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.md").write_text("<<<<<<< a\n1\n<<<<<<< b\n2\n>>>>>>> c\n", encoding="utf-8")
+            wf = root / ".github/workflows/ci.yml"
+            wf.parent.mkdir(parents=True)
+            wf.write_bytes(b"\xff\xfe\n")
+            hits = list(MOD.scan(str(root)))
+            self.assertEqual([h[1] for h in hits if h[3] == "marker"], [1, 3])
+            self.assertEqual([h[3] for h in hits if h[3] == "workflow"], ["workflow"])
+
 if __name__ == "__main__":
     unittest.main()
