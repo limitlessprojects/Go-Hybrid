@@ -2655,7 +2655,15 @@ impl<'a> Checker<'a> {
         collect_ref_roots(&src.value, &mut src_roots);
         for d in &dst_roots {
             for s in &src_roots {
-                if d != s && self.binding_may_share(st, d) && self.binding_may_share(st, s) {
+                // pr-319 (#318): a source element that slices an addressable
+                // primitive array (`copy(dst, [][]int{arr[:]})`) copies a
+                // slice header viewing `arr` itself, even though `[N]int`
+                // alone never `shape_may_share`s.
+                if d != s
+                    && self.binding_may_share(st, d)
+                    && (self.binding_may_share(st, s)
+                        || self.expr_slices_addressable_array(st, &src.value, s))
+                {
                     st.share_edge(d, s);
                 }
             }
@@ -2752,9 +2760,17 @@ impl<'a> Checker<'a> {
                     continue;
                 }
                 for s in &src_roots {
+                    // pr-319 (#318): an argument slicing an addressable
+                    // primitive array (`store_slice(dst, arr[:])`) hands the
+                    // callee a view of `arr` itself.
+                    let slices_arr = matches!(
+                        src_src,
+                        CalleeSlotSource::Arg(e) if self.expr_slices_addressable_array(st, e, s)
+                    );
                     if d != s
                         && (self.binding_may_share(st, s)
-                            || self.lookup_binding(st, s).is_some_and(|b| b.immutable))
+                            || self.lookup_binding(st, s).is_some_and(|b| b.immutable)
+                            || slices_arr)
                     {
                         st.share_edge(d, s);
                     }
