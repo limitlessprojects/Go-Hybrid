@@ -59,7 +59,7 @@ NEST_SHAPES = [
     "managed {{ {body} }}",
 ]
 
-BAD_TEXT = ("panicked at", "internal compiler error", "stack overflow")
+BAD_TEXT = ("panicked at", "internal compiler error", "stack overflow", "fatal runtime error")
 
 
 def gen_salad(rng, n):
@@ -71,7 +71,9 @@ def load_corpus(corpus_dir):
     for f in sorted(os.listdir(corpus_dir)):
         if f.endswith(".hy"):
             with open(os.path.join(corpus_dir, f), encoding="utf-8") as fh:
-                progs.append(fh.read())
+                txt = fh.read()
+                if txt.strip():
+                    progs.append(txt)
     return progs
 
 

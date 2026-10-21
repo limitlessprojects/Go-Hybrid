@@ -262,5 +262,16 @@ class FuzzInputValidationTests(unittest.TestCase):
                 hyfuzz.main()
 
 
+    def test_fatal_runtime_error_and_blank_corpus_fail_closed(self):
+        with tempfile.TemporaryDirectory() as workdir, patch.object(
+            hyfuzz.subprocess, "run",
+            return_value=subprocess.CompletedProcess([], 1, "", "fatal runtime error: abort"),
+        ):
+            bad, ok = hyfuzz.check_one("hyb", "fn main() {}", workdir, 1)
+            self.assertTrue(bad and bad.startswith("ICE:"))
+            self.assertFalse(ok)
+            (Path(workdir) / "case.hy").write_text("   \n", encoding="utf-8")
+            self.assertEqual(hyfuzz.load_corpus(workdir), [])
+
 if __name__ == "__main__":
     unittest.main()
