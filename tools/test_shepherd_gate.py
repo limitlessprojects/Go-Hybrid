@@ -117,5 +117,18 @@ class ProbeParser(unittest.TestCase):
         self.assertFalse(any("removed line" in ln for ln in added))
 
 
+    def test_triage_collect_skips_compare_on_current_base_and_caches_merge_base(self):
+        import types
+        calls = []
+        def fake_get(p):
+            calls.append(p)
+            if p.endswith("/commits/main"): return {"sha": "m1"}
+            if "/pulls/" in p: return {"mergeable": True, "mergeable_state": "clean"}
+            return {"behind_by": 2, "merge_base_commit": {"sha": "mb0"}, "files": [{"filename": "a.py"}]}
+        gh = types.SimpleNamespace(repo="o/r", get=fake_get, paginate=lambda p: [{"number": 1, "title": "t", "user": {"login": "u"}, "created_at": "2026-10-21T00:00:00Z", "updated_at": "2026-10-21T00:00:00Z", "draft": False, "base": {"sha": "m1"}, "head": {"sha": "h1"}}, {"number": 2, "title": "t2", "user": {"login": "u"}, "created_at": "2026-10-21T00:00:00Z", "updated_at": "2026-10-21T00:00:00Z", "draft": False, "base": {"sha": "old"}, "head": {"sha": "h2"}}, {"number": 3, "title": "t3", "user": {"login": "u"}, "created_at": "2026-10-21T00:00:00Z", "updated_at": "2026-10-21T00:00:00Z", "draft": False, "base": {"sha": "old"}, "head": {"sha": "h3"}}] if "state=open" in p else [{"filename": "a.py", "additions": 1, "deletions": 0}])
+        items, _ = sh.tb.collect({}, gh, types.SimpleNamespace(jobs=1))
+        self.assertEqual([sum("compare/m1...h1" in c for c in calls), sum("compare/mb0...m1" in c for c in calls), len(items)], [0, 1, 3])
+
+
 if __name__ == "__main__":
     unittest.main()

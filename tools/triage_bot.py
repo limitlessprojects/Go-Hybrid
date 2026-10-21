@@ -183,7 +183,7 @@ def collect(cfg, gh, args):
     # overlap detection via the main-side compare is only worth its cost inside
     # the actionable rebase window; a PR 600 commits behind is a stale-base
     # close-candidate regardless of overlap.
-    overlap_window = 100
+    overlap_window, mb_cache = 100, {}
 
     def one(pr):
         n = pr["number"]
@@ -194,15 +194,16 @@ def collect(cfg, gh, args):
         adds = sum(f.get("additions", 0) or 0 for f in files)
         dels = sum(f.get("deletions", 0) or 0 for f in files)
 
-        behind_by, overlap_paths, merge_base = 0, set(), None
-        cmp1 = gh.get("/repos/%s/compare/%s...%s" % (gh.repo, main_sha, pr["head"]["sha"]))
+        behind_by, overlap_paths, merge_base = 0, set(), main_sha
+        cmp1 = None if (pr.get("base") or {}).get("sha") == main_sha else gh.get("/repos/%s/compare/%s...%s" % (gh.repo, main_sha, pr["head"]["sha"]))
         if cmp1:
             behind_by = cmp1.get("behind_by", 0) or 0
             merge_base = (cmp1.get("merge_base_commit") or {}).get("sha")
             if 0 < behind_by <= overlap_window and merge_base:
-                cmp2 = gh.get("/repos/%s/compare/%s...%s?per_page=250" % (gh.repo, merge_base, main_sha))
-                main_paths = {f["filename"] for f in (cmp2 or {}).get("files", [])}
-                overlap_paths = pset & main_paths
+                if merge_base not in mb_cache:
+                    cmp2 = gh.get("/repos/%s/compare/%s...%s?per_page=250" % (gh.repo, merge_base, main_sha))
+                    mb_cache[merge_base] = {f["filename"] for f in (cmp2 or {}).get("files", [])}
+                overlap_paths = pset & mb_cache[merge_base]
         return {
             "number": n,
             "title": pr["title"][:90],
