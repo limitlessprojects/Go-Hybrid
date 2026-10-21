@@ -217,6 +217,42 @@ templates clear every gate at $0. The LLM arms (Ornith-1.0/1.5-9B, cloud)
 remain UNRUN and now target the RESIDUAL (issues outside the families),
 not the head classes.
 
+## 6c. Round-2 result (2026-10-22) — the class family landed three issues
+
+**Arm A0 `specialized` round 2: 2/2 bundles authored READY in one round,
+LANDED through the unchanged autoland gates; a third pick (#903) closed as
+a subsumed sibling take with credit. Cumulative: 4/4 landings green, 0
+over-reach, 0 reverts, $0.**
+
+| judge metric (frozen §5) | #929 (T-EBIND tuple-guards) | #905 (T-EBIND buildable-guards) |
+|---|---|---|
+| bundle→READY rate (≤4 rounds) | 1 round | 1 round |
+| autoland gates | baseline ACCEPT → patched REJECT (HYB-E2002) ✓ | ACCEPT → REJECT (HYB-E1002) ✓ |
+| full battery | green (98fe6c2) | green (3f671b3) |
+| over-reach escapes | 0 | 0 (one over-reach caught pre-gate by the accept-corpus tripwire — `Try` misclassification — fixed in the template, regression test pins it) |
+| Ghost-Fork P1 seed before authoring | **seeded** (round-1's miss repaired) | **seeded** |
+| cost per landed fix | $0 | $0 |
+
+Round-2 specifics (full evidence: ghost-fork `reports/13-queue-study-
+score-r2.md`): (a) the pick was frozen pre-run (`bakeoff-r2-pick.json` —
+the entire queue head is stale-base companioned; premises verified fresh
+at 535e39c: 11/11 repros ACCEPT, 8/8 accept controls); (b) #903 closed
+with credit (all six repro forms verified REJECT on the landed tree);
+(c) the autoland **workflow's** live push is blocked by branch
+protection (GH006, non-admin token + required checks) — both landings ran
+`autoland.py` session-side with the same gates, and the transport fix
+(bundle → PR → required checks → auto-merge) is the NEXT-session
+infrastructure item; (d) autoland's baseline gate caught issue #905's
+never-clean verbatim repro fence (`AUTOLAND-STALE-PREMISE`) — sanitized
+session-side with a meta note, class shapes untouched; (e) sibling-take
+credits: magomedta (PR #930, #906, plus the reports), rickymulya (PR
+#904). Corpus 126 (38/2/86), census 8/8 surfaces.
+
+Thesis status: **holding on the measured slice** — four deterministic
+landings across two rounds, all classes from the 63.4% top-2 mass, at $0
+with zero over-reach. The LLM arms remain UNRUN and scoped to the
+residual.
+
 ## 7. Shipped today / not shipped
 
 Shipped: `tools/author_stage.py` (v0, selftest green, stdlib-only),
