@@ -1934,7 +1934,30 @@ impl<'a> Collector<'a> {
             },
             Expr::Field { base, name, .. } => {
                 let bk = self.kind_of_expr(base);
-                self.struct_field_kind(&bk, name).unwrap_or(OpKind::Unknown)
+                if let Some(k) = self.struct_field_kind(&bk, name) {
+                    return k;
+                }
+                // #682 U1: a method value (`f := z.add`) is a function value
+                // whose receiver is already bound, so its arity is the
+                // declaration's parameter count — exactly what `OpKind::Fn`'s
+                // count slot carries for closures. Without this the binding
+                // fell through to `Unknown` (fail-open) and `f(1, 2)` reached
+                // emission, where Go refuses `too many arguments in call to f`.
+                let head = Checker::base_named_type_str(name);
+                if let Some(sn) = self.struct_base_name(&bk) {
+                    if let Some(m) = self.ck.method_decls.get(&(sn, head.to_string())) {
+                        if m.type_params.is_empty() {
+                            return OpKind::Fn(
+                                m.results
+                                    .iter()
+                                    .map(|r| self.kind_of_ty(&r.ty, 0))
+                                    .collect(),
+                                Some(m.params.len()),
+                            );
+                        }
+                    }
+                }
+                OpKind::Unknown
             }
             Expr::StructLit { ty, .. } => ty
                 .as_ref()
