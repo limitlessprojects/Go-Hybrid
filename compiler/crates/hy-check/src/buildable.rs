@@ -326,6 +326,14 @@ struct Collector<'a> {
     /// Every identifier mentioned in the file plus every dotted type root —
     /// the import-usage set (the emitter's declared-import header needs it).
     roots: HashSet<String>,
+    /// #777: does the emitted Go force the `option` prelude in? Set by
+    /// `TypeExpr::Option`, a bracketed `option[..]` type, or a `some`/`none`
+    /// mention — the same three things `hy-emit`'s `needs_option` keys on.
+    uses_option_surface: bool,
+    /// #777: does the emitted Go force the `set` prelude in? Set by a
+    /// bracketed `set[..]` type or an `.insert`/`.remove`/`.contains` call —
+    /// the same things `hy-emit`'s `needs_set` keys on.
+    uses_set_surface: bool,
     diags: Vec<Diagnostic>,
     path: String,
 }
@@ -347,6 +355,8 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             select_depth: 0,
             defines: Vec::new(),
             roots: HashSet::new(),
+            uses_option_surface: false,
+            uses_set_surface: false,
             diags: Vec::new(),
             path: ck.path.clone(),
         };
@@ -383,6 +393,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
                 Decl::Fn(f) => c.fn_decl(f),
             }
         }
+        c.check_prelude_name_collisions(file);
         c.check_imports(file);
         c.finish();
         c.diags
@@ -1078,6 +1089,10 @@ impl<'a> Collector<'a> {
     fn expr(&mut self, e: &Expr) {
         match e {
             Expr::Ident { name, span } => {
+                // #777: record the prelude surface this name reaches BEFORE the
+                // value-position check runs, so a `some` that only ever reads
+                // the prelude is still seen as using it.
+                self.note_prelude_surface_ident(name);
                 self.read(name);
                 // #778: a value position, so a type name here cannot build.
                 self.check_type_name_in_value_position(name, *span);
@@ -1138,6 +1153,7 @@ impl<'a> Collector<'a> {
             // interface is not a struct — so reject the base explicitly.
             Expr::Field { base, name, span } => {
                 self.check_pointer_method_receiver(base, name, *span);
+                self.note_prelude_surface_member(name);
                 if matches!(self.kind_of_expr(base), OpKind::Interface) {
                     self.emit_e1002(
                         *span,
@@ -1162,7 +1178,13 @@ impl<'a> Collector<'a> {
                 // fixture. An identifier base is read for used-marking; a
                 // deeper base (a call result, an index) recurses normally.
                 match unwrap_parens(base) {
-                    Expr::Ident { name, .. } => self.read(name),
+                    Expr::Ident { name, .. } => {
+                        // #777: read-only here, so `note_prelude_surface_member`
+                        // never fires for `o.unwrap()`. Without this the set
+                        // prelude's three methods read clean next to `fn insert`.
+                        self.note_prelude_surface_member(name);
+                        self.read(name);
+                    }
                     other => self.expr(other),
                 }
             }
@@ -1175,7 +1197,15 @@ impl<'a> Collector<'a> {
                 // must not fire there. `read` still runs, because an unused
                 // local closure called as `f()` has been read.
                 match unwrap_parens(callee) {
-                    Expr::Ident { name, .. } => self.read(name),
+                    Expr::Ident { name, .. } => {
+                        // #777: `some(3)` is a CALLEE, so this branch never
+                        // reaches the value-position walk — but the call still
+                        // pulls the option prelude in. Note the surface here
+                        // or `fn panic` alongside `o.unwrap()` reads clean and
+                        // then fails `go build` on the prelude's own `panic`.
+                        self.note_prelude_surface_ident(name);
+                        self.read(name);
+                    }
                     other => self.expr(other),
                 }
                 // `new(T)` and `make(T, len, cap)` take a TYPE as their FIRST
@@ -1310,6 +1340,7 @@ impl<'a> Collector<'a> {
     fn ty(&mut self, t: &TypeExpr) {
         match t {
             TypeExpr::Named { name, span } => {
+                self.note_prelude_surface_type(name);
                 self.record_type_name_roots(name);
                 self.check_named_type_instantiation(name, *span);
             }
@@ -1326,7 +1357,10 @@ impl<'a> Collector<'a> {
                 self.ty(value);
             }
             TypeExpr::Chan { elem, .. } => self.ty(elem),
-            TypeExpr::Option { elem, .. } => self.ty(elem),
+            TypeExpr::Option { elem, .. } => {
+                self.uses_option_surface = true;
+                self.ty(elem);
+            }
             TypeExpr::Fn {
                 params, results, ..
             } => {
@@ -1335,6 +1369,138 @@ impl<'a> Collector<'a> {
                 }
                 for r in results {
                     self.ty(r);
+                }
+            }
+        }
+    }
+
+    /// #777: note that the emitted Go will pull in a prelude whose
+    /// declarations (or whose body's builtin calls) can collide with a user
+    /// top-level name. The three signals below mirror `hy-emit`'s prelude
+    /// predicate — `needs_option` / `needs_set` in `Emitter::finish` — and
+    /// the correspondence is pinned by `prelude_name_collision.rs`.
+    fn note_prelude_surface_ident(&mut self, name: &str) {
+        // `some(v)` lowers to the option prelude's constructor and `none` to
+        // its zero value; both put `some(` / `option[` in the emitted body.
+        if name == "some" || name == "none" {
+            self.uses_option_surface = true;
+        }
+    }
+
+    fn note_prelude_surface_member(&mut self, member: &str) {
+        // SET_PRELUDE declares exactly these three methods on `set`, and the
+        // emitter's `needs_set` test keys on the same three spellings.
+        if matches!(member, "insert" | "remove" | "contains") {
+            self.uses_set_surface = true;
+        }
+    }
+
+    fn note_prelude_surface_type(&mut self, name: &str) {
+        // Bracketed spellings only. `option[T]` / `set[T]` force the prelude
+        // in; a bare `option` (a user struct) does not — keeping that
+        // distinction is what lets the `struct option` control stay accepted.
+        if name.contains("option[") {
+            self.uses_option_surface = true;
+        }
+        if name.contains("set[") {
+            self.uses_set_surface = true;
+        }
+    }
+
+    /// #777 — the emitted Go prepends a prelude (`OPTION_PRELUDE`,
+    /// `SET_PRELUDE`, `POP_PRELUDE`) into the same file as the user's
+    /// declarations whenever the program uses the matching surface. A user
+    /// top-level name the prelude declares — or a predeclared identifier the
+    /// prelude's body calls — therefore makes the file unbuildable even
+    /// though `hyb check` reported 0 diagnostics. Two shapes, both rejected
+    /// as HYB-E1002 (rule `BUILDABLE`):
+    ///
+    ///   1. **redeclaration** — the prelude declares `option`, `some`, `set`
+    ///      and `hy_pop` at package scope, so a user declaration of one of
+    ///      those names is `redeclared in this block`;
+    ///   2. **predeclared capture** — a package-level `make` / `len` /
+    ///      `delete` / `panic` shadows the builtin for the WHOLE emitted
+    ///      file, so the prelude's own body resolves its call to the user's
+    ///      declaration (`cannot use s.m (variable of type map[t]struct{})
+    ///      as []int value in argument to len`).
+    ///
+    /// `some` and `hy_pop` are rejected unconditionally: the declaration
+    /// spelling itself (`func some(`, `func hy_pop(`) is what trips the
+    /// emitter's substring test, so the prelude is injected for *any*
+    /// program that declares them. Every other name is gated on the surface
+    /// that pulls its prelude in — a bare `fn set` with no set surface emits
+    /// no prelude and must stay accepted.
+    fn check_prelude_name_collisions(&mut self, file: &File) {
+        // Names the preludes declare, and the prelude each one belongs to.
+        // `None` in the gate column = always collides.
+        const DECLARED: &[(&str, Option<bool>)] = &[
+            // (name, Some(true)=needs option surface, Some(false)=needs set
+            // surface, None=unconditional)
+            ("some", None),
+            ("hy_pop", None),
+            ("option", Some(true)),
+            ("set", Some(false)),
+        ];
+        // Predeclared identifiers the prelude BODIES call, with the prelude
+        // that calls them: SET_PRELUDE calls make/len/delete, OPTION_PRELUDE
+        // calls panic.
+        const CAPTURED: &[(&str, bool)] = &[
+            ("make", false),
+            ("len", false),
+            ("delete", false),
+            ("panic", true),
+        ];
+
+        for d in &file.decls {
+            let (name, span) = match d {
+                Decl::Const(c) => (&c.name, c.span),
+                Decl::Struct(s) => (&s.name, s.span),
+                Decl::Enum(e) => (&e.name, e.span),
+                Decl::TypeAlias(t) => (&t.name, t.span),
+                // A method is emitted as `func (r T) name(...)`, which does
+                // not collide with the prelude's package-scope `func name`.
+                // Struct-associated `fn S.f` lowers to `S_f`.
+                Decl::Fn(f) if f.receiver.is_none() && !f.name.contains('.') => {
+                    (&f.name, f.span)
+                }
+                _ => continue,
+            };
+
+            if let Some((_, gate)) = DECLARED.iter().find(|(n, _)| n == name) {
+                let fires = match gate {
+                    None => true,
+                    Some(true) => self.uses_option_surface,
+                    Some(false) => self.uses_set_surface,
+                };
+                if fires {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`{}` is a reserved prelude name — the emitted Go declares it at package scope, so this declaration is `{} redeclared in this block` (HYB-E1002)",
+                            name, name
+                        ),
+                        "rename this declaration: `option`, `some`, `set` and `hy_pop` are reserved by the prelude the emitter injects",
+                    );
+                }
+                continue;
+            }
+
+            if let Some((_, needs_option)) = CAPTURED.iter().find(|(n, _)| n == name) {
+                let fires = if *needs_option {
+                    self.uses_option_surface
+                } else {
+                    self.uses_set_surface
+                };
+                if fires {
+                    let prelude = if *needs_option { "option" } else { "set" };
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "a package-level `{}` shadows the predeclared `{}` for the whole emitted file, including the injected {} prelude's own call to it — Go refuses the result (HYB-E1002)",
+                            name, name, prelude
+                        ),
+                        "rename this declaration: the prelude's body calls builtins unqualified, so a package-scope declaration of the same name captures it",
+                    );
                 }
             }
         }

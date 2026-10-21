@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 120 programs — ACCEPT 38 · ACCEPT-MANAGED 2 · REJECT 80 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
-**Current registered corpus: 120 programs — ACCEPT 38 · ACCEPT-MANAGED 2 · REJECT 80 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 124 programs — ACCEPT 40 · ACCEPT-MANAGED 2 · REJECT 82 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 124 programs — ACCEPT 40 · ACCEPT-MANAGED 2 · REJECT 82 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -301,3 +301,26 @@ in `hy-check/tests/type_name_in_value_position.rs` (13 tests).
 
 With this registration the corpus is **120 programs: ACCEPT 38 ·
 ACCEPT-MANAGED 2 · REJECT 80** — main's 118 plus these two.
+
+`prelude-name-collision-reject.hy`, `prelude-predeclared-capture-reject.hy`,
+`prelude-name-collision-controls-accept.hy`,
+`prelude-method-name-controls-accept.hy` — issue #777: a **top-level name the
+emitted prelude already declares or captures**. The emitter generates a fixed
+prelude per program (`option`, `set`, `len`, `some`, …), so a user program that
+binds one of those names shadows it: the program checks clean and then fails
+`go build` with `option redeclared in this block`.
+
+The rule is **gated on prelude surface use**, and the gate is the point. The
+first version was unconditional and rejected five buildable programs at once —
+a bare `struct option`, a `fn set` that never touches the set surface, a `fn
+len`, a METHOD named `some`, and `fn holder.some`. A user name only collides if
+the program actually reaches the prelude binding it would shadow, so the walk
+records `uses_option_surface` / `uses_set_surface` and the gate lets those five
+through. Regression pins live in `hy-check/tests/prelude_name_collision.rs`
+(13 tests: 7 reject, 6 accept — including the three over-rejection fences
+`user_fn_set_without_set_surface_is_accepted`,
+`user_struct_option_without_option_surface_is_accepted` and
+`user_fn_len_without_set_surface_is_accepted`).
+
+With this registration the corpus is **124 programs: ACCEPT 40 ·
+ACCEPT-MANAGED 2 · REJECT 82** — main's 120 plus these four.
