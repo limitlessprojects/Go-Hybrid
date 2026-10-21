@@ -178,5 +178,14 @@ output.chmod(0o755)
         self.assertEqual(first.returncode, 0, stdout + stderr)
 
 
+    def test_relative_csv_resolves_against_caller_cwd_and_extra_args_fail(self):
+        sub = self.root / "caller"
+        sub.mkdir()
+        ok = subprocess.run(["bash", str(self.runner), "out.csv"], env=self.triplet_env(), cwd=sub, capture_output=True, text=True, timeout=15)
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        self.assertTrue((sub / "out.csv").is_file())
+        bad = subprocess.run(["bash", str(self.runner), "a.csv", "b.csv"], env=self.triplet_env(), cwd=sub, capture_output=True, text=True, timeout=15)
+        self.assertEqual(bad.returncode, 2)
+
 if __name__ == "__main__":
     unittest.main()

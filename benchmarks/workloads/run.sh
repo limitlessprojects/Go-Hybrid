@@ -11,6 +11,11 @@
 #
 # Usage: benchmarks/workloads/run.sh [out.csv]
 set -e
+[ "$#" -le 1 ] || { echo "usage: benchmarks/workloads/run.sh [out.csv]" >&2; exit 2; }
+OUT_CSV=""
+if [ -n "${1:-}" ]; then
+  case "$1" in /*) OUT_CSV="$1" ;; *) OUT_CSV="$PWD/$1" ;; esac
+fi
 cd "$(dirname "$0")"
 REPO=$(cd ../.. && pwd)
 export PATH="$REPO/../tools/go/bin:$HOME/.cargo/bin:$PATH"
@@ -38,9 +43,9 @@ echo "== Hybrid twins (hyb check + build; the checker runs) =="
 "$HYB" build hy/alloc.hy -o "$WORK/wl-hy-alloc" >/dev/null
 "$WORK/wl-hy-alloc"
 
-if [ -n "$1" ]; then
+if [ -n "$OUT_CSV" ]; then
   {
     echo "lang,workload,p50_ns,p99_ns,mean_ns,n"
-  } > "$1"
+  } > "$OUT_CSV"
   echo "(csv append mode: rerun with a parser — the machine lines above carry p50/p99 per twin)"
 fi
