@@ -1797,3 +1797,53 @@ fn main() {
     );
     assert_eq!(r.verdict, Verdict::Accept);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #998: assignment into a narrow-typed var whose RHS is a NAMED
+// file-level const (`x = k`). An assign-side check existed but folded with a
+// bare syntactic fold that saw `k` as NotConst; the declaration path (W10,
+// `const big = 300; var n int8 = big`) resolved named consts via the file
+// const map. The assign path now shares that fold, so `x = k` rejects exactly
+// like the declaration twin does.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn assign_named_const_overflow_is_e6002() {
+    let r = check(
+        "const k = 70000\n\nfn main() {\n    var x int16 = 1\n    x = k\n    _ = x\n}\n",
+    );
+    assert!(
+        error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for `x = k` with k = 70000 on int16, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn assign_named_const_wider_target_accepts() {
+    // Over-reach control: 70000 fits int32, so the same named const must
+    // stay accepted on a wider declared type.
+    let r = check(
+        "const k = 70000\n\nfn main() {\n    var y int32 = 1\n    y = k\n    _ = y\n}\n",
+    );
+    assert!(
+        error_codes(&r).is_empty(),
+        "expected 70000 into int32 to accept, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
+
+#[test]
+fn assign_literal_overflow_still_rejected() {
+    // The pre-#998 wired shape (`n = 300` on int8, literal RHS) must keep
+    // rejecting — the shared fold must not weaken the literal path.
+    let r = check("fn main() {\n    var n int8 = 1\n    n = 300\n    _ = n\n}\n");
+    assert!(
+        error_codes(&r).iter().any(|c| c == "HYB-E6002"),
+        "expected HYB-E6002 for `n = 300` on int8, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
