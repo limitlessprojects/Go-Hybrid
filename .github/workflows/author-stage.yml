@@ -29,6 +29,11 @@ on:
         description: "Authoring rounds before honest BLOCKED"
         required: false
         default: "4"
+      brain:
+        description: "Authoring brain (api or specialized)"
+        required: false
+        default: "api"
+        type: string
 
 permissions:
   contents: write
@@ -71,13 +76,18 @@ jobs:
         id: author
         run: |
           set -o pipefail
+          rc=0
           python3 tools/author_stage.py author \
             --issue "${{ github.event.inputs.issue }}" \
             --max-rounds "${{ github.event.inputs.max-rounds }}" \
+            --brain "${{ github.event.inputs.brain || 'api' }}" \
             --out "automation/land-queue/author-${{ github.event.inputs.issue }}" \
-            2>&1 | tee author-stage-run.log
-          V="$(grep -oE 'AUTHOR-STAGE-(READY|BLOCKED|ERROR)' author-stage-run.log | tail -1)"
+            2>&1 | tee author-stage-run.log || rc=$?
+          V="$(grep -oE 'AUTHOR-STAGE-(READY|BLOCKED|ERROR)' author-stage-run.log | tail -1 || true)"
           echo "verdict=${V:-AUTHOR-STAGE-NONE}" >> "$GITHUB_OUTPUT"
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
+            exit "$rc"
+          fi
 
       - name: Live mode — commit the READY bundle (autoland gates it next)
         if: ${{ vars.AUTHOR_MODE == 'live' && steps.author.outputs.verdict == 'AUTHOR-STAGE-READY' }}
