@@ -1,0 +1,4 @@
+{
+  "suite": "managed_gate_edge_cases",
+  "cases": ["missing_reason", "launch_failure", "unreadable_hy"]
+}
