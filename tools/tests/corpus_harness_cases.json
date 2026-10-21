@@ -1,0 +1,4 @@
+{
+  "suite": "corpus_harness_edge_cases",
+  "cases": ["unclassified_rule", "unreadable_file"]
+}
