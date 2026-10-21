@@ -351,5 +351,11 @@ class WorktreeShaTests(unittest.TestCase):
         self.assertIn('failed to resolve HEAD', summary['steps'][0]['out_tail'])
 
 
+    def test_whitespace_commands_bad_timeouts_and_blank_expected_fail_closed(self):
+        self.assertEqual(RunnerFailureTests().run_job([], [{"name": "b", "run": "   "}])[0], 1)
+        for bad_t in (True, False, 0, -5, float("inf"), float("nan")):
+            self.assertEqual(runner.run_cmd([sys.executable, "-c", "pass"], bad_t)[0], 125)
+        self.assertEqual(RunnerFailureTests().run_job([], [step("n", "pass")], ["   "])[0], 1)
+
 if __name__ == '__main__':
     unittest.main()

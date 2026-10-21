@@ -36,6 +36,7 @@ Stdlib only — must run on a bare Kaggle/Actions image with just python3.
 import argparse
 import datetime
 import json
+import math
 import os
 import platform
 import shutil
@@ -51,6 +52,10 @@ def run_cmd(cmd, timeout, cwd=None, env=None):
     start = time.monotonic()
     out_tail = ""
     try:
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout must be a positive finite number, got {!r}".format(timeout))
+        if not isinstance(cmd, (str, list)) or (isinstance(cmd, list) and (not cmd or any(not isinstance(x, str) for x in cmd) or not cmd[0].strip())):
+            raise TypeError("command must be a non-empty string or list of strings")
         p = subprocess.run(
             cmd if isinstance(cmd, list) else ["/bin/sh", "-c", cmd],
             cwd=cwd, env=env,
@@ -248,7 +253,7 @@ def main():
                 break
             name = step.get("name") or "setup-{}".format(idx)
             cmd = step.get("run")
-            if not cmd:
+            if not cmd or (isinstance(cmd, str) and not cmd.strip()):
                 record(name, "setup", 1, 0.0, "step missing required 'run' command")
                 if step.get("hard"):
                     hard_setup_failed = True
@@ -268,7 +273,7 @@ def main():
             break
         name = step.get("name") or "cmd-{}".format(idx)
         cmd = step.get("run")
-        if not cmd:
+        if not cmd or (isinstance(cmd, str) and not cmd.strip()):
             record(name, "cmd", 1, 0.0, "command step missing required 'run' command")
             if step.get("hard"):
                 break
@@ -286,7 +291,7 @@ def main():
                "expected_results must be a list of file paths")
         expected_results = []
     for expected in expected_results:
-        if not isinstance(expected, str) or not expected:
+        if not isinstance(expected, str) or not expected.strip():
             record("expected-result", "check", 1, 0.0,
                    "expected result must be a non-empty file path")
             continue
