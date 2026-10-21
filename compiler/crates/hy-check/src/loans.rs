@@ -5606,7 +5606,17 @@ impl<'a> Checker<'a> {
                 } else {
                     let root = t.root();
                     if !root.is_empty() && self.binding_may_share(st, root) {
+                        if self.shape_may_share(&info.shape) {
+                            if let Some(origin) = info.non_owned {
+                                if let Some(b) = st.env_lookup_mut(root) {
+                                    if b.non_owned_origin.is_none() {
+                                        b.non_owned_origin = Some(origin);
+                                    }
+                                }
+                            }
+                        }
                         self.record_may_share(st, root, v);
+                        self.record_move_const_and_a3_loans(st, root, v, idx);
                     }
                 }
             }
@@ -5744,6 +5754,16 @@ impl<'a> Checker<'a> {
                     let root = t.root();
                     if !root.is_empty() && self.binding_may_share(st, root) {
                         self.record_multi_value_may_share(st, root, &shape, &values[0]);
+                        self.record_move_const_and_a3_loans(st, root, &values[0], idx);
+                        if self.shape_may_share(&shape) {
+                            if let Some(origin) = &moved_non_owned {
+                                if let Some(b) = st.env_lookup_mut(root) {
+                                    if b.non_owned_origin.is_none() {
+                                        b.non_owned_origin = Some(origin.clone());
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
