@@ -114,10 +114,10 @@ jobs:
           fi
 
       - name: Battery — cargo workspace
-        run: cargo test --workspace
+        run: cargo test --manifest-path compiler/Cargo.toml --workspace
 
       - name: Battery — build hyb
-        run: cargo build -p hyb --quiet
+        run: cargo build --manifest-path compiler/Cargo.toml -p hyb --quiet
 
       - name: Battery — corpus harness
         run: python3 tools/corpus_harness.py
