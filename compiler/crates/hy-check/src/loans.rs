@@ -2034,6 +2034,7 @@ impl<'a> Checker<'a> {
         collect_ref_roots(inner, &mut ref_roots);
         ref_roots.iter().any(|r| {
             st.borrow_bindings.contains(r)
+                || self.lookup_binding(st, r).is_some_and(|b| b.slot_loan)
                 || st
                     .loans
                     .iter()
@@ -3776,13 +3777,17 @@ impl<'a> Checker<'a> {
                     let borrow_slot =
                         field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown);
                     let inner = unwrap_parens(v);
-                    let is_borrow = as_addr_of(inner).is_some()
+                    let is_borrow = carries_borrow
+                        || as_addr_of(inner).is_some()
                         || contains_addr_of_in_literal(inner)
-                        || matches!(inner, Expr::Ident { name: src, .. } if st.borrow_bindings.contains(src));
+                        || matches!(inner, Expr::Ident { name: src, .. }
+                            if st.borrow_bindings.contains(src)
+                                || self.lookup_binding(st, src).is_some_and(|b| b.slot_loan));
+                    let is_local_scope = st.lookup_depth(name) == Some(st.scopes.len());
                     if (values.len() == targets.len() || borrow_slot) && (is_borrow || carries_borrow)
                     {
                         st.borrow_bindings.insert(name.clone());
-                    } else {
+                    } else if is_local_scope {
                         st.borrow_bindings.remove(name);
                     }
                     if borrow_slot && move_operand_ident(v).is_none() {
@@ -7372,6 +7377,7 @@ impl<'a> Checker<'a> {
             // returns every named result binding (`st.named_results`).
             for name in st.named_results.clone() {
                 let is_loan_escape = st.borrow_bindings.contains(&name)
+                    || self.lookup_binding(st, &name).is_some_and(|b| b.slot_loan)
                     || st
                         .loans
                         .iter()
@@ -7419,6 +7425,7 @@ impl<'a> Checker<'a> {
             let is_bound_borrow = match unwrap_parens(v) {
                 Expr::Ident { name, .. } => {
                     st.borrow_bindings.contains(name)
+                        || self.lookup_binding(st, name).is_some_and(|b| b.slot_loan)
                         || st
                             .loans
                             .iter()

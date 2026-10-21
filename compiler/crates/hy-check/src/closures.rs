@@ -214,6 +214,8 @@ fn check_one_closure(
         env,
         aliases: st.aliases.clone(),
         may_share: st.may_share.clone(),
+        borrow_bindings: st.borrow_bindings.clone(),
+        loans: st.loans.clone(),
         ..FnState::default()
     };
     for (k, b) in cst.env.iter_mut() {
@@ -225,6 +227,10 @@ fn check_one_closure(
         }
     }
     for p in params {
+        cst.borrow_bindings.remove(&p.name);
+        cst.loans.retain(|l| {
+            !matches!(&l.target, crate::model::LoanTarget::MapSlot { binding, .. } if binding == &p.name)
+        });
         let shape = ck.shape_of_type(&p.ty);
         cst.env.insert(
             p.name.clone(),
@@ -247,6 +253,10 @@ fn check_one_closure(
         let shape = ck.shape_of_type(&r.ty);
         if let Some(name) = &r.name {
             if name != "_" {
+                cst.borrow_bindings.remove(name);
+                cst.loans.retain(|l| {
+                    !matches!(&l.target, crate::model::LoanTarget::MapSlot { binding, .. } if binding == name)
+                });
                 cst.env.insert(
                     name.clone(),
                     Binding {
@@ -418,6 +428,7 @@ fn check_stmt_own_uses(ck: &mut Checker<'_>, st: &mut FnState, stmt: &Stmt, mana
         }
     }
     ck.check_uses(st, &uses);
+    ck.check_addr_of_loan_stmt(st, stmt, &uses);
 }
 
 fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a Stmt, managed: bool, nested: &mut Vec<NestedClosure<'a>>) {
@@ -669,6 +680,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     }
                 }
                 ck.record_local_borrow_aliases(st, l);
+                ck.mark_slot_loans_local(st, l);
             } else {
                 // multi-name define from one value (`v, ok := m[k]`, `a, b := f()`)
                 let moved_non_owned = l
@@ -1137,6 +1149,8 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             sync_nested_moves(st, nested);
             collect_stmt_direct_fnlits(stmt, st, nested);
             ck.process_closure_assign(st, targets, *op, values);
+            ck.record_assign_borrow_aliases(st, targets, *op, values);
+            ck.mark_slot_loans_assign(st, targets, *op, values);
             sync_nested_moves(st, nested);
             if targets.len() == values.len() {
                 for (t, v) in targets.iter().zip(values.iter()) {

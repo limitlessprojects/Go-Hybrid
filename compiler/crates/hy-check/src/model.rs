@@ -296,6 +296,9 @@ pub(crate) struct FnState {
     /// composite literal containing `&...`), for O2 `LOAN-ESCAPE` on
     /// named-result / variable returns (`out = &x; return` / `return out`).
     pub borrow_bindings: HashSet<String>,
+    /// Saved `borrow_bindings` sets for outer scopes so an inner shadowing
+    /// define (`if true { p := 1 }`) cannot erase an outer borrow binding.
+    pub borrow_binding_scopes: Vec<HashSet<String>>,
     /// Local closure bindings -> `(params, results, body)` recorded at define/rebind
     /// time so call sites can analyze parameter/capture stores (`record_callee_param_stores`).
     pub closure_defs:
@@ -310,6 +313,7 @@ impl FnState {
         self.share_scopes.push(self.may_share.clone());
         self.shadow_link_scopes.push(self.shadow_links.clone());
         self.fnlit_scopes.push(Vec::new());
+        self.borrow_binding_scopes.push(self.borrow_bindings.clone());
     }
 
     /// Exit the innermost block scope (walk.rs's Pop events).
@@ -433,7 +437,19 @@ impl FnState {
                 }
             }
         }
+        let mut inner_outer_borrows: Vec<String> = Vec::new();
+        for b in &self.borrow_bindings {
+            if survives_as_outer(b, &self.aliases, &self.env, &self.scopes) {
+                inner_outer_borrows.push(b.clone());
+            }
+        }
         self.scopes.pop();
+        if let Some(mut outer_borrows) = self.borrow_binding_scopes.pop() {
+            for b in inner_outer_borrows {
+                outer_borrows.insert(b);
+            }
+            self.borrow_bindings = outer_borrows;
+        }
         if let Some(outer_shadows) = self.shadow_link_scopes.pop() {
             self.shadow_links = outer_shadows;
         }
