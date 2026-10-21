@@ -89,9 +89,20 @@ def gh_token():
     env = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     if env:
         return env
-    _, out = sh(["git", "remote", "get-url", "origin"], timeout=30)
-    m = re.search(r"https://([^@]+)@github.com", out or "")
-    return m.group(1) if m else None
+    out = sh(["git", "remote", "get-url", "origin"], timeout=30).stdout or ""
+    m = re.search(r"https://([^@]+)@github.com", out)
+    if m:
+        return m.group(1)
+    # session fallback: the token file persists across container resets even
+    # when no env var or embedded remote credential is present.
+    for p in (pathlib.Path("/home/z/my-project/.gh_token"), ROOT / ".gh_token"):
+        try:
+            t = p.read_text().strip()
+            if t:
+                return t
+        except OSError:
+            pass
+    return None
 
 
 def api_get(path):

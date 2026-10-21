@@ -56,6 +56,15 @@ FAMILIES = {
     "HYB-E6001": "sp_tmpl_e6001",
     "HYB-E6006": "sp_tmpl_e6006",
     "HYB-E2009": "sp_tmpl_e2009",
+    "HYB-E2002": "sp_tmpl_ebind",
+    "HYB-E1002": "sp_tmpl_ebind",
+}
+
+# Issues whose body names no HYB-E code route by class membership (the
+# issue names the rule family's file/rule; the anti-Goodhart binding is
+# unchanged: the class template must still pass every gate, else BLOCK).
+ISSUE_FAMILY_HINTS = {
+    905: "sp_tmpl_ebind",
 }
 
 
@@ -214,7 +223,7 @@ def propose(issue_no: int, round_no: int, repro_src: str, expected: str,
             feedback: str) -> str | None:
     """Round r = candidate r (deterministic descent). Returns a completion
     string with ```diff blocks, or a no-diff rationale."""
-    fam = FAMILIES.get(expected)
+    fam = FAMILIES.get(expected) or ISSUE_FAMILY_HINTS.get(issue_no)
     if fam is None:
         _trace(issue_no, {"kind": "no-family", "expected": expected})
         return (f"specialized brain: no template family for {expected} — the "
@@ -226,7 +235,12 @@ def propose(issue_no: int, round_no: int, repro_src: str, expected: str,
         mod = importlib.import_module(fam)
     except ImportError:
         mod = importlib.import_module(f"tools.{fam}")
-    cands = mod.candidates()
+    # families declare candidates_for(issue) when their class has per-issue
+    # variants; the older families keep the plain candidates() descent.
+    if hasattr(mod, "candidates_for"):
+        cands = mod.candidates_for(issue_no)
+    else:
+        cands = mod.candidates()
     repro_rel = "compiler/target/author-stage/repro.hy"
     SMOKE_DIR.mkdir(parents=True, exist_ok=True)
     (ROOT / repro_rel).write_text(repro_src)
@@ -282,8 +296,9 @@ def selftest() -> int:
         ok = ok and cond
 
     import importlib
-    check("families registered", set(FAMILIES) == {"HYB-E6001", "HYB-E6006", "HYB-E2009"})
-    for fam in ("sp_tmpl_e6001", "sp_tmpl_e6006", "sp_tmpl_e2009"):
+    check("families registered", set(FAMILIES) == {"HYB-E6001", "HYB-E6006", "HYB-E2009", "HYB-E2002", "HYB-E1002"})
+    check("issue hints registered", ISSUE_FAMILY_HINTS == {905: "sp_tmpl_ebind"})
+    for fam in ("sp_tmpl_e6001", "sp_tmpl_e6006", "sp_tmpl_e2009", "sp_tmpl_ebind"):
         try:
             try:
                 mod = importlib.import_module(fam)
