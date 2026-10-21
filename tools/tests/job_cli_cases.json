@@ -1,0 +1,4 @@
+{
+  "suite": "job_cli_validation_cases",
+  "cases": ["missing_job_json", "invalid_id_format", "null_fetch_dir"]
+}
