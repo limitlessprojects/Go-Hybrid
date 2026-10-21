@@ -840,6 +840,18 @@ impl Emitter {
                         }
                     }
                 }
+                // User-struct methods (#726): a method on a struct the user
+                // declared is not in SHAPES, so the curated lookup above
+                // finds nothing and the `?` hoist would fall through to the
+                // two-name form. `var_struct` holds the struct name for the
+                // receiver expression; `method_results` holds its arity.
+                if let Expr::Ident { name: vn, .. } = base.as_ref() {
+                    if let Some(sn) = self.var_struct.get(vn) {
+                        if let Some(r) = self.method_results.get(&(sn.clone(), name.clone())) {
+                            return Some(*r);
+                        }
+                    }
+                }
                 None
             }
             // User fns: the eagerly collected declared shape.

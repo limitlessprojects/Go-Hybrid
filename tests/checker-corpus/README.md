@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 120 programs — ACCEPT 38 · ACCEPT-MANAGED 2 · REJECT 80 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
-**Current registered corpus: 120 programs — ACCEPT 38 · ACCEPT-MANAGED 2 · REJECT 80 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 121 programs — ACCEPT 39 · ACCEPT-MANAGED 2 · REJECT 80 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 121 programs — ACCEPT 39 · ACCEPT-MANAGED 2 · REJECT 80 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -301,3 +301,23 @@ in `hy-check/tests/type_name_in_value_position.rs` (13 tests).
 
 With this registration the corpus is **120 programs: ACCEPT 38 ·
 ACCEPT-MANAGED 2 · REJECT 80** — main's 118 plus these two.
+
+`bare-error-try-lowering-accept.hy` — issue #726: `?` on a call returning bare
+`error`, the simplest legal E3 use per SPEC E1. The checker was right to accept
+it; the **lowering** was wrong, emitting `hyT0, hyErr1 := step()` against a
+one-value call. Two causes: `fn_shapes` stored `results.len()`, which includes
+the trailing `error`, so `fn step() error` read as `(1, true)` instead of
+`(0, true)` — unlike the descriptor tables, which spell it the other way
+(`serde_json.value.set` is `(0, true)`) — and a method on a **user** struct was
+in no table at all, so `s.save()?` fell through to the two-name form.
+
+Deliberately an ACCEPT fixture: `hyb check` reported 0 diagnostics before and
+after, so a reject fixture would have been the wrong shape and would have passed
+for the wrong reason. The real assertion lives in
+`hy-emit/tests/bare_error_try_lowering.rs` (7 tests), which drives the emitter
+and inspects the generated Go — including a pin that the fix did NOT collapse
+the value token for a call that genuinely has one.
+
+With this registration the corpus is **119 programs: ACCEPT 38 · ACCEPT-MANAGED 2 · REJECT 79** — main's 118 plus this one.
+
+With this registration the corpus is **121 programs: ACCEPT 39 · ACCEPT-MANAGED 2 · REJECT 80** — main's 120 plus this one.

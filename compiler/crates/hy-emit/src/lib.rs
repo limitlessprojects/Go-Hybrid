@@ -503,6 +503,11 @@ pub struct Emitter {
     /// normalizes like any rust-call — and the pointer-param auto-address
     /// at call sites (09: `scale_then_register(e, …)` with `e *env`).
     fn_shapes: BTreeMap<String, FnShape>,
+    /// User-defined METHODS: (receiver struct name, method name) →
+    /// (value-result count, ends in error). The descriptor tables cover
+    /// curated types only, so a method on a user struct needs its own
+    /// registry for the `?` hoist to know the arity (#726).
+    method_results: BTreeMap<(String, String), (usize, bool)>,
     /// User-struct field types (Batch I): struct → (field, declared hy type
     /// name — dotted for shape-known fields, "" otherwise). Receiver typing
     /// for `stats.mu.lock()` (18).
@@ -560,6 +565,7 @@ impl Emitter {
             export_pub: false,
             cur_fn_error_returns: None,
             fn_shapes: BTreeMap::new(),
+            method_results: BTreeMap::new(),
             struct_fields: BTreeMap::new(),
             var_struct: BTreeMap::new(),
             var_ty: BTreeMap::new(),
@@ -714,7 +720,43 @@ impl Emitter {
                         _ => None,
                     })
                     .collect::<Vec<_>>();
-                (f.name.clone(), (f.results.len(), err, kind, ptr_params))
+                // The VALUE results, excluding a trailing `error` (#726).
+                // `call_results` feeds this straight into the `?` hoist,
+                // which decides between `hyErrN := call` (no value temp) and
+                // `hyT0, hyErrN := call` — and the descriptor tables spell
+                // that count the same way (`serde_json.value.set` is
+                // `(0, true)`: it returns only an error). Storing
+                // `results.len()` here counted the error itself, so
+                // `fn step() error` read as `(1, true)` and every `step()?`
+                // emitted a two-name assignment against a one-value call.
+                let value_results = f.results.len() - usize::from(err);
+                (f.name.clone(), (value_results, err, kind, ptr_params))
+            })
+            .collect();
+
+        // User-defined METHODS, keyed by (receiver struct, method name).
+        // `call_results` resolves a descriptor member through
+        // `lookup_member`, but a user struct is not in SHAPES, so
+        // `s.save()?` found no entry at all and fell through to the
+        // two-name form (#726). The receiver's type gives the struct name
+        // that `var_struct` stores for a binding, so the two join.
+        self.method_results = file
+            .fns()
+            .filter_map(|f| {
+                let recv = f.receiver.as_ref()?;
+                let struct_name = base_ty_name(&recv.ty)?;
+                if struct_name.is_empty() {
+                    return None;
+                }
+                let err = matches!(
+                    f.results.last(),
+                    Some(FnResult {
+                        ty: TypeExpr::Named { name, .. },
+                        ..
+                    }) if name == "error"
+                );
+                let value_results = f.results.len() - usize::from(err);
+                Some(((struct_name, f.name.clone()), (value_results, err)))
             })
             .collect();
 
