@@ -108,5 +108,14 @@ class EnvironmentReportTests(unittest.TestCase):
         self.assertEqual(self.report()["tool_go"], value)
 
 
+    def test_autoland_missing_bundle_files_returns_no_bundle(self):
+        from tools import autoland
+        bdir = self.root / "incomplete-bundle"
+        bdir.mkdir()
+        (bdir / "meta.json").write_text('{"issue": 1, "expected_code": "HYB-E1000"}\n')
+        with mock.patch.object(autoland, "QUEUE", self.root):
+            self.assertEqual(autoland.run_bundle("incomplete-bundle", False, "GITHUB_TOKEN"), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
