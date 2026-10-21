@@ -156,5 +156,12 @@ class CheckVersionsTests(unittest.TestCase):
         self.assertNotIn("installed rustc", result.stdout)
 
 
+    def test_unknown_flags_and_malformed_pins_fail_closed(self):
+        for args in (["--skip-toolchain"], ["--no-toolchain", "extra"]):
+            r = subprocess.run(["bash", str(self.root / "tools/check-versions.sh"), *args], cwd=self.root, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1)
+        self.edit("tools/env.sh", 'PINNED_GO="go1.26.9"', 'PINNED_GO="1.26.9"')
+        self.assertDrift("malformed PINNED_GO")
+
 if __name__ == "__main__":
     unittest.main()

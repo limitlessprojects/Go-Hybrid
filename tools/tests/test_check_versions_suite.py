@@ -1,2 +1,0 @@
-from tools.test_check_versions_cli_pins import CheckVersionsCliAndPinFormatTests
-assert CheckVersionsCliAndPinFormatTests is not None
