@@ -383,9 +383,14 @@ def main() -> int:
     for rel, content in FILES.items():
         p = ROOT / rel
         if check:
-            if not p.is_file() or p.read_text(encoding="utf-8") != content:
+            try:
+                ok = p.is_file() and p.read_text(encoding="utf-8") == content
+            except (OSError, UnicodeDecodeError):
+                ok = False
+            if not ok:
                 drift.append(rel)
         else:
+            p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
             print(f"wrote {rel}")
     if check:

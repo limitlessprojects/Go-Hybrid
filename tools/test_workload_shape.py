@@ -153,5 +153,13 @@ class WorkloadShapeTests(unittest.TestCase):
             self.assertTrue((self.workloads / name).exists())
 
 
+    def test_invalid_utf8_and_missing_parent_dirs_do_not_crash(self):
+        (self.workloads / "go/main.go").write_bytes(b"\xff\xfe")
+        r = self.run_shape("--check")
+        self.assertEqual(r.returncode, 1)
+        self.assertNotIn("Traceback", r.stderr)
+        shutil.rmtree(self.workloads / "go")
+        self.assertEqual(self.run_shape().returncode, 0)
+
 if __name__ == "__main__":
     unittest.main()
