@@ -1,4 +1,1 @@
-{
-  "suite": "check_versions_edge_cases",
-  "cases": ["unknown_flag", "malformed_pin"]
-}
+{"cases": ["unknown_flag", "extra_arg", "bad_go_pin", "bad_rust_pin"]}
