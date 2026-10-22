@@ -417,6 +417,42 @@ impl<'a> Scan<'a> {
                                     ),
                                 ]),
                             );
+                        } else if !self.allowed.contains(root)
+                            && !self.file_decls.contains(root)
+                            && !self.packages.contains(root)
+                            && !crate::foreign::BUILTIN_PACKAGES.contains(&root.as_str())
+                            && !crate::foreign::is_curated_package_root(root)
+                        {
+                            // Issue #1131: a bare dotted access whose root is
+                            // neither declared, imported, nor a curated
+                            // package root (`widgets.count` with no import)
+                            // passed the checker and then failed `go build`
+                            // with `undefined: widgets` (BUILDABLE row 13).
+                            // The arms above cover explicit uncurated
+                            // imports, bare uncurated stdlib roots, and
+                            // unknown members of curated roots; this arm
+                            // closes the remaining shape: a root that is
+                            // none of those. Fail-open for every name the
+                            // checker cannot see (an unresolved local, a
+                            // file-level decl, an imported package, a
+                            // builtin package, a curated package).
+                            self.diags.push(
+                                hy_diag::Diagnostic::error(
+                                    "HYB-E1001",
+                                    self.path.to_string(),
+                                    *span,
+                                    format!(
+                                        "`{}.{}` cannot be resolved — `{}` is not an imported package, a declared name, or a curated package root (Go refuses `undefined: {}`) (HYB-E1001)",
+                                        root, name, root, root
+                                    ),
+                                )
+                                .with_notes(vec![
+                                    format!(
+                                        "declare `{}` in the file or scope, or `import` the package that provides it — imports (plus the builtin package table) are the only package-qualified roots",
+                                        root
+                                    ),
+                                ]),
+                            );
                         }
                     }
                 } else {
