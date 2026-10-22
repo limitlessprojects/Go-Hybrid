@@ -22,7 +22,7 @@ use crate::const_overflow::{
     const_float_value, const_int_fold_with, const_int_value, fixed_width_int_range, fold_bin,
     parse_int_lit, ConstFold, ConstInt,
 };
-use crate::model::{unwrap_parens, Checker, FnState, TypeShape};
+use crate::model::{as_addr_of, unwrap_parens, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
     AssignOp, BinOp, CallArg, Expr, FnDecl, ForKind, InterpPart, LitKind, Place, PlaceKind,
@@ -149,7 +149,7 @@ impl<'a> Checker<'a> {
                     for (t, v) in targets.iter().zip(values.iter()) {
                         if !matches!(op, AssignOp::ShlAssign | AssignOp::ShrAssign) {
                             if let Some(target_ty) = self.place_target_ty(st, t) {
-                                self.check_const_overflow_assign(&t.render(), &target_ty, v);
+                                self.check_const_overflow_assign(&t.render(), &target_ty, v, Some(st));
                             }
                         }
                     }
@@ -1150,6 +1150,19 @@ impl<'a> Checker<'a> {
 
     fn check_array_len(&mut self, st: Option<&FnState>, len: &Expr) {
         let span = len.span();
+        // Issue #758: a constant zero divisor inside the length
+        // expression is a Go compile error exactly like value position
+        // (`invalid operation: division by zero` in the array type) —
+        // the SAME predicate, mirrored onto the type-expression site
+        // (#999 pattern). Fail-open on non-constant lengths: those are
+        // the existing checks' business.
+        {
+            let empty_st = crate::model::FnState::default();
+            self.check_expr_const_zero_divisor(
+                st.unwrap_or(&empty_st),
+                len,
+            );
+        }
         // 1) A constant integer expression: must be non-negative.
         let direct_or_folded = const_int_value(len).or_else(|| {
             if matches!(unwrap_parens(len), Expr::Ident { .. }) {
@@ -1561,7 +1574,11 @@ impl<'a> Checker<'a> {
         if depth > 32 {
             return None;
         }
-        match unwrap_parens(expr) {
+        let bare = unwrap_parens(expr);
+        if let Some(operand) = as_addr_of(bare) {
+            return self.const_array_len_at(operand, use_pos, depth + 1);
+        }
+        match bare {
             Expr::Ident { name, span: id_span, .. } => {
                 if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
                     if (sight.pos.line, sight.pos.col) != (use_pos.line, use_pos.col) {
@@ -1571,14 +1588,16 @@ impl<'a> Checker<'a> {
                             }
                         }
                         if let Some(value) = sight.value {
-                            return self.array_lit_len(value, depth + 1);
+                            if let Some(len) = self.const_array_len_at(value, use_pos, depth + 1) {
+                                return Some(len);
+                            }
                         }
                     }
                     return None;
                 }
                 self.param_array_len_at(name, id_span.start)
             }
-            _ => None,
+            other => self.array_lit_len(other, depth + 1),
         }
     }
 
