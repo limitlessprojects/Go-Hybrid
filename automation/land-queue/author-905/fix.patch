@@ -1,0 +1,304 @@
+diff --git a/compiler/crates/hy-check/src/buildable.rs b/compiler/crates/hy-check/src/buildable.rs
+index c6a74b8..8e220b3 100644
+--- a/compiler/crates/hy-check/src/buildable.rs
++++ b/compiler/crates/hy-check/src/buildable.rs
+@@ -175,6 +175,37 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
+     }
+ }
+ 
++/// Is `e` provably a single-value expression (the #905/#903 binding-count
++/// class)?
++///
++/// Conservative: `true` only for shapes that cannot yield two values in
++/// any context. Calls, receives, and index expressions are excluded —
++/// their counts are owned by the source-count rules (tuple.rs T23 and the
++/// #926 void-position rule) — and an unresolved shape fails open.
++fn is_definitely_single_value(e: &Expr) -> bool {
++    match unwrap_parens(e) {
++        Expr::Lit { .. }
++        | Expr::Ident { .. }
++        | Expr::Binary { .. }
++        | Expr::Unary { .. }
++        | Expr::AddrOf { .. }
++        | Expr::Field { .. }
++        | Expr::Interp { .. }
++        | Expr::Slice { .. }
++        | Expr::StructLit { .. }
++        | Expr::SliceLit { .. }
++        | Expr::MapLit { .. }
++        | Expr::FnLit { .. } => true,
++        // NOTE: `Expr::Try` is deliberately NOT here — `f()?` on a
++        // (T1, T2, error) call yields TWO values after the unwrap (the
++        // accept-corpus program 10-a5-http-handler-capture pins
++        // `code, body := httptest.get(...)?` as legal), so a Try is a
++        // source-count question, not a provably-single value.
++        Expr::Move { operand, .. } => is_definitely_single_value(operand),
++        _ => false,
++    }
++}
++
+ /// Symmetrical conflict check for equality operators (`==`, `!=`).
+ ///
+ /// Untyped numeric constants adapt between integer and floating types
+@@ -715,6 +746,70 @@ impl<'a> Collector<'a> {
+         if l.names.len() == 1 && l.values.len() == 1 {
+             self.check_single_value_position(&l.values[0], "a binding", /*binding_position=*/ true);
+         }
++        // Binding-count guards: a declaration whose value count cannot
++        // match its names fails go build with `assignment mismatch`.
++        if l.values.len() > 1 && l.names.len() != l.values.len() {
++            self.emit_e1002(
++                l.span,
++                format!(
++                    "assignment mismatch: {} variables but {} values (HYB-E1002)",
++                    l.names.len(),
++                    l.values.len()
++                ),
++                "a parallel declaration binds positionally; the name and value counts must match",
++            );
++        }
++        if l.names.len() > 1
++            && l.values.len() == 1
++            && is_definitely_single_value(&l.values[0])
++        {
++            self.emit_e1002(
++                l.span,
++                format!(
++                    "assignment mismatch: {} variables but the initializer yields exactly 1 (HYB-E1002)",
++                    l.names.len()
++                ),
++                "call, receive, and index sources are checked by the source-count rules; a provably single value binds one name",
++            );
++        }
++        // A typed declaration must accept its initializers — Go refuses
++        // `cannot use ... as ... value in variable declaration`.
++        if let Some(t) = &l.ty {
++            let want = self.kind_of_ty(t, 0);
++            if l.values.len() == 1 && l.names.len() == 1 {
++                let vk = self.kind_of_expr(&l.values[0]);
++                if kinds_conflict(&want, &vk) {
++                    self.emit_e1002(
++                        l.span,
++                        format!(
++                            "cannot initialize `{}` (type `{}`) with a value of type `{}` — Go refuses `cannot use ... as {} value in variable declaration` (HYB-E1002)",
++                            l.names[0],
++                            want.label(),
++                            vk.label(),
++                            want.label()
++                        ),
++                        "the declared type is fixed; write an explicit conversion when a conversion is intended",
++                    );
++                }
++            } else if l.values.len() > 1 && l.values.len() == l.names.len() {
++                for (name, v) in l.names.iter().zip(l.values.iter()) {
++                    let vk = self.kind_of_expr(v);
++                    if kinds_conflict(&want, &vk) {
++                        self.emit_e1002(
++                            l.span,
++                            format!(
++                                "cannot initialize `{}` (type `{}`) with a value of type `{}` — Go refuses `cannot use ... as {} value in variable declaration` (HYB-E1002)",
++                                name,
++                                want.label(),
++                                vk.label(),
++                                want.label()
++                            ),
++                            "the declared type is fixed; write an explicit conversion when a conversion is intended",
++                        );
++                    }
++                }
++            }
++        }
+         // Composed resolution (pr-430 x landed pr-475): #475's track_read
+         // set (Define|Let|Var|Const) drives which locals get unused-read
+         // tracking; #430's operand-kind inference runs for EVERY name so
+@@ -2925,6 +3020,60 @@ impl<'a> Collector<'a> {
+                             "the target's declared type is fixed; write an explicit conversion when a conversion is intended",
+                         );
+                     }
++                } else if values.len() > 1 && values.len() != targets.len() {
++                    // Binding-count guards: a parallel assignment is
++                    // positional — a count mismatch fails go build with
++                    // `assignment mismatch`.
++                    self.emit_e1002(
++                        span,
++                        format!(
++                            "assignment mismatch: {} variables but {} values (HYB-E1002)",
++                            targets.len(),
++                            values.len()
++                        ),
++                        "a parallel assignment binds positionally; the target and value counts must match",
++                    );
++                } else if targets.len() > 1 && values.len() == targets.len() {
++                    // Every positional pair must satisfy the same kind check
++                    // as the single-target form, with the same O8 loan-shape
++                    // fail-open.
++                    for (t, v) in targets.iter().zip(values.iter()) {
++                        if as_addr_of(v)
++                            .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }))
++                        {
++                            continue;
++                        }
++                        let tpk = self.kind_of_place(t);
++                        let vk = self.kind_of_expr(v);
++                        if kinds_conflict(&tpk, &vk) {
++                            self.emit_e1002(
++                                v.span(),
++                                format!(
++                                    "cannot assign a value of type `{}` to `{}` (type `{}`) in parallel assignment — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
++                                    vk.label(),
++                                    t.render(),
++                                    tpk.label(),
++                                    tpk.label()
++                                ),
++                                "each target's declared type is fixed; write an explicit conversion when a conversion is intended",
++                            );
++                        }
++                    }
++                } else if targets.len() > 1 && values.len() == 1 {
++                    // One provably-single value bound to several targets —
++                    // go build refuses with `assignment mismatch`. Call,
++                    // receive, and index sources are owned by the
++                    // source-count rules.
++                    if is_definitely_single_value(&values[0]) {
++                        self.emit_e1002(
++                            span,
++                            format!(
++                                "assignment mismatch: {} variables but the value yields exactly 1 (HYB-E1002)",
++                                targets.len()
++                            ),
++                            "bind one name per value, or use a source that yields one value per target",
++                        );
++                    }
+                 }
+             }
+             AssignOp::Inc | AssignOp::Dec => {
+diff --git a/compiler/crates/hy-check/tests/binding_shape_guards_parallel.rs b/compiler/crates/hy-check/tests/binding_shape_guards_parallel.rs
+new file mode 100644
+index 0000000..f2e43da
+--- /dev/null
++++ b/compiler/crates/hy-check/tests/binding_shape_guards_parallel.rs
+@@ -0,0 +1,124 @@
++//! Binding-shape guards (parallel counts + declared-type compat) — #905/#903 class.
++//!
++//! A parallel declaration/assignment whose name and value counts differ
++//! fails go build with `assignment mismatch`; a provably single value bound
++//! to several names likewise. A typed declaration's initializers must
++//! satisfy the declared type, and a parallel assignment is positional —
++//! each pair must satisfy the same kind check as the single-target form
++//! (with the O8 slot-loan fail-open preserved). Valid counts and adaptive
++//! initializers stay legal.
++
++use hy_check::check_file;
++use hy_syntax::parse_file;
++
++fn codes(src: &str) -> Vec<String> {
++    let ast = parse_file("test.hy", src).expect("parses");
++    check_file(&ast)
++        .diagnostics
++        .into_iter()
++        .map(|d| d.code)
++        .collect()
++}
++
++fn assert_code(src: &str, want: &str) {
++    let cs = codes(src);
++    assert!(
++        !cs.is_empty() && cs.iter().all(|c| c == want),
++        "expected only [{want}], got {cs:?} for:\n{src}"
++    );
++}
++
++fn assert_ok(src: &str) {
++    let cs = codes(src);
++    assert!(cs.is_empty(), "expected 0 diagnostics, got {cs:?} for:\n{src}");
++}
++
++#[test]
++fn parallel_decl_count_mismatch_reject() {
++    assert_code(
++        "fn main() {\n    a, b, c := 1, 2\n    _ = a\n    _ = b\n    _ = c\n}\n",
++        "HYB-E1002",
++    );
++    assert_code(
++        "fn main() {\n    d, e := 1, 2, 3\n    _ = d\n    _ = e\n}\n",
++        "HYB-E1002",
++    );
++    assert_code(
++        "fn main() {\n    x, y := 1\n    _ = x\n    _ = y\n}\n",
++        "HYB-E1002",
++    );
++}
++
++#[test]
++fn parallel_assign_count_mismatch_reject() {
++    assert_code(
++        "fn main() {\n    var x int\n    var y int\n    x, y = 10, 20, 30\n    _ = x\n    _ = y\n}\n",
++        "HYB-E1002",
++    );
++    assert_code(
++        "fn main() {\n    var x int\n    var y int\n    x, y = 10\n    _ = x\n    _ = y\n}\n",
++        "HYB-E1002",
++    );
++}
++
++#[test]
++fn typed_decl_initializer_conflict_reject() {
++    assert_code(
++        "fn main() {\n    var a int = \"hello\"\n    _ = a\n}\n",
++        "HYB-E1002",
++    );
++    assert_code(
++        "fn main() {\n    let b bool = 123\n    _ = b\n}\n",
++        "HYB-E1002",
++    );
++    assert_code(
++        "fn main() {\n    const s string = 456\n    _ = s\n}\n",
++        "HYB-E1002",
++    );
++    // NOTE: the grammar has no multi-name typed declaration (`var a, b int =
++    // 1, 2` is E0002 at the parser), so the positional zip guard in `local`
++    // is defensive class-shape; the single-name forms above are the issue's
++    // actual repros.
++}
++
++#[test]
++fn parallel_assign_positional_conflict_reject() {
++    assert_code(
++        "fn main() {\n    x := 1\n    s := \"a\"\n    x, s = s, x\n    _ = x\n    _ = s\n}\n",
++        "HYB-E1002",
++    );
++}
++
++#[test]
++fn valid_parallel_forms_stay_legal() {
++    // matching counts stay legal
++    assert_ok(
++        "fn main() {\n    a, b, c := 1, 2, 3\n    _ = a\n    _ = b\n    _ = c\n}\n",
++    );
++    // same-type swap stays legal
++    assert_ok(
++        "fn main() {\n    x := 1\n    s := \"a\"\n    x, s = x, s\n    _ = x\n    _ = s\n}\n",
++    );
++    // the untyped-int-to-float adaptation stays legal (kinds_conflict arm)
++    assert_ok(
++        "fn main() {\n    var f float64 = 1\n    _ = f\n}\n",
++    );
++    // an interface target accepts any initializer
++    assert_ok(
++        "fn main() {\n    var a any = 1\n    var b any = \"str\"\n    _ = a\n    _ = b\n}\n",
++    );
++    // matching counts in a parallel declaration stay legal
++    assert_ok(
++        "fn main() {\n    a, b := 1, 2\n    _ = a\n    _ = b\n}\n",
++    );
++    // typed parallel assignment with matching kinds (the zip loop's happy path)
++    assert_ok(
++        "fn main() {\n    var x int\n    var y int\n    x, y = 1, 2\n    _ = x\n    _ = y\n}\n",
++    );
++    // `f()?` on a (T1, T2, error) call yields two values after the unwrap —
++    // stays legal (the 10-a5-http-handler-capture corpus class); the Try
++    // source is fail-open for the count guards.
++    assert_ok(
++        "fn main() {\n    code, body := http.get(\"/x\")?\n    fmt.println(code, body)\n}\n",
++    );
++}

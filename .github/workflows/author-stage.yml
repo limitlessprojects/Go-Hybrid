@@ -1,0 +1,134 @@
+# Author-stage — the AUTHOR layer (AUTHOR-STAGE.md, session-32).
+#
+# Produces a land-queue bundle for ONE issue via tools/author_stage.py:
+#   issue -> repro extraction -> brain rounds (scope-guarded diffs)
+#         -> fast gates (build, repro REJECT + expected code,
+#            accept controls read from HEAD) -> bundle + full trace
+#
+# It NEVER pushes code, NEVER lands, NEVER closes. A READY bundle only
+# reaches main when AUTHOR_MODE=live commits THE BUNDLE ITSELF — and the
+# unchanged autoland gates (plus SHEPHERD_MODE) still decide everything
+# after that. BLOCKED bundles never enter the queue (artifacts only).
+#
+# Kill-switch ladder (each stage one step behind the next):
+#   AUTHOR_ENABLED  repo var — unset/absent = this workflow no-ops
+#   AUTHOR_MODE     repo var — dry-run (default) = artifact + evidence
+#                              comment only; live = ALSO commit the bundle
+#   SHEPHERD_MODE   repo var — unchanged; guards autoland's landing
+
+name: author-stage
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: "Issue number to author a fix for"
+        required: true
+        type: string
+      max-rounds:
+        description: "Authoring rounds before honest BLOCKED"
+        required: false
+        default: "4"
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: author-stage-${{ github.event.inputs.issue }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  author:
+    if: ${{ vars.AUTHOR_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      AUTHOR_API_BASE: ${{ secrets.AUTHOR_API_BASE }}
+      AUTHOR_API_KEY: ${{ secrets.AUTHOR_API_KEY }}
+      AUTHOR_MODEL: ${{ secrets.AUTHOR_MODEL }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout main (pinned v4, full history)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: W0 setup (pinned toolchains + caches)
+        uses: ./.github/actions/shepherd-setup
+
+      - name: Identity
+        run: |
+          git config user.name "author-stage-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git fetch -q origin main && git checkout -q main && git pull -q --ff-only origin main
+
+      - name: Author the fix bundle (bundle-only; never pushes code)
+        id: author
+        run: |
+          set -o pipefail
+          python3 tools/author_stage.py author \
+            --issue "${{ github.event.inputs.issue }}" \
+            --max-rounds "${{ github.event.inputs.max-rounds }}" \
+            --out "automation/land-queue/author-${{ github.event.inputs.issue }}" \
+            2>&1 | tee author-stage-run.log
+          V="$(grep -oE 'AUTHOR-STAGE-(READY|BLOCKED|ERROR)' author-stage-run.log | tail -1)"
+          echo "verdict=${V:-AUTHOR-STAGE-NONE}" >> "$GITHUB_OUTPUT"
+
+      - name: Live mode — commit the READY bundle (autoland gates it next)
+        if: ${{ vars.AUTHOR_MODE == 'live' && steps.author.outputs.verdict == 'AUTHOR-STAGE-READY' }}
+        run: |
+          git add "automation/land-queue/author-${{ github.event.inputs.issue }}"
+          git commit -q -m "author-stage: bundle for #${{ github.event.inputs.issue }} (brain=${AUTHOR_MODEL:-unset}) — NOT a landing; autoland gates next"
+          git push -q origin HEAD:main
+
+      - name: Upload bundle + trace (always — blocked runs included)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: author-stage-${{ github.event.inputs.issue }}
+          path: |
+            automation/land-queue/author-${{ github.event.inputs.issue }}/
+            target/author-blocked/issue-${{ github.event.inputs.issue }}/
+            author-stage-run.log
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Issue comment — evidence, never a self-report
+        if: always()
+        env:
+          ISSUE: ${{ github.event.inputs.issue }}
+          VERDICT: ${{ steps.author.outputs.verdict }}
+        run: |
+          set -e
+          {
+            echo "### author-stage (v0) report for #${ISSUE}"
+            echo
+            echo "verdict: **${VERDICT:-AUTHOR-STAGE-NONE}**"
+            echo
+            echo "A bundle is NOT a landing. It reaches \`main\` only through the"
+            echo "autoland gates (baseline ACCEPT -> patched REJECT with the expected"
+            echo "code -> full battery -> push-and-assert), and only at SHEPHERD_MODE=live."
+            echo "Trace tail (full log in the run artifacts):"
+            echo
+            echo '```'
+            tail -c 2500 author-stage-run.log 2>/dev/null || echo "(no log)"
+            echo '```'
+          } > author-stage-comment.md
+          python3 - "${ISSUE}" <<'PY'
+          import json, os, sys, urllib.request
+          issue = sys.argv[1]
+          tok = os.environ["GITHUB_TOKEN"]
+          body = open("author-stage-comment.md").read()
+          req = urllib.request.Request(
+              f"https://api.github.com/repos/limitlessprojects/Go-Hybrid/issues/{issue}/comments",
+              data=json.dumps({"body": body}).encode(),
+              headers={"Authorization": "token " + tok,
+                       "Accept": "application/vnd.github+json",
+                       "Content-Type": "application/json"})
+          urllib.request.urlopen(req, timeout=30)
+          PY
