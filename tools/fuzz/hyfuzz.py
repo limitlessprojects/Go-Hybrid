@@ -369,18 +369,21 @@ def check_one(hyb, src, workdir, timeout):
             [hyb, "check", path], cwd=workdir, capture_output=True,
             text=True, timeout=timeout,
         )
-    except OSError as exc:
-        if getattr(exc, "winerror", None) == 193:
-            r = subprocess.run(
-                [sys.executable, hyb, "check", path], cwd=workdir,
-                capture_output=True, text=True, timeout=timeout,
-            )
-        else:
-            raise
     except subprocess.TimeoutExpired:
         return "HANG", False
-    except OSError as err:
-        return f"EXEC_ERROR: {err}", False
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 193:
+            try:
+                r = subprocess.run(
+                    [sys.executable, hyb, "check", path], cwd=workdir,
+                    capture_output=True, text=True, timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                return "HANG", False
+            except OSError as err:
+                return f"EXEC_ERROR: {err}", False
+        else:
+            return f"EXEC_ERROR: {exc}", False
     if r.returncode not in (0, 1):
         return f"UNEXPECTED exit={r.returncode}", False
     blob = (r.stdout + r.stderr).lower()
@@ -470,16 +473,21 @@ def oracle_one(hyb, src, workdir, timeout):
             [hyb, "build", path, "-o", out_bin],
             cwd=workdir, capture_output=True, text=True, timeout=timeout,
         )
-    except OSError as exc:
-        if getattr(exc, "winerror", None) == 193:
-            r = subprocess.run(
-                [sys.executable, hyb, "build", path, "-o", out_bin],
-                cwd=workdir, capture_output=True, text=True, timeout=timeout,
-            )
-        else:
-            raise
     except subprocess.TimeoutExpired:
         return "ORACLE_HANG", False
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 193:
+            try:
+                r = subprocess.run(
+                    [sys.executable, hyb, "build", path, "-o", out_bin],
+                    cwd=workdir, capture_output=True, text=True, timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                return "ORACLE_HANG", False
+            except OSError as err:
+                return f"ORACLE_EXEC_ERROR: {err}", False
+        else:
+            return f"ORACLE_EXEC_ERROR: {exc}", False
     combined = (r.stdout or "") + (r.stderr or "")
     blob = combined.lower()
     if any(b in blob for b in BAD_TEXT):
