@@ -1150,6 +1150,19 @@ impl<'a> Checker<'a> {
 
     fn check_array_len(&mut self, st: Option<&FnState>, len: &Expr) {
         let span = len.span();
+        // Issue #758: a constant zero divisor inside the length
+        // expression is a Go compile error exactly like value position
+        // (`invalid operation: division by zero` in the array type) —
+        // the SAME predicate, mirrored onto the type-expression site
+        // (#999 pattern). Fail-open on non-constant lengths: those are
+        // the existing checks' business.
+        {
+            let empty_st = crate::model::FnState::default();
+            self.check_expr_const_zero_divisor(
+                st.unwrap_or(&empty_st),
+                len,
+            );
+        }
         // 1) A constant integer expression: must be non-negative.
         let direct_or_folded = const_int_value(len).or_else(|| {
             if matches!(unwrap_parens(len), Expr::Ident { .. }) {
