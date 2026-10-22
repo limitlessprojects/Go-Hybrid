@@ -70,6 +70,13 @@ pub struct Token {
     pub span: Span,
 }
 
+/// Hex/octal escapes carry a byte in strings and a code point in runes.
+/// Keep that distinction until the literal's context consumes the escape.
+enum EscapeValue {
+    Byte(u8),
+    Scalar(char),
+}
+
 /// Reserved words (LX3) + the reserved-for-future list (error to use today).
 const KEYWORDS: &[&str] = &[
     "break",
@@ -628,7 +635,10 @@ impl<'a> Lexer<'a> {
                     return self.tok(start, Tok::CharLit('\0'));
                 }
                 let _ = esc_start;
-                e.unwrap()
+                match e.unwrap() {
+                    EscapeValue::Byte(byte) => char::from(byte),
+                    EscapeValue::Scalar(ch) => ch,
+                }
             }
             Some(c) if c != '\n' => {
                 self.bump();
@@ -730,7 +740,7 @@ impl<'a> Lexer<'a> {
     /// InterpOpen successor in `pending`).
     fn lex_str_segment(&mut self, emitted_any: bool) -> Option<Token> {
         let start = self.pos();
-        let mut cooked = String::new();
+        let mut cooked = Vec::new();
         loop {
             let Some(c) = self.at(0) else {
                 self.frames.pop();
@@ -739,7 +749,7 @@ impl<'a> Lexer<'a> {
                     return Some(self.tok(start, Tok::StrEnd));
                 }
                 self.pending = Some(self.tok(self.pos(), Tok::StrEnd));
-                return Some(self.tok(start, Tok::StrChunk(cooked)));
+                return Some(self.str_chunk(start, cooked));
             };
             match c {
                 '"' => {
@@ -749,13 +759,13 @@ impl<'a> Lexer<'a> {
                         return Some(self.tok(start, Tok::StrEnd));
                     }
                     self.pending = Some(self.tok(self.pos(), Tok::StrEnd));
-                    return Some(self.tok(start, Tok::StrChunk(cooked)));
+                    return Some(self.str_chunk(start, cooked));
                 }
                 '{' => {
                     if self.at(1) == Some('{') {
                         self.bump();
                         self.bump();
-                        cooked.push('{');
+                        cooked.push(b'{');
                     } else {
                         self.bump();
                         // mark the Str frame as having emitted, push the interp frame
@@ -767,7 +777,7 @@ impl<'a> Lexer<'a> {
                             return Some(self.tok(start, Tok::InterpOpen));
                         }
                         self.pending = Some(self.tok(self.pos(), Tok::InterpOpen));
-                        return Some(self.tok(start, Tok::StrChunk(cooked)));
+                        return Some(self.str_chunk(start, cooked));
                     }
                 }
                 '}' => {
@@ -776,26 +786,47 @@ impl<'a> Lexer<'a> {
                     if self.at(0) == Some('}') {
                         self.bump();
                     }
-                    cooked.push('}');
+                    cooked.push(b'}');
                 }
                 '\\' => {
                     self.bump();
                     match self.escape_char(true) {
-                        Some(e) => cooked.push(e),
+                        Some(EscapeValue::Byte(byte)) => cooked.push(byte),
+                        Some(EscapeValue::Scalar(ch)) => {
+                            cooked.extend_from_slice(ch.encode_utf8(&mut [0; 4]).as_bytes());
+                        }
                         None => {
                             // unknown escape: keep the char verbatim (diag recorded)
                             if let Some(c2) = self.bump() {
-                                cooked.push(c2);
+                                cooked.extend_from_slice(c2.encode_utf8(&mut [0; 4]).as_bytes());
                             }
                         }
                     }
                 }
                 _ => {
-                    cooked.push(c);
+                    cooked.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
                     self.bump();
                 }
             }
         }
+    }
+
+    /// Decode only after adjacent byte escapes have formed a complete
+    /// literal segment. T3 permits invalid UTF-8 through byte-slice
+    /// conversion, not through source literals; never silently replace it.
+    fn str_chunk(&mut self, start: Pos, bytes: Vec<u8>) -> Token {
+        let text = match String::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(_) => {
+                self.escape_diag(
+                    start,
+                    true,
+                    "invalid UTF-8 in string literal: byte escapes must form a valid UTF-8 segment (T3)",
+                );
+                String::new()
+            }
+        };
+        self.tok(start, Tok::StrChunk(text))
     }
 
     /// One escape sequence after `\`. `str_mode` selects the Go string escape
@@ -807,7 +838,7 @@ impl<'a> Lexer<'a> {
     /// recorded" on `None`. The one silent `None` left is end-of-input
     /// mid-escape: the literal loop then runs to EOF and the caller emits
     /// its own `unterminated string/char literal` diagnostic.
-    fn escape_char(&mut self, str_mode: bool) -> Option<char> {
+    fn escape_char(&mut self, str_mode: bool) -> Option<EscapeValue> {
         let start = self.pos();
         let c = self.bump()?;
         let out = match c {
@@ -837,8 +868,7 @@ impl<'a> Lexer<'a> {
                     };
                     v = v * 16 + d;
                 }
-                // v <= 0xFF is always a scalar value; from_u32 cannot fail.
-                char::from_u32(v)?
+                return Some(EscapeValue::Byte(v as u8));
             }
             'u' => {
                 if str_mode {
@@ -942,7 +972,7 @@ impl<'a> Lexer<'a> {
                     );
                     return None;
                 }
-                char::from_u32(v)?
+                return Some(EscapeValue::Byte(v as u8));
             }
             _ => {
                 self.diag(
@@ -953,7 +983,7 @@ impl<'a> Lexer<'a> {
                 return None;
             }
         };
-        Some(out)
+        Some(EscapeValue::Scalar(out))
     }
 
     /// `char::from_u32(v)` or a named fail-closed diagnostic (surrogate

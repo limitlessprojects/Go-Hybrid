@@ -108,3 +108,34 @@ fn ordinary_interpolation_and_format_calls_keep_their_semantics() {
             .as_bytes(),
     );
 }
+
+#[test]
+fn utf8_byte_escapes_preserve_length_indexing_and_comparison() {
+    check_build_run(
+        "utf8-byte-values",
+        r#"    s := "\xc3\xa9"
+    fmt.println(len(s))
+    fmt.println(s[0])
+    fmt.println(s[1])
+    fmt.println(s == "é")
+    fmt.println("\303\251" == "é")
+    fmt.println("\xe4\xb8\xad" == "中")
+    fmt.println("\xf0\x9f\x99\x82" == "🙂")
+    fmt.println("prefix:\xc3\xa9:{value}" == "prefix:é:7")
+    fmt.println("\x41" == "A")
+    fmt.println("\u00e9" == "é")
+    fmt.println("\U0001f642" == "🙂")
+    fmt.println('\xe9' == '\u{e9}')"#,
+        b"2\n195\n169\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n",
+    );
+}
+
+#[test]
+fn format_calls_preserve_utf8_escaped_chunks() {
+    check_build_run(
+        "utf8-format-chunks",
+        r#"    fmt.printf("\xc3\xa9{value}\344\270\255\n")
+    fmt.fprintf(os.stdout, "\xf0\x9f\x99\x82{value}\303\251\n")"#,
+        "é7中\n🙂7é\n".as_bytes(),
+    );
+}

@@ -72,12 +72,18 @@ fn octal_escape_unbounded_digits_do_not_panic_or_silently_drop() {
 
 #[test]
 fn octal_escape_leading_zero_and_above_255_fail_closed() {
-    let toks = lex("test.hy", r#"fn main() { s := "\0\000\012\377" }"#).expect("valid octals");
+    // LX7 byte escapes must form UTF-8 (T3). The old isolated \377
+    // expectation encoded the byte as U+00FF and pinned issue #1199's bug.
+    // Keep the leading-zero controls; pin the 255 boundary in rune context.
+    let toks = lex("test.hy", r#"fn main() { s := "\0\000\012\303\277" }"#)
+        .expect("valid octals forming UTF-8");
     assert!(
         toks.iter()
             .any(|t| t.tok == Tok::StrChunk("\0\0\n\u{ff}".into())),
-        "expected \\0, \\000, \\012, \\377 to decode cleanly, got: {toks:?}"
+        "expected zero/newline controls and UTF-8 \\303\\277, got: {toks:?}"
     );
+    let byte_max = lex("test.hy", r#"'\377'"#).expect("255 remains a valid rune escape");
+    assert!(byte_max.iter().any(|t| t.tok == Tok::CharLit('\u{ff}')));
 
     for src in [
         r#"fn main() { s := "\400" }"#,

@@ -184,6 +184,13 @@ are `HYB-E0002` parse errors (rule `LX7`; the rune-literal forms carry
 `LX6`): the escape set is enforced fail-closed, never silently skipped
 with the remaining characters leaking into the value (corpus 61).
 
+Hex (`\xNN`) and octal byte escapes contribute bytes, not Unicode scalar
+values: `"\xc3\xa9"` and `"\303\251"` both contain the two UTF-8 bytes for
+`é`. Unicode escapes (`\uNNNN` / `\UNNNNNNNN`) contribute the UTF-8 encoding
+of their scalar value. Each literal segment, including those separated by
+interpolation, must form valid UTF-8 (T3); otherwise it is `HYB-E0002` with
+rule `LX7`. Rune hex/octal escapes continue to denote code points (LX6).
+
 ```hy
 name := "Hybrid"
 fmt.println("hello, {name}!")     // expect: hello, Hybrid!
