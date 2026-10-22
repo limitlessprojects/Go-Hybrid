@@ -1038,3 +1038,40 @@ agreement, tripwire not fired**.
 
 With this registration the corpus is **122 programs: ACCEPT 38 ·
 ACCEPT-MANAGED 2 · REJECT 82** — main's 120 plus these two.
+
+-------------------------------------------------------------------------------
+
+### tests/checker-corpus/const-zero-divisor-const-forms-reject.hy (issue #758) — REJECT
+
+// The divisor predicate only inspected inline literals (`is_int_literal_zero`,
+
+
+-------------------------------------------------------------------------------
+
+### range-bound-type-forms-reject (issue #827) — REJECT
+
+// `non_integer_bound_kind` missed nil / bool-result operators / AddrOf,
+
+With this registration the corpus is **124 programs: ACCEPT 38 ·
+ACCEPT-MANAGED 2 · REJECT 84** — main's 122 plus these two, landed
+
+-------------------------------------------------------------------------------
+
+### multivalue-bind-source-count-reject (issue #929) — REJECT
+
+receive/map-index over two names, slice-index multi-name, select-recv 3 names, and 1-result calls bound to 2+ names — all rejected fail-closed before emission (T23 + BUILDABLE)
+
+With this registration the corpus is **125 programs: ACCEPT 38 ·
+ACCEPT-MANAGED 2 · REJECT 85** — main's 124 plus this one.
+
+-------------------------------------------------------------------------------
+
+### parallel-bind-count-and-decl-type-reject (issue #905) — REJECT
+
+parallel decl/assign count mismatches, provably-single sources bound to several names, typed-decl initializer conflicts, positional parallel-assign kind conflicts — all rejected fail-closed (BUILDABLE)
+
+With this registration the corpus is **126 programs: ACCEPT 38 ·
+ACCEPT-MANAGED 2 · REJECT 86** — main's 125 plus this one.
+by the autonomous pipeline (bundles author-758 / author-827, landings
+0107658 / d0a2db5). Sibling-take credit: sonson0910's stale-base
+companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.

@@ -75,3 +75,20 @@ landing; the default `dry-run` runs baseline checks only. Format, gates, and
 trust boundaries: `automation/land-queue/README.md`. The judgment work
 (authoring the fix + its tests + the corpus registration) stays with the
 agent sessions; everything mechanical after that is the machine's.
+
+## Author stage (session-32) — the layer that writes the fix
+
+`tools/author_stage.py` + the `author-stage` workflow produce a land-queue
+bundle from an issue (brain = any OpenAI-compatible endpoint, e.g. an
+Ornith-1.0-9B GGUF llama.cpp server on a Kaggle GPU kernel, or a cloud
+model). It never pushes code, never lands, never closes: a READY bundle
+enters `automation/land-queue/` and is gated by the SAME autoland
+pipeline; BLOCKED bundles never enter the queue (artifacts only, full
+trace). Scope-guarded diffs (`compiler/` + `tests/` only), accept
+controls read from HEAD so a patch cannot weaken its own tripwire, PRs
+refused outright. Kill switches stack in front of autoland's:
+`AUTHOR_ENABLED` arms the workflow, `AUTHOR_MODE=dry-run` (default)
+keeps everything to artifacts + evidence comments, `SHEPHERD_MODE`
+(unchanged) still guards the landing. Brain/harness decisions, the
+problem taxonomy (63.4% of open bugs = const-eval + bounds), and the
+pre-declared bake-off protocol: **AUTHOR-STAGE.md**.

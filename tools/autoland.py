@@ -43,10 +43,11 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 QUEUE = ROOT / "automation" / "land-queue"
 HYB = ROOT / "compiler" / "target" / "debug" / "hyb"
+COMPILER = ROOT / "compiler"
 
 
-def sh(args, **kw) -> subprocess.CompletedProcess:
-    return subprocess.run(args, cwd=ROOT, capture_output=True, text=True, **kw)
+def sh(args, cwd=None, **kw) -> subprocess.CompletedProcess:
+    return subprocess.run(args, cwd=cwd or ROOT, capture_output=True, text=True, **kw)
 
 
 def die(kind: str, slug: str, detail: str, code: int) -> "int":
@@ -65,7 +66,7 @@ def read_meta(d: pathlib.Path) -> dict:
 
 
 def build() -> None:
-    r = sh(["cargo", "build", "-p", "hyb", "--quiet"])
+    r = sh(["cargo", "build", "-p", "hyb", "--quiet"], cwd=str(COMPILER))
     if r.returncode != 0:
         raise RuntimeError(f"cargo build failed: {r.stderr[-800:]}")
 
@@ -79,13 +80,16 @@ def check_repro(repro_rel: str) -> tuple[int, str]:
 def battery() -> list[tuple[str, bool, str]]:
     steps = [
         ("workspace", ["cargo", "test", "--workspace"]),
-        ("corpus", ["python3", "tools/corpus_harness.py"]),
+        ("corpus", ["python3", "tools/corpus_harness.py", "--bin", str(HYB)]),
         ("census", ["python3", "tools/check_corpus_census.py"]),
-        ("differential", ["python3", "tools/differential_loop.py"]),
+        ("differential", ["python3", "tools/differential_loop.py",
+                          "--bin", str(HYB)]),
     ]
     results = []
     for name, cmd in steps:
-        r = sh(cmd)
+        # cargo steps run from the workspace root (compiler/); the python
+        # tooling steps run from the repo root (they resolve their own paths).
+        r = sh(cmd, cwd=str(COMPILER) if cmd[0] == "cargo" else None)
         ok = r.returncode == 0
         results.append((name, ok, (r.stdout + r.stderr)[-600:] if not ok else ""))
         if not ok:
