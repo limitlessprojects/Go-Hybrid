@@ -270,10 +270,15 @@ impl<'a> Checker<'a> {
     ) {
         let tl = self.typed_int_bound(st, lo);
         let th = self.typed_int_bound(st, hi);
-        let mismatch = match (&tl, &th) {
+        // Issue #1165: compare the two bounds as Go types, not as spellings.
+        // `byte` and `rune` are Go aliases of `uint8`/`int32`, and `u8`/`i32`
+        // are the SPEC spellings the emitter maps onto those same Go types.
+        let tl_c = tl.as_deref().map(crate::const_overflow::canonical_int_type_name);
+        let th_c = th.as_deref().map(crate::const_overflow::canonical_int_type_name);
+        let mismatch = match (&tl_c, &th_c) {
             (Some(a), Some(b)) => a != b,
-            (None, Some(b)) => b != "int",
-            (Some(a), None) => inclusive && a != "int",
+            (None, Some(b)) => *b != "int",
+            (Some(a), None) => inclusive && *a != "int",
             (None, None) => false,
         };
         if mismatch {

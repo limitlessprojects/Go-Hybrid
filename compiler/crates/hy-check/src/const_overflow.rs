@@ -1106,6 +1106,31 @@ pub(crate) fn fixed_width_int_range(name: &str) -> Option<(i128, i128)> {
     })
 }
 
+/// Canonical Go type name for a Hybrid integer spelling (issue #1165).
+///
+/// Only the aliases that Go itself treats as *one type* collapse: `byte` and
+/// `rune` are Go builtins that alias `uint8`/`int32`, and `u8`/`i8`/`u16`/…
+/// are the SPEC-LANGUAGE spellings that `hy_emit::shapes::go_primitive_name`
+/// emits as `uint8`/`int8`/`uint16`/…. Everything else keeps its own identity:
+/// `int`/`uint` stay word-sized (Go gives them their own type — `int` is not
+/// `int64`), and `uintptr` is deliberately not folded into `uint` even though
+/// `fixed_width_int_range` groups their *ranges*, because Go keeps them
+/// distinct. `usize`/`isize` are absent by design (SPEC-LANGUAGE §402: the
+/// language does not define them) and are left untouched here.
+pub(crate) fn canonical_int_type_name(name: &str) -> &str {
+    match name {
+        "u8" | "byte" => "uint8",
+        "i8" => "int8",
+        "u16" => "uint16",
+        "i16" => "int16",
+        "u32" => "uint32",
+        "i32" | "rune" => "int32",
+        "u64" => "uint64",
+        "i64" => "int64",
+        other => other,
+    }
+}
+
 /// Parsed integer literal, retaining the fact that a syntactically valid
 /// value exceeded i128 instead of treating it as non-constant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1527,6 +1552,17 @@ mod unit {
         assert_eq!(fixed_width_int_range("u16"), Some((0, 65535)));
         assert!(fixed_width_int_range("string").is_none());
         assert!(fixed_width_int_range("float64").is_none());
+    }
+
+    #[test]
+    fn canonical_int_types() {
+        assert_eq!(canonical_int_type_name("u8"), "uint8");
+        assert_eq!(canonical_int_type_name("byte"), "uint8");
+        assert_eq!(canonical_int_type_name("uint8"), "uint8");
+        assert_eq!(canonical_int_type_name("rune"), "int32");
+        assert_eq!(canonical_int_type_name("i32"), "int32");
+        assert_eq!(canonical_int_type_name("int"), "int");
+        assert_eq!(canonical_int_type_name("uintptr"), "uintptr");
     }
 
     #[test]
