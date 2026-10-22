@@ -2,17 +2,18 @@
 name = "hyrt"
 version = "0.1.0"
 edition = "2021"
-description = "The Hybrid runtime bridge — extern C wrappers over the pinned crates (sha3, serde_json). Loaded as ONE staticlib per binary; panic=abort at the boundary (never unwind across — SPEC prime directive 6)."
+description = "The Hybrid runtime bridge — extern C wrappers over the pinned crates (sha3, sha2, flate2, ed25519-dalek, serde_json, regex). Loaded as WASM module or staticlib."
 
 [lib]
-crate-type = ["staticlib"]
+crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-# Pinned EXACT versions (SPEC M6: no ranges — reproducibility is a Phase-5
-# requirement adopted now; changes are Decision Log entries).
 sha3 = "=0.10.8"
-serde_json = "=1.0.140"
-regex = "=1.11.1"
+sha2 = "=0.10.8"
+serde_json = { version = "=1.0.140", default-features = false, features = ["alloc"] }
+regex = { version = "=1.11.1", default-features = false, features = ["std", "perf", "unicode"] }
+flate2 = { version = "=1.0.35", default-features = false, features = ["zlib-rs"] }
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["alloc"] }
 
 [profile.release]
 opt-level = 3
