@@ -1,5 +1,7 @@
 # Hybrid Language: Development Plan
 
+- Contributor PR #1663 revalidation (2026-11-02, PABixn): refreshed onto main `77ebac9`, retaining its relative-bin-directory fix. On that main the three symlink regressions fail and the healthy-upgrade control passes; the refreshed tree passes all 28 offline installer tests (25.851s), shell syntax and diff checks. Canonicalized the temporary runtime-test root to handle macOS `/var`/`/private/var` aliases without relaxing assertions. Compiler/runtime suites were not rerun; upstream CI and maintainer/bounty review remain required.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - `hyb generate` excludes sibling filenames reported by `go list -e -find -json .` as `IgnoredGoFiles`, once per directory and invocation. Modern/legacy constraints, platform suffixes and `GOFLAGS` tags use Go's own selection; existing production-package conflict checks remain. This is CLI tooling correctness, not a language/checker soundness change; PR #1900's separate dot/underscore-prefix fix is untouched.

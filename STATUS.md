@@ -1,5 +1,7 @@
 # STATUS (for the human — 15 lines max)
 
+- Contributor PR #1663 revalidation (2026-11-02, PABixn): refreshed onto main `77ebac9`, retaining its relative-bin-directory fix. On that main the three symlink regressions fail and the healthy-upgrade control passes; the refreshed tree passes all 28 offline installer tests (25.851s), shell syntax and diff checks. Canonicalized the temporary runtime-test root to handle macOS `/var`/`/private/var` aliases without relaxing assertions. Compiler/runtime suites were not rerun; upstream CI and maintainer/bounty review remain required.
+
 - Contributor (2026-11-01): PR #2400 integrated with main `7e770ea`; pinned Linux workspace 2097/2097, corpus 130/130, differential 42/42 + 88/88 and all 12 local stages pass. Tested code/lockfile unchanged by final documentation. Hosted CI for the refreshed head, review and any award remain pending. See PLAN.md.
 
 - Contributor #1165: range bounds spelled as different names of one Go integer type no longer raise a false HYB-E2009 (shared canonicaliser in `hy-check` + regression pin); workspace/corpus/differential/CI remain delivery gates.
