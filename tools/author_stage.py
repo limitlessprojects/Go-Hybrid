@@ -209,10 +209,11 @@ def write_blocked(issue_no: int, trace: pathlib.Path, note: str) -> int:
 def run_author(issue_no: int, out: pathlib.Path, max_rounds: int,
                brain: str = "api") -> int:
     trace = pathlib.Path(tempfile.mkdtemp(prefix="author-stage-")) / "trace.log"
-    if not QUEUE.resolve() in out.resolve().parents and out.resolve() != QUEUE.resolve():
-        if not str(out).startswith(str(ROOT)):
-            print(f"AUTHOR-STAGE-ERROR: --out must live inside the repo ({ROOT})")
-            return 2
+    out_res = (ROOT / out).resolve() if not out.is_absolute() else out.resolve()
+    if not out_res.is_relative_to(ROOT.resolve()):
+        print(f"AUTHOR-STAGE-ERROR: --out must live inside the repo ({ROOT})")
+        return 2
+    out = out_res
     if dirty():
         print("AUTHOR-STAGE-ERROR: working tree dirty — refusing to run (clean it first)")
         return 2
@@ -247,6 +248,16 @@ def run_author(issue_no: int, out: pathlib.Path, max_rounds: int,
     repro = REPRO_DIR / "repro.hy"
     repro.write_text(repro_src)
     repro_rel = str(repro.relative_to(ROOT))
+
+    b0 = sh(["cargo", "build", "-p", "hyb", "--quiet"], cwd=str(COMPILER), timeout=1800)
+    if b0.returncode != 0:
+        return write_blocked(issue_no, trace,
+                             "baseline cargo build -p hyb failed on HEAD:\n" + (b0.stderr or "")[-800:])
+    base_code, base_out = hyb_check(repro_rel)
+    if base_code != 0:
+        return write_blocked(issue_no, trace,
+                             f"stale premise — repro already REJECTs on HEAD (exit {base_code}):\n{base_out[-600:]}")
+    tr(trace, "gate-baseline-ok", exit=0)
 
     files = [l.strip() for l in (sh(["git", "ls-files", "compiler/crates"], timeout=60).stdout or "").splitlines()
              if l.endswith(".rs")][:60]
@@ -405,6 +416,12 @@ def selftest() -> int:
     blocked_dir = (BLOCKED_DIR / "selftest-probe").resolve()
     check("blocked path outside the queue",
           QUEUE.resolve() not in blocked_dir.parents and blocked_dir != QUEUE.resolve())
+    sibling = pathlib.Path(str(ROOT) + "-sibling/bundle")
+    sibling_res = (ROOT / sibling).resolve() if not sibling.is_absolute() else sibling.resolve()
+    check("out path rejects sibling prefix", not sibling_res.is_relative_to(ROOT.resolve()))
+    rel_ok = pathlib.Path("target/test-bundle")
+    rel_ok_res = (ROOT / rel_ok).resolve() if not rel_ok.is_absolute() else rel_ok.resolve()
+    check("out path accepts repo-relative target", rel_ok_res.is_relative_to(ROOT.resolve()))
     print("SELFTEST " + ("PASS" if ok else "FAIL"))
     return 0 if ok else 1
 
