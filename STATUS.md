@@ -1,5 +1,6 @@
 # STATUS (for the human — 15 lines max)
 
+- Contributor installer fix (2026-10-22, PABixn): replace launcher-file symlinks instead of overwriting their targets; 3 pre-fix failures reproduced, all 26 offline installer tests pass. Upstream CI and bounty review pending.
 - Contributor #656 follow-up: apply the existing receiver guard to task callees and bound method values; 19 focused regressions cover residual defects and valid controls. Full workspace, corpus, differential, and CI are delivery gates.
 - Phase: **MVP DONE + v0.1.0 released + community OPEN** — session-23: triage bot shipped (PR #941) + Pareto landed 12 PRs verified (#892 #741 #869 #901 #915 #899 #913 #917 #671 #938 #885 #870) + #804/#793 evidence-closed (Go 1.26.9 accepts directional makes) — main tip b84fff6, battery cargo green, corpus 113/113, differential FULL 37+76, census 7/7
 - **M1 VERDICTS: 21/21 drafts + late-arrival addendum READY** (`/home/z/my-project/VERDICTS-M1-DRAFT.md`): post to discussion #365 on 2026-11-01 00:00 UTC per the file's checklist; spike evidence now includes #709 (W-006, CI pending at last check), #704/#635/#637 (all CI green, December-window posture), #379 (W-015, green)
