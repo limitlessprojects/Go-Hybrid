@@ -351,5 +351,68 @@ class WorktreeShaTests(unittest.TestCase):
         self.assertIn('failed to resolve HEAD', summary['steps'][0]['out_tail'])
 
 
+class ResultFreshnessTests(unittest.TestCase):
+    def run_reused_job(self, action, declaration='prefixed', phase='commands'):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            results = root / 'output'
+            results.mkdir()
+            (results / 'summary.json').write_text('{"ok": true}', encoding='utf-8')
+            artifact = results / 'measurement.json'
+            artifact.write_text('{"run": "old"}', encoding='utf-8')
+            # Make the existing output unambiguously older, without sleeps.
+            os.utime(artifact, (1, 1))
+            expected = {'prefixed': 'results/measurement.json',
+                        'absolute': str(artifact),
+                        'relative': os.path.relpath(artifact)}[declaration]
+            script = {
+                'noop': 'pass',
+                'rewrite': f'from pathlib import Path; Path({str(artifact)!r}).write_text({json.dumps({"run": "new"})!r})',
+                'same-bytes': f'from pathlib import Path; p=Path({str(artifact)!r}); p.write_bytes(p.read_bytes())',
+            }[action]
+            job = {'job': 'freshness', phase: [step('produce', script)],
+                   'expected_results': [expected, 'results/summary.json']}
+            job_path = root / 'job.json'
+            job_path.write_text(json.dumps(job), encoding='utf-8')
+            argv = ['runner.py', str(job_path), '--results-dir', str(results),
+                    '--repo-dir', str(root / 'no-checkout')]
+            with patch.object(sys, 'argv', argv), patch.dict(os.environ), \
+                    patch.object(runner, 'env_report', return_value={'test': True}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as stopped:
+                    runner.main()
+            return (stopped.exception.code,
+                    json.loads((results / 'summary.json').read_text(encoding='utf-8')),
+                    artifact.read_text(encoding='utf-8'))
+
+    def test_untouched_old_result_cannot_satisfy_new_job(self):
+        for declaration in ('prefixed', 'absolute', 'relative'):
+            with self.subTest(declaration=declaration):
+                code, summary, contents = self.run_reused_job('noop', declaration)
+                self.assertEqual(code, 1)
+                self.assertFalse(summary['ok'])
+                self.assertEqual(summary['steps'][-1]['name'], 'expected-result')
+                self.assertIn('unchanged', summary['steps'][-1]['out_tail'])
+                self.assertEqual(contents, '{"run": "old"}')
+
+    def test_rewritten_result_in_reused_directory_passes(self):
+        code, summary, contents = self.run_reused_job('rewrite')
+        self.assertEqual(code, 0)
+        self.assertTrue(summary['ok'])
+        self.assertEqual(contents, '{"run": "new"}')
+
+    def test_identical_output_rewritten_this_run_passes(self):
+        code, summary, contents = self.run_reused_job('same-bytes')
+        self.assertEqual(code, 0)
+        self.assertTrue(summary['ok'])
+        self.assertEqual(contents, '{"run": "old"}')
+
+    def test_setup_can_refresh_declared_result(self):
+        code, summary, contents = self.run_reused_job('rewrite', phase='setup')
+        self.assertEqual(code, 0)
+        self.assertTrue(summary['ok'])
+        self.assertEqual(contents, '{"run": "new"}')
+
+
 if __name__ == '__main__':
     unittest.main()

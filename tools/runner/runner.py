@@ -30,6 +30,8 @@ Behavior:
   * Output files land in the results dir (default: $RESULTS_DIR or ./results).
   * Declared expected_results must be files. A results/ prefix refers to the
     selected results dir, including when --results-dir overrides the default.
+    Pre-existing outputs must be refreshed by this run; unchanged files are
+    reported as failures without deleting them. summary.json is generated last.
   * Never panics; all errors become entries in summary.json.
 Stdlib only — must run on a bare Kaggle/Actions image with just python3.
 """
@@ -119,6 +121,25 @@ def redact(env: dict) -> dict:
     return out
 
 
+def result_path(expected, results_dir):
+    """Resolve the portable results/ prefix the same way before and after a job."""
+    return (os.path.join(results_dir, expected[len("results/"):])
+            if expected.startswith("results/") else expected)
+
+
+def result_signature(path):
+    """Detect unchanged output without reading large artifacts or counting atime.
+
+    This is a stale-file check, not a proof of artifact provenance. Rewriting
+    identical bytes is allowed; deleting cached evidence is never necessary.
+    """
+    try:
+        stat = os.stat(path)
+    except (OSError, ValueError):
+        return None
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("job_json")
@@ -193,6 +214,15 @@ def main():
     if not setup_raw and not commands_raw:
         record("job-spec", "check", 1, 0.0, "job defines no executable setup or commands")
         write_summary_and_exit()
+
+    # Snapshot before setup, which may itself produce a declared result.
+    # Keep malformed declarations for the existing validation below.
+    expected_results = job.get("expected_results", [])
+    previous_results = {}
+    if isinstance(expected_results, list):
+        for expected in expected_results:
+            if isinstance(expected, str) and expected:
+                previous_results[expected] = result_signature(result_path(expected, results_dir))
 
     # sanity: verify we are at the pinned SHA when a repo checkout exists
     sha_ok = True
@@ -291,14 +321,17 @@ def main():
                    "expected result must be a non-empty file path")
             continue
         # Job specs use results/... independent of the worker's output root.
-        target = (os.path.join(results_dir, expected[len("results/"):])
-                  if expected.startswith("results/") else expected)
+        target = result_path(expected, results_dir)
         # This file is generated below, after the final verdict is known.
         if os.path.abspath(target) == os.path.abspath(path):
             continue
         if not os.path.isfile(target):
             record("expected-result", "check", 1, 0.0,
                    "missing expected result file: {}".format(expected))
+        elif (previous_results.get(expected) is not None
+              and result_signature(target) == previous_results[expected]):
+            record("expected-result", "check", 1, 0.0,
+                   "expected result file unchanged from before this run: {}".format(expected))
 
     write_summary_and_exit()
 
