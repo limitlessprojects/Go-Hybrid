@@ -5195,16 +5195,13 @@ func init() {
 	copy(mem[1448292:], []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, })
 }
 
-// static_fn_62 is the statically emitted Go implementation of Wasm fn 62
-func static_fn_62(arg0 uint64) uint64 {
-	var locals [1]uint64
-	locals[0] = arg0
-	var valStack [64]uint64
+// genFn62 is the statically emitted Go implementation of Wasm fn 62
+func genFn62(p0 uint64) uint64 {
+	var s [32]uint64
 	sp := 0
-	valStack[sp] = locals[0]
+	s[sp] = p0
 	sp++
-	if sp > 0 { return valStack[sp-1] }
-	return 0
+	return s[sp-1]
 }
 
 var vmStackPool = sync.Pool{
@@ -6283,7 +6280,7 @@ func (b *WasmBridge) Free(ptr uint32, size uint32) {
 }
 
 func (b *WasmBridge) HyNop(x uint64) uint64 {
-	return static_fn_62(x)
+	return genFn62(x)
 }
 
 func (b *WasmBridge) HySha3Digest256(dataPtr, dataLen, outPtr uint32) (int32, error) {
