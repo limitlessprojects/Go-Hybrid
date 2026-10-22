@@ -418,7 +418,6 @@ pub extern "C" fn hy_json_value_text(v: u64, out: *mut u8, cap: usize, out_len: 
     if out_len.is_null() {
         return ERR_TABLE;
     }
-    let mut status = 0i32;
     with_table(|t| {
         let text = table_get(t, v)?.to_string();
         let need = text.len();
@@ -426,15 +425,13 @@ pub extern "C" fn hy_json_value_text(v: u64, out: *mut u8, cap: usize, out_len: 
             *out_len = need as u64;
         }
         if out.is_null() || cap < need {
-            status = 3; // TRY_AGAIN with the reported length
-            return Ok(());
+            return Err(3); // TRY_AGAIN with the reported length
         }
         unsafe {
             ptr::copy_nonoverlapping(text.as_ptr(), out, need);
         }
         Ok(())
-    });
-    status
+    })
 }
 
 /// `serde_json.to_string_pretty(v)` — same buffer protocol, pretty form.
@@ -448,7 +445,6 @@ pub extern "C" fn hy_json_to_string_pretty(
     if out_len.is_null() {
         return ERR_TABLE;
     }
-    let mut status = 0i32;
     with_table(|t| {
         let text = serde_json::to_string_pretty(table_get(t, v)?).map_err(|_| ERR_JSON)?;
         let need = text.len();
@@ -456,15 +452,13 @@ pub extern "C" fn hy_json_to_string_pretty(
             *out_len = need as u64;
         }
         if out.is_null() || cap < need {
-            status = 3;
-            return Ok(());
+            return Err(3);
         }
         unsafe {
             ptr::copy_nonoverlapping(text.as_ptr(), out, need);
         }
         Ok(())
-    });
-    status
+    })
 }
 
 /// Release a handle (idempotent; stale generations read INVALID). Go calls
@@ -575,4 +569,94 @@ pub extern "C" fn hyrt_abi_word() -> u64 {
     // Bump when an export's signature/semantics changes (E0001-style
     // discipline for the ABI itself). v1: the Batch F/G surface.
     0x68795f61626931 // "hy_abi1"
+}
+
+#[cfg(test)]
+mod json_text_tests {
+    use super::{
+        hy_json_parse, hy_json_release, hy_json_to_string_pretty, hy_json_value_text, ERR_TABLE,
+    };
+    use std::ptr;
+
+    type Serializer = extern "C" fn(u64, *mut u8, usize, *mut u64) -> i32;
+
+    fn rejects_invalid_handles(serialize: Serializer) {
+        for handle in [0, u64::MAX, 0x0000_0001_ffff_ffff] {
+            let mut out = [0xa5; 32];
+            let mut need = 0xfeed;
+            let status = serialize(handle, out.as_mut_ptr(), out.len(), &mut need);
+            eprintln!("handle={handle:#x} status={status} out_len={need:#x}");
+            assert_eq!(
+                status, ERR_TABLE,
+                "invalid handle must return a table error"
+            );
+            assert_eq!(out, [0xa5; 32]);
+            assert_eq!(need, 0xfeed);
+
+            assert_eq!(serialize(handle, ptr::null_mut(), 0, &mut need), ERR_TABLE);
+            assert_eq!(need, 0xfeed);
+        }
+    }
+
+    fn keeps_buffer_protocol(serialize: Serializer, expected: &[u8]) {
+        let raw = br#"{"k":7}"#;
+        let mut handle = 0;
+        assert_eq!(
+            hy_json_parse(raw.as_ptr() as u64, raw.len() as u64, &mut handle),
+            0
+        );
+        let mut need = 0;
+        assert_eq!(serialize(handle, ptr::null_mut(), 0, &mut need), 3);
+        assert_eq!(need as usize, expected.len());
+
+        let mut out = [0xa5; 64];
+        assert_eq!(
+            serialize(handle, out.as_mut_ptr(), expected.len() - 1, &mut need),
+            3
+        );
+        assert_eq!(need as usize, expected.len());
+        assert_eq!(out, [0xa5; 64]);
+
+        assert_eq!(
+            serialize(
+                handle,
+                out.as_mut_ptr().wrapping_add(1),
+                expected.len(),
+                &mut need
+            ),
+            0
+        );
+        assert_eq!(need as usize, expected.len());
+        assert_eq!(&out[1..expected.len() + 1], expected);
+        assert_eq!(out[0], 0xa5);
+        assert!(out[expected.len() + 1..].iter().all(|&b| b == 0xa5));
+
+        let mut guarded = [0xa5; 64];
+        assert_eq!(
+            serialize(handle, guarded.as_mut_ptr(), guarded.len(), ptr::null_mut()),
+            ERR_TABLE
+        );
+        assert_eq!(guarded, [0xa5; 64]);
+        assert_eq!(hy_json_release(handle), 0);
+    }
+
+    #[test]
+    fn compact_rejects_invalid_handles() {
+        rejects_invalid_handles(hy_json_value_text);
+    }
+
+    #[test]
+    fn pretty_rejects_invalid_handles() {
+        rejects_invalid_handles(hy_json_to_string_pretty);
+    }
+
+    #[test]
+    fn compact_preserves_query_short_buffer_and_copy_protocol() {
+        keeps_buffer_protocol(hy_json_value_text, br#"{"k":7}"#);
+    }
+
+    #[test]
+    fn pretty_preserves_query_short_buffer_and_copy_protocol() {
+        keeps_buffer_protocol(hy_json_to_string_pretty, b"{\n  \"k\": 7\n}");
+    }
 }

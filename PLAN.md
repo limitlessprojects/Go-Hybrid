@@ -263,3 +263,9 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 ## Contributor validation: submit revision lookup (2026-10-16)
 - Base 00610f7: resolve_head ignores failed git rev-parse, allowing an invalid revision/error message into a Kaggle upload and submitted.json. Abort before touching worker files or invoking Kaggle when HEAD lookup fails.
 - Three new offline tests: original two failures/one pass; patched all 11 job-test methods pass. Real temporary Git repositories cover unborn and committed HEAD; a mocked upload boundary verifies no push, payload mutation or submission record after lookup failure. git diff --check passes. No real Kaggle submission or compiler/Rust/Go suite run; maintainer CI remains required, including repair of existing workflow conflict markers (#339).
+
+## Contributor candidate — JSON serialization status, 2026-10-22
+
+- `hy_json_value_text` and `hy_json_to_string_pretty` now return the handle-table result instead of reporting false success for invalid handles; status3 remains the existing buffer-size retry signal. No ABI or Go API changes.
+- Reproduced on current main `9f61f54`: pinned Rust1.99.0 Windows direct-export tests had two invalid-handle failures and two valid-buffer controls passing. After this fix all four tests pass; invalid handles leave output bytes and length untouched, and query/short/exact buffers retain their contract.
+- Full local Linux battery completed at 2026-10-22T14:35:20Z on Rust1.99.0 and Go1.26.9: runtime unit4/4, fresh release archive linked into real Go runtime test/vet/build, compiler workspace1770/1770, corpus126/126, differential40/40+86/86, format and clippy exit0. The existing `Align16` dead-code warning remains. Hosted CI, maintainer review, merge and any award/payment remain pending.
