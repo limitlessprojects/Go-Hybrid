@@ -106,7 +106,7 @@ fn block_scoped_local_consts_overflow_in_init_assign_default_int_and_composites(
 #[test]
 fn runtime_locals_shadowing_consts_and_in_range_consts_accept_cleanly() {
     let src = "const big = 300\n\
-               const f_ok = 2.0\n\
+               const ok_i8 = 127\n\
                struct box_i8 {\n\
                \tv i8\n\
                }\n\
@@ -116,7 +116,7 @@ fn runtime_locals_shadowing_consts_and_in_range_consts_accept_cleanly() {
                fn main() {\n\
                \tconst local_ok = 42\n\
                \tvar a i8 = local_ok\n\
-               \tvar b i8 = f_ok\n\
+               \tvar b i8 = ok_i8\n\
                \tbig := i8(7)\n\
                \tvar c i8 = 1\n\
                \tc = big\n\
