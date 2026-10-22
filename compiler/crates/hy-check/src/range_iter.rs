@@ -95,11 +95,22 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::For {
-                kind: ForKind::Range { var, lo, hi, .. },
+                kind: ForKind::Range {
+                    var,
+                    lo,
+                    hi,
+                    inclusive,
+                    ..
+                },
                 ..
             } => {
                 self.check_integer_range_bound(st, var, lo);
                 self.check_integer_range_bound(st, var, hi);
+                // Issue #827: the lowering-derived rules — the bounds must
+                // type-check as a comparison after `i := lo; i < hi` (and
+                // the inclusive `hyLo`/`hyHi` form), and constant bounds
+                // must fit the counter's integer type.
+                self.check_range_bound_types(st, var, lo, hi, *inclusive);
             }
             _ => {}
         }
@@ -139,18 +150,50 @@ impl<'a> Checker<'a> {
                 ..
             }
             | Expr::Interp { .. } => return Some("string".to_string()),
-            Expr::Unary { operand, .. } => {
+            Expr::Lit {
+                kind: LitKind::Nil,
+                ..
+            } => return Some("nil".to_string()),
+            Expr::Ident { name, .. }
+                if matches!(name.as_str(), "nil" | "true" | "false") =>
+            {
+                return Some(name.to_string());
+            }
+            Expr::Unary { op, operand, .. } => {
+                // Issue #827: `!x` yields a bool — never an integer bound.
+                if matches!(op, hy_syntax::UnOp::Not) {
+                    return Some("bool".to_string());
+                }
                 if let Some(k) = self.non_integer_bound_kind(st, operand) {
                     return Some(k);
                 }
             }
-            Expr::Binary { lhs, rhs, .. } => {
+            Expr::Binary { op, lhs, rhs, .. } => {
+                // Issue #827: comparison/logical operators yield a bool —
+                // `0..(1 < 2)` is `mismatched types` in the lowered Go.
+                if matches!(
+                    op,
+                    hy_syntax::BinOp::Eq
+                        | hy_syntax::BinOp::Ne
+                        | hy_syntax::BinOp::Lt
+                        | hy_syntax::BinOp::Le
+                        | hy_syntax::BinOp::Gt
+                        | hy_syntax::BinOp::Ge
+                        | hy_syntax::BinOp::And
+                        | hy_syntax::BinOp::Or
+                ) {
+                    return Some("bool".to_string());
+                }
                 if let Some(k) = self
                     .non_integer_bound_kind(st, lhs)
                     .or_else(|| self.non_integer_bound_kind(st, rhs))
                 {
                     return Some(k);
                 }
+            }
+            Expr::AddrOf { .. } => {
+                // Issue #827: `&x` is a pointer — never an integer bound.
+                return Some("pointer".to_string());
             }
             _ => {}
         }
@@ -173,11 +216,166 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        // Issue #827: an untyped const identifier carries no type
+        // ascription, so `ty_of_expr`/`shape_of_expr` see nothing. Resolve
+        // the initializer through the file const map (#998 pattern) and
+        // classify the literal. Block-scoped consts stay fail-open (no
+        // const-value map in FnState — the #998 precedent).
+        if let Expr::Ident { name, .. } = unwrap_parens(expr) {
+            if st.env_lookup(name).is_none() {
+                if let Some(init) = self.const_values.get(name.as_str()) {
+                    match unwrap_parens(init) {
+                        Expr::Lit {
+                            kind: LitKind::Float(_),
+                            ..
+                        } => return Some("float".to_string()),
+                        Expr::Lit {
+                            kind: LitKind::Bool(_),
+                            ..
+                        } => return Some("bool".to_string()),
+                        Expr::Lit {
+                            kind: LitKind::Str(_) | LitKind::RawStr(_),
+                            ..
+                        } => return Some("string".to_string()),
+                        Expr::Lit {
+                            kind: LitKind::Nil,
+                            ..
+                        } => return Some("nil".to_string()),
+                        _ => {}
+                    }
+                }
+            }
+        }
         let shape = self.shape_of_expr(st, expr);
         match shape {
             TypeShape::Primitive | TypeShape::Unknown => None,
             other => Some(other.render()),
         }
+    }
+
+    /// Issue #827: the lowering-derived range rules. Exclusive
+    /// `for i in lo..hi` lowers to `i := lo; i < hi; i++`; inclusive
+    /// `lo..=hi` lowers to `hyLo := lo; hyHi := hi; i, hyCont := hyLo,
+    /// hyLo <= hyHi; ...`. The comparison type-mismatches when the two
+    /// sides resolve to different fixed-width integer types — including
+    /// the untyped-defaults-to-`int` rule for the synthesized slots.
+    /// Constant bounds must fit the counter's type.
+    fn check_range_bound_types(
+        &mut self,
+        st: &FnState,
+        var: &str,
+        lo: &Expr,
+        hi: &Expr,
+        inclusive: bool,
+    ) {
+        let tl = self.typed_int_bound(st, lo);
+        let th = self.typed_int_bound(st, hi);
+        let mismatch = match (&tl, &th) {
+            (Some(a), Some(b)) => a != b,
+            (None, Some(b)) => b != "int",
+            (Some(a), None) => inclusive && a != "int",
+            (None, None) => false,
+        };
+        if mismatch {
+            let ta = tl.clone().unwrap_or_else(|| "untyped (adapts to int)".to_string());
+            let tb = th.clone().unwrap_or_else(|| "untyped (adapts to int)".to_string());
+            let span = lo.span();
+            let msg = format!(
+                "range bounds `{}` ({ta}) and `{}` ({tb}) lower to mismatched integer types — `for {var} in lo..hi` must type-check after the lowering (LX13) (HYB-E2009)",
+                lo.render(),
+                hi.render()
+            );
+            let notes = vec![
+                "why: the emitter lowers `for i in lo..hi` to `i := lo; i < hi; i++` — Go rejects a comparison over mismatched integer types, so the emitted module would not build".to_string(),
+                "fix: give the bounds the same integer type, or use untyped constants (they adapt to the counter)".to_string(),
+            ];
+            self.diags.push(
+                Diagnostic::error("HYB-E2009", self.path.clone(), span, msg).with_notes(notes),
+            );
+            return;
+        }
+        let counter = tl.unwrap_or_else(|| "int".to_string());
+        let Some((clo, chi)) = crate::const_overflow::fixed_width_int_range(&counter) else {
+            return;
+        };
+        for (bound, role) in [(lo, "lo"), (hi, "hi")] {
+            let overflows = match crate::const_overflow::const_int_fold_with(
+                bound,
+                &self.const_values,
+                0,
+                Some(st),
+            ) {
+                crate::const_overflow::ConstFold::Val(v) => v < clo || v > chi,
+                crate::const_overflow::ConstFold::TooBig => true,
+                crate::const_overflow::ConstFold::NotConst => false,
+            };
+            if overflows {
+                let span = bound.span();
+                let msg = format!(
+                    "constant bound `{}` ({role}) overflows the range counter's type `{counter}` — Go rejects `constant ... overflows {counter}` (HYB-E2009)",
+                    bound.render()
+                );
+                let notes = vec![
+                    "why: the counter takes `lo`'s type (defaulting to int) and Go folds constant bounds against it — an out-of-range constant is a compile error, so the emitted module would not build".to_string(),
+                    "fix: use a constant within the counter's range, or widen the counter's type".to_string(),
+                ];
+                self.diags.push(
+                    Diagnostic::error("HYB-E2009", self.path.clone(), span, msg).with_notes(notes),
+                );
+            }
+        }
+    }
+
+    /// The bound's INTEGER type when a typed expression fixes it — `None`
+    /// for untyped literals and untyped consts, which adapt to the
+    /// counter's type in the lowering (and in Go's constant arithmetic).
+    fn typed_int_bound(&self, st: &FnState, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Lit { .. } => None,
+            Expr::Ident { name, .. } => {
+                if st.env_lookup(name).is_none() {
+                    if let Some(b) = self.consts.get(name.as_str()) {
+                        // a file-level const: a TYPED const fixes the
+                        // bound's type; an untyped const adapts.
+                        let ty = b.ty.as_ref()?;
+                        let resolved = self.resolve_type_alias(ty);
+                        if let TypeExpr::Named { name: rn, .. } = resolved {
+                            if crate::const_overflow::fixed_width_int_range(&rn).is_some() {
+                                return Some(rn);
+                            }
+                        }
+                        return None;
+                    }
+                }
+                let ty = self.ty_of_expr(st, e)?;
+                self.named_int_of(&ty)
+            }
+            Expr::Call { callee, args, .. } if args.len() == 1 && !args[0].spread => {
+                // a fixed-width conversion names its own type: `u32(0)`
+                // is a u32 bound regardless of what ty_of_expr infers.
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if crate::const_overflow::fixed_width_int_range(name).is_some() {
+                        return Some(name.clone());
+                    }
+                }
+                let ty = self.ty_of_expr(st, e)?;
+                self.named_int_of(&ty)
+            }
+            _ => {
+                let ty = self.ty_of_expr(st, e)?;
+                self.named_int_of(&ty)
+            }
+        }
+    }
+
+    fn named_int_of(&self, ty: &TypeExpr) -> Option<String> {
+        let resolved = self.resolve_type_alias(ty);
+        if let TypeExpr::Named { name, .. } = resolved {
+            if crate::const_overflow::fixed_width_int_range(&name).is_some() {
+                return Some(name);
+            }
+        }
+        None
     }
 
     /// Classify a range's ITERABLE — the mirror of `check_send_target`
