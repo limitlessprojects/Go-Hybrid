@@ -489,6 +489,30 @@ impl<'a> Lexer<'a> {
                     break;
                 }
             }
+            if self.at(0) == Some('.') && self.at(1) != Some('.') {
+                // A prefixed base literal (0x, 0b, 0o) cannot have a fractional part
+                // (SPEC-LANGUAGE.md LX6). Consume the dot and subsequent characters so
+                // it fails as a single malformed literal instead of leaking as an orphan
+                // leading-dot float on the same line (issue #1168).
+                s.push('.');
+                self.bump();
+                while let Some(c) = self.at(0) {
+                    if c == '_' || c.is_ascii_alphanumeric() || c == '+' || c == '-' {
+                        s.push(c);
+                        self.bump();
+                    } else {
+                        break;
+                    }
+                }
+                self.escape_diag(
+                    start,
+                    false,
+                    format!(
+                        "malformed 0{base} integer literal: prefixed base literals cannot have a fractional part (SPEC-LANGUAGE.md LX6)"
+                    ),
+                );
+                return self.tok(start, Tok::Int(s));
+            }
             let digits = &s[2..];
             if digits.is_empty() {
                 self.escape_diag(
@@ -1237,6 +1261,40 @@ mod tests {
         assert_eq!(r2[0], Tok::Int("1".into()));
         assert_eq!(r2[1], Tok::Punct("..="));
     }
+
+    #[test]
+    fn prefixed_base_literal_fraction_issue_1168() {
+        // Issue #1168: prefixed base literals (0x, 0b, 0o) followed by a fractional
+        // dot must not split into Tok::Int and orphan leading-dot Tok::Float.
+        for (src, base) in [
+            ("x := 0x1.8", "0x"),
+            ("x := 0x1.f", "0x"),
+            ("x := 0x1.8p-2", "0x"),
+            ("x := 0x1.", "0x"),
+            ("x := 0o7.5", "0o"),
+            ("x := 0b1.0", "0b"),
+        ] {
+            let errs = lex_errs(src);
+            assert!(
+                errs.iter().any(|d| d.message.contains(&format!("malformed {base}"))
+                    && d.message.contains("fractional part")
+                    && d.tier0_rule.as_deref() == Some("LX6")),
+                "expected malformed {base} diagnostic for `{src}`, got: {errs:?}"
+            );
+        }
+
+        // Range syntax on prefixed base literals must remain valid (not treated as fraction)
+        let r_hex = toks("0x1..0x10");
+        assert_eq!(r_hex[0], Tok::Int("0x1".into()));
+        assert_eq!(r_hex[1], Tok::Punct(".."));
+        assert_eq!(r_hex[2], Tok::Int("0x10".into()));
+
+        let r_hex_inc = toks("0x1..=0x10");
+        assert_eq!(r_hex_inc[0], Tok::Int("0x1".into()));
+        assert_eq!(r_hex_inc[1], Tok::Punct("..="));
+        assert_eq!(r_hex_inc[2], Tok::Int("0x10".into()));
+    }
+
 
     #[test]
     fn operators_lex_correctly() {

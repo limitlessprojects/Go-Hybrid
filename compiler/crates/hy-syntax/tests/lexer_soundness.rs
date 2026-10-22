@@ -166,3 +166,40 @@ fn empty_and_multichar_char_literals_fail_closed_without_quote_desync() {
         "multi-char rune literal must recover at closing quote on the same line: {multi_errs:?}"
     );
 }
+
+#[test]
+fn prefixed_base_literal_with_fraction_fails_closed() {
+    // Regression test for Issue #1168:
+    // `0x1.8` previously lexed as `Tok::Int("0x1")` followed by `Tok::Float(".8")`,
+    // parsing as two statements (`x := 0x1` and expression statement `.8`),
+    // passing `hy check` with 0 diagnostics and failing `go build`.
+    for src in [
+        "fn main() { x := 0x1.8 }",
+        "fn main() { x := 0x1.8p+3 }",
+        "fn main() { x := 0b101.1 }",
+        "fn main() { x := 0o77.2 }",
+        "fn main() { x := 0xDEAD.BEEF }",
+    ] {
+        let errs = lex_errs(src);
+        assert!(
+            errs.iter().any(|d| d.code == "HYB-E0002"
+                && d.tier0_rule.as_deref() == Some("LX6")
+                && d.message.contains("cannot have a fractional part")),
+            "expected HYB-E0002 [LX6] for `{src}`, got: {errs:?}"
+        );
+    }
+
+    // Range operations on prefixed base integers must remain valid (not split or rejected as fraction).
+    for valid in [
+        "fn main() { for i in 0x0..0x10 { } }",
+        "fn main() { for i in 0x0..=0x10 { } }",
+        "fn main() { for i in 0b0..0b10 { } }",
+        "fn main() { for i in 0o0..0o7 { } }",
+    ] {
+        assert!(
+            parse_file("test.hy", valid).is_ok(),
+            "expected valid range expression to parse cleanly: {valid}"
+        );
+    }
+}
+
