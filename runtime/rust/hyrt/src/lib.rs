@@ -31,7 +31,8 @@ use std::ptr;
 // ---------------------------------------------------------------------------
 
 /// `sha3.digest256(data)` — SHA3-256 of `data[0..len]`, 32 bytes into `out`.
-/// Status 0 ok / 1 err (out or data null, or len with null data).
+/// Empty input may use a null data pointer. Status 0 ok / 1 err (out null,
+/// or nonempty input with null data).
 #[no_mangle]
 pub extern "C" fn hy_sha3_digest256(
     data: *const u8,
@@ -42,7 +43,14 @@ pub extern "C" fn hy_sha3_digest256(
         return 1;
     }
     use sha3::{Digest, Sha3_256};
-    let slice = unsafe { std::slice::from_raw_parts(data, len) };
+    // Even an empty Rust slice must have a non-null pointer. The Go binding
+    // deliberately passes null/0 for empty input, so do not construct that
+    // slice from the foreign pointer.
+    let slice = if len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(data, len) }
+    };
     let digest = Sha3_256::digest(slice);
     unsafe {
         ptr::copy_nonoverlapping(digest.as_ptr(), out, 32);
@@ -575,4 +583,64 @@ pub extern "C" fn hyrt_abi_word() -> u64 {
     // Bump when an export's signature/semantics changes (E0001-style
     // discipline for the ABI itself). v1: the Batch F/G surface.
     0x68795f61626931 // "hy_abi1"
+}
+
+#[cfg(test)]
+mod sha3_tests {
+    use super::hy_sha3_digest256;
+    use std::ptr;
+
+    const EMPTY_DIGEST: [u8; 32] = [
+        0xa7, 0xff, 0xc6, 0xf8, 0xbf, 0x1e, 0xd7, 0x66, 0x51, 0xc1, 0x47, 0x56, 0xa0, 0x61, 0xd6,
+        0x62, 0xf5, 0x80, 0xff, 0x4d, 0xe4, 0x3b, 0x49, 0xfa, 0x82, 0xd8, 0x0a, 0x4b, 0x80, 0xf8,
+        0x43, 0x4a,
+    ];
+    const ABC_DIGEST: [u8; 32] = [
+        0x3a, 0x98, 0x5d, 0xa7, 0x4f, 0xe2, 0x25, 0xb2, 0x04, 0x5c, 0x17, 0x2d, 0x6b, 0xd3, 0x90,
+        0xbd, 0x85, 0x5f, 0x08, 0x6e, 0x3e, 0x9d, 0x52, 0x5b, 0x46, 0xbf, 0xe2, 0x45, 0x11, 0x43,
+        0x15, 0x32,
+    ];
+
+    #[test]
+    fn digest256_null_empty_input() {
+        let mut out = [0; 32];
+        assert_eq!(hy_sha3_digest256(ptr::null(), 0, out.as_mut_ptr()), 0);
+        assert_eq!(out, EMPTY_DIGEST);
+    }
+
+    #[test]
+    fn digest256_nonnull_empty_input() {
+        let mut out = [0; 32];
+        let data = ptr::NonNull::<u8>::dangling().as_ptr();
+        assert_eq!(hy_sha3_digest256(data, 0, out.as_mut_ptr()), 0);
+        assert_eq!(out, EMPTY_DIGEST);
+    }
+
+    #[test]
+    fn digest256_abc_writes_only_the_digest() {
+        let data = b"abc";
+        let mut storage = [0xa5; 34];
+        let out = storage[1..33].as_mut_ptr();
+        assert_eq!(hy_sha3_digest256(data.as_ptr(), data.len(), out), 0);
+        assert_eq!(storage[1..33], ABC_DIGEST);
+        assert_eq!(storage[0], 0xa5);
+        assert_eq!(storage[33], 0xa5);
+    }
+
+    #[test]
+    fn digest256_rejects_null_nonempty_input_without_writing() {
+        let mut out = [0xa5; 32];
+        assert_eq!(hy_sha3_digest256(ptr::null(), 1, out.as_mut_ptr()), 1);
+        assert_eq!(out, [0xa5; 32]);
+    }
+
+    #[test]
+    fn digest256_rejects_null_output() {
+        assert_eq!(hy_sha3_digest256(ptr::null(), 0, ptr::null_mut()), 1);
+        let data = b"abc";
+        assert_eq!(
+            hy_sha3_digest256(data.as_ptr(), data.len(), ptr::null_mut()),
+            1
+        );
+    }
 }
