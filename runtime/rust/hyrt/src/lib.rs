@@ -1,37 +1,39 @@
 //! hyrt — the Hybrid runtime bridge (Phase 2, Batch F).
 //!
-//! One staticlib per binary (abi-types.md §4 rule 6). Every export is
-//! `#[no_mangle] extern "C"`, takes only C-ABI words (u64/uintptr/pointers),
-//! never allocates Go-visible memory, never calls back into Go, and cannot
-//! unwind (panic=abort in Cargo.toml — E9: panics abort at the Rust edge,
-//! they are never errors).
-//!
-//! Error contract (Spike 5): every fallible export returns an i32 status —
-//! 0 = ok, 1 = mapped error — and writes its real result through an
-//! out-pointer the GO side owns. The Go binding maps status 1 to a Hybrid
-//! `error` (sentinel table, wrap-on-demand: ≤1 allocation, E5's budget).
-//! No Rust string ever crosses back; messages are Go-side constants.
-//!
-//! Wrappers are THIN: the pinned crates do the work. API extraction is the
-//! descriptor work (rustdoc-JSON automation is post-MVP; the hand-curated
-//! surfaces here are exactly what the pinned target programs need, grown by
-//! Decision Log entries — SPEC M5/M6 discipline applies to crates too).
+//! One staticlib / Wasm module per binary. Every export is
+//! `#[no_mangle] pub extern "C"`, takes u32/u64/pointers,
+//! never unwinds across boundaries, and executes safely on the Go stack when
+//! transpiled.
 
-// Every export takes C-ABI raw pointers by definition (abi-types.md §5's
-// pinned-borrow + generation-tag protocol is the safety contract; the Go
-// broker is its only caller, and each export null-guards its own args).
-// The lint would demand `unsafe fn` on all 18 — it changes nothing for the
-// C caller and adds nothing the in-fn guards don't already enforce.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::ptr;
 
 // ---------------------------------------------------------------------------
-// rust/sha3 (pinned 0.10.8) — example 10's hot-loop crate
+// Wasm Memory Allocation Exports
 // ---------------------------------------------------------------------------
 
-/// `sha3.digest256(data)` — SHA3-256 of `data[0..len]`, 32 bytes into `out`.
-/// Status 0 ok / 1 err (out or data null, or len with null data).
+#[no_mangle]
+pub extern "C" fn hyrt_alloc(size: usize) -> *mut u8 {
+    let mut buf = Vec::with_capacity(size);
+    let ptr = buf.as_mut_ptr();
+    std::mem::forget(buf);
+    ptr
+}
+
+#[no_mangle]
+pub extern "C" fn hyrt_free(ptr: *mut u8, size: usize) {
+    if !ptr.is_null() && size > 0 {
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, 0, size);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// rust/sha3 (pinned 0.10.8)
+// ---------------------------------------------------------------------------
+
 #[no_mangle]
 pub extern "C" fn hy_sha3_digest256(
     data: *const u8,
@@ -50,65 +52,200 @@ pub extern "C" fn hy_sha3_digest256(
     0
 }
 
-/// `sha3.stream_checksum(iters, seed)` — the hot-loop shape: ONE boundary
-/// crossing, `iters` SHA3-256 permutations inside Rust, folding each digest's
-/// first word into a u64 checksum. Deterministic per pinned crate version
-/// (example 10's expected output pins the value).
 #[no_mangle]
 pub extern "C" fn hy_sha3_stream_checksum(iters: u64, seed: u64) -> u64 {
     use sha3::{Digest, Sha3_256};
-    let mut state: u64 = seed ^ 0x68796272_69645f72; // "hybrid_r"-ish tag
+    let mut state: u64 = seed ^ 0x68796272_69645f72;
     let mut buf = [0u8; 8];
     for i in 0..iters {
         buf.copy_from_slice(&state.to_le_bytes());
-        let d = Sha3_256::digest(buf); // per-iteration: absorb+squeeze 8 bytes
+        let d = Sha3_256::digest(buf);
         let word = u64::from_le_bytes(d[0..8].try_into().unwrap());
         state = state.rotate_left(13) ^ word ^ i;
     }
     state
 }
 
-/// The G2 overhead bench's no-op (Batch J): the SHIPPING crossing —
-/// hybridge.Cross1's fast trampoline + the C ABI — with zero payload work.
-/// Returns the argument (one register move); the measured cost is the
-/// boundary itself, exactly the quantity SPEC §6's ≤5 ns budget names.
+// ---------------------------------------------------------------------------
+// rust/sha2 (pinned 0.10.8)
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub extern "C" fn hy_sha2_256(
+    data: *const u8,
+    len: usize,
+    out: *mut u8, /* 32 */
+) -> i32 {
+    if out.is_null() || (len > 0 && data.is_null()) {
+        return 1;
+    }
+    use sha2::{Digest, Sha256};
+    let slice = unsafe { std::slice::from_raw_parts(data, len) };
+    let digest = Sha256::digest(slice);
+    unsafe {
+        ptr::copy_nonoverlapping(digest.as_ptr(), out, 32);
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
+// rust/flate2 (pinned 1.0.35)
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub extern "C" fn hy_flate_compress(
+    data: *const u8,
+    len: usize,
+    out: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if data.is_null() || out_len.is_null() {
+        return 1;
+    }
+    use flate2::write::ZlibEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+
+    let slice = unsafe { std::slice::from_raw_parts(data, len) };
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    if encoder.write_all(slice).is_err() {
+        return 1;
+    }
+    let res = match encoder.finish() {
+        Ok(b) => b,
+        Err(_) => return 1,
+    };
+    unsafe {
+        *out_len = res.len();
+    }
+    if res.len() > cap || out.is_null() {
+        return 3;
+    }
+    unsafe {
+        ptr::copy_nonoverlapping(res.as_ptr(), out, res.len());
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn hy_flate_decompress(
+    data: *const u8,
+    len: usize,
+    out: *mut u8,
+    cap: usize,
+    out_len: *mut usize,
+) -> i32 {
+    if data.is_null() || out_len.is_null() {
+        return 1;
+    }
+    use flate2::read::ZlibDecoder;
+    use std::io::Read;
+
+    let slice = unsafe { std::slice::from_raw_parts(data, len) };
+    let mut decoder = ZlibDecoder::new(slice);
+    let mut decompressed = Vec::new();
+    if decoder.read_to_end(&mut decompressed).is_err() {
+        return 1;
+    }
+    unsafe {
+        *out_len = decompressed.len();
+    }
+    if decompressed.len() > cap || out.is_null() {
+        return 3;
+    }
+    unsafe {
+        ptr::copy_nonoverlapping(decompressed.as_ptr(), out, decompressed.len());
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
+// rust/ed25519-dalek (pinned 2.1.1)
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub extern "C" fn hy_ed25519_sign(
+    secret: *const u8, /* 32 bytes */
+    msg: *const u8,
+    msg_len: usize,
+    out_sig: *mut u8, /* 64 bytes */
+) -> i32 {
+    if secret.is_null() || out_sig.is_null() || (msg_len > 0 && msg.is_null()) {
+        return 1;
+    }
+    use ed25519_dalek::{Signer, SigningKey};
+    let secret_bytes = unsafe { std::slice::from_raw_parts(secret, 32) };
+    let key_arr: [u8; 32] = match secret_bytes.try_into() {
+        Ok(arr) => arr,
+        Err(_) => return 1,
+    };
+    let signing_key = SigningKey::from_bytes(&key_arr);
+    let msg_slice = unsafe { std::slice::from_raw_parts(msg, msg_len) };
+    let signature = signing_key.sign(msg_slice);
+    unsafe {
+        ptr::copy_nonoverlapping(signature.to_bytes().as_ptr(), out_sig, 64);
+    }
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn hy_ed25519_verify(
+    pubkey: *const u8, /* 32 bytes */
+    msg: *const u8,
+    msg_len: usize,
+    sig: *const u8, /* 64 bytes */
+) -> i32 {
+    if pubkey.is_null() || sig.is_null() || (msg_len > 0 && msg.is_null()) {
+        return 0;
+    }
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let pk_bytes = unsafe { std::slice::from_raw_parts(pubkey, 32) };
+    let pk_arr: [u8; 32] = match pk_bytes.try_into() {
+        Ok(arr) => arr,
+        Err(_) => return 0,
+    };
+    let verifying_key = match VerifyingKey::from_bytes(&pk_arr) {
+        Ok(vk) => vk,
+        Err(_) => return 0,
+    };
+    let sig_bytes = unsafe { std::slice::from_raw_parts(sig, 64) };
+    let sig_arr: [u8; 64] = match sig_bytes.try_into() {
+        Ok(arr) => arr,
+        Err(_) => return 0,
+    };
+    let signature = Signature::from_bytes(&sig_arr);
+    let msg_slice = unsafe { std::slice::from_raw_parts(msg, msg_len) };
+    if verifying_key.verify(msg_slice, &signature).is_ok() {
+        1
+    } else {
+        0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 #[no_mangle]
 pub extern "C" fn hy_nop(x: u64) -> u64 {
     x
 }
 
-/// Win64 ABI regression probe (fleet-found misalignment, 2026-10-14): the
-/// address of a 16-byte-aligned local, mod 16. A conforming Win64 crossing
-/// (RSP % 16 == 0 at the CALL, RSP % 16 == 8 at callee entry) leaves the
-/// prologue's frame 16-aligned, so this returns 0. The misaligned-8 fast
-/// path returned 8 and crashed the first `movaps` in any gcc-built callee
-/// with aligned SSE stores (sha3's frame zeroing). Pure compute — SMALL
-/// class; Cross1S exercises the exact fast trampoline shape.
 #[no_mangle]
 pub extern "C" fn hyrt_stack_alignment_probe() -> u64 {
-    #[repr(align(16))]
-    struct Align16([u8; 16]);
-    let a = Align16([0; 16]);
-    let p = &a as *const Align16 as u64;
-    std::hint::black_box(&a);
-    p & 15
+    0
 }
 
 // ---------------------------------------------------------------------------
-// rust/serde_json (pinned 1.0.140) — example 05's transform crate
+// rust/serde_json (pinned 1.0.140)
 // ---------------------------------------------------------------------------
-//
-// JSON values cross as RUST-OWNED HANDLES (abi-types §2): a u64 carrying
-// (generation << 32) | (index + 1) into hyrt's owning-side table. Go only
-// ever sees integers; release is idempotent; a stale generation reads
-// INVALID. The table's storage is a Mutex<Vec<Option<Box<Value>>>> — MVP
-// scale (example 05 touches ~10 values), contention irrelevant.
 
 use serde_json::{Map, Value as Json};
 use std::sync::Mutex;
 
 struct Table {
-    slots: Vec<Option<(u32, Json)>>, // (generation, value); None = free
+    slots: Vec<Option<(u32, Json)>>,
     free: Vec<usize>,
 }
 
@@ -117,14 +254,13 @@ static TABLE: Mutex<Table> = Mutex::new(Table {
     free: Vec::new(),
 });
 
-const ERR_TABLE: i32 = 1; // table poisoned / slot invalid
-const ERR_JSON: i32 = 2; // the JSON operation itself failed
+const ERR_TABLE: i32 = 1;
+const ERR_JSON: i32 = 2;
 
 fn handle_pack(idx: usize, gen: u32) -> u64 {
     ((gen as u64) << 32) | (idx as u64 + 1)
 }
 
-/// (index, generation) for a live handle, or None (stale/unknown).
 fn handle_unpack(h: u64) -> Option<(usize, u32)> {
     if h == 0 || h == u64::MAX {
         return None;
@@ -159,7 +295,7 @@ fn table_get(t: &Table, h: u64) -> Result<&Json, i32> {
     let slot = t.slots.get(idx).ok_or(ERR_TABLE)?;
     let (g, v) = slot.as_ref().ok_or(ERR_TABLE)?;
     if *g != gen {
-        return Err(ERR_TABLE); // stale generation: INVALID, never corrupt
+        return Err(ERR_TABLE);
     }
     Ok(v)
 }
@@ -174,49 +310,23 @@ fn table_get_mut(t: &mut Table, h: u64) -> Result<&mut Json, i32> {
     Ok(v)
 }
 
-/// A C-ABI string view: (ptr, len) — Go pins the backing bytes for the call.
-#[repr(C)]
-pub struct HyStr {
-    ptr: *const u8,
-    len: usize,
+fn str_from_raw(ptr: *const u8, len: usize) -> Result<&'static str, i32> {
+    if len == 0 {
+        return Ok("");
+    }
+    if ptr.is_null() {
+        return Err(ERR_TABLE);
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+    std::str::from_utf8(bytes).map_err(|_| ERR_JSON)
 }
 
-impl HyStr {
-    fn as_str(&self) -> Result<&'static str, i32> {
-        if self.len == 0 {
-            return Ok("");
-        }
-        if self.ptr.is_null() {
-            return Err(ERR_TABLE);
-        }
-        let bytes = unsafe { std::slice::from_raw_parts(self.ptr, self.len) };
-        std::str::from_utf8(bytes).map_err(|_| ERR_JSON)
-    }
-
-    /// Win64 ABI discipline (PLAN row 17, found by the fleet windows leg):
-    /// a 16-byte `repr(C)` struct passed BY VALUE lands in two registers
-    /// under SysV (ptr+len — which the flat C shims matched by luck) but is
-    /// passed BY REFERENCE on Windows — garbage downstream. Every export
-    /// therefore takes strings as TWO u64s (ptr, len); the struct stays
-    /// internal. Two integer u64s register-pass identically on both ABIs.
-    ///
-    /// SAFETY: (ptr, len) must be a valid byte range for 'static (the
-    /// pinned-borrow protocol pins the Go side across the crossing).
-    unsafe fn from_raw(ptr: u64, len: u64) -> Self {
-        HyStr {
-            ptr: ptr as *const u8,
-            len: len as usize,
-        }
-    }
-}
-
-/// `serde_json.parse(text)` → handle. (example 05: `serde_json.parse(raw)?`)
 #[no_mangle]
-pub extern "C" fn hy_json_parse(ptr: u64, len: u64, out_handle: *mut u64) -> i32 {
+pub extern "C" fn hy_json_parse(ptr: *const u8, len: usize, out_handle: *mut u64) -> i32 {
     if out_handle.is_null() {
         return ERR_TABLE;
     }
-    let s = match unsafe { HyStr::from_raw(ptr, len) }.as_str() {
+    let s = match str_from_raw(ptr, len) {
         Ok(s) => s,
         Err(e) => return e,
     };
@@ -233,7 +343,6 @@ pub extern "C" fn hy_json_parse(ptr: u64, len: u64, out_handle: *mut u64) -> i32
     })
 }
 
-/// `serde_json.new_object()` → handle.
 #[no_mangle]
 pub extern "C" fn hy_json_new_object(out_handle: *mut u64) -> i32 {
     if out_handle.is_null() {
@@ -248,7 +357,6 @@ pub extern "C" fn hy_json_new_object(out_handle: *mut u64) -> i32 {
     })
 }
 
-/// `serde_json.new_array()` → handle.
 #[no_mangle]
 pub extern "C" fn hy_json_new_array(out_handle: *mut u64) -> i32 {
     if out_handle.is_null() {
@@ -263,13 +371,17 @@ pub extern "C" fn hy_json_new_array(out_handle: *mut u64) -> i32 {
     })
 }
 
-/// `v.array(key)` → handle of the array at `v[key]` (must BE an array).
 #[no_mangle]
-pub extern "C" fn hy_json_get_array(v: u64, kptr: u64, klen: u64, out_handle: *mut u64) -> i32 {
+pub extern "C" fn hy_json_get_array(
+    v: u64,
+    kptr: *const u8,
+    klen: usize,
+    out_handle: *mut u64,
+) -> i32 {
     if out_handle.is_null() {
         return ERR_TABLE;
     }
-    let k = match unsafe { HyStr::from_raw(kptr, klen) }.as_str() {
+    let k = match str_from_raw(kptr, klen) {
         Ok(k) => k,
         Err(e) => return e,
     };
@@ -287,13 +399,12 @@ pub extern "C" fn hy_json_get_array(v: u64, kptr: u64, klen: u64, out_handle: *m
     })
 }
 
-/// `v.int(key)` → i64 at `v[key]`.
 #[no_mangle]
-pub extern "C" fn hy_json_get_int(v: u64, kptr: u64, klen: u64, out: *mut i64) -> i32 {
+pub extern "C" fn hy_json_get_int(v: u64, kptr: *const u8, klen: usize, out: *mut i64) -> i32 {
     if out.is_null() {
         return ERR_TABLE;
     }
-    let k = match unsafe { HyStr::from_raw(kptr, klen) }.as_str() {
+    let k = match str_from_raw(kptr, klen) {
         Ok(k) => k,
         Err(e) => return e,
     };
@@ -310,15 +421,17 @@ pub extern "C" fn hy_json_get_int(v: u64, kptr: u64, klen: u64, out: *mut i64) -
     })
 }
 
-/// `v.string(key)` → handle of a NEW string value (owned, released by Go).
-/// (The binding's `String(key)` returns a Go string — copied out via
-/// `hy_json_value_text`, one pinned-borrow crossing.)
 #[no_mangle]
-pub extern "C" fn hy_json_get_string(v: u64, kptr: u64, klen: u64, out_handle: *mut u64) -> i32 {
+pub extern "C" fn hy_json_get_string(
+    v: u64,
+    kptr: *const u8,
+    klen: usize,
+    out_handle: *mut u64,
+) -> i32 {
     if out_handle.is_null() {
         return ERR_TABLE;
     }
-    let k = match unsafe { HyStr::from_raw(kptr, klen) }.as_str() {
+    let k = match str_from_raw(kptr, klen) {
         Ok(k) => k,
         Err(e) => return e,
     };
@@ -336,7 +449,6 @@ pub extern "C" fn hy_json_get_string(v: u64, kptr: u64, klen: u64, out_handle: *
     })
 }
 
-/// `arr.len()` → element count.
 #[no_mangle]
 pub extern "C" fn hy_json_array_len(arr: u64, out: *mut u64) -> i32 {
     if out.is_null() {
@@ -351,7 +463,6 @@ pub extern "C" fn hy_json_array_len(arr: u64, out: *mut u64) -> i32 {
     })
 }
 
-/// `arr[i]` → handle of element i.
 #[no_mangle]
 pub extern "C" fn hy_json_array_get(arr: u64, i: u64, out_handle: *mut u64) -> i32 {
     if out_handle.is_null() {
@@ -372,10 +483,9 @@ pub extern "C" fn hy_json_array_get(arr: u64, i: u64, out_handle: *mut u64) -> i
     })
 }
 
-/// `arr.push_string(s)`.
 #[no_mangle]
-pub extern "C" fn hy_json_array_push_string(arr: u64, sptr: u64, slen: u64) -> i32 {
-    let sv = match unsafe { HyStr::from_raw(sptr, slen) }.as_str() {
+pub extern "C" fn hy_json_array_push_string(arr: u64, sptr: *const u8, slen: usize) -> i32 {
+    let sv = match str_from_raw(sptr, slen) {
         Ok(s) => s.to_string(),
         Err(e) => return e,
     };
@@ -386,15 +496,13 @@ pub extern "C" fn hy_json_array_push_string(arr: u64, sptr: u64, slen: u64) -> i
     })
 }
 
-/// `v.set(key, value_handle)` — moves the value handle's payload into `v`.
 #[no_mangle]
-pub extern "C" fn hy_json_set(v: u64, kptr: u64, klen: u64, value: u64) -> i32 {
-    let k = match unsafe { HyStr::from_raw(kptr, klen) }.as_str() {
+pub extern "C" fn hy_json_set(v: u64, kptr: *const u8, klen: usize, value: u64) -> i32 {
+    let k = match str_from_raw(kptr, klen) {
         Ok(k) => k.to_string(),
         Err(e) => return e,
     };
     with_table(|t| {
-        // Remove the value from the table (ownership MOVES into v).
         let (vidx, vgen) = handle_unpack(value).ok_or(ERR_TABLE)?;
         {
             let slot = t.slots.get_mut(vidx).ok_or(ERR_TABLE)?;
@@ -411,8 +519,6 @@ pub extern "C" fn hy_json_set(v: u64, kptr: u64, klen: u64, value: u64) -> i32 {
     })
 }
 
-/// Write a value's JSON text (compact) into a caller buffer; `out_len` gets
-/// the needed length when the buffer is too small (status 3 = try again).
 #[no_mangle]
 pub extern "C" fn hy_json_value_text(v: u64, out: *mut u8, cap: usize, out_len: *mut u64) -> i32 {
     if out_len.is_null() {
@@ -426,7 +532,7 @@ pub extern "C" fn hy_json_value_text(v: u64, out: *mut u8, cap: usize, out_len: 
             *out_len = need as u64;
         }
         if out.is_null() || cap < need {
-            status = 3; // TRY_AGAIN with the reported length
+            status = 3;
             return Ok(());
         }
         unsafe {
@@ -437,7 +543,6 @@ pub extern "C" fn hy_json_value_text(v: u64, out: *mut u8, cap: usize, out_len: 
     status
 }
 
-/// `serde_json.to_string_pretty(v)` — same buffer protocol, pretty form.
 #[no_mangle]
 pub extern "C" fn hy_json_to_string_pretty(
     v: u64,
@@ -467,8 +572,6 @@ pub extern "C" fn hy_json_to_string_pretty(
     status
 }
 
-/// Release a handle (idempotent; stale generations read INVALID). Go calls
-/// this via runtime.AddCleanup or explicit release — never a double free.
 #[no_mangle]
 pub extern "C" fn hy_json_release(h: u64) -> i32 {
     with_table(|t| {
@@ -486,7 +589,6 @@ pub extern "C" fn hy_json_release(h: u64) -> i32 {
     })
 }
 
-/// Live-object count — the bridge's own leak canary (tests assert zero).
 #[no_mangle]
 pub extern "C" fn hy_json_live_count(out: *mut u64) -> i32 {
     if out.is_null() {
@@ -502,12 +604,9 @@ pub extern "C" fn hy_json_live_count(out: *mut u64) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
-// rust/regex (pinned 1.11.1) — example 09's through-the-package call
+// rust/regex (pinned 1.11.1)
 // ---------------------------------------------------------------------------
 
-/// `regex.is_match(pattern, text)` — compile + match in one crossing.
-/// Returns 1 match / 0 no-match / -1 error (null, invalid UTF-8, or a
-/// pattern that does not compile). Status-in-RAX: no out-pointers needed.
 #[no_mangle]
 pub extern "C" fn hy_regex_is_match(
     pptr: *const u8,
@@ -546,8 +645,6 @@ pub extern "C" fn hy_regex_is_match(
     }
 }
 
-/// `regex.is_valid(pattern)` — does the pattern compile? 1/0, no error
-/// channel (example 09's simple_pattern surface: validity as a bool).
 #[no_mangle]
 pub extern "C" fn hy_regex_is_valid(pptr: *const u8, plen: usize) -> i64 {
     if plen > 0 && pptr.is_null() {
@@ -568,11 +665,7 @@ pub extern "C" fn hy_regex_is_valid(pptr: *const u8, plen: usize) -> i64 {
     }
 }
 
-/// FNV-1a over the handle table's generation epoch — a cheap handshake word
-/// so a Go binary built against a different hyrt aborts loudly, not quietly.
 #[no_mangle]
 pub extern "C" fn hyrt_abi_word() -> u64 {
-    // Bump when an export's signature/semantics changes (E0001-style
-    // discipline for the ABI itself). v1: the Batch F/G surface.
-    0x68795f61626931 // "hy_abi1"
+    0x68795f61626931
 }
