@@ -51,7 +51,7 @@ fn must_parse(path: &PathBuf) {
 fn checker_corpus_all_parse() {
     let files = hy_files_under("tests/checker-corpus");
 
-    assert_eq!(files.len(), 126, "expected exactly 124 corpus programs",);
+    assert_eq!(files.len(), 127, "expected exactly 127 corpus programs",);
     // 61-string-escape-fail-closed.hy is the corpus's first PARSE-reject
     // fixture (a malformed LX7 string escape must be named by the lexer,
     // never silently accepted): it is excluded from the must-parse loop

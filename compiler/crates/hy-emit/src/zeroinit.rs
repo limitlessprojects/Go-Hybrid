@@ -18,11 +18,22 @@
 //!     struct field)              → `var b bag = bag{counts: map[string]int{}}`
 //!   * `bag{}` / `bag{name: "x"}` → the unkeyed map fields are added
 //!   * `new(bag)`                 → `&bag{counts: map[string]int{}}`
+//!   * `make([]bag, n[, c])`      → `hy_n5_make(func() bag { return bag{…} }, n[, c])`
+//!     (N5_MAKE_PRELUDE: every slot up to the capacity is allocated, so a
+//!     later reslice inside the capacity still meets N5 values)
+//!   * `var a [2]bag` / `[2]bag{}` → an IIFE that fills every element:
+//!     `func() (hyArr [2]bag) { for i := range hyArr { hyArr[i] = bag{…} }; return hyArr }()`
+//!
+//! Allocation sites — `make`, arrays — are declaration sites in disguise:
+//! the element type is known structurally, so the same zero-value table
+//! applies (the gap reported with #645's follow-ups). Zero values produced
+//! by READS — a missing map element (`mm[k][k2] = v`, `b, ok := m[k]`), a
+//! receive from a closed channel — are NOT reached by this lowering: they
+//! have no allocation site, only a place, and need a write-site design.
 //!
 //! Generic structs (`box[t]{}`) keep Go's zero value: their field types
 //! need the literal's type arguments substituted, which the folded
-//! `box[int]` name does not carry structurally. Arrays of such structs and
-//! `make([]bag, n)` elements are likewise not covered by this lowering.
+//! `box[int]` name does not carry structurally.
 
 use std::collections::BTreeSet;
 
@@ -47,6 +58,16 @@ impl Emitter {
         }
         match self.n5_resolve_alias(ty) {
             TypeExpr::Map { .. } => Some(format!("{}{{}}", self.type_text(ty))),
+            // `[N]T` whose elements need allocation: fill every element in
+            // an IIFE so the init is one expression for any `N` (a literal
+            // or a const), usable at every site a zero array appears.
+            TypeExpr::Array { elem, .. } => {
+                let init = self.n5_zero_init_at(&elem, depth + 1)?;
+                let arr = self.type_text(ty);
+                Some(format!(
+                    "func() (hyArr {arr}) {{ for i := range hyArr {{ hyArr[i] = {init} }}; return hyArr }}()"
+                ))
+            }
             TypeExpr::Named { name, .. } => {
                 let fields = self.n5_structs.get(&name)?.clone();
                 let extra = self.n5_missing_fields_at(&fields, &BTreeSet::new(), depth + 1);
@@ -128,9 +149,20 @@ impl Emitter {
         self.n5_zero_init(&ty).map(|init| format!("&{}", init))
     }
 
+    /// `make([]T, n[, c])` where T's zero value needs N5 allocation →
+    /// `hy_n5_make(func() T { return <init> }, n[, c])` (N5_MAKE_PRELUDE).
+    /// `elem` is the slice's element type; `sizes` are make's remaining
+    /// arguments, already emitted. None when Go's `make` is already right.
+    pub(crate) fn n5_make_slice(&mut self, elem: &TypeExpr, sizes: &[String]) -> Option<String> {
+        let init = self.n5_zero_init(elem)?;
+        let mut parts = vec![format!("func() {} {{ return {} }}", self.type_text(elem), init)];
+        parts.extend(sizes.iter().cloned());
+        Some(format!("hy_n5_make({})", parts.join(", ")))
+    }
+
     /// Follow user type aliases (`type counts = map[string]int`) to the
     /// type they name; anything else is returned as written.
-    fn n5_resolve_alias(&self, ty: &TypeExpr) -> TypeExpr {
+    pub(crate) fn n5_resolve_alias(&self, ty: &TypeExpr) -> TypeExpr {
         let mut cur = ty.clone();
         for _ in 0..MAX_DEPTH {
             let next = match &cur {

@@ -95,3 +95,106 @@ fn main() {
     );
     assert!(go.contains("b := box[int]{}"), ":\n{go}");
 }
+
+// ---------------------------------------------------------------------------
+// Allocation sites (the #645 follow-up): `make([]T, n)` elements and `[N]T`
+// arrays are zero values too — they used to keep Go's nil map.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn n5_make_slice_allocates_every_element() {
+    let go = emit_src(
+        "\
+struct bag {
+    counts map[string]int
+}
+
+struct plain {
+    n int
+}
+
+type bags = []bag
+
+fn main() {
+    a := make([]bag, 2)
+    b := make([]bag, 0, 4)
+    c := make([]map[string]int, 1)
+    d := make(bags, 2)
+    var n u8 = 2
+    e := make([]bag, n)
+    f := make([]int, 3)
+    g := make([]plain, 2)
+    h := make(chan bag, 1)
+    fmt.println(len(a) + len(b) + len(c) + len(d) + len(e) + len(f) + len(g) + cap(h))
+}
+",
+    );
+    for want in [
+        "a := hy_n5_make(func() bag { return bag{counts: map[string]int{}} }, 2)",
+        // The capacity is allocated too: a reslice inside it meets N5 values.
+        "b := hy_n5_make(func() bag { return bag{counts: map[string]int{}} }, 0, 4)",
+        "c := hy_n5_make(func() map[string]int { return map[string]int{} }, 1)",
+        // A slice alias resolves to its element type.
+        "d := hy_n5_make(func() bag { return bag{counts: map[string]int{}} }, 2)",
+        // Go's make takes any integer type; the helper takes int.
+        "e := hy_n5_make(func() bag { return bag{counts: map[string]int{}} }, int(n))",
+        // Element types whose Go zero value already is Hybrid's: untouched.
+        "f := make([]int, 3)",
+        "g := make([]plain, 2)",
+        "h := make(chan bag, 1)",
+        "func hy_n5_make[t any](zero func() t, n int, c ...int) []t {",
+    ] {
+        assert!(go.contains(want), "missing {want:?} in:\n{go}");
+    }
+}
+
+#[test]
+fn n5_make_prelude_is_emitted_only_when_used() {
+    let go = emit_src("fn main() {\n    a := make([]int, 3)\n    fmt.println(len(a))\n}\n");
+    assert!(go.contains("a := make([]int, 3)"), ":\n{go}");
+    assert!(!go.contains("hy_n5_make"), "prelude leaked:\n{go}");
+}
+
+#[test]
+fn n5_arrays_allocate_every_element() {
+    let go = emit_src(
+        "\
+struct bag {
+    counts map[string]int
+}
+
+struct shelf {
+    slots [2]bag
+}
+
+const k = 3
+
+fn main() {
+    var a [2]bag
+    b := [2]bag{}
+    var c [k]bag
+    d := [3]bag{bag{}}
+    var s shelf
+    var e [2]int
+    f := [2]int{}
+    fmt.println(len(a) + len(b) + len(c) + len(d) + len(s.slots) + len(e) + len(f))
+}
+",
+    );
+    const FILL2: &str = "func() (hyArr [2]bag) { for i := range hyArr { hyArr[i] = bag{counts: map[string]int{}} }; return hyArr }()";
+    for want in [
+        &format!("var a [2]bag = {FILL2}"),
+        &format!("b := {FILL2}"),
+        // A const length is fine: the IIFE ranges over the array.
+        "var c [k]bag = func() (hyArr [k]bag) { for i := range hyArr { hyArr[i] = bag{counts: map[string]int{}} }; return hyArr }()",
+        // A partial literal pads its trailing zero elements.
+        "d := [3]bag{bag{counts: map[string]int{}}, bag{counts: map[string]int{}}, bag{counts: map[string]int{}}}",
+        // An array field of a zero struct goes through the same table.
+        &format!("var s shelf = shelf{{slots: {FILL2}}}"),
+        // Element types whose Go zero value already is Hybrid's: untouched.
+        "var e [2]int\n",
+        "f := [2]int{}",
+    ] {
+        assert!(go.contains(want), "missing {want:?} in:\n{go}");
+    }
+}

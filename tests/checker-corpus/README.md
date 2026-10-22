@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 126 programs — ACCEPT 38 · ACCEPT-MANAGED 2 · REJECT 86 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
-**Current registered corpus: 126 programs — ACCEPT 38 · ACCEPT-MANAGED 2 · REJECT 86 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 127 programs — ACCEPT 39 · ACCEPT-MANAGED 2 · REJECT 86 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 127 programs — ACCEPT 39 · ACCEPT-MANAGED 2 · REJECT 86 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -301,3 +301,18 @@ in `hy-check/tests/type_name_in_value_position.rs` (13 tests).
 
 With this registration the corpus is **120 programs: ACCEPT 38 ·
 ACCEPT-MANAGED 2 · REJECT 80** — main's 118 plus these two.
+
+### n5-zero-map-allocation-sites (2026-10-23, the #645 follow-up) — ACCEPT
+
+N5's first landing (#662) allocated zero maps where they are DECLARED: `var`,
+struct literals, `new(T)`. A zero value is also PRODUCED by every allocation —
+`make([]bag, n)` elements, the spare capacity of `make([]bag, 0, c)`, and `[N]bag`
+arrays in var / literal / const-length / partial-literal form — and each of those
+passed `hyb check`, built, and panicked `assignment to entry in nil map` at its
+first write. The fixture pins all of them in one program with a byte-exact
+`EXPECTED-OUTPUT` (the hyb test `spec_n5_zero_maps.rs` diffs it). Zero values
+produced by a READ (a missing map element, a closed-channel receive) have no
+allocation site and are deliberately NOT pinned here.
+
+With this registration the corpus is **127 programs: ACCEPT 39 ·
+ACCEPT-MANAGED 2 · REJECT 86** — main's 126 plus this one.

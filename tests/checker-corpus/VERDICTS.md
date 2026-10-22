@@ -1075,3 +1075,12 @@ ACCEPT-MANAGED 2 · REJECT 86** — main's 125 plus this one.
 by the autonomous pipeline (bundles author-758 / author-827, landings
 0107658 / d0a2db5). Sibling-take credit: sonson0910's stale-base
 companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.
+
+-------------------------------------------------------------------------------
+
+### n5-zero-map-allocation-sites (the #645 follow-up) — ACCEPT
+
+`make([]T, n)` / `make([]T, n, c)` elements (and the spare capacity a reslice exposes), `make([]map[K]V, n)` elements, and `[N]T` arrays (var, literal, const length, partial literal) are N5 zero values: their maps allocate, so the first write works instead of panicking `assignment to entry in nil map`. No check-site; ACCEPT with a byte-exact EXPECTED-OUTPUT.
+
+With this registration the corpus is **127 programs: ACCEPT 39 ·
+ACCEPT-MANAGED 2 · REJECT 86** — main's 126 plus this one.
