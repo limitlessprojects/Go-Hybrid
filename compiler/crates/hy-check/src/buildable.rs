@@ -862,7 +862,20 @@ impl<'a> Collector<'a> {
             return self.multi_value_kinds(&l.values[0]);
         }
         if n == l.values.len() {
-            return l.values.iter().map(|v| self.kind_of_expr(v)).collect();
+            return l
+                .values
+                .iter()
+                .map(|v| {
+                    if let Some(op) = as_addr_of(unwrap_parens(v)) {
+                        if let Expr::Index { base, .. } = unwrap_parens(op) {
+                            if matches!(self.kind_of_expr(base), OpKind::Map(..)) {
+                                return self.kind_of_expr(unwrap_parens(op));
+                            }
+                        }
+                    }
+                    self.kind_of_expr(v)
+                })
+                .collect();
         }
         vec![OpKind::Unknown; n]
     }

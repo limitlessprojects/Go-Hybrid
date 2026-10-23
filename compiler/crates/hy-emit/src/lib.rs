@@ -517,6 +517,9 @@ pub struct Emitter {
     pointer_vars: BTreeSet<String>,
     /// Local/parameter/receiver/result names bound in the current function frame.
     local_vars: BTreeSet<String>,
+    /// Names shadowed by a local declaration in an inner scope since the last
+    /// slot-loan binding for that name.
+    shadowed_since_loan: BTreeSet<String>,
     /// Functions whose first result is a pointer type.
     ptr_returning_fns: BTreeSet<String>,
     /// N5 (zeroinit.rs): non-generic user struct → its declared fields,
@@ -527,6 +530,7 @@ pub struct Emitter {
 
 pub(crate) struct ScopeSnapshot {
     local_vars: BTreeSet<String>,
+    shadowed_since_loan: BTreeSet<String>,
     bindings: BTreeMap<String, BindingKind>,
     var_ty: BTreeMap<String, (String, bool)>,
     var_struct: BTreeMap<String, String>,
@@ -565,6 +569,7 @@ impl Emitter {
             var_ty: BTreeMap::new(),
             pointer_vars: BTreeSet::new(),
             local_vars: BTreeSet::new(),
+            shadowed_since_loan: BTreeSet::new(),
             ptr_returning_fns: BTreeSet::new(),
             explicit_imports: BTreeMap::new(),
             n5_structs: BTreeMap::new(),
@@ -579,6 +584,7 @@ impl Emitter {
     pub(crate) fn save_scope(&self) -> ScopeSnapshot {
         ScopeSnapshot {
             local_vars: self.local_vars.clone(),
+            shadowed_since_loan: self.shadowed_since_loan.clone(),
             bindings: self.bindings.clone(),
             var_ty: self.var_ty.clone(),
             var_struct: self.var_struct.clone(),
@@ -588,6 +594,7 @@ impl Emitter {
 
     pub(crate) fn restore_scope(&mut self, saved: ScopeSnapshot) {
         self.local_vars = saved.local_vars;
+        self.shadowed_since_loan = saved.shadowed_since_loan;
         self.bindings = saved.bindings;
         self.var_ty = saved.var_ty;
         self.var_struct = saved.var_struct;
@@ -597,6 +604,7 @@ impl Emitter {
     pub(crate) fn shadow_local_name(&mut self, name: &str) {
         if name != "_" {
             self.local_vars.insert(name.to_string());
+            self.shadowed_since_loan.insert(name.to_string());
             self.bindings.remove(name);
             self.var_ty.remove(name);
             self.var_struct.remove(name);
@@ -1182,6 +1190,7 @@ impl Emitter {
         self.var_ty.clear();
         self.pointer_vars.clear();
         self.local_vars.clear();
+        self.shadowed_since_loan.clear();
         self.temp_n = 0;
         self.try_temps.clear();
         self.loop_labels.clear();

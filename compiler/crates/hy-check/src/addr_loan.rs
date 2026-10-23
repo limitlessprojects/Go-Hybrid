@@ -29,12 +29,12 @@ fn is_slot_loan_expr(e: &Expr) -> bool {
     let Some(inner) = as_addr_of(unwrap_parens(e)) else {
         return false;
     };
-    matches!(unwrap_parens(inner), Expr::Index { .. })
+    matches!(unwrap_parens(inner), Expr::Index { .. } | Expr::Field { .. })
 }
 
 impl<'a> Checker<'a> {
-    /// After `process_local`: flag every name bound to `&m[k]` (including
-    /// parenthesized `(&m[k])` and `&(m[k])`).
+    /// After `process_local`: flag every name bound to `&m[k]` or `&s.field`
+    /// (including parenthesized `(&m[k])` and `&(m[k])`).
     pub(crate) fn mark_slot_loans_local(&self, st: &mut FnState, l: &LocalDecl) {
         if l.names.len() != l.values.len() {
             return;
@@ -48,8 +48,9 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// After `process_assign`: `x = &m[k]` makes `x` a slot loan; any other
-    /// plain re-assignment of a whole binding clears the flag.
+    /// After `process_assign`: `x = &m[k]` / `x = &s.field` makes `x` a slot
+    /// loan; any other plain re-assignment (including multi-return `x, ok = f()`)
+    /// of a whole binding clears the flag.
     pub(crate) fn mark_slot_loans_assign(
         &self,
         st: &mut FnState,
@@ -57,14 +58,24 @@ impl<'a> Checker<'a> {
         op: AssignOp,
         values: &[hy_syntax::Expr],
     ) {
-        if op != AssignOp::Assign || targets.len() != values.len() {
+        if op != AssignOp::Assign {
             return;
         }
-        for (t, v) in targets.iter().zip(values.iter()) {
-            if let PlaceKind::Ident(name) = &t.kind {
-                let is_loan = is_slot_loan_expr(v);
-                if let Some(b) = st.env_lookup_mut(name) {
-                    b.slot_loan = is_loan;
+        if targets.len() == values.len() {
+            for (t, v) in targets.iter().zip(values.iter()) {
+                if let PlaceKind::Ident(name) = &t.kind {
+                    let is_loan = is_slot_loan_expr(v);
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        b.slot_loan = is_loan;
+                    }
+                }
+            }
+        } else if values.len() == 1 {
+            for t in targets {
+                if let PlaceKind::Ident(name) = &t.kind {
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        b.slot_loan = false;
+                    }
                 }
             }
         }
@@ -334,7 +345,7 @@ impl<'a> Checker<'a> {
                         self.emit_addr_of_loan_diag(name, *id_span);
                     }
                 }
-                Expr::Field { .. } => {
+                Expr::Field { .. } | Expr::Index { .. } => {
                     if let Some(root) = operand.root_ident() {
                         if self.lookup_binding(st, root).is_some_and(|b| b.slot_loan) {
                             self.emit_addr_of_loan_diag(root, *span);
