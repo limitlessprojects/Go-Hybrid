@@ -156,24 +156,7 @@ impl<'a> Checker<'a> {
                     if let Some(g) = &arm.guard {
                         let mut arm_st = st.clone();
                         arm_st.scope_push();
-                        if let hy_syntax::MatchPattern::Path {
-                            segments,
-                            binding: Some(b),
-                        } = &arm.pattern
-                        {
-                            if segments == &["some"] {
-                                self.bind_match_arm(&mut arm_st, b, subject, false);
-                                if let Some(ty) = self.ty_of_expr(st, subject) {
-                                    if let hy_syntax::TypeExpr::Option { elem, .. } =
-                                        self.resolve_type_alias(&ty)
-                                    {
-                                        if let Some(binding) = arm_st.env_lookup_mut(b) {
-                                            binding.ty = Some(*elem);
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        self.bind_recv_match_arm(st, &mut arm_st, subject, &arm.pattern);
                         self.check_expr_recv_operands(&arm_st, g);
                     }
                 }
@@ -313,22 +296,108 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn recv_chan_type_expr(&self, st: &FnState, expr: &Expr) -> Option<hy_syntax::TypeExpr> {
-        if let Some(ty) = self.ty_of_expr(st, expr) {
-            return Some(ty);
+    fn resolve_recv_expr_shape(&self, st: &FnState, expr: &Expr) -> TypeShape {
+        match self.shape_of_expr(st, expr) {
+            TypeShape::Unknown => self
+                .recv_chan_type_expr(st, expr)
+                .map(|t| self.shape_of_type(&t))
+                .unwrap_or(TypeShape::Unknown),
+            s => s,
         }
+    }
+
+    fn recv_chan_type_expr(&self, st: &FnState, expr: &Expr) -> Option<hy_syntax::TypeExpr> {
+        use hy_syntax::TypeExpr;
         match expr {
-            Expr::Paren { inner, .. }
-            | Expr::Move { operand: inner, .. }
-            | Expr::Try { operand: inner, .. } => self.recv_chan_type_expr(st, inner),
+            Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } => {
+                self.recv_chan_type_expr(st, inner)
+            }
+            Expr::Try { operand, .. } => {
+                let inner = self.recv_chan_type_expr(st, operand)?;
+                match self.resolve_type_alias(&inner) {
+                    TypeExpr::Option { elem, .. } => Some(*elem),
+                    _ => Some(inner),
+                }
+            }
             Expr::Receive { chan, .. } => {
                 let outer_ty = self.recv_chan_type_expr(st, chan)?;
                 match self.resolve_type_alias(&outer_ty) {
-                    hy_syntax::TypeExpr::Chan { elem, .. } => Some(*elem),
+                    TypeExpr::Chan { elem, .. } => Some(*elem),
                     _ => None,
                 }
             }
-            _ => None,
+            Expr::Slice { base, span, .. } => {
+                let base_ty = self.recv_chan_type_expr(st, base)?;
+                match self.resolve_type_alias(&base_ty) {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+                        Some(TypeExpr::Slice { elem, span: *span })
+                    }
+                    TypeExpr::Pointer { to, .. } => match self.resolve_type_alias(&to) {
+                        TypeExpr::Array { elem, .. } => {
+                            Some(TypeExpr::Slice { elem, span: *span })
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }
+            Expr::Index { base, .. } => {
+                let base_ty = self.recv_chan_type_expr(st, base)?;
+                match self.resolve_type_alias(&base_ty) {
+                    TypeExpr::Slice { elem, .. }
+                    | TypeExpr::Array { elem, .. }
+                    | TypeExpr::Map { value: elem, .. } => Some(*elem),
+                    TypeExpr::Pointer { to, .. } => match self.resolve_type_alias(&to) {
+                        TypeExpr::Array { elem, .. } => Some(*elem),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }
+            Expr::SliceLit {
+                elem: None,
+                items,
+                span,
+            } if expr.as_array_lit().is_none() => {
+                let first_ty = self.recv_chan_type_expr(st, items.first()?)?;
+                Some(TypeExpr::Slice {
+                    elem: Box::new(first_ty),
+                    span: *span,
+                })
+            }
+            Expr::Call { callee, args, span } => {
+                if let Expr::Ident { name, .. } = crate::model::unwrap_parens(callee) {
+                    if self.lookup_binding(st, name).is_none() {
+                        match name.as_str() {
+                            "append" => {
+                                return self.recv_chan_type_expr(st, &args.first()?.value);
+                            }
+                            "some" => {
+                                let inner = self.recv_chan_type_expr(st, &args.first()?.value)?;
+                                return Some(TypeExpr::Option {
+                                    elem: Box::new(inner),
+                                    span: *span,
+                                });
+                            }
+                            "make" => {
+                                let first = crate::model::unwrap_parens(&args.first()?.value);
+                                if let Expr::Ident { name: tn, span: ts } = first {
+                                    if self.type_aliases.contains_key(tn) {
+                                        return Some(TypeExpr::Named {
+                                            name: tn.clone(),
+                                            span: *ts,
+                                        });
+                                    }
+                                }
+                                return self.recv_chan_type_expr(st, first);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                self.ty_of_expr(st, expr)
+            }
+            _ => self.ty_of_expr(st, expr),
         }
     }
 
@@ -340,7 +409,7 @@ impl<'a> Checker<'a> {
     /// side, an ill-typed source is not a sendability doubt — `managed`
     /// does not suppress it.
     pub(crate) fn check_recv_operand(&mut self, st: &FnState, chan: &Expr, span: Span) -> bool {
-        match self.shape_of_expr(st, chan) {
+        match self.resolve_recv_expr_shape(st, chan) {
             TypeShape::Chan(_) => {
                 if let Some(ty) = self.recv_chan_type_expr(st, chan) {
                     let resolved = self.resolve_type_alias(&ty);
@@ -409,5 +478,193 @@ impl<'a> Checker<'a> {
                 false
             }
         }
+    }
+    fn bind_recv_match_arm(
+        &mut self,
+        eval_st: &FnState,
+        arm_st: &mut FnState,
+        subject: &Expr,
+        pattern: &hy_syntax::MatchPattern,
+    ) {
+        let hy_syntax::MatchPattern::Path {
+            segments,
+            binding: Some(b),
+        } = pattern
+        else {
+            return;
+        };
+        if segments == &["some"] {
+            self.bind_match_arm(arm_st, b, subject, false);
+        }
+        if let Some(ty) = self.resolve_match_arm_payload_type(eval_st, subject, segments) {
+            let shape = self.shape_of_type(&ty);
+            if b != "_" {
+                self.define_binding(arm_st, b, shape, Some(ty), false, false, false);
+            }
+        }
+    }
+
+    fn resolve_match_arm_payload_type(
+        &self,
+        st: &FnState,
+        subject: &Expr,
+        segments: &[String],
+    ) -> Option<hy_syntax::TypeExpr> {
+        let subj_ty = self.recv_chan_type_expr(st, subject)?;
+        let resolved = self.resolve_type_alias(&subj_ty);
+        if segments == &["some"] {
+            if let hy_syntax::TypeExpr::Option { elem, .. } = resolved {
+                return Some(*elem);
+            }
+        }
+        let vname = segments.last()?.as_str();
+        let hy_syntax::TypeExpr::Named { name, span } = &resolved else {
+            return None;
+        };
+        let base = Self::base_named_type_str(name);
+        if segments.len() == 2 && segments[0] != base {
+            return None;
+        }
+        let type_args = split_type_args(name, *span);
+        for d in &self.file.decls {
+            if let hy_syntax::Decl::Enum(ed) = d {
+                if ed.name == base {
+                    let variant = ed.variants.iter().find(|v| v.name == vname)?;
+                    let payload = variant.payload.as_ref()?;
+                    let mut tps = Vec::new();
+                    for p in ed.variants.iter().filter_map(|v| v.payload.as_ref()) {
+                        self.collect_unresolved_type_names(p, &mut tps);
+                    }
+                    return Some(subst_type(payload, &tps, &type_args));
+                }
+            }
+        }
+        match (base.eq_ignore_ascii_case("result"), vname) {
+            (true, "ok") => type_args.first().cloned(),
+            (true, "err") => type_args.get(1).cloned(),
+            _ => None,
+        }
+    }
+
+    fn collect_unresolved_type_names(&self, ty: &hy_syntax::TypeExpr, out: &mut Vec<String>) {
+        use hy_syntax::TypeExpr::*;
+        match ty {
+            Named { name, .. } => {
+                let b = Self::base_named_type_str(name);
+                let known = matches!(
+                    b,
+                    "int"
+                        | "int8"
+                        | "int16"
+                        | "int32"
+                        | "int64"
+                        | "uint"
+                        | "uint8"
+                        | "uint16"
+                        | "uint32"
+                        | "uint64"
+                        | "uintptr"
+                        | "float32"
+                        | "float64"
+                        | "bool"
+                        | "string"
+                        | "byte"
+                        | "rune"
+                        | "any"
+                        | "error"
+                ) || self.structs.contains_key(b)
+                    || self.enums.contains_key(b)
+                    || self.type_aliases.contains_key(b);
+                if !known && !out.iter().any(|p| p == b) {
+                    out.push(b.to_string());
+                }
+            }
+            Pointer { to, .. }
+            | Slice { elem: to, .. }
+            | Array { elem: to, .. }
+            | Chan { elem: to, .. }
+            | Option { elem: to, .. } => self.collect_unresolved_type_names(to, out),
+            Map { key, value, .. } => {
+                self.collect_unresolved_type_names(key, out);
+                self.collect_unresolved_type_names(value, out);
+            }
+            Fn { .. } => {}
+        }
+    }
+}
+
+fn split_type_args(name: &str, span: Span) -> Vec<hy_syntax::TypeExpr> {
+    let Some(inner) = name.split_once('[').and_then(|(_, r)| r.strip_suffix(']')) else {
+        return Vec::new();
+    };
+    let pt = |s: &str| {
+        if let Ok(f) = hy_syntax::parse_file("<type>", &format!("type a = {}", s.trim())) {
+            if let Some(hy_syntax::Decl::TypeAlias(ta)) = f.decls.into_iter().next() {
+                return ta.ty;
+            }
+        }
+        hy_syntax::TypeExpr::Named {
+            name: s.trim().to_string(),
+            span,
+        }
+    };
+    let (mut out, mut depth, mut start) = (Vec::new(), 0usize, 0usize);
+    for (i, ch) in inner.char_indices() {
+        match ch {
+            '[' | '(' => depth += 1,
+            ']' | ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                out.push(pt(&inner[start..i]));
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if start <= inner.len() && !inner[start..].trim().is_empty() {
+        out.push(pt(&inner[start..]));
+    }
+    out
+}
+
+fn subst_type(
+    ty: &hy_syntax::TypeExpr,
+    params: &[String],
+    args: &[hy_syntax::TypeExpr],
+) -> hy_syntax::TypeExpr {
+    use hy_syntax::TypeExpr::*;
+    match ty {
+        Named { name, .. } => params
+            .iter()
+            .position(|p| p == name)
+            .and_then(|i| args.get(i).cloned())
+            .unwrap_or_else(|| ty.clone()),
+        Pointer { to, span } => Pointer {
+            to: Box::new(subst_type(to, params, args)),
+            span: *span,
+        },
+        Slice { elem, span } => Slice {
+            elem: Box::new(subst_type(elem, params, args)),
+            span: *span,
+        },
+        Array { len, elem, span } => Array {
+            len: len.clone(),
+            elem: Box::new(subst_type(elem, params, args)),
+            span: *span,
+        },
+        Map { key, value, span } => Map {
+            key: Box::new(subst_type(key, params, args)),
+            value: Box::new(subst_type(value, params, args)),
+            span: *span,
+        },
+        Chan { dir, elem, span } => Chan {
+            dir: *dir,
+            elem: Box::new(subst_type(elem, params, args)),
+            span: *span,
+        },
+        Option { elem, span } => Option {
+            elem: Box::new(subst_type(elem, params, args)),
+            span: *span,
+        },
+        Fn { .. } => ty.clone(),
     }
 }
