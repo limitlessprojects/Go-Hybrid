@@ -1,0 +1,305 @@
+diff --git a/compiler/crates/hy-check/src/buildable.rs b/compiler/crates/hy-check/src/buildable.rs
+index a60a785..c6a74b8 100644
+--- a/compiler/crates/hy-check/src/buildable.rs
++++ b/compiler/crates/hy-check/src/buildable.rs
+@@ -61,7 +61,7 @@ use crate::model::{as_addr_of, unwrap_parens, Checker};
+ /// `Unknown` stays permissive (fail-open for operand checks; concurrency
+ /// boundaries remain fail-closed in `sendability.rs`).
+ #[derive(Debug, Clone, PartialEq, Eq)]
+-enum OpKind {
++pub(crate) enum OpKind {
+     Unknown,
+     /// A known interface type (`any`) — #682 U9-U12.
+     ///
+@@ -1650,7 +1650,7 @@ impl<'a> Collector<'a> {
+             .map(|(_, ty)| self.kind_of_ty_with_subst(ty, &subst, 0))
+     }
+ 
+-    fn kind_of_expr(&self, e: &Expr) -> OpKind {
++    pub(crate) fn kind_of_expr(&self, e: &Expr) -> OpKind {
+         match e {
+             Expr::Ident { name, .. } => {
+                 if let Some(k) = self.lookup_kind(name) {
+diff --git a/compiler/crates/hy-check/src/tuple.rs b/compiler/crates/hy-check/src/tuple.rs
+index 8eb75d0..5077953 100644
+--- a/compiler/crates/hy-check/src/tuple.rs
++++ b/compiler/crates/hy-check/src/tuple.rs
+@@ -17,6 +17,7 @@
+ //! foreign package calls. `?`-unwrapped calls stay permissive (unwrapping the
+ //! error produces a single value).
+ 
++use crate::buildable::OpKind;
+ use crate::foreign;
+ use crate::model::{unwrap_parens, Checker, FnState, TypeShape};
+ use hy_diag::{Diagnostic, Span};
+@@ -24,6 +25,14 @@ use hy_syntax::{
+     AssignOp, Expr, ForKind, InterpPart, Place, PlaceKind, SelectArmKind, Stmt, TypeExpr,
+ };
+ 
++/// Statically known value count of a non-call binding source (T23).
++pub(crate) enum BindSourceBound {
++    /// A channel receive / map index: `v` or `v, ok`.
++    AtMost(usize),
++    /// An index of a known slice/array/string base: exactly one value.
++    Exact(usize),
++}
++
+ fn unwrap_parens_and_move(mut e: &Expr) -> &Expr {
+     loop {
+         match e {
+@@ -124,8 +133,24 @@ impl<'a> Checker<'a> {
+                             self.check_expr_single_value(st, chan, chan.span());
+                             self.check_expr_single_value(st, value, value.span());
+                         }
+-                        SelectArmKind::Recv { chan, .. } => {
++                        SelectArmKind::Recv { names, chan } => {
+                             self.check_expr_single_value(st, chan, chan.span());
++                            // A receive yields at most two values (`v, ok`);
++                            // 3+ names crash the emitter's select lowering —
++                            // reject fail-closed as T23 before emission.
++                            if names.len() > 2 {
++                                let msg = format!(
++                                    "select receive binds {} names, but a receive yields at most 2 values (`v` or `v, ok`) (T23)",
++                                    names.len()
++                                );
++                                self.diags.push(
++                                    Diagnostic::error("HYB-E2002", self.path.clone(), chan.span(), msg)
++                                        .with_notes(vec![
++                                            "why: the emitter refuses select receive with 3+ names, so the program would not build".to_string(),
++                                            "fix: bind at most two names — `v := <-ch` or `v, ok := <-ch`".to_string(),
++                                        ]),
++                                );
++                            }
+                         }
+                         SelectArmKind::Default => {}
+                     }
+@@ -226,20 +251,93 @@ impl<'a> Checker<'a> {
+ 
+     fn check_multi_value_bind(&mut self, st: &FnState, value: &Expr, targets: usize, span: Span) {
+         let Some((name, results)) = self.static_result_count(st, value) else {
++            // Non-call binding sources: a channel receive and a map index
++            // yield at most two values (`v` or `v, ok`); indexing a slice,
++            // array, or string yields exactly one and has no comma-ok form.
++            // Binding a count the source cannot yield fails go build with
++            // `assignment mismatch` — reject fail-closed as T23.
++            if let Some(bound) = self.static_bind_source_bound(st, value) {
++                let (desc, over) = match bound {
++                    BindSourceBound::AtMost(n) => (
++                        format!("yields at most {n} values (`v` or `v, ok`)"),
++                        targets > n,
++                    ),
++                    BindSourceBound::Exact(n) => (
++                        format!("yields exactly {n} value (no comma-ok form)"),
++                        targets != n,
++                    ),
++                };
++                if over {
++                    let msg = format!(
++                        "`{}` {desc}, but {targets} {} bound: the binding cannot yield that many values (T23)",
++                        value.render(),
++                        if targets == 1 { "name is" } else { "names are" }
++                    );
++                    self.diags.push(
++                        Diagnostic::error("HYB-E2002", self.path.clone(), span, msg).with_notes(vec![
++                            "why: Go rejects the emitted binding (`assignment mismatch`), so the program would not build".to_string(),
++                            "fix: bind the count the source yields — `v` for an index, `v` or `v, ok` for a receive or map lookup".to_string(),
++                        ]),
++                    );
++                }
++            }
+             return;
+         };
+-        if results < 2 || targets == results {
++        if results >= 2 {
++            if targets == results {
++                return;
++            }
++            let msg = format!(
++                "`{name}` returns {results} values, but {targets} {} bound: a multi-value result is not a tuple (T23)",
++                if targets == 1 { "name is" } else { "names are" }
++            );
++            self.diags.push(
++                Diagnostic::error("HYB-E2002", self.path.clone(), span, msg).with_notes(vec![
++                    "why: Hybrid has no tuple type, and Go rejects the emitted binding (`assignment mismatch`), so the program would not build".to_string(),
++                ]),
++            );
+             return;
+         }
+-        let msg = format!(
+-            "`{name}` returns {results} values, but {targets} {} bound: a multi-value result is not a tuple (T23)",
+-            if targets == 1 { "name is" } else { "names are" }
+-        );
+-        self.diags.push(
+-            Diagnostic::error("HYB-E2002", self.path.clone(), span, msg).with_notes(vec![
+-                "why: Hybrid has no tuple type, and Go rejects the emitted binding (`assignment mismatch`), so the program would not build".to_string(),
+-            ]),
+-        );
++        // results == 1: a 1-result source bound to 2+ names is a plain
++        // assignment mismatch — Go refuses `assignment mismatch: N
++        // variables but name returns 1 value`. Void sources (0 results)
++        // stay owned by the void-position rule.
++        if targets > 1 {
++            let msg = format!(
++                "`{name}` returns 1 value, but {targets} names are bound: assignment mismatch (T23 binding count)"
++            );
++            self.diags.push(
++                Diagnostic::error("HYB-E1002", self.path.clone(), span, msg).with_notes(vec![
++                    "why: Go rejects the emitted binding (`assignment mismatch`), so the program would not build".to_string(),
++                    "fix: bind one name, or call a function that returns one value per target".to_string(),
++                ]),
++            );
++        }
++    }
++
++    /// The statically known value count of a non-call binding source:
++    /// a receive and a map index yield at most two values, an index of a
++    /// known slice/array/string base yields exactly one. `None` fails
++    /// open (unresolved bases, other shapes).
++    fn static_bind_source_bound(&self, st: &FnState, expr: &Expr) -> Option<BindSourceBound> {
++        match unwrap_parens_and_move(expr) {
++            Expr::Receive { .. } => Some(BindSourceBound::AtMost(2)),
++            Expr::Index { base, .. } => match self.shape_of_expr(st, base) {
++                TypeShape::Map(..) => Some(BindSourceBound::AtMost(2)),
++                TypeShape::Slice(..) | TypeShape::Array(..) | TypeShape::Str => {
++                    Some(BindSourceBound::Exact(1))
++                }
++                // a pointer to an array auto-derefs on indexing in Go —
++                // still exactly one value; every other pointer/base stays
++                // fail-open.
++                TypeShape::Pointer(inner) => match inner.as_ref() {
++                    TypeShape::Array(..) => Some(BindSourceBound::Exact(1)),
++                    _ => None,
++                },
++                _ => None,
++            },
++            _ => None,
++        }
+     }
+ 
+     /// `Some((callee, result count))` when `expr` is a direct or indirect call
+diff --git a/compiler/crates/hy-check/tests/binding_shape_guards.rs b/compiler/crates/hy-check/tests/binding_shape_guards.rs
+new file mode 100644
+index 0000000..a8555c6
+--- /dev/null
++++ b/compiler/crates/hy-check/tests/binding_shape_guards.rs
+@@ -0,0 +1,120 @@
++//! Binding-shape guards (T23 source counts) — #929 class.
++//!
++//! A channel receive and a map index yield at most two values (`v` or
++//! `v, ok`); indexing a slice, array, or string yields exactly one and has
++//! no comma-ok form. Binding a count the source cannot yield — including a
++//! 1-result call bound to 2+ names, and a select receive arm with 3+ names
++//! (which crashes the emitter's select lowering) — fails go build with
++//! `assignment mismatch` and is rejected fail-closed before emission. Every
++//! valid 1-value and comma-ok 2-value form stays legal.
++
++use hy_check::check_file;
++use hy_syntax::parse_file;
++
++fn codes(src: &str) -> Vec<String> {
++    let ast = parse_file("test.hy", src).expect("parses");
++    check_file(&ast)
++        .diagnostics
++        .into_iter()
++        .map(|d| d.code)
++        .collect()
++}
++
++fn assert_code(src: &str, want: &str) {
++    let cs = codes(src);
++    assert!(
++        !cs.is_empty() && cs.iter().all(|c| c == want),
++        "expected only [{want}], got {cs:?} for:\n{src}"
++    );
++}
++
++fn assert_ok(src: &str) {
++    let cs = codes(src);
++    assert!(cs.is_empty(), "expected 0 diagnostics, got {cs:?} for:\n{src}");
++}
++
++#[test]
++fn one_result_call_to_multiple_names_reject() {
++    assert_code(
++        "fn one() int {\n    return 1\n}\nfn main() {\n    a, b := one()\n    _ = a\n    _ = b\n}\n",
++        "HYB-E1002",
++    );
++    assert_code(
++        "fn one() int {\n    return 1\n}\nfn main() {\n    var a int\n    var b int\n    a, b = one()\n    _ = a\n    _ = b\n}\n",
++        "HYB-E1002",
++    );
++}
++
++#[test]
++fn receive_over_two_names_reject() {
++    assert_code(
++        "fn main() {\n    ch := make(chan int, 1)\n    a, b, c := <-ch\n    _ = a\n    _ = b\n    _ = c\n}\n",
++        "HYB-E2002",
++    );
++    assert_code(
++        "fn main() {\n    ch := make(chan int, 1)\n    var a int\n    var b int\n    var c int\n    a, b, c = <-ch\n    _ = a\n    _ = b\n    _ = c\n}\n",
++        "HYB-E2002",
++    );
++}
++
++#[test]
++fn map_index_over_two_names_reject() {
++    assert_code(
++        "fn main() {\n    m := map[string]int{\"k\": 1}\n    a, b, c := m[\"k\"]\n    _ = a\n    _ = b\n    _ = c\n}\n",
++        "HYB-E2002",
++    );
++}
++
++#[test]
++fn slice_index_multi_name_reject() {
++    assert_code(
++        "fn main() {\n    xs := []int{1, 2}\n    a, b := xs[0]\n    _ = a\n    _ = b\n}\n",
++        "HYB-E2002",
++    );
++    assert_code(
++        "fn main() {\n    xs := []int{1, 2}\n    var a int\n    var b int\n    a, b = xs[0]\n    _ = a\n    _ = b\n}\n",
++        "HYB-E2002",
++    );
++}
++
++#[test]
++fn select_recv_three_names_reject() {
++    assert_code(
++        "fn main() {\n    ch := make(chan int, 1)\n    select {\n    a, b, c := <-ch:\n        fmt.println(a)\n    }\n}\n",
++        "HYB-E2002",
++    );
++}
++
++#[test]
++fn valid_source_forms_stay_legal() {
++    // 1-value and comma-ok 2-value forms (issue accept controls)
++    assert_ok(
++        "fn main() {\n    ch := make(chan int, 1)\n    v := <-ch\n    _ = v\n}\n",
++    );
++    assert_ok(
++        "fn main() {\n    ch := make(chan int, 1)\n    v, ok := <-ch\n    _ = v\n    _ = ok\n}\n",
++    );
++    assert_ok(
++        "fn main() {\n    m := map[string]int{\"k\": 1}\n    v := m[\"k\"]\n    _ = v\n}\n",
++    );
++    assert_ok(
++        "fn main() {\n    m := map[string]int{\"k\": 1}\n    v, ok := m[\"k\"]\n    _ = v\n    _ = ok\n}\n",
++    );
++    assert_ok(
++        "fn main() {\n    xs := []int{1, 2}\n    v := xs[0]\n    _ = v\n}\n",
++    );
++    assert_ok(
++        "fn main() {\n    ch := make(chan int, 1)\n    select {\n    v, ok := <-ch:\n        fmt.println(v, ok)\n    }\n}\n",
++    );
++    assert_ok(
++        "fn main() {\n    ch := make(chan int, 1)\n    select {\n    v := <-ch:\n        fmt.println(v)\n    }\n}\n",
++    );
++    // 2-result call to 2 names stays legal (the T23 baseline)
++    assert_ok(
++        "fn minmax(a int, b int) (int, int) {\n    if a > b {\n        return a, b\n    }\n    return b, a\n}\nfn main() {\n    lo, hi := minmax(3, 9)\n    _ = lo\n    _ = hi\n}\n",
++    );
++    // 1-result call to 1 name stays legal
++    assert_ok(
++        "fn one() int {\n    return 1\n}\nfn main() {\n    x := one()\n    _ = x\n}\n",
++    );
++}

@@ -1,0 +1,75 @@
+# Autoland — autonomous verify-and-land for prepared fix bundles.
+#
+# The missing piece the sessions authored by hand: a fix bundle in
+# automation/land-queue/<slug>/ (meta.json + fix.patch + repro.hy) is
+# verified end-to-end and LANDED by this workflow with no human awake:
+#
+#   baseline ACCEPT -> patch -> patched REJECT with the expected code
+#   -> full battery (workspace, corpus, census, differential FULL)
+#   -> commit (Fixes #N) -> push -> ls-remote LAND-ASSERT
+#   -> bundle meta flips to landed -> shepherd log (change log).
+#
+# Any gate failure records BLOCKED with evidence and lands nothing.
+# Merges run ONLY at SHEPHERD_MODE=live (repo variable, kill switch);
+# the default dry-run executes baseline checks only and lands nothing.
+
+name: autoland
+
+on:
+  push:
+    paths:
+      - "automation/land-queue/**"
+      - "tools/autoland.py"
+  workflow_dispatch:
+    inputs:
+      slug:
+        description: "Bundle slug to run (empty = all pending)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: autoland
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  autoland:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      SHEPHERD_MODE: ${{ vars.SHEPHERD_MODE || 'dry-run' }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout main (pinned v4, full history)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: W0 setup (pinned toolchains + caches)
+        uses: ./.github/actions/shepherd-setup
+
+      - name: Identity
+        run: |
+          git config user.name "autoland-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git fetch -q origin main && git checkout -q main && git pull -q --ff-only origin main
+
+      - name: List pending bundles
+        run: python3 tools/autoland.py list
+
+      - name: Run bundles (live) / baseline-only (dry-run)
+        run: |
+          set -o pipefail
+          SLUG="${{ github.event.inputs.slug }}"
+          if [ -n "$SLUG" ]; then
+            python3 tools/autoland.py run --slug "$SLUG"
+          else
+            python3 tools/autoland.py run --all
+          fi

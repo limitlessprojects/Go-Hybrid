@@ -1,0 +1,17 @@
+{
+  "issue": 827,
+  "expected_code": "HYB-E2009",
+  "basis": "author-stage v0 brain=specialized rounds=1",
+  "status": "landed",
+  "gates": {
+    "baseline": "ACCEPT",
+    "patched": "REJECT HYB-E2009",
+    "acceptControls": [
+      "tests/checker-corpus/control-uint8-max.hy",
+      "tests/checker-corpus/control-composite-literal-in-range.hy"
+    ],
+    "rounds": 1
+  },
+  "landedSha": "d0a2db587b7863e59d7308375f1dd2943f1096ab",
+  "landedAt": "2026-10-21T19:08:54Z"
+}
