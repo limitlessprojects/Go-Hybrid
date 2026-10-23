@@ -129,3 +129,30 @@ fn large_array_length_control_accepts() {
     // must stay clean (the bound only fires on a constant index).
     assert_accept("fn main() {\n    var a [300]int8\n    fmt.println(\"{len(a)}\")\n}\n");
 }
+
+// ---------------------------------------------------------------------------
+// Issue #999: the assignment-target place (`a[300] = 1`) bypassed the bound —
+// `place_read` passed no base expression to `check_index_kind`, so the
+// declared array length was never resolved on the write path. The read path
+// (`a[5]` above) was already bounded. The base place is now mirrored into
+// expression form, so the write path resolves the length exactly like reads.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn const_index_assign_past_var_array_length_is_e1002() {
+    assert_reject_e1002("fn main() {\n    var a [2]int\n    a[300] = 1\n    fmt.println(\"{a[0]}\")\n}\n");
+}
+
+#[test]
+fn const_index_assign_in_bounds_still_accepts() {
+    assert_accept("fn main() {\n    var a [2]int\n    a[1] = 1\n    fmt.println(\"{a[0]}\")\n}\n");
+}
+
+#[test]
+fn const_index_assign_on_slice_still_accepts() {
+    // Over-reach fence: a slice's length is not part of its type, so the
+    // constant store past a slice's current length is a RUNTIME panic in Go,
+    // not a compile error — this must stay accepted (mirrors
+    // `control-slice-index-past-length.hy` in the corpus).
+    assert_accept("fn main() {\n    var s []int = [1, 2]\n    s[300] = 1\n    _ = s\n}\n");
+}

@@ -128,9 +128,10 @@ def is_registered_discover(name, patterns):
 
 def is_reached_discover(root, relpath, start, pattern):
     """Mirror discovery's directory boundary without importing test code."""
-    target = (Path(root) / relpath).resolve()
-    start_dir = (Path(root) / start).resolve()
-    if not start_dir.is_dir() or not target.is_relative_to(start_dir):
+    root_dir = Path(root).resolve()
+    target = (root_dir / relpath).resolve()
+    start_dir = (root_dir / start).resolve()
+    if not start_dir.is_dir() or not start_dir.is_relative_to(root_dir) or not target.is_relative_to(start_dir):
         return False
     if not is_registered_discover(target.name, [pattern]):
         return False
