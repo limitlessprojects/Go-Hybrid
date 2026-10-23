@@ -86,17 +86,23 @@ class Gh:
                     raw = resp.read().decode()
                     return resp.status, (json.loads(raw) if raw.strip() else None)
             except HTTPError as e:
-                if e.code in (429, 502, 503, 504) and attempt < 3:
-                    time.sleep([2, 5, 10][attempt])
-                    last_err = e
-                    continue
-                if e.code == 404:
-                    return 404, None
                 body_txt = ""
                 try:
                     body_txt = e.read().decode()[:400]
                 except Exception:
                     pass
+                if e.code == 404:
+                    return 404, None
+                # GitHub secondary rate limits surface as 403 with a "rate
+                # limit" body, not 429 — retry those with a longer backoff
+                # (the window is typically 30-60s). Other 403s are permission
+                # errors: fail fast, retrying cannot help.
+                is_rate_403 = e.code == 403 and "rate limit" in body_txt.lower()
+                if (e.code in (429, 502, 503, 504) or is_rate_403) and attempt < 3:
+                    time.sleep([2, 5, 10][attempt] if e.code != 403
+                               else [5, 20, 45][attempt])
+                    last_err = e
+                    continue
                 raise RuntimeError("%s %s -> %s %s" % (method, path, e.code, body_txt))
             except RateGuard:
                 raise
