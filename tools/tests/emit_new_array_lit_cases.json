@@ -1,0 +1,1 @@
+{"suite": "emit_new_array_lit", "cases": ["new([4]u8{})", "make([4]int{}, 4)"]}

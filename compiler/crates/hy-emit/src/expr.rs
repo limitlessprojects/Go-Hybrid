@@ -927,7 +927,7 @@ impl Emitter {
                 elem: Some(t),
                 items,
                 ..
-            } if items.is_empty() && first.value.as_array_lit().is_none() => {
+            } if items.is_empty() && first_val.as_array_lit().is_none() => {
                 format!("[]{}", self.type_text(t))
             }
             Expr::MapLit {
@@ -968,7 +968,7 @@ impl Emitter {
                 elem: Some(t),
                 items,
                 ..
-            } if items.is_empty() => format!("[]{}", self.type_text(t)),
+            } if items.is_empty() => if val.as_array_lit().is_some() { self.type_text(t) } else { format!("[]{}", self.type_text(t)) },
             Expr::MapLit {
                 key,
                 value,

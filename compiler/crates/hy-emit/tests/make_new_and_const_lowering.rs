@@ -21,10 +21,11 @@ fn emit_make_with_type_alias_and_parenthesized_type() {
 #[test]
 fn emit_new_slice_chan_and_spec_primitive() {
     let go = emit(
-        "type str_map = map[string]int\nfn main() {\n    ps := new([]int)\n    pm := new((str_map))\n    pc := new((chan int))\n    pu := new(u8)\n    fmt.println(ps, pm, pc, pu)\n}\n",
+        "type str_map = map[string]int\nfn main() {\n    ps := new([]int)\n    pa := new([4]u8{})\n    pm := new((str_map))\n    pc := new((chan int))\n    pu := new(u8)\n    fmt.println(ps, pa, pm, pc, pu)\n}\n",
     )
     .expect("must emit");
     assert!(go.contains("new([]int)"), "got:\n{}", go);
+    assert!(go.contains("new([4]uint8)"), "got:\n{}", go);
     assert!(!go.contains("new([]int{})"), "got:\n{}", go);
     assert!(go.contains("new(str_map)"), "got:\n{}", go);
     assert!(go.contains("new(chan int)"), "got:\n{}", go);

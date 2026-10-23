@@ -446,11 +446,11 @@ impl<'a> Checker<'a> {
 
     fn classify_make_target(&self, e: &Expr) -> MakeTargetKind {
         match unwrap_parens(e) {
-            Expr::SliceLit {
+            b @ Expr::SliceLit {
                 elem: Some(_),
                 items,
                 ..
-            } if items.is_empty() => MakeTargetKind::Slice,
+            } if items.is_empty() && b.as_array_lit().is_none() => MakeTargetKind::Slice,
             Expr::MapLit { entries, .. } if entries.is_empty() => MakeTargetKind::Map,
             Expr::StructLit {
                 ty: Some(hy_syntax::TypeExpr::Chan { .. }),

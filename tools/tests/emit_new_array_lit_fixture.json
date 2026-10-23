@@ -1,0 +1,1 @@
+{"fixture": "emit_new_array_lit", "expected_go": "new([4]uint8)"}
