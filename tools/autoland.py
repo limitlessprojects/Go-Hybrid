@@ -36,6 +36,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -146,8 +147,27 @@ def log_event(token_env: str, event: str, verdict: str, note: str, issue: int | 
     sh(cmd)
 
 
+def bundle_dir(slug: str) -> pathlib.Path | None:
+    """Resolve a bundle slug to a directory strictly INSIDE the queue.
+
+    autoland is the only path to main; a slug with dot-segments (`../../x`)
+    or an absolute component (`/tmp/x`) must never select a bundle outside
+    automation/land-queue/ — the same input-validation family as install.sh's
+    HYB_VERSION rejection and package_release.sh's dot-segment rejection.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", slug) or ".." in slug.split("/") or len(slug) > 128:
+        return None
+    root = QUEUE.resolve()
+    d = (QUEUE / slug).resolve()
+    if d == root or root not in d.parents:
+        return None
+    return d
+
+
 def run_bundle(slug: str, live: bool, token_env: str) -> int:
-    d = QUEUE / slug
+    d = bundle_dir(slug)
+    if d is None:
+        return die("NO-BUNDLE", slug, "unsafe slug (dot-segments, absolute path, or outside the land-queue)", 2)
     if not (d / "meta.json").is_file():
         return die("NO-BUNDLE", slug, "missing meta.json", 2)
     meta = read_meta(d)

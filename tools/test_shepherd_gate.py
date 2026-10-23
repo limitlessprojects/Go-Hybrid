@@ -117,5 +117,47 @@ class ProbeParser(unittest.TestCase):
         self.assertFalse(any("removed line" in ln for ln in added))
 
 
+class AutolandSlugGuard(unittest.TestCase):
+    """autoland's bundle_dir confines --slug to the land-queue (#1300).
+
+    autoland is the only path to main; a slug that escapes the queue turns
+    any writable directory into a push-to-main bundle. Same input-validation
+    family as install.sh HYB_VERSION (#1097) and package_release.sh
+    dot-segments (#1095).
+    """
+
+    def test_plain_slug_resolves_inside_queue(self):
+        import autoland
+        d = autoland.bundle_dir("author-17")
+        self.assertIsNotNone(d)
+        root = autoland.QUEUE.resolve()
+        self.assertNotEqual(d, root)
+        self.assertIn(root, d.parents)
+
+    def test_dot_segments_rejected(self):
+        import autoland
+        self.assertIsNone(autoland.bundle_dir("../../evil"))
+        self.assertIsNone(autoland.bundle_dir("author-17/../../evil"))
+        self.assertIsNone(autoland.bundle_dir(".."))
+
+    def test_absolute_slug_rejected(self):
+        # pathlib discards QUEUE when the right operand is absolute.
+        import autoland
+        self.assertIsNone(autoland.bundle_dir("/etc/evil"))
+        self.assertIsNone(autoland.bundle_dir("C:/evil"))
+
+    def test_slug_charset_rejected(self):
+        import autoland
+        for bad in ("", ".hidden", "-dash", "with space", "semi;colon",
+                    "sub/dir", "a" * 300):
+            self.assertIsNone(autoland.bundle_dir(bad), repr(bad))
+
+    def test_queue_itself_rejected(self):
+        # A slug resolving to the queue root would let fix.patch land at the
+        # queue top level, colliding with every bundle's file names.
+        import autoland
+        self.assertIsNone(autoland.bundle_dir("."))
+
+
 if __name__ == "__main__":
     unittest.main()
