@@ -5403,6 +5403,53 @@ func genFn70(p0 uint64, p1 uint64) uint64 {
 	return execWasm(70, p0, p1)
 }
 
+// fallback: opcode 0x23 in genFn66
+func genFn66(p0 uint64, p1 uint64, p2 uint64) uint64 {
+	return execWasm(66, p0, p1, p2)
+}
+
+// fallback: opcode 0x28 in genFn41
+func genFn41(p0 uint64, p1 uint64, p2 uint64) uint64 {
+	return execWasm(41, p0, p1, p2)
+}
+
+func genFn1330(p0 uint64, p1 uint64) uint64 {
+	var s [32]uint64
+	_ = s
+	sp := 0
+	_ = sp
+	s[sp] = p0; sp++
+	s[sp] = p1; sp++
+	genFn1329(s[sp-2], s[sp-1])
+	sp -= 2
+	return 0
+}
+
+// fallback: opcode 0x02 in genFn1329
+func genFn1329(p0 uint64, p1 uint64) uint64 {
+	return execWasm(1329, p0, p1)
+}
+
+// fallback: opcode 0x23 in genFn1449
+func genFn1449(p0 uint64, p1 uint64, p2 uint64, p3 uint64) uint64 {
+	return execWasm(1449, p0, p1, p2, p3)
+}
+
+// fallback: opcode 0x23 in genFn67
+func genFn67(p0 uint64, p1 uint64) uint64 {
+	return execWasm(67, p0, p1)
+}
+
+// fallback: opcode 0x23 in genFn65
+func genFn65(p0 uint64, p1 uint64, p2 uint64) uint64 {
+	return execWasm(65, p0, p1, p2)
+}
+
+// fallback: opcode 0x28 in genFn1327
+func genFn1327(p0 uint64, p1 uint64, p2 uint64) uint64 {
+	return execWasm(1327, p0, p1, p2)
+}
+
 var vmStackPool = sync.Pool{
 	New: func() any {
 		s := make([]uint64, 1024)
@@ -6487,15 +6534,15 @@ func (b *WasmBridge) HyNop(x uint64) uint64 {
 }
 
 func (b *WasmBridge) HySha3Digest256(dataPtr, dataLen, outPtr uint32) (int32, error) {
-	return int32(execWasm(66, uint64(dataPtr), uint64(dataLen), uint64(outPtr))), nil
+	return int32(genFn66(uint64(dataPtr), uint64(dataLen), uint64(outPtr))), nil
 }
 
 func (b *WasmBridge) HySha3StreamChecksum(iters, seed uint64) (uint64, error) {
-	return execWasm(67, iters, seed), nil
+	return genFn67(iters, seed), nil
 }
 
 func (b *WasmBridge) HySha2256(dataPtr, dataLen, outPtr uint32) (int32, error) {
-	return int32(execWasm(65, uint64(dataPtr), uint64(dataLen), uint64(outPtr))), nil
+	return int32(genFn65(uint64(dataPtr), uint64(dataLen), uint64(outPtr))), nil
 }
 
 func (b *WasmBridge) HyFlateCompress(dataPtr, dataLen, outPtr, capPtr, outLenPtr uint32) (int32, error) {
