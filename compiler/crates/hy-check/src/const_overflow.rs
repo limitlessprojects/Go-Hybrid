@@ -170,6 +170,11 @@ impl<'a> Checker<'a> {
 
     /// When `ty` is a fixed-width integer and `value` assigned to `target`
     /// is an integer constant outside that type's range, or a float constant, emit HYB-E6002.
+    ///
+    /// Issue #998: the RHS may be a *named* file-level `const` (`x = k`), so
+    /// the fold must resolve identifiers through the file const map exactly
+    /// like the declaration path does — a bare syntactic fold sees `k` as
+    /// `NotConst` and the accepted-but-unbuildable shape slips through.
     pub(crate) fn check_const_overflow_assign(
         &mut self,
         target: &str,

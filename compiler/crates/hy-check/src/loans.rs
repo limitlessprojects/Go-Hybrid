@@ -5395,6 +5395,7 @@ impl<'a> Checker<'a> {
             // context (HYB-E4001).
             self.check_composite_nils(st, v);
             // Constant overflow on assignment: `n = 300`, `arr[0] = 300`, `n += 300`
+            // (#998: the RHS may be a named file const, folded via const_values)
             if !matches!(op, AssignOp::ShlAssign | AssignOp::ShrAssign) {
                 if let Some(target_ty) = self.place_target_ty(st, t) {
                     self.check_const_overflow_assign(&t.render(), &target_ty, v, Some(st));

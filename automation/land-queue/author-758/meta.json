@@ -1,0 +1,17 @@
+{
+  "issue": 758,
+  "expected_code": "HYB-E6001",
+  "basis": "author-stage v0 brain=specialized rounds=1",
+  "status": "landed",
+  "gates": {
+    "baseline": "ACCEPT",
+    "patched": "REJECT HYB-E6001",
+    "acceptControls": [
+      "tests/checker-corpus/control-uint8-max.hy",
+      "tests/checker-corpus/control-composite-literal-in-range.hy"
+    ],
+    "rounds": 1
+  },
+  "landedSha": "0107658b6a0832132b334ade5499bb0ec08ff51d",
+  "landedAt": "2026-10-21T19:04:39Z"
+}

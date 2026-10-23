@@ -692,6 +692,10 @@ pub(crate) struct Checker<'a> {
     pub type_aliases: HashMap<String, TypeExpr>,
     /// fn name -> decl (return-type inference for single-value defines).
     pub fns: HashMap<String, &'a FnDecl>,
+    /// Issue #758: names defined inside the deep-walked closure body
+    /// currently under the zero-divisor walk — a closure-local shadow
+    /// is invisible to `st`, so resolution fails open on them.
+    pub zd_defined: std::collections::HashSet<String>,
     /// (receiver base type name, method name) -> decl (method return-type inference).
     pub method_decls: HashMap<(String, String), &'a FnDecl>,
     /// file-level consts (immutable, visible in every fn).
@@ -746,6 +750,7 @@ impl<'a> Checker<'a> {
             enum_has_zero_value: HashMap::new(),
             type_aliases: HashMap::new(),
             fns: HashMap::new(),
+            zd_defined: std::collections::HashSet::new(),
             method_decls: HashMap::new(),
             consts: HashMap::new(),
             const_values: HashMap::new(),

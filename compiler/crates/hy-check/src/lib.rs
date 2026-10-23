@@ -538,7 +538,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
 
         // Issue #149: `/` or `%` by a literal 0 must not be accepted —
         // Go refuses to compile the emitted expression.
-        ck.check_stmt_const_zero_divisor(stmt);
+        ck.check_stmt_const_zero_divisor(&st, stmt);
 
         // Issue #201: expression/type guards (incomparable `==`,
         // constant negative shifts, local array-length ascriptions).
