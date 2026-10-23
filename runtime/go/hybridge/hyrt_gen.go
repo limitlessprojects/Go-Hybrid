@@ -5259,7 +5259,7 @@ func genFn1334(p0 uint64, p1 uint64) uint64 {
 	return execWasm(1334, p0, p1)
 }
 
-// fallback: opcode 0x23 in genFn1335
+// fallback: opcode 0x02 in genFn1335
 func genFn1335(p0 uint64) uint64 {
 	return execWasm(1335, p0)
 }
@@ -5274,7 +5274,7 @@ func genFn1392(p0 uint64, p1 uint64, p2 uint64) uint64 {
 	return execWasm(1392, p0, p1, p2)
 }
 
-// fallback: opcode 0x28 in genFn1340
+// fallback: opcode 0x02 in genFn1340
 func genFn1340(p0 uint64, p1 uint64) uint64 {
 	return execWasm(1340, p0, p1)
 }
@@ -5299,7 +5299,7 @@ func genFn1345(p0 uint64, p1 uint64) uint64 {
 	return execWasm(1345, p0, p1)
 }
 
-// fallback: opcode 0x23 in genFn1346
+// fallback: opcode 0x00 in genFn1346
 func genFn1346(p0 uint64, p1 uint64) uint64 {
 	return execWasm(1346, p0, p1)
 }
@@ -5309,7 +5309,7 @@ func genFn1361(p0 uint64) uint64 {
 	return execWasm(1361, p0)
 }
 
-// fallback: opcode 0x28 in genFn1362
+// fallback: opcode 0x11 in genFn1362
 func genFn1362(p0 uint64) uint64 {
 	return execWasm(1362, p0)
 }
@@ -5319,12 +5319,12 @@ func genFn1410() uint64 {
 	return execWasm(1410)
 }
 
-// fallback: opcode 0x23 in genFn1431
+// fallback: opcode 0x00 in genFn1431
 func genFn1431(p0 uint64, p1 uint64, p2 uint64) uint64 {
 	return execWasm(1431, p0, p1, p2)
 }
 
-// fallback: opcode 0x23 in genFn1342
+// fallback: opcode 0x00 in genFn1342
 func genFn1342(p0 uint64) uint64 {
 	return execWasm(1342, p0)
 }
@@ -5334,17 +5334,17 @@ func genFn1343(p0 uint64) uint64 {
 	return execWasm(1343, p0)
 }
 
-// fallback: opcode 0x23 in genFn1363
+// fallback: opcode 0x02 in genFn1363
 func genFn1363(p0 uint64) uint64 {
 	return execWasm(1363, p0)
 }
 
-// fallback: opcode 0x23 in genFn1366
+// fallback: opcode 0x02 in genFn1366
 func genFn1366(p0 uint64, p1 uint64, p2 uint64, p3 uint64, p4 uint64) uint64 {
 	return execWasm(1366, p0, p1, p2, p3, p4)
 }
 
-// fallback: opcode 0x28 in genFn1367
+// fallback: opcode 0x02 in genFn1367
 func genFn1367(p0 uint64) uint64 {
 	return execWasm(1367, p0)
 }
@@ -5373,17 +5373,17 @@ func genFn1337(p0 uint64, p1 uint64, p2 uint64) uint64 {
 	return execWasm(1337, p0, p1, p2)
 }
 
-// fallback: opcode 0x28 in genFn1338
+// fallback: opcode 0x02 in genFn1338
 func genFn1338(p0 uint64) uint64 {
 	return execWasm(1338, p0)
 }
 
-// fallback: opcode 0x74 in genFn1451
+// fallback: opcode 0x00 in genFn1451
 func genFn1451(p0 uint64, p1 uint64, p2 uint64) uint64 {
 	return execWasm(1451, p0, p1, p2)
 }
 
-// fallback: opcode 0x1a in genFn1332
+// fallback: opcode 0x00 in genFn1332
 func genFn1332(p0 uint64, p1 uint64) uint64 {
 	return execWasm(1332, p0, p1)
 }
@@ -5403,12 +5403,12 @@ func genFn70(p0 uint64, p1 uint64) uint64 {
 	return execWasm(70, p0, p1)
 }
 
-// fallback: opcode 0x23 in genFn66
+// fallback: opcode 0x02 in genFn66
 func genFn66(p0 uint64, p1 uint64, p2 uint64) uint64 {
 	return execWasm(66, p0, p1, p2)
 }
 
-// fallback: opcode 0x28 in genFn41
+// fallback: opcode 0x03 in genFn41
 func genFn41(p0 uint64, p1 uint64, p2 uint64) uint64 {
 	return execWasm(41, p0, p1, p2)
 }
@@ -5430,22 +5430,22 @@ func genFn1329(p0 uint64, p1 uint64) uint64 {
 	return execWasm(1329, p0, p1)
 }
 
-// fallback: opcode 0x23 in genFn1449
+// fallback: opcode 0x02 in genFn1449
 func genFn1449(p0 uint64, p1 uint64, p2 uint64, p3 uint64) uint64 {
 	return execWasm(1449, p0, p1, p2, p3)
 }
 
-// fallback: opcode 0x23 in genFn67
+// fallback: opcode 0x02 in genFn67
 func genFn67(p0 uint64, p1 uint64) uint64 {
 	return execWasm(67, p0, p1)
 }
 
-// fallback: opcode 0x23 in genFn65
+// fallback: opcode 0x02 in genFn65
 func genFn65(p0 uint64, p1 uint64, p2 uint64) uint64 {
 	return execWasm(65, p0, p1, p2)
 }
 
-// fallback: opcode 0x28 in genFn1327
+// fallback: opcode 0x02 in genFn1327
 func genFn1327(p0 uint64, p1 uint64, p2 uint64) uint64 {
 	return execWasm(1327, p0, p1, p2)
 }
