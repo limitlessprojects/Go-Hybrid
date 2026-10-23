@@ -315,6 +315,10 @@ impl<'a> Checker<'a> {
             // everything else (calls, receives, arithmetic, try, paren):
             // classify the result shape
             _ => {
+                let (c, t) = match unwrap_parens(expr) { Expr::Try { operand, .. } => (unwrap_parens(operand), 1), o => (o, 0) };
+                if let Expr::Call { callee, .. } = c { if let Some(r) = self.call_result_tys(st, callee) { if r.len() > 1 + t {
+                    return r.iter().take(r.len() - t).map(|ty| self.outcome_for_shape(&self.shape_of_type(ty), &expr.render())).find(|o| !matches!(o, Outcome::Ok)).unwrap_or(Outcome::Ok);
+                } } }
                 let shape = self.shape_of_expr(st, expr);
                 self.outcome_for_shape(&shape, &expr.render())
             }
@@ -2743,6 +2747,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                     let base_ty = self.dir_ty_of_expr(base, env)?;
+                    if let Some((_, fty)) = self.struct_fields_for_type(&base_ty).and_then(|fs| fs.into_iter().find(|(n, _)| n == name)) { if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&fty) { return Some(results); } }
                     let recv_base = Self::base_named_type(&self.resolve_type_alias(&base_ty))
                         .or_else(|| Self::base_named_type(&base_ty))?;
                     let m = self

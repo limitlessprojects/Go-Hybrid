@@ -1146,8 +1146,9 @@ impl<'a> Checker<'a> {
                 self.method_decls
                     .get(&(recv_base, head.to_string()))
                     .map(|f| f.results.iter().map(|r| r.ty.clone()).collect())
+                    .or_else(|| match self.resolve_type_alias(&self.ty_of_expr(st, callee)?) { TypeExpr::Fn { results, .. } => Some(results), _ => None })
             }
-            _ => None,
+            other => match self.resolve_type_alias(&self.ty_of_expr(st, other)?) { TypeExpr::Fn { results, .. } => Some(results), _ => None },
         }
     }
 

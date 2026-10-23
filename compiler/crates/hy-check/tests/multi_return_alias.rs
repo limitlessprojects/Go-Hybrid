@@ -135,3 +135,7 @@ fn main() {
         codes(&r)
     );
 }
+#[test]
+fn spawn_multi_value_call_and_fn_field_reject_non_first_reference_result() {
+    for src in ["fn p(m map[string]int) (int, map[string]int) { return 1, m }\nfn w(a int, b map[string]int) { b[\"k\"] = a }\nfn main() { m := map[string]int{\"k\": 0}\n task w(p(m)) }", "struct h { f fn() int map[string]int }\nfn w(a int, b map[string]int) { b[\"k\"] = a }\nfn main() { m := map[string]int{\"k\": 0}\n x := h{f: fn() (int, map[string]int) { return 1, m }}\n task w(x.f()) }"] { assert!(codes(&check(src)).contains(&"HYB-E3001".to_string())); }
+}

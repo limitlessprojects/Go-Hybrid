@@ -226,3 +226,7 @@ fn recv_from_send_only_param_and_select_arms_reject_e3008_issue_89() {
         vec!["HYB-E3008", "HYB-E3008", "HYB-E3008", "HYB-E3008"]
     );
 }
+#[test]
+fn close_recv_only_from_multi_return_struct_fn_field_rejects_e3009() {
+    assert_eq!(first_code(&check("struct h { f fn() int <-chan int }\nfn main() { ch := make(chan int, 1)\n x := h{f: fn() (int, <-chan int) { return 1, ch }}\n _, rx := x.f()\n close(rx) }")).as_deref(), Some("HYB-E3009"));
+}
