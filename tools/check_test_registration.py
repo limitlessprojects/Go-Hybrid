@@ -31,6 +31,7 @@ import argparse
 import fnmatch
 import os
 from pathlib import Path
+import posixpath
 import re
 import shlex
 import sys
@@ -75,8 +76,11 @@ def python_commands(workflow_text):
                 if PYTHON_FLAGS_RE.fullmatch(option):
                     arguments = arguments[1:]
                 elif option in ("-W", "-X", "--check-hash-based-pycs"):
+                    if len(arguments) < 2 or not arguments[1] or arguments[1].startswith("-"):
+                        arguments = []
+                        break
                     arguments = arguments[2:]
-                elif option.startswith(("-W", "-X")):
+                elif option.startswith(("-W", "-X", "--check-hash-based-pycs=")):
                     arguments = arguments[1:]
                 elif option == "--":
                     arguments = arguments[1:]
@@ -102,17 +106,34 @@ def registered_discoveries(workflow_text):
     for arguments in python_commands(workflow_text):
         if arguments[:3] != ["-m", "unittest", "discover"]:
             continue
-        start, pattern = ".", None
-        for index, argument in enumerate(arguments[3:], 3):
-            if argument in ("-s", "--start-directory") and index + 1 < len(arguments):
-                start = arguments[index + 1]
-            elif argument in ("-p", "--pattern") and index + 1 < len(arguments):
-                pattern = arguments[index + 1]
+        start, pattern, valid = ".", "test*.py", True
+        index = 3
+        while index < len(arguments):
+            argument = arguments[index]
+            if argument in ("-s", "--start-directory", "-p", "--pattern", "-t", "--top-level-directory"):
+                if index + 1 >= len(arguments) or not arguments[index + 1] or arguments[index + 1].startswith("-"):
+                    valid = False
+                    break
+                if argument in ("-s", "--start-directory"):
+                    start = arguments[index + 1]
+                elif argument in ("-p", "--pattern"):
+                    pattern = arguments[index + 1]
+                index += 2
             elif argument.startswith("--start-directory="):
                 start = argument.split("=", 1)[1]
+                if not start or start.startswith("-"):
+                    valid = False
+                    break
+                index += 1
             elif argument.startswith("--pattern="):
                 pattern = argument.split("=", 1)[1]
-        if pattern is not None:
+                if not pattern or pattern.startswith("-"):
+                    valid = False
+                    break
+                index += 1
+            else:
+                index += 1
+        if valid and pattern:
             discoveries.append((start, pattern))
     return discoveries
 
@@ -147,8 +168,14 @@ def is_reached_discover(root, relpath, start, pattern):
 
 def is_registered_direct(relpath, workflow_text):
     """A script must be the Python entry point, not a comment or argument."""
-    return any(arguments and arguments[0] in (relpath, "./" + relpath)
-               for arguments in python_commands(workflow_text))
+    for arguments in python_commands(workflow_text):
+        if not arguments or not arguments[0] or arguments[0].startswith("-"):
+            continue
+        raw = arguments[0].replace("\\", "/")
+        if not raw.startswith("/") and ".." not in raw.split("/"):
+            if posixpath.normpath(raw) == relpath:
+                return True
+    return False
 
 
 def find_test_files(root, directory):
@@ -187,8 +214,15 @@ def main():
                     help="repository root holding the test directories")
     args = ap.parse_args()
 
-    with open(args.workflow, encoding="utf-8") as handle:
-        workflow_text = handle.read()
+    if not os.path.isdir(args.root):
+        print(f"REGISTRATION CHECK ERROR: invalid root directory {args.root}", file=sys.stderr)
+        return 2
+    try:
+        with open(args.workflow, encoding="utf-8") as handle:
+            workflow_text = handle.read()
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"REGISTRATION CHECK ERROR: cannot read workflow {args.workflow}: {exc}", file=sys.stderr)
+        return 2
 
     patterns = registered_patterns(workflow_text)
     found = (find_test_files(args.root, DISCOVER_DIR)
