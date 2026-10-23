@@ -91,20 +91,29 @@ def scan_managed_lines(src: str) -> list[int]:
 def audit(hyb, prog):
     r = subprocess.run(
         [hyb, "check", prog, "--json", "--report-managed"],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, timeout=120,
     )
+    # The checker serializes UTF-8 JSON regardless of the host locale. Decode
+    # bytes here, rather than in Windows subprocess reader threads, so malformed
+    # output is a gate error and cannot corrupt a reviewed Unicode baseline.
+    try:
+        stdout = r.stdout.decode("utf-8")
+        stderr = r.stderr.decode("utf-8")
+    except UnicodeDecodeError as error:
+        print(f"GATE ERROR: {prog}: checker output is not valid UTF-8: {error}")
+        sys.exit(2)
     # Fail closed on a checker failure (issue #53): a rejected or malformed
     # program has no trustworthy managed-block inventory. Treating that as
     # "zero blocks" reported PASS and — in --rebaseline mode — could replace
     # a reviewed baseline with an empty one. The gate must stop instead; the
     # rebaseline path flows through this same audit() call.
     if r.returncode != 0:
-        print(f"GATE ERROR: {prog}: hyb check exited {r.returncode}; no gate decision on a failed check\n{r.stderr}")
+        print(f"GATE ERROR: {prog}: hyb check exited {r.returncode}; no gate decision on a failed check\n{stderr}")
         sys.exit(2)
     try:
-        out = json.loads(r.stdout)
+        out = json.loads(stdout)
     except json.JSONDecodeError:
-        print(f"GATE ERROR: {prog}: hyb check did not emit JSON\n{r.stdout}\n{r.stderr}")
+        print(f"GATE ERROR: {prog}: hyb check did not emit JSON\n{stdout}\n{stderr}")
         sys.exit(2)
     # Missing audit data is not evidence of an empty inventory. In particular,
     # do not let a stale/wrapped checker returning {} clear a reviewed baseline.

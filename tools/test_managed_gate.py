@@ -68,8 +68,8 @@ class ManagedGateTests(unittest.TestCase):
                 # reported count and the block list must be consistent with it.
                 report = subprocess.CompletedProcess(
                     [], 0,
-                    json.dumps({'summary': {'managed': {'managed_blocks': 0, 'blocks': []}}}),
-                    '')
+                    json.dumps({'summary': {'managed': {'managed_blocks': 0, 'blocks': []}}}).encode('utf-8'),
+                    b'')
                 with patch.object(sys, 'argv', args), \
                         patch.object(gate.subprocess, 'run', return_value=report) as checker, \
                         contextlib.redirect_stdout(io.StringIO()) as output:
@@ -85,7 +85,7 @@ class ManagedGateTests(unittest.TestCase):
             prog.write_text(source, encoding='utf-8')
             report = {'summary': {'managed': {
                 'managed_blocks': len(blocks), 'blocks': blocks}}}
-            result = subprocess.CompletedProcess([], returncode, json.dumps(report), '')
+            result = subprocess.CompletedProcess([], returncode, json.dumps(report).encode('utf-8'), b'')
             with patch.object(gate.subprocess, 'run', return_value=result):
                 return gate.audit('hyb', str(prog))
 
@@ -209,7 +209,7 @@ class ManagedGateTests(unittest.TestCase):
                         baseline.write_bytes(original)
                         argv = ['managed_gate.py'] + (['--rebaseline'] if rebaseline else [])
                         argv += ['hyb', str(baseline), str(prog)]
-                        result = subprocess.CompletedProcess([], 0, json.dumps(payload), '')
+                        result = subprocess.CompletedProcess([], 0, json.dumps(payload).encode('utf-8'), b'')
                         output = io.StringIO()
                         with patch.object(gate.sys, 'argv', argv), \
                              patch.object(gate.subprocess, 'run', return_value=result), \
@@ -231,7 +231,7 @@ class ManagedGateTests(unittest.TestCase):
             # Rust omits blocks for an empty Vec; the counter proves this is
             # an actual empty report rather than absent audit data.
             report = {'summary': {'managed': {'managed_blocks': 0}}}
-            result = subprocess.CompletedProcess([], 0, json.dumps(report), '')
+            result = subprocess.CompletedProcess([], 0, json.dumps(report).encode('utf-8'), b'')
             for rebaseline in (False, True):
                 with self.subTest(rebaseline=rebaseline):
                     baseline.write_bytes(original)
@@ -443,7 +443,7 @@ gate.main()
             }
             baseline.write_text(json.dumps(original))
             report = {'summary': {'managed': {'managed_blocks': 0}}}
-            result = subprocess.CompletedProcess([], 0, json.dumps(report), '')
+            result = subprocess.CompletedProcess([], 0, json.dumps(report).encode('utf-8'), b'')
             output = io.StringIO()
             argv = ['managed_gate.py', 'hyb', str(baseline), str(prog_a)]
             with patch.object(gate.sys, 'argv', argv), \
@@ -469,7 +469,7 @@ gate.main()
             }
             baseline.write_text(json.dumps(original))
             report = {'summary': {'managed': {'managed_blocks': 0}}}
-            result = subprocess.CompletedProcess([], 0, json.dumps(report), '')
+            result = subprocess.CompletedProcess([], 0, json.dumps(report).encode('utf-8'), b'')
             output = io.StringIO()
             argv = ['managed_gate.py', '--rebaseline', 'hyb', str(baseline), str(prog_a)]
             with patch.object(gate.sys, 'argv', argv), \
@@ -479,6 +479,115 @@ gate.main()
             saved = json.loads(baseline.read_text())['blocks']
             self.assertNotIn(f'{prog_a}:1', saved)
             self.assertEqual(saved.get('unrelated.hy:10'), block('unrelated_stay'))
+
+
+class ManagedGateUtf8Tests(unittest.TestCase):
+    """Exercise actual checker pipes, including a legacy Windows fallback codec."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.source = self.root / 'case.hy'
+        self.source.write_text('managed("caf\u00e9", "other") {}', encoding='utf-8')
+        self.baseline = self.root / 'baseline.json'
+        self.checker = self.root / 'checker.py'
+        self.checker.write_text(
+            'import json, sys\n'
+            'case = sys.argv[-1]\n'
+            'if case == "invalid-stdout":\n'
+            '    sys.stdout.buffer.write(b"\\xff")\n'
+            'elif case == "checker-error":\n'
+            '    sys.stderr.buffer.write("checker: caf\\u00e9".encode("utf-8"))\n'
+            '    raise SystemExit(2)\n'
+            'else:\n'
+            '    reason = "plain" if case == "ascii" else "caf\\u00e9"\n'
+            '    report = {"summary": {"managed": {"managed_blocks": 1,\n'
+            '              "blocks": [{"reason": reason, "category": "other",\n'
+            '                          "tickets": [reason]}]}}}\n'
+            '    sys.stdout.buffer.write(json.dumps(report, ensure_ascii=False).encode("utf-8"))\n'
+            '    if case == "invalid-stderr":\n'
+            '        sys.stderr.buffer.write(b"\\xff")\n', encoding='utf-8')
+        self.real_run = subprocess.run
+        self.case = 'unicode'
+
+    def run_checker(self, command, **kwargs):
+        # Route the checker executable only; retain real process I/O and decoding.
+        # CP936 reproduces the native Windows default on Linux CI as well.
+        if kwargs.get('text') or kwargs.get('universal_newlines'):
+            kwargs.setdefault('encoding', 'cp936')
+        return self.real_run([sys.executable, str(self.checker), self.case], **kwargs)
+
+    def run_gate(self, rebaseline=False):
+        argv = ['managed_gate.py'] + (['--rebaseline'] if rebaseline else [])
+        argv += ['hyb', str(self.baseline), str(self.source)]
+        output = io.StringIO()
+        with patch.object(gate.sys, 'argv', argv), \
+                patch.object(gate.subprocess, 'run', self.run_checker), \
+                contextlib.redirect_stdout(output):
+            try:
+                gate.main()
+            except SystemExit as error:
+                return error.code, output.getvalue()
+        return 0, output.getvalue()
+
+    def reviewed_baseline(self, reason='caf\u00e9'):
+        reviewed = block(reason)
+        reviewed['tickets'] = [reason]
+        original = json.dumps({'version': 1, 'blocks': {
+            f'{self.source}:1': reviewed}}).encode('utf-8')
+        self.baseline.write_bytes(original)
+        return original
+
+    def test_unicode_reason_and_tickets_survive_real_pipes(self):
+        with patch.object(gate.subprocess, 'run', self.run_checker):
+            inventory = gate.audit('hyb', str(self.source))
+        self.assertEqual(inventory[f'{self.source}:1']['reason'], 'caf\u00e9')
+        self.assertEqual(inventory[f'{self.source}:1']['tickets'], ['caf\u00e9'])
+
+    def test_ascii_report_remains_compatible(self):
+        self.case = 'ascii'
+        original = self.reviewed_baseline('plain')
+        code, output = self.run_gate()
+        self.assertEqual(code, 0, output)
+        self.assertIn('managed gate: PASS', output)
+        self.assertEqual(self.baseline.read_bytes(), original)
+
+    def test_unchanged_unicode_baseline_passes_without_rewrite(self):
+        original = self.reviewed_baseline()
+        code, output = self.run_gate()
+        self.assertEqual(code, 0, output)
+        self.assertIn('managed gate: PASS', output)
+        self.assertEqual(self.baseline.read_bytes(), original)
+
+    def test_rebaseline_records_exact_unicode_report(self):
+        self.reviewed_baseline()
+        code, output = self.run_gate(rebaseline=True)
+        self.assertEqual(code, 0, output)
+        saved = json.loads(self.baseline.read_bytes())['blocks'][f'{self.source}:1']
+        self.assertEqual(saved['reason'], 'caf\u00e9')
+        self.assertEqual(saved['tickets'], ['caf\u00e9'])
+
+    def test_checker_failure_retains_utf8_diagnostic(self):
+        self.case = 'checker-error'
+        original = self.reviewed_baseline()
+        code, output = self.run_gate(rebaseline=True)
+        self.assertEqual(code, 2, output)
+        self.assertIn('checker: caf\u00e9', output)
+        self.assertEqual(self.baseline.read_bytes(), original)
+
+    def test_invalid_utf8_never_passes_or_rewrites_baseline(self):
+        for case in ('invalid-stdout', 'invalid-stderr'):
+            for rebaseline in (False, True):
+                with self.subTest(case=case, rebaseline=rebaseline):
+                    self.case = case
+                    original = self.reviewed_baseline()
+                    code, output = self.run_gate(rebaseline)
+                    self.assertEqual(code, 2, output)
+                    self.assertIn('GATE ERROR', output)
+                    self.assertIn('UTF-8', output)
+                    self.assertNotIn('managed gate: PASS', output)
+                    self.assertEqual(self.baseline.read_bytes(), original)
 
 
 if __name__ == '__main__':
