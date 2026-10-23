@@ -19,6 +19,19 @@ import sys
 
 
 def main(binpath):
+    import os
+    if not binpath or not isinstance(binpath, str):
+        print("FAILED: binary path is required (usage: extract_offsets.py <go-binary>)", file=sys.stderr)
+        sys.exit(2)
+    if not os.path.isfile(binpath):
+        print(f"FAILED: binary path does not exist or is not a regular file: {binpath}", file=sys.stderr)
+        sys.exit(2)
+    if not os.access(binpath, os.R_OK):
+        print(f"FAILED: binary is not readable: {binpath}", file=sys.stderr)
+        sys.exit(2)
+    if not os.access(binpath, os.X_OK):
+        print(f"FAILED: binary is not executable: {binpath}", file=sys.stderr)
+        sys.exit(2)
     proc = subprocess.run(["readelf", "--debug-dump=info", binpath],
                           capture_output=True, text=True, timeout=600)
     if proc.returncode != 0:
