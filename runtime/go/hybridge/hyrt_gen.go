@@ -5197,10 +5197,210 @@ func init() {
 
 func genFn62(p0 uint64) uint64 {
 	var s [32]uint64
+	_ = s
 	sp := 0
 	_ = sp
 	s[sp] = p0; sp++
 	return s[sp-1]
+}
+
+func genFn68() uint64 {
+	var s [32]uint64
+	_ = s
+	sp := 0
+	_ = sp
+	s[sp] = uint64(29406848140601649); sp++
+	return s[sp-1]
+}
+
+func genFn71() uint64 {
+	var s [32]uint64
+	_ = s
+	sp := 0
+	_ = sp
+	s[sp] = uint64(0); sp++
+	return s[sp-1]
+}
+
+// fallback: opcode 0x02 in genFn69
+func genFn69(p0 uint64) uint64 {
+	return execWasm(69, p0)
+}
+
+func genFn76() uint64 {
+	var s [32]uint64
+	_ = s
+	sp := 0
+	_ = sp
+	return 0
+	return 0
+}
+
+func genFn72(p0 uint64, p1 uint64) uint64 {
+	var s [32]uint64
+	_ = s
+	sp := 0
+	_ = sp
+	s[sp] = p0; sp++
+	s[sp] = p1; sp++
+	s[sp-2] = genFn1333(s[sp-2], s[sp-1])
+	sp -= 1
+	return s[sp-1]
+	return s[sp-1]
+}
+
+// fallback: opcode 0x02 in genFn1333
+func genFn1333(p0 uint64, p1 uint64) uint64 {
+	return execWasm(1333, p0, p1)
+}
+
+// fallback: opcode 0x02 in genFn1334
+func genFn1334(p0 uint64, p1 uint64) uint64 {
+	return execWasm(1334, p0, p1)
+}
+
+// fallback: opcode 0x23 in genFn1335
+func genFn1335(p0 uint64) uint64 {
+	return execWasm(1335, p0)
+}
+
+// fallback: opcode 0x02 in genFn1386
+func genFn1386(p0 uint64, p1 uint64) uint64 {
+	return execWasm(1386, p0, p1)
+}
+
+// fallback: opcode 0x02 in genFn1392
+func genFn1392(p0 uint64, p1 uint64, p2 uint64) uint64 {
+	return execWasm(1392, p0, p1, p2)
+}
+
+// fallback: opcode 0x28 in genFn1340
+func genFn1340(p0 uint64, p1 uint64) uint64 {
+	return execWasm(1340, p0, p1)
+}
+
+// fallback: opcode 0x02 in genFn1341
+func genFn1341(p0 uint64, p1 uint64) uint64 {
+	return execWasm(1341, p0, p1)
+}
+
+// fallback: opcode 0x02 in genFn1404
+func genFn1404(p0 uint64, p1 uint64) uint64 {
+	return execWasm(1404, p0, p1)
+}
+
+// fallback: opcode 0x00 in genFn1395
+func genFn1395(p0 uint64, p1 uint64) uint64 {
+	return execWasm(1395, p0, p1)
+}
+
+// fallback: opcode 0x00 in genFn1345
+func genFn1345(p0 uint64, p1 uint64) uint64 {
+	return execWasm(1345, p0, p1)
+}
+
+// fallback: opcode 0x23 in genFn1346
+func genFn1346(p0 uint64, p1 uint64) uint64 {
+	return execWasm(1346, p0, p1)
+}
+
+// fallback: opcode 0x00 in genFn1361
+func genFn1361(p0 uint64) uint64 {
+	return execWasm(1361, p0)
+}
+
+// fallback: opcode 0x28 in genFn1362
+func genFn1362(p0 uint64) uint64 {
+	return execWasm(1362, p0)
+}
+
+// fallback: opcode 0x00 in genFn1410
+func genFn1410() uint64 {
+	return execWasm(1410)
+}
+
+// fallback: opcode 0x23 in genFn1431
+func genFn1431(p0 uint64, p1 uint64, p2 uint64) uint64 {
+	return execWasm(1431, p0, p1, p2)
+}
+
+// fallback: opcode 0x23 in genFn1342
+func genFn1342(p0 uint64) uint64 {
+	return execWasm(1342, p0)
+}
+
+// fallback: opcode 0x00 in genFn1343
+func genFn1343(p0 uint64) uint64 {
+	return execWasm(1343, p0)
+}
+
+// fallback: opcode 0x23 in genFn1363
+func genFn1363(p0 uint64) uint64 {
+	return execWasm(1363, p0)
+}
+
+// fallback: opcode 0x23 in genFn1366
+func genFn1366(p0 uint64, p1 uint64, p2 uint64, p3 uint64, p4 uint64) uint64 {
+	return execWasm(1366, p0, p1, p2, p3, p4)
+}
+
+// fallback: opcode 0x28 in genFn1367
+func genFn1367(p0 uint64) uint64 {
+	return execWasm(1367, p0)
+}
+
+// fallback: opcode 0x02 in genFn1368
+func genFn1368(p0 uint64, p1 uint64) uint64 {
+	return execWasm(1368, p0, p1)
+}
+
+func genFn73(p0 uint64, p1 uint64, p2 uint64) uint64 {
+	var s [32]uint64
+	_ = s
+	sp := 0
+	_ = sp
+	s[sp] = p0; sp++
+	s[sp] = p1; sp++
+	s[sp] = p2; sp++
+	genFn1337(s[sp-3], s[sp-2], s[sp-1])
+	sp -= 3
+	return 0
+	return 0
+}
+
+// fallback: opcode 0x02 in genFn1337
+func genFn1337(p0 uint64, p1 uint64, p2 uint64) uint64 {
+	return execWasm(1337, p0, p1, p2)
+}
+
+// fallback: opcode 0x28 in genFn1338
+func genFn1338(p0 uint64) uint64 {
+	return execWasm(1338, p0)
+}
+
+// fallback: opcode 0x74 in genFn1451
+func genFn1451(p0 uint64, p1 uint64, p2 uint64) uint64 {
+	return execWasm(1451, p0, p1, p2)
+}
+
+// fallback: opcode 0x1a in genFn1332
+func genFn1332(p0 uint64, p1 uint64) uint64 {
+	return execWasm(1332, p0, p1)
+}
+
+// fallback: opcode 0x00 in genFn1331
+func genFn1331(p0 uint64, p1 uint64) uint64 {
+	return execWasm(1331, p0, p1)
+}
+
+// fallback: opcode 0x00 in genFn1336
+func genFn1336() uint64 {
+	return execWasm(1336)
+}
+
+// fallback: opcode 0x02 in genFn70
+func genFn70(p0 uint64, p1 uint64) uint64 {
+	return execWasm(70, p0, p1)
 }
 
 var vmStackPool = sync.Pool{
@@ -6267,15 +6467,19 @@ func (m genMemory) wazeroOnly() {}
 var genMemInstance genMemory
 
 func (b *WasmBridge) HyAbiWord() uint64 {
-	return execWasm(68)
+	return genFn68()
+}
+
+func (b *WasmBridge) HyrtStackAlignmentProbe() uint64 {
+	return genFn71()
 }
 
 func (b *WasmBridge) Alloc(size uint32) (uint32, error) {
-	return uint32(execWasm(69, uint64(size))), nil
+	return uint32(genFn69(uint64(size))), nil
 }
 
 func (b *WasmBridge) Free(ptr uint32, size uint32) {
-	execWasm(70, uint64(ptr), uint64(size))
+	genFn70(uint64(ptr), uint64(size))
 }
 
 func (b *WasmBridge) HyNop(x uint64) uint64 {

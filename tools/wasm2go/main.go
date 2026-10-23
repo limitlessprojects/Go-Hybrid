@@ -293,6 +293,7 @@ func (tr *Transpiler) emitStaticFn(fnIdx uint32, buf *bytes.Buffer) {
 	}
 
 	buf.WriteString("\tvar s [32]uint64\n")
+	buf.WriteString("\t_ = s\n")
 	buf.WriteString("\tsp := 0\n")
 	buf.WriteString("\t_ = sp\n")
 
@@ -668,7 +669,7 @@ func (tr *Transpiler) emitGo(buf *bytes.Buffer) {
 	}
 	buf.WriteString("}\n\n")
 
-	// Discover and statically emit call tree for hy_nop
+	// Discover and statically emit call trees for target exports
 	exportMap := make(map[string]uint32)
 	for _, exp := range tr.exports {
 		if exp.Kind == 0 { // Func
@@ -678,14 +679,20 @@ func (tr *Transpiler) emitGo(buf *bytes.Buffer) {
 	if tr.staticSet == nil {
 		tr.staticSet = make(map[uint32]bool)
 	}
-	var tree []uint32
-	if nopIdx, ok := exportMap["hy_nop"]; ok {
-		tree = tr.buildCallTree(nopIdx)
-		for _, f := range tree {
-			tr.staticSet[f] = true
+	targetExports := []string{"hy_nop", "hyrt_abi_word", "hyrt_stack_alignment_probe", "hyrt_alloc", "hyrt_free"}
+	var allTreeFuncs []uint32
+	for _, expName := range targetExports {
+		if fIdx, ok := exportMap[expName]; ok {
+			tree := tr.buildCallTree(fIdx)
+			for _, f := range tree {
+				if !tr.staticSet[f] {
+					tr.staticSet[f] = true
+					allTreeFuncs = append(allTreeFuncs, f)
+				}
+			}
 		}
 	}
-	for _, f := range tree {
+	for _, f := range allTreeFuncs {
 		tr.emitStaticFn(f, buf)
 	}
 
@@ -1778,7 +1785,15 @@ func (tr *Transpiler) emitExportWrappers(buf *bytes.Buffer) {
 
 	buf.WriteString("func (b *WasmBridge) HyAbiWord() uint64 {\n")
 	if f, ok := exportMap["hyrt_abi_word"]; ok {
-		buf.WriteString(fmt.Sprintf("\treturn execWasm(%d)\n", f))
+		buf.WriteString(fmt.Sprintf("\treturn genFn%d()\n", f))
+	} else {
+		buf.WriteString("\treturn 0\n")
+	}
+	buf.WriteString("}\n\n")
+
+	buf.WriteString("func (b *WasmBridge) HyrtStackAlignmentProbe() uint64 {\n")
+	if f, ok := exportMap["hyrt_stack_alignment_probe"]; ok {
+		buf.WriteString(fmt.Sprintf("\treturn genFn%d()\n", f))
 	} else {
 		buf.WriteString("\treturn 0\n")
 	}
@@ -1786,7 +1801,7 @@ func (tr *Transpiler) emitExportWrappers(buf *bytes.Buffer) {
 
 	buf.WriteString("func (b *WasmBridge) Alloc(size uint32) (uint32, error) {\n")
 	if f, ok := exportMap["hyrt_alloc"]; ok {
-		buf.WriteString(fmt.Sprintf("\treturn uint32(execWasm(%d, uint64(size))), nil\n", f))
+		buf.WriteString(fmt.Sprintf("\treturn uint32(genFn%d(uint64(size))), nil\n", f))
 	} else {
 		buf.WriteString("\treturn 0, fmt.Errorf(\"alloc not found\")\n")
 	}
@@ -1794,7 +1809,7 @@ func (tr *Transpiler) emitExportWrappers(buf *bytes.Buffer) {
 
 	buf.WriteString("func (b *WasmBridge) Free(ptr uint32, size uint32) {\n")
 	if f, ok := exportMap["hyrt_free"]; ok {
-		buf.WriteString(fmt.Sprintf("\texecWasm(%d, uint64(ptr), uint64(size))\n", f))
+		buf.WriteString(fmt.Sprintf("\tgenFn%d(uint64(ptr), uint64(size))\n", f))
 	}
 	buf.WriteString("}\n\n")
 
