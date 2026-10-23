@@ -282,7 +282,7 @@ impl<'a> Checker<'a> {
             Expr::Call { callee, args, .. }
                 if matches!(
                     unwrap_parens(callee),
-                    Expr::Ident { name, .. } if name == "some" && self.lookup_binding(st, name).is_none()
+                    Expr::Ident { name, .. } if name == "some" && self.is_unshadowed_predeclared(st, name)
                 ) =>
             {
                 self.classify_composite(st, expr, args.iter().map(|a| &a.value))
