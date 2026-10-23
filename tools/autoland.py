@@ -36,6 +36,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -44,6 +45,29 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 QUEUE = ROOT / "automation" / "land-queue"
 HYB = ROOT / "compiler" / "target" / "debug" / "hyb"
 COMPILER = ROOT / "compiler"
+
+_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+
+
+def _safe_bundle_dir(slug: str, queue: pathlib.Path | None = None) -> pathlib.Path | None:
+    if not isinstance(slug, str) or not _SLUG_RE.fullmatch(slug):
+        return None
+    if ".." in slug.split("/") or ".." in slug.split("\\"):
+        return None
+    q = (queue or QUEUE).resolve()
+    try:
+        d = (q / slug).resolve()
+    except OSError:
+        return None
+    if d == q or q not in d.parents:
+        return None
+    return d
+
+
+def _single_line(value: object, default: str = "n/a") -> str:
+    raw = str(value if value is not None else default)
+    text = " ".join(part.strip() for part in raw.splitlines() if part.strip())
+    return text or default
 
 
 def sh(args, cwd=None, **kw) -> subprocess.CompletedProcess:
@@ -58,7 +82,10 @@ def die(kind: str, slug: str, detail: str, code: int) -> "int":
 def bundle_dirs() -> list[pathlib.Path]:
     if not QUEUE.is_dir():
         return []
-    return sorted(p for p in QUEUE.iterdir() if p.is_dir() and (p / "meta.json").is_file())
+    return sorted(
+        p for p in QUEUE.iterdir()
+        if p.is_dir() and _safe_bundle_dir(p.name) == p.resolve() and (p / "meta.json").is_file()
+    )
 
 
 def read_meta(d: pathlib.Path) -> dict:
@@ -104,12 +131,16 @@ def revert() -> None:
 
 def land_commit(slug: str, meta: dict, repro_rel: str) -> str:
     issue = meta["issue"]
+    if isinstance(issue, bool) or not isinstance(issue, int) or issue <= 0:
+        raise ValueError(f"invalid issue number in meta.json: {issue!r}")
+    basis = _single_line(meta.get("basis", "n/a"))
+    expected_code = _single_line(meta.get("expected_code", ""), default="")
     msg = (
         f"Land #{issue} via autoland bundle '{slug}'\n\n"
         f"Bundle: automation/land-queue/{slug} (authored in an agent session,\n"
         f"verified + landed by tools/autoland.py under SHEPHERD_MODE=live).\n"
-        f"Basis: {meta.get('basis', 'n/a')}\n"
-        f"Gates: baseline ACCEPT -> patched REJECT ({meta.get('expected_code')})\n"
+        f"Basis: {basis}\n"
+        f"Gates: baseline ACCEPT -> patched REJECT ({expected_code})\n"
         f"-> full battery green -> push-and-assert LAND-CONFIRMED.\n\n"
         f"Fixes #{issue}"
     )
@@ -147,7 +178,9 @@ def log_event(token_env: str, event: str, verdict: str, note: str, issue: int | 
 
 
 def run_bundle(slug: str, live: bool, token_env: str) -> int:
-    d = QUEUE / slug
+    d = _safe_bundle_dir(slug)
+    if d is None:
+        return die("NO-BUNDLE", str(slug), "unsafe slug", 2)
     if not (d / "meta.json").is_file():
         return die("NO-BUNDLE", slug, "missing meta.json", 2)
     meta = read_meta(d)
@@ -155,9 +188,11 @@ def run_bundle(slug: str, live: bool, token_env: str) -> int:
         print(f"AUTOLAND-SKIP: {slug} already landed at {meta.get('landedSha', '?')[:9]}")
         return 0
     issue = meta.get("issue")
-    expected = meta.get("expected_code", "")
+    if isinstance(issue, bool) or not isinstance(issue, int) or issue <= 0:
+        return die("NO-BUNDLE", slug, "invalid issue in meta.json", 2)
+    expected = _single_line(meta.get("expected_code", ""), default="")
     repro_src = d / "repro.hy"
-    repro_rel = f"automation/land-queue/{slug}/repro.hy"
+    repro_rel = f"automation/land-queue/{d.name}/repro.hy"
 
     # ---- 1. BASELINE: the unpatched tree must ACCEPT the repro ----
     build()
@@ -193,7 +228,7 @@ def run_bundle(slug: str, live: bool, token_env: str) -> int:
                 return die("BATTERY-FAILED", slug, f"gate '{name}' failed:\n{tail}", 7)
 
         # ---- 4. LAND (push-and-assert inside) ----
-        sha = land_commit(slug, meta, repro_rel)
+        sha = land_commit(d.name, meta, repro_rel)
 
         # ---- 5. RECORD ----
         meta["status"] = "landed"
@@ -201,11 +236,11 @@ def run_bundle(slug: str, live: bool, token_env: str) -> int:
         meta["landedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         (d / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
         sh(["git", "add", "-A"])
-        sh(["git", "commit", "--quiet", "-m", f"autoland: bundle '{slug}' consumed — landed {sha[:9]} (Fixes #{issue})"])
+        sh(["git", "commit", "--quiet", "-m", f"autoland: bundle '{d.name}' consumed — landed {sha[:9]} (Fixes #{issue})"])
         sh(["git", "push", "origin", "HEAD:main"])
         log_event(token_env, "autoland", "landed",
-                  f"#{issue}: bundle '{slug}' landed {sha[:9]} — baseline ACCEPT, patched REJECT {expected}, battery green, LAND-CONFIRMED", issue, live=live)
-        print(f"AUTOLAND-LANDED: {slug} — {sha[:9]} LAND-CONFIRMED (Fixes #{issue})")
+                  f"#{issue}: bundle '{d.name}' landed {sha[:9]} — baseline ACCEPT, patched REJECT {expected}, battery green, LAND-CONFIRMED", issue, live=live)
+        print(f"AUTOLAND-LANDED: {d.name} — {sha[:9]} LAND-CONFIRMED (Fixes #{issue})")
         return 0
     finally:
         # If anything above raised, leave main clean (the landing path

@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
-"""test_shepherd_gate.py — offline self-tests for tools/shepherd.py.
+"""test_shepherd_gate.py — offline self-tests for tools/shepherd.py and tools/autoland.py.
 
 No network, no subprocesses: only the pure functions that the workflows lean
-on. If the kill-switch matrix, the dup planner, the conflict classifier, or
-the probe parser drift, CI fails before any workflow can.
+on. If the kill-switch matrix, the dup planner, the conflict classifier,
+the probe parser, or the autoland slug confinement guard drift, CI fails
+before any workflow can.
 """
 
+import contextlib
+import io
+import json
 import re
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import autoland as al  # noqa: E402
 import shepherd as sh  # noqa: E402
 
 
@@ -115,6 +123,111 @@ class ProbeParser(unittest.TestCase):
         added = list(sh.added_lines(self.DIFF))
         self.assertTrue(any(re.search(rule["pattern"], ln) for ln in added))
         self.assertFalse(any("removed line" in ln for ln in added))
+
+
+class AutolandSlugValidationTests(unittest.TestCase):
+    """Issue #1300: run_bundle must confine --slug to direct children of QUEUE."""
+
+    def test_rejects_dot_segments_separators_and_absolute_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = Path(tmp) / "automation" / "land-queue"
+            queue.mkdir(parents=True)
+            unsafe_slugs = [
+                "",
+                ".",
+                "..",
+                "../evil",
+                "../../evil",
+                "a/../b",
+                "a/b",
+                "a\\b",
+                "/tmp/evil",
+                "-flag-slug",
+                ".hidden",
+                "slug\nwith-newline",
+            ]
+            for slug in unsafe_slugs:
+                with self.subTest(slug=slug):
+                    self.assertIsNone(al._safe_bundle_dir(slug, queue=queue))
+
+    def test_accepts_canonical_slug_inside_queue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = Path(tmp) / "automation" / "land-queue"
+            bundle = queue / "fix-1300_bundle.1"
+            bundle.mkdir(parents=True)
+            resolved = al._safe_bundle_dir("fix-1300_bundle.1", queue=queue)
+            self.assertEqual(resolved, bundle.resolve())
+
+    def test_run_bundle_rejects_traversing_slug_before_reading_out_of_queue_bundle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            queue = root / "automation" / "land-queue"
+            queue.mkdir(parents=True)
+            evil = root / "evil-bundle"
+            evil.mkdir()
+            (evil / "meta.json").write_text(
+                json.dumps({"issue": 1, "expected_code": "", "basis": "x"}),
+                encoding="utf-8",
+            )
+            (evil / "repro.hy").write_text("fn main() {}\n", encoding="utf-8")
+            (evil / "fix.patch").write_text("", encoding="utf-8")
+
+            stdout = io.StringIO()
+            with patch.object(al, "QUEUE", queue), \
+                 patch.object(al, "build", side_effect=AssertionError("build must not run")), \
+                 contextlib.redirect_stdout(stdout):
+                rc = al.run_bundle("../../evil-bundle", live=False, token_env="GITHUB_TOKEN")
+
+            self.assertEqual(rc, 2)
+            self.assertIn("AUTOLAND-NO-BUNDLE: ../../evil-bundle — unsafe slug", stdout.getvalue())
+
+    def test_run_bundle_rejects_absolute_path_slug_before_reading_bundle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            queue = root / "automation" / "land-queue"
+            queue.mkdir(parents=True)
+            evil = root / "abs-evil"
+            evil.mkdir()
+            (evil / "meta.json").write_text(
+                json.dumps({"issue": 1, "expected_code": "", "basis": "x"}),
+                encoding="utf-8",
+            )
+
+            stdout = io.StringIO()
+            with patch.object(al, "QUEUE", queue), \
+                 patch.object(al, "build", side_effect=AssertionError("build must not run")), \
+                 contextlib.redirect_stdout(stdout):
+                rc = al.run_bundle(str(evil), live=False, token_env="GITHUB_TOKEN")
+
+            self.assertEqual(rc, 2)
+            self.assertIn("unsafe slug", stdout.getvalue())
+
+    def test_land_commit_flattens_multiline_basis_and_validates_issue(self):
+        recorded_commits = []
+
+        def fake_sh(args, cwd=None, **kw):
+            if args[:2] == ["git", "commit"]:
+                recorded_commits.append(args[args.index("-m") + 1])
+                return subprocess.CompletedProcess(args, 0, "", "")
+            if args[:2] == ["git", "ls-remote"]:
+                return subprocess.CompletedProcess(args, 0, "deadbeef1234567890\trefs/heads/main\n", "")
+            if args[:2] == ["git", "rev-parse"]:
+                return subprocess.CompletedProcess(args, 0, "deadbeef1234567890\n", "")
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with patch.object(al, "sh", side_effect=fake_sh):
+            sha = al.land_commit(
+                "bundle-1",
+                {"issue": 1300, "basis": "line1\n\nFixes #9999", "expected_code": "HYB-E1000"},
+                "automation/land-queue/bundle-1/repro.hy",
+            )
+        self.assertEqual(sha, "deadbeef1234567890")
+        self.assertEqual(len(recorded_commits), 1)
+        self.assertIn("Basis: line1 Fixes #9999\n", recorded_commits[0])
+        self.assertTrue(recorded_commits[0].endswith("\n\nFixes #1300"))
+
+        with self.assertRaises(ValueError):
+            al.land_commit("bundle-1", {"issue": "1300\nFixes #1"}, "repro.hy")
 
 
 if __name__ == "__main__":
