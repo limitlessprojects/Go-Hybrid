@@ -1,0 +1,17 @@
+{
+  "issue": 929,
+  "expected_code": "HYB-E2002",
+  "basis": "author-stage v0 brain=specialized rounds=1",
+  "status": "landed",
+  "gates": {
+    "baseline": "ACCEPT",
+    "patched": "REJECT HYB-E2002",
+    "acceptControls": [
+      "tests/checker-corpus/control-uint8-max.hy",
+      "tests/checker-corpus/control-composite-literal-in-range.hy"
+    ],
+    "rounds": 1
+  },
+  "landedSha": "98fe6c2029302f44ddbf48fbc82434f5f7ad07fd",
+  "landedAt": "2026-10-21T20:49:49Z"
+}
