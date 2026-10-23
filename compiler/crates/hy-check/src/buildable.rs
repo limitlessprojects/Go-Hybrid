@@ -61,7 +61,7 @@ use crate::model::{as_addr_of, unwrap_parens, Checker};
 /// `Unknown` stays permissive (fail-open for operand checks; concurrency
 /// boundaries remain fail-closed in `sendability.rs`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum OpKind {
+pub(crate) enum OpKind {
     Unknown,
     /// A known interface type (`any`) — #682 U9-U12.
     ///
@@ -175,6 +175,37 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
     }
 }
 
+/// Is `e` provably a single-value expression (the #905/#903 binding-count
+/// class)?
+///
+/// Conservative: `true` only for shapes that cannot yield two values in
+/// any context. Calls, receives, and index expressions are excluded —
+/// their counts are owned by the source-count rules (tuple.rs T23 and the
+/// #926 void-position rule) — and an unresolved shape fails open.
+fn is_definitely_single_value(e: &Expr) -> bool {
+    match unwrap_parens(e) {
+        Expr::Lit { .. }
+        | Expr::Ident { .. }
+        | Expr::Binary { .. }
+        | Expr::Unary { .. }
+        | Expr::AddrOf { .. }
+        | Expr::Field { .. }
+        | Expr::Interp { .. }
+        | Expr::Slice { .. }
+        | Expr::StructLit { .. }
+        | Expr::SliceLit { .. }
+        | Expr::MapLit { .. }
+        | Expr::FnLit { .. } => true,
+        // NOTE: `Expr::Try` is deliberately NOT here — `f()?` on a
+        // (T1, T2, error) call yields TWO values after the unwrap (the
+        // accept-corpus program 10-a5-http-handler-capture pins
+        // `code, body := httptest.get(...)?` as legal), so a Try is a
+        // source-count question, not a provably-single value.
+        Expr::Move { operand, .. } => is_definitely_single_value(operand),
+        _ => false,
+    }
+}
+
 /// Symmetrical conflict check for equality operators (`==`, `!=`).
 ///
 /// Untyped numeric constants adapt between integer and floating types
@@ -280,6 +311,30 @@ fn is_fully_resolved(k: &OpKind) -> bool {
 /// package-qualified calls (`fmt.print`, `httptest.get`), which are `Ident`
 /// callees and never reach this check.
 const LOWERED_METHOD_INTRINSICS: &[&str] = &["pop"];
+
+/// Mirror an assignment-target place back into expression form so the shared
+/// index/slice checks can resolve declared lengths of the base (issue #999).
+/// `None` means "cannot mirror" (address-of bases) — every caller stays
+/// fail-open exactly as before the mirror existed.
+fn place_as_expr(p: &Place) -> Option<Expr> {
+    Some(match &p.kind {
+        PlaceKind::Ident(name) => Expr::Ident {
+            name: name.clone(),
+            span: p.span,
+        },
+        PlaceKind::Index { base, index } => Expr::Index {
+            base: Box::new(place_as_expr(base)?),
+            index: Box::new(index.clone()),
+            span: p.span,
+        },
+        PlaceKind::Field { base, name } => Expr::Field {
+            base: Box::new(place_as_expr(base)?),
+            name: name.clone(),
+            span: p.span,
+        },
+        PlaceKind::AddrOf { .. } => return None,
+    })
+}
 
 /// One function-local binding that Go requires to be read: `:=`/`let`
 /// (checked since #185), `var`/`const` (PR #475), and the elidable
@@ -691,6 +746,70 @@ impl<'a> Collector<'a> {
         if l.names.len() == 1 && l.values.len() == 1 {
             self.check_single_value_position(&l.values[0], "a binding", /*binding_position=*/ true);
         }
+        // Binding-count guards: a declaration whose value count cannot
+        // match its names fails go build with `assignment mismatch`.
+        if l.values.len() > 1 && l.names.len() != l.values.len() {
+            self.emit_e1002(
+                l.span,
+                format!(
+                    "assignment mismatch: {} variables but {} values (HYB-E1002)",
+                    l.names.len(),
+                    l.values.len()
+                ),
+                "a parallel declaration binds positionally; the name and value counts must match",
+            );
+        }
+        if l.names.len() > 1
+            && l.values.len() == 1
+            && is_definitely_single_value(&l.values[0])
+        {
+            self.emit_e1002(
+                l.span,
+                format!(
+                    "assignment mismatch: {} variables but the initializer yields exactly 1 (HYB-E1002)",
+                    l.names.len()
+                ),
+                "call, receive, and index sources are checked by the source-count rules; a provably single value binds one name",
+            );
+        }
+        // A typed declaration must accept its initializers — Go refuses
+        // `cannot use ... as ... value in variable declaration`.
+        if let Some(t) = &l.ty {
+            let want = self.kind_of_ty(t, 0);
+            if l.values.len() == 1 && l.names.len() == 1 {
+                let vk = self.kind_of_expr(&l.values[0]);
+                if kinds_conflict(&want, &vk) {
+                    self.emit_e1002(
+                        l.span,
+                        format!(
+                            "cannot initialize `{}` (type `{}`) with a value of type `{}` — Go refuses `cannot use ... as {} value in variable declaration` (HYB-E1002)",
+                            l.names[0],
+                            want.label(),
+                            vk.label(),
+                            want.label()
+                        ),
+                        "the declared type is fixed; write an explicit conversion when a conversion is intended",
+                    );
+                }
+            } else if l.values.len() > 1 && l.values.len() == l.names.len() {
+                for (name, v) in l.names.iter().zip(l.values.iter()) {
+                    let vk = self.kind_of_expr(v);
+                    if kinds_conflict(&want, &vk) {
+                        self.emit_e1002(
+                            l.span,
+                            format!(
+                                "cannot initialize `{}` (type `{}`) with a value of type `{}` — Go refuses `cannot use ... as {} value in variable declaration` (HYB-E1002)",
+                                name,
+                                want.label(),
+                                vk.label(),
+                                want.label()
+                            ),
+                            "the declared type is fixed; write an explicit conversion when a conversion is intended",
+                        );
+                    }
+                }
+            }
+        }
         // Composed resolution (pr-430 x landed pr-475): #475's track_read
         // set (Define|Let|Var|Const) drives which locals get unused-read
         // tracking; #430's operand-kind inference runs for EVERY name so
@@ -1066,7 +1185,14 @@ impl<'a> Collector<'a> {
                 self.expr(index);
                 let bk = self.kind_of_place(base);
                 let ik = self.kind_of_expr(index);
-                self.check_index_kind(&base.render(), None, &bk, index, &ik, p.span);
+                // Issue #999: pass the base as an expression so the constant
+                // index-bounds rule (fixed-size arrays, constant strings) can
+                // resolve the base's declared length on assignment places —
+                // the read path (`a[i]` in expression position) already does;
+                // the `None` here silently disabled the array-length lookup
+                // for `a[300] = 1` on a var-declared array.
+                let base_expr = place_as_expr(base);
+                self.check_index_kind(&base.render(), base_expr.as_ref(), &bk, index, &ik, p.span);
             }
             PlaceKind::Field { base, .. } => self.place_read(base),
             PlaceKind::AddrOf { base } => self.place_read(base),
@@ -1619,7 +1745,7 @@ impl<'a> Collector<'a> {
             .map(|(_, ty)| self.kind_of_ty_with_subst(ty, &subst, 0))
     }
 
-    fn kind_of_expr(&self, e: &Expr) -> OpKind {
+    pub(crate) fn kind_of_expr(&self, e: &Expr) -> OpKind {
         match e {
             Expr::Ident { name, .. } => {
                 if let Some(k) = self.lookup_kind(name) {
@@ -2892,6 +3018,60 @@ impl<'a> Collector<'a> {
                                 tk.label()
                             ),
                             "the target's declared type is fixed; write an explicit conversion when a conversion is intended",
+                        );
+                    }
+                } else if values.len() > 1 && values.len() != targets.len() {
+                    // Binding-count guards: a parallel assignment is
+                    // positional — a count mismatch fails go build with
+                    // `assignment mismatch`.
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "assignment mismatch: {} variables but {} values (HYB-E1002)",
+                            targets.len(),
+                            values.len()
+                        ),
+                        "a parallel assignment binds positionally; the target and value counts must match",
+                    );
+                } else if targets.len() > 1 && values.len() == targets.len() {
+                    // Every positional pair must satisfy the same kind check
+                    // as the single-target form, with the same O8 loan-shape
+                    // fail-open.
+                    for (t, v) in targets.iter().zip(values.iter()) {
+                        if as_addr_of(v)
+                            .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }))
+                        {
+                            continue;
+                        }
+                        let tpk = self.kind_of_place(t);
+                        let vk = self.kind_of_expr(v);
+                        if kinds_conflict(&tpk, &vk) {
+                            self.emit_e1002(
+                                v.span(),
+                                format!(
+                                    "cannot assign a value of type `{}` to `{}` (type `{}`) in parallel assignment — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
+                                    vk.label(),
+                                    t.render(),
+                                    tpk.label(),
+                                    tpk.label()
+                                ),
+                                "each target's declared type is fixed; write an explicit conversion when a conversion is intended",
+                            );
+                        }
+                    }
+                } else if targets.len() > 1 && values.len() == 1 {
+                    // One provably-single value bound to several targets —
+                    // go build refuses with `assignment mismatch`. Call,
+                    // receive, and index sources are owned by the
+                    // source-count rules.
+                    if is_definitely_single_value(&values[0]) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "assignment mismatch: {} variables but the value yields exactly 1 (HYB-E1002)",
+                                targets.len()
+                            ),
+                            "bind one name per value, or use a source that yields one value per target",
                         );
                     }
                 }
