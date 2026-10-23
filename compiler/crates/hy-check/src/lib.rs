@@ -520,7 +520,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         walk::own_uses_with_results(stmt, &st.named_results, &mut uses);
         ck.check_uses(&st, &uses);
         // T24: no address-of on a map-slot loan (HYB-E3104).
-        ck.check_addr_of_loan(&st, &uses);
+        ck.check_addr_of_loan_stmt(&st, stmt, &uses);
         // T24 + O8: a live slot loan cannot be re-bound to a general
         // pointer — the loan lowers to a copy + store-back (HYB-E3104).
         ck.check_slot_loan_rebind(&st, stmt);

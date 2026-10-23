@@ -439,6 +439,25 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
                 via_move: false,
                 via_addr: true,
             }),
+            Expr::Field { .. } => {
+                if let Some(root) = crate::model::unwrap_parens(operand).root_ident() {
+                    out.push(Use {
+                        name: root.to_string(),
+                        span: *span,
+                        is_write: false,
+                        via_move: false,
+                        via_addr: true,
+                    });
+                }
+                expr_uses(operand, out);
+            }
+            Expr::Index { base, index, .. } => {
+                // Only non-map indexing (`&n.arr[i]` or `&n[i]`) will be rejected by
+                // `check_addr_of_loan_stmt`; for `own_uses`, record a read use on `base`
+                // and `index`.
+                expr_uses(base, out);
+                expr_uses(index, out);
+            }
             _ => expr_uses(operand, out),
         },
         Expr::Unary { operand, .. } => expr_uses(operand, out),

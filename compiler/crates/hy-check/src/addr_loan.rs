@@ -20,7 +20,10 @@
 use crate::model::{as_addr_of, unwrap_parens, Checker, FnState, TypeShape};
 use crate::walk::{self, Use};
 use hy_diag::{Diagnostic, FixIt, Span};
-use hy_syntax::{AssignOp, Expr, ForKind, InterpPart, LocalDecl, Place, PlaceKind, SelectArmKind, Stmt};
+use hy_syntax::{
+    AssignOp, Expr, ForKind, InterpPart, LocalDecl, Place, PlaceKind, SelectArmKind, Stmt, UnOp,
+};
+use std::collections::HashSet;
 
 fn is_slot_loan_expr(e: &Expr) -> bool {
     if walk::addr_of_index_base_path(e).is_some() {
@@ -33,14 +36,24 @@ fn is_slot_loan_expr(e: &Expr) -> bool {
 }
 
 impl<'a> Checker<'a> {
-    /// After `process_local`: flag every name bound to `&m[k]` (including
-    /// parenthesized `(&m[k])` and `&(m[k])`).
+    /// After `process_local`: flag every name bound to `&m[k]` (or aliased to a
+    /// live `slot_loan` binding).
     pub(crate) fn mark_slot_loans_local(&self, st: &mut FnState, l: &LocalDecl) {
         if l.names.len() != l.values.len() {
             return;
         }
+        let mut same_stmt_loans: HashSet<String> = HashSet::new();
         for (name, val) in l.names.iter().zip(l.values.iter()) {
-            if is_slot_loan_expr(val) {
+            let is_loan = is_slot_loan_expr(val)
+                || match unwrap_parens(val) {
+                    Expr::Ident { name: src, .. } => {
+                        same_stmt_loans.contains(src)
+                            || self.lookup_binding(st, src).is_some_and(|b| b.slot_loan)
+                    }
+                    _ => false,
+                };
+            if is_loan {
+                same_stmt_loans.insert(name.clone());
                 if let Some(b) = st.env_lookup_mut(name) {
                     b.slot_loan = true;
                 }
@@ -48,23 +61,41 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// After `process_assign`: `x = &m[k]` makes `x` a slot loan; any other
-    /// plain re-assignment of a whole binding clears the flag.
+    /// After `process_assign`: `x = &m[k]` makes `x` a slot loan; a plain
+    /// re-assignment of a whole binding at its declaring scope depth clears
+    /// the flag. Conditional assignments inside inner scopes preserve any
+    /// prior `slot_loan = true` because the branch may not execute at runtime.
     pub(crate) fn mark_slot_loans_assign(
         &self,
         st: &mut FnState,
         targets: &[Place],
         op: AssignOp,
-        values: &[hy_syntax::Expr],
+        values: &[Expr],
     ) {
         if op != AssignOp::Assign || targets.len() != values.len() {
             return;
         }
+        let mut same_stmt_loans: HashSet<String> = HashSet::new();
         for (t, v) in targets.iter().zip(values.iter()) {
             if let PlaceKind::Ident(name) = &t.kind {
-                let is_loan = is_slot_loan_expr(v);
-                if let Some(b) = st.env_lookup_mut(name) {
-                    b.slot_loan = is_loan;
+                let is_loan = is_slot_loan_expr(v)
+                    || match unwrap_parens(v) {
+                        Expr::Ident { name: src, .. } => {
+                            same_stmt_loans.contains(src)
+                                || self.lookup_binding(st, src).is_some_and(|b| b.slot_loan)
+                        }
+                        _ => false,
+                    };
+                let is_local_scope = st.lookup_depth(name) == Some(st.scopes.len());
+                if is_loan {
+                    same_stmt_loans.insert(name.clone());
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        b.slot_loan = true;
+                    }
+                } else if is_local_scope {
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        b.slot_loan = false;
+                    }
                 }
             }
         }
@@ -138,6 +169,7 @@ impl<'a> Checker<'a> {
     }
 
     /// T24: `&x` where `x` is a live slot-loan binding.
+    #[allow(dead_code)]
     pub(crate) fn check_addr_of_loan(&mut self, st: &FnState, uses: &[Use]) {
         for u in uses.iter().filter(|u| u.via_addr) {
             let Some(b) = self.lookup_binding(st, &u.name) else {
@@ -147,6 +179,225 @@ impl<'a> Checker<'a> {
                 continue;
             }
             self.emit_addr_of_loan_diag(&u.name, u.span);
+        }
+    }
+
+    /// T24: `&x` (or `&x.field` / `&x.arr[i]`) where `x` is a live slot-loan binding,
+    /// including same-statement parallel bindings (`n, p := &m[k], &n` / `n, p = &m[k], &n`).
+    pub(crate) fn check_addr_of_loan_stmt(&mut self, st: &FnState, stmt: &Stmt, uses: &[Use]) {
+        let mut same_stmt_loans: HashSet<String> = HashSet::new();
+        match stmt {
+            Stmt::Local(l) if l.names.len() == l.values.len() => {
+                for (name, val) in l.names.iter().zip(l.values.iter()) {
+                    if is_slot_loan_expr(val)
+                        || matches!(unwrap_parens(val), Expr::Ident { name: src, .. }
+                            if same_stmt_loans.contains(src)
+                                || self.lookup_binding(st, src).is_some_and(|b| b.slot_loan))
+                    {
+                        same_stmt_loans.insert(name.clone());
+                    }
+                }
+            }
+            Stmt::Assign {
+                targets,
+                op: AssignOp::Assign,
+                values,
+                ..
+            } if targets.len() == values.len() => {
+                for (t, v) in targets.iter().zip(values.iter()) {
+                    if let PlaceKind::Ident(name) = &t.kind {
+                        if is_slot_loan_expr(v)
+                            || matches!(unwrap_parens(v), Expr::Ident { name: src, .. }
+                                if same_stmt_loans.contains(src)
+                                    || self.lookup_binding(st, src).is_some_and(|b| b.slot_loan))
+                        {
+                            same_stmt_loans.insert(name.clone());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        for u in uses.iter().filter(|u| u.via_addr) {
+            let is_loan = same_stmt_loans.contains(&u.name)
+                || self.lookup_binding(st, &u.name).is_some_and(|b| b.slot_loan);
+            if is_loan {
+                self.emit_addr_of_loan_diag(&u.name, u.span);
+            }
+        }
+
+        self.check_stmt_non_map_index_addr_on_loan(st, stmt, &same_stmt_loans);
+    }
+
+    fn check_stmt_non_map_index_addr_on_loan(
+        &mut self,
+        st: &FnState,
+        stmt: &Stmt,
+        same_stmt_loans: &HashSet<String>,
+    ) {
+        match stmt {
+            Stmt::Local(l) => {
+                for v in &l.values {
+                    self.check_expr_non_map_index_addr_on_loan(st, v, same_stmt_loans);
+                }
+            }
+            Stmt::Assign { values, .. } | Stmt::Return { values, .. } => {
+                for v in values {
+                    self.check_expr_non_map_index_addr_on_loan(st, v, same_stmt_loans);
+                }
+            }
+            Stmt::Expr { expr, .. } => {
+                self.check_expr_non_map_index_addr_on_loan(st, expr, same_stmt_loans);
+            }
+            Stmt::Send { chan, value, .. } => {
+                self.check_expr_non_map_index_addr_on_loan(st, chan, same_stmt_loans);
+                self.check_expr_non_map_index_addr_on_loan(st, value, same_stmt_loans);
+            }
+            Stmt::Task { callee, args, .. } => {
+                self.check_expr_non_map_index_addr_on_loan(st, callee, same_stmt_loans);
+                for a in args {
+                    self.check_expr_non_map_index_addr_on_loan(st, &a.value, same_stmt_loans);
+                }
+            }
+            Stmt::Defer { call, .. } => {
+                self.check_expr_non_map_index_addr_on_loan(st, call, same_stmt_loans);
+            }
+            Stmt::If { cond, .. } => {
+                self.check_expr_non_map_index_addr_on_loan(st, cond, same_stmt_loans);
+            }
+            Stmt::For { kind, .. } => match kind {
+                ForKind::While { cond } => {
+                    self.check_expr_non_map_index_addr_on_loan(st, cond, same_stmt_loans);
+                }
+                ForKind::Range { lo, hi, .. } => {
+                    self.check_expr_non_map_index_addr_on_loan(st, lo, same_stmt_loans);
+                    self.check_expr_non_map_index_addr_on_loan(st, hi, same_stmt_loans);
+                }
+                ForKind::Iterate { expr, .. } => {
+                    self.check_expr_non_map_index_addr_on_loan(st, expr, same_stmt_loans);
+                }
+                ForKind::Infinite => {}
+            },
+            Stmt::Match { subject, arms, .. } => {
+                self.check_expr_non_map_index_addr_on_loan(st, subject, same_stmt_loans);
+                for arm in arms {
+                    if let Some(g) = &arm.guard {
+                        self.check_expr_non_map_index_addr_on_loan(st, g, same_stmt_loans);
+                    }
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                for arm in arms {
+                    match &arm.kind {
+                        SelectArmKind::Send { chan, value, .. } => {
+                            self.check_expr_non_map_index_addr_on_loan(st, chan, same_stmt_loans);
+                            self.check_expr_non_map_index_addr_on_loan(st, value, same_stmt_loans);
+                        }
+                        SelectArmKind::Recv { chan, .. } => {
+                            self.check_expr_non_map_index_addr_on_loan(st, chan, same_stmt_loans);
+                        }
+                        SelectArmKind::Default => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn check_expr_non_map_index_addr_on_loan(
+        &mut self,
+        st: &FnState,
+        expr: &Expr,
+        same_stmt_loans: &HashSet<String>,
+    ) {
+        match expr {
+            Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                span,
+            }
+            | Expr::AddrOf { operand, span } => {
+                let inner = unwrap_parens(operand);
+                if let Expr::Index { base, index, .. } = inner {
+                    let base_shape = self.shape_of_expr(st, base);
+                    // Only map indexing `&m[k]` is a valid O8 map-slot loan. Taking
+                    // `&n.arr[i]` or `&n[i]` on a slice/array rooted at a slot-loan
+                    // binding takes the address of a copy/element of a loan.
+                    if !matches!(base_shape, TypeShape::Map(_, _)) {
+                        if let Some(root) = inner.root_ident() {
+                            let is_loan = same_stmt_loans.contains(root)
+                                || self.lookup_binding(st, root).is_some_and(|b| b.slot_loan);
+                            if is_loan {
+                                self.emit_addr_of_loan_diag(root, *span);
+                            }
+                        }
+                    }
+                    self.check_expr_non_map_index_addr_on_loan(st, base, same_stmt_loans);
+                    self.check_expr_non_map_index_addr_on_loan(st, index, same_stmt_loans);
+                } else {
+                    self.check_expr_non_map_index_addr_on_loan(st, operand, same_stmt_loans);
+                }
+            }
+            Expr::Unary { operand, .. } | Expr::Move { operand, .. } | Expr::Try { operand, .. } => {
+                self.check_expr_non_map_index_addr_on_loan(st, operand, same_stmt_loans);
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.check_expr_non_map_index_addr_on_loan(st, lhs, same_stmt_loans);
+                self.check_expr_non_map_index_addr_on_loan(st, rhs, same_stmt_loans);
+            }
+            Expr::Call { callee, args, .. } => {
+                self.check_expr_non_map_index_addr_on_loan(st, callee, same_stmt_loans);
+                for a in args {
+                    self.check_expr_non_map_index_addr_on_loan(st, &a.value, same_stmt_loans);
+                }
+            }
+            Expr::Receive { chan, .. } => {
+                self.check_expr_non_map_index_addr_on_loan(st, chan, same_stmt_loans);
+            }
+            Expr::Index { base, index, .. } => {
+                self.check_expr_non_map_index_addr_on_loan(st, base, same_stmt_loans);
+                self.check_expr_non_map_index_addr_on_loan(st, index, same_stmt_loans);
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                self.check_expr_non_map_index_addr_on_loan(st, base, same_stmt_loans);
+                if let Some(lo) = lo {
+                    self.check_expr_non_map_index_addr_on_loan(st, lo, same_stmt_loans);
+                }
+                if let Some(hi) = hi {
+                    self.check_expr_non_map_index_addr_on_loan(st, hi, same_stmt_loans);
+                }
+            }
+            Expr::Field { base, .. } => {
+                self.check_expr_non_map_index_addr_on_loan(st, base, same_stmt_loans);
+            }
+            Expr::StructLit { fields, .. } => {
+                for f in fields {
+                    self.check_expr_non_map_index_addr_on_loan(st, &f.value, same_stmt_loans);
+                }
+            }
+            Expr::SliceLit { items, .. } => {
+                for it in items {
+                    self.check_expr_non_map_index_addr_on_loan(st, it, same_stmt_loans);
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    self.check_expr_non_map_index_addr_on_loan(st, k, same_stmt_loans);
+                    self.check_expr_non_map_index_addr_on_loan(st, v, same_stmt_loans);
+                }
+            }
+            Expr::Paren { inner, .. } => {
+                self.check_expr_non_map_index_addr_on_loan(st, inner, same_stmt_loans);
+            }
+            Expr::Interp { parts, .. } => {
+                for p in parts {
+                    if let InterpPart::Expr(e) = p {
+                        self.check_expr_non_map_index_addr_on_loan(st, e, same_stmt_loans);
+                    }
+                }
+            }
+            Expr::Ident { .. } | Expr::Lit { .. } | Expr::FnLit { .. } => {}
         }
     }
 
@@ -418,6 +669,14 @@ impl<'a> Checker<'a> {
     }
 
     fn emit_addr_of_loan_diag(&mut self, name: &str, span: Span) {
+        let prefix = format!("`&{}`", name);
+        if self.diags.iter().any(|d| {
+            d.code == "HYB-E3104"
+                && d.span.start.line == span.start.line
+                && d.message.starts_with(&prefix)
+        }) {
+            return;
+        }
         let msg = format!(
             "`&{}` takes the address of a loan: a map-slot loan is not an addressable value (T24)",
             name
