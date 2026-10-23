@@ -22,8 +22,9 @@ VER="${1:?usage: package_release.sh <version-tag, e.g. v0.1.0>}"
 # The version is a single path component in both the staging directory
 # (removed with rm -rf below) and the archive name. Reject path separators
 # and other non-filename characters before starting any build or write.
+[ "$#" -eq 1 ] || { echo "invalid version: expected exactly one version tag" >&2; exit 2; }
 case "$VER" in
-    *[!a-zA-Z0-9._+-]*)
+    *[!a-zA-Z0-9._+-]* | .* | -* | *..*)
         echo "invalid version: use only ASCII letters, digits, '.', '_', '+', or '-'" >&2
         exit 2
         ;;
