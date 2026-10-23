@@ -147,6 +147,7 @@ def collect_problems(root: Path) -> tuple[list[str], int, Counter]:
     """Every disagreement with the corpus, plus the derived census."""
     corpus_dir = root / CORPUS_REL
     if not corpus_dir.is_dir():
+        print(f"FAIL: corpus directory missing or not a directory: {corpus_dir}", file=sys.stderr)
         return [f"no corpus directory at {corpus_dir}"], 0, Counter()
 
     total, counts = census(corpus_dir)
