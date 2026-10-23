@@ -847,7 +847,7 @@ impl<'a> Checker<'a> {
         let is_untyped_int_lit = matches!(
             inner,
             Expr::Lit {
-                kind: LitKind::Int(_) | LitKind::Rune(_),
+                kind: LitKind::Int(_),
                 ..
             }
         );
@@ -880,7 +880,7 @@ impl<'a> Checker<'a> {
                     ..
                 } => Some(("bool", "bool".to_string())),
                 Expr::Lit {
-                    kind: LitKind::Int(_) | LitKind::Rune(_),
+                    kind: LitKind::Int(_),
                     ..
                 } => Some(("int", "int".to_string())),
                 Expr::Lit {
