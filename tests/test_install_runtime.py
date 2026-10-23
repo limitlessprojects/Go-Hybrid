@@ -260,5 +260,10 @@ class LauncherRuntimeTests(unittest.TestCase):
                 )
 
 
+    def test_unsafe_hyb_version_is_rejected_before_network(self):
+        for bad in ("../evil", "-rf", "..", "v1/2"):
+            r = subprocess.run(["sh", str(ROOT / "install.sh")], env={**os.environ, "HYB_VERSION": bad}, capture_output=True, text=True, timeout=5)
+            self.assertEqual(r.returncode, 2)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
