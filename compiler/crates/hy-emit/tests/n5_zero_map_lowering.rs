@@ -198,3 +198,22 @@ fn main() {
         assert!(go.contains(want), "missing {want:?} in:\n{go}");
     }
 }
+
+#[test]
+fn n5_make_package_mode_injects_prelude_only_when_used() {
+    let ast_used = parse_file(
+        "pkg_used.hy",
+        "package pkg\n\nstruct bag {\n    counts map[string]int\n}\n\npub fn alloc_bags(n int32) []bag {\n    return make([]bag, n)\n}\n",
+    )
+    .expect("parses");
+    let go = hy_emit::emit_go_package(&ast_used, "pkg", "pkg_used.hy").expect("emits package");
+    assert!(
+        go.contains("func hy_n5_make[t any](zero func() t, n int, c ...int) []t"),
+        "missing prelude in package mode:\n{go}"
+    );
+    assert!(
+        go.contains("hy_n5_make(func() bag { return bag{counts: map[string]int{}} }, int(n))"),
+        "missing int(n) lowered call in package mode:\n{go}"
+    );
+}
+
