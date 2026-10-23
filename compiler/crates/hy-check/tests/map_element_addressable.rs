@@ -459,3 +459,143 @@ fn main() {
         "HYB-E3104",
     );
 }
+
+#[test]
+fn rejects_closure_param_and_local_map_element_store_and_loan() {
+    let cases = [
+        r#"struct acct {
+    bal int
+}
+
+fn main() {
+    g := fn(m map[string]acct) {
+        m["a"].bal = 9
+    }
+    g(map[string]acct{"a": acct{bal: 1}})
+}
+"#,
+        r#"struct acct {
+    bal int
+}
+
+fn main() {
+    g := fn(m map[string]acct) {
+        q := &m["a"].bal
+        fmt.println("{q}")
+    }
+    g(map[string]acct{"a": acct{bal: 1}})
+}
+"#,
+        r#"struct acct {
+    bal int
+}
+
+fn main() {
+    f := fn() {
+        m := map[string]acct{"a": acct{bal: 1}}
+        m["a"].bal = 9
+    }
+    f()
+}
+"#,
+        r#"struct acct {
+    bal int
+}
+
+fn main() {
+    m := map[string]acct{"a": acct{bal: 1}}
+    f := fn() {
+        m["a"].bal = 9
+        m := []acct{acct{bal: 2}}
+        _ = m
+    }
+    f()
+}
+"#,
+    ];
+    for src in cases {
+        rejects_with(src, "HYB-E2010");
+    }
+}
+
+#[test]
+fn rejects_generic_struct_and_generic_map_field_element_store_and_loan() {
+    let cases = [
+        r#"struct acct {
+    bal int
+}
+
+struct box[t] {
+    val t
+}
+
+fn main() {
+    m := map[string]box[acct]{"a": box[acct]{val: acct{bal: 1}}}
+    m["a"].val.bal = 9
+}
+"#,
+        r#"struct acct {
+    bal int
+}
+
+struct box[t] {
+    val t
+}
+
+fn main() {
+    m := map[string]box[acct]{"a": box[acct]{val: acct{bal: 1}}}
+    q := &m["a"].val.bal
+    fmt.println("{q}")
+}
+"#,
+        r#"struct box[t] {
+    val t
+}
+
+fn main() {
+    m := map[string]box[[2]int]{}
+    m["a"].val[0] = 9
+}
+"#,
+        r#"struct acct {
+    bal int
+}
+
+struct bank[t] {
+    accts map[string]t
+}
+
+fn main() {
+    b := bank[acct]{accts: map[string]acct{"a": acct{bal: 1}}}
+    b.accts["a"].bal = 9
+}
+"#,
+        r#"struct acct {
+    bal int
+}
+
+struct bank[t] {
+    accts map[string]t
+}
+
+fn main() {
+    b := bank[acct]{accts: map[string]acct{"a": acct{bal: 1}}}
+    q := &b.accts["a"].bal
+    fmt.println("{q}")
+}
+"#,
+        r#"struct acct {
+    bal int
+}
+
+fn main() {
+    m := map[string]acct{"a": acct{bal: 1}}
+    q := move &m["a"].bal
+    fmt.println("{q}")
+}
+"#,
+    ];
+    for src in cases {
+        rejects_with(src, "HYB-E2010");
+    }
+}
