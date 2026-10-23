@@ -13,7 +13,7 @@
 set -e
 cd "$(dirname "$0")"
 REPO=$(cd ../.. && pwd)
-export PATH="$REPO/../tools/go/bin:$HOME/.cargo/bin:$PATH"
+export PATH="/home/z/tools/go/bin:$HOME/.cargo/bin:$PATH"
 HYB=${HYB:-$REPO/compiler/target/release/hyb}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
