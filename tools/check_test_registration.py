@@ -111,6 +111,10 @@ def registered_discoveries(workflow_text):
     for arguments in python_commands(workflow_text):
         if arguments[:3] != ["-m", "unittest", "discover"]:
             continue
+        # argparse exits successfully for help before discovery imports any
+        # test module. A help-only command cannot register a test suite.
+        if any(argument in ("-h", "--help") for argument in arguments[3:]):
+            continue
         start, pattern = ".", None
         for index, argument in enumerate(arguments[3:], 3):
             if argument in ("-s", "--start-directory") and index + 1 < len(arguments):
