@@ -679,7 +679,7 @@ func (tr *Transpiler) emitGo(buf *bytes.Buffer) {
 	if tr.staticSet == nil {
 		tr.staticSet = make(map[uint32]bool)
 	}
-	targetExports := []string{"hy_nop", "hyrt_abi_word", "hyrt_stack_alignment_probe", "hyrt_alloc", "hyrt_free"}
+	targetExports := []string{"hy_nop", "hyrt_abi_word", "hyrt_stack_alignment_probe", "hyrt_alloc", "hyrt_free", "hy_sha3_digest256", "hy_sha3_stream_checksum", "hy_sha2_256"}
 	var allTreeFuncs []uint32
 	for _, expName := range targetExports {
 		if fIdx, ok := exportMap[expName]; ok {
@@ -1823,7 +1823,7 @@ func (tr *Transpiler) emitExportWrappers(buf *bytes.Buffer) {
 
 	buf.WriteString("func (b *WasmBridge) HySha3Digest256(dataPtr, dataLen, outPtr uint32) (int32, error) {\n")
 	if f, ok := exportMap["hy_sha3_digest256"]; ok {
-		buf.WriteString(fmt.Sprintf("\treturn int32(execWasm(%d, uint64(dataPtr), uint64(dataLen), uint64(outPtr))), nil\n", f))
+		buf.WriteString(fmt.Sprintf("\treturn int32(genFn%d(uint64(dataPtr), uint64(dataLen), uint64(outPtr))), nil\n", f))
 	} else {
 		buf.WriteString("\treturn 1, nil\n")
 	}
@@ -1831,7 +1831,7 @@ func (tr *Transpiler) emitExportWrappers(buf *bytes.Buffer) {
 
 	buf.WriteString("func (b *WasmBridge) HySha3StreamChecksum(iters, seed uint64) (uint64, error) {\n")
 	if f, ok := exportMap["hy_sha3_stream_checksum"]; ok {
-		buf.WriteString(fmt.Sprintf("\treturn execWasm(%d, iters, seed), nil\n", f))
+		buf.WriteString(fmt.Sprintf("\treturn genFn%d(iters, seed), nil\n", f))
 	} else {
 		buf.WriteString("\treturn 0, nil\n")
 	}
@@ -1839,7 +1839,7 @@ func (tr *Transpiler) emitExportWrappers(buf *bytes.Buffer) {
 
 	buf.WriteString("func (b *WasmBridge) HySha2256(dataPtr, dataLen, outPtr uint32) (int32, error) {\n")
 	if f, ok := exportMap["hy_sha2_256"]; ok {
-		buf.WriteString(fmt.Sprintf("\treturn int32(execWasm(%d, uint64(dataPtr), uint64(dataLen), uint64(outPtr))), nil\n", f))
+		buf.WriteString(fmt.Sprintf("\treturn int32(genFn%d(uint64(dataPtr), uint64(dataLen), uint64(outPtr))), nil\n", f))
 	} else {
 		buf.WriteString("\treturn 1, nil\n")
 	}
