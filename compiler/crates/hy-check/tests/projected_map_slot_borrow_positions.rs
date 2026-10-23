@@ -9,39 +9,40 @@ fn check(src: &str) -> hy_check::CheckResult {
 #[test]
 fn projected_map_element_borrows_reject_e3104_while_slice_hop_accepts() {
     let reject_cases = [
-        "struct acct { bal int }
+        r#"struct Acct { bal int }
 fn touch(p *int) { *p = 9 }
 fn main() {
-    m := map[string]acct{"a": acct{bal: 1}}
+    m := map[string]Acct{"a": Acct{bal: 1}}
     touch(&m["a"].bal)
 }
-",
-        "fn touch(p *int) { *p = 9 }
+"#,
+        r#"fn touch(p *int) { *p = 9 }
 fn main() {
     m := map[string][2]int{"a": [2]int{1, 2}}
     touch(&m["a"][0])
 }
-",
-        "struct bucket { slots [2]int }
+"#,
+        r#"struct Bucket { slots [2]int }
 fn touch(p *int) { *p = 9 }
 fn main() {
-    m := map[string]bucket{"a": bucket{slots: [2]int{1, 2}}}
+    m := map[string]Bucket{"a": Bucket{slots: [2]int{1, 2}}}
     touch(&m["a"].slots[0])
 }
-",
+"#,
     ];
     for src in reject_cases {
         let r = check(src);
-        assert_eq!(r.verdict, Verdict::Reject);
-        assert!(r.diagnostics.iter().any(|d| d.severity == Severity::Error && d.code == "HYB-E3104"));
+        assert_eq!(r.verdict, Verdict::Reject, "expected REJECT for:\n{}", src);
+        assert!(r.diagnostics.iter().any(|d| d.severity == Severity::Error && d.code == "HYB-E3104"),
+                "expected HYB-E3104 for:\n{}\ndiags: {:?}", src, r.diagnostics);
     }
 
-    let ok = check("struct bucket { items []int }
+    let ok = check(r#"struct Bucket { items []int }
 fn touch(p *int) { *p = 9 }
 fn main() {
-    m := map[string]bucket{"a": bucket{items: []int{1, 2}}}
+    m := map[string]Bucket{"a": Bucket{items: []int{1, 2}}}
     touch(&m["a"].items[0])
 }
-");
+"#);
     assert_eq!(ok.verdict, Verdict::Accept);
 }
