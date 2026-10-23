@@ -9,6 +9,8 @@ STATUS.md is deliberately outside the surface list (supervisor-only file in
 this pipeline), so no drift test exists for it.
 """
 import importlib.util
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -148,6 +150,55 @@ class DriftTests(_ProblemsMixin, unittest.TestCase):
         )
         self.assertEqual(len(hits), 1)
         self.assertIn("says 7 programs", hits[0])
+
+
+class RatioDenominatorTests(_ProblemsMixin, unittest.TestCase):
+    def test_ci_denominator_only_drift_is_named(self):
+        hits = self._problems_with(
+            ".github/workflows/ci.yml",
+            "      - name: x (verdict agreement (3/99 + tripwire)\n",
+        )
+        self.assertEqual(len(hits), 1)
+        self.assertIn("3/99", hits[0])
+
+    def test_makefile_denominator_only_drift_is_named(self):
+        hits = self._problems_with(
+            "Makefile", '\t@echo "Tier-0 corpus verdicts (3/99)"\n'
+        )
+        self.assertEqual(len(hits), 1)
+        self.assertIn("3/99", hits[0])
+
+    def test_readme_denominator_only_drift_is_named(self):
+        hits = self._problems_with("README.md", "checker corpus 3/99\n")
+        self.assertEqual(len(hits), 1)
+        self.assertIn("3/99", hits[0])
+
+    def test_later_stale_ratio_is_not_hidden_by_a_consistent_one(self):
+        hits = self._problems_with(
+            "README.md", "checker corpus 3/3\nchecker corpus 3/99\n"
+        )
+        self.assertEqual(len(hits), 1)
+        self.assertIn("3/99", hits[0])
+
+    def test_cli_distinguishes_clean_and_denominator_only_drift(self):
+        for denominator, expected_exit in ((3, 0), (99, 1)):
+            with self.subTest(denominator=denominator):
+                files = consistent_tree()
+                files["README.md"] = f"checker corpus 3/{denominator}\n"
+                files["tools/check_corpus_census.py"] = SCRIPT.read_text(encoding="utf-8")
+                tmp, root = make_tree(files)
+                self.addCleanup(tmp.cleanup)
+                result = subprocess.run(
+                    [sys.executable, str(root / "tools/check_corpus_census.py")],
+                    cwd=root, capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, expected_exit,
+                                 result.stdout + result.stderr)
+                if expected_exit:
+                    self.assertIn("README.md", result.stderr)
+                    self.assertIn("3/99", result.stderr)
+                else:
+                    self.assertIn("OK:", result.stdout)
 
 
 class FailClosedTests(_ProblemsMixin, unittest.TestCase):
