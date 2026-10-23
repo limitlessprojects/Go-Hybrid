@@ -15,6 +15,15 @@ use crate::model::{Checker, FnState, TypeShape};
 use hy_syntax::{BinOp, CallArg, Expr, TypeExpr};
 
 impl<'a> Checker<'a> {
+    pub(crate) fn is_unshadowed_predeclared(&self, st: &FnState, name: &str) -> bool {
+        let head = Self::base_named_type_str(name);
+        self.lookup_binding(st, name).is_none()
+            && !self.fns.contains_key(name)
+            && !self.fns.contains_key(head)
+            && !self.type_aliases.contains_key(head)
+            && !self.structs.contains_key(head)
+    }
+
     const MAX_TYPE_RESOLUTION_DEPTH: usize = 8;
 
     // -----------------------------------------------------------------------
@@ -318,7 +327,7 @@ impl<'a> Checker<'a> {
                 .map(|r| self.shape_of_type(&r.ty))
                 .unwrap_or(TypeShape::Unknown),
             Expr::Ident { name, .. } => {
-                // Local bindings shadow top-level functions and builtins.
+                // Local bindings and package-level declarations shadow predeclared builtins/types.
                 if let Some(b) = self.lookup_binding(st, name) {
                     if let Some(TypeExpr::Fn { results, .. }) = &b.ty {
                         return results
@@ -327,6 +336,21 @@ impl<'a> Checker<'a> {
                             .unwrap_or(TypeShape::Unknown);
                     }
                     return TypeShape::Unknown;
+                }
+                let head = Self::base_named_type_str(name);
+                if let Some(f) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
+                    return f
+                        .results
+                        .first()
+                        .map(|r| self.shape_of_type(&r.ty))
+                        .unwrap_or(TypeShape::Unknown);
+                }
+                if self.structs.contains_key(head) || self.type_aliases.contains_key(head) {
+                    return if args.len() == 1 {
+                        self.named_shape(head)
+                    } else {
+                        TypeShape::Unknown
+                    };
                 }
                 match name.as_str() {
                     // `make(chan T, n)` — defensive against parser spellings of
@@ -709,39 +733,46 @@ impl<'a> Checker<'a> {
                         }
                         return None;
                     }
-                    if name == "some" {
-                        let elem = args
-                            .first()
-                            .and_then(|a| self.ty_of_expr(st, &a.value))
-                            .unwrap_or_else(|| TypeExpr::Named {
-                                name: "any".to_string(),
-                                span: *span,
-                            });
-                        return Some(TypeExpr::Option {
-                            elem: Box::new(elem),
+                    let head = Self::base_named_type_str(name);
+                    if let Some(f) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
+                        return f.results.first().map(|r| r.ty.clone());
+                    }
+                    if args.len() == 1
+                        && (self.structs.contains_key(head) || self.type_aliases.contains_key(head))
+                    {
+                        return Some(TypeExpr::Named {
+                            name: name.clone(),
                             span: *span,
                         });
                     }
-                    if name == "make" {
-                        return args.first().and_then(|a| self.ty_of_expr(st, &a.value));
-                    }
-                    if args.len() == 1 {
-                        let is_type_name = crate::const_overflow::fixed_width_int_range(name).is_some()
-                            || crate::const_init::is_conversion_type_name(name)
-                            || self.type_aliases.contains_key(name);
-                        if is_type_name && !self.fns.contains_key(name.as_str()) {
+                    if self.is_unshadowed_predeclared(st, name) {
+                        if name == "some" {
+                            let elem = args
+                                .first()
+                                .and_then(|a| self.ty_of_expr(st, &a.value))
+                                .unwrap_or_else(|| TypeExpr::Named {
+                                    name: "any".to_string(),
+                                    span: *span,
+                                });
+                            return Some(TypeExpr::Option {
+                                elem: Box::new(elem),
+                                span: *span,
+                            });
+                        }
+                        if name == "make" {
+                            return args.first().and_then(|a| self.ty_of_expr(st, &a.value));
+                        }
+                        if args.len() == 1
+                            && (crate::const_overflow::fixed_width_int_range(name).is_some()
+                                || crate::const_init::is_conversion_type_name(name))
+                        {
                             return Some(TypeExpr::Named {
                                 name: name.clone(),
                                 span: *span,
                             });
                         }
                     }
-                    let head = Self::base_named_type_str(name);
-                    self.fns
-                        .get(name.as_str())
-                        .or_else(|| self.fns.get(head))
-                        .and_then(|f| f.results.first())
-                        .map(|r| r.ty.clone())
+                    None
                 }
                 Expr::Field { base, name, .. } => {
                     let head = Self::base_named_type_str(name);

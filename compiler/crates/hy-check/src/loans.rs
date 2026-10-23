@@ -281,14 +281,15 @@ impl<'a> Checker<'a> {
                 // carries mutable GC storage, so the destination and source
                 // share it afterwards — a later `move` of either must freeze
                 // the other (O5.2). Primitive-element slices share nothing.
-                if name == "copy" {
+                let unshadowed = self.is_unshadowed_predeclared(st, &name);
+                if unshadowed && name == "copy" {
                     self.record_copy_may_share(st, cr);
                 }
-                if name == "delete" || name == "clear" {
+                if unshadowed && (name == "delete" || name == "clear") {
                     // A3: map delete / clear is a map mutation
                     self.check_delete_conflict(st, cr, idx);
                 }
-                if matches!(name.as_str(), "delete" | "copy" | "clear" | "append") {
+                if unshadowed && matches!(name.as_str(), "delete" | "copy" | "clear" | "append") {
                     // T22 (#123/#188): a delete, copy, or clear mutates its first
                     // argument — a `const` root is frozen like an index write.
                     // `append` writes in place into the destination's spare
@@ -297,7 +298,7 @@ impl<'a> Checker<'a> {
                 }
                 self.check_call_const_writes(st, cr, &HashSet::new());
                 self.record_callee_param_stores(st, cr);
-                if self.fns.contains_key(&name) {
+                if self.lookup_binding(st, &name).is_none() && self.fns.contains_key(&name) {
                     // A3 #111: the callee may insert/delete through the
                     // argument — that event runs inside THIS call site's
                     // window when the call is within it.
@@ -313,7 +314,11 @@ impl<'a> Checker<'a> {
                         // A3 #111 form 4: a local closure whose body mutates a
                         // captured binding — event attributed to this call site.
                         self.check_a3_closure_call(st, cr, idx, &name);
-                    } else if !A3_PURE_FNS.contains(&name.as_str()) && name != "delete" {
+                    } else if !(unshadowed
+                        && (A3_PURE_FNS.contains(&name.as_str())
+                            || name == "delete"
+                            || name == "clear"))
+                    {
                         // Unresolved callee (e.g. a `fn(...)` parameter or local
                         // function variable): fail-closed on any map argument
                         // that conflicts with a live slot loan.
@@ -979,13 +984,11 @@ impl<'a> Checker<'a> {
         };
         match cr.callee {
             Expr::Ident { name, .. } => {
-                if name == "delete" || name == "clear" {
-                    return cr.args.first().map(&arg_root_is_param).unwrap_or(false);
-                }
-                if A3_PURE_FNS.contains(&name.as_str()) {
-                    return false;
-                }
-                if let Some(decl) = self.fns.get(name) {
+                if let Some(decl) = self
+                    .fns
+                    .get(name)
+                    .or_else(|| self.fns.get(Self::base_named_type_str(name)))
+                {
                     for (i, a) in cr.args.iter().enumerate() {
                         if !arg_root_is_param(a) {
                             continue;
@@ -999,6 +1002,12 @@ impl<'a> Checker<'a> {
                             None => return true, // fail closed
                         }
                     }
+                    return false;
+                }
+                if name == "delete" || name == "clear" {
+                    return cr.args.first().map(&arg_root_is_param).unwrap_or(false);
+                }
+                if A3_PURE_FNS.contains(&name.as_str()) {
                     return false;
                 }
                 // unknown Ident callee (closure / builtin we don't model):
@@ -6015,7 +6024,7 @@ impl<'a> Checker<'a> {
                     self.check_delete_const(&cst, cr, &HashSet::new());
                     self.check_call_const_writes(&cst, cr, &HashSet::new());
                     if let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) {
-                        if name == "copy" {
+                        if self.is_unshadowed_predeclared(&cst, name) && name == "copy" {
                             self.record_copy_may_share(&mut cst, cr);
                         }
                     }
@@ -6352,7 +6361,9 @@ impl<'a> Checker<'a> {
         let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) else {
             return;
         };
-        if !matches!(name.as_str(), "delete" | "copy" | "clear" | "append") {
+        if !self.is_unshadowed_predeclared(st, name)
+            || !matches!(name.as_str(), "delete" | "copy" | "clear" | "append")
+        {
             return;
         }
         let Some(first) = cr.args.first() else {
@@ -6469,10 +6480,11 @@ impl<'a> Checker<'a> {
     pub(crate) fn check_call_const_writes(&mut self, st: &FnState, cr: &CallRef, declared: &HashSet<String>) {
         let callee = crate::model::unwrap_parens(cr.callee);
         if let Expr::Ident { name, .. } = callee {
-            if name == "delete"
-                || name == "copy"
-                || name == "clear"
-                || A3_PURE_FNS.contains(&name.as_str())
+            if self.is_unshadowed_predeclared(st, name)
+                && (name == "delete"
+                    || name == "copy"
+                    || name == "clear"
+                    || A3_PURE_FNS.contains(&name.as_str()))
             {
                 return;
             }
@@ -7176,13 +7188,11 @@ impl<'a> Checker<'a> {
             |a: &hy_syntax::CallArg| Self::expr_reaches_const_aliases(&a.value, aliases);
         match crate::model::unwrap_parens(cr.callee) {
             Expr::Ident { name, .. } => {
-                if name == "delete" || name == "copy" || name == "clear" {
-                    return cr.args.first().map(&arg_reaches_alias).unwrap_or(false);
-                }
-                if A3_PURE_FNS.contains(&name.as_str()) {
-                    return false;
-                }
-                if let Some(decl) = self.fns.get(name) {
+                if let Some(decl) = self
+                    .fns
+                    .get(name)
+                    .or_else(|| self.fns.get(Self::base_named_type_str(name)))
+                {
                     for (i, a) in cr.args.iter().enumerate() {
                         if !arg_reaches_alias(a) {
                             continue;
@@ -7196,6 +7206,12 @@ impl<'a> Checker<'a> {
                             None => return true,
                         }
                     }
+                    return false;
+                }
+                if name == "delete" || name == "copy" || name == "clear" {
+                    return cr.args.first().map(&arg_reaches_alias).unwrap_or(false);
+                }
+                if A3_PURE_FNS.contains(&name.as_str()) {
                     return false;
                 }
                 cr.args.iter().any(&arg_reaches_alias)
