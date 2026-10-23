@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"sort"
 )
 
 type WasmType struct {
@@ -120,66 +119,117 @@ func main() {
 	fmt.Printf("Successfully generated %s (%d bytes)\n", outPath, out.Len())
 }
 
-func (tr *Transpiler) discoverCallTree(fnIdx uint32, visited map[uint32]bool) {
-	if visited[fnIdx] || fnIdx < tr.numImports {
-		return
+func (tr *Transpiler) buildCallTree(exportFnIdx uint32) []uint32 {
+	var result []uint32
+	visited := make(map[uint32]bool)
+
+	var dfs func(fnIdx uint32)
+	dfs = func(fnIdx uint32) {
+		if visited[fnIdx] {
+			return
+		}
+		visited[fnIdx] = true
+		result = append(result, fnIdx)
+
+		if fnIdx < tr.numImports {
+			return
+		}
+		codeIdx := fnIdx - tr.numImports
+		if int(codeIdx) >= len(tr.codeList) {
+			return
+		}
+		code := tr.codeList[codeIdx]
+		pos := 0
+		localCntVec := readLEB128u(code, &pos)
+		for l := uint32(0); l < localCntVec; l++ {
+			_ = readLEB128u(code, &pos)
+			pos++
+		}
+		for pos < len(code) {
+			op := code[pos]
+			pos++
+			switch op {
+			case 0x10: // call
+				targetIdx := readLEB128u(code, &pos)
+				dfs(targetIdx)
+			case 0x11: // call_indirect
+				_ = readLEB128u(code, &pos)
+				pos++
+			case 0x02, 0x03, 0x04:
+				pos++
+			case 0x0c, 0x0d:
+				_ = readLEB128u(code, &pos)
+			case 0x0e:
+				cnt := readLEB128u(code, &pos)
+				for i := uint32(0); i <= cnt; i++ {
+					_ = readLEB128u(code, &pos)
+				}
+			case 0x20, 0x21, 0x22, 0x23, 0x24:
+				_ = readLEB128u(code, &pos)
+			case 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+				0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+				0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e:
+				_ = readLEB128u(code, &pos)
+				_ = readLEB128u(code, &pos)
+			case 0x3f, 0x40:
+				pos++
+			case 0x41, 0x42:
+				_ = readLEB128s(code, &pos)
+			case 0x43:
+				pos += 4
+			case 0x44:
+				pos += 8
+			case 0xfc:
+				sub := readLEB128u(code, &pos)
+				if sub == 10 || sub == 11 {
+					pos += 2
+				}
+			}
+		}
 	}
-	visited[fnIdx] = true
+
+	dfs(exportFnIdx)
+	fmt.Fprintf(os.Stderr, "buildCallTree(%d) reachable functions: %v\n", exportFnIdx, result)
+	return result
+}
+
+func (tr *Transpiler) canStaticEmit(fnIdx uint32) (bool, byte) {
+	if fnIdx < tr.numImports {
+		return false, 0
+	}
 	codeIdx := fnIdx - tr.numImports
 	if int(codeIdx) >= len(tr.codeList) {
-		return
+		return false, 0
 	}
 	code := tr.codeList[codeIdx]
 	pos := 0
+
 	localCntVec := readLEB128u(code, &pos)
 	for l := uint32(0); l < localCntVec; l++ {
 		_ = readLEB128u(code, &pos)
-		pos++
+		pos++ // valType
 	}
+
 	for pos < len(code) {
 		op := code[pos]
 		pos++
 		switch op {
+		case 0x01, 0x0b, 0x0f, 0x45, 0x46, 0x6a, 0x6b, 0x6c, 0x7c, 0xac, 0xad, 0xa7:
+			// no immediates
 		case 0x10: // call
-			targetIdx := readLEB128u(code, &pos)
-			tr.discoverCallTree(targetIdx, visited)
-		case 0x11: // call_indirect
 			_ = readLEB128u(code, &pos)
-			pos++
-		case 0x02, 0x03, 0x04:
-			pos++
-		case 0x0c, 0x0d:
+		case 0x20, 0x21, 0x22: // local.get, local.set, local.tee
 			_ = readLEB128u(code, &pos)
-		case 0x0e:
-			cnt := readLEB128u(code, &pos)
-			for i := uint32(0); i <= cnt; i++ {
-				_ = readLEB128u(code, &pos)
-			}
-		case 0x20, 0x21, 0x22, 0x23, 0x24:
-			_ = readLEB128u(code, &pos)
-		case 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
-			0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
-			0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e:
-			_ = readLEB128u(code, &pos)
-			_ = readLEB128u(code, &pos)
-		case 0x3f, 0x40:
-			pos++
-		case 0x41, 0x42:
+		case 0x41, 0x42: // i32.const, i64.const
 			_ = readLEB128s(code, &pos)
-		case 0x43:
-			pos += 4
-		case 0x44:
-			pos += 8
-		case 0xfc:
-			sub := readLEB128u(code, &pos)
-			if sub == 10 || sub == 11 {
-				pos += 2
-			}
+		default:
+			return false, op
 		}
 	}
+	return true, 0
 }
 
-func (tr *Transpiler) staticEmit(fnIdx uint32, buf *bytes.Buffer) {
+func (tr *Transpiler) emitStaticFn(fnIdx uint32, buf *bytes.Buffer) {
 	if fnIdx < tr.numImports {
 		return
 	}
@@ -187,13 +237,32 @@ func (tr *Transpiler) staticEmit(fnIdx uint32, buf *bytes.Buffer) {
 	if int(codeIdx) >= len(tr.codeList) {
 		return
 	}
-	code := tr.codeList[codeIdx]
-	pos := 0
-
 	tIdx := tr.funcTypeIndices[codeIdx]
 	wasmType := tr.types[tIdx]
 	numParams := len(wasmType.Params)
 	numResults := len(wasmType.Results)
+
+	ok, fallbackOp := tr.canStaticEmit(fnIdx)
+	if !ok {
+		buf.WriteString(fmt.Sprintf("// fallback: opcode 0x%02x in genFn%d\n", fallbackOp, fnIdx))
+		buf.WriteString(fmt.Sprintf("func genFn%d(", fnIdx))
+		for i := 0; i < numParams; i++ {
+			if i > 0 {
+				buf.WriteString(", ")
+			}
+			buf.WriteString(fmt.Sprintf("p%d uint64", i))
+		}
+		buf.WriteString(") uint64 {\n")
+		buf.WriteString(fmt.Sprintf("\treturn execWasm(%d", fnIdx))
+		for i := 0; i < numParams; i++ {
+			buf.WriteString(fmt.Sprintf(", p%d", i))
+		}
+		buf.WriteString(")\n}\n\n")
+		return
+	}
+
+	code := tr.codeList[codeIdx]
+	pos := 0
 
 	localCntVec := readLEB128u(code, &pos)
 	extraLocals := 0
@@ -203,7 +272,6 @@ func (tr *Transpiler) staticEmit(fnIdx uint32, buf *bytes.Buffer) {
 		extraLocals += int(cnt)
 	}
 
-	buf.WriteString(fmt.Sprintf("// genFn%d is the statically emitted Go implementation of Wasm fn %d\n", fnIdx, fnIdx))
 	buf.WriteString(fmt.Sprintf("func genFn%d(", fnIdx))
 	for i := 0; i < numParams; i++ {
 		if i > 0 {
@@ -219,20 +287,14 @@ func (tr *Transpiler) staticEmit(fnIdx uint32, buf *bytes.Buffer) {
 			if i > 0 {
 				buf.WriteString(", ")
 			}
-			buf.WriteString(fmt.Sprintf("local%d", numParams+i))
+			buf.WriteString(fmt.Sprintf("l%d", numParams+i))
 		}
-		buf.WriteString(" uint64\n\t")
-		for i := 0; i < extraLocals; i++ {
-			if i > 0 {
-				buf.WriteString("; ")
-			}
-			buf.WriteString(fmt.Sprintf("_ = local%d", numParams+i))
-		}
-		buf.WriteString("\n")
+		buf.WriteString(" uint64\n")
 	}
 
 	buf.WriteString("\tvar s [32]uint64\n")
 	buf.WriteString("\tsp := 0\n")
+	buf.WriteString("\t_ = sp\n")
 
 	for pos < len(code) {
 		op := code[pos]
@@ -240,15 +302,9 @@ func (tr *Transpiler) staticEmit(fnIdx uint32, buf *bytes.Buffer) {
 
 		switch op {
 		case 0x01: // nop
-			// do nothing
+			buf.WriteString("\t// nop\n")
 		case 0x0b: // end
-			if pos == len(code) {
-				if numResults > 0 {
-					buf.WriteString("\treturn s[sp-1]\n")
-				} else {
-					buf.WriteString("\treturn 0\n")
-				}
-			}
+			// emit nothing for end
 		case 0x0f: // return
 			if numResults > 0 {
 				buf.WriteString("\treturn s[sp-1]\n")
@@ -267,9 +323,6 @@ func (tr *Transpiler) staticEmit(fnIdx uint32, buf *bytes.Buffer) {
 			for i := 0; i < pCnt; i++ {
 				callArgs = append(callArgs, fmt.Sprintf("s[sp-%d]", pCnt-i))
 			}
-			if pCnt > 0 {
-				buf.WriteString(fmt.Sprintf("\tsp -= %d\n", pCnt))
-			}
 			argList := ""
 			for i, a := range callArgs {
 				if i > 0 {
@@ -277,18 +330,48 @@ func (tr *Transpiler) staticEmit(fnIdx uint32, buf *bytes.Buffer) {
 				}
 				argList += a
 			}
-			if tr.staticSet[targetIdx] {
-				buf.WriteString(fmt.Sprintf("\tres := genFn%d(%s)\n", targetIdx, argList))
-			} else {
-				buf.WriteString(fmt.Sprintf("\tres := execWasm(%d, %s)\n", targetIdx, argList))
-			}
 			rCnt := 0
 			if int(targetIdx) < totalFuncs {
 				t := tr.types[tr.funcTypeIndices[targetIdx-tr.numImports]]
 				rCnt = len(t.Results)
 			}
-			if rCnt > 0 {
-				buf.WriteString("\ts[sp] = res\n\tsp++\n")
+			if tr.staticSet[targetIdx] {
+				targetName := fmt.Sprintf("genFn%d", targetIdx)
+				if rCnt > 0 {
+					if pCnt > 0 {
+						buf.WriteString(fmt.Sprintf("\ts[sp-%d] = %s(%s)\n", pCnt, targetName, argList))
+						if pCnt > 1 {
+							buf.WriteString(fmt.Sprintf("\tsp -= %d\n", pCnt-1))
+						}
+					} else {
+						buf.WriteString(fmt.Sprintf("\ts[sp] = %s(); sp++\n", targetName))
+					}
+				} else {
+					buf.WriteString(fmt.Sprintf("\t%s(%s)\n", targetName, argList))
+					if pCnt > 0 {
+						buf.WriteString(fmt.Sprintf("\tsp -= %d\n", pCnt))
+					}
+				}
+			} else {
+				targetName := fmt.Sprintf("execWasm(%d", targetIdx)
+				if argList != "" {
+					argList = ", " + argList
+				}
+				if rCnt > 0 {
+					if pCnt > 0 {
+						buf.WriteString(fmt.Sprintf("\ts[sp-%d] = %s%s)\n", pCnt, targetName, argList))
+						if pCnt > 1 {
+							buf.WriteString(fmt.Sprintf("\tsp -= %d\n", pCnt-1))
+						}
+					} else {
+						buf.WriteString(fmt.Sprintf("\ts[sp] = %s%s); sp++\n", targetName, argList))
+					}
+				} else {
+					buf.WriteString(fmt.Sprintf("\t%s%s)\n", targetName, argList))
+					if pCnt > 0 {
+						buf.WriteString(fmt.Sprintf("\tsp -= %d\n", pCnt))
+					}
+				}
 			}
 		case 0x20: // local.get
 			idx := readLEB128u(code, &pos)
@@ -296,53 +379,59 @@ func (tr *Transpiler) staticEmit(fnIdx uint32, buf *bytes.Buffer) {
 			if int(idx) < numParams {
 				varName = fmt.Sprintf("p%d", idx)
 			} else {
-				varName = fmt.Sprintf("local%d", idx)
+				varName = fmt.Sprintf("l%d", idx)
 			}
-			buf.WriteString(fmt.Sprintf("\ts[sp] = %s\n\tsp++\n", varName))
+			buf.WriteString(fmt.Sprintf("\ts[sp] = %s; sp++\n", varName))
 		case 0x21: // local.set
 			idx := readLEB128u(code, &pos)
 			var varName string
 			if int(idx) < numParams {
 				varName = fmt.Sprintf("p%d", idx)
 			} else {
-				varName = fmt.Sprintf("local%d", idx)
+				varName = fmt.Sprintf("l%d", idx)
 			}
-			buf.WriteString(fmt.Sprintf("\tsp--\n\t%s = s[sp]\n", varName))
+			buf.WriteString(fmt.Sprintf("\tsp--; %s = s[sp]\n", varName))
 		case 0x22: // local.tee
 			idx := readLEB128u(code, &pos)
 			var varName string
 			if int(idx) < numParams {
 				varName = fmt.Sprintf("p%d", idx)
 			} else {
-				varName = fmt.Sprintf("local%d", idx)
+				varName = fmt.Sprintf("l%d", idx)
 			}
 			buf.WriteString(fmt.Sprintf("\t%s = s[sp-1]\n", varName))
 		case 0x41: // i32.const
 			v := readLEB128s(code, &pos)
-			buf.WriteString(fmt.Sprintf("\ts[sp] = uint64(uint32(%d))\n\tsp++\n", v))
+			buf.WriteString(fmt.Sprintf("\ts[sp] = uint64(uint32(%d)); sp++\n", v))
 		case 0x42: // i64.const
 			v := readLEB128s(code, &pos)
-			buf.WriteString(fmt.Sprintf("\ts[sp] = uint64(%d)\n\tsp++\n", v))
+			buf.WriteString(fmt.Sprintf("\ts[sp] = uint64(%d); sp++\n", v))
+		case 0x45: // i32.eqz
+			buf.WriteString("\tsp--; if uint32(s[sp]) == 0 { s[sp] = 1 } else { s[sp] = 0 }; sp++\n")
+		case 0x46: // i32.eq
+			buf.WriteString("\tsp -= 2; if uint32(s[sp]) == uint32(s[sp+1]) { s[sp] = 1 } else { s[sp] = 0 }; sp++\n")
 		case 0x6a: // i32.add
-			buf.WriteString("\ts[sp-2] = uint64(uint32(s[sp-2]) + uint32(s[sp-1]))\n\tsp--\n")
+			buf.WriteString("\tsp -= 2; s[sp] = uint64(uint32(s[sp]) + uint32(s[sp+1])); sp++\n")
 		case 0x6b: // i32.sub
-			buf.WriteString("\ts[sp-2] = uint64(uint32(s[sp-2]) - uint32(s[sp-1]))\n\tsp--\n")
+			buf.WriteString("\tsp -= 2; s[sp] = uint64(uint32(s[sp]) - uint32(s[sp+1])); sp++\n")
 		case 0x6c: // i32.mul
-			buf.WriteString("\ts[sp-2] = uint64(uint32(s[sp-2]) * uint32(s[sp-1]))\n\tsp--\n")
+			buf.WriteString("\tsp -= 2; s[sp] = uint64(uint32(s[sp]) * uint32(s[sp+1])); sp++\n")
 		case 0x7c: // i64.add
-			buf.WriteString("\ts[sp-2] = s[sp-2] + s[sp-1]\n\tsp--\n")
-		case 0x7d: // i64.sub
-			buf.WriteString("\ts[sp-2] = s[sp-2] - s[sp-1]\n\tsp--\n")
-		case 0x7e: // i64.mul
-			buf.WriteString("\ts[sp-2] = s[sp-2] * s[sp-1]\n\tsp--\n")
-		default:
-			// Fallback comment with compile-time panic comment / execWasm fallback
-			buf.WriteString(fmt.Sprintf("\t// TODO: opcode 0x%02x not yet implemented\n", op))
-			buf.WriteString(fmt.Sprintf("\treturn execWasm(%d)\n", fnIdx))
-			pos = len(code)
+			buf.WriteString("\tsp -= 2; s[sp] = s[sp] + s[sp+1]; sp++\n")
+		case 0xac: // i64.extend_i32_s
+			buf.WriteString("\tsp--; s[sp] = uint64(int64(int32(s[sp]))); sp++\n")
+		case 0xad: // i64.extend_i32_u
+			buf.WriteString("\tsp--; s[sp] = uint64(uint32(s[sp])); sp++\n")
+		case 0xa7: // i32.wrap_i64
+			buf.WriteString("\tsp--; s[sp] = uint64(uint32(s[sp])); sp++\n")
 		}
 	}
 
+	if numResults > 0 {
+		buf.WriteString("\treturn s[sp-1]\n")
+	} else {
+		buf.WriteString("\treturn 0\n")
+	}
 	buf.WriteString("}\n\n")
 }
 
@@ -589,24 +678,15 @@ func (tr *Transpiler) emitGo(buf *bytes.Buffer) {
 	if tr.staticSet == nil {
 		tr.staticSet = make(map[uint32]bool)
 	}
+	var tree []uint32
 	if nopIdx, ok := exportMap["hy_nop"]; ok {
-		visited := make(map[uint32]bool)
-		tr.discoverCallTree(nopIdx, visited)
-		fmt.Printf("hy_nop (func %d) call tree:\n", nopIdx)
-		for f := range visited {
-			fmt.Printf("  reachable func: %d\n", f)
+		tree = tr.buildCallTree(nopIdx)
+		for _, f := range tree {
 			tr.staticSet[f] = true
 		}
 	}
-	var sortedStatic []uint32
-	for f := range tr.staticSet {
-		sortedStatic = append(sortedStatic, f)
-	}
-	sort.Slice(sortedStatic, func(i, j int) bool {
-		return sortedStatic[i] < sortedStatic[j]
-	})
-	for _, f := range sortedStatic {
-		tr.staticEmit(f, buf)
+	for _, f := range tree {
+		tr.emitStaticFn(f, buf)
 	}
 
 	// VM Exec engine
@@ -1720,11 +1800,7 @@ func (tr *Transpiler) emitExportWrappers(buf *bytes.Buffer) {
 
 	buf.WriteString("func (b *WasmBridge) HyNop(x uint64) uint64 {\n")
 	if f, ok := exportMap["hy_nop"]; ok {
-		if tr.staticSet[f] {
-			buf.WriteString(fmt.Sprintf("\treturn genFn%d(x)\n", f))
-		} else {
-			buf.WriteString(fmt.Sprintf("\treturn execWasm(%d, x)\n", f))
-		}
+		buf.WriteString(fmt.Sprintf("\treturn genFn%d(x)\n", f))
 	} else {
 		buf.WriteString("\treturn 0\n")
 	}
