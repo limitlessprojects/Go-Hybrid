@@ -11,7 +11,8 @@
 use hy_syntax::*;
 
 use super::{
-    go_quote, special_member, to_go_name, BindingKind, EmitError, Emitter, MemberSpecial,
+    base_ty_name, go_quote, special_member, to_go_name, BindingKind, EmitError, Emitter,
+    MemberSpecial,
 };
 
 use super::shapes::{
@@ -30,6 +31,18 @@ fn bin_prec(op: BinOp) -> u8 {
         // SPEC-LANGUAGE 1.4: `|` `^` are AddOp level, `&` `<<` `>>` are MulOp level.
         BinOp::BitOr | BinOp::BitXor => 4,
         BinOp::BitAnd | BinOp::Shl | BinOp::Shr => 5,
+    }
+}
+
+/// The zero-value spelling of a declared `option[T]` type text, else None.
+/// `option[int]` → `option[int]{}` — the prelude struct's zero value IS
+/// `none` (a false ok-flag), so no payload needs constructing.
+pub(crate) fn option_zero_text(declared: &str) -> Option<String> {
+    let t = declared.trim();
+    if t.starts_with("option[") && t.ends_with(']') {
+        Some(format!("{}{{}}", t))
+    } else {
+        None
     }
 }
 
@@ -72,6 +85,14 @@ impl Emitter {
             while let Expr::Paren { inner, .. } = lit {
                 lit = inner;
             }
+            // `none` is the prelude `option[v]` struct's ZERO VALUE, so a
+            // value position whose target type is a declared `option[T]`
+            // lowers to `option[T]{}`. Without an expected type there is no
+            // evidence to lower against and the refusal below still fires
+            // (`x := none` is rejected by the checker, HYB-E1002).
+            if let Some(head) = self.none_option_zero(lit, exp) {
+                return Ok(head);
+            }
             match lit {
                 Expr::StructLit {
                     ty: None, fields, ..
@@ -97,6 +118,20 @@ impl Emitter {
             }
         }
         self.emit_expr(e, min_prec)
+    }
+
+    /// Lower a bare `none` against a DECLARED `option[T]` target type: the
+    /// zero value of the emitted prelude struct (`option[T]{}`).
+    pub(crate) fn none_option_zero(&mut self, e: &Expr, expected: &TypeExpr) -> Option<String> {
+        let mut lit = e;
+        while let Expr::Paren { inner, .. } = lit {
+            lit = inner;
+        }
+        if !matches!(lit, Expr::Ident { name, .. } if name == "none") {
+            return None;
+        }
+        let head = self.type_text(expected);
+        option_zero_text(&head)
     }
 
     fn top_prec(&self, e: &Expr) -> u8 {
@@ -502,7 +537,21 @@ impl Emitter {
         ty: &TypeExpr,
         fields: &[FieldInit],
     ) -> Result<String, EmitError> {
-        let body = self.field_inits(fields)?;
+        // The struct's own field declarations are the expected types for its
+        // initializers: a `none` field value lowers to `option[T]{}` (#1297).
+        let field_tys: Vec<(String, TypeExpr)> = match base_ty_name(ty).as_deref() {
+            Some(name) => self
+                .n5_structs
+                .get(name)
+                .map(|fs| {
+                    fs.iter()
+                        .map(|f| (f.name.clone(), f.ty.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let body = self.field_inits(fields, &field_tys)?;
         let extra = self.n5_missing_fields(ty, fields);
         if extra.is_empty() {
             return Ok(body);
@@ -515,10 +564,21 @@ impl Emitter {
         Ok(parts.join(", "))
     }
 
-    fn field_inits(&mut self, fields: &[FieldInit]) -> Result<String, EmitError> {
+    fn field_inits(
+        &mut self,
+        fields: &[FieldInit],
+        field_tys: &[(String, TypeExpr)],
+    ) -> Result<String, EmitError> {
         let mut parts = Vec::new();
         for f in fields {
-            let v = self.emit_expr(&f.value, 0)?;
+            let declared = field_tys
+                .iter()
+                .find(|(n, _)| n == &f.name)
+                .map(|(_, t)| t.clone());
+            let v = match declared.as_ref() {
+                Some(t) => self.emit_expr_exp(&f.value, 0, Some(t))?,
+                None => self.emit_expr(&f.value, 0)?,
+            };
             parts.push(format!("{}: {}", f.name, v));
         }
         Ok(parts.join(", "))
