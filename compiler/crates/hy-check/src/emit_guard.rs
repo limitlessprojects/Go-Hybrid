@@ -122,6 +122,7 @@ impl<'a> Checker<'a> {
                             self.check_default_float_overflow(name, value, Some(st));
                         }
                     }
+                    self.check_slot_loan_rebind(st, stmt);
                     self.bind_closure_local_for_emit_guard(st, l);
                     self.mark_slot_loans_local(st, l);
                 }
@@ -153,6 +154,7 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
+                    self.check_slot_loan_rebind(st, stmt);
                     self.mark_slot_loans_assign(st, targets, *op, values);
                 }
             }
