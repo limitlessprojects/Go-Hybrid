@@ -1548,3 +1548,120 @@ mod unit {
         assert_eq!(target_uint_range(), (0, u64::MAX as i128));
     }
 }
+
+/// Outcome of folding a constant map key value (issue #687).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum ConstKeyValue {
+    Int(i128),
+    Str(String),
+    Bool(bool),
+    Float(u64),
+}
+
+/// Fold a constant key expression (integers, strings, booleans, floats, and const identifiers)
+/// for duplicate detection in map literals (issue #687).
+pub(crate) fn const_key_fold_with(
+    e: &Expr,
+    consts: &HashMap<String, &Expr>,
+    depth: u32,
+    st: Option<&FnState>,
+) -> Option<ConstKeyValue> {
+    match unwrap_parens(e) {
+        Expr::Lit { kind: LitKind::Int(s), .. } => match parse_int_lit(s) {
+            Some(ConstInt::Value(v)) => Some(ConstKeyValue::Int(v)),
+            _ => None,
+        },
+        Expr::Lit { kind: LitKind::Char(c), .. } => Some(ConstKeyValue::Int(*c as i128)),
+        Expr::Lit { kind: LitKind::Str(s), .. } => Some(ConstKeyValue::Str(s.clone())),
+        Expr::Lit { kind: LitKind::Bool(b), .. } => Some(ConstKeyValue::Bool(*b)),
+        Expr::Lit { kind: LitKind::Float(s), .. } => {
+            s.replace('_', "").parse::<f64>().ok().map(|f| ConstKeyValue::Float(f.to_bits()))
+        }
+        Expr::Ident { name, .. } => {
+            if let Some(st) = st {
+                if st.env_lookup(name).is_some() {
+                    return None;
+                }
+            }
+            if depth < 16 {
+                if let Some(v) = consts.get(name) {
+                    return const_key_fold_with(v, consts, depth + 1, None);
+                }
+            }
+            None
+        }
+        Expr::Unary { op: UnOp::Neg, operand, .. } => {
+            if let Some(ConstKeyValue::Int(v)) = const_key_fold_with(operand, consts, depth + 1, st) {
+                return v.checked_neg().map(ConstKeyValue::Int);
+            }
+            if let Some(ConstKeyValue::Float(bits)) = const_key_fold_with(operand, consts, depth + 1, st) {
+                let f = f64::from_bits(bits);
+                return Some(ConstKeyValue::Float((-f).to_bits()));
+            }
+            None
+        }
+        Expr::Binary { op, lhs, rhs, .. } => {
+            // String concatenation folding ("a" + "b")
+            if *op == BinOp::Add {
+                if let (Some(ConstKeyValue::Str(l)), Some(ConstKeyValue::Str(r))) = (
+                    const_key_fold_with(lhs, consts, depth + 1, st),
+                    const_key_fold_with(rhs, consts, depth + 1, st),
+                ) {
+                    return Some(ConstKeyValue::Str(format!("{}{}", l, r)));
+                }
+            }
+            // Integer binary folding
+            match const_int_fold_with(e, consts, depth, st) {
+                ConstFold::Val(v) => Some(ConstKeyValue::Int(v)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+#[cfg(test)]
+mod map_lit_duplicate_tests {
+    use crate::{check_file, Verdict};
+    use hy_syntax::parse_file;
+
+    fn check(src: &str) -> crate::CheckResult {
+        let ast = parse_file("test.hy", src).expect("test snippet must parse");
+        check_file(&ast)
+    }
+
+    #[test]
+    fn map_lit_duplicate_constant_keys_rejected() {
+        let cases = [
+            "fn main() {\n    m := map[int]string{1: \"a\", 1: \"b\"}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[string]int{\"a\": 1, \"a\": 2}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[string]int{\"a\" + \"b\": 1, \"ab\": 2}\n    fmt.println(m)\n}\n",
+            "const k = 1\nfn main() {\n    m := map[int]string{k: \"a\", 1: \"b\"}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[bool]int{true: 1, true: 2}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[int]int{1 + 1: 0, 2: 0}\n    fmt.println(m)\n}\n",
+        ];
+        for src in cases {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                r.diagnostics.iter().any(|d| d.code == "HYB-E1002" && d.message.contains("duplicate key")),
+                "expected HYB-E1002 duplicate key diagnostic, got {:?} for:\n{src}",
+                r.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn map_lit_distinct_constant_keys_accepted() {
+        let cases = [
+            "fn main() {\n    m := map[int]string{1: \"a\", 2: \"b\"}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[string]int{\"a\": 1, \"b\": 2}\n    fmt.println(m)\n}\n",
+            "const k = 1\nfn main() {\n    m := map[int]string{k: \"a\", 2: \"b\"}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[bool]int{true: 1, false: 2}\n    fmt.println(m)\n}\n",
+        ];
+        for src in cases {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Accept, "expected accept for:\n{src}");
+        }
+    }
+}
+
