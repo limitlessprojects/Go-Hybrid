@@ -382,6 +382,10 @@ impl<'a> Checker<'a> {
             notes.push(
                 "a composite `const` with reference storage lowers to a runtime-mutable Go value, so sharing it across a task or channel boundary without `managed` can race if the receiver mutates it (issue #188)".to_string(),
             );
+        } else if self.shape_is_const_sendable(&b.shape, &mut Vec::new()) {
+            notes.push(
+                "unlike a fresh composite literal (O4.6), a mutable struct or array binding can be aliased locally via a slice view (`a[:]`) or O8 loan (`&p.f`); pass `move` (Class 3) to transfer ownership or declare the binding `const` (Class 4) (issue #723)".to_string(),
+            );
         }
         if matches!(b.shape, TypeShape::Map(_, _)) {
             notes.push(
