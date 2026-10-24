@@ -1,5 +1,6 @@
 # Hybrid Language: Development Plan
 
+- Contributor amendment (2026-10-25, LX7): normalize actual CR characters in raw-string values to Go semantics, retaining source cursor movement. Existing bounds and map-key checks now reject two previously accepted unbuildable cases and accept the distinct raw/interpreted-CR key pair. Eight focused tests pin this verdict amendment; 1,808 workspace tests, corpus 127/127 and differential 41/41 accept + 86/86 reject pass locally. Upstream CI and maintainer review remain pending.
 - Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15
