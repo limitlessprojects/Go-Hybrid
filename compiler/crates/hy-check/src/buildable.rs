@@ -2101,6 +2101,25 @@ impl<'a> Collector<'a> {
     ) {
         let Some(t) = ty else { return };
         let sk = self.kind_of_ty(t, 0);
+        // A composite literal needs a struct, array, slice or map type. A
+        // scalar or interface type (`int{}`, `string{}`, `any{}`, or an alias
+        // of one) is `invalid composite literal type` in Go. A user struct
+        // that shadows a predeclared name resolves to `Struct` first.
+        if matches!(
+            sk,
+            OpKind::Int | OpKind::Float | OpKind::Bool | OpKind::Str | OpKind::Interface
+        ) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "invalid composite literal type `{}` — Go refuses `invalid composite literal type {}`; only struct, array, slice and map types take a `{{...}}` literal (HYB-E1002)",
+                    t.render(),
+                    t.render()
+                ),
+                "write the value directly (`0`, `\"\"`, `false`) or a conversion (`int(x)`) instead of a composite literal",
+            );
+            return;
+        }
         let Some(full_name) = self.struct_name(&sk) else {
             return;
         };
