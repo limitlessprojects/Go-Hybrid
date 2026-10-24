@@ -119,15 +119,26 @@ class RegistrationTests(unittest.TestCase):
             ["tools/test_live.py"])
         (root / "tools/test_live.py").write_text(
             "import unittest\nclass Tests(unittest.TestCase):\n"
-            "    def test_failure(self): self.fail('filtered regression ran')\n",
+            "    def test_failure(self): self.fail('filtered regression ran')\n"
+            "    def test_pass(self): pass\n",
             encoding="utf-8")
         command = [sys.executable, "-m", "unittest", "discover", "-s", "tools", "-p", "test_live.py"]
-        skipped = subprocess.run(command + ["-k", "never_matches"], cwd=root,
-                                 capture_output=True, text=True, timeout=15)
-        self.assertEqual(skipped.returncode, 0, skipped.stderr)
-        self.assertIn("Ran 0 tests", skipped.stderr)
+        # Python 3.12+ rejects an empty selection, but a passing subset still
+        # exits zero while hiding this file's failing regression on all versions.
+        for pattern, count, code in (
+                ("never_matches", 0, 5 if sys.version_info >= (3, 12) else 0),
+                ("test_pass", 1, 0)):
+            with self.subTest(pattern=pattern):
+                skipped = subprocess.run(command + ["-k", pattern], cwd=root,
+                                         capture_output=True, text=True, timeout=15)
+                self.assertEqual(skipped.returncode, code, skipped.stderr)
+                self.assertIn(f"Ran {count} test", skipped.stderr)
+                filtered = text.replace("never_matches", pattern)
+                self.assertEqual([rel for rel, _ in guard.unregistered(root, filtered)],
+                                 ["tools/test_live.py"])
         exercised = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=15)
         self.assertNotEqual(exercised.returncode, 0)
+        self.assertIn("Ran 2 tests", exercised.stderr)
         self.assertIn("filtered regression ran", exercised.stderr)
         self.assertEqual([rel for rel, _ in guard.unregistered(root, text)], ["tools/test_live.py"])
         # A separate complete invocation still registers the file.

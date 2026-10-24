@@ -105,8 +105,8 @@ def registered_discoveries(workflow_text):
         if arguments[:3] != ["-m", "unittest", "discover"]:
             continue
         # A basename match only establishes discovery, not execution of the
-        # suite. unittest's -k/-kPATTERN can filter every test away and still
-        # exit successfully. Require an unfiltered invocation as evidence;
+        # suite. unittest's -k/-kPATTERN can hide failing tests while selected
+        # passing tests return success. Require an unfiltered invocation as evidence;
         # do not import arbitrary test modules to guess which methods match.
         if any(re.match(r"^-[vqbfc]*k", argument) for argument in arguments[3:]):
             continue
