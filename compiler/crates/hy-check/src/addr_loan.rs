@@ -47,7 +47,13 @@ impl<'a> Checker<'a> {
             return;
         }
         for (name, val) in l.names.iter().zip(l.values.iter()) {
-            if is_slot_loan_expr(val) {
+            let is_copy_of_loan = match unwrap_parens(val) {
+                Expr::Ident { name: rhs, .. } => {
+                    self.lookup_binding(st, rhs).is_some_and(|b| b.slot_loan)
+                }
+                _ => false,
+            };
+            if is_slot_loan_expr(val) || is_copy_of_loan {
                 if let Some(b) = st.env_lookup_mut(name) {
                     b.slot_loan = true;
                 }
@@ -75,7 +81,13 @@ impl<'a> Checker<'a> {
         }
         for (t, v) in targets.iter().zip(values.iter()) {
             if let PlaceKind::Ident(name) = &t.kind {
-                let is_loan = is_slot_loan_expr(v);
+                let is_copy_of_loan = match unwrap_parens(v) {
+                    Expr::Ident { name: rhs, .. } => {
+                        self.lookup_binding(st, rhs).is_some_and(|b| b.slot_loan)
+                    }
+                    _ => false,
+                };
+                let is_loan = is_slot_loan_expr(v) || is_copy_of_loan;
                 if let Some(b) = st.env_lookup_mut(name) {
                     b.slot_loan |= is_loan;
                 }
@@ -375,6 +387,18 @@ impl<'a> Checker<'a> {
                     if let Some(root) = operand.root_ident() {
                         if self.lookup_binding(st, root).is_some_and(|b| b.slot_loan) {
                             self.emit_addr_of_loan_diag(root, *span);
+                        }
+                    }
+                }
+                Expr::Index { base, .. } => {
+                    if !matches!(
+                        self.shape_of_expr(st, base),
+                        TypeShape::Map { .. } | TypeShape::Slice(_)
+                    ) {
+                        if let Some(root) = operand.root_ident() {
+                            if self.lookup_binding(st, root).is_some_and(|b| b.slot_loan) {
+                                self.emit_addr_of_loan_diag(root, *span);
+                            }
                         }
                     }
                 }
