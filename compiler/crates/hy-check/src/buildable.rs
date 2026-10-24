@@ -1068,6 +1068,9 @@ impl<'a> Collector<'a> {
                 for a in args {
                     self.expr(&a.value);
                 }
+                if self.multi_value_arg_count(args).is_some() {
+                    self.check_multi_value_arg_arity(callee, args, *span);
+                }
                 match unwrap_parens(callee) {
                     Expr::Ident { name, .. } => {
                         self.check_user_fn_arity(name, args, *span);
@@ -2290,6 +2293,27 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn multi_value_arg_kinds(&self, args: &[CallArg]) -> Option<Vec<OpKind>> {
+        if args.len() != 1 {
+            return None;
+        }
+        match unwrap_parens(&args[0].value) {
+            Expr::Call {
+                callee,
+                args: inner_args,
+                ..
+            } => {
+                let res = self.call_result_kinds(callee, inner_args)?;
+                if res.len() >= 2 {
+                    Some(res)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// #577 C9 — a closure or `fn`-typed value whose declared parameter count
     /// is known (`f := fn(x int) int {...}; f(1, 2)`).
     fn report_local_arity(&mut self, name: &str, want: usize, got: usize, span: Span) {
@@ -2398,6 +2422,9 @@ impl<'a> Collector<'a> {
         if !m.type_params.is_empty() {
             return;
         }
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
         let (want, got) = (m.params.len(), args.len());
         if want == got {
             return;
@@ -2440,7 +2467,26 @@ impl<'a> Collector<'a> {
         if !f.type_params.is_empty() {
             return;
         }
-        if self.multi_value_arg_count(args).is_some() {
+        if let Some(got_kinds) = self.multi_value_arg_kinds(args) {
+            if f.params.len() != got_kinds.len() {
+                return;
+            }
+            for (p, got) in f.params.iter().zip(got_kinds.iter()) {
+                let want = self.kind_of_ty(&p.ty, 0);
+                if kinds_conflict(&want, got) {
+                    self.emit_e1002(
+                        args[0].value.span(),
+                        format!(
+                            "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
+                            args[0].value.render(),
+                            got.label(),
+                            want.label(),
+                            name
+                        ),
+                        "argument types must match declared parameter types",
+                    );
+                }
+            }
             return;
         }
         if f.params.len() != args.len() {
@@ -2480,7 +2526,27 @@ impl<'a> Collector<'a> {
         if !m.type_params.is_empty() {
             return;
         }
-        if self.multi_value_arg_count(args).is_some() {
+        if let Some(got_kinds) = self.multi_value_arg_kinds(args) {
+            if m.params.len() != got_kinds.len() {
+                return;
+            }
+            for (p, got) in m.params.iter().zip(got_kinds.iter()) {
+                let want = self.kind_of_ty(&p.ty, 0);
+                if kinds_conflict(&want, got) {
+                    self.emit_e1002(
+                        args[0].value.span(),
+                        format!(
+                            "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}.{}` — Go refuses mismatched argument types (HYB-E1002)",
+                            args[0].value.render(),
+                            got.label(),
+                            want.label(),
+                            sn,
+                            name
+                        ),
+                        "argument types must match declared parameter types",
+                    );
+                }
+            }
             return;
         }
         if m.params.len() != args.len() {
@@ -2635,29 +2701,98 @@ impl<'a> Collector<'a> {
         let Some(n) = self.multi_value_arg_count(args) else {
             return;
         };
-        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
-            return;
-        };
-        let head = Checker::base_named_type_str(name);
-        let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
-            return;
-        };
-        let want = f.params.len();
-        if want == n {
-            return;
+        match unwrap_parens(callee) {
+            Expr::Ident { name, .. } => {
+                if let Some(k) = self.lookup_kind(name) {
+                    if let OpKind::Fn(_, Some(want)) = k {
+                        if want != n {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "`{}` takes {want} argument{} but its argument list expands to {n} value{} — Go refuses `{} arguments in call to {}` (HYB-E1002)",
+                                    name,
+                                    if want == 1 { "" } else { "s" },
+                                    if n == 1 { "" } else { "s" },
+                                    if n < want { "not enough" } else { "too many" },
+                                    name
+                                ),
+                                "a multi-value call expands to one argument per result; the callee must accept exactly that many",
+                            );
+                        }
+                    }
+                    return;
+                }
+                let head = Checker::base_named_type_str(name);
+                let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
+                    return;
+                };
+                if !f.type_params.is_empty() {
+                    return;
+                }
+                let want = f.params.len();
+                if want == n {
+                    return;
+                }
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`{}` takes {want} argument{} but its argument list expands to {n} value{} — Go refuses `{} arguments in call to {}` (HYB-E1002)",
+                        name,
+                        if want == 1 { "" } else { "s" },
+                        if n == 1 { "" } else { "s" },
+                        if n < want { "not enough" } else { "too many" },
+                        name
+                    ),
+                    "a multi-value call expands to one argument per result; the callee must accept exactly that many",
+                );
+            }
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                if let Some(sn) = self.struct_base_name(&bk) {
+                    if let Some(m) = self.ck.method_decls.get(&(sn.clone(), name.clone())) {
+                        if !m.type_params.is_empty() {
+                            return;
+                        }
+                        let want = m.params.len();
+                        if want != n {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "method `{}` on `{}` takes {want} argument{} but its argument list expands to {n} value{} — Go refuses `{} arguments in call to {}.{}` (HYB-E1002)",
+                                    name,
+                                    sn,
+                                    if want == 1 { "" } else { "s" },
+                                    if n == 1 { "" } else { "s" },
+                                    if n < want { "not enough" } else { "too many" },
+                                    sn,
+                                    name
+                                ),
+                                "a multi-value call expands to one argument per result; the callee must accept exactly that many",
+                            );
+                        }
+                        return;
+                    }
+                }
+                if let Some(OpKind::Fn(_, Some(want))) = self.struct_field_kind(&bk, name) {
+                    if want != n {
+                        let rendered = callee.render();
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`{}` takes {want} argument{} but its argument list expands to {n} value{} — Go refuses `{} arguments in call to {}` (HYB-E1002)",
+                                rendered,
+                                if want == 1 { "" } else { "s" },
+                                if n == 1 { "" } else { "s" },
+                                if n < want { "not enough" } else { "too many" },
+                                rendered
+                            ),
+                            "a multi-value call expands to one argument per result; the callee must accept exactly that many",
+                        );
+                    }
+                }
+            }
+            _ => {}
         }
-        self.emit_e1002(
-            span,
-            format!(
-                "`{}` takes {want} argument{} but its argument list expands to {n} value{} — Go refuses `{} arguments in call to {}` (HYB-E1002)",
-                name,
-                if want == 1 { "" } else { "s" },
-                if n == 1 { "" } else { "s" },
-                if n < want { "not enough" } else { "too many" },
-                name
-            ),
-            "a multi-value call expands to one argument per result; the callee must accept exactly that many",
-        );
     }
 
     /// #682 U5 — `append`'s appended values must be assignable to the slice's
@@ -2720,7 +2855,10 @@ impl<'a> Collector<'a> {
         let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
             return;
         };
-        if !f.type_params.is_empty() || f.params.len() == args.len() {
+        if !f.type_params.is_empty()
+            || self.multi_value_arg_count(args).is_some()
+            || f.params.len() == args.len()
+        {
             return;
         }
         let want = f.params.len();
@@ -3815,7 +3953,10 @@ impl<'a> Collector<'a> {
                         // A local bound to a closure or fn-typed value carries
                         // its declared parameter count, so the call's arity is
                         // checkable (#577 C9).
-                        OpKind::Fn(_, Some(want)) if want != args.len() => {
+                        OpKind::Fn(_, Some(want))
+                            if self.multi_value_arg_count(args).is_none()
+                                && want != args.len() =>
+                        {
                             self.report_local_arity(name, want, args.len(), span)
                         }
                         OpKind::Fn(..) | OpKind::Unknown => {}
@@ -3891,7 +4032,7 @@ impl<'a> Collector<'a> {
                     }
                     // `u.cb(1, 2)` where `cb fn(x int) int` — the field type
                     // states the count.
-                    if !has_method {
+                    if !has_method && self.multi_value_arg_count(args).is_none() {
                         if let OpKind::Fn(_, Some(want)) = fk {
                             if want != args.len() {
                                 self.report_local_arity(&callee.render(), want, args.len(), span);
@@ -4852,5 +4993,39 @@ fn main() {
             "unexpected diagnostics: {:?}",
             r.diagnostics
         );
+    }
+
+    #[test]
+    fn multi_value_call_arguments_type_checked_and_expanded_1015() {
+        // 1. Mismatched element types in multi-value call arguments must reject with HYB-E1002.
+        for src in [
+            "fn takes_ints(a int, b int) {}\nfn returns_strings() (string, string) { return \"a\", \"b\" }\nfn main() {\n    takes_ints(returns_strings())\n}\n",
+            "fn takes_ints(a int, b int) {}\nfn returns_strings() (string, string) { return \"a\", \"b\" }\nfn main() {\n    task takes_ints(returns_strings())\n}\n",
+            "struct st {}\nfn (s st) takes_ints(a int, b int) {}\nfn returns_strings() (string, string) { return \"a\", \"b\" }\nfn main() {\n    var s st\n    s.takes_ints(returns_strings())\n}\n",
+            "struct st {}\nfn (s st) takes_one(a int) {}\nfn two() (int, int) { return 1, 2 }\nfn main() {\n    var s st\n    s.takes_one(two())\n}\n",
+            "fn two() (int, int) { return 1, 2 }\nfn main() {\n    cb := fn(a int) {}\n    cb(two())\n}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                error_codes(&r).contains(&"HYB-E1002".to_string()),
+                "expected HYB-E1002, got {:?} for:\n{src}",
+                error_codes(&r)
+            );
+        }
+
+        // 2. Valid multi-value expansion into method and closure calls must accept.
+        for src in [
+            "struct st {}\nfn (s st) takes_two(a int, b int) {}\nfn two() (int, int) { return 1, 2 }\nfn main() {\n    var s st\n    s.takes_two(two())\n}\n",
+            "fn two() (int, int) { return 1, 2 }\nfn main() {\n    cb := fn(a int, b int) { fmt.println(a + b) }\n    cb(two())\n}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(
+                r.verdict,
+                Verdict::Accept,
+                "expected accept for:\n{src}\ndiags: {:?}",
+                r.diagnostics
+            );
+        }
     }
 }
