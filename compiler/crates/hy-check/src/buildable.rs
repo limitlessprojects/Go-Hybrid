@@ -628,6 +628,58 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_signature_unique_identifiers(
+        &mut self,
+        receiver: Option<&str>,
+        params: &[hy_syntax::Param],
+        results: &[hy_syntax::FnResult],
+    ) {
+        let mut seen: HashSet<&str> = HashSet::new();
+        if let Some(rname) = receiver {
+            if rname != "_" {
+                seen.insert(rname);
+            }
+        }
+        for p in params {
+            if p.name != "_" && !seen.insert(p.name.as_str()) {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E1003",
+                        self.path.clone(),
+                        p.span,
+                        format!(
+                            "`{}` redeclared in this block — Go refuses duplicate parameter and result identifiers (HYB-E1003)",
+                            p.name
+                        ),
+                    )
+                    .with_notes(vec![
+                        "function parameters, receiver, and named results share a single scope; each non-blank identifier must be unique".to_string(),
+                    ]),
+                );
+            }
+        }
+        for r in results {
+            if let Some(rname) = &r.name {
+                if rname != "_" && !seen.insert(rname.as_str()) {
+                    self.diags.push(
+                        Diagnostic::error(
+                            "HYB-E1003",
+                            self.path.clone(),
+                            r.ty.span(),
+                            format!(
+                                "`{}` redeclared in this block — Go refuses duplicate parameter and result identifiers (HYB-E1003)",
+                                rname
+                            ),
+                        )
+                        .with_notes(vec![
+                            "function parameters, receiver, and named results share a single scope; each non-blank identifier must be unique".to_string(),
+                        ]),
+                    );
+                }
+            }
+        }
+    }
+
     // -- declarations --------------------------------------------------------
 
     fn fn_decl(&mut self, f: &FnDecl) {
@@ -640,6 +692,11 @@ impl<'a> Collector<'a> {
         for r in &f.results {
             self.ty(&r.ty);
         }
+        self.check_signature_unique_identifiers(
+            f.receiver.as_ref().map(|r| r.name.as_str()),
+            &f.params,
+            &f.results,
+        );
         let result_kinds: Vec<OpKind> = f
             .results
             .iter()
@@ -1382,6 +1439,7 @@ impl<'a> Collector<'a> {
                 for r in results {
                     self.ty(&r.ty);
                 }
+                self.check_signature_unique_identifiers(None, params, results);
                 self.push_scope();
                 for p in params {
                     self.exempt(&p.name);
@@ -4782,5 +4840,50 @@ fn main() {
             "unexpected diagnostics: {:?}",
             r.diagnostics
         );
+    }
+
+    #[test]
+    fn rejects_duplicate_parameters_and_named_results_issue_1409() {
+        // Regressions from issue #1409
+        for src in [
+            // 1. Duplicate value parameters — duplicate_parameter.hy
+            "fn add(a int, a int) int {\n    return a\n}\nfn main() {\n    fmt.println(\"{add(1, 2)}\")\n}\n",
+            // 2. Duplicate named results — duplicate_named_result.hy
+            "fn two() (a int, a int) {\n    a = 1\n    return\n}\nfn main() {\n    x, y := two()\n    fmt.println(\"{x} {y}\")\n}\n",
+            // 3. Duplicate between parameter and named result
+            "fn shadow_res(a int) (a int) {\n    return a\n}\nfn main() {}\n",
+            // 4. Duplicate in closure literal
+            "fn main() {\n    f := fn(a int, a int) int { return a }\n    _ = f(1, 2)\n}\n",
+            // 5. Duplicate receiver and parameter
+            "struct worker {}\nfn (w *worker) work(w int) {}\nfn main() {}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                error_codes(&r).contains(&"HYB-E1003".to_string()),
+                "expected HYB-E1003, got {:?} for:\n{src}",
+                error_codes(&r)
+            );
+        }
+
+        // Controls: distinct parameters, distinct named results, unnamed results, blank identifiers
+        for src in [
+            // Distinct parameters and named results
+            "fn add(a int, b int) (sum int, ok bool) {\n    sum = a + b\n    ok = true\n    return\n}\nfn main() {}\n",
+            // Unnamed results
+            "fn two() (int, int) {\n    return 1, 2\n}\nfn main() {}\n",
+            // Multiple blank identifiers are legal in Go signatures
+            "fn ignore(_ int, _ string) (_ int, _ error) {\n    return 0, nil\n}\nfn main() {}\n",
+            // Closure with distinct parameters
+            "fn main() {\n    f := fn(a int, b int) int { return a + b }\n    _ = f(1, 2)\n}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(
+                r.verdict,
+                Verdict::Accept,
+                "unexpected reject for control:\n{src}\ndiagnostics: {:?}",
+                r.diagnostics
+            );
+        }
     }
 }
