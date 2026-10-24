@@ -69,8 +69,10 @@ if [ -n "$VERSION" ]; then
     TAG="$VERSION"
 else
     echo "==> resolving latest release"
+    # Match the known release URL and complete tag, allowing build metadata
+    # and CRLF headers. Encoded or unsupported suffixes fall back to the API.
     TAG="$(curl -fsSI "https://github.com/$REPO/releases/latest" 2>/dev/null \
-        | sed -n 's/^location:.*\/tag\/\(v[0-9A-Za-z._-]*\).*/\1/ip' | head -1)"
+        | sed -n "s|^[Ll][Oo][Cc][Aa][Tt][Ii][Oo][Nn]:[[:space:]]*https://github[.]com/$REPO/releases/tag/\(v[0-9A-Za-z._+-]*\)[[:space:]]*$|\1|p" | head -1)"
     if [ -z "$TAG" ]; then
         API_JSON="$(mktemp)"
         if fetch "https://api.github.com/repos/$REPO/releases/latest" "$API_JSON" 2>/dev/null; then
