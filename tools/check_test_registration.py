@@ -155,11 +155,27 @@ def find_test_files(root, directory):
     """Repo-relative paths of every test_*.py under root/directory."""
     found = []
     base_dir = os.path.join(root, directory)
-    for base, _dirs, files in os.walk(base_dir):
-        for filename in files:
-            if filename.startswith("test_") and filename.endswith(".py"):
-                rel = os.path.relpath(os.path.join(base, filename), root)
-                found.append(rel.replace(os.sep, "/"))
+    # A repository may contain only tools/ or only tests/. Check absence
+    # before walking; once an entry exists, every traversal error is fatal.
+    # lstat preserves dangling symlinks so they fail rather than look absent.
+    try:
+        os.lstat(base_dir)
+    except FileNotFoundError:
+        return []
+    # os.walk suppresses entry-classification errors even with onerror.
+    # Scan explicitly so an unreadable subtree cannot produce a false green.
+    pending = [base_dir]
+    while pending:
+        with os.scandir(pending.pop()) as entries:
+            for entry in entries:
+                if entry.is_dir():
+                    # Match os.walk's default: scan a symlinked root, but do
+                    # not follow nested directory symlinks (including cycles).
+                    if not entry.is_symlink():
+                        pending.append(entry.path)
+                elif entry.name.startswith("test_") and entry.name.endswith(".py"):
+                    rel = os.path.relpath(entry.path, root)
+                    found.append(rel.replace(os.sep, "/"))
     return sorted(found)
 
 
@@ -191,8 +207,13 @@ def main():
         workflow_text = handle.read()
 
     patterns = registered_patterns(workflow_text)
-    found = (find_test_files(args.root, DISCOVER_DIR)
-             + [t for d in DIRECT_DIRS for t in find_test_files(args.root, d)])
+    try:
+        found = (find_test_files(args.root, DISCOVER_DIR)
+                 + [t for d in DIRECT_DIRS for t in find_test_files(args.root, d)])
+    except OSError as exc:
+        print(f"REGISTRATION CHECK ERROR: test inventory scan failed: {exc}",
+              file=sys.stderr)
+        return 2
     if not found:
         print(f"REGISTRATION CHECK ERROR: no test_*.py found under "
               f"{args.root} ({DISCOVER_DIR}/ or {', '.join(DIRECT_DIRS)}/)",
@@ -203,7 +224,12 @@ def main():
               "all; the guard cannot verify anything", file=sys.stderr)
         return 2
 
-    missing = unregistered(args.root, workflow_text)
+    try:
+        missing = unregistered(args.root, workflow_text)
+    except OSError as exc:
+        print(f"REGISTRATION CHECK ERROR: test inventory scan failed: {exc}",
+              file=sys.stderr)
+        return 2
     if missing:
         print(f"UNREGISTERED TEST FILE(S) — nothing runs these, so they cannot fail CI:")
         for rel, why in missing:

@@ -8,6 +8,7 @@ guard covers two invocation styles, and both are pinned here:
   tests/**/test_*.py  reached by literal repo-relative path
 """
 import contextlib
+import errno
 import importlib.util
 import io
 import os
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location(
     "check_test_registration", Path(__file__).with_name("check_test_registration.py"))
@@ -313,9 +315,247 @@ class GuardMisuseTests(unittest.TestCase):
             self.run_main("python3 -m unittest discover -s tools/fuzz -p 'test_*.py'\n",
                           ["tools/fuzz/test_control.py", "tools/test_orphan.py"]), 1)
 
-
     def test_start_directory_escaping_repo_root_is_rejected(self):
-        self.assertEqual(self.run_main("python3 -m unittest discover -s .. -p 'test_*.py'\n", ["tools/test_x.py"]), 1)
+        # Package markers make the parent directory capable of reaching this
+        # test, so only the repository boundary can reject the escaped start.
+        for start, expected in (("..", 1), (".", 0), ("./tools", 0)):
+            with self.subTest(start=start):
+                self.assertEqual(self.run_main(
+                    f"python3 -m unittest discover -s {start} -p 'test_*.py'\n",
+                    ["__init__.py", "tools/__init__.py", "tools/test_x.py"]), expected)
+
+
+class ScanFailureTests(unittest.TestCase):
+    """An incomplete test inventory must never be reported as registered."""
+
+    def test_scan_permission_error_does_not_hide_unscanned_tests(self):
+        with tempfile.TemporaryDirectory() as td:
+            tools_dir = Path(td) / "tools"
+            tools_dir.mkdir()
+            (tools_dir / "test_visible.py").write_text("# test\n")
+            real_scandir = os.scandir
+
+            class UnreadableScan:
+                # Match scandir's iterator and context-manager protocols so
+                # this regression also exercises the original os.walk path.
+                def __init__(self, path):
+                    self.entries = real_scandir(path)
+                    self.yielded = False
+
+                def __enter__(self):
+                    self.entries.__enter__()
+                    return self
+
+                def __exit__(self, *args):
+                    return self.entries.__exit__(*args)
+
+                def __iter__(self):
+                    return self
+
+                def __next__(self):
+                    if self.yielded:
+                        raise PermissionError(13, "permission denied", str(tools_dir))
+                    self.yielded = True
+                    return next(self.entries)
+
+            with patch.object(guard.os, "scandir", UnreadableScan):
+                with self.assertRaisesRegex(PermissionError, "permission denied"):
+                    guard.find_test_files(td, "tools")
+
+    def test_absent_and_empty_optional_roots_have_empty_inventories(self):
+        with tempfile.TemporaryDirectory() as td:
+            for directory in ("tools", "tests"):
+                with self.subTest(directory=directory):
+                    self.assertEqual(guard.find_test_files(td, directory), [])
+                    (Path(td) / directory).mkdir()
+                    self.assertEqual(guard.find_test_files(td, directory), [])
+
+    def test_invalid_root_types_are_not_treated_as_absent(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "tools").write_text("not a directory", encoding="utf-8")
+            with self.assertRaises(NotADirectoryError):
+                guard.find_test_files(root, "tools")
+            (root / "tools").unlink()
+            (root / "tools").symlink_to(root / "missing", target_is_directory=True)
+            with self.assertRaises(FileNotFoundError):
+                guard.find_test_files(root, "tools")
+
+    def test_root_inspection_errors_are_not_treated_as_absent(self):
+        with tempfile.TemporaryDirectory() as td:
+            for error_number in (errno.EACCES, errno.EIO):
+                with self.subTest(errno=error_number):
+                    error = OSError(error_number, "root inspection failed", td + "/tools")
+                    with patch.object(guard.os, "lstat", side_effect=error):
+                        with self.assertRaises(OSError) as raised:
+                            guard.find_test_files(td, "tools")
+                    self.assertIs(raised.exception, error)
+
+    def test_real_scan_errors_in_both_inventory_passes_fail_closed(self):
+        # Inject at scandir, not at the finder/walker boundary: exercise the
+        # real optional-root check, inventory traversal, and CLI error handling.
+        for directory in ("tools", "tests"):
+            for nested in (False, True):
+                for scan_pass in (1, 2):
+                    for error_number in (errno.ENOENT, errno.EACCES, errno.EIO):
+                        with self.subTest(directory=directory, nested=nested,
+                                          scan_pass=scan_pass, errno=error_number), \
+                                tempfile.TemporaryDirectory() as td:
+                            root = Path(td)
+                            for name in ("tools", "tests"):
+                                (root / name).mkdir()
+                                (root / name / "test_visible.py").write_text("# test\n")
+                            target = root / directory
+                            if nested:
+                                target = target / "nested"
+                                target.mkdir()
+                                (target / "test_hidden.py").write_text("# test\n")
+                            workflow = root / "ci.yml"
+                            workflow.write_text(
+                                "python3 -m unittest discover -s tools -p test_*.py\n"
+                                "python3 tests/test_visible.py\n")
+                            real_scandir = os.scandir
+                            visits = 0
+
+                            def failing_scandir(path):
+                                nonlocal visits
+                                if Path(path) == target:
+                                    visits += 1
+                                    if visits == scan_pass:
+                                        raise OSError(error_number, "scan failed", str(path))
+                                return real_scandir(path)
+
+                            stdout, stderr = io.StringIO(), io.StringIO()
+                            with patch.object(guard.os, "scandir", failing_scandir), \
+                                    patch.object(guard.sys, "argv", [
+                                        "check_test_registration.py", "--root", td,
+                                        "--workflow", str(workflow)]), \
+                                    contextlib.redirect_stdout(stdout), \
+                                    contextlib.redirect_stderr(stderr):
+                                code = guard.main()
+                            self.assertEqual(code, 2)
+                            self.assertEqual(visits, scan_pass)
+                            self.assertIn("test inventory scan failed", stderr.getvalue())
+                            self.assertNotIn("test registration: OK", stdout.getvalue())
+
+    def test_directory_classification_errors_in_both_passes_fail_closed(self):
+        # os.walk suppresses errors raised by DirEntry.is_dir(), even with
+        # onerror supplied. A failed classification must not hide a subtree.
+        real_scandir = os.scandir
+        for directory in ("tools", "tests"):
+            for scan_pass in (1, 2):
+                for error_number in (errno.EACCES, errno.EIO):
+                    with self.subTest(directory=directory, scan_pass=scan_pass,
+                                      errno=error_number), \
+                            tempfile.TemporaryDirectory() as td:
+                        root = Path(td)
+                        hidden = root / directory / "hidden"
+                        hidden.mkdir(parents=True)
+                        (hidden / "test_hidden.py").write_text("# test\n")
+                        (hidden / "__init__.py").touch()
+                        (root / directory / "test_visible.py").write_text("# test\n")
+                        workflow = root / "ci.yml"
+                        workflow.write_text(
+                            "python3 -m unittest discover -s tools -p test_*.py\n"
+                            "python3 tests/test_visible.py\n"
+                            "python3 tests/hidden/test_hidden.py\n")
+                        visits = 0
+
+                        class EntryProxy:
+                            def __init__(self, entry):
+                                self.entry = entry
+
+                            def __getattr__(self, name):
+                                return getattr(self.entry, name)
+
+                            def is_dir(self, *args, **kwargs):
+                                nonlocal visits
+                                if Path(self.entry.path) == hidden:
+                                    visits += 1
+                                    if visits == scan_pass:
+                                        raise OSError(error_number, "classification failed",
+                                                      self.entry.path)
+                                return self.entry.is_dir(*args, **kwargs)
+
+                        class ScandirProxy:
+                            def __init__(self, path):
+                                self.entries = real_scandir(path)
+
+                            def __enter__(self):
+                                self.entries.__enter__()
+                                return self
+
+                            def __exit__(self, *args):
+                                return self.entries.__exit__(*args)
+
+                            def __iter__(self):
+                                return self
+
+                            def __next__(self):
+                                return EntryProxy(next(self.entries))
+
+                        stdout, stderr = io.StringIO(), io.StringIO()
+                        with patch.object(guard.os, "scandir", ScandirProxy), \
+                                patch.object(guard.sys, "argv", [
+                                    "check_test_registration.py", "--root", td,
+                                    "--workflow", str(workflow)]), \
+                                contextlib.redirect_stdout(stdout), \
+                                contextlib.redirect_stderr(stderr):
+                            code = guard.main()
+                        self.assertEqual(code, 2)
+                        self.assertIn("classification failed", stderr.getvalue())
+                        self.assertNotIn("test registration: OK", stdout.getvalue())
+
+    def test_symlinked_root_is_scanned_without_following_nested_directory_links(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            actual = root / "actual"
+            actual.mkdir()
+            (actual / "test_visible.py").write_text("# test\n")
+            (actual / "cycle").symlink_to(actual, target_is_directory=True)
+            (actual / "test_directory.py").symlink_to(actual, target_is_directory=True)
+            (actual / "test_alias.py").symlink_to(actual / "test_visible.py")
+            (root / "tools").symlink_to(actual, target_is_directory=True)
+            self.assertEqual(guard.find_test_files(root, "tools"),
+                             ["tools/test_alias.py", "tools/test_visible.py"])
+
+    def run_main_with_finder(self, finder):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "tools").mkdir()
+            (root / "tools/test_visible.py").write_text("# test\n", encoding="utf-8")
+            workflow = root / "ci.yml"
+            workflow.write_text(
+                "python3 -m unittest discover -s tools -p test_visible.py\n",
+                encoding="utf-8",
+            )
+            stderr = io.StringIO()
+            with patch.object(guard, "find_test_files", side_effect=finder), \
+                    patch.object(guard.sys, "argv", [
+                        "check_test_registration.py", "--workflow", str(workflow),
+                        "--root", str(root),
+                    ]), contextlib.redirect_stderr(stderr), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                code = guard.main()
+            return code, stderr.getvalue()
+
+    def test_initial_inventory_failure_exits_two(self):
+        code, stderr = self.run_main_with_finder(
+            PermissionError(13, "permission denied", "tools/hidden"))
+        self.assertEqual(code, 2)
+        self.assertIn("REGISTRATION CHECK ERROR", stderr)
+        self.assertIn("permission denied", stderr)
+
+    def test_second_inventory_failure_exits_two(self):
+        # First scan has one registered test; recheck encounters an unreadable
+        # nested directory. Both passes must reject incomplete inventory.
+        code, stderr = self.run_main_with_finder([
+            ["tools/test_visible.py"], [], PermissionError("hidden test directory")
+        ])
+        self.assertEqual(code, 2)
+        self.assertIn("REGISTRATION CHECK ERROR", stderr)
+        self.assertIn("hidden test directory", stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

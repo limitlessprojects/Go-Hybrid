@@ -1,5 +1,7 @@
 # Hybrid Language: Development Plan
 
+- Contributor queue-reset revalidation (2026-10-24, replaces closed #1100): current main `1f0ff978` still silently accepts incomplete test inventories. Preserve the exact published fail-closed traversal and optional-root behavior; repair only the regression scanner wrapper to implement both iterator/context protocols. Corrected baseline: 36 assertion failures plus two uncaught PermissionErrors; candidate focused suite 41/41. Full Python checks, independent review and own upstream CI remain delivery gates.
+
 - Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15
