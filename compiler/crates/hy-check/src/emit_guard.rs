@@ -517,8 +517,12 @@ impl<'a> Checker<'a> {
                 key,
                 value,
                 entries,
-                ..
+                span,
             } => {
+                // A literal's `key`/`value` are checked one level down, so the
+                // `TypeExpr::Map` arm above never sees them — the key still has
+                // to be comparable (#1565).
+                self.check_map_key_type(key, *span);
                 self.check_type_expr_with_state(Some(st), key);
                 self.check_type_expr_with_state(Some(st), value);
                 let key_ty = *key.clone();
@@ -1001,7 +1005,12 @@ impl<'a> Checker<'a> {
             | TypeExpr::Slice { elem: to, .. }
             | TypeExpr::Option { elem: to, .. }
             | TypeExpr::Chan { elem: to, .. } => self.check_type_expr_with_state(st, to),
-            TypeExpr::Map { key, value, .. } => {
+            TypeExpr::Map { key, value, span } => {
+                // Issue #1565: `map[K]V` is a compile error in Go when `K` has
+                // no `==` (`invalid map key type []int`). Map LITERALS pass
+                // their key/value types here one level down (see Expr::MapLit
+                // below), so this arm and that call site share the helper.
+                self.check_map_key_type(key, *span);
                 self.check_type_expr_with_state(st, key);
                 self.check_type_expr_with_state(st, value);
             }
@@ -1017,6 +1026,30 @@ impl<'a> Checker<'a> {
             }
             TypeExpr::Named { .. } => {}
         }
+    }
+
+    /// Issue #1565: a `map[K]V` key type must be comparable in Go. Only
+    /// PROVEN-incomparable shapes reject (`incomparable_noun`): slice, map,
+    /// function, an array with such an element, or a struct carrying one.
+    /// `any`/interfaces, pointers, channels, type parameters and unresolved
+    /// shapes stay fail-open.
+    fn check_map_key_type(&mut self, key: &TypeExpr, span: Span) {
+        let key_shape = self.shape_of_type(key);
+        let Some(noun) = self.incomparable_noun(&key_shape) else {
+            return;
+        };
+        let msg = format!(
+            "invalid map key type `{}`: a `{}` has no `==` in Go, so `map[K]V` is rejected at compile time (HYB-E1002)",
+            key.render(),
+            noun
+        );
+        let notes = vec![
+            "why: Go requires map keys to be comparable; the checker accepted the type and the emitter copied it verbatim, so the program failed later with `invalid map key type` (issue #1565, GUARANTEES row 13 BUILDABLE)".to_string(),
+            "fix: key by a comparable value (`string`, an int type, a pointer or chan), or by a canonical form of the value — e.g. a joined string or a `[N]byte` hash of the slice".to_string(),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E1002", self.path.clone(), span, msg).with_notes(notes),
+        );
     }
 
     pub(crate) fn eval_array_len_const(&self, len: &Expr) -> Option<usize> {
