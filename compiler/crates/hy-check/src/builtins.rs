@@ -256,9 +256,13 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expr::FnLit { .. } => {
-                // Closure bodies are not walked here — builtin checks inside
-                // closures are intentionally skipped (fail open).
+            Expr::FnLit { body, .. } => {
+                // Closure bodies are not flattened into Pass B — deep-walk
+                // with a default FnState (closure locals won't resolve, fail
+                // open on Unknown shape).
+                for stmt in &body.stmts {
+                    self.check_stmt_builtin_args_inner(&FnState::default(), stmt, /*deep=*/ true);
+                }
             }
             Expr::Ident { .. } | Expr::Lit { .. } => {}
         }
@@ -313,7 +317,6 @@ impl<'a> Checker<'a> {
                         | TypeShape::OwnHandle(_)
                         | TypeShape::BorrowHandle(_)
                         | TypeShape::ForeignOpaque(_)
-                        | TypeShape::Unknown
                 );
                 let src_bad = matches!(
                     src_k,
@@ -327,7 +330,6 @@ impl<'a> Checker<'a> {
                         | TypeShape::BorrowHandle(_)
                         | TypeShape::ForeignOpaque(_)
                         | TypeShape::Map(_, _)
-                        | TypeShape::Unknown
                 );
                 if dst_bad || src_bad {
                     self.emit_builtin(
@@ -367,7 +369,6 @@ impl<'a> Checker<'a> {
                         | TypeShape::OwnHandle(_)
                         | TypeShape::BorrowHandle(_)
                         | TypeShape::ForeignOpaque(_)
-                        | TypeShape::Unknown
                 );
                 if bad {
                     self.emit_builtin(
