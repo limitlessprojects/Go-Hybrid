@@ -139,7 +139,7 @@ impl<'a> Checker<'a> {
         // Issue #201-B: a float constant is never assignable to an integer
         // type in Go — `var x int = 2.5` fails with `(truncated)` (and a
         // magnitude that cannot fit fails with `(overflows)`).
-        if let Some(f) = const_float_value(value) {
+        if let Some(f) = const_float_value_with(value, &self.const_values, 0, st) {
             let span = value.span();
             let msg = format!(
                 "float constant `{}` assigned to integer type `{}` of `{}` (HYB-E6002)",
@@ -289,7 +289,7 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
-        if const_float_value(value).is_some() {
+        if const_float_value_with(value, &self.const_values, 0, st).is_some() {
             let span = value.span();
             let msg = format!(
                 "float constant `{}` assigned to integer type `{}` of `{}` (HYB-E6002)",
@@ -317,14 +317,20 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Check integer constants in variable declarations without an explicit
-    /// type. Go gives these declarations the target's default `int` type.
-    pub(crate) fn check_default_int_overflow(
+    /// When an untyped integer constant expression is evaluated in a context
+    /// that gives it Go's default `int` type (such as `n := 1 << 200`,
+    /// `let n = 1 << 63`, string interpolation `{1 << 200}`, or an untyped
+    /// call argument) and overflows `int` (`[i64::MIN, i64::MAX]`), emit
+    /// HYB-E6002.
+    pub(crate) fn check_untyped_int_const_overflow(
         &mut self,
-        name: &str,
+        target: &str,
         value: &Expr,
         st: Option<&FnState>,
     ) {
+        if st.is_some_and(|s| self.ty_of_expr(s, value).is_some()) {
+            return;
+        }
         let (lo, hi) = target_int_range();
         match const_int_fold_with(value, &self.const_values, 0, st) {
             ConstFold::NotConst => return,
@@ -336,10 +342,10 @@ impl<'a> Checker<'a> {
         let msg = format!(
             "constant expression `{}` overflows default type `int` of `{}` (HYB-E6002)",
             value.render(),
-            name
+            target
         );
         let notes = vec![
-            "why: Go assigns default type `int` to an untyped integer constant in a variable declaration and rejects values outside the target int range, so an accepted Hybrid program would emit unbuildable Go (issue #228)"
+            "why: Go assigns default type `int` to an untyped integer constant in a variable declaration or runtime expression and rejects values outside the target int range, so an accepted Hybrid program would emit unbuildable Go (issue #228 / #576)"
                 .to_string(),
             format!(
                 "fix: use a value in [{}, {}], declare an explicit wider type, or keep the value as an untyped constant",
@@ -1128,19 +1134,11 @@ pub(crate) enum ConstFold {
     TooBig,
 }
 
-/// Fold a pure integer constant expression: int literals (any base the
-/// lexer keeps), unary `-`, parentheses, and the arithmetic/shift/bitwise
-/// operators over constant operands (issue #201-B: Go folds `100 + 100`
-/// and `1 << 10` before the range check, so they overflow identically).
-/// Anything else (idents, calls) is `NotConst`.
-pub(crate) fn const_int_fold(e: &Expr) -> ConstFold {
-    const_int_fold_with(e, &HashMap::new(), 0, None)
-}
-
-/// Like [`const_int_fold`], but resolves file-level `const` identifiers to
-/// their (constant) initializers: `const big = 300; var n int8 = big` must
-/// be rejected like the literal. A local binding with the same name shadows
-/// the file-level const, so `st` is consulted before resolving.
+/// Fold an integer constant expression: int literals (any base the lexer
+/// keeps), unary `-`, parentheses, the arithmetic/shift/bitwise operators
+/// over constant operands, and file-level or function-local `const`
+/// identifiers. A non-const local binding with the same name shadows any
+/// outer/file-level const.
 pub(crate) fn const_int_fold_with(
     e: &Expr,
     consts: &HashMap<String, &Expr>,
@@ -1161,18 +1159,22 @@ pub(crate) fn const_int_fold_with(
             ..
         } => ConstFold::Val(*c as i128),
         Expr::Ident { name, .. } => {
+            if depth >= 16 {
+                return ConstFold::NotConst;
+            }
             if let Some(st) = st {
+                if let Some(local_e) = st.local_const_expr(name) {
+                    return const_int_fold_with(local_e, consts, depth + 1, Some(st));
+                }
                 if st.env_lookup(name).is_some() {
                     return ConstFold::NotConst;
                 }
             }
-            if depth < 16 {
-                if let Some(v) = consts.get(name) {
-                    // The function state guards the identifier at the *use
-                    // site* only: a const's own initializer refers to the
-                    // file-level scope, so expand it without `st`.
-                    return const_int_fold_with(v, consts, depth + 1, None);
-                }
+            if let Some(v) = consts.get(name) {
+                // The function state guards the identifier at the *use
+                // site* only: a const's own initializer refers to the
+                // file-level scope, so expand it without `st`.
+                return const_int_fold_with(v, consts, depth + 1, None);
             }
             ConstFold::NotConst
         }
@@ -1348,8 +1350,17 @@ pub(crate) fn fold_bin(op: BinOp, l: ConstFold, r: ConstFold) -> ConstFold {
 
 /// Convenience: fold to a value when the expression IS a constant in
 /// range (used by the negative-shift check in emit_guard.rs).
+#[allow(dead_code)]
 pub(crate) fn const_int_value(e: &Expr) -> Option<i128> {
-    match const_int_fold(e) {
+    const_int_value_with(e, &HashMap::new(), None)
+}
+
+pub(crate) fn const_int_value_with(
+    e: &Expr,
+    consts: &HashMap<String, &Expr>,
+    st: Option<&FnState>,
+) -> Option<i128> {
+    match const_int_fold_with(e, consts, 0, st) {
         ConstFold::Val(v) => Some(v),
         _ => None,
     }
@@ -1357,17 +1368,74 @@ pub(crate) fn const_int_value(e: &Expr) -> Option<i128> {
 
 /// Fold a float constant expression (literals, unary `-`, parens) — the
 /// `var x int = 2.5` truncation site (issue #201-B).
+#[allow(dead_code)]
 pub(crate) fn const_float_value(e: &Expr) -> Option<f64> {
+    const_float_value_with(e, &HashMap::new(), 0, None)
+}
+
+pub(crate) fn const_float_value_with(
+    e: &Expr,
+    consts: &HashMap<String, &Expr>,
+    depth: u32,
+    st: Option<&FnState>,
+) -> Option<f64> {
+    if depth >= 16 {
+        return None;
+    }
     match unwrap_parens(e) {
         Expr::Lit {
             kind: LitKind::Float(s),
             ..
         } => s.replace('_', "").parse::<f64>().ok(),
+        Expr::Ident { name, .. } => {
+            if let Some(st) = st {
+                if let Some(local_e) = st.local_const_expr(name) {
+                    return const_float_value_with(local_e, consts, depth + 1, Some(st));
+                }
+                if st.env_lookup(name).is_some() {
+                    return None;
+                }
+            }
+            if let Some(v) = consts.get(name) {
+                return const_float_value_with(v, consts, depth + 1, None);
+            }
+            None
+        }
         Expr::Unary {
             op: UnOp::Neg,
             operand,
             ..
-        } => const_float_value(operand).map(|v| -v),
+        } => const_float_value_with(operand, consts, depth + 1, st).map(|v| -v),
+        Expr::Binary { op, lhs, rhs, .. } => {
+            use BinOp::*;
+            if !matches!(op, Add | Sub | Mul | Div) {
+                return None;
+            }
+            let l_float = const_float_value_with(lhs, consts, depth + 1, st);
+            let r_float = const_float_value_with(rhs, consts, depth + 1, st);
+            if l_float.is_none() && r_float.is_none() {
+                return None;
+            }
+            let l = l_float.or_else(|| {
+                match const_int_fold_with(lhs, consts, depth + 1, st) {
+                    ConstFold::Val(v) => Some(v as f64),
+                    _ => None,
+                }
+            })?;
+            let r = r_float.or_else(|| {
+                match const_int_fold_with(rhs, consts, depth + 1, st) {
+                    ConstFold::Val(v) => Some(v as f64),
+                    _ => None,
+                }
+            })?;
+            match op {
+                Add => Some(l + r),
+                Sub => Some(l - r),
+                Mul => Some(l * r),
+                Div if r != 0.0 => Some(l / r),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -1481,6 +1549,13 @@ fn is_float_const_expr(
 /// Render a folded float as the nearest integer literal for the fix-it.
 fn integer_of_float(f: f64) -> String {
     format!("{}", f.trunc() as i128)
+}
+
+pub(crate) fn parse_int_lit_i128(s: &str) -> Option<i128> {
+    match parse_int_lit(s) {
+        Some(ConstInt::Value(v)) => Some(v),
+        _ => None,
+    }
 }
 
 pub(crate) fn parse_int_lit(s: &str) -> Option<ConstInt> {

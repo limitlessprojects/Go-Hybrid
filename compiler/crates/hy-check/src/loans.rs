@@ -1615,10 +1615,9 @@ impl<'a> Checker<'a> {
                 if let Some(t) = &l.ty {
                     self.check_const_overflow_init(name, t, value, Some(st));
                 } else if l.kind != LocalKind::Const {
-                    // Issue #228: untyped variable declarations use the
-                    // target's default int type in emitted Go (the emitted
-                    // Go declaration is `int` when no ascription is present).
-                    self.check_default_int_overflow(name, value, Some(st));
+                    // Issue #228 / #576: untyped variable declarations use the
+                    // target's default int/float64 type in emitted Go.
+                    self.check_untyped_int_const_overflow(name, value, Some(st));
                     self.check_default_float_overflow(name, value, Some(st));
                 }
                 // N1: a bare `nil` initializer under a non-nilable
@@ -1680,7 +1679,15 @@ impl<'a> Checker<'a> {
                     (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
                     (_, inferred) => (
                         inferred,
-                        l.ty.clone().or_else(|| self.ty_of_expr(&pre_st, value)),
+                        l.ty.clone()
+                            .or_else(|| self.ty_of_expr(&pre_st, value))
+                            .or_else(|| {
+                                if l.kind != LocalKind::Const {
+                                    self.default_var_numeric_ty_of_expr(&pre_st, value)
+                                } else {
+                                    None
+                                }
+                            }),
                     ),
                 };
                 let is_fresh_copy = self.call_returns_fresh_copy(&pre_st, value);
@@ -1784,6 +1791,16 @@ impl<'a> Checker<'a> {
                     None
                 };
                 self.define_binding(st, name, shape, ty, immutable, managed, is_let);
+                if matches!(l.kind, LocalKind::Const) {
+                    if !matches!(
+                        unwrap_parens(value),
+                        Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
+                    ) {
+                        st.local_consts.insert(name.clone(), value.clone());
+                    } else {
+                        st.local_consts.remove(name);
+                    }
+                }
                 if let Some(origin) = &moved_non_owned {
                     if let Some(b) = st.env_lookup_mut(name) {
                         if b.non_owned_origin.is_none() {
@@ -7327,37 +7344,37 @@ impl<'a> Checker<'a> {
                 }
                 PlaceKind::Ident(name) => {
                     let b = self.lookup_binding(st, name)?;
-                    let mut cur = b.ty.as_ref()?;
+                    let mut cur = self.resolve_type_alias(b.ty.as_ref()?);
                     steps.reverse();
                     for step in steps {
-                        while let hy_syntax::TypeExpr::Pointer { to, .. } = cur {
-                            cur = to.as_ref();
+                        while let hy_syntax::TypeExpr::Pointer { to, .. } = &cur {
+                            cur = self.resolve_type_alias(to);
                         }
                         match step {
-                            Step::Index => match cur {
+                            Step::Index => match &cur {
                                 hy_syntax::TypeExpr::Array { elem, .. }
                                 | hy_syntax::TypeExpr::Slice { elem, .. } => {
-                                    cur = elem.as_ref();
+                                    cur = self.resolve_type_alias(elem);
                                 }
                                 hy_syntax::TypeExpr::Map { value, .. } => {
-                                    cur = value.as_ref();
+                                    cur = self.resolve_type_alias(value);
                                 }
                                 _ => return None,
                             },
-                            Step::Field(field_name) => match cur {
+                            Step::Field(field_name) => match &cur {
                                 hy_syntax::TypeExpr::Named {
                                     name: struct_name, ..
                                 } => {
                                     let fields = self.structs.get(struct_name)?;
                                     let (_, field_ty) =
                                         fields.iter().find(|(f, _)| f == field_name)?;
-                                    cur = field_ty;
+                                    cur = self.resolve_type_alias(field_ty);
                                 }
                                 _ => return None,
                             },
                         }
                     }
-                    return Some(cur.clone());
+                    return Some(cur);
                 }
             }
         }

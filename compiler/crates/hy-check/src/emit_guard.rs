@@ -19,8 +19,8 @@
 //! exactly once via `Expr::FnLit`.
 
 use crate::const_overflow::{
-    const_float_value, const_int_fold_with, const_int_value, fixed_width_int_range, fold_bin,
-    parse_int_lit, ConstFold, ConstInt,
+    const_float_value, const_float_value_with, const_int_fold_with, const_int_value,
+    const_int_value_with, fixed_width_int_range, fold_bin, parse_int_lit, ConstFold, ConstInt,
 };
 use crate::model::{as_addr_of, unwrap_parens, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};
@@ -116,9 +116,9 @@ impl<'a> Checker<'a> {
                         for (name, value) in l.names.iter().zip(l.values.iter()) {
                             self.check_const_overflow_init(name, ty, value, Some(st));
                         }
-                    } else if l.kind != hy_syntax::LocalKind::Const {
+                    } else if !matches!(l.kind, hy_syntax::LocalKind::Const) {
                         for (name, value) in l.names.iter().zip(l.values.iter()) {
-                            self.check_default_int_overflow(name, value, Some(st));
+                            self.check_untyped_int_const_overflow(name, value, Some(st));
                             self.check_default_float_overflow(name, value, Some(st));
                         }
                     }
@@ -143,7 +143,7 @@ impl<'a> Checker<'a> {
                 }
                 // `x <<= -1` — the compound form of HYB-E6005.
                 if matches!(op, AssignOp::ShlAssign | AssignOp::ShrAssign) && values.len() == 1 {
-                    self.check_negative_shift(&values[0], *span);
+                    self.check_negative_shift(&values[0], *span, Some(st));
                 }
                 if deep {
                     for (t, v) in targets.iter().zip(values.iter()) {
@@ -238,7 +238,13 @@ impl<'a> Checker<'a> {
                 for (i, v) in values.iter().enumerate() {
                     if let Some(res_ty) = st.result_types.get(i) {
                         let resolved_ty = self.resolve_type_alias(res_ty);
-                        self.check_const_overflow_init("return statement", &resolved_ty, v, None);
+                        self.check_const_overflow_init(
+                            "return statement",
+                            &resolved_ty,
+                            v,
+                            Some(st),
+                        );
+                        self.check_return_numeric_type_mismatch(st, &resolved_ty, v);
                     }
                     self.check_expr_emit_guard(st, v);
                 }
@@ -365,9 +371,134 @@ impl<'a> Checker<'a> {
                     (Some(t), TypeShape::Unknown) => self.shape_of_type(t),
                     (_, s) => s,
                 };
-                let ty = l.ty.clone().or_else(|| self.ty_of_expr(st, val));
+                let ty = l
+                    .ty
+                    .clone()
+                    .or_else(|| self.ty_of_expr(st, val))
+                    .or_else(|| {
+                        if !immutable || is_let {
+                            self.default_var_numeric_ty_of_expr(st, val)
+                        } else {
+                            None
+                        }
+                    });
                 self.define_binding(st, name, shape, ty, immutable, false, is_let);
+                if immutable
+                    && !is_let
+                    && !matches!(
+                        unwrap_parens(val),
+                        Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
+                    )
+                {
+                    st.local_consts.insert(name.clone(), val.clone());
+                }
             }
+        }
+    }
+
+    pub(crate) fn default_var_numeric_ty_of_expr(
+        &self,
+        st: &FnState,
+        expr: &Expr,
+    ) -> Option<TypeExpr> {
+        if !matches!(
+            const_int_fold_with(expr, &self.const_values, 0, Some(st)),
+            ConstFold::NotConst
+        ) {
+            return Some(TypeExpr::Named {
+                name: "int".to_string(),
+                span: expr.span(),
+            });
+        }
+        if const_float_value_with(expr, &self.const_values, 0, Some(st)).is_some() {
+            return Some(TypeExpr::Named {
+                name: "float64".to_string(),
+                span: expr.span(),
+            });
+        }
+        if let Expr::Call { callee, .. } = unwrap_parens(expr) {
+            if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                if matches!(name.as_str(), "len" | "cap")
+                    && self.lookup_binding(st, name).is_none()
+                    && !self.fns.contains_key(name.as_str())
+                {
+                    return Some(TypeExpr::Named {
+                        name: "int".to_string(),
+                        span: expr.span(),
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    fn check_return_numeric_type_mismatch(
+        &mut self,
+        st: &FnState,
+        resolved_res_ty: &TypeExpr,
+        val: &Expr,
+    ) {
+        let TypeExpr::Named {
+            name: res_name,
+            ..
+        } = resolved_res_ty
+        else {
+            return;
+        };
+        let Some(res_canon) = canonical_numeric_type_name(res_name) else {
+            return;
+        };
+        let Some(val_ty) = self.ty_of_expr(st, val) else {
+            // Untyped constant expressions (`return 1` in `fn() float64` or
+            // `fn() int8`) have `ty_of_expr == None` and are valid in Go
+            // when in range (range-checked by `check_const_overflow_init`).
+            return;
+        };
+        let resolved_val_ty = self.resolve_type_alias(&val_ty);
+        let TypeExpr::Named {
+            name: val_name,
+            ..
+        } = &resolved_val_ty
+        else {
+            return;
+        };
+        let Some(val_canon) = canonical_numeric_type_name(val_name) else {
+            return;
+        };
+        let res_is_float = matches!(res_canon, "float32" | "float64");
+        let val_is_float = matches!(val_canon, "float32" | "float64");
+        if !res_is_float && val_is_float {
+            // `buildable.rs::check_return` (#577 C10) already rejects
+            // `(OpKind::Int, OpKind::Float)` with HYB-E1002; avoid emitting a
+            // duplicate diagnostic on the same return expression.
+            return;
+        }
+        if res_canon != val_canon {
+            let msg = format!(
+                "cannot return `{}` (type `{}`) as `{}` in return statement — Go requires an explicit numeric conversion `{}` (HYB-E1002)",
+                val.render(),
+                val_canon,
+                res_canon,
+                res_canon
+            );
+            self.diags.push(
+                Diagnostic::error("HYB-E1002", self.path.clone(), val.span(), msg)
+                    .with_rule("BUILDABLE")
+                    .with_notes(vec![
+                        format!(
+                            "why: Go does not implicitly convert between distinct numeric types (`cannot use {} (variable of type {}) as {} value in return statement`)",
+                            val.render(),
+                            val_canon,
+                            res_canon
+                        ),
+                        format!(
+                            "fix: convert the returned value explicitly (`return {}({})`) or change the declared result type to `{}`",
+                            res_name,
+                            val.render(),
+                            val_name
+                        ),
+                    ]),
+            );
         }
     }
 
@@ -398,7 +529,7 @@ impl<'a> Checker<'a> {
                 self.check_expr_emit_guard(st, rhs);
                 match op {
                     BinOp::Eq | BinOp::Ne => self.check_equality(st, lhs, rhs, *span),
-                    BinOp::Shl | BinOp::Shr => self.check_negative_shift(rhs, *span),
+                    BinOp::Shl | BinOp::Shr => self.check_negative_shift(rhs, *span, Some(st)),
                     _ => {}
                 }
                 self.check_binary_const_overflow(st, *op, lhs, rhs);
@@ -469,7 +600,7 @@ impl<'a> Checker<'a> {
                                     &format!("{}.{}", sname, f.name),
                                     f_ty,
                                     &f.value,
-                                    None,
+                                    Some(st),
                                 );
                             }
                         }
@@ -491,7 +622,12 @@ impl<'a> Checker<'a> {
                     let elem_ty = *elem_ty.clone();
                     let resolved_elem = self.resolve_type_alias(&elem_ty);
                     for i in items {
-                        self.check_const_overflow_init("slice literal element", &elem_ty, i, None);
+                        self.check_const_overflow_init(
+                            "slice literal element",
+                            &elem_ty,
+                            i,
+                            Some(st),
+                        );
                         if let Expr::SliceLit {
                             elem: None,
                             items: sub_items,
@@ -525,8 +661,8 @@ impl<'a> Checker<'a> {
                 let val_ty = *value.clone();
                 self.check_map_literal_duplicate_keys(entries, Some(st));
                 for (k, v) in entries {
-                    self.check_const_overflow_init("map literal key", &key_ty, k, None);
-                    self.check_const_overflow_init("map literal value", &val_ty, v, None);
+                    self.check_const_overflow_init("map literal key", &key_ty, k, Some(st));
+                    self.check_const_overflow_init("map literal value", &val_ty, v, Some(st));
                     self.check_expr_emit_guard(st, k);
                     self.check_expr_emit_guard(st, v);
                 }
@@ -591,7 +727,7 @@ impl<'a> Checker<'a> {
     fn check_call_const_overflow(&mut self, st: &FnState, callee: &Expr, args: &[CallArg]) {
         let unwrapped = crate::model::unwrap_parens(callee);
 
-        // 1. Built-in: append(slice, items...) and delete(map, key)
+        // 1. Built-ins: append(slice, items...) and delete(map, key)
         if let Expr::Ident { name, .. } = unwrapped {
             if name == "append" {
                 if let Some(first_arg) = args.first() {
@@ -605,7 +741,12 @@ impl<'a> Checker<'a> {
                     if let Some(elem_ty) = elem_ty {
                         for a in &args[1..] {
                             if !a.spread {
-                                self.check_const_overflow_init("argument of append", &elem_ty, &a.value, Some(st));
+                                self.check_const_overflow_init(
+                                    "argument of append",
+                                    &elem_ty,
+                                    &a.value,
+                                    Some(st),
+                                );
                             }
                         }
                     }
@@ -624,11 +765,61 @@ impl<'a> Checker<'a> {
                             });
                         if let Some(key_ty) = key_ty {
                             let resolved_key = self.resolve_type_alias(&key_ty);
-                            self.check_const_overflow_init("argument to delete", &resolved_key, &key_arg.value, Some(st));
+                            self.check_const_overflow_init(
+                                "argument to delete",
+                                &resolved_key,
+                                &key_arg.value,
+                                Some(st),
+                            );
                         }
                     }
                 }
                 return;
+            }
+            // Explicit fixed-width integer type conversion `T(const_expr)`
+            // (including type aliases `type narrow = uint8; narrow(-1)`): Go
+            // rejects constant conversions that overflow or truncate `T` at
+            // compile time (`cannot convert … (untyped int constant …) to type T`).
+            if self.lookup_binding(st, name).is_none()
+                && !self.fns.contains_key(name.as_str())
+                && args.len() == 1
+                && !args[0].spread
+            {
+                let conv_ty = TypeExpr::Named {
+                    name: name.clone(),
+                    span: callee.span(),
+                };
+                let resolved_conv = self.resolve_type_alias(&conv_ty);
+                if let TypeExpr::Named { name: rname, .. } = &resolved_conv {
+                    if let Some((lo, hi)) = fixed_width_int_range(rname) {
+                        let arg_expr = &args[0].value;
+                        let is_spec_sub64_wrap = matches!(
+                            name.as_str(),
+                            "u8" | "i8" | "u16" | "i16" | "u32" | "i32"
+                        );
+                        let is_int_const = !is_spec_sub64_wrap
+                            && !matches!(
+                                const_int_fold_with(arg_expr, &self.const_values, 0, Some(st)),
+                                ConstFold::NotConst
+                            );
+                        let bad_float_const = const_float_value_with(
+                            arg_expr,
+                            &self.const_values,
+                            0,
+                            Some(st),
+                        )
+                        .is_some_and(|f| !(f.fract() == 0.0 && f >= lo as f64 && f <= hi as f64));
+                        if is_int_const || bad_float_const {
+                            self.check_const_overflow_init(
+                                &format!("type conversion `{}`", name),
+                                &resolved_conv,
+                                arg_expr,
+                                Some(st),
+                            );
+                        }
+                        return;
+                    }
+                }
             }
         }
 
@@ -637,11 +828,23 @@ impl<'a> Checker<'a> {
             Expr::Ident { name, .. } => {
                 if self.lookup_binding(st, name).is_none() {
                     self.fns.get(name.as_str()).map(|decl| {
-                        decl.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect()
+                        decl.params
+                            .iter()
+                            .map(|p| (p.name.clone(), p.ty.clone()))
+                            .collect()
                     })
                 } else if let Some(b) = self.lookup_binding(st, name) {
-                    if let Some(TypeExpr::Fn { params, .. }) = &b.ty {
-                        Some(params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect())
+                    if let Some(b_ty) = &b.ty {
+                        if let TypeExpr::Fn { params, .. } = self.resolve_type_alias(b_ty) {
+                            Some(
+                                params
+                                    .iter()
+                                    .map(|p| (p.name.clone(), p.ty.clone()))
+                                    .collect(),
+                            )
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }
@@ -649,13 +852,18 @@ impl<'a> Checker<'a> {
                     None
                 }
             }
-            Expr::Field { base, name: method_name, .. } => {
-                let is_pkg = if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) {
-                    self.lookup_binding(st, pkg).is_none()
-                        && self.fns.contains_key(&format!("{}.{}", pkg, method_name))
-                } else {
-                    false
-                };
+            Expr::Field {
+                base,
+                name: method_name,
+                ..
+            } => {
+                let is_pkg =
+                    if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) {
+                        self.lookup_binding(st, pkg).is_none()
+                            && self.fns.contains_key(&format!("{}.{}", pkg, method_name))
+                    } else {
+                        false
+                    };
 
                 if is_pkg {
                     let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) else {
@@ -663,7 +871,10 @@ impl<'a> Checker<'a> {
                     };
                     let full = format!("{}.{}", pkg, method_name);
                     self.fns.get(full.as_str()).map(|decl| {
-                        decl.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect()
+                        decl.params
+                            .iter()
+                            .map(|p| (p.name.clone(), p.ty.clone()))
+                            .collect()
                     })
                 } else {
                     let recv_struct = match self.shape_of_expr(st, base) {
@@ -686,12 +897,20 @@ impl<'a> Checker<'a> {
                             .find(|((_, m), _)| m == method_name)
                             .map(|(_, d)| *d)
                     };
-                    decl.map(|d| d.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect())
+                    decl.map(|d| {
+                        d.params
+                            .iter()
+                            .map(|p| (p.name.clone(), p.ty.clone()))
+                            .collect()
+                    })
                 }
             }
-            Expr::FnLit { params, .. } => {
-                Some(params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect())
-            }
+            Expr::FnLit { params, .. } => Some(
+                params
+                    .iter()
+                    .map(|p| (p.name.clone(), p.ty.clone()))
+                    .collect(),
+            ),
             _ => None,
         };
 
@@ -711,7 +930,7 @@ impl<'a> Checker<'a> {
                         &format!("parameter `{}`", p_name),
                         &resolved_ty,
                         &a.value,
-                        None,
+                        Some(st),
                     );
                 }
             }
@@ -816,8 +1035,8 @@ impl<'a> Checker<'a> {
     // B4 — constant negative shift counts (HYB-E6005)
     // ------------------------------------------------------------------
 
-    fn check_negative_shift(&mut self, rhs: &Expr, span: Span) {
-        let Some(v) = const_int_value(rhs) else {
+    fn check_negative_shift(&mut self, rhs: &Expr, span: Span, st: Option<&FnState>) {
+        let Some(v) = const_int_value_with(rhs, &self.const_values, st) else {
             return;
         };
         if v >= 0 {
@@ -1165,13 +1384,12 @@ impl<'a> Checker<'a> {
             );
         }
         // 1) A constant integer expression: must be non-negative.
-        let direct_or_folded = const_int_value(len).or_else(|| {
-            if matches!(unwrap_parens(len), Expr::Ident { .. }) {
-                None
-            } else {
-                self.const_int_value_at(len, span.start, 0)
-            }
-        });
+        let direct_or_folded = if matches!(unwrap_parens(len), Expr::Ident { .. }) {
+            None
+        } else {
+            const_int_value_with(len, &self.const_values, st)
+                .or_else(|| self.const_int_value_at(len, span.start, 0))
+        };
         if let Some(v) = direct_or_folded {
             if v < 0 {
                 let msg = format!(
@@ -1189,22 +1407,24 @@ impl<'a> Checker<'a> {
             return;
         }
         // 2) A non-integer constant (`[2.5]int`) — Go: truncated.
-        if let Some(f) = const_float_value(len) {
-            if f.fract() != 0.0 {
-                let msg = format!(
-                    "array length `{}` is not an integer — Go rejects this (`invalid array length`), so the emitted module would not build (HYB-E6004)",
-                    len.render()
-                );
-                self.diags.push(
-                    Diagnostic::error("HYB-E6004", self.path.clone(), span, msg).with_notes(vec![
-                        "why: an array length must be an integer constant in Go (issue #201)"
-                            .to_string(),
-                        "fix: round the length to an integer constant, or declare a slice (`[]T`)"
-                            .to_string(),
-                    ]),
-                );
+        if !matches!(unwrap_parens(len), Expr::Ident { .. }) {
+            if let Some(f) = const_float_value_with(len, &self.const_values, 0, st) {
+                if f.fract() != 0.0 || f < 0.0 {
+                    let msg = format!(
+                        "array length `{}` is not a non-negative integer — Go rejects this (`invalid array length`), so the emitted module would not build (HYB-E6004)",
+                        len.render()
+                    );
+                    self.diags.push(
+                        Diagnostic::error("HYB-E6004", self.path.clone(), span, msg).with_notes(vec![
+                            "why: an array length must be a non-negative integer constant in Go (issue #201)"
+                                .to_string(),
+                            "fix: round the length to a non-negative integer constant, or declare a slice (`[]T`)"
+                                .to_string(),
+                        ]),
+                    );
+                }
+                return;
             }
-            return;
         }
         // 2b) A boolean, string, or comparison/logical expression (`[true]int`,
         // `[!true]int`, `[1 == 2]int`, `["hi"]int`) is never an integer length.
@@ -2601,3 +2821,23 @@ fn is_primitive_receiver(name: &str) -> bool {
             | "error"
     )
 }
+
+fn canonical_numeric_type_name(name: &str) -> Option<&'static str> {
+    match name {
+        "int" | "isize" => Some("int"),
+        "uint" | "usize" => Some("uint"),
+        "uintptr" => Some("uintptr"),
+        "int8" | "i8" => Some("int8"),
+        "int16" | "i16" => Some("int16"),
+        "int32" | "i32" | "rune" | "char" => Some("int32"),
+        "int64" | "i64" => Some("int64"),
+        "uint8" | "u8" | "byte" => Some("uint8"),
+        "uint16" | "u16" => Some("uint16"),
+        "uint32" | "u32" => Some("uint32"),
+        "uint64" | "u64" => Some("uint64"),
+        "float32" | "f32" => Some("float32"),
+        "float64" | "f64" => Some("float64"),
+        _ => None,
+    }
+}
+

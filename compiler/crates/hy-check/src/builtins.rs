@@ -9,7 +9,7 @@
 //! Literal-only scope mirrors the landed #149 / #148 const-arith checks:
 //! variable operands stay a run-time concern, matching Go.
 
-use crate::model::{unwrap_parens, Checker};
+use crate::model::{unwrap_parens, Checker, FnState};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{Expr, ForKind, LitKind, Place, PlaceKind, SelectArmKind, Stmt, UnOp};
 
@@ -17,9 +17,9 @@ impl<'a> Checker<'a> {
     /// Pass-B entry: HYB-E2001 on `defer` + HYB-E2005 on builtin calls.
     /// Nested block bodies are NOT recursed — `walk::flatten` already lists
     /// those statements (same discipline as `arith.rs`).
-    pub(crate) fn check_stmt_builtins(&mut self, stmt: &Stmt) {
+    pub(crate) fn check_stmt_builtins(&mut self, st: &FnState, stmt: &Stmt) {
         self.check_stmt_defer_call(stmt);
-        self.check_stmt_builtin_args_inner(stmt, /*deep=*/ false);
+        self.check_stmt_builtin_args_inner(st, stmt, /*deep=*/ false);
     }
 
     pub(crate) fn check_stmt_defer_call(&mut self, stmt: &Stmt) {
@@ -48,27 +48,27 @@ impl<'a> Checker<'a> {
         );
     }
 
-    fn check_stmt_builtin_args_inner(&mut self, stmt: &Stmt, deep: bool) {
+    fn check_stmt_builtin_args_inner(&mut self, st: &FnState, stmt: &Stmt, deep: bool) {
         match stmt {
             Stmt::Local(l) => {
                 for v in &l.values {
-                    self.check_expr_builtin_args(v);
+                    self.check_expr_builtin_args(st, v);
                 }
             }
             Stmt::Assign {
                 targets, values, ..
             } => {
                 for t in targets {
-                    self.check_place_builtin_args(t);
+                    self.check_place_builtin_args(st, t);
                 }
                 for v in values {
-                    self.check_expr_builtin_args(v);
+                    self.check_expr_builtin_args(st, v);
                 }
             }
-            Stmt::Expr { expr, .. } => self.check_expr_builtin_args(expr),
+            Stmt::Expr { expr, .. } => self.check_expr_builtin_args(st, expr),
             Stmt::Send { chan, value, .. } => {
-                self.check_expr_builtin_args(chan);
-                self.check_expr_builtin_args(value);
+                self.check_expr_builtin_args(st, chan);
+                self.check_expr_builtin_args(st, value);
             }
             Stmt::If {
                 init,
@@ -79,72 +79,72 @@ impl<'a> Checker<'a> {
             } => {
                 if deep {
                     if let Some(init) = init {
-                        self.check_stmt_builtin_args_inner(init, true);
+                        self.check_stmt_builtin_args_inner(st, init, true);
                     }
                 }
-                self.check_expr_builtin_args(cond);
+                self.check_expr_builtin_args(st, cond);
                 if deep {
                     for s in &then.stmts {
-                        self.check_stmt_builtin_args_inner(s, true);
+                        self.check_stmt_builtin_args_inner(st, s, true);
                     }
                     if let Some(other) = otherwise {
-                        self.check_stmt_builtin_args_inner(other, true);
+                        self.check_stmt_builtin_args_inner(st, other, true);
                     }
                 }
             }
             Stmt::For { kind, body, .. } => {
                 match kind {
-                    ForKind::While { cond } => self.check_expr_builtin_args(cond),
+                    ForKind::While { cond } => self.check_expr_builtin_args(st, cond),
                     ForKind::Range { lo, hi, .. } => {
-                        self.check_expr_builtin_args(lo);
-                        self.check_expr_builtin_args(hi);
+                        self.check_expr_builtin_args(st, lo);
+                        self.check_expr_builtin_args(st, hi);
                     }
-                    ForKind::Iterate { expr, .. } => self.check_expr_builtin_args(expr),
+                    ForKind::Iterate { expr, .. } => self.check_expr_builtin_args(st, expr),
                     ForKind::Infinite => {}
                 }
                 if deep {
                     for s in &body.stmts {
-                        self.check_stmt_builtin_args_inner(s, true);
+                        self.check_stmt_builtin_args_inner(st, s, true);
                     }
                 }
             }
             Stmt::Return { values, .. } => {
                 for v in values {
-                    self.check_expr_builtin_args(v);
+                    self.check_expr_builtin_args(st, v);
                 }
             }
             Stmt::Task { callee, args, .. } => {
-                self.check_expr_builtin_args(callee);
+                self.check_expr_builtin_args(st, callee);
                 for a in args {
-                    self.check_expr_builtin_args(&a.value);
+                    self.check_expr_builtin_args(st, &a.value);
                 }
             }
             Stmt::Managed { body, .. } => {
                 if deep {
                     for s in &body.stmts {
-                        self.check_stmt_builtin_args_inner(s, true);
+                        self.check_stmt_builtin_args_inner(st, s, true);
                     }
                 }
             }
             Stmt::Match { subject, arms, .. } => {
-                self.check_expr_builtin_args(subject);
+                self.check_expr_builtin_args(st, subject);
                 for arm in arms {
                     if let Some(g) = &arm.guard {
-                        self.check_expr_builtin_args(g);
+                        self.check_expr_builtin_args(st, g);
                     }
                     if deep {
                         for s in &arm.body.stmts {
-                            self.check_stmt_builtin_args_inner(s, true);
+                            self.check_stmt_builtin_args_inner(st, s, true);
                         }
                     }
                 }
             }
-            Stmt::Defer { call, .. } => self.check_expr_builtin_args(call),
+            Stmt::Defer { call, .. } => self.check_expr_builtin_args(st, call),
             Stmt::Break { .. } | Stmt::Continue { .. } => {}
             Stmt::Block { block, .. } => {
                 if deep {
                     for s in &block.stmts {
-                        self.check_stmt_builtin_args_inner(s, true);
+                        self.check_stmt_builtin_args_inner(st, s, true);
                     }
                 }
             }
@@ -152,15 +152,15 @@ impl<'a> Checker<'a> {
                 for arm in arms {
                     match &arm.kind {
                         SelectArmKind::Send { chan, value, .. } => {
-                            self.check_expr_builtin_args(chan);
-                            self.check_expr_builtin_args(value);
+                            self.check_expr_builtin_args(st, chan);
+                            self.check_expr_builtin_args(st, value);
                         }
-                        SelectArmKind::Recv { chan, .. } => self.check_expr_builtin_args(chan),
+                        SelectArmKind::Recv { chan, .. } => self.check_expr_builtin_args(st, chan),
                         SelectArmKind::Default => {}
                     }
                     if deep {
                         for s in &arm.body.stmts {
-                            self.check_stmt_builtin_args_inner(s, true);
+                            self.check_stmt_builtin_args_inner(st, s, true);
                         }
                     }
                 }
@@ -168,23 +168,23 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_place_builtin_args(&mut self, place: &Place) {
+    fn check_place_builtin_args(&mut self, st: &FnState, place: &Place) {
         match &place.kind {
             PlaceKind::Index { base, index } => {
-                self.check_place_builtin_args(base);
-                self.check_expr_builtin_args(index);
+                self.check_place_builtin_args(st, base);
+                self.check_expr_builtin_args(st, index);
             }
             PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
-                self.check_place_builtin_args(base);
+                self.check_place_builtin_args(st, base);
             }
             PlaceKind::Ident(_) => {}
         }
     }
 
-    pub(crate) fn check_expr_builtin_args(&mut self, expr: &Expr) {
+    pub(crate) fn check_expr_builtin_args(&mut self, st: &FnState, expr: &Expr) {
         match expr {
             Expr::Call { callee, args, span } => {
-                self.check_expr_builtin_args(callee);
+                self.check_expr_builtin_args(st, callee);
                 let is_type_arg_builtin = matches!(
                     unwrap_parens(callee),
                     Expr::Ident { name, .. }
@@ -194,36 +194,36 @@ impl<'a> Checker<'a> {
                     if is_type_arg_builtin && i == 0 {
                         continue;
                     }
-                    self.check_expr_builtin_args(&a.value);
+                    self.check_expr_builtin_args(st, &a.value);
                 }
                 if let Expr::Ident { name, .. } = unwrap_parens(callee) {
-                    self.check_builtin_call(name, args, *span);
+                    self.check_builtin_call(st, name, args, *span);
                 }
             }
             Expr::Binary { lhs, rhs, .. } => {
-                self.check_expr_builtin_args(lhs);
-                self.check_expr_builtin_args(rhs);
+                self.check_expr_builtin_args(st, lhs);
+                self.check_expr_builtin_args(st, rhs);
             }
             Expr::Unary { operand, .. }
             | Expr::AddrOf { operand, .. }
             | Expr::Move { operand, .. }
             | Expr::Try { operand, .. }
-            | Expr::Paren { inner: operand, .. } => self.check_expr_builtin_args(operand),
-            Expr::Receive { chan, .. } => self.check_expr_builtin_args(chan),
+            | Expr::Paren { inner: operand, .. } => self.check_expr_builtin_args(st, operand),
+            Expr::Receive { chan, .. } => self.check_expr_builtin_args(st, chan),
             Expr::Index { base, index, .. } => {
-                self.check_expr_builtin_args(base);
-                self.check_expr_builtin_args(index);
+                self.check_expr_builtin_args(st, base);
+                self.check_expr_builtin_args(st, index);
             }
             Expr::Slice { base, lo, hi, .. } => {
-                self.check_expr_builtin_args(base);
+                self.check_expr_builtin_args(st, base);
                 if let Some(lo) = lo {
-                    self.check_expr_builtin_args(lo);
+                    self.check_expr_builtin_args(st, lo);
                 }
                 if let Some(hi) = hi {
-                    self.check_expr_builtin_args(hi);
+                    self.check_expr_builtin_args(st, hi);
                 }
             }
-            Expr::Field { base, .. } => self.check_expr_builtin_args(base),
+            Expr::Field { base, .. } => self.check_expr_builtin_args(st, base),
             Expr::StructLit { ty, fields, span } => {
                 if let Some(t @ hy_syntax::TypeExpr::Chan { .. }) = ty {
                     let ty_str = t.render();
@@ -235,43 +235,49 @@ impl<'a> Checker<'a> {
                     );
                 }
                 for f in fields {
-                    self.check_expr_builtin_args(&f.value);
+                    self.check_expr_builtin_args(st, &f.value);
                 }
             }
             Expr::SliceLit { items, .. } => {
                 for it in items {
-                    self.check_expr_builtin_args(it);
+                    self.check_expr_builtin_args(st, it);
                 }
             }
             Expr::MapLit { entries, .. } => {
                 for (k, v) in entries {
-                    self.check_expr_builtin_args(k);
-                    self.check_expr_builtin_args(v);
+                    self.check_expr_builtin_args(st, k);
+                    self.check_expr_builtin_args(st, v);
                 }
             }
             Expr::Interp { parts, .. } => {
                 for p in parts {
                     if let hy_syntax::InterpPart::Expr(e) = p {
-                        self.check_expr_builtin_args(e);
+                        self.check_expr_builtin_args(st, e);
                     }
                 }
             }
             Expr::FnLit { body, .. } => {
                 // Closure bodies are not flattened into Pass B — deep-walk.
                 for stmt in &body.stmts {
-                    self.check_stmt_builtin_args_inner(stmt, /*deep=*/ true);
+                    self.check_stmt_builtin_args_inner(st, stmt, /*deep=*/ true);
                 }
             }
             Expr::Ident { .. } | Expr::Lit { .. } => {}
         }
     }
 
-    fn check_builtin_call(&mut self, name: &str, args: &[hy_syntax::CallArg], span: Span) {
+    fn check_builtin_call(
+        &mut self,
+        st: &FnState,
+        name: &str,
+        args: &[hy_syntax::CallArg],
+        span: Span,
+    ) {
         if self.fns.contains_key(name) {
             return;
         }
         match name {
-            "make" => self.check_make_args(args, span),
+            "make" => self.check_make_args(st, args, span),
             "len" => self.check_len_cap_args("len", args, span, /*cap=*/ false),
             "cap" => self.check_len_cap_args("cap", args, span, /*cap=*/ true),
             "delete" => {
@@ -475,7 +481,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_make_args(&mut self, args: &[hy_syntax::CallArg], span: Span) {
+    fn check_make_args(&mut self, st: &FnState, args: &[hy_syntax::CallArg], span: Span) {
         if args.is_empty() {
             self.emit_builtin(
                 span,
@@ -523,7 +529,7 @@ impl<'a> Checker<'a> {
         }
         let mut evaluated_sizes = Vec::new();
         for arg in args.iter().skip(1) {
-            match classify_make_size(&arg.value) {
+            match classify_make_size(&arg.value, &self.const_values, Some(st)) {
                 MakeSize::Ok(v) => evaluated_sizes.push(Some(v)),
                 MakeSize::NonLiteral => evaluated_sizes.push(None),
                 MakeSize::Negative => {
@@ -615,7 +621,20 @@ enum MakeSize {
     BadLiteral(&'static str),
 }
 
-fn classify_make_size(e: &Expr) -> MakeSize {
+fn classify_make_size(
+    e: &Expr,
+    consts: &std::collections::HashMap<String, &Expr>,
+    st: Option<&FnState>,
+) -> MakeSize {
+    match crate::const_overflow::const_int_fold_with(e, consts, 0, st) {
+        crate::const_overflow::ConstFold::Val(n) if n < 0 => return MakeSize::Negative,
+        crate::const_overflow::ConstFold::Val(n) => return MakeSize::Ok(n),
+        crate::const_overflow::ConstFold::TooBig => return MakeSize::BadLiteral("integer"),
+        crate::const_overflow::ConstFold::NotConst => {}
+    }
+    if crate::const_overflow::const_float_value_with(e, consts, 0, st).is_some() {
+        return MakeSize::BadLiteral("float");
+    }
     let bare = unwrap_parens(e);
     match bare {
         Expr::Lit { kind, .. } => match kind {

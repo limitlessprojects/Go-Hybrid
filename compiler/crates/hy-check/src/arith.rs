@@ -713,7 +713,13 @@ fn divisor_int_fold(
     }
     match bare {
         Expr::Ident { name, .. } => {
-            if st.env_lookup(name).is_some() || defined.contains(name) {
+            if defined.contains(name) {
+                return ConstFold::NotConst;
+            }
+            if let Some(init) = st.local_consts.get(name) {
+                return divisor_int_fold(init, consts, st, defined, depth + 1);
+            }
+            if st.env_lookup(name).is_some() {
                 return ConstFold::NotConst;
             }
             if let Some(v) = consts.get(name.as_str()) {

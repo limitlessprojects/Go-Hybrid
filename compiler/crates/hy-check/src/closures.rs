@@ -67,6 +67,7 @@ struct NestedClosure<'a> {
     saved_scopes: Vec<std::collections::HashMap<String, Binding>>,
     saved_aliases: std::collections::HashMap<String, String>,
     saved_share: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    saved_local_consts: std::collections::HashMap<String, Expr>,
     overwritten: std::collections::HashSet<(usize, String)>,
 }
 
@@ -84,6 +85,7 @@ fn push_nested_closure<'a>(
         saved_scopes: st.scopes.clone(),
         saved_aliases: st.aliases.clone(),
         saved_share: st.may_share.clone(),
+        saved_local_consts: st.local_consts.clone(),
         overwritten: std::collections::HashSet::new(),
     });
 }
@@ -214,6 +216,7 @@ fn check_one_closure(
         env,
         aliases: st.aliases.clone(),
         may_share: st.may_share.clone(),
+        local_consts: st.local_consts.clone(),
         ..FnState::default()
     };
     for (k, b) in cst.env.iter_mut() {
@@ -226,6 +229,7 @@ fn check_one_closure(
     }
     for p in params {
         let shape = ck.shape_of_type(&p.ty);
+        cst.local_consts.remove(&p.name);
         cst.env.insert(
             p.name.clone(),
             Binding {
@@ -247,6 +251,7 @@ fn check_one_closure(
         let shape = ck.shape_of_type(&r.ty);
         if let Some(name) = &r.name {
             if name != "_" {
+                cst.local_consts.remove(name);
                 cst.env.insert(
                     name.clone(),
                     Binding {
@@ -273,6 +278,7 @@ fn check_one_closure(
     for nc in nested {
         let mut snap = cst.clone();
         snap.scopes = nc.saved_scopes;
+        snap.local_consts = nc.saved_local_consts;
         // A nested closure checks against ITS OWN named results: reset the
         // enclosing closure's seeded state, check_one_closure re-seeds from
         // nresults (a bare return inside the nested closure must not record
@@ -619,6 +625,16 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         None
                     };
                     ck.define_binding(st, name, shape, ty, immutable, managed, is_let);
+                    if immutable && !is_let {
+                        if !matches!(
+                            crate::model::unwrap_parens(value),
+                            Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
+                        ) {
+                            st.local_consts.insert(name.clone(), value.clone());
+                        } else {
+                            st.local_consts.remove(name);
+                        }
+                    }
                     if let Some(origin) = &moved_non_owned {
                         if let Some(b) = st.env_lookup_mut(name) {
                             if b.non_owned_origin.is_none() {

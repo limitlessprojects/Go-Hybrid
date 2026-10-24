@@ -697,7 +697,26 @@ impl<'a> Checker<'a> {
             }),
             Expr::Move { operand, .. }
             | Expr::Try { operand, .. }
-            | Expr::Paren { inner: operand, .. } => self.ty_of_expr(st, operand),
+            | Expr::Paren { inner: operand, .. }
+            | Expr::Unary {
+                op: hy_syntax::UnOp::Neg,
+                operand,
+                ..
+            } => self.ty_of_expr(st, operand),
+            Expr::Binary { op, lhs, rhs, .. } => match op {
+                hy_syntax::BinOp::Add
+                | hy_syntax::BinOp::Sub
+                | hy_syntax::BinOp::Mul
+                | hy_syntax::BinOp::Div
+                | hy_syntax::BinOp::Mod
+                | hy_syntax::BinOp::BitAnd
+                | hy_syntax::BinOp::BitOr
+                | hy_syntax::BinOp::BitXor => {
+                    self.ty_of_expr(st, lhs).or_else(|| self.ty_of_expr(st, rhs))
+                }
+                hy_syntax::BinOp::Shl | hy_syntax::BinOp::Shr => self.ty_of_expr(st, lhs),
+                _ => None,
+            },
             Expr::Call { callee, args, span } => match crate::model::unwrap_parens(callee) {
                 Expr::FnLit { results, .. } => results.first().map(|r| r.ty.clone()),
                 Expr::Ident { name, .. } => {
@@ -737,11 +756,20 @@ impl<'a> Checker<'a> {
                         }
                     }
                     let head = Self::base_named_type_str(name);
-                    self.fns
-                        .get(name.as_str())
-                        .or_else(|| self.fns.get(head))
-                        .and_then(|f| f.results.first())
-                        .map(|r| r.ty.clone())
+                    if let Some(f) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
+                        return f.results.first().map(|r| r.ty.clone());
+                    }
+                    if args.len() == 1
+                        && (crate::const_init::is_conversion_type_name(name)
+                            || crate::const_overflow::fixed_width_int_range(name).is_some()
+                            || self.type_aliases.contains_key(name.as_str()))
+                    {
+                        return Some(TypeExpr::Named {
+                            name: name.clone(),
+                            span: *span,
+                        });
+                    }
+                    None
                 }
                 Expr::Field { base, name, .. } => {
                     let head = Self::base_named_type_str(name);
@@ -795,23 +823,6 @@ impl<'a> Checker<'a> {
                     }
                 }
             },
-            Expr::Binary { op, lhs, rhs, .. } => {
-                if matches!(
-                    op,
-                    hy_syntax::BinOp::Add
-                        | hy_syntax::BinOp::Sub
-                        | hy_syntax::BinOp::Mul
-                        | hy_syntax::BinOp::Div
-                        | hy_syntax::BinOp::Mod
-                        | hy_syntax::BinOp::BitAnd
-                        | hy_syntax::BinOp::BitOr
-                        | hy_syntax::BinOp::BitXor
-                ) {
-                    self.ty_of_expr(st, lhs).or_else(|| self.ty_of_expr(st, rhs))
-                } else {
-                    None
-                }
-            }
             _ => None,
         }
     }
