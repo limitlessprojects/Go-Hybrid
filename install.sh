@@ -138,7 +138,9 @@ if [ "$PAYLOAD_BIN" = "$LAUNCHER_BIN" ]; then
     exit 1
 fi
 rm -rf "$INSTALL_DIR/runtime" "$INSTALL_DIR/bin"
-cp -R "$TMP/hybrid-${TAG}/runtime" "$INSTALL_DIR/runtime"
+# Keep the packaged static library newer than its sources: the compiler uses
+# these timestamps to decide whether it can run without rebuilding via Cargo.
+cp -pR "$TMP/hybrid-${TAG}/runtime" "$INSTALL_DIR/runtime"
 mkdir -p "$INSTALL_DIR/bin"
 cp "$TMP/hybrid-${TAG}/hyb" "$INSTALL_DIR/bin/hyb"
 chmod +x "$INSTALL_DIR/bin/hyb"

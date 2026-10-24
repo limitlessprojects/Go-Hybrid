@@ -151,6 +151,34 @@ class LauncherRuntimeTests(unittest.TestCase):
         self.install_fixture()
         self.assertEqual(self.probe()["runtime"], str(self.install / "runtime"))
 
+    def test_install_preserves_prebuilt_runtime_freshness(self):
+        # The compiler compares the static library's mtime with Cargo.toml and
+        # Rust sources before deciding whether a Rust-free install needs Cargo.
+        payload = self.root / "hybrid-v0.0.0-test"
+        crate = payload / "runtime/rust/hyrt"
+        timestamps = {
+            "Cargo.toml": 1600000000,
+            "src/lib.rs": 1600000000,
+            "target/release/libhyrt.a": 1700000000,
+        }
+        for relative, timestamp in timestamps.items():
+            path = crate / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("offline runtime fixture\n", encoding="utf-8")
+            os.utime(path, (timestamp, timestamp))
+        asset = next((self.root / "release").glob("*.tar.gz"))
+        with tarfile.open(asset, "w:gz") as archive:
+            archive.add(payload, arcname=payload.name)
+        digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+        asset.with_name(asset.name + ".sha256").write_text(f"{digest}  {asset.name}\n")
+
+        self.install_fixture()
+
+        for relative, timestamp in timestamps.items():
+            with self.subTest(file=relative):
+                installed = self.install / "runtime/rust/hyrt" / relative
+                self.assertEqual(installed.stat().st_mtime, timestamp)
+
     def test_empty_runtime_uses_packaged_default(self):
         self.install_fixture()
         self.assertEqual(self.probe(HYB_RUNTIME_DIR="")["runtime"], str(self.install / "runtime"))
