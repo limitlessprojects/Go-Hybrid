@@ -28,7 +28,7 @@
 
 use crate::model::{Binding, Checker, FnState, TypeShape};
 use hy_syntax::ForKind::*;
-use hy_syntax::{Block, Expr, LocalKind, SelectArmKind, Stmt};
+use hy_syntax::{Block, Expr, ForKind, LocalKind, MatchPattern, SelectArmKind, Stmt};
 
 /// Check the boundary statements of every closure body reachable from
 /// `body` (one env per closure, captures included). Called once per
@@ -1784,6 +1784,52 @@ fn update_pre_defer_peers(
                 }
             }
         }
+        Stmt::For {
+            kind: ForKind::Iterate { vars, expr },
+            ..
+        } => {
+            let mut refs = Vec::new();
+            expr_referenced_bindings(expr, &mut refs);
+            for target in vars {
+                if target == "_" {
+                    continue;
+                }
+                sever_peer_node(peers, target);
+                for r in &refs {
+                    let may_share = ck
+                        .lookup_binding(st, r)
+                        .map(|b| ck.shape_may_share(&b.shape))
+                        .unwrap_or(true);
+                    if may_share {
+                        link_peer_nodes(peers, target, r);
+                    }
+                }
+            }
+        }
+        Stmt::Match { subject, arms, .. } => {
+            let mut refs = Vec::new();
+            expr_referenced_bindings(subject, &mut refs);
+            for arm in arms {
+                if let MatchPattern::Path {
+                    binding: Some(target),
+                    ..
+                } = &arm.pattern
+                {
+                    if target != "_" {
+                        sever_peer_node(peers, target);
+                        for r in &refs {
+                            let may_share = ck
+                                .lookup_binding(st, r)
+                                .map(|b| ck.shape_may_share(&b.shape))
+                                .unwrap_or(true);
+                            if may_share {
+                                link_peer_nodes(peers, target, r);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -1836,6 +1882,51 @@ fn update_post_defer_watch(
                 }
             }
         }
+        Stmt::For {
+            kind: ForKind::Iterate { vars, expr },
+            ..
+        } => {
+            let reads_watched = watch
+                .iter()
+                .any(|w| ck.value_reads_storage_of(st, expr, w));
+            for target in vars {
+                if target == "_" {
+                    continue;
+                }
+                if reads_watched {
+                    watch.insert(target.clone());
+                } else {
+                    watch.remove(target);
+                    if target == deferred_name {
+                        *rebound_self = true;
+                    }
+                }
+            }
+        }
+        Stmt::Match { subject, arms, .. } => {
+            let reads_watched = watch
+                .iter()
+                .any(|w| ck.value_reads_storage_of(st, subject, w));
+            for arm in arms {
+                if let MatchPattern::Path {
+                    binding: Some(target),
+                    ..
+                } = &arm.pattern
+                {
+                    if target == "_" {
+                        continue;
+                    }
+                    if reads_watched {
+                        watch.insert(target.clone());
+                    } else {
+                        watch.remove(target);
+                        if target == deferred_name {
+                            *rebound_self = true;
+                        }
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -1868,7 +1959,11 @@ fn stmt_moves_watched_binding(
     };
 
     match stmt {
-        Stmt::Task { args, .. } => {
+        Stmt::Task { callee, args, .. } => {
+            let desc_callee = format!("the spawn callee `{}`", callee.render());
+            if let Some(mv) = check_expr(callee, desc_callee) {
+                return Some(mv);
+            }
             for a in args {
                 let desc = format!("the spawn argument `{}`", a.value.render());
                 if let Some(mv) = check_expr(&a.value, desc) {
@@ -1891,8 +1986,17 @@ fn stmt_moves_watched_binding(
                     value.render()
                 }
             );
+            if let Some(mv) = check_expr(chan, format!("the send channel `{}`", chan.render())) {
+                return Some(mv);
+            }
             if *is_move {
-                if let Expr::Ident { name, .. } = crate::model::unwrap_parens(value) {
+                let unwrapped = crate::model::unwrap_parens(value);
+                let root = match unwrapped {
+                    Expr::Ident { name, .. } => Some(name.as_str()),
+                    Expr::Field { .. } => unwrapped.root_ident(),
+                    _ => None,
+                };
+                if let Some(name) = root {
                     if watch.contains(name) {
                         return Some(crate::model::MoveInfo {
                             span: *span,
@@ -1915,7 +2019,15 @@ fn stmt_moves_watched_binding(
                 }
             }
         }
-        Stmt::Assign { values, .. } => {
+        Stmt::Assign { targets, values, .. } => {
+            for t in targets {
+                if let hy_syntax::PlaceKind::Index { base, index } = &t.kind {
+                    let desc = format!("the assign target `{}`", base.render());
+                    if let Some(mv) = check_expr(index, desc) {
+                        return Some(mv);
+                    }
+                }
+            }
             for v in values {
                 let desc = format!("the move-assignment `{}`", v.render());
                 if let Some(mv) = check_expr(v, desc) {
@@ -1933,13 +2045,96 @@ fn stmt_moves_watched_binding(
         }
         Stmt::Select { arms, .. } => {
             for arm in arms {
-                if let SelectArmKind::Send { chan, value, .. } = &arm.kind {
+                if let SelectArmKind::Send { chan, value, is_move } = &arm.kind {
                     let desc = format!(
                         "the select move-send `{} <- {}`",
                         chan.render(),
-                        value.render()
+                        if *is_move && !matches!(value, Expr::Move { .. }) {
+                            format!("move {}", value.render())
+                        } else {
+                            value.render()
+                        }
                     );
+                    if let Some(mv) =
+                        check_expr(chan, format!("the select channel `{}`", chan.render()))
+                    {
+                        return Some(mv);
+                    }
+                    if *is_move {
+                        let unwrapped = crate::model::unwrap_parens(value);
+                        let root = match unwrapped {
+                            Expr::Ident { name, .. } => Some(name.as_str()),
+                            Expr::Field { .. } => unwrapped.root_ident(),
+                            _ => None,
+                        };
+                        if let Some(name) = root {
+                            if watch.contains(name) {
+                                return Some(crate::model::MoveInfo {
+                                    span: value.span(),
+                                    kind: crate::model::MoveKind::Moved,
+                                    desc,
+                                    moved_name: name.to_string(),
+                                });
+                            }
+                        }
+                    }
                     if let Some(mv) = check_expr(value, desc) {
+                        return Some(mv);
+                    }
+                }
+            }
+        }
+        Stmt::Expr { expr, .. } => {
+            let desc = format!("the move-expression `{}`", expr.render());
+            if let Some(mv) = check_expr(expr, desc) {
+                return Some(mv);
+            }
+        }
+        Stmt::Defer { call, .. } => {
+            let desc = format!("the move-defer `{}`", call.render());
+            if let Some(mv) = check_expr(call, desc) {
+                return Some(mv);
+            }
+        }
+        Stmt::If { cond, .. } => {
+            let desc = format!("the if condition `{}`", cond.render());
+            if let Some(mv) = check_expr(cond, desc) {
+                return Some(mv);
+            }
+        }
+        Stmt::For { kind, .. } => match kind {
+            ForKind::While { cond } => {
+                let desc = format!("the for condition `{}`", cond.render());
+                if let Some(mv) = check_expr(cond, desc) {
+                    return Some(mv);
+                }
+            }
+            ForKind::Range { lo, hi, .. } => {
+                if let Some(mv) = check_expr(lo, format!("the range bound `{}`", lo.render())) {
+                    return Some(mv);
+                }
+                if let Some(mv) = check_expr(hi, format!("the range bound `{}`", hi.render())) {
+                    return Some(mv);
+                }
+            }
+            ForKind::Iterate { expr, .. } => {
+                if let Some(mv) = check_expr(expr, format!("the iterable `{}`", expr.render())) {
+                    return Some(mv);
+                }
+            }
+            ForKind::Infinite => {}
+        },
+        Stmt::Match { subject, arms, .. } => {
+            if let Some(mv) =
+                check_expr(subject, format!("the match subject `{}`", subject.render()))
+            {
+                return Some(mv);
+            }
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    if let Some(mv) =
+                        check_expr(guard, format!("the match guard `{}`", guard.render()))
+                    {
                         return Some(mv);
                     }
                 }
@@ -2097,5 +2292,84 @@ fn main() {
 }
 "#;
         assert_eq!(codes(src), vec!["HYB-E3003"]);
+    }
+
+    #[test]
+    fn reject_defer_use_after_move_select_field_expr_and_peers_issue_1184() {
+        // 1. Select move-send
+        let src1 = r#"
+fn report(m map[string]int) int { return m["k"] }
+fn main() {
+    ch := make(chan map[string]int, 2)
+    if true {
+        shared := map[string]int{"k": 1}
+        defer report(shared)
+        select {
+        ch <- move shared:
+        }
+    }
+}
+"#;
+        assert_eq!(codes(src1), vec!["HYB-E3003"]);
+
+        // 2. Pre-defer alias moved via select move-send after rebind
+        let src2 = r#"
+fn report(m map[string]int) int { return m["k"] }
+fn main() {
+    ch := make(chan map[string]int, 2)
+    top := map[string]int{"k": 2}
+    alias := top
+    defer report(top)
+    top = map[string]int{}
+    select {
+    ch <- move alias:
+    }
+}
+"#;
+        assert_eq!(codes(src2), vec!["HYB-E3003"]);
+
+        // 3. Field move-send: ch <- move b.shared
+        let src3 = r#"
+struct box { shared map[string]int }
+fn report(m map[string]int) int { return m["k"] }
+fn main() {
+    ch := make(chan map[string]int, 2)
+    if true {
+        b := box{shared: map[string]int{"k": 1}}
+        defer report(b.shared)
+        ch <- move b.shared
+    }
+}
+"#;
+        assert!(codes(src3).contains(&"HYB-E3003".to_string()));
+
+        // 4. Expression move: consume(move s)
+        let src4 = r#"
+fn report(m map[string]int) int { return m["k"] }
+fn consume(m map[string]int) {}
+fn main() {
+    if true {
+        s := map[string]int{"k": 2}
+        defer report(s)
+        consume(move s)
+    }
+}
+"#;
+        assert_eq!(codes(src4), vec!["HYB-E3003"]);
+
+        // 5. Range iterate: items rebound, element v moved
+        let src5 = r#"
+fn worker(owned map[string]int) {}
+fn report(m []map[string]int) int { return len(m) }
+fn main() {
+    items := []map[string]int{map[string]int{"k": 1}}
+    defer report(items)
+    for _, v in items {
+        items = []map[string]int{}
+        task worker(move v)
+    }
+}
+"#;
+        assert!(codes(src5).contains(&"HYB-E3003".to_string()));
     }
 }
