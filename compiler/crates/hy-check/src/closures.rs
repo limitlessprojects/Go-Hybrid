@@ -67,6 +67,7 @@ struct NestedClosure<'a> {
     saved_scopes: Vec<std::collections::HashMap<String, Binding>>,
     saved_aliases: std::collections::HashMap<String, String>,
     saved_share: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    saved_borrow_bindings: std::collections::HashSet<String>,
     overwritten: std::collections::HashSet<(usize, String)>,
 }
 
@@ -84,6 +85,7 @@ fn push_nested_closure<'a>(
         saved_scopes: st.scopes.clone(),
         saved_aliases: st.aliases.clone(),
         saved_share: st.may_share.clone(),
+        saved_borrow_bindings: st.borrow_bindings.clone(),
         overwritten: std::collections::HashSet::new(),
     });
 }
@@ -121,6 +123,11 @@ fn sync_nested_moves(st: &FnState, nested: &mut [NestedClosure<'_>]) {
                         }
                     }
                 }
+            }
+        }
+        for b in &st.borrow_bindings {
+            if !is_overwritten_in_nc(st, nc, b) {
+                nc.saved_borrow_bindings.insert(b.clone());
             }
         }
         for (k, v) in &st.aliases {
@@ -214,6 +221,7 @@ fn check_one_closure(
         env,
         aliases: st.aliases.clone(),
         may_share: st.may_share.clone(),
+        borrow_bindings: st.borrow_bindings.clone(),
         ..FnState::default()
     };
     for (k, b) in cst.env.iter_mut() {
@@ -226,6 +234,7 @@ fn check_one_closure(
     }
     for p in params {
         let shape = ck.shape_of_type(&p.ty);
+        cst.borrow_bindings.remove(&p.name);
         cst.env.insert(
             p.name.clone(),
             Binding {
@@ -247,6 +256,7 @@ fn check_one_closure(
         let shape = ck.shape_of_type(&r.ty);
         if let Some(name) = &r.name {
             if name != "_" {
+                cst.borrow_bindings.remove(name);
                 cst.env.insert(
                     name.clone(),
                     Binding {
@@ -279,6 +289,7 @@ fn check_one_closure(
         // uses for the enclosing closure's result names).
         snap.named_results = Vec::new();
         snap.result_shapes = Vec::new();
+        snap.borrow_bindings = nc.saved_borrow_bindings;
         for (k, v) in nc.saved_aliases {
             snap.aliases.insert(k, v);
         }
@@ -798,6 +809,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 if let Some(v) = l.values.first() {
                     ck.link_multi_value_return_aliases(st, v, &l.names);
                 }
+                ck.record_local_borrow_aliases(st, l);
             }
             sync_nested_moves(st, nested);
         }
@@ -986,12 +998,22 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     sync_nested_moves(st, nested);
                     collect_expr_direct_fnlits(expr, st, nested);
                     let is_chan = matches!(ck.shape_of_expr(st, expr), TypeShape::Chan(_));
+                    let iter_carries_borrow = !is_chan && ck.expr_carries_borrow(st, expr);
                     let shapes = ck.iterate_var_shapes(st, expr, vars.len());
                     for (name, shape) in vars.iter().zip(shapes) {
                         let is_ref = shape.is_reference_alias();
                         let may_share = ck.shape_may_share(&shape);
+                        let borrow_slot = crate::loans::field_borrow_kind(&shape).is_some()
+                            || matches!(shape, TypeShape::Unknown);
                         mark_nested_overwritten(st, name, nested);
                         ck.define_binding(st, name, shape, None, false, managed, false);
+                        if name != "_" {
+                            if borrow_slot && iter_carries_borrow {
+                                st.borrow_bindings.insert(name.clone());
+                            } else {
+                                st.borrow_bindings.remove(name);
+                            }
+                        }
                         if !is_chan {
                             if may_share {
                                 ck.record_may_share(st, name, expr);
@@ -1141,8 +1163,9 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             if targets.len() == values.len() {
                 for (t, v) in targets.iter().zip(values.iter()) {
                     if matches!(t.kind, hy_syntax::PlaceKind::Field { .. }) {
+                        let shape = ck.shape_of_expr(st, v);
                         let is_borrow = crate::model::as_addr_of(v).is_some()
-                            || matches!(ck.shape_of_expr(st, v), TypeShape::BorrowHandle(_));
+                            || crate::loans::field_borrow_kind(&shape).is_some();
                         if is_borrow {
                             ck.emit_a6_field_borrow_error(t);
                         }
@@ -1152,7 +1175,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 let shapes = ck.multi_value_shapes(st, &values[0], targets.len());
                 for (t, shape) in targets.iter().zip(shapes.iter()) {
                     if matches!(t.kind, hy_syntax::PlaceKind::Field { .. })
-                        && matches!(shape, TypeShape::BorrowHandle(_))
+                        && crate::loans::field_borrow_kind(shape).is_some()
                     {
                         ck.emit_a6_field_borrow_error(t);
                     }

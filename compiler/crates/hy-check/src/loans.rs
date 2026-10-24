@@ -1975,9 +1975,31 @@ impl<'a> Checker<'a> {
             Expr::Call { callee, args, .. } => {
                 if self.expr_has_borrow_shape(st, e) {
                     if let Expr::Field { base, .. } = unwrap_parens(callee) {
+                        let recv_shape = self.shape_of_expr(st, base);
+                        if !matches!(recv_shape, TypeShape::Pointer(_))
+                            && self.call_receiver_is_pointer(st, callee)
+                        {
+                            if let Some(root) = base.root_ident() {
+                                if self.binding_can_be_borrowed(st, root) {
+                                    out.push(root.to_string());
+                                }
+                            }
+                        }
                         self.collect_expr_addr_of_roots(st, base, out);
                     }
-                    for a in args {
+                    for (idx, a) in args.iter().enumerate() {
+                        if !matches!(unwrap_parens(&a.value), Expr::Move { .. }) {
+                            let arg_shape = self.shape_of_expr(st, &a.value);
+                            if !matches!(arg_shape, TypeShape::Pointer(_))
+                                && self.call_param_is_pointer(st, callee, idx)
+                            {
+                                if let Some(root) = a.value.root_ident() {
+                                    if self.binding_can_be_borrowed(st, root) {
+                                        out.push(root.to_string());
+                                    }
+                                }
+                            }
+                        }
                         self.collect_expr_addr_of_roots(st, &a.value, out);
                     }
                 }
@@ -2653,10 +2675,40 @@ impl<'a> Checker<'a> {
         collect_ref_roots(&dst.value, &mut dst_roots);
         let mut src_roots = Vec::new();
         collect_ref_roots(&src.value, &mut src_roots);
+        let src_carries_borrow = self.expr_carries_borrow(st, &src.value);
+        let mut src_borrowed = Vec::new();
+        if move_operand_ident(&src.value).is_none() {
+            self.collect_borrowed_roots(st, &src.value, &mut src_borrowed);
+        }
         for d in &dst_roots {
+            if src_carries_borrow && self.binding_may_share(st, d) {
+                st.borrow_bindings.insert(d.clone());
+            }
             for s in &src_roots {
                 if d != s && self.binding_may_share(st, d) && self.binding_may_share(st, s) {
                     st.share_edge(d, s);
+                }
+            }
+            if self.binding_may_share(st, d) {
+                for r in &src_borrowed {
+                    if d != r {
+                        st.share_edge(d, r);
+                        if let Some(origin) = self
+                            .lookup_binding(st, r)
+                            .and_then(|b| b.non_owned_origin.clone())
+                        {
+                            let peer_origin = if origin.starts_with("a may-share peer of ") {
+                                origin
+                            } else {
+                                format!("a may-share peer of {}", origin)
+                            };
+                            if let Some(db) = st.env_lookup_mut(d) {
+                                if db.non_owned_origin.is_none() {
+                                    db.non_owned_origin = Some(peer_origin);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2747,9 +2799,22 @@ impl<'a> Checker<'a> {
                 }
             };
 
+            let src_carries_borrow = match src_src {
+                CalleeSlotSource::Arg(src_expr) => self.expr_carries_borrow(st, src_expr),
+                CalleeSlotSource::OuterBinding(name) => st.borrow_bindings.contains(name),
+            };
+            let mut src_borrowed = Vec::new();
+            if let CalleeSlotSource::Arg(src_expr) = src_src {
+                if move_operand_ident(src_expr).is_none() {
+                    self.collect_borrowed_roots(st, src_expr, &mut src_borrowed);
+                }
+            }
             for d in &dst_roots {
                 if !self.binding_may_share(st, d) {
                     continue;
+                }
+                if src_carries_borrow {
+                    st.borrow_bindings.insert(d.clone());
                 }
                 for s in &src_roots {
                     if d != s
@@ -2757,6 +2822,26 @@ impl<'a> Checker<'a> {
                             || self.lookup_binding(st, s).is_some_and(|b| b.immutable))
                     {
                         st.share_edge(d, s);
+                    }
+                }
+                for r in &src_borrowed {
+                    if d != r {
+                        st.share_edge(d, r);
+                        if let Some(origin) = self
+                            .lookup_binding(st, r)
+                            .and_then(|b| b.non_owned_origin.clone())
+                        {
+                            let peer_origin = if origin.starts_with("a may-share peer of ") {
+                                origin
+                            } else {
+                                format!("a may-share peer of {}", origin)
+                            };
+                            if let Some(db) = st.env_lookup_mut(d) {
+                                if db.non_owned_origin.is_none() {
+                                    db.non_owned_origin = Some(peer_origin);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -3816,13 +3901,24 @@ impl<'a> Checker<'a> {
                         st.borrow_bindings.insert(root.to_string());
                         if move_operand_ident(v).is_none() {
                             let mut addr_roots = Vec::new();
-                            self.collect_expr_addr_of_roots(st, v, &mut addr_roots);
+                            self.collect_borrowed_roots(st, v, &mut addr_roots);
                             for src in addr_roots {
                                 if src != root {
-                                    if let Some(b) = self.lookup_binding(st, &src) {
-                                        if !b.shape.is_sendable_by_type() {
-                                            st.aliases.entry(root.to_string()).or_insert(src);
-                                            break;
+                                    let matched = self.lookup_binding(st, &src).map(|b| {
+                                        let ok = !b.shape.is_sendable_by_type()
+                                            || b.immutable
+                                            || self.binding_can_be_borrowed(st, &src);
+                                        (ok, b.non_owned_origin.clone())
+                                    });
+                                    if let Some((true, origin)) = matched {
+                                        st.share_edge(root, &src);
+                                        st.aliases.entry(root.to_string()).or_insert(src);
+                                        if let Some(origin) = origin {
+                                            if let Some(nb) = st.env_lookup_mut(root) {
+                                                if nb.non_owned_origin.is_none() {
+                                                    nb.non_owned_origin = Some(origin);
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -5191,6 +5287,7 @@ impl<'a> Checker<'a> {
             }
         }
 
+        let subject_carries_borrow = self.expr_carries_borrow(st, subject);
         let self_shadows_const = pre_const_root.as_deref() == Some(name);
         self.define_binding(
             st,
@@ -5201,6 +5298,13 @@ impl<'a> Checker<'a> {
             managed || pre_tainted,
             false,
         );
+        if (field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown))
+            && subject_carries_borrow
+        {
+            st.borrow_bindings.insert(name.to_string());
+        } else {
+            st.borrow_bindings.remove(name);
+        }
 
         self.record_may_share(st, name, subject);
         self.record_alias(st, name, subject);
@@ -7850,7 +7954,7 @@ impl<'a> Checker<'a> {
     }
 }
 
-fn field_borrow_kind(shape: &TypeShape) -> Option<&'static str> {
+pub(crate) fn field_borrow_kind(shape: &TypeShape) -> Option<&'static str> {
     match shape {
         TypeShape::BorrowHandle(_) => Some("borrow-handle"),
         TypeShape::Pointer(inner) if !matches!(**inner, TypeShape::Atomic) => Some("pointer"),
@@ -8630,5 +8734,187 @@ fn main() {
             "expected HYB-E3103 for parenthesized &(x) stored in struct field"
         );
     }
+
+    #[test]
+    fn auto_addressed_and_aliased_borrow_escape_and_closure_borrow_soundness() {
+        // 1. Auto-addressed *T call argument and pointer-receiver method escape (HYB-E3104)
+        let src_auto_addr_call = "\
+struct box {
+    v int
 }
 
+fn id_ptr(p *box) *box {
+    return p
+}
+
+fn (b *box) self_ptr() *box {
+    return b
+}
+
+fn leak_call() *box {
+    b := box{v: 1}
+    return id_ptr(b)
+}
+
+fn leak_method_bound() *box {
+    b := box{v: 1}
+    p := b.self_ptr()
+    return p
+}
+";
+        let codes_auto = check_codes(src_auto_addr_call);
+        assert_eq!(
+            codes_auto.iter().filter(|c| *c == "HYB-E3104").count(),
+            2,
+            "expected 2 HYB-E3104 diagnostics for auto-addressed *T call and pointer-receiver escape, got {:?}",
+            codes_auto
+        );
+
+        // 2. Borrow propagation across ForKind::Iterate, Match, copy(dst, src), and out-param stores (HYB-E3104)
+        let src_iter_match_copy = "\
+fn put_ptr(dst []*int, p *int) {
+    dst[0] = p
+}
+
+fn leak_iter() *int {
+    x := 1
+    ptrs := []*int{&x}
+    for _, p in ptrs {
+        return p
+    }
+    return nil
+}
+
+fn leak_match() *int {
+    x := 1
+    opt := some(&x)
+    match opt {
+        some(p) => { return p }
+        none => { return nil }
+    }
+}
+
+fn leak_copy() []*int {
+    x := 1
+    src := []*int{&x}
+    dst := make([]*int, 1)
+    copy(dst, src)
+    return dst
+}
+
+fn leak_out_param() []*int {
+    x := 1
+    dst := make([]*int, 1)
+    put_ptr(dst, &x)
+    return dst
+}
+";
+        let codes_imc = check_codes(src_iter_match_copy);
+        assert_eq!(
+            codes_imc.iter().filter(|c| *c == "HYB-E3104").count(),
+            4,
+            "expected 4 HYB-E3104 diagnostics across range, match, copy, and out-param stores, got {:?}",
+            codes_imc
+        );
+
+        // 3. Index-assigned borrow (`slots[0] = &s`) links may_share & non_owned_origin for O5.2/O5.4
+        let src_index_borrow_race = "\
+struct stats {
+    count int
+}
+
+fn worker(slots []*stats) {
+    slots[0].count = 99
+}
+
+fn race_local() {
+    s := stats{count: 1}
+    slots := make([]*stats, 1)
+    slots[0] = &s
+    task worker(move slots)
+    s.count = 2
+}
+
+fn non_owned_param(s stats) {
+    slots := make([]*stats, 1)
+    slots[0] = &s
+    task worker(move slots)
+}
+";
+        let codes_idx = check_codes(src_index_borrow_race);
+        assert!(
+            codes_idx.iter().any(|c| c == "HYB-E3003"),
+            "expected HYB-E3003 when local struct borrowed via index store is mutated after task move, got {:?}",
+            codes_idx
+        );
+        assert!(
+            codes_idx.iter().any(|c| c == "HYB-E3004"),
+            "expected HYB-E3004 when parameter struct borrowed via index store is moved to task, got {:?}",
+            codes_idx
+        );
+
+        // 4. Closure capturing outer borrow binding, multi-value borrow unpack in closure, and closure A6 pointer field store
+        let src_closure = "\
+struct stats {
+    count int
+}
+
+struct holder {
+    p *stats
+}
+
+fn borrow_pair(p *stats) (*stats, bool) {
+    return p, true
+}
+
+fn worker(p *stats) {
+    p.count = 9
+}
+
+fn main() {
+    s := stats{count: 1}
+    p := &s
+    var h holder
+    f1 := fn() *stats {
+        return p
+    }
+    f2 := fn() *stats {
+        s2 := stats{count: 2}
+        q, ok := borrow_pair(&s2)
+        _ = ok
+        return q
+    }
+    f3 := fn() {
+        s3 := stats{count: 3}
+        q, ok := borrow_pair(&s3)
+        _ = ok
+        task worker(move q)
+        s3.count = 4
+    }
+    f4 := fn() {
+        h.p = p
+    }
+    _ = f1
+    _ = f2
+    f3()
+    f4()
+}
+";
+        let codes_closure = check_codes(src_closure);
+        assert!(
+            codes_closure.iter().filter(|c| *c == "HYB-E3104").count() >= 2,
+            "expected at least 2 HYB-E3104 diagnostics for closure captured & multi-value borrow escapes, got {:?}",
+            codes_closure
+        );
+        assert!(
+            codes_closure.iter().any(|c| c == "HYB-E3003"),
+            "expected HYB-E3003 for multi-value borrow unpack move race inside closure, got {:?}",
+            codes_closure
+        );
+        assert!(
+            codes_closure.iter().any(|c| c == "HYB-E3103"),
+            "expected HYB-E3103 for storing pointer borrow binding into struct field inside closure, got {:?}",
+            codes_closure
+        );
+    }
+}
