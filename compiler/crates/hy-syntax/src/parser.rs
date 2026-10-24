@@ -616,7 +616,7 @@ impl Parser {
             let mut results = Vec::new();
             while !self.at_punct(")") && !self.at_eof() {
                 let named =
-                    matches!(self.cur(), Tok::Ident(_)) && matches!(self.nth(1), Tok::Ident(_));
+                    matches!(self.cur(), Tok::Ident(_)) && self.is_type_start_at(1);
                 if named {
                     let name = self.expect_ident()?;
                     let ty = self.parse_type()?;
@@ -657,6 +657,16 @@ impl Parser {
         match self.cur() {
             Tok::Punct("*") | Tok::Punct("[") | Tok::Kw("chan") | Tok::Kw("fn") => true,
             Tok::Punct("<-") => matches!(self.nth(1), Tok::Kw("chan")),
+            Tok::Ident(_) => true,
+            _ => false,
+        }
+    }
+
+    /// Can the token `n` positions ahead begin a type?
+    fn is_type_start_at(&self, n: usize) -> bool {
+        match self.nth(n) {
+            Tok::Punct("*") | Tok::Punct("[") | Tok::Kw("chan") | Tok::Kw("fn") => true,
+            Tok::Punct("<-") => matches!(self.nth(n + 1), Tok::Kw("chan")),
             Tok::Ident(_) => true,
             _ => false,
         }
