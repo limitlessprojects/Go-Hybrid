@@ -166,3 +166,40 @@ fn empty_and_multichar_char_literals_fail_closed_without_quote_desync() {
         "multi-char rune literal must recover at closing quote on the same line: {multi_errs:?}"
     );
 }
+
+#[test]
+fn prefixed_base_literal_with_fraction_fails_closed_issue_1168() {
+    // Issue #1168: Prefixed base literals (0x, 0b, 0o) cannot have a fractional part
+    // (SPEC-LANGUAGE.md LX6). They must fail closed as a malformed literal rather than
+    // splitting into an integer token and an orphan leading-dot float on the same line.
+    for src in [
+        "fn main() { n := 0x1.8 }",
+        "fn main() { n := 0x1.f }",
+        "fn main() { n := 0x1.8p-2 }",
+        "fn main() { n := 0x1. }",
+        "fn main() { n := 0o7.5 }",
+        "fn main() { n := 0b1.0 }",
+        "fn main() { n := 0xDEAD.BEEF }",
+    ] {
+        let errs = lex_errs(src);
+        assert!(
+            errs.iter().any(|d| d.code == "HYB-E0002"
+                && d.tier0_rule.as_deref() == Some("LX6")
+                && d.message.contains("fractional part")),
+            "expected HYB-E0002 [LX6] rejecting fractional prefixed base literal in `{src}`, got: {errs:?}"
+        );
+    }
+
+    // Range syntax on prefixed base literals must remain valid (not treated as fraction)
+    for valid in [
+        "fn main() { for _ in 0x0..0x10 {} }",
+        "fn main() { for _ in 0x1..=0x10 {} }",
+        "fn main() { for _ in 0b0..0b10 {} }",
+        "fn main() { for _ in 0o0..0o7 {} }",
+    ] {
+        assert!(
+            parse_file("test.hy", valid).is_ok(),
+            "expected valid range with prefixed base to parse cleanly: {valid}"
+        );
+    }
+}
