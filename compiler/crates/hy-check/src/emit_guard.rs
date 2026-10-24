@@ -1019,6 +1019,199 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Issue #1566: a struct may not contain itself BY VALUE. Go rejects the
+    /// type declaration (`invalid recursive type: node refers to itself`),
+    /// and nothing in the checker looked at the containment graph, so the
+    /// emitter copied the declaration and `go build` failed. A slice, map,
+    /// channel, function or pointer indirection breaks the cycle and stays
+    /// legal; only a direct field, an array element and an `option[T]`
+    /// payload carry the value.
+    pub(crate) fn check_recursive_value_type(&mut self, root: &str, span: Span) {
+        let mut path: Vec<String> = vec![root.to_string()];
+        let mut visiting = std::collections::HashSet::new();
+        visiting.insert(root.to_string());
+        if !self.value_type_reaches(root, root, &mut visiting, &mut path, 0) {
+            return;
+        }
+        let rendered = path.join(" -> ");
+        let msg = format!(
+            "invalid recursive type: `{}` contains itself by value ({}) — Go rejects this at compile time (HYB-E1002)",
+            root, rendered
+        );
+        let notes = vec![
+            format!(
+                "why: a Go struct cannot contain itself except through an indirection (`invalid recursive type: {} refers to itself`); the checker accepted the declaration and the emitter copied it verbatim, so the program failed later (issue #1566, GUARANTEES row 13 BUILDABLE)",
+                root
+            ),
+            "fix: break the cycle with an indirection — `[]node` for trees and lists, `map[K]node` or `chan node` where those fit; arrays (`[N]node`) and `option[node]` carry the payload by value and do not break it".to_string(),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E1002", self.path.clone(), span, msg).with_notes(notes),
+        );
+    }
+
+    /// Depth-first search of the by-value containment graph from `current`
+    /// back to `root`. `visiting` doubles as the failed-node memo: a node is
+    /// inserted before descending and never removed, so a node that cannot
+    /// reach `root` is not re-walked from another branch.
+    fn value_type_reaches(
+        &self,
+        current: &str,
+        root: &str,
+        visiting: &mut std::collections::HashSet<String>,
+        path: &mut Vec<String>,
+        depth: usize,
+    ) -> bool {
+        if depth > 32 {
+            return false;
+        }
+        let Some(fields) = self.structs.get(current) else {
+            return false;
+        };
+        for (_, ty) in fields {
+            let mut deps = Vec::new();
+            self.value_type_deps(ty, &mut deps, 0);
+            for dep in deps {
+                if dep == root {
+                    path.push(dep);
+                    return true;
+                }
+                if !visiting.insert(dep.clone()) {
+                    continue;
+                }
+                path.push(dep.clone());
+                if self.value_type_reaches(&dep, root, visiting, path, depth + 1) {
+                    return true;
+                }
+                path.pop();
+            }
+        }
+        false
+    }
+
+    /// Issue #1566, alias leg: an ALIAS that expands to itself. Unlike a
+    /// defined type, an alias is a transparent renaming, so Go rejects the
+    /// cycle through ANY constructor — `type a = []a`, `type a = map[k]a`,
+    /// `type a = *a` and `type a = a` are all
+    /// `invalid recursive type: a refers to itself`. Only the alias chain is
+    /// walked here; a cycle that closes through a struct DECLARATION is the
+    /// struct pass's job.
+    pub(crate) fn check_recursive_type_alias(&mut self, name: &str, span: Span) {
+        let mut seen = std::collections::HashSet::new();
+        seen.insert(name.to_string());
+        let mut path = vec![name.to_string()];
+        let Some(target) = self.type_aliases.get(name).cloned() else {
+            return;
+        };
+        if !self.type_expr_reaches_alias(&target, name, &mut seen, &mut path, 0) {
+            return;
+        }
+        let rendered = path.join(" -> ");
+        let msg = format!(
+            "invalid recursive type alias: `{}` expands to itself ({}) — Go rejects this at compile time (HYB-E1002)",
+            name, rendered
+        );
+        let notes = vec![
+            format!(
+                "why: an alias is a transparent renaming, so a reference back to itself expands forever (`invalid recursive type: {} refers to itself`); unlike a defined type, a slice, map, channel or pointer does not break the cycle, and the emitted module fails `go build` (issue #1566, GUARANTEES row 13 BUILDABLE)",
+                name
+            ),
+            format!(
+                "fix: give the type a definition instead of an alias (`struct {} {{ ... }}` or a named slice/map type), or drop the alias and spell the target type at its uses",
+                name
+            ),
+        ];
+        self.diags.push(
+            Diagnostic::error("HYB-E1002", self.path.clone(), span, msg).with_notes(notes),
+        );
+    }
+
+    /// Does `ty` mention ANY alias that leads back to `root`? Every type
+    /// constructor is followed: an alias expands through all of them.
+    fn type_expr_reaches_alias(
+        &self,
+        ty: &TypeExpr,
+        root: &str,
+        seen: &mut std::collections::HashSet<String>,
+        path: &mut Vec<String>,
+        depth: usize,
+    ) -> bool {
+        if depth > 32 {
+            return false;
+        }
+        match ty {
+            TypeExpr::Named { name, .. } => {
+                let base = Self::base_named_type_str(name).to_string();
+                if base == root {
+                    path.push(base);
+                    return true;
+                }
+                if !self.type_aliases.contains_key(&base) || !seen.insert(base.clone()) {
+                    return false;
+                }
+                path.push(base.clone());
+                let Some(target) = self.type_aliases.get(&base).cloned() else {
+                    path.pop();
+                    return false;
+                };
+                if self.type_expr_reaches_alias(&target, root, seen, path, depth + 1) {
+                    return true;
+                }
+                path.pop();
+                false
+            }
+            TypeExpr::Pointer { to, .. }
+            | TypeExpr::Slice { elem: to, .. }
+            | TypeExpr::Array { elem: to, .. }
+            | TypeExpr::Option { elem: to, .. }
+            | TypeExpr::Chan { elem: to, .. } => {
+                self.type_expr_reaches_alias(to, root, seen, path, depth + 1)
+            }
+            TypeExpr::Map { key, value, .. } => {
+                self.type_expr_reaches_alias(key, root, seen, path, depth + 1)
+                    || self.type_expr_reaches_alias(value, root, seen, path, depth + 1)
+            }
+            TypeExpr::Fn {
+                params, results, ..
+            } => {
+                for p in params {
+                    if self.type_expr_reaches_alias(&p.ty, root, seen, path, depth + 1) {
+                        return true;
+                    }
+                }
+                for r in results {
+                    if self.type_expr_reaches_alias(r, root, seen, path, depth + 1) {
+                        return true;
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    /// Direct by-value struct dependencies of a field type: the struct itself,
+    /// array elements, `option[T]` payloads, and aliases resolved through.
+    /// Pointer / slice / map / chan / fn break the containment chain.
+    fn value_type_deps(&self, ty: &TypeExpr, out: &mut Vec<String>, depth: usize) {
+        if depth > 32 {
+            return;
+        }
+        match ty {
+            TypeExpr::Named { name, .. } => {
+                let base = Self::base_named_type_str(name);
+                if self.structs.contains_key(base) {
+                    out.push(base.to_string());
+                } else if let Some(target) = self.type_aliases.get(base) {
+                    self.value_type_deps(target, out, depth + 1);
+                }
+            }
+            TypeExpr::Array { elem, .. } | TypeExpr::Option { elem, .. } => {
+                self.value_type_deps(elem, out, depth + 1);
+            }
+            _ => {}
+        }
+    }
+
     pub(crate) fn eval_array_len_const(&self, len: &Expr) -> Option<usize> {
         let v = const_int_value(len)
             .or_else(|| self.const_int_value_at(len, len.span().start, 0))?;

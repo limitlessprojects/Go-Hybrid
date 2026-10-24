@@ -310,6 +310,10 @@ fn build_tables(ck: &mut Checker<'_>) {
                 for f in &s.fields {
                     ck.check_type_expr(&f.ty);
                 }
+                // Issue #1566: a value cycle (`struct node { next node }`) is
+                // a Go compile error; the containment walk needs every struct
+                // and alias registered, so it runs in this post-collection pass.
+                ck.check_recursive_value_type(&s.name, s.span);
             }
             Decl::Fn(f) => {
                 if let Some(r) = &f.receiver {
@@ -322,7 +326,12 @@ fn build_tables(ck: &mut Checker<'_>) {
                     ck.check_type_expr(&r.ty);
                 }
             }
-            Decl::TypeAlias(a) => ck.check_type_expr(&a.ty),
+            Decl::TypeAlias(a) => {
+                ck.check_type_expr(&a.ty);
+                // Issue #1566 (alias leg): `type a = b` / `type b = a`,
+                // `type a = []a` — an alias that expands to itself.
+                ck.check_recursive_type_alias(&a.name, a.span);
+            }
             Decl::Enum(e) => {
                 for v in &e.variants {
                     if let Some(p) = &v.payload {
