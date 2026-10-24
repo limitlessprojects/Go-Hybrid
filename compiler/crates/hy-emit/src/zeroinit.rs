@@ -97,7 +97,10 @@ impl Emitter {
     /// or as an empty type-as-value literal (`new(map[string]int)`).
     pub(crate) fn n5_new(&mut self, args: &[CallArg]) -> Option<String> {
         let [arg] = args else { return None };
-        let ty = match &arg.value {
+        if arg.name.is_some() || arg.spread {
+            return None;
+        }
+        let ty = match Self::peel_parens(&arg.value) {
             Expr::Ident { name, span } => TypeExpr::Named {
                 name: name.clone(),
                 span: *span,
@@ -124,6 +127,13 @@ impl Emitter {
             if self.local_vars.contains(name) {
                 return None;
             }
+        }
+        // Go forbids taking the address of a map composite literal (`&map[K]V{}`
+        // or `&alias{}` when `alias` resolves to a map), so map types keep Go's
+        // `new(T)` lowering while struct types (and struct aliases) receive
+        // `&T{...}` with their map fields allocated.
+        if matches!(self.n5_resolve_alias(&ty), TypeExpr::Map { .. }) {
+            return None;
         }
         self.n5_zero_init(&ty).map(|init| format!("&{}", init))
     }
