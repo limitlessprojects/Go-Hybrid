@@ -58,6 +58,32 @@ class RunnerRedactionTests(unittest.TestCase):
         for key, value in secret_keys.items():
             self.assertEqual(redacted[key], '[REDACTED len={}]'.format(len(value)))
 
+    def test_plural_secret_segments_with_trailing_qualifiers_are_redacted(self):
+        secret_keys = {
+            key: 'marker-value' for key in (
+                'CI_TOKENS_JSON', 'GITHUB_SECRETS_B64', 'KAGGLE_PASSWORDS_JSON',
+                'CI_CREDENTIALS_JSON', 'GITHUB_PATS_B64', 'MY_KEYS_FILE',
+                'CI_API_KEYS_BASE64',
+            )
+        }
+
+        redacted = runner.redact(secret_keys)
+
+        for key, value in secret_keys.items():
+            self.assertEqual(redacted[key], '[REDACTED len={}]'.format(len(value)))
+
+    def test_plural_compact_secret_suffixes_are_redacted(self):
+        secret_keys = {
+            key: 'marker-value' for key in (
+                'CLIENTCREDENTIALS', 'XTOKENS', 'GITHUBPATS',
+            )
+        }
+
+        redacted = runner.redact(secret_keys)
+
+        for key, value in secret_keys.items():
+            self.assertEqual(redacted[key], '[REDACTED len={}]'.format(len(value)))
+
     def test_path_and_nonsecret_names_remain_unredacted(self):
         paths = {
             'GITHUB_PATH': '/tmp/github-path',
@@ -68,6 +94,8 @@ class RunnerRedactionTests(unittest.TestCase):
             'KAGGLE_DATASET_PATH': '/input/data',
             'GITHUB_DISPATCH_TYPE': 'workflow_dispatch',
             'COMPATIBILITY': 'preserve-me',
+            'PATHS': '/tmp/paths',
+            'KEYSTONE': 'stone',
         }
 
         self.assertEqual(runner.redact(paths), paths)
