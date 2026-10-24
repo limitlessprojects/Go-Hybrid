@@ -69,8 +69,9 @@ def gen_salad(rng, n):
 def load_corpus(corpus_dir):
     progs = []
     for f in sorted(os.listdir(corpus_dir)):
-        if f.endswith(".hy"):
-            with open(os.path.join(corpus_dir, f), encoding="utf-8") as fh:
+        path = os.path.join(corpus_dir, f)
+        if f.endswith(".hy") and os.path.isfile(path):
+            with open(path, encoding="utf-8", errors="replace") as fh:
                 progs.append(fh.read())
     return progs
 
@@ -117,7 +118,7 @@ def check_one(hyb, src, workdir, timeout):
     try:
         r = subprocess.run(
             [hyb, "check", path], cwd=workdir, capture_output=True,
-            text=True, timeout=timeout,
+            text=True, encoding="utf-8", errors="replace", timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return "HANG", False
@@ -125,9 +126,10 @@ def check_one(hyb, src, workdir, timeout):
         return f"EXEC_ERROR: {err}", False
     if r.returncode not in (0, 1):
         return f"UNEXPECTED exit={r.returncode}", False
-    blob = (r.stdout + r.stderr).lower()
+    out = (r.stdout or "") + (r.stderr or "")
+    blob = out.lower()
     if any(b in blob for b in BAD_TEXT):
-        return f"ICE: {(r.stdout + r.stderr)[:120]}", False
+        return f"ICE: {out[:120]}", False
     return None, r.returncode == 0
 
 
@@ -173,6 +175,9 @@ def main():
     args.hyb = os.path.abspath(args.hyb)
     if not os.path.isfile(args.hyb):
         raise SystemExit(f"hyfuzz: --hyb binary not found: {args.hyb}")
+    if not os.access(args.hyb, os.X_OK):
+        print(f"hyfuzz: --hyb binary is not executable: {args.hyb}", file=sys.stderr)
+        raise SystemExit(2)
     if not os.path.isdir(args.corpus):
         raise SystemExit(f"hyfuzz: --corpus directory not found: {args.corpus}")
     if args.cases <= 0:
@@ -185,9 +190,10 @@ def main():
 
     failures = []
     failure_run_dir = None
-    clean_rejects = ok_accepts = 0
+    clean_rejects = ok_accepts = executed = 0
     with tempfile.TemporaryDirectory(prefix="hyfuzz-") as workdir:
         for i in range(args.cases):
+            executed += 1
             kind = i % 3
             if kind == 0:
                 src = gen_salad(rng, 60)
@@ -217,7 +223,7 @@ def main():
             else:
                 clean_rejects += 1
 
-    print(f"hyfuzz: {args.cases} cases, seed={args.seed}, "
+    print(f"hyfuzz: {executed} cases, seed={args.seed}, "
           f"clean-rejects={clean_rejects}, clean-accepts={ok_accepts}")
     if failures:
         print(f"hyfuzz: {len(failures)} INVARIANT VIOLATIONS:")
