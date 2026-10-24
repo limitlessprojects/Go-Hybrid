@@ -598,9 +598,11 @@ impl<'a> Checker<'a> {
         self.diags.push(d);
     }
 
-    /// The `&m[k]` shape whose base resolves to a map: the address-of a map
-    /// index expression, which Go refuses (`cannot take address of m[k]`).
-    /// Only map bases qualify — slice/array elements are addressable.
+    /// The `&m[k]` shape (including struct-field and fixed-array projections
+    /// `&m[k].f`, `&m[k][i]`, `&m[k].arr[i]`) whose base resolves to a map:
+    /// the address-of a map index expression or a value-projected sub-place,
+    /// which Go refuses (`cannot take address of m[k]`). Only map bases and
+    /// value-typed hops qualify — slice/pointer hops are addressable in Go.
     fn map_slot_borrow_span(&self, st: &FnState, e: &Expr) -> Option<Span> {
         let (operand, span) = match unwrap_parens(e) {
             Expr::AddrOf { operand, span } => (operand.as_ref(), *span),
@@ -611,11 +613,25 @@ impl<'a> Checker<'a> {
             } => (operand.as_ref(), *span),
             _ => return None,
         };
-        match unwrap_parens(operand) {
-            Expr::Index { base, .. } if matches!(self.shape_of_expr(st, base), TypeShape::Map(..)) => {
-                Some(span)
-            }
-            _ => None,
+        if self.is_map_element_or_value_projection(st, operand) {
+            Some(span)
+        } else {
+            None
+        }
+    }
+
+    fn is_map_element_or_value_projection(&self, st: &FnState, e: &Expr) -> bool {
+        match unwrap_parens(e) {
+            Expr::Index { base, .. } => match self.shape_of_expr(st, base) {
+                TypeShape::Map(..) => true,
+                TypeShape::Array(_) => self.is_map_element_or_value_projection(st, base),
+                _ => false,
+            },
+            Expr::Field { base, .. } => match self.shape_of_expr(st, base) {
+                TypeShape::Struct(_) => self.is_map_element_or_value_projection(st, base),
+                _ => false,
+            },
+            _ => false,
         }
     }
 
