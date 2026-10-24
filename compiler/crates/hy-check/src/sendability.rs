@@ -617,11 +617,46 @@ impl<'a> Checker<'a> {
                     name
                 ))
             }
+            Expr::Field { .. } => {
+                if self.resolve_spawn_method_decl(st, callee).is_some() {
+                    return CalleeVerdict::Proven;
+                }
+                CalleeVerdict::Unproven(format!(
+                    "the checker can only prove spawns of declared top-level `fn`s and struct methods — `{}` is an unresolved method value or a computed callee, which the spawn-callee proof (O4.0) cannot verify",
+                    callee.render()
+                ))
+            }
             _ => CalleeVerdict::Unproven(format!(
                 "the checker can only prove spawns of declared top-level `fn`s — `{}` is a method value or a computed callee, which the spawn-callee proof (O4.0) cannot verify",
                 callee.render()
             )),
         }
+    }
+
+    pub(crate) fn resolve_spawn_method_decl<'b>(
+        &self,
+        st: &FnState,
+        callee: &'b Expr,
+    ) -> Option<(&'a hy_syntax::FnDecl, &'b Expr)> {
+        let Expr::Field {
+            base,
+            name: method_name,
+            ..
+        } = unwrap_parens(callee)
+        else {
+            return None;
+        };
+        let recv_base = match self.shape_of_expr(st, base) {
+            TypeShape::Struct(Some(s)) => Some(Self::base_named_type_str(&s).to_string()),
+            TypeShape::Pointer(inner) => match *inner {
+                TypeShape::Struct(Some(s)) => Some(Self::base_named_type_str(&s).to_string()),
+                _ => None,
+            },
+            _ => None,
+        };
+        let head = Self::base_named_type_str(method_name).to_string();
+        let f = recv_base.and_then(|rb| self.method_decls.get(&(rb, head)).copied())?;
+        Some((f, base.as_ref()))
     }
 
     /// The spawn callee's parameter shapes when the callee resolves to a
@@ -1140,7 +1175,34 @@ impl<'a> Checker<'a> {
         // task before looking at the arguments.
         if let Some(callee) = spawn_callee {
             match self.spawn_callee_verdict(st, callee) {
-                CalleeVerdict::Proven => {}
+                CalleeVerdict::Proven => {
+                    if let Some((f, base)) = self.resolve_spawn_method_decl(st, callee) {
+                        let ptr_recv = f.receiver.as_ref().is_some_and(|r| {
+                            r.is_pointer || matches!(self.shape_of_type(&r.ty), TypeShape::Pointer(_))
+                        });
+                        let is_auto_addr_recv = ptr_recv
+                            && !matches!(self.shape_of_expr(st, base), TypeShape::Pointer(_))
+                            && matches!(
+                                crate::model::unwrap_parens(base),
+                                Expr::Ident { .. } | Expr::Field { .. } | Expr::Index { .. }
+                            );
+                        let recv_outcome = if is_auto_addr_recv {
+                            self.classify_addr_of(st, base, crate::model::unwrap_parens(base))
+                        } else {
+                            self.classify_value(st, base)
+                        };
+                        match recv_outcome {
+                            Outcome::Ok => {}
+                            Outcome::Managed { desc, risky } => {
+                                if risky {
+                                    managed_descs.push(desc);
+                                }
+                            }
+                            Outcome::Rejected(info) => rejects.push(info),
+                            Outcome::Unproven(info) => unprovens.push(info),
+                        }
+                    }
+                }
                 CalleeVerdict::Closure(info) => rejects.push(info),
                 CalleeVerdict::Unproven(reason) => {
                     unprovens.push(UnprovenInfo {
