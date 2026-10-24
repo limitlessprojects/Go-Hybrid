@@ -135,18 +135,40 @@ def land_commit(slug: str, meta: dict, repro_rel: str) -> str:
     raise RuntimeError("LAND-ASSERT failed: origin/main does not contain the landing")
 
 
-def log_event(token_env: str, event: str, verdict: str, note: str, issue: int | None = None, live: bool = True) -> None:
+def log_event(
+    token_env: str,
+    event: str,
+    verdict: str,
+    note: str,
+    issue: int | None = None,
+    live: bool = True,
+    sha: str | None = None,
+) -> None:
     if not live:
         print(f"AUTOLAND-LOG(dry-run, not written): {event} {verdict} — {note}")
         return
     cmd = ["python3", "tools/shepherd.py", "--token-env", token_env, "log",
            "--event", event, "--verdict", verdict, "--note", note]
-    if issue:
-        cmd += ["--issue", str(issue)]
+    if issue is not None:
+        cmd += ["--pr", str(issue)]
+    if sha:
+        cmd += ["--sha", sha]
     sh(cmd)
 
 
+def valid_slug(slug: str) -> bool:
+    if not slug or slug in (".", "..") or "/" in slug or "\\" in slug:
+        return False
+    try:
+        target = (QUEUE / slug).resolve()
+        return target.parent == QUEUE.resolve()
+    except OSError:
+        return False
+
+
 def run_bundle(slug: str, live: bool, token_env: str) -> int:
+    if not valid_slug(slug):
+        return die("NO-BUNDLE", slug, "invalid bundle slug", 2)
     d = QUEUE / slug
     if not (d / "meta.json").is_file():
         return die("NO-BUNDLE", slug, "missing meta.json", 2)
@@ -157,6 +179,11 @@ def run_bundle(slug: str, live: bool, token_env: str) -> int:
     issue = meta.get("issue")
     expected = meta.get("expected_code", "")
     repro_src = d / "repro.hy"
+    patch_src = d / "fix.patch"
+    if not repro_src.is_file():
+        return die("NO-BUNDLE", slug, "missing repro.hy", 2)
+    if live and not patch_src.is_file():
+        return die("NO-BUNDLE", slug, "missing fix.patch", 2)
     repro_rel = f"automation/land-queue/{slug}/repro.hy"
 
     # ---- 1. BASELINE: the unpatched tree must ACCEPT the repro ----
@@ -172,45 +199,55 @@ def run_bundle(slug: str, live: bool, token_env: str) -> int:
         return 0
 
     # ---- 2. APPLY: patched tree must REJECT with the expected code ----
-    r = sh(["git", "apply", str(d / "fix.patch")])
+    r = sh(["git", "apply", str(patch_src)])
     if r.returncode != 0:
         log_event(token_env, "autoland", "blocked", f"#{issue}: fix.patch does not apply on main tip", issue, live=live)
         return die("APPLY-FAILED", slug, f"git apply failed: {r.stderr[-400:]}", 4)
+    landed = False
     try:
         build()
         code, out = check_repro(repro_rel)
         if code == 0:
+            revert()
             log_event(token_env, "autoland", "blocked", f"#{issue}: patch applied but repro still ACCEPTs — ineffective", issue, live=live)
             return die("INEFFECTIVE", slug, "repro still ACCEPTs after patch — nothing landed", 5)
         if expected and expected not in out:
+            revert()
             log_event(token_env, "autoland", "blocked", f"#{issue}: repro rejected but without expected code {expected}", issue, live=live)
             return die("WRONG-CODE", slug, f"expected {expected} in diagnostics, got: {out[:300]}", 6)
 
         # ---- 3. BATTERY ----
         for name, ok, tail in battery():
             if not ok:
+                revert()
                 log_event(token_env, "autoland", "blocked", f"#{issue}: battery gate '{name}' failed", issue, live=live)
                 return die("BATTERY-FAILED", slug, f"gate '{name}' failed:\n{tail}", 7)
 
         # ---- 4. LAND (push-and-assert inside) ----
         sha = land_commit(slug, meta, repro_rel)
+        landed = True
 
         # ---- 5. RECORD ----
         meta["status"] = "landed"
         meta["landedSha"] = sha
         meta["landedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         (d / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
-        sh(["git", "add", "-A"])
-        sh(["git", "commit", "--quiet", "-m", f"autoland: bundle '{slug}' consumed — landed {sha[:9]} (Fixes #{issue})"])
-        sh(["git", "push", "origin", "HEAD:main"])
+        for step_name, git_cmd in (
+            ("add", ["git", "add", "-A"]),
+            ("commit", ["git", "commit", "--quiet", "-m", f"autoland: bundle '{slug}' consumed — landed {sha[:9]} (Fixes #{issue})"]),
+            ("push", ["git", "push", "origin", "HEAD:main"]),
+        ):
+            gr = sh(git_cmd)
+            if gr.returncode != 0:
+                raise RuntimeError(f"record git {step_name} failed: {gr.stderr[-400:]}")
         log_event(token_env, "autoland", "landed",
-                  f"#{issue}: bundle '{slug}' landed {sha[:9]} — baseline ACCEPT, patched REJECT {expected}, battery green, LAND-CONFIRMED", issue, live=live)
+                  f"#{issue}: bundle '{slug}' landed {sha[:9]} — baseline ACCEPT, patched REJECT {expected}, battery green, LAND-CONFIRMED",
+                  issue, live=live, sha=sha)
         print(f"AUTOLAND-LANDED: {slug} — {sha[:9]} LAND-CONFIRMED (Fixes #{issue})")
         return 0
     finally:
-        # If anything above raised, leave main clean (the landing path
-        # pushed already; a failure path must not leave the tree dirty).
-        pass
+        if not landed:
+            revert_on_failure()
 
 
 def revert_on_failure() -> None:
