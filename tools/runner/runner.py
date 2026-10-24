@@ -36,8 +36,10 @@ Stdlib only — must run on a bare Kaggle/Actions image with just python3.
 import argparse
 import datetime
 import json
+import math
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -46,11 +48,33 @@ import time
 UTC = lambda: datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _validate_run_args(cmd, timeout):
+    """Reject malformed commands and timeouts before calling subprocess."""
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise TypeError("timeout must be an int or float, not bool")
+    try:
+        finite_timeout = math.isfinite(timeout)
+    except OverflowError:
+        finite_timeout = False
+    if not finite_timeout or timeout <= 0:
+        raise ValueError("timeout must be finite and greater than zero")
+
+    if isinstance(cmd, str):
+        return
+    if not isinstance(cmd, list):
+        raise TypeError("run must be a string or a list of strings")
+    if not cmd:
+        raise ValueError("run command list must not be empty")
+    if any(not isinstance(arg, str) for arg in cmd):
+        raise TypeError("run command list elements must be strings")
+
+
 def run_cmd(cmd, timeout, cwd=None, env=None):
     """Run one command; return (exit_code, duration_s, tail_of_output). Never raises."""
     start = time.monotonic()
     out_tail = ""
     try:
+        _validate_run_args(cmd, timeout)
         p = subprocess.run(
             cmd if isinstance(cmd, list) else ["/bin/sh", "-c", cmd],
             cwd=cwd, env=env,
@@ -107,12 +131,36 @@ def env_report():
 # Lesson 2026-10-12: Kaggle embeds ephemeral session JWTs (KAGGLE_DATA_PROXY_TOKEN,
 # KAGGLE_USER_SECRETS_TOKEN) in kernel env; they leaked into committed summaries once.
 _SECRET_KEY = ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "_KEY", "API_KEY", "PAT")
+_SECRET_KEY_SEGMENTS = frozenset(
+    marker for marker in _SECRET_KEY if not marker.startswith("_") and "_" not in marker
+)
+_SECRET_KEY_SUFFIXES = tuple(_SECRET_KEY_SEGMENTS) + tuple(
+    marker + "S" for marker in _SECRET_KEY_SEGMENTS
+)
+_CREDENTIAL_VALUE_PREFIXES = ("ghp_", "gho_", "ghs_", "ghr_", "github_pat_", "KGAT_")
+
+
+def _secret_key_name(key):
+    upper = key.upper()
+    segments = upper.replace("-", "_").split("_")
+    if any(segment in _SECRET_KEY_SEGMENTS for segment in segments):
+        return True
+    # Preserve suffix-style names such as CLIENTCREDENTIAL and API_KEY without
+    # matching incidental substrings inside PATH, DISPATCH, or COMPATIBILITY.
+    return upper.endswith(_SECRET_KEY_SUFFIXES + ("_KEY", "-KEY"))
+
+
+def _has_credential_value_prefix(value):
+    if not isinstance(value, str):
+        return False
+    upper = value.upper()
+    return any(prefix.upper() in upper for prefix in _CREDENTIAL_VALUE_PREFIXES)
 
 
 def redact(env: dict) -> dict:
     out = {}
     for k, v in env.items():
-        if any(s in k.upper() for s in _SECRET_KEY):
+        if _secret_key_name(k) or _has_credential_value_prefix(v):
             out[k] = "[REDACTED len={}]".format(len(v)) if v else "[EMPTY]"
         else:
             out[k] = v
@@ -197,27 +245,39 @@ def main():
     # sanity: verify we are at the pinned SHA when a repo checkout exists
     sha_ok = True
     unverifiable_pin = False
+    sha_present = "sha" in job
     want = job.get("sha")
+    if sha_present and not isinstance(want, str):
+        sha_ok = False
+        unverifiable_pin = True
+        record("sha-check", "check", 1, 0.0,
+               "sha pin must be a string, got {}".format(type(want).__name__))
+    sha_pin = want.strip() if isinstance(want, str) else None
     # Linked worktrees and submodules use a .git file, not a directory.
     # Even a broken metadata link or corrupt .git directory inside an ancestor
     # git repository must enter the fail-closed SHA check without walking up to
     # an enclosing parent repository.
-    if os.path.lexists(os.path.join(repo_dir, ".git")):
+    if sha_ok and os.path.lexists(os.path.join(repo_dir, ".git")):
         sha_env = dict(os.environ, GIT_CEILING_DIRECTORIES=os.path.dirname(repo_dir))
         code, _, out = run_cmd(["git", "rev-parse", "HEAD"], 10, cwd=repo_dir, env=sha_env)
         at = out.strip()
         if code != 0:
             sha_ok = False
             record("sha-check", "check", 1, 0.0, "failed to resolve HEAD: {}".format(out.strip()))
-        elif want in (None, "HEAD", ""):
+        elif sha_pin in (None, "HEAD", ""):
             record("sha-check", "check", 0, 0.0, "job pins HEAD; at {}".format(at[:12]))
-        elif at != want:
-            # shallow clones of a SHA may differ if fetch fell back to a branch; log loudly
-            sha_ok = False
-            record("sha-check", "check", 1, 0.0, "repo at {} but job pins {}".format(at, want))
         else:
-            record("sha-check", "check", 0, 0.0, "at {}".format(at))
-    elif want not in (None, "HEAD", ""):
+            is_hex_sha = re.fullmatch(r"[0-9a-fA-F]+", sha_pin) is not None
+            actual_pin = at.lower() if is_hex_sha else at
+            expected_pin = sha_pin.lower() if is_hex_sha else sha_pin
+            if actual_pin != expected_pin:
+                # A shallow clone may have fallen back to a different branch.
+                sha_ok = False
+                record("sha-check", "check", 1, 0.0,
+                       "repo at {} but job pins {}".format(at, want))
+            else:
+                record("sha-check", "check", 0, 0.0, "at {}".format(at))
+    elif sha_ok and sha_pin not in (None, "HEAD", ""):
         # A pinned job against a checkout with no .git (e.g. the Kaggle worker's
         # codeload-tarball fallback): there is nothing to verify the pin against,
         # so the job must not run or report ok. Reporting green here would make
@@ -244,11 +304,10 @@ def main():
         for idx, step in enumerate(setup_raw):
             if not isinstance(step, dict):
                 record("setup-{}".format(idx), "setup", 1, 0.0, "step must be an object, got {}".format(type(step).__name__))
-                hard_setup_failed = True
-                break
+                continue
             name = step.get("name") or "setup-{}".format(idx)
             cmd = step.get("run")
-            if not cmd:
+            if "run" not in step or (isinstance(cmd, str) and not cmd):
                 record(name, "setup", 1, 0.0, "step missing required 'run' command")
                 if step.get("hard"):
                     hard_setup_failed = True
@@ -265,10 +324,10 @@ def main():
     for idx, step in enumerate(commands):
         if not isinstance(step, dict):
             record("cmd-{}".format(idx), "cmd", 1, 0.0, "command step must be an object, got {}".format(type(step).__name__))
-            break
+            continue
         name = step.get("name") or "cmd-{}".format(idx)
         cmd = step.get("run")
-        if not cmd:
+        if "run" not in step or (isinstance(cmd, str) and not cmd):
             record(name, "cmd", 1, 0.0, "command step missing required 'run' command")
             if step.get("hard"):
                 break

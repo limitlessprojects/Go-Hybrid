@@ -23,6 +23,42 @@ def step(name, code, hard=False, timeout=10):
             'hard': hard, 'timeout': timeout}
 
 
+class RunnerRedactionTests(unittest.TestCase):
+    def test_segmented_secret_keys_and_credential_values(self):
+        paths = {
+            'GITHUB_PATH': '/tmp/github-path',
+            'GITHUB_EVENT_PATH': '/tmp/event.json',
+            'LD_LIBRARY_PATH': '/opt/lib',
+            'PYTHONPATH': '/opt/python',
+            'GOPATH': '/home/runner/go',
+            'KAGGLE_DATASET_PATH': '/input/data',
+            'GITHUB_DISPATCH_TYPE': 'workflow_dispatch',
+            'COMPATIBILITY': 'preserve-me',
+        }
+        secret_keys = {
+            key: 'fake-value' for key in (
+                'PAT', 'GITHUB_PAT', 'GH-PAT', 'API_KEY', 'CLIENT_KEY',
+                'TOKEN', 'SECRET', 'PASSWORD', 'CREDENTIAL',
+            )
+        }
+        credential_values = {
+            'value-{}'.format(idx): 'prefix-{}example'.format(prefix)
+            for idx, prefix in enumerate(
+                ('ghp_', 'gho_', 'ghs_', 'ghr_', 'github_pat_', 'KGAT_'))
+        }
+        redacted = runner.redact({
+            **paths, **secret_keys, **credential_values, 'EMPTY_PAT': '',
+        })
+
+        for key, value in paths.items():
+            self.assertEqual(redacted[key], value)
+        for key, value in secret_keys.items():
+            self.assertEqual(redacted[key], '[REDACTED len={}]'.format(len(value)))
+        for key, value in credential_values.items():
+            self.assertEqual(redacted[key], '[REDACTED len={}]'.format(len(value)))
+        self.assertEqual(redacted['EMPTY_PAT'], '[EMPTY]')
+
+
 class RunnerFailureTests(unittest.TestCase):
     def run_job(self, setup, commands, expected_results=None):
         with tempfile.TemporaryDirectory() as directory:
@@ -60,6 +96,17 @@ class RunnerFailureTests(unittest.TestCase):
         self.assertFalse(summary['ok'])
         self.assertEqual([s['name'] for s in summary['steps']], ['optional', 'later-setup', 'command'])
 
+    def test_malformed_setup_step_continues_through_setup_and_commands(self):
+        code, summary = self.run_job(
+            [step('before', 'pass'), 'malformed', step('after', 'pass')],
+            [step('command', 'pass')])
+        self.assertEqual(code, 1)
+        self.assertFalse(summary['ok'])
+        self.assertEqual([(s['name'], s['exit']) for s in summary['steps']], [
+            ('before', 0), ('setup-1', 1), ('after', 0), ('command', 0),
+        ])
+        self.assertIn('must be an object, got str', summary['steps'][1]['out_tail'])
+
     def test_successful_hard_setup_allows_commands(self):
         code, summary = self.run_job([step('required', 'print(1)', True)], [step('command', 'print(2)')])
         self.assertEqual(code, 0)
@@ -75,6 +122,16 @@ class RunnerFailureTests(unittest.TestCase):
         code, summary = self.run_job([], [step('first', 'raise SystemExit(9)'), step('later', 'print(1)')])
         self.assertEqual(code, 1)
         self.assertEqual([s['name'] for s in summary['steps']], ['first', 'later'])
+
+    def test_malformed_command_step_continues_through_later_commands(self):
+        code, summary = self.run_job(
+            [], [step('before', 'pass'), None, step('after', 'pass')])
+        self.assertEqual(code, 1)
+        self.assertFalse(summary['ok'])
+        self.assertEqual([(s['name'], s['exit']) for s in summary['steps']], [
+            ('before', 0), ('cmd-1', 1), ('after', 0),
+        ])
+        self.assertIn('must be an object, got NoneType', summary['steps'][1]['out_tail'])
 
     def test_hard_setup_timeout_stops_commands_and_records_timeout(self):
         code, summary = self.run_job([step('required', 'import time; time.sleep(60)', True, 0.1)],
@@ -158,7 +215,7 @@ class RunnerFailureTests(unittest.TestCase):
         self.assertEqual(summary['steps'][0]['exit'], 1)
 
     def test_invalid_run_types_write_failed_summary(self):
-        for command in (42, {'command': 'true'}, [42]):
+        for command in (42, {'command': 'true'}, [], [42], False, None):
             with self.subTest(command=command):
                 code, summary = self.run_job([], [{'name': 'invalid-run', 'run': command}])
                 self.assertEqual(code, 1)
@@ -168,16 +225,33 @@ class RunnerFailureTests(unittest.TestCase):
                 self.assertIn('runner error', summary['steps'][0]['out_tail'])
                 self.assertIsNotNone(summary['finished'])
 
+    def test_run_cmd_rejects_bytes_argv_before_subprocess(self):
+        command = [os.fsencode(sys.executable), b'-c', b'print("must not run")']
+        with patch.object(runner.subprocess, 'run') as subprocess_run:
+            code, _, output = runner.run_cmd(command, 1)
+        self.assertEqual(code, 125)
+        self.assertIn('<<runner error:', output)
+        subprocess_run.assert_not_called()
+
     def test_invalid_timeout_types_write_failed_summary(self):
-        for timeout in ('invalid', {'seconds': 1}):
-            with self.subTest(timeout=timeout):
-                code, summary = self.run_job([], [step('invalid-timeout', 'pass', timeout=timeout)])
+        timeouts = (
+            ('invalid', 'invalid'), ('mapping', {'seconds': 1}),
+            ('true', True), ('false', False), ('zero', 0), ('negative', -1),
+            ('nan', float('nan')), ('positive-infinity', float('inf')),
+            ('negative-infinity', -float('inf')), ('none', None),
+        )
+        for label, timeout in timeouts:
+            with self.subTest(timeout=label):
+                with patch.object(runner.subprocess, 'run') as subprocess_run:
+                    code, summary = self.run_job(
+                        [], [step('invalid-timeout', 'pass', timeout=timeout)])
                 self.assertEqual(code, 1)
                 self.assertFalse(summary['ok'])
                 self.assertEqual([(s['name'], s['exit']) for s in summary['steps']],
                                  [('invalid-timeout', 125)])
-                self.assertIn('runner error', summary['steps'][0]['out_tail'])
+                self.assertIn('<<runner error:', summary['steps'][0]['out_tail'])
                 self.assertIsNotNone(summary['finished'])
+                subprocess_run.assert_not_called()
 
     def test_invalid_commands_type_fails(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -307,10 +381,16 @@ class WorktreeShaTests(unittest.TestCase):
             self.assertTrue((worktree / '.git').is_file())
             if broken:
                 (worktree / '.git').write_text('gitdir: missing-metadata\n', encoding='utf-8')
+            if pin == 'exact':
+                sha_pin = at
+            elif pin == 'uppercase-padded':
+                sha_pin = '  \t{}\n '.format(at.upper())
+            else:
+                sha_pin = pin
             setup_marker, command_marker = root / 'setup.ran', root / 'command.ran'
             job_path, results = root / 'job.json', root / 'results'
             job_path.write_text(json.dumps({
-                'job': 'worktree-pin', 'sha': at if pin == 'exact' else pin,
+                'job': 'worktree-pin', 'sha': sha_pin,
                 'setup': [step('setup', f'from pathlib import Path; Path({str(setup_marker)!r}).touch()')],
                 'commands': [step('command', f'from pathlib import Path; Path({str(command_marker)!r}).touch()')],
             }), encoding='utf-8')
@@ -341,6 +421,24 @@ class WorktreeShaTests(unittest.TestCase):
                 self.assertTrue(setup_ran)
                 self.assertTrue(command_ran)
                 self.assertEqual([s['name'] for s in summary['steps']], ['sha-check', 'setup', 'command'])
+
+    def test_uppercase_whitespace_padded_sha_matches(self):
+        code, summary, setup_ran, command_ran = self.run_worktree_job('uppercase-padded')
+        self.assertEqual(code, 0)
+        self.assertTrue(summary['ok'])
+        self.assertTrue(setup_ran)
+        self.assertTrue(command_ran)
+
+    def test_non_string_sha_pins_fail_closed(self):
+        for pin in (12345, True, ['HEAD'], None):
+            with self.subTest(pin=pin):
+                code, summary, setup_ran, command_ran = self.run_worktree_job(pin)
+                self.assertEqual(code, 1)
+                self.assertFalse(summary['ok'])
+                self.assertFalse(setup_ran)
+                self.assertFalse(command_ran)
+                self.assertEqual([(s['name'], s['exit']) for s in summary['steps']],
+                                 [('sha-check', 1)])
 
     def test_broken_git_file_fails_closed(self):
         code, summary, setup_ran, command_ran = self.run_worktree_job('HEAD', broken=True)
