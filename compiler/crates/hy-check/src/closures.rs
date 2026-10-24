@@ -1210,6 +1210,8 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
     let saved_last_use = std::mem::replace(&mut st.last_use, flat.last_use.clone());
     let saved_loop_end = std::mem::replace(&mut st.loop_end, flat.loop_end.clone());
     let saved_loans = std::mem::take(&mut st.loans);
+    let saved_aliases = st.aliases.clone();
+    let saved_may_share = st.may_share.clone();
     for (stmt, idx) in &flat.stmts {
         let idx = *idx;
         let mut calls = Vec::new();
@@ -1221,10 +1223,21 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
         match stmt {
             Stmt::Local(l) => {
                 if l.names.len() == l.values.len() {
+                    let pre_st = st.clone();
+                    let overwritten: Vec<String> = l.names.clone();
                     for (name, val) in l.names.iter().zip(l.values.iter()) {
                         if let Some(path) = walk::addr_of_index_base_path(val) {
                             let binding = name.clone();
                             let key = walk::addr_of_index_slot_key(val);
+                            ck.emit_o8_alias_if_live(
+                                st,
+                                &path,
+                                key.as_deref(),
+                                Some(&binding),
+                                val.span(),
+                                idx,
+                                "a second slot loan",
+                            );
                             let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
                             st.loans.push(Loan {
                                 target: LoanTarget::MapSlot {
@@ -1239,6 +1252,15 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                             });
                         } else {
                             ck.extend_map_slot_loan_to_alias(st, name, val, idx);
+                            ck.record_storage_from_snapshot(
+                                st,
+                                &pre_st,
+                                name,
+                                val,
+                                &overwritten,
+                                true,
+                                false,
+                            );
                         }
                     }
                 }
@@ -1250,11 +1272,28 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                 ..
             } => {
                 if *op == hy_syntax::AssignOp::Assign && targets.len() == values.len() {
+                    let pre_st = st.clone();
+                    let overwritten: Vec<String> = targets
+                        .iter()
+                        .filter_map(|t| match &t.kind {
+                            hy_syntax::PlaceKind::Ident(n) => Some(n.clone()),
+                            _ => None,
+                        })
+                        .collect();
                     for (t, v) in targets.iter().zip(values.iter()) {
                         if let hy_syntax::PlaceKind::Ident(name) = &t.kind {
                             if let Some(path) = walk::addr_of_index_base_path(v) {
                                 let binding = name.clone();
                                 let key = walk::addr_of_index_slot_key(v);
+                                ck.emit_o8_alias_if_live(
+                                    st,
+                                    &path,
+                                    key.as_deref(),
+                                    Some(&binding),
+                                    v.span(),
+                                    idx,
+                                    "a second slot loan",
+                                );
                                 let last =
                                     st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
                                 st.loans.push(Loan {
@@ -1270,6 +1309,15 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                                 });
                             } else {
                                 ck.extend_map_slot_loan_to_alias(st, name, v, idx);
+                                ck.record_storage_from_snapshot(
+                                    st,
+                                    &pre_st,
+                                    name,
+                                    v,
+                                    &overwritten,
+                                    false,
+                                    false,
+                                );
                             }
                         }
                     }
@@ -1280,11 +1328,24 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                             ck.emit_a3_if_live_pub(st, &path, t.span, idx, "insert");
                         }
                     }
+                    if let Some((path, key)) = walk::place_field_store_slot(t) {
+                        ck.emit_o8_alias_if_live(
+                            st,
+                            &path,
+                            key.as_deref(),
+                            None,
+                            t.span,
+                            idx,
+                            "a field store",
+                        );
+                    }
                 }
             }
             _ => {}
         }
     }
+    st.may_share = saved_may_share;
+    st.aliases = saved_aliases;
     st.loans = saved_loans;
     st.loop_end = saved_loop_end;
     st.last_use = saved_last_use;

@@ -84,3 +84,27 @@ fn distinct_slots_and_closed_windows_stay_legal() {
     let r = check(src);
     assert_eq!(r.verdict, Verdict::Accept, "got {:?}", codes(&r));
 }
+
+#[test]
+fn closure_body_enforces_o8_uniqueness_and_local_alias_a3() {
+    // 1. Second slot loan on the same map slot inside a closure body (O8)
+    assert_e3102(
+        "    m := map[string]acct{\"a\": acct{bal: 1}}\n    f := fn() {\n        p := &m[\"a\"]\n        q := &m[\"a\"]\n        q.bal = 50\n        p.bal = p.bal + 1\n    }\n    f()\n",
+        "two loans on m[\"a\"] inside closure body",
+    );
+    // 2. Field store through base inside slot-loan window inside a closure body (O8)
+    assert_e3102(
+        "    ns := []acct{acct{bal: 1}}\n    f := fn() {\n        p := &ns[0]\n        ns[0].bal = 50\n        p.bal = p.bal + 1\n    }\n    f()\n",
+        "ns[0].bal store while p is live inside closure body",
+    );
+    // 3. Map insert through closure-local alias while slot loan is live (A3)
+    assert_e3102(
+        "    m := map[string]acct{\"a\": acct{bal: 1}}\n    f := fn() {\n        alias := m\n        p := &m[\"a\"]\n        alias[\"b\"] = acct{bal: 2}\n        p.bal = p.bal + 1\n    }\n    f()\n",
+        "insert through closure-local alias while p is live",
+    );
+    // 4. Positive control inside closure: distinct keys and sequential non-overlapping loans stay legal
+    let legal = "struct acct { bal int }\n\nfn main() {\n    m := map[string]acct{\"a\": acct{bal: 1}, \"b\": acct{bal: 2}}\n    f := fn() {\n        p := &m[\"a\"]\n        q := &m[\"b\"]\n        q.bal = 50\n        p.bal = p.bal + 1\n        r := &m[\"a\"]\n        r.bal = 3\n    }\n    f()\n}\n";
+    let r = check(legal);
+    assert_eq!(r.verdict, Verdict::Accept, "got {:?}", codes(&r));
+}
+
