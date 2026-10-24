@@ -896,12 +896,11 @@ impl<'a> Checker<'a> {
             (ForeignOpaque(_), _) | (_, ForeignOpaque(_)) => true,
             (Primitive, Primitive) | (Str, Str) | (Atomic, Atomic) => true,
             (Struct(Some(a)), Struct(Some(b))) => a == b,
-            (Map(_, _), Map(_, _)) => true,
-            (Slice(_), Slice(_)) | (Array(_), Array(_)) => true,
-            // Go converts between slice and array of the same element class
-            // only in limited cases; keep coarse-class permissive here.
-            (Slice(_), Array(_)) | (Array(_), Slice(_)) => true,
-            (Pointer(_), Pointer(_)) => true,
+            (Map(gk, gv), Map(wk, wv)) => {
+                Self::shape_may_be_elem(gk, wk) && Self::shape_may_be_elem(gv, wv)
+            }
+            (Slice(a), Slice(b)) | (Array(a), Array(b)) => Self::shape_may_be_elem(a, b),
+            (Pointer(a), Pointer(b)) => Self::shape_may_be_elem(a, b),
             (Chan(a), Chan(b)) => Self::shape_may_be_elem(a, b),
             (Closure, Closure) => true,
             (OwnHandle(a), OwnHandle(b)) | (BorrowHandle(a), BorrowHandle(b)) => a == b,
@@ -1024,6 +1023,102 @@ impl<'a> Checker<'a> {
         if let Some(elem_ty) = self.chan_elem_ty(st, chan) {
             let desc = format!("channel `{}`", chan.render());
             self.check_const_overflow_init(&desc, &elem_ty, value, Some(st));
+            self.check_chan_send_primitive_elem(st, &elem_ty, value);
+        }
+    }
+
+    fn check_chan_send_primitive_elem(
+        &mut self,
+        st: &FnState,
+        elem_ty: &TypeExpr,
+        value: &Expr,
+    ) {
+        let vspan = value.span();
+        if self
+            .diags
+            .iter()
+            .any(|d| d.severity == hy_diag::Severity::Error && d.span == vspan)
+        {
+            return;
+        }
+        let resolved_elem = self.resolve_type_alias(elem_ty);
+        let TypeExpr::Named { name: want_name, .. } = &resolved_elem else {
+            return;
+        };
+        let Some(want_kind) = Self::prim_elem_kind(want_name) else {
+            return;
+        };
+        let inner = match unwrap_parens(value) {
+            Expr::Move { operand, .. } => unwrap_parens(operand),
+            other => other,
+        };
+        let is_untyped_int_lit = matches!(
+            inner,
+            Expr::Lit {
+                kind: LitKind::Int(_),
+                ..
+            }
+        );
+        let got_info = self
+            .ty_of_expr(st, inner)
+            .map(|t| self.resolve_type_alias(&t))
+            .and_then(|t| match t {
+                TypeExpr::Named { name, .. } => Self::prim_elem_kind(&name).map(|k| (k, name)),
+                _ => None,
+            })
+            .or_else(|| match inner {
+                Expr::Lit {
+                    kind: LitKind::Bool(_),
+                    ..
+                }
+                | Expr::Unary {
+                    op: hy_syntax::UnOp::Not,
+                    ..
+                }
+                | Expr::Binary {
+                    op:
+                        hy_syntax::BinOp::Eq
+                        | hy_syntax::BinOp::Ne
+                        | hy_syntax::BinOp::Lt
+                        | hy_syntax::BinOp::Le
+                        | hy_syntax::BinOp::Gt
+                        | hy_syntax::BinOp::Ge
+                        | hy_syntax::BinOp::And
+                        | hy_syntax::BinOp::Or,
+                    ..
+                } => Some(("bool", "bool".to_string())),
+                Expr::Lit {
+                    kind: LitKind::Int(_),
+                    ..
+                } => Some(("int", "int".to_string())),
+                Expr::Lit {
+                    kind: LitKind::Float(_),
+                    ..
+                } => Some(("float", "float64".to_string())),
+                _ => None,
+            });
+        let Some((got_kind, got_label)) = got_info else {
+            return;
+        };
+        if got_kind == want_kind || (want_kind == "float" && is_untyped_int_lit) {
+            return;
+        }
+        let msg = format!(
+            "`{}` has type `{}` but the channel element type is `{}` (HYB-E3011)",
+            value.render(),
+            got_label,
+            want_name
+        );
+        self.push_chan_elem_mismatch(vspan, msg);
+    }
+
+    fn prim_elem_kind(name: &str) -> Option<&'static str> {
+        match name {
+            "bool" => Some("bool"),
+            "float32" | "float64" => Some("float"),
+            "int" | "int8" | "int16" | "int32" | "int64" | "uint" | "uint8" | "uint16"
+            | "uint32" | "uint64" | "uintptr" | "byte" | "rune" => Some("int"),
+            _ => None,
         }
     }
 
