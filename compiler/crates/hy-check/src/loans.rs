@@ -2084,10 +2084,17 @@ impl<'a> Checker<'a> {
         match unwrap_parens(callee) {
             Expr::Ident { name, .. } => {
                 if let Some(b) = self.lookup_binding(st, name) {
-                    if let Some(hy_syntax::TypeExpr::Fn { params, .. }) = &b.ty {
-                        return params
-                            .get(idx)
-                            .is_some_and(|p| matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. }));
+                    if let Some(ty) = &b.ty {
+                        if let hy_syntax::TypeExpr::Fn { params, .. } = self.resolve_type_alias(ty) {
+                            return params
+                                .get(idx)
+                                .is_some_and(|p| {
+                                    matches!(
+                                        self.resolve_type_alias(&p.ty),
+                                        hy_syntax::TypeExpr::Pointer { .. }
+                                    )
+                                });
+                        }
                     }
                     return false;
                 }
@@ -2127,10 +2134,28 @@ impl<'a> Checker<'a> {
                         },
                         _ => None,
                     });
+                if let Some(f) = recv_base
+                    .as_ref()
+                    .and_then(|rb| self.method_decls.get(&(rb.clone(), head.to_string())))
+                {
+                    return f
+                        .params
+                        .get(idx)
+                        .is_some_and(|p| matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. }));
+                }
                 recv_base
-                    .and_then(|rb| self.method_decls.get(&(rb, head.to_string())))
-                    .and_then(|f| f.params.get(idx))
-                    .is_some_and(|p| matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. }))
+                    .and_then(|rb| self.structs.get(&rb))
+                    .and_then(|fs| fs.iter().find(|(n, _)| n == name))
+                    .and_then(|(_, fty)| match self.resolve_type_alias(fty) {
+                        hy_syntax::TypeExpr::Fn { params, .. } => params.get(idx).map(|p| {
+                            matches!(
+                                self.resolve_type_alias(&p.ty),
+                                hy_syntax::TypeExpr::Pointer { .. }
+                            )
+                        }),
+                        _ => None,
+                    })
+                    .unwrap_or(false)
             }
             Expr::FnLit { params, .. } => params
                 .get(idx)
@@ -6570,7 +6595,9 @@ impl<'a> Checker<'a> {
                             None => (false, true),
                         }
                     } else if let Some(b) = self.lookup_binding(st, name) {
-                        if let Some(hy_syntax::TypeExpr::Fn { params, .. }) = &b.ty {
+                        if let Some(hy_syntax::TypeExpr::Fn { params, .. }) =
+                            b.ty.as_ref().map(|t| self.resolve_type_alias(t))
+                        {
                             match params.get(i) {
                                 Some(p) => {
                                     let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
@@ -6608,7 +6635,18 @@ impl<'a> Checker<'a> {
                         };
                         (false, mutates)
                     } else if matches!(self.shape_of_expr(st, callee), TypeShape::Closure) {
-                        (false, true)
+                        let is_ptr = self
+                            .ty_of_expr(st, callee)
+                            .map(|t| self.resolve_type_alias(&t))
+                            .and_then(|t| match t {
+                                hy_syntax::TypeExpr::Fn { params, .. } => params.get(i).map(|p| {
+                                    matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                                        || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_))
+                                }),
+                                _ => None,
+                            })
+                            .unwrap_or(false);
+                        (is_ptr, true)
                     } else {
                         let recv_base = match self.shape_of_expr(st, base) {
                             TypeShape::Struct(Some(s)) => Some(s),

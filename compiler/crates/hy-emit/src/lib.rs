@@ -1737,9 +1737,24 @@ impl Emitter {
             TypeExpr::Fn {
                 params, results, ..
             } => {
+                let all_named = params.iter().all(|p| {
+                    !p.name.is_empty()
+                        && !matches!(&p.ty, TypeExpr::Named { name, .. } if name.is_empty())
+                });
                 let ps = params
                     .iter()
-                    .map(|p| format!("{} {}", p.name, self.type_text(&p.ty)))
+                    .map(|p| {
+                        let t = self.type_text(&p.ty);
+                        if p.name.is_empty() {
+                            t
+                        } else if t.is_empty() {
+                            self.go_type_name(&p.name)
+                        } else if all_named {
+                            format!("{} {}", p.name, t)
+                        } else {
+                            t
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 let rs = results
@@ -1747,10 +1762,10 @@ impl Emitter {
                     .map(|t| self.type_text(t))
                     .collect::<Vec<_>>()
                     .join(", ");
-                if rs.is_empty() {
-                    format!("func({})", ps)
-                } else {
-                    format!("func({}) {}", ps, rs)
+                match results.len() {
+                    0 => format!("func({})", ps),
+                    1 => format!("func({}) {}", ps, rs),
+                    _ => format!("func({}) ({})", ps, rs),
                 }
             }
         }
@@ -1910,7 +1925,8 @@ impl Emitter {
             TypeExpr::Slice { .. }
             | TypeExpr::Map { .. }
             | TypeExpr::Chan { .. }
-            | TypeExpr::Pointer { .. } => "nil".into(),
+            | TypeExpr::Pointer { .. }
+            | TypeExpr::Fn { .. } => "nil".into(),
             TypeExpr::Option { .. } => format!("{}{{}}", self.type_text(t)),
             _ => format!("*new({})", self.type_text(t)),
         }

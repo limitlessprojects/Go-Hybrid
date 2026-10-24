@@ -1735,14 +1735,12 @@ impl<'a> Collector<'a> {
                 OpKind::Chan(Box::new(self.kind_of_ty_with_subst(elem, subst, depth + 1)))
             }
             TypeExpr::Option { .. } => OpKind::Unknown,
-            TypeExpr::Fn { results, .. } => OpKind::Fn(
+            TypeExpr::Fn { params, results, .. } => OpKind::Fn(
                 results
                     .iter()
                     .map(|r| self.kind_of_ty_with_subst(r, subst, depth + 1))
                     .collect(),
-                // A bare fn TYPE does not carry a call signature the kind model
-                // can trust a count from — keep the arity unknown.
-                None,
+                Some(params.len()),
             ),
         }
     }
