@@ -251,7 +251,6 @@ func (tr *Transpiler) emitGo(buf *bytes.Buffer) {
 	buf.WriteString("package hybridge\n\n")
 	buf.WriteString("import (\n")
 	buf.WriteString("\t\"encoding/binary\"\n")
-	buf.WriteString("\t\"fmt\"\n")
 	buf.WriteString("\t\"math\"\n")
 	buf.WriteString("\t\"math/bits\"\n")
 	buf.WriteString("\t\"github.com/tetratelabs/wazero/api\"\n")
@@ -307,7 +306,7 @@ func (tr *Transpiler) emitGo(buf *bytes.Buffer) {
 		tableSize = 1
 	}
 
-	buf.WriteString(fmt.Sprintf("var funcTable [%d]func(...uint64) uint64\n\n", tableSize))
+	buf.WriteString(fmt.Sprintf("var funcTable = make([]func(...uint64) uint64, %d)\n\n", tableSize))
 
 	// init() block initializing Data section segments into memory and funcTable
 	buf.WriteString("func init() {\n")
@@ -619,7 +618,7 @@ func (tr *Transpiler) emitStaticFuncs(buf *bytes.Buffer) {
 				depth := int(readLEB128u(code, &p))
 				if depth < len(ctrlStack) {
 					target := ctrlStack[len(ctrlStack)-1-depth]
-					if sp > target.startSp {
+					if target.kind != 3 && sp > target.startSp {
 						buf.WriteString(fmt.Sprintf("\ts%d = s%d\n", target.startSp, sp-1))
 					}
 					if target.kind == 3 {
@@ -629,7 +628,11 @@ func (tr *Transpiler) emitStaticFuncs(buf *bytes.Buffer) {
 					}
 				} else {
 					if sp > 0 {
-						buf.WriteString(fmt.Sprintf("\treturn s%d\n", sp-1))
+			if sp > 0 {
+				buf.WriteString(fmt.Sprintf("\treturn s%d\n", sp-1))
+			} else {
+				buf.WriteString("\treturn 0\n")
+			}
 					} else {
 						buf.WriteString("\treturn 0\n")
 					}
@@ -644,7 +647,7 @@ func (tr *Transpiler) emitStaticFuncs(buf *bytes.Buffer) {
 						lbl = fmt.Sprintf("label_%d_start", target.id)
 					}
 					buf.WriteString(fmt.Sprintf("\tif s%d != 0 {\n", sp))
-					if sp > target.startSp {
+					if target.kind != 3 && sp > target.startSp {
 						buf.WriteString(fmt.Sprintf("\t\ts%d = s%d\n", target.startSp, sp-1))
 					}
 					buf.WriteString(fmt.Sprintf("\t\tgoto %s\n\t}\n", lbl))
@@ -674,7 +677,7 @@ func (tr *Transpiler) emitStaticFuncs(buf *bytes.Buffer) {
 							lbl = fmt.Sprintf("label_%d_start", target.id)
 						}
 						buf.WriteString(fmt.Sprintf("\tcase %d:\n", i))
-						if sp > target.startSp {
+						if target.kind != 3 && sp > target.startSp {
 							buf.WriteString(fmt.Sprintf("\t\ts%d = s%d\n", target.startSp, sp-1))
 						}
 						buf.WriteString(fmt.Sprintf("\t\tgoto %s\n", lbl))
@@ -687,7 +690,7 @@ func (tr *Transpiler) emitStaticFuncs(buf *bytes.Buffer) {
 						lbl = fmt.Sprintf("label_%d_start", target.id)
 					}
 					buf.WriteString("\tdefault:\n")
-					if sp > target.startSp {
+					if target.kind != 3 && sp > target.startSp {
 						buf.WriteString(fmt.Sprintf("\t\ts%d = s%d\n", target.startSp, sp-1))
 					}
 					buf.WriteString(fmt.Sprintf("\t\tgoto %s\n", lbl))

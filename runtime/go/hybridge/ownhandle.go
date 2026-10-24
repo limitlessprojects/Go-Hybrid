@@ -10,7 +10,7 @@ var (
 	ErrInvalidPointer = errors.New("ownhandle: invalid or out-of-bounds pointer access")
 )
 
-const ReservedNullHeader = 64 // Wasm address 0 is NULL; offsets < 64 are reserved
+const ReservedNullHeader = 2097152 // Wasm address 0 is NULL; offsets < 2MB reserved for Wasm stack + static data
 
 type OwnHandle struct {
 	mem []byte
@@ -20,7 +20,7 @@ type OwnHandle struct {
 var handlePool = sync.Pool{
 	New: func() any {
 		return &OwnHandle{
-			mem: make([]byte, 65536),
+			mem: make([]byte, ReservedNullHeader+65536),
 			off: ReservedNullHeader,
 		}
 	},
@@ -28,8 +28,9 @@ var handlePool = sync.Pool{
 
 func GetOwnHandle(capacity int) *OwnHandle {
 	h := handlePool.Get().(*OwnHandle)
-	if capacity > len(h.mem) {
-		h.mem = make([]byte, capacity)
+	needed := ReservedNullHeader + capacity
+	if needed > len(h.mem) {
+		h.mem = make([]byte, needed)
 	}
 	h.off = ReservedNullHeader
 	return h
@@ -44,7 +45,7 @@ func ReleaseOwnHandle(h *OwnHandle) {
 
 func NewOwnHandle(initialCap int) *OwnHandle {
 	if initialCap <= ReservedNullHeader {
-		initialCap = 65536
+		initialCap = ReservedNullHeader + 65536
 	}
 	return &OwnHandle{
 		mem: make([]byte, initialCap),
