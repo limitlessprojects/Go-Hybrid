@@ -1,0 +1,4 @@
+{
+  "queue_dir": "land-queue",
+  "expected_exit_code": 2
+}

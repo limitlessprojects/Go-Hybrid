@@ -1,0 +1,16 @@
+{
+  "issue": 1300,
+  "invalid_slugs": [
+    "",
+    ".",
+    "..",
+    "../outside",
+    "a/b",
+    "a\\b",
+    "/abs"
+  ],
+  "valid_slugs": [
+    "0001-sample-bundle",
+    "fix-1300"
+  ]
+}
