@@ -29,14 +29,36 @@ export HEAVY_LOCK="/tmp/heavy.lock"
 
 # Verify pins quickly: `source tools/env.sh && tools/env.sh --check`
 check() {
-  go version 2>/dev/null | rg -q "$PINNED_GO" || echo "WARN: go != $PINNED_GO"
-  rustc --version 2>/dev/null | rg -q "$PINNED_RUST" || echo "WARN: rustc != $PINNED_RUST"
+  local status=0 output tool verb version rest
+  # Check the probe status before parsing its version field. A failed shim
+  # can print a plausible version, and a pin elsewhere in the text is not it.
+  if ! output=$(go version 2>/dev/null) ||
+     ! IFS=$' \t' read -r tool verb version rest <<< "$output" ||
+     [[ "$tool" != go || "$verb" != version || "$version" != "$PINNED_GO" ]]; then
+    echo "WARN: go != $PINNED_GO"
+    status=1
+  fi
+  if ! output=$(rustc --version 2>/dev/null) ||
+     ! IFS=$' \t' read -r tool version rest <<< "$output" ||
+     [[ "$tool" != rustc || "$version" != "$PINNED_RUST" ]]; then
+    echo "WARN: rustc != $PINNED_RUST"
+    status=1
+  fi
   df -h / | tail -1
   free -m | head -2
+  return "$status"
 }
 
 # ==== inline check when invoked directly ====
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  if (( $# )); then
+    if [[ $# == 1 && "$1" == --check ]]; then
+      check
+      exit $?
+    fi
+    echo "usage: tools/env.sh [--check]" >&2
+    exit 2
+  fi
   echo "Go:      $(go version 2>/dev/null || echo MISSING)"
   echo "Rust:    $(rustc --version 2>/dev/null || echo MISSING)"
   echo "Cargo:   $(cargo --version 2>/dev/null || echo MISSING)"

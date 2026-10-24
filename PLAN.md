@@ -1,5 +1,7 @@
 # Hybrid Language: Development Plan
 
+- Contributor queue-reset revalidation (2026-10-25 JST, replaces closed #1161): original env.sh fix on main `1f0ff978`; 12 controlled shell methods pass. Open #1560 overlaps direct-check and failed-probe handling, but still accepts a wrong version field when the pin appears elsewhere/extra check arguments and rejects valid tab-delimited fields. Original tests reproduce 28 baseline and 9 competing-head assertion failures; these are not independent bug counts. Real installed Go 1.26.9/Rust 1.99.0 checks pass after explicitly routing to their existing cloud paths. No pins, exports or compiler-default parser changes; independent review and own upstream CI remain gates.
+
 - Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15
