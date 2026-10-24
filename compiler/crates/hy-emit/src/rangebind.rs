@@ -67,9 +67,47 @@ fn ty_reads(t: &TypeExpr, target: &str) -> bool {
     }
 }
 
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Checks whether `s` reads `target`, accounting for parser-folded bracket
+/// arguments (`fns[i]`, `fns[grid[i]]`, `fns[cfg.slots[i]]`) produced when
+/// a bracketed expression is followed by `(` or `{`. Field/method segments
+/// immediately preceded by `.` are excluded because they name members rather
+/// than variable bindings.
+fn ident_reads_target(s: &str, target: &str, is_field_name: bool) -> bool {
+    if !is_field_name && s == target {
+        return true;
+    }
+    if !s.contains('[') || target.is_empty() {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    let tbytes = target.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if is_ident_byte(bytes[i]) {
+            let start = i;
+            i += 1;
+            while i < bytes.len() && is_ident_byte(bytes[i]) {
+                i += 1;
+            }
+            let is_field =
+                (start == 0 && is_field_name) || (start > 0 && bytes[start - 1] == b'.');
+            if !is_field && &bytes[start..i] == tbytes {
+                return true;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
 pub(crate) fn expr_reads(e: &Expr, target: &str) -> bool {
     match e {
-        Expr::Ident { name, .. } => name == target,
+        Expr::Ident { name, .. } => ident_reads_target(name, target, false),
         Expr::Lit { .. } => false,
         Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
             InterpPart::Expr(x) => expr_reads(x, target),
@@ -87,7 +125,9 @@ pub(crate) fn expr_reads(e: &Expr, target: &str) -> bool {
                 || lo.as_ref().is_some_and(|x| expr_reads(x, target))
                 || hi.as_ref().is_some_and(|x| expr_reads(x, target))
         }
-        Expr::Field { base, .. } => expr_reads(base, target),
+        Expr::Field { base, name, .. } => {
+            expr_reads(base, target) || ident_reads_target(name, target, true)
+        }
         Expr::Call { callee, args, .. } => {
             expr_reads(callee, target) || args.iter().any(|a| expr_reads(&a.value, target))
         }
