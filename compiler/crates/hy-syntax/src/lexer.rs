@@ -16,7 +16,8 @@
 //!     StrChunk InterpOpen <expr tokens> InterpClose … StrEnd
 //!     and the parser assembles `Expr::Interp` (or `Lit::Str` when the
 //!     string has no interpolation). `{{` / `}}` escape literal braces.
-//!     Raw strings (backticks) are verbatim: no escapes, no interpolation.
+//!     Raw strings (backticks) have no escapes or interpolation; Go discards
+//!     carriage returns from their values.
 //!   * `in` is NOT lexed as a keyword: spike-6 04 (must-parse) uses `in` as
 //!     an ordinary channel name (`fn squarer(in <-chan int, …)`,
 //!     `for v in in`). It is a contextual keyword the for-parser looks for
@@ -667,7 +668,12 @@ impl<'a> Lexer<'a> {
                     return self.tok(start, Tok::RawStr(s));
                 }
                 Some(c) => {
-                    s.push(c);
+                    // Go discards carriage returns from raw-string values.
+                    // Normalize here so constant evaluation sees the same
+                    // bytes as the raw literal emitted into Go source.
+                    if c != '\r' {
+                        s.push(c);
+                    }
                     self.bump();
                 }
                 None => {
