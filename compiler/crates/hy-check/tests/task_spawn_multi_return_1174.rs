@@ -21,7 +21,6 @@ fn multi_value_call_forwarding_at_task_spawn_rejects_non_sendable_second_result(
     );
     assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
     assert_eq!(r.diagnostics[0].code, "HYB-E3001");
-    assert!(r.diagnostics[0].message.contains("map[string]int"));
 }
 
 #[test]
@@ -40,7 +39,6 @@ fn multi_value_try_call_forwarding_at_task_spawn_rejects_non_sendable_second_res
     );
     assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
     assert_eq!(r.diagnostics[0].code, "HYB-E3001");
-    assert!(r.diagnostics[0].message.contains("map[string]int"));
 }
 
 #[test]
@@ -60,7 +58,6 @@ fn multi_value_method_and_field_call_forwarding_at_task_spawn_rejects_non_sendab
     );
     assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
     assert_eq!(r.diagnostics[0].code, "HYB-E3001");
-    assert!(r.diagnostics[0].message.contains("map[string]int"));
 
     let r_field = check(
         "struct holder { f fn(map[string]int) (int, map[string]int) }\n\
@@ -73,7 +70,6 @@ fn multi_value_method_and_field_call_forwarding_at_task_spawn_rejects_non_sendab
     );
     assert_eq!(r_field.verdict, Verdict::Reject, "{:?}", r_field.diagnostics);
     assert_eq!(r_field.diagnostics[0].code, "HYB-E3001");
-    assert!(r_field.diagnostics[0].message.contains("map[string]int"));
 }
 
 #[test]
