@@ -542,7 +542,7 @@ impl<'a> Checker<'a> {
                 params,
                 results,
                 body,
-                ..
+                span,
             } => {
                 // Closure signature types (`fn(a [-1]int) …`) are declared
                 // here, not at a local ascription — check them too.
@@ -552,6 +552,7 @@ impl<'a> Checker<'a> {
                 for r in results {
                     self.check_type_expr_with_state(Some(st), &r.ty);
                 }
+                self.check_missing_return("function literal", results, body, *span);
                 // Closure bodies are not flattened into Pass B — deep-walk
                 // with a closure-scoped environment so closure parameters and
                 // locals accurately shadow or extend the enclosing function env.
