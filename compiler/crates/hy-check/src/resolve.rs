@@ -65,6 +65,13 @@ pub(crate) fn is_predeclared_type_name(name: &str) -> bool {
     PREDECLARED.iter().any(|p| *p == name)
 }
 
+/// Is `name` one of Go's predeclared identifiers (a builtin function, a
+/// predeclared type, or a SPEC conversion spelling)? Issue #1574 needs the
+/// same list at an assignment TARGET, which is a `Place`, not a value.
+pub(crate) fn is_predeclared_name(name: &str) -> bool {
+    PREDECLARED.contains(&name)
+}
+
 /// Which names the current walk records.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
