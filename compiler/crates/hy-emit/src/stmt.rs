@@ -2447,33 +2447,58 @@ impl Emitter {
         loan_var: &str,
         rest: &[Stmt],
     ) -> Result<(String, String), EmitError> {
-        if let Expr::Index { base, index, .. } = operand {
-            let needs_key_snapshot = match index.as_ref() {
-                Expr::Lit { .. } => false,
-                Expr::Ident { name, .. } => {
-                    name == loan_var
-                        || rest.iter().any(|s| Self::stmt_modifies_ident(s, name))
-                }
-                _ => true,
-            };
-            let base_mentions_loan_var =
-                loan_var != "_" && Self::expr_mentions_ident(base, loan_var);
-            if needs_key_snapshot || base_mentions_loan_var {
-                let base_text = self.emit_expr(base, ATOM)?;
-                let idx_text = self.emit_expr(index, 0)?;
-                let key_place = if needs_key_snapshot {
-                    let kt = self.next_temp("hyKey");
-                    self.push(&format!("{} := {}", kt, idx_text));
-                    kt
-                } else {
-                    idx_text
-                };
-                let place = format!("{}[{}]", base_text, key_place);
-                return Ok((place.clone(), place));
-            }
-        }
-        let place = self.emit_expr(operand, 0)?;
+        let place = self.emit_slot_loan_place_expr(operand, loan_var, rest)?;
         Ok((place.clone(), place))
+    }
+
+    fn emit_slot_loan_place_expr(
+        &mut self,
+        operand: &Expr,
+        loan_var: &str,
+        rest: &[Stmt],
+    ) -> Result<String, EmitError> {
+        match operand {
+            Expr::Field { base, field, .. } => {
+                let base_place = self.emit_slot_loan_place_expr(base, loan_var, rest)?;
+                return Ok(format!("{}.{}", base_place, field));
+            }
+            Expr::Paren { inner, .. } => {
+                let inner_place = self.emit_slot_loan_place_expr(inner, loan_var, rest)?;
+                return Ok(format!("({})", inner_place));
+            }
+            Expr::Index { base, index, .. } => {
+                let needs_key_snapshot = match index.as_ref() {
+                    Expr::Lit { .. } => false,
+                    Expr::Ident { name, .. } => {
+                        name == loan_var
+                            || rest.iter().any(|s| Self::stmt_modifies_ident(s, name))
+                    }
+                    _ => true,
+                };
+                let base_mentions_loan_var =
+                    loan_var != "_" && Self::expr_mentions_ident(base, loan_var);
+                let base_is_proj =
+                    matches!(base.as_ref(), Expr::Index { .. } | Expr::Field { .. } | Expr::Paren { .. });
+                if needs_key_snapshot || base_mentions_loan_var || base_is_proj {
+                    let base_text = if base_is_proj {
+                        self.emit_slot_loan_place_expr(base, loan_var, rest)?
+                    } else {
+                        self.emit_expr(base, ATOM)?
+                    };
+                    let idx_text = self.emit_expr(index, 0)?;
+                    let key_place = if needs_key_snapshot {
+                        let kt = self.next_temp("hyKey");
+                        self.push(&format!("{} := {}", kt, idx_text));
+                        kt
+                    } else {
+                        idx_text
+                    };
+                    return Ok(format!("{}[{}]", base_text, key_place));
+                }
+            }
+            _ => {}
+        }
+        self.emit_expr(operand, 0)
     }
 
     /// Flushes and removes any active slot-loan entries for `target_name` in
@@ -2542,11 +2567,38 @@ impl Emitter {
                     while i < frame.len() {
                         let (name, place) = &frame[i];
                         let root = Self::place_root(place);
+                        let mut roots = vec![root.to_string()];
+                        for prev in &stmts[..idx] {
+                            if let Stmt::Local(l) = prev {
+                                for (ln, lv) in l.names.iter().zip(l.values.iter()) {
+                                    if let Expr::Ident { name: rhs, .. } = lv {
+                                        if roots.iter().any(|r| r == rhs) && !roots.contains(ln) {
+                                            roots.push(ln.clone());
+                                        }
+                                    }
+                                }
+                            } else if let Stmt::Assign { targets, values, .. } = prev {
+                                for (t, v) in targets.iter().zip(values.iter()) {
+                                    if let (PlaceKind::Ident(tn), Expr::Ident { name: rhs, .. }) =
+                                        (&t.kind, v)
+                                    {
+                                        if roots.iter().any(|r| r == rhs) && !roots.contains(tn) {
+                                            roots.push(tn.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         if !name.is_empty()
                             && !Self::remaining_stmts_use_loan(rest, name)
-                            && Self::stmt_has_boundary_using(st, name, root)
+                            && roots
+                                .iter()
+                                .any(|r| Self::stmt_has_boundary_using(st, name, r))
                         {
-                            if Self::stmt_must_pre_flush_loan(st, name, root) {
+                            if roots
+                                .iter()
+                                .any(|r| Self::stmt_must_pre_flush_loan(st, name, r))
+                            {
                                 pre_flush.push(frame.remove(i));
                             } else {
                                 handoff.push(frame.remove(i));
@@ -2733,14 +2785,10 @@ impl Emitter {
         match e {
             Expr::Move { operand, .. } => Self::expr_mentions_ident(operand, root),
             Expr::Call { callee, args, .. } => {
-                let is_delete_or_clear = matches!(
-                    callee.as_ref(),
-                    Expr::Ident { name, .. } if name == "delete" || name == "clear"
-                ) && args
-                    .first()
-                    .map(|a| Self::expr_mentions_ident(&a.value, root))
-                    .unwrap_or(false);
-                is_delete_or_clear
+                Self::expr_mentions_ident(callee, root)
+                    || args
+                        .iter()
+                        .any(|a| Self::expr_mentions_ident(&a.value, root))
                     || Self::expr_has_boundary_using(callee, root)
                     || args
                         .iter()
@@ -3101,6 +3149,13 @@ impl Emitter {
                 let head_modifies = match kind {
                     ForKind::Range { var, .. } => var == target,
                     ForKind::Iterate { vars, .. } => vars.iter().any(|v| v == target),
+                    ForKind::Classic { init, post, .. } => {
+                        init.as_ref()
+                            .is_some_and(|i| Self::stmt_modifies_ident(i, target))
+                            || post
+                                .as_ref()
+                                .is_some_and(|p| Self::stmt_modifies_ident(p, target))
+                    }
                     _ => false,
                 };
                 head_modifies
@@ -3110,16 +3165,24 @@ impl Emitter {
                         .any(|s| Self::stmt_modifies_ident(s, target))
             }
             Stmt::Match { arms, .. } => arms.iter().any(|a| {
-                a.body
+                matches!(
+                    &a.pattern,
+                    MatchPattern::Path {
+                        binding: Some(b),
+                        ..
+                    } if b == target
+                ) || a
+                    .body
                     .stmts
                     .iter()
                     .any(|s| Self::stmt_modifies_ident(s, target))
             }),
             Stmt::Select { arms, .. } => arms.iter().any(|a| {
-                a.body
-                    .stmts
-                    .iter()
-                    .any(|s| Self::stmt_modifies_ident(s, target))
+                Self::select_arm_binds(&a.kind, target)
+                    || a.body
+                        .stmts
+                        .iter()
+                        .any(|s| Self::stmt_modifies_ident(s, target))
             }),
             Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => body
                 .stmts
