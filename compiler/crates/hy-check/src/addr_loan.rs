@@ -334,7 +334,7 @@ impl<'a> Checker<'a> {
                         self.emit_addr_of_loan_diag(name, *id_span);
                     }
                 }
-                Expr::Field { .. } => {
+                Expr::Field { .. } | Expr::Index { .. } => {
                     if let Some(root) = operand.root_ident() {
                         if self.lookup_binding(st, root).is_some_and(|b| b.slot_loan) {
                             self.emit_addr_of_loan_diag(root, *span);
