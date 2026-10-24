@@ -851,6 +851,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 let targets = ck.chan_elem_shape(st, chan);
                 ck.check_site(st, *span, "HYB-E3002", &vals, managed, &desc, *is_move, None, targets.as_deref());
                 ck.check_chan_send_const_overflow(st, chan, value);
+                ck.check_chan_send_named_mismatch(st, chan, value, *span);
             }
             sync_nested_moves(st, nested);
             collect_stmt_direct_fnlits(stmt, st, nested);
@@ -889,6 +890,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                             let targets = ck.chan_elem_shape(st, chan);
                             ck.check_site(st, span, "HYB-E3002", &vals, managed, &desc, *is_move, None, targets.as_deref());
                             ck.check_chan_send_const_overflow(st, chan, value);
+                            ck.check_chan_send_named_mismatch(st, chan, value, span);
                         }
                         sync_nested_moves(st, nested);
                         collect_expr_direct_fnlits(chan, st, nested);
