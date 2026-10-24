@@ -74,7 +74,8 @@ pub struct TypeShape {
 /// the chain continues if an example needs it.
 pub static SHAPES: &[(&str, TypeShape)] = &[
     (
-        // 06: r.method, r.url (fields on *http.Request)
+        // 06: r.method, r.url (fields on *http.Request) + curated request
+        // fields/methods so handler selectors normalize cleanly.
         "http.request",
         TypeShape {
             members: &[
@@ -83,7 +84,17 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
                 ("header", field("Header", Some("http.header"))),
                 ("host", field("Host", None)),
                 ("remote_addr", field("RemoteAddr", None)),
+                ("request_uri", field("RequestURI", None)),
+                ("proto", field("Proto", None)),
+                ("content_length", field("ContentLength", None)),
                 ("body", field("Body", None)),
+                ("context", method("Context", None)),
+                ("form_value", method("FormValue", None)),
+                ("post_form_value", method("PostFormValue", None)),
+                ("path_value", method("PathValue", None)),
+                ("user_agent", method("UserAgent", None)),
+                ("referer", method("Referer", None)),
+                ("cookie", method("Cookie", None)),
             ],
         },
     ),
@@ -93,11 +104,18 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
         "url.url",
         TypeShape {
             members: &[
+                ("scheme", field("Scheme", None)),
+                ("opaque", field("Opaque", None)),
                 ("path", field("Path", None)),
                 ("raw_path", field("RawPath", None)),
                 ("raw_query", field("RawQuery", None)),
+                ("fragment", field("Fragment", None)),
                 ("host", field("Host", None)),
                 ("query", method0("Query", Some("url.values"))),
+                ("hostname", method("Hostname", None)),
+                ("port", method("Port", None)),
+                ("escaped_path", method("EscapedPath", None)),
+                ("string", method("String", None)),
             ],
         },
     ),
@@ -108,6 +126,8 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
             members: &[
                 ("get", method("Get", None)),
                 ("set", method("Set", None)),
+                ("add", method("Add", None)),
+                ("del", method("Del", None)),
                 ("has", method("Has", None)),
                 ("encode", method("Encode", None)),
             ],
@@ -125,13 +145,17 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
         },
     ),
     (
-        // http.Header — the result of w.header(); get/set/add.
+        // http.Header — the result of w.header() / r.header.
         "http.header",
         TypeShape {
             members: &[
                 ("get", method("Get", None)),
                 ("set", method("Set", None)),
                 ("add", method("Add", None)),
+                ("del", method("Del", None)),
+                ("values", method("Values", None)),
+                ("clone", method("Clone", Some("http.header"))),
+                ("write", method("Write", None)),
             ],
         },
     ),
@@ -165,14 +189,38 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
                 ("seconds", method0("Seconds", None)),
                 ("minutes", method0("Minutes", None)),
                 ("hours", method0("Hours", None)),
+                ("string", method("String", None)),
+                ("abs", method("Abs", Some("time.duration"))),
+                ("truncate", method("Truncate", Some("time.duration"))),
+                ("round", method("Round", Some("time.duration"))),
             ],
         },
     ),
     (
-        // 10: t0 from time.now() — typed so since(t0) chains cleanly; no
-        // members the pinned surface uses yet.
+        // 10: t0 from time.now() — bound as ForeignTy("time.time"), so every
+        // curated method must live in SHAPES (the generic Foreign fallback
+        // only fires on BindingKind::Foreign).
         "time.time",
-        TypeShape { members: &[] },
+        TypeShape {
+            members: &[
+                ("unix", method("Unix", None)),
+                ("unix_milli", method("UnixMilli", None)),
+                ("unix_micro", method("UnixMicro", None)),
+                ("unix_nano", method("UnixNano", None)),
+                ("sub", method("Sub", Some("time.duration"))),
+                ("add", method("Add", Some("time.time"))),
+                ("before", method("Before", None)),
+                ("after", method("After", None)),
+                ("equal", method("Equal", None)),
+                ("is_zero", method("IsZero", None)),
+                ("utc", method("UTC", Some("time.time"))),
+                ("local", method("Local", Some("time.time"))),
+                ("truncate", method("Truncate", Some("time.time"))),
+                ("round", method("Round", Some("time.time"))),
+                ("format", method("Format", None)),
+                ("string", method("String", None)),
+            ],
+        },
     ),
     (
         // 05: methods on a serde_json handle value (all Methods — Go's
@@ -292,6 +340,69 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
             ],
         },
     ),
+    (
+        "atomic.value",
+        TypeShape {
+            members: &[
+                ("load", method("Load", None)),
+                ("store", method("Store", None)),
+                ("swap", method("Swap", None)),
+                ("compare_and_swap", method("CompareAndSwap", None)),
+            ],
+        },
+    ),
+    (
+        "sync.wait_group",
+        TypeShape {
+            members: &[
+                ("add", method("Add", None)),
+                ("done", method("Done", None)),
+                ("wait", method("Wait", None)),
+            ],
+        },
+    ),
+    (
+        "sync.once",
+        TypeShape {
+            members: &[("do", method("Do", None))],
+        },
+    ),
+    (
+        "sync.cond",
+        TypeShape {
+            members: &[
+                ("wait", method("Wait", None)),
+                ("signal", method("Signal", None)),
+                ("broadcast", method("Broadcast", None)),
+            ],
+        },
+    ),
+    (
+        "sync.pool",
+        TypeShape {
+            members: &[
+                ("get", method("Get", None)),
+                ("put", method("Put", None)),
+            ],
+        },
+    ),
+    (
+        "sync.map",
+        TypeShape {
+            members: &[
+                ("load", method("Load", None)),
+                ("store", method("Store", None)),
+                ("load_or_store", method("LoadOrStore", None)),
+                ("load_and_delete", method("LoadAndDelete", None)),
+                ("delete", method("Delete", None)),
+                ("swap", method("Swap", None)),
+                ("compare_and_swap", method("CompareAndSwap", None)),
+                ("compare_and_delete", method("CompareAndDelete", None)),
+                ("range", method("Range", None)),
+                ("clear", method("Clear", None)),
+            ],
+        },
+    ),
 ];
 
 /// Result shapes for binding-value methods: (descriptor type, method) →
@@ -304,6 +415,7 @@ pub static METHOD_RESULTS: &[(&str, &str, (u8, bool))] = &[
     ("serde_json.value", "string", (1, true)),
     ("serde_json.value", "set", (0, true)),
     ("serde_json.value", "push_string", (0, true)),
+    ("http.header", "write", (0, true)),
 ];
 
 pub fn lookup_method_results(ty: &str, name: &str) -> Option<(u8, bool)> {
