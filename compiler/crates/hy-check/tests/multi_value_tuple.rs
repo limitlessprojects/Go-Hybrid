@@ -271,7 +271,11 @@ fn positive_controls_destructuring_try_unwrap_and_rebind_accept() {
     assert!(codes(&r1).is_empty(), "unexpected errors: {:?}", r1.diagnostics);
     assert_eq!(r1.verdict, Verdict::Accept);
 
-    // 2. Rebinding a local fn variable from 2-result to 1-result updates b.ty
+    // 2. Rebinding a 2-result fn variable to a 1-result fn is itself a Go
+    //    type error (`cannot use plus (value of type func(a int, b int) int)
+    //    as func(a int, b int) (int, int) value in assignment`), so it must
+    //    reject under HYB-E1002 rather than reach `go build`. This control
+    //    used to assert ACCEPT; the program never built (#1599).
     let r2 = check(
         "fn minmax(a int, b int) (int, int) { return a, b }\n\
          fn plus(a int, b int) int { return a + b }\n\
@@ -282,6 +286,9 @@ fn positive_controls_destructuring_try_unwrap_and_rebind_accept() {
              fmt.println(p)\n\
          }\n",
     );
-    assert!(codes(&r2).is_empty(), "unexpected errors: {:?}", r2.diagnostics);
-    assert_eq!(r2.verdict, Verdict::Accept);
+    assert!(
+        codes(&r2).contains(&"HYB-E1002".to_string()),
+        "expected HYB-E1002 for the mismatched fn rebind, got {:?}",
+        r2.diagnostics
+    );
 }

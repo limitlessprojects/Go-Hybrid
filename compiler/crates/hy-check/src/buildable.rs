@@ -88,8 +88,10 @@ pub(crate) enum OpKind {
     /// Function kind: result kinds, plus the declared parameter count when the
     /// signature is known (`None` = unknown, e.g. a `fn`-typed value whose
     /// declaration is out of reach). The count is what closes the
-    /// closure/method-value arity bypass (#577 C9).
-    Fn(Vec<OpKind>, Option<usize>),
+    /// closure/method-value arity bypass (#577 C9). The last field holds the
+    /// parameter kinds when every parameter's declared type is in reach
+    /// (`None` otherwise); only then are two signatures compared.
+    Fn(Vec<OpKind>, Option<usize>, Option<Vec<OpKind>>),
     Void,
 }
 
@@ -113,6 +115,18 @@ impl OpKind {
             OpKind::Struct(Some(n)) => format!("struct {}", n),
             OpKind::Struct(None) => "struct".to_string(),
             OpKind::Pointer(inner) => format!("*{}", inner.label()),
+            OpKind::Fn(results, _, Some(params)) => {
+                let ps = params.iter().map(OpKind::label).collect::<Vec<_>>().join(", ");
+                match results.as_slice() {
+                    [] => format!("fn({})", ps),
+                    [r] => format!("fn({}) {}", ps, r.label()),
+                    rs => format!(
+                        "fn({}) ({})",
+                        ps,
+                        rs.iter().map(OpKind::label).collect::<Vec<_>>().join(", ")
+                    ),
+                }
+            }
             OpKind::Fn(..) => "fn".to_string(),
             OpKind::Void => "void".to_string(),
         }
@@ -167,8 +181,15 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         }
         (Map(k1, v1), Map(k2, v2)) => kinds_conflict(k1, k2) || kinds_conflict(v1, v2),
         (Pointer(a), Pointer(b)) => kinds_conflict(a, b),
-        // Fn kinds only carry results here, so a result match is not proof of
-        // a signature match; stay permissive.
+        // Go function types are assignable only when identical. Compare the
+        // signatures only when both parameter lists are known; otherwise a
+        // result match is not proof of a signature match, so stay permissive.
+        (Fn(r1, _, Some(p1)), Fn(r2, _, Some(p2))) => {
+            p1.len() != p2.len()
+                || r1.len() != r2.len()
+                || p1.iter().zip(p2).any(|(a, b)| kinds_differ(a, b))
+                || r1.iter().zip(r2).any(|(a, b)| kinds_differ(a, b))
+        }
         (Fn(..), Fn(..)) => false,
         // Everything else is a shape or scalar-family mismatch Go refuses.
         _ => true,
@@ -204,6 +225,13 @@ fn is_definitely_single_value(e: &Expr) -> bool {
         Expr::Move { operand, .. } => is_definitely_single_value(operand),
         _ => false,
     }
+}
+
+/// Type identity, as far as the kind model can tell: a conflict in either
+/// direction. Used inside function signatures, where Go allows no implicit
+/// conversion at all (an `int` result does not satisfy a `float64` one).
+fn kinds_differ(a: &OpKind, b: &OpKind) -> bool {
+    kinds_conflict(a, b) || kinds_conflict(b, a)
 }
 
 /// Symmetrical conflict check for equality operators (`==`, `!=`).
@@ -1645,8 +1673,29 @@ impl<'a> Collector<'a> {
                     .map(|r| self.kind_of_ty(r, depth + 1))
                     .collect(),
                 Some(params.len()),
+                Some(self.fn_type_param_kinds(params, depth + 1)),
             ),
         }
+    }
+
+    /// Parameter kinds of a `fn(...)` TYPE. Go's rule: either every parameter
+    /// is named or none is. When no parameter carries a type, the parser has
+    /// stored each type in `Param.name` (`fn(int, string)`), so read it from
+    /// there; once any parameter is typed, the bare ones are grouped names
+    /// (`fn(a, b int)`) whose types are not in reach and stay unknown.
+    fn fn_type_param_kinds(&self, params: &[hy_syntax::Param], depth: usize) -> Vec<OpKind> {
+        let untyped = |p: &hy_syntax::Param| matches!(&p.ty, TypeExpr::Named { name, .. } if name.is_empty());
+        let all_unnamed = params.iter().all(untyped);
+        params
+            .iter()
+            .map(|p| {
+                if all_unnamed {
+                    self.kind_of_type_str(&p.name, depth)
+                } else {
+                    self.kind_of_ty(&p.ty, depth)
+                }
+            })
+            .collect()
     }
 
     fn kind_of_named(&self, name: &str, depth: usize) -> OpKind {
@@ -1743,6 +1792,7 @@ impl<'a> Collector<'a> {
                 // A bare fn TYPE does not carry a call signature the kind model
                 // can trust a count from — keep the arity unknown.
                 None,
+                None,
             ),
         }
     }
@@ -1832,6 +1882,7 @@ impl<'a> Collector<'a> {
                             .map(|r| self.kind_of_ty(&r.ty, 0))
                             .collect(),
                         Some(f.params.len()),
+                        Some(f.params.iter().map(|p| self.kind_of_ty(&p.ty, 0)).collect()),
                     );
                 }
                 OpKind::Unknown
@@ -1963,6 +2014,7 @@ impl<'a> Collector<'a> {
                     .map(|r| self.kind_of_ty(&r.ty, 0))
                     .collect(),
                 Some(params.len()),
+                Some(params.iter().map(|p| self.kind_of_ty(&p.ty, 0)).collect()),
             ),
             Expr::Call { callee, args, .. } => match self.call_result_kinds(callee, args) {
                 Some(res) if res.is_empty() => OpKind::Void,
@@ -1990,7 +2042,7 @@ impl<'a> Collector<'a> {
             }
             Expr::Ident { name, .. } => {
                 if let Some(k) = self.lookup_kind(name) {
-                    if let OpKind::Fn(res, _) = k {
+                    if let OpKind::Fn(res, _, _) = k {
                         return Some(res);
                     }
                     return None;
@@ -2043,7 +2095,7 @@ impl<'a> Collector<'a> {
                         );
                     }
                 }
-                if let Some(OpKind::Fn(res, _)) = self.struct_field_kind(&bk, name) {
+                if let Some(OpKind::Fn(res, _, _)) = self.struct_field_kind(&bk, name) {
                     return Some(res);
                 }
                 None
@@ -3815,7 +3867,7 @@ impl<'a> Collector<'a> {
                         // A local bound to a closure or fn-typed value carries
                         // its declared parameter count, so the call's arity is
                         // checkable (#577 C9).
-                        OpKind::Fn(_, Some(want)) if want != args.len() => {
+                        OpKind::Fn(_, Some(want), _) if want != args.len() => {
                             self.report_local_arity(name, want, args.len(), span)
                         }
                         OpKind::Fn(..) | OpKind::Unknown => {}
@@ -3892,7 +3944,7 @@ impl<'a> Collector<'a> {
                     // `u.cb(1, 2)` where `cb fn(x int) int` — the field type
                     // states the count.
                     if !has_method {
-                        if let OpKind::Fn(_, Some(want)) = fk {
+                        if let OpKind::Fn(_, Some(want), _) = fk {
                             if want != args.len() {
                                 self.report_local_arity(&callee.render(), want, args.len(), span);
                             }
