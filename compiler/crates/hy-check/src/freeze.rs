@@ -399,15 +399,13 @@ impl<'a> Checker<'a> {
         for (op, mspan) in ops {
             if let Expr::Ident { name, .. } = op {
                 self.mark_move(st, name, mspan, desc.clone(), MoveKind::Moved);
-            } else if matches!(op, Expr::Field { .. })
-                && matches!(
+            } else if let Some(root) = own_handle_field_root(op).filter(|_| {
+                matches!(
                     self.shape_of_expr(st, op),
                     crate::model::TypeShape::OwnHandle(_)
                 )
-            {
-                if let Some(root) = op.root_ident() {
-                    self.mark_move(st, root, mspan, desc.clone(), MoveKind::Moved);
-                }
+            }) {
+                self.mark_move(st, root, mspan, desc.clone(), MoveKind::Moved);
             } else {
                 self.check_o54_non_ident_move(st, op, mspan);
             }
@@ -424,9 +422,9 @@ impl<'a> Checker<'a> {
         let mut ops = Vec::new();
         crate::model::collect_move_operands(value, &mut ops);
         for (op, _) in ops {
-            let root = match op {
+            let root = match crate::model::unwrap_parens(op) {
                 Expr::Ident { name, .. } => Some(name.as_str()),
-                Expr::Field { .. } => op.root_ident(),
+                Expr::Field { .. } => own_handle_field_root(op),
                 _ => None,
             };
             if let Some(src) = root {
@@ -451,7 +449,7 @@ impl<'a> Checker<'a> {
         span: hy_diag::Span,
     ) {
         let shape = self.shape_of_expr(st, operand);
-        if matches!(operand, Expr::Field { .. })
+        if own_handle_field_root(operand).is_some()
             && matches!(shape, crate::model::TypeShape::OwnHandle(_))
         {
             return;
@@ -1212,6 +1210,24 @@ impl<'a> Checker<'a> {
             crate::model::unwrap_parens(&args[0].value),
             Expr::SliceLit { items, .. } if items.is_empty()
         )
+    }
+}
+
+/// Root identifier of a binding-rooted struct field chain (`s.conn`,
+/// `w.s.conn`, `(s).conn`). Returns `None` for composite-literal, call, slice,
+/// or index bases (`(wrap{h: h}).h.conn`, `id(h).conn`, `xs[0].conn`) whose
+/// evaluation does not name a single freezeable struct binding under SPEC O5.4.
+fn own_handle_field_root(expr: &Expr) -> Option<&str> {
+    let Expr::Field { base, .. } = crate::model::unwrap_parens(expr) else {
+        return None;
+    };
+    let mut cur = base.as_ref();
+    loop {
+        match crate::model::unwrap_parens(cur) {
+            Expr::Ident { name, .. } if name != "_" => return Some(name.as_str()),
+            Expr::Field { base: inner, .. } => cur = inner.as_ref(),
+            _ => return None,
+        }
     }
 }
 
