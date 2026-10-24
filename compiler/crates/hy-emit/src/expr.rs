@@ -587,18 +587,17 @@ impl Emitter {
                         return m.result;
                     }
                 }
-                // Batch I: user-struct field typing — `stats.mu` resolves
-                // through var_struct + struct_fields when the field's
-                // declared type is shape-known (18: sync.mutex).
-                if let Expr::Ident { name: vn, .. } = Self::unwrap_parens(base.as_ref()) {
-                    if let Some(sn) = self.var_struct.get(vn) {
-                        if let Some(fields) = self.struct_fields.get(sn) {
-                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
-                                if let Some((k, _)) =
-                                    super::shapes::SHAPES.iter().find(|(k, _)| *k == fty)
-                                {
-                                    return Some(k);
-                                }
+                // Batch I: user-struct field typing — `stats.mu` and nested
+                // chains (`o.sub.mu`) resolve through user_struct_of_expr +
+                // struct_fields when the field's declared type is shape-known.
+                if let Some(sn) = self.user_struct_of_expr(base) {
+                    if let Some(fields) = self.struct_fields.get(sn) {
+                        if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
+                            let resolved = self.resolve_alias_ty_name(fty.as_str());
+                            if let Some((k, _)) =
+                                super::shapes::SHAPES.iter().find(|(k, _)| *k == resolved)
+                            {
+                                return Some(k);
                             }
                         }
                     }
@@ -654,25 +653,66 @@ impl Emitter {
         }
     }
 
-    fn is_user_struct_expr(&self, e: &Expr) -> bool {
-        match Self::unwrap_parens(e) {
-            Expr::Ident { name, .. } => self.var_struct.contains_key(name),
-            Expr::StructLit { .. } => true,
-            Expr::AddrOf { operand, .. } => self.is_user_struct_expr(operand),
-            Expr::Field { base, name, .. } => {
-                if let Expr::Ident { name: vn, .. } = Self::unwrap_parens(base) {
-                    if let Some(sn) = self.var_struct.get(vn) {
-                        if let Some(fields) = self.struct_fields.get(sn) {
-                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
-                                return self.struct_fields.contains_key(fty.as_str());
-                            }
-                        }
-                    }
-                }
-                false
+    fn resolve_alias_ty_name<'a>(&'a self, mut name: &'a str) -> &'a str {
+        for _ in 0..8 {
+            match self.n5_aliases.get(name) {
+                Some(TypeExpr::Named { name: target, .. }) => name = target.as_str(),
+                _ => break,
             }
-            _ => false,
         }
+        name
+    }
+
+    fn user_struct_of_expr(&self, e: &Expr) -> Option<&str> {
+        match Self::unwrap_parens(e) {
+            Expr::Ident { name, .. } => self
+                .var_struct
+                .get(name)
+                .map(|s| self.resolve_alias_ty_name(s.as_str()))
+                .and_then(|s| self.struct_fields.get_key_value(s.split('[').next().unwrap_or(s)))
+                .map(|(k, _)| k.as_str()),
+            Expr::StructLit {
+                ty: Some(TypeExpr::Named { name, .. }),
+                ..
+            } => {
+                let resolved = self.resolve_alias_ty_name(name.as_str());
+                let base = resolved.split('[').next().unwrap_or(resolved);
+                self.struct_fields.get_key_value(base).map(|(k, _)| k.as_str())
+            }
+            Expr::AddrOf { operand, .. } => self.user_struct_of_expr(operand),
+            Expr::Field { base, name, .. } => {
+                let sn = self.user_struct_of_expr(base)?;
+                let (_, fty) = self.struct_fields.get(sn)?.iter().find(|(f, _)| f == name)?;
+                let resolved = self.resolve_alias_ty_name(fty.as_str());
+                let base_sn = resolved.split('[').next().unwrap_or(resolved);
+                self.struct_fields.get_key_value(base_sn).map(|(k, _)| k.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    fn is_user_struct_expr(&self, e: &Expr) -> bool {
+        matches!(Self::unwrap_parens(e), Expr::StructLit { .. })
+            || self.user_struct_of_expr(e).is_some()
+    }
+
+    fn is_nested_set_expr(&self, e: &Expr) -> bool {
+        if self.is_set_expr(e) {
+            return true;
+        }
+        if let Expr::Field { base, name, .. } = Self::unwrap_parens(e) {
+            if let Some(sn) = self.user_struct_of_expr(base) {
+                if let Some((_, fty)) = self
+                    .struct_fields
+                    .get(sn)
+                    .and_then(|fs| fs.iter().find(|(f, _)| f == name))
+                {
+                    let resolved = self.resolve_alias_ty_name(fty.as_str());
+                    return resolved.starts_with("set[") || resolved == "set";
+                }
+            }
+        }
+        false
     }
 
     pub(crate) fn emit_call(
@@ -823,11 +863,11 @@ impl Emitter {
                 let a = self.emit_call_arg(&args[0])?;
                 return Ok(format!("{}({})", go, a));
             }
-            if name == "len" && args.len() == 1 && self.is_set_expr(&args[0].value) {
+            if name == "len" && args.len() == 1 && self.is_nested_set_expr(&args[0].value) {
                 let a = self.emit_call_arg(&args[0])?;
                 return Ok(format!("{}.len()", a));
             }
-            if name == "delete" && args.len() == 2 && self.is_set_expr(&args[0].value) {
+            if name == "delete" && args.len() == 2 && self.is_nested_set_expr(&args[0].value) {
                 let s = self.emit_call_arg(&args[0])?;
                 let v = self.emit_call_arg(&args[1])?;
                 return Ok(format!("{}.remove({})", s, v));
