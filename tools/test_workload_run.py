@@ -88,9 +88,11 @@ output.chmod(0o755)
             "TMPDIR": str(self.scratch),
         }
 
-    def run_triplet(self, failure=""):
+    def run_triplet(self, failure="", *, env=None, cwd=None):
         result = subprocess.run(
-            ["bash", str(self.runner)], env=self.triplet_env(failure), cwd=self.root,
+            ["bash", str(self.runner)],
+            env=self.triplet_env(failure) if env is None else env,
+            cwd=self.root if cwd is None else cwd,
             capture_output=True, text=True, timeout=10,
         )
         trace = self.trace.read_text().splitlines()
@@ -100,6 +102,51 @@ output.chmod(0o755)
         result, trace = self.run_triplet()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("run wl-hy-load", trace)
+        self.assertIn("run wl-hy-alloc", trace)
+
+    def test_relative_hyb_uses_callers_compiler(self):
+        wrong = self.workloads / "bin/hyb"
+        wrong.parent.mkdir()
+        wrong.write_text("#!/bin/sh\nexit 93\n")
+        wrong.chmod(0o755)
+        for override in ("bin/hyb", "./bin/hyb"):
+            with self.subTest(hyb=override):
+                env = self.triplet_env()
+                env["HYB"] = override
+                result, trace = self.run_triplet(env=env)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("run wl-hy-load", trace)
+                self.assertIn("run wl-hy-alloc", trace)
+
+    def test_relative_hyb_preserves_spaces_and_parent_components(self):
+        compiler = self.root / "tools with spaces/hyb"
+        compiler.parent.mkdir()
+        compiler.write_bytes((self.bin / "hyb").read_bytes())
+        compiler.chmod(0o755)
+        caller = self.root / "caller"
+        caller.mkdir()
+        env = self.triplet_env()
+        env["HYB"] = "../tools with spaces/hyb"
+        result, trace = self.run_triplet(env=env, cwd=caller)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("run wl-hy-alloc", trace)
+
+    def test_bare_hyb_uses_path(self):
+        env = self.triplet_env()
+        env["HYB"] = "hyb"
+        result, trace = self.run_triplet(env=env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("run wl-hy-alloc", trace)
+
+    def test_unset_hyb_uses_repository_default(self):
+        compiler = self.root / "compiler/target/release/hyb"
+        compiler.parent.mkdir(parents=True)
+        compiler.write_bytes((self.bin / "hyb").read_bytes())
+        compiler.chmod(0o755)
+        env = self.triplet_env()
+        env.pop("HYB")
+        result, trace = self.run_triplet(env=env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("run wl-hy-alloc", trace)
 
     def test_load_build_failure_stops_before_alloc_build(self):

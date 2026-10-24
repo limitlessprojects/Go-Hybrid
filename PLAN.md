@@ -1,5 +1,7 @@
 # Hybrid Language: Development Plan
 
+- Contributor queue-reset revalidation (2026-10-24, replaces closed #1392): current main `1f0ff978` still resolves a caller-relative `HYB` after changing directories (3 failing baseline cases). Preserve the original caller-directory anchoring and regression: all 13 workload tests pass, including default/PATH/absolute controls and cleanup/failure cases; upstream CI remains required.
+
 - Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15

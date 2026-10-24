@@ -11,6 +11,12 @@
 #
 # Usage: benchmarks/workloads/run.sh [out.csv]
 set -e
+# A relative executable path belongs to the caller's directory. Bare command
+# names still use PATH, and the default is selected after locating the repo.
+case ${HYB:-} in
+  /*) ;;
+  */*) HYB="$(pwd -P)/$HYB" ;;
+esac
 cd "$(dirname "$0")"
 REPO=$(cd ../.. && pwd)
 export PATH="$REPO/../tools/go/bin:$HOME/.cargo/bin:$PATH"
