@@ -63,7 +63,7 @@ impl ConstKeyVal {
 /// length lives in its *type* whether or not the binding is constant.
 #[derive(Debug, Clone, Copy)]
 struct BindingSight<'b> {
-    ty: &'b Option<TypeExpr>,
+    ty: Option<&'b TypeExpr>,
     value: Option<&'b Expr>,
     pos: hy_diag::Pos,
     is_const: bool,
@@ -1699,26 +1699,119 @@ impl<'a> Checker<'a> {
         if let Some(operand) = as_addr_of(bare) {
             return self.const_array_len_at(operand, use_pos, depth + 1);
         }
+        if let Some(len) = self.array_lit_len(bare, depth + 1) {
+            return Some(len);
+        }
+        if let Expr::Ident { name, span: id_span } = bare {
+            if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
+                if (sight.pos.line, sight.pos.col) != (use_pos.line, use_pos.col) {
+                    if let Some(ty) = sight.ty {
+                        return self.array_len_of_ty(ty);
+                    }
+                    if let Some(value) = sight.value {
+                        return self.const_array_len_at(value, use_pos, depth + 1);
+                    }
+                }
+                return None;
+            }
+            if let Some(ty) = self.fn_sig_type_at(name, id_span.start) {
+                return self.array_len_of_ty(&ty);
+            }
+            if let Some(c) = self.file.decls.iter().find_map(|d| match d {
+                hy_syntax::Decl::Const(c) if c.name == *name => Some(c),
+                _ => None,
+            }) {
+                if let Some(ty) = &c.ty {
+                    return self.array_len_of_ty(ty);
+                }
+                return self.const_array_len_at(&c.value, c.span.start, depth + 1);
+            }
+            return None;
+        }
+        let ty = self.array_expr_type_at(bare, use_pos, depth + 1)?;
+        self.array_len_of_ty(&ty)
+    }
+
+    fn array_expr_type_at(
+        &self,
+        expr: &Expr,
+        use_pos: hy_diag::Pos,
+        depth: usize,
+    ) -> Option<TypeExpr> {
+        if depth > 32 {
+            return None;
+        }
+        let bare = unwrap_parens(expr);
+        if let Some(operand) = as_addr_of(bare) {
+            return self.array_expr_type_at(operand, use_pos, depth + 1);
+        }
         match bare {
-            Expr::Ident { name, span: id_span, .. } => {
+            Expr::Ident { name, span: id_span } => {
                 if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
                     if (sight.pos.line, sight.pos.col) != (use_pos.line, use_pos.col) {
                         if let Some(ty) = sight.ty {
-                            if let Some(len) = self.array_len_of_ty(ty) {
-                                return Some(len);
-                            }
+                            return Some(ty.clone());
                         }
                         if let Some(value) = sight.value {
-                            if let Some(len) = self.const_array_len_at(value, use_pos, depth + 1) {
-                                return Some(len);
-                            }
+                            return self.array_expr_type_at(value, use_pos, depth + 1);
                         }
                     }
                     return None;
                 }
-                self.param_array_len_at(name, id_span.start)
+                if let Some(ty) = self.fn_sig_type_at(name, id_span.start) {
+                    return Some(ty);
+                }
+                self.file.decls.iter().find_map(|d| match d {
+                    hy_syntax::Decl::Const(c) if c.name == *name => c
+                        .ty
+                        .clone()
+                        .or_else(|| self.array_expr_type_at(&c.value, c.span.start, depth + 1)),
+                    _ => None,
+                })
             }
-            other => self.array_lit_len(other, depth + 1),
+            Expr::SliceLit { elem: Some(ty), .. } => Some((**ty).clone()),
+            Expr::StructLit { ty: Some(ty), .. } => Some(ty.clone()),
+            Expr::Field { base, name, .. } => {
+                let mut cur =
+                    self.resolve_type_alias(&self.array_expr_type_at(base, use_pos, depth + 1)?);
+                while let TypeExpr::Pointer { to, .. } = cur {
+                    cur = self.resolve_type_alias(&to);
+                }
+                if let TypeExpr::Named { name: sname, .. } = cur {
+                    let sname = sname.split('[').next().unwrap_or(&sname);
+                    for (fname, fty) in self.structs.get(sname)? {
+                        if fname == name {
+                            return Some(fty.clone());
+                        }
+                    }
+                }
+                None
+            }
+            Expr::Index { base, .. } => {
+                let mut cur =
+                    self.resolve_type_alias(&self.array_expr_type_at(base, use_pos, depth + 1)?);
+                while let TypeExpr::Pointer { to, .. } = cur {
+                    cur = self.resolve_type_alias(&to);
+                }
+                match cur {
+                    TypeExpr::Array { elem, .. }
+                    | TypeExpr::Slice { elem, .. }
+                    | TypeExpr::Map { value: elem, .. } => Some(*elem),
+                    _ => None,
+                }
+            }
+            Expr::Call { callee, .. } => match unwrap_parens(callee) {
+                Expr::Ident { name, .. } => self.file.decls.iter().find_map(|d| match d {
+                    hy_syntax::Decl::Fn(f)
+                        if f.receiver.is_none() && f.name == *name && f.results.len() == 1 =>
+                    {
+                        Some(f.results[0].ty.clone())
+                    }
+                    _ => None,
+                }),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
@@ -1760,16 +1853,20 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Declared length of the fixed-size array parameter `name`, when the use
-    /// site sits inside that function.
-    fn param_array_len_at(&self, name: &str, use_pos: hy_diag::Pos) -> Option<i128> {
+    fn fn_sig_type_at(&self, name: &str, use_pos: hy_diag::Pos) -> Option<TypeExpr> {
         for decl in &self.file.decls {
             if let hy_syntax::Decl::Fn(f) = decl {
                 if span_contains(f.span, use_pos) {
-                    for p in &f.params {
-                        if p.name == name {
-                            return self.array_len_of_ty(&p.ty);
+                    if let Some(recv) = &f.receiver {
+                        if recv.name == name {
+                            return Some(recv.ty.clone());
                         }
+                    }
+                    if let Some(p) = f.params.iter().find(|p| p.name == name) {
+                        return Some(p.ty.clone());
+                    }
+                    if let Some(r) = f.results.iter().find(|r| r.name.as_deref() == Some(name)) {
+                        return Some(r.ty.clone());
                     }
                     return None;
                 }
@@ -1811,7 +1908,7 @@ impl<'a> Checker<'a> {
                 // when the initializer is not foldable. The constant folders go
                 // through `constant_initializer`, which stops here anyway.
                 *found = Some(BindingSight {
-                    ty: &l.ty,
+                    ty: l.ty.as_ref(),
                     value: l.values.get(idx),
                     pos: l.span.start,
                     is_const: matches!(l.kind, hy_syntax::LocalKind::Const),
@@ -1915,7 +2012,12 @@ impl<'a> Checker<'a> {
                             return;
                         }
                         if var == name {
-                            *found = None;
+                            *found = Some(BindingSight {
+                                ty: None,
+                                value: None,
+                                pos: lo.span().start,
+                                is_const: false,
+                            });
                         }
                     }
                     ForKind::Iterate { vars, expr } => {
@@ -1924,7 +2026,12 @@ impl<'a> Checker<'a> {
                             return;
                         }
                         if vars.iter().any(|v| v == name) {
-                            *found = None;
+                            *found = Some(BindingSight {
+                                ty: None,
+                                value: None,
+                                pos: expr.span().start,
+                                is_const: false,
+                            });
                         }
                     }
                     ForKind::Infinite => {}
@@ -1953,7 +2060,12 @@ impl<'a> Checker<'a> {
                         } = &arm.pattern
                         {
                             if b == name {
-                                *found = None;
+                                *found = Some(BindingSight {
+                                    ty: None,
+                                    value: None,
+                                    pos: arm.body.span.start,
+                                    is_const: false,
+                                });
                             }
                         }
                         if let Some(g) = &arm.guard {
@@ -1993,7 +2105,12 @@ impl<'a> Checker<'a> {
                     if span_contains(arm.body.span, use_pos) {
                         if let SelectArmKind::Recv { names, .. } = &arm.kind {
                             if names.iter().any(|n| n == name) {
-                                *found = None;
+                                *found = Some(BindingSight {
+                                    ty: None,
+                                    value: None,
+                                    pos: arm.body.span.start,
+                                    is_const: false,
+                                });
                             }
                         }
                         Self::scan_block_for_local_const(&arm.body, name, use_pos, found);
@@ -2031,10 +2148,20 @@ impl<'a> Checker<'a> {
                         return;
                     }
                 }
-                if params.iter().any(|p| p.name == name)
-                    || results.iter().any(|r| r.name.as_deref() == Some(name))
-                {
-                    *found = None;
+                if let Some(p) = params.iter().find(|p| p.name == name) {
+                    *found = Some(BindingSight {
+                        ty: Some(&p.ty),
+                        value: None,
+                        pos: p.span.start,
+                        is_const: false,
+                    });
+                } else if let Some(r) = results.iter().find(|r| r.name.as_deref() == Some(name)) {
+                    *found = Some(BindingSight {
+                        ty: Some(&r.ty),
+                        value: None,
+                        pos: r.ty.span().start,
+                        is_const: false,
+                    });
                 }
                 if span_contains(body.span, use_pos) {
                     Self::scan_block_for_local_const(body, name, use_pos, found);
