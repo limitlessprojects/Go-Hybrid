@@ -124,3 +124,24 @@ fn valid_integer_ranges_stay_legal() {
         "fn main() {\n    var n int = 5\n    for i in 0..n { _ = i }\n}\n",
     );
 }
+
+#[test]
+fn equivalent_go_integer_type_spellings_are_accepted_issue_1165() {
+    // u8 / uint8 / byte aliases
+    assert_ok("fn main() {\n    var a u8 = 0\n    var b uint8 = 10\n    for i in a..b { _ = i }\n}\n");
+    assert_ok("fn main() {\n    var a byte = 0\n    var b uint8 = 10\n    for i in a..b { _ = i }\n}\n");
+    assert_ok("fn main() {\n    var a u8 = 0\n    var b byte = 10\n    for i in a..b { _ = i }\n}\n");
+
+    // i32 / int32 / rune aliases
+    assert_ok("fn main() {\n    var a i32 = 0\n    var b int32 = 10\n    for i in a..b { _ = i }\n}\n");
+    assert_ok("fn main() {\n    var a rune = 0\n    var b int32 = 10\n    for i in a..b { _ = i }\n}\n");
+    assert_ok("fn main() {\n    var a i32 = 0\n    var b rune = 10\n    for i in a..b { _ = i }\n}\n");
+
+    // other SPEC / Go integer aliases
+    assert_ok("fn main() {\n    var a i8 = 0\n    var b int8 = 10\n    for i in a..b { _ = i }\n}\n");
+    assert_ok("fn main() {\n    var a u16 = 0\n    var b uint16 = 10\n    for i in a..b { _ = i }\n}\n");
+    assert_ok("fn main() {\n    var a i16 = 0\n    var b int16 = 10\n    for i in a..b { _ = i }\n}\n");
+    assert_ok("fn main() {\n    var a u32 = 0\n    var b uint32 = 10\n    for i in a..b { _ = i }\n}\n");
+    assert_ok("fn main() {\n    var a u64 = 0\n    var b uint64 = 10\n    for i in a..b { _ = i }\n}\n");
+    assert_ok("fn main() {\n    var a i64 = 0\n    var b int64 = 10\n    for i in a..b { _ = i }\n}\n");
+}

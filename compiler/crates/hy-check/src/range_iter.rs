@@ -271,9 +271,9 @@ impl<'a> Checker<'a> {
         let tl = self.typed_int_bound(st, lo);
         let th = self.typed_int_bound(st, hi);
         let mismatch = match (&tl, &th) {
-            (Some(a), Some(b)) => a != b,
-            (None, Some(b)) => b != "int",
-            (Some(a), None) => inclusive && a != "int",
+            (Some(a), Some(b)) => canonical_int_type_name(a) != canonical_int_type_name(b),
+            (None, Some(b)) => canonical_int_type_name(b) != "int",
+            (Some(a), None) => inclusive && canonical_int_type_name(a) != "int",
             (None, None) => false,
         };
         if mismatch {
@@ -473,5 +473,30 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+    }
+}
+
+/// Canonicalise Go equivalent spellings of the same integer type (issue #1165).
+/// Collapses:
+///   * u8 / byte / uint8 -> uint8
+///   * i8 / int8 -> int8
+///   * u16 / uint16 -> uint16
+///   * i16 / int16 -> int16
+///   * u32 / uint32 -> uint32
+///   * i32 / rune / int32 -> int32
+///   * u64 / uint64 -> uint64
+///   * i64 / int64 -> int64
+/// Word-sized `int` and `uint` remain distinct, and `uintptr` remains distinct.
+pub(crate) fn canonical_int_type_name(name: &str) -> &str {
+    match name {
+        "u8" | "byte" | "uint8" => "uint8",
+        "i8" | "int8" => "int8",
+        "u16" | "uint16" => "uint16",
+        "i16" | "int16" => "int16",
+        "u32" | "uint32" => "uint32",
+        "i32" | "rune" | "int32" => "int32",
+        "u64" | "uint64" => "uint64",
+        "i64" | "int64" => "int64",
+        other => other,
     }
 }
