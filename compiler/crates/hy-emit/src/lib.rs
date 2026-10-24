@@ -438,6 +438,8 @@ pub struct Emitter {
     /// Dotted associated-fn names declared in this file
     /// (`lru_cache.new`) — call sites mangle to `lru_cache_new[...]`.
     assoc_fns: BTreeSet<String>,
+    /// File-level `const` initializers for SPEC X4 constant-conversion folding.
+    file_consts: BTreeMap<String, Expr>,
     /// The enclosing fn's single result type IF it is an option (`option[v]`)
     /// — `return none` lowers to that type's zero value.
     cur_option_result: Option<String>,
@@ -545,6 +547,7 @@ impl Emitter {
             fnlit_depth: 0,
             for_depth: 0,
             assoc_fns: BTreeSet::new(),
+            file_consts: BTreeMap::new(),
             cur_option_result: None,
             loop_labels: Vec::new(),
             loop_label_n: 0,
@@ -642,6 +645,14 @@ impl Emitter {
             .fns()
             .filter(|f| f.name.contains('.'))
             .map(|f| f.name.clone())
+            .collect();
+        self.file_consts = file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Const(c) => Some((c.name.clone(), c.value.clone())),
+                _ => None,
+            })
             .collect();
 
         // Eager tables (Batch I): user-struct field types + per-fn result
