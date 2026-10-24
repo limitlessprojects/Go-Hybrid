@@ -701,6 +701,33 @@ impl<'a> Collector<'a> {
         );
 
         if let Some(r) = &f.receiver {
+            if let Some(base) = Checker::base_named_type(&r.ty) {
+                if let Some(fields) = self.ck.structs.get(&base) {
+                    if fields.iter().any(|(fname, _)| fname == &f.name) {
+                        self.diags.push(
+                            Diagnostic::error(
+                                "HYB-E1002",
+                                self.path.clone(),
+                                f.span,
+                                format!(
+                                    "method `{}` on `{}` has the same name as field `{}.{}` — Go refuses \"field and method with the same name\" (HYB-E1002)",
+                                    f.name, base, base, f.name
+                                ),
+                            )
+                            .with_notes(vec![
+                                format!(
+                                    "why: Go rejects a type with a field and method of the same name (`field and method with the same name {}`), so the emitted module would not build (Row 13 BUILDABLE)",
+                                    f.name
+                                ),
+                                format!(
+                                    "fix: rename method `{}.{}` or field `{}.{}` to avoid collision",
+                                    base, f.name, base, f.name
+                                ),
+                            ]),
+                        );
+                    }
+                }
+            }
             self.ty(&r.ty);
         }
         for p in &f.params {
