@@ -1,0 +1,9 @@
+{
+  "issue": 789,
+  "posix_launch_tests": [
+    "test_builder_permission_error_is_reported",
+    "test_program_permission_error_continues_to_next_case",
+    "test_program_exec_format_error_continues_to_next_case",
+    "test_executable_programs_still_agree"
+  ]
+}

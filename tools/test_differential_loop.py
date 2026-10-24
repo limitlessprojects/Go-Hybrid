@@ -447,3 +447,129 @@ class TimeoutCorpusTests(unittest.TestCase):
         status, output = self.run_with_timeout(None)
         self.assertEqual(status, 0, output)
         self.assertIn("differential: FULL AGREEMENT", output)
+
+class ProcessLaunchCorpusTests(unittest.TestCase):
+    """Issue #789: a builder or produced binary that raises OSError on launch
+    is recorded as a failed case; remaining corpus cases still execute."""
+
+    def run_with_oserror(self, error_stage):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            (root / "01-first.hy").write_text(
+                "// EXPECTED-VERDICT: ACCEPT\nfn main() {}\n", encoding="utf-8")
+            (root / "02-second.hy").write_text(
+                "// EXPECTED-VERDICT: ACCEPT\nfn main() {}\n", encoding="utf-8")
+            first_run_pending = False
+
+            def simulate_process(command, **kwargs):
+                nonlocal first_run_pending
+                if len(command) > 1 and command[1] == "build":
+                    if error_stage == "builder":
+                        raise PermissionError(13, "Permission denied", command[0])
+                    is_first = pathlib.Path(command[2]).name == "01-first.hy"
+                    (pathlib.Path(kwargs["cwd"]) / "a.out").touch()
+                    first_run_pending = is_first
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                if first_run_pending:
+                    first_run_pending = False
+                    if error_stage == "permission":
+                        raise PermissionError(13, "Permission denied", command[0])
+                    if error_stage == "format":
+                        raise OSError(8, "Exec format error", command[0])
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            output = io.StringIO()
+            with patch.object(sys, "argv", [
+                    str(HARNESS), "--bin", sys.executable, "--corpus", str(root)]), \
+                 patch.object(HARNESS_MOD.subprocess, "run", side_effect=simulate_process), \
+                 contextlib.redirect_stdout(output):
+                status = HARNESS_MOD.main()
+            return status, output.getvalue()
+
+    def test_builder_oserror_reports_both_cases_failed(self):
+        status, output = self.run_with_oserror("builder")
+        self.assertEqual(status, 1, output)
+        self.assertIn("FAIL  01-first.hy", output)
+        self.assertIn("builder could not be run:", output)
+        self.assertIn("FAIL  02-second.hy", output)
+        self.assertIn("differential accept-side (build+run): 0/2", output)
+        self.assertIn("differential: 2 disagreement(s)", output)
+        self.assertNotIn("Traceback", output)
+        self.assertNotIn("FULL AGREEMENT", output)
+
+    def test_program_permission_error_continues_to_second_case(self):
+        status, output = self.run_with_oserror("permission")
+        self.assertEqual(status, 1, output)
+        self.assertIn("FAIL  01-first.hy", output)
+        self.assertIn("program could not be run:", output)
+        self.assertIn("PASS  02-second.hy", output)
+        self.assertIn("differential accept-side (build+run): 1/2", output)
+        self.assertIn("differential: 1 disagreement(s)", output)
+        self.assertNotIn("Traceback", output)
+
+    def test_program_exec_format_error_continues_to_second_case(self):
+        status, output = self.run_with_oserror("format")
+        self.assertEqual(status, 1, output)
+        self.assertIn("FAIL  01-first.hy", output)
+        self.assertIn("program could not be run:", output)
+        self.assertIn("PASS  02-second.hy", output)
+        self.assertIn("differential accept-side (build+run): 1/2", output)
+        self.assertIn("differential: 1 disagreement(s)", output)
+        self.assertNotIn("Traceback", output)
+
+
+@unittest.skipUnless(os.name == "posix", "requires POSIX executable file permissions")
+class PosixProcessLaunchTests(unittest.TestCase):
+    """Real child-process reproduction on POSIX."""
+
+    def run_corpus(self, failure):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            corpus = root / "corpus"
+            corpus.mkdir()
+            for name in ("01-first.hy", "02-second.hy"):
+                (corpus / name).write_text(
+                    "// EXPECTED-VERDICT: ACCEPT\nfn main() {}\n", encoding="utf-8")
+            program = f"#!{sys.executable}\n"
+            builder = root / "hyb"
+            builder.write_text(
+                f"#!{sys.executable}\nimport pathlib, sys\n"
+                "out = pathlib.Path('a.out')\n"
+                f"out.write_text({program!r}, encoding='utf-8')\n"
+                "out.chmod(0o755)\n"
+                "if sys.argv[2].endswith('01-first.hy'):\n"
+                f"    if {failure!r} == 'permission':\n"
+                "        out.chmod(0o644)\n"
+                f"    if {failure!r} == 'format':\n"
+                "        out.write_text('not an executable', encoding='utf-8')\n",
+                encoding="utf-8")
+            builder.chmod(0o644 if failure == "builder" else 0o755)
+            return subprocess.run(
+                [sys.executable, str(HARNESS), "--bin", str(builder),
+                 "--corpus", str(corpus)],
+                capture_output=True, encoding="utf-8", timeout=10)
+
+    def assert_report(self, failure, passed):
+        result = self.run_corpus(failure)
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("FAIL  01-first.hy", output)
+        self.assertIn("02-second.hy", output)
+        self.assertIn(f"differential accept-side (build+run): {passed}/2", output)
+        self.assertIn(f"differential: {2 - passed} disagreement(s)", output)
+        self.assertNotIn("Traceback", output)
+        self.assertNotIn("FULL AGREEMENT", output)
+
+    def test_builder_permission_error_is_reported(self):
+        self.assert_report("builder", 0)
+
+    def test_program_permission_error_continues_to_next_case(self):
+        self.assert_report("permission", 1)
+
+    def test_program_exec_format_error_continues_to_next_case(self):
+        self.assert_report("format", 1)
+
+    def test_executable_programs_still_agree(self):
+        result = self.run_corpus(None)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("differential: FULL AGREEMENT", result.stdout)
