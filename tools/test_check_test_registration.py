@@ -266,6 +266,55 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
                          ["tools/test_disabled.py", "tests/test_disabled.py"])
 
+    def test_non_identifier_test_filename_is_skipped_by_unittest_and_rejected_by_guard(self):
+        root, text = self.build(
+            "python3 -m unittest discover -s tools -p 'test_*.py'\n",
+            ["tools/test_control.py", "tools/test_bad-name.py", "tools/test_v1.2.py"])
+        (root / "tools/test_control.py").write_text(
+            "import unittest\nclass Control(unittest.TestCase):\n"
+            "    def test_pass(self): pass\n", encoding="utf-8")
+        for invalid in ("tools/test_bad-name.py", "tools/test_v1.2.py"):
+            (root / invalid).write_text(
+                "raise AssertionError('non-identifier module must not run')\n",
+                encoding="utf-8")
+        discover = subprocess.run(
+            [sys.executable, "-m", "unittest", "discover", "-s", "tools", "-p", "test_*.py"],
+            cwd=root, capture_output=True, text=True, timeout=15)
+        self.assertEqual(discover.returncode, 0, discover.stderr)
+        self.assertIn("Ran 1 test", discover.stderr)
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
+                         ["tools/test_bad-name.py", "tools/test_v1.2.py"])
+
+    def test_top_level_directory_requires_importable_start_directory_within_top(self):
+        root, text = self.build(
+            "python3 -m unittest discover -s tools/fuzz -p 'test_*.py' -t .\n",
+            ["tools/fuzz/test_hyfuzz.py"])
+        (root / "tools/fuzz/test_hyfuzz.py").write_text(
+            "import unittest\nclass Hyfuzz(unittest.TestCase):\n"
+            "    def test_pass(self): pass\n", encoding="utf-8")
+        command = [sys.executable, "-m", "unittest", "discover",
+                   "-s", "tools/fuzz", "-p", "test_*.py", "-t", "."]
+        failed = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
+                         ["tools/fuzz/test_hyfuzz.py"])
+        (root / "tools/fuzz/__init__.py").write_text("", encoding="utf-8")
+        passed = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=15)
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertEqual(guard.unregistered(root, text), [])
+        # Top-level directory escaping repo root or disjoint from start_dir is rejected.
+        self.assertEqual(
+            [rel for rel, _ in guard.unregistered(
+                root, "python3 -m unittest discover -s tools/fuzz -p 'test_*.py' -t ..\n")],
+            ["tools/fuzz/test_hyfuzz.py"])
+        (root / "tools/runner").mkdir(parents=True, exist_ok=True)
+        self.assertEqual(
+            [rel for rel, _ in guard.unregistered(
+                root,
+                "python3 -m unittest discover -s tools/fuzz -p 'test_*.py' "
+                "--top-level-directory=tools/runner\n")],
+            ["tools/fuzz/test_hyfuzz.py"])
+
 
 class GuardMisuseTests(unittest.TestCase):
     def run_main(self, workflow, suites=()):
@@ -293,6 +342,11 @@ class GuardMisuseTests(unittest.TestCase):
     def test_workflow_without_any_reference_fails_closed(self):
         self.assertEqual(
             self.run_main("python3 -m py_compile tools/job.py\n", ["tools/test_x.py"]), 2)
+        self.assertEqual(
+            self.run_main("# run tests\npython3 -m py_compile tools/job.py\n",
+                          ["tools/test_x.py"]), 2)
+        self.assertEqual(
+            self.run_main("python3 tests/test_x.py\n", ["tests/test_x.py"]), 0)
 
     def test_root_without_suites_fails_closed(self):
         self.assertEqual(

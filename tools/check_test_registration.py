@@ -42,6 +42,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # as execution.
 PYTHON_RE = re.compile(r"(?:.*/)?python(?:3(?:\.\d+)?)?\Z")
 PYTHON_FLAGS_RE = re.compile(r"-[bBdEIOPqRsSuvx]+\Z")
+VALID_MODULE_NAME = re.compile(r"[_a-z]\w*\.py\Z", re.IGNORECASE)
 
 
 def shell_words(line):
@@ -91,6 +92,31 @@ DISCOVER_DIR = "tools"   # referenced through a `unittest discover -p` pattern
 DIRECT_DIRS = ("tests",)  # referenced by literal repo-relative path
 
 
+def _registered_discoveries(workflow_text):
+    """Yield (start, pattern, top) triples from explicit discovery commands."""
+    discoveries = []
+    for arguments in python_commands(workflow_text):
+        if arguments[:3] != ["-m", "unittest", "discover"]:
+            continue
+        start, pattern, top = ".", None, None
+        for index, argument in enumerate(arguments[3:], 3):
+            if argument in ("-s", "--start-directory") and index + 1 < len(arguments):
+                start = arguments[index + 1]
+            elif argument in ("-p", "--pattern") and index + 1 < len(arguments):
+                pattern = arguments[index + 1]
+            elif argument in ("-t", "--top-level-directory") and index + 1 < len(arguments):
+                top = arguments[index + 1]
+            elif argument.startswith("--start-directory="):
+                start = argument.split("=", 1)[1]
+            elif argument.startswith("--pattern="):
+                pattern = argument.split("=", 1)[1]
+            elif argument.startswith("--top-level-directory="):
+                top = argument.split("=", 1)[1]
+        if pattern is not None:
+            discoveries.append((start, pattern, top))
+    return discoveries
+
+
 def registered_discoveries(workflow_text):
     """Pair each discovery pattern with its own start directory (repo cwd).
 
@@ -98,23 +124,8 @@ def registered_discoveries(workflow_text):
     the repository root; it is not a general shell/YAML or load_tests
     interpreter.
     """
-    discoveries = []
-    for arguments in python_commands(workflow_text):
-        if arguments[:3] != ["-m", "unittest", "discover"]:
-            continue
-        start, pattern = ".", None
-        for index, argument in enumerate(arguments[3:], 3):
-            if argument in ("-s", "--start-directory") and index + 1 < len(arguments):
-                start = arguments[index + 1]
-            elif argument in ("-p", "--pattern") and index + 1 < len(arguments):
-                pattern = arguments[index + 1]
-            elif argument.startswith("--start-directory="):
-                start = argument.split("=", 1)[1]
-            elif argument.startswith("--pattern="):
-                pattern = argument.split("=", 1)[1]
-        if pattern is not None:
-            discoveries.append((start, pattern))
-    return discoveries
+    return [(start, pattern)
+            for start, pattern, _ in _registered_discoveries(workflow_text)]
 
 
 def registered_patterns(workflow_text):
@@ -123,15 +134,24 @@ def registered_patterns(workflow_text):
 
 
 def is_registered_discover(name, patterns):
-    return any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
+    return (VALID_MODULE_NAME.fullmatch(name) is not None
+            and any(fnmatch.fnmatch(name, pattern) for pattern in patterns))
 
 
-def is_reached_discover(root, relpath, start, pattern):
+def is_reached_discover(root, relpath, start, pattern, top=None):
     """Mirror discovery's directory boundary without importing test code."""
     root_dir = Path(root).resolve()
     target = (root_dir / relpath).resolve()
     start_dir = (root_dir / start).resolve()
-    if not start_dir.is_dir() or not start_dir.is_relative_to(root_dir) or not target.is_relative_to(start_dir):
+    top_dir = start_dir if top is None else (root_dir / top).resolve()
+    if (not start_dir.is_dir()
+            or not top_dir.is_dir()
+            or not start_dir.is_relative_to(root_dir)
+            or not top_dir.is_relative_to(root_dir)
+            or not start_dir.is_relative_to(top_dir)
+            or not target.is_relative_to(start_dir)):
+        return False
+    if start_dir != top_dir and not (start_dir / "__init__.py").is_file():
         return False
     if not is_registered_discover(target.name, [pattern]):
         return False
@@ -165,11 +185,11 @@ def find_test_files(root, directory):
 
 def unregistered(root, workflow_text):
     """Test files no reference in the workflow reaches."""
-    discoveries = registered_discoveries(workflow_text)
+    discoveries = _registered_discoveries(workflow_text)
     missing = []
     for rel in find_test_files(root, DISCOVER_DIR):
-        if not any(is_reached_discover(root, rel, start, pattern)
-                   for start, pattern in discoveries):
+        if not any(is_reached_discover(root, rel, start, pattern, top)
+                   for start, pattern, top in discoveries):
             missing.append((rel, "no `unittest discover -s ... -p ...` invocation reaches it"))
     for directory in DIRECT_DIRS:
         for rel in find_test_files(root, directory):
@@ -198,7 +218,13 @@ def main():
               f"{args.root} ({DISCOVER_DIR}/ or {', '.join(DIRECT_DIRS)}/)",
               file=sys.stderr)
         return 2
-    if not patterns and not any(d in workflow_text for d in DIRECT_DIRS):
+    has_direct = any(
+        arguments and any(
+            arguments[0].startswith((f"{d}/", f"./{d}/")) for d in DIRECT_DIRS
+        )
+        for arguments in python_commands(workflow_text)
+    )
+    if not patterns and not has_direct:
         print(f"REGISTRATION CHECK ERROR: {args.workflow} references no test at "
               "all; the guard cannot verify anything", file=sys.stderr)
         return 2
