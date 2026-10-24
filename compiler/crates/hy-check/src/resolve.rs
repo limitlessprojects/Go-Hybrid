@@ -64,6 +64,51 @@ const PREDECLARED: &[&str] = &[
     "_",
 ];
 
+#[allow(dead_code)]
+pub(crate) fn is_predeclared_name(name: &str) -> bool {
+    PREDECLARED.contains(&name)
+}
+
+pub(crate) fn is_predeclared_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "bool"
+            | "byte"
+            | "complex64"
+            | "complex128"
+            | "error"
+            | "float32"
+            | "float64"
+            | "int"
+            | "int8"
+            | "int16"
+            | "int32"
+            | "int64"
+            | "rune"
+            | "string"
+            | "uint"
+            | "uint8"
+            | "uint16"
+            | "uint32"
+            | "uint64"
+            | "uintptr"
+            | "any"
+            | "comparable"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "f32"
+            | "f64"
+            | "usize"
+            | "isize"
+    )
+}
+
 /// Which names the current walk records.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
