@@ -214,6 +214,7 @@ fn check_one_closure(
         env,
         aliases: st.aliases.clone(),
         may_share: st.may_share.clone(),
+        borrow_bindings: st.borrow_bindings.clone(),
         ..FnState::default()
     };
     for (k, b) in cst.env.iter_mut() {
@@ -2097,5 +2098,65 @@ fn main() {
 }
 "#;
         assert_eq!(codes(src), vec!["HYB-E3003"]);
+    }
+
+    #[test]
+    fn reject_addr_of_index_projection_on_slot_loan_t24() {
+        let src = r#"struct container {
+    arr []int
+    fixed [3]int
+}
+
+fn main() {
+    m1 := map[string]container{"k": container{arr: []int{1, 2, 3}, fixed: [3]int{4, 5, 6}}}
+    n1 := &m1["k"]
+    p1 := &n1.arr[0]
+    _ = p1
+
+    m2 := map[string]container{"k": container{arr: []int{1, 2, 3}, fixed: [3]int{4, 5, 6}}}
+    n2 := &m2["k"]
+    p2 := &n2.fixed[0]
+    _ = p2
+
+    f := fn() {
+        c := map[string]container{"k": container{arr: []int{1}, fixed: [3]int{1, 2, 3}}}
+        s := &c["k"]
+        q := &s.fixed[0]
+        _ = q
+    }
+    f()
+}
+"#;
+        assert_eq!(codes(src), vec!["HYB-E3104", "HYB-E3104", "HYB-E3104"]);
+    }
+
+    #[test]
+    fn reject_closure_slot_loan_rebind_to_general_pointer_or_nil_t24() {
+        let src = r#"struct node {
+    val int
+}
+
+fn main() {
+    f := fn() {
+        m := map[string]node{"a": node{val: 1}}
+        other := node{val: 2}
+        s := &m["a"]
+        s = &other
+        _ = s
+    }
+    f()
+
+    outer := fn() *node {
+        m2 := map[string]node{"a": node{val: 1}}
+        s2 := &m2["a"]
+        inner := fn() *node {
+            return s2
+        }
+        return inner()
+    }
+    _ = outer
+}
+"#;
+        assert_eq!(codes(src), vec!["HYB-E3104", "HYB-E3104"]);
     }
 }
