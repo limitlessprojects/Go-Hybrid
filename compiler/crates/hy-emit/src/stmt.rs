@@ -1738,23 +1738,36 @@ impl Emitter {
                 hi,
                 inclusive,
             } => {
-                if Self::expr_has_hoistable_try(hi) {
-                    self.hoist_order_before_try(lo)?;
-                } else {
-                    self.hoist_tries_expr(lo)?;
-                }
-                self.hoist_tries_expr(hi)?;
+                self.hoist_tries_expr(lo)?;
                 let lo_t = self.emit_expr(lo, 0)?;
-                let hi_t = self.emit_expr(hi, 0)?;
                 // `for _ in a..b` (differential corpus 16/17/18): Go has no
                 // blank := variable — a fresh temp carries the count. The
                 // semantics are identical: the variable is never read.
                 let v = if var == "_" {
                     self.next_temp("hyBlank")
                 } else {
-                    self.shadow_local_name(var);
                     var.clone()
                 };
+                // Both range forms evaluate their bounds exactly once, in the
+                // enclosing scope and before the loop variable is declared
+                // (#730). Hoist in source order so mutation/shadowing and
+                // side-effecting upper bounds cannot change the trip count.
+                let lo_once = self.next_temp("hyLo");
+                let hi_once = self.next_temp("hyHi");
+                self.push(&format!("{} := {}", lo_once, lo_t));
+                // Capture even a plain lower-bound read before hoisting an
+                // upper-bound `?`: its call can mutate that binding or an
+                // indexed element. Both bounds still see the outer scope.
+                self.hoist_tries_expr(hi)?;
+                let hi_t = self.emit_expr(hi, 0)?;
+                self.shadow_local_name(var);
+                // Infer the upper-bound storage type from the captured lower
+                // bound. `hi := upper` defaults even named untyped constants
+                // (e.g. `const upper = 127`) to int, breaking an int8 range.
+                // Assigning into a lower-typed variable preserves the original
+                // comparison's constant conversion while evaluating hi once.
+                self.push(&format!("{} := {}", hi_once, lo_once));
+                self.push(&format!("{} = {}", hi_once, hi_t));
                 if *inclusive {
                     // Issue #322: `for v := lo; v <= hi; v++` wraps past the
                     // type maximum (int8 127..=127 never stops). Emit a
@@ -1765,18 +1778,14 @@ impl Emitter {
                     //       cont = v != hyHi
                     //       body
                     //   }
-                    let lo_once = self.next_temp("hyLo");
-                    let hi_once = self.next_temp("hyHi");
                     let cont = self.next_temp("hyCont");
-                    self.push(&format!("{} := {}", lo_once, lo_t));
-                    self.push(&format!("{} := {}", hi_once, hi_t));
                     inclusive_stop = Some((cont.clone(), v.clone(), hi_once.clone()));
                     format!(
                         "for {}, {} := {}, {} <= {}; {}; {}++ {{",
                         v, cont, lo_once, lo_once, hi_once, cont, v
                     )
                 } else {
-                    format!("for {} := {}; {} < {}; {}++ {{", v, lo_t, v, hi_t, v)
+                    format!("for {} := {}; {} < {}; {}++ {{", v, lo_once, v, hi_once, v)
                 }
             }
             ForKind::Iterate { vars, expr } => {

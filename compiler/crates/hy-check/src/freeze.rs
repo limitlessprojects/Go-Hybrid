@@ -694,22 +694,9 @@ impl<'a> Checker<'a> {
                     } => {
                         crate::walk::expr_uses(expr, &mut uses);
                     }
-                    hy_syntax::Stmt::For {
-                        kind: hy_syntax::ForKind::Range { hi, .. },
-                        ..
-                    } => {
-                        // Integration note (21-b): the PR also added `lo`
-                        // here, but the emitted Go evaluates `lo` ONCE at
-                        // loop init (`for v := lo; v < hi; v++`) — and the
-                        // inclusive form hoists both bounds into hyLo/hyHi
-                        // temps — so `lo` is never re-read on the back-edge.
-                        // A move inside the body cannot race the header's
-                        // `lo`; keeping the hunk would model a read that
-                        // does not happen (and re-order first-diagnostics
-                        // in already-rejecting shapes). `hi` IS the loop
-                        // condition and stays checked.
-                        crate::walk::expr_uses(hi, &mut uses);
-                    }
+                    // Integer-range bounds are both captured before the
+                    // loop (#730); unlike while conditions and iterable
+                    // expressions, neither bound is read on the back-edge.
                     _ => {}
                 }
             } else {
