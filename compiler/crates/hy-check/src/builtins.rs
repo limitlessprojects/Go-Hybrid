@@ -9,7 +9,8 @@
 //! Literal-only scope mirrors the landed #149 / #148 const-arith checks:
 //! variable operands stay a run-time concern, matching Go.
 
-use crate::model::{unwrap_parens, Checker, OpKind};
+use crate::buildable::OpKind;
+use crate::model::{unwrap_parens, Checker};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{Expr, ForKind, LitKind, Place, PlaceKind, SelectArmKind, Stmt, UnOp};
 
