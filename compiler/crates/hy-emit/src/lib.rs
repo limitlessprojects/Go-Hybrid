@@ -1458,13 +1458,15 @@ impl Emitter {
 
     pub(crate) fn expr_is_pointer(&self, e: &Expr) -> bool {
         match e {
-            Expr::AddrOf { .. } => true,
+            Expr::AddrOf { .. } | Expr::Unary { op: UnOp::Addr, .. } => true,
             Expr::Paren { inner, .. } => self.expr_is_pointer(inner),
-            Expr::Try { operand, .. } => self.expr_is_pointer(operand),
+            Expr::Move { operand, .. } | Expr::Try { operand, .. } => {
+                self.expr_is_pointer(operand)
+            }
             Expr::Ident { name, .. } => self.pointer_vars.contains(name),
             Expr::Call { callee, .. } => {
-                if let Expr::Ident { name, .. } = callee.as_ref() {
-                    self.ptr_returning_fns.contains(name)
+                if let Expr::Ident { name, .. } = Self::peel_parens(callee) {
+                    name == "new" || self.ptr_returning_fns.contains(name)
                 } else {
                     false
                 }
@@ -1478,11 +1480,25 @@ impl Emitter {
     /// whose type is a user struct (`pool_stats`, value or pointer) lands
     /// in var_struct — `stats.mu.lock()` types through struct_fields.
     fn register_var_ty(&mut self, name: &str, ty: &TypeExpr) {
-        let (base, ptr) = match ty {
-            TypeExpr::Pointer { to, .. } => (base_ty_name(to), true),
-            t => (base_ty_name(t), false),
-        };
-        let Some(base) = base else { return };
+        let mut cur = ty;
+        let mut ptr = false;
+        for _ in 0..16 {
+            match cur {
+                TypeExpr::Pointer { to, .. } => {
+                    ptr = true;
+                    cur = to;
+                }
+                TypeExpr::Named { name: n, .. } => {
+                    if let Some(next) = self.n5_aliases.get(n) {
+                        cur = next;
+                    } else {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        let Some(base) = base_ty_name(cur) else { return };
         if base.is_empty() {
             return;
         }
@@ -1499,29 +1515,35 @@ impl Emitter {
     /// table knows gives ForeignTy(key) — members resolve field-vs-method;
     /// any other dotted type stays generic Foreign.
     fn binding_kind_of_ty(&self, t: &TypeExpr) -> Option<BindingKind> {
-        if matches!(t, TypeExpr::Chan { .. }) {
-            return Some(BindingKind::Chan);
+        let mut cur = t;
+        for _ in 0..16 {
+            match cur {
+                TypeExpr::Chan { .. } => return Some(BindingKind::Chan),
+                TypeExpr::Pointer { to, .. } => cur = to,
+                TypeExpr::Named { name, .. } => {
+                    if let Some(next) = self.n5_aliases.get(name) {
+                        cur = next;
+                        continue;
+                    }
+                    let name = name.as_str();
+                    if name.starts_with("set[") || name == "set" {
+                        return Some(BindingKind::Set);
+                    }
+                    if name.is_empty() || !name.contains('.') {
+                        return None;
+                    }
+                    if shapes::SHAPES.iter().any(|(k, _)| *k == name) {
+                        return Some(BindingKind::ForeignTy(
+                            shapes::SHAPES.iter().find(|(k, _)| *k == name).unwrap().0,
+                        ));
+                    } else {
+                        return Some(BindingKind::Foreign);
+                    }
+                }
+                _ => return None,
+            }
         }
-        let name = match t {
-            TypeExpr::Named { name, .. } => name.as_str(),
-            TypeExpr::Pointer { to, .. } => return self.binding_kind_of_ty(to),
-            _ => return None,
-        };
-        if name.starts_with("set[") || name == "set" {
-            return Some(BindingKind::Set);
-        }
-        if name.is_empty() || !name.contains('.') {
-            return None;
-        }
-        if shapes::SHAPES.iter().any(|(k, _)| *k == name) {
-            // &'static from the static table — find returns a reference with
-            // the static lifetime.
-            Some(BindingKind::ForeignTy(
-                shapes::SHAPES.iter().find(|(k, _)| *k == name).unwrap().0,
-            ))
-        } else {
-            Some(BindingKind::Foreign)
-        }
+        None
     }
 
     /// The conversion-target key of a result type (`http.handler`), if the
