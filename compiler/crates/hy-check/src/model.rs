@@ -316,7 +316,7 @@ impl FnState {
     pub(crate) fn scope_pop(&mut self) {
         if let Some(fnlits) = self.fnlit_scopes.pop() {
             if !fnlits.is_empty() {
-                let mut snap_env = self.env.clone();
+                let mut snap_env = HashMap::new();
                 for layer in &self.scopes {
                     for (k, v) in layer {
                         snap_env.insert(k.clone(), v.clone());
@@ -332,6 +332,17 @@ impl FnState {
             }
         }
         let popped_scope = self.scopes.last().cloned().unwrap_or_default();
+        for (pk, pb) in &popped_scope {
+            if let Some(mv) = &pb.moved {
+                for (s_env, _, _) in self.closure_scoped_envs.values_mut() {
+                    if let Some(sb) = s_env.get_mut(pk) {
+                        if sb.moved.is_none() {
+                            sb.moved = Some(mv.clone());
+                        }
+                    }
+                }
+            }
+        }
         let exists_in_outer = |name: &str, env: &HashMap<String, Binding>, scopes: &[HashMap<String, Binding>]| {
             env.contains_key(name) || scopes.iter().rev().skip(1).any(|s| s.contains_key(name))
         };

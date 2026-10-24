@@ -1636,14 +1636,53 @@ fn inspect_later_defer_fate(
     }
 
     let mut rebound_self = false;
+    let mut depth: usize = 0;
+    let mut defer_depth: usize = 0;
+    let mut inner_shadows: Vec<std::collections::HashSet<String>> = Vec::new();
     for (stmt, idx) in &flat.stmts {
-        if *idx <= defer_idx || flat.in_managed(*idx) {
+        if let Some(evts) = flat.events.get(idx) {
+            for ev in evts {
+                match ev {
+                    crate::walk::ScopeEvent::Push => {
+                        depth += 1;
+                        if *idx > defer_idx && depth > defer_depth {
+                            inner_shadows.push(std::collections::HashSet::new());
+                        }
+                    }
+                    crate::walk::ScopeEvent::Pop => {
+                        if *idx > defer_idx && depth > defer_depth {
+                            inner_shadows.pop();
+                        }
+                        depth = depth.saturating_sub(1);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if *idx == defer_idx {
+            defer_depth = depth;
             continue;
         }
-        if let Some(mv) = stmt_moves_watched_binding(stmt, &watch) {
+        if *idx < defer_idx || flat.in_managed(*idx) {
+            continue;
+        }
+        let active_watch: std::collections::HashSet<String> = watch
+            .iter()
+            .filter(|w| !inner_shadows.iter().any(|s| s.contains(*w)))
+            .cloned()
+            .collect();
+        if let Some(mv) = stmt_moves_watched_binding(stmt, &active_watch) {
             return LaterDeferFate::Moved(mv);
         }
-        update_post_defer_watch(ck, st, stmt, name, &mut watch, &mut rebound_self);
+        update_post_defer_watch(
+            ck,
+            st,
+            stmt,
+            name,
+            &mut watch,
+            &mut inner_shadows,
+            &mut rebound_self,
+        );
     }
     if rebound_self {
         LaterDeferFate::ReboundBeforeMove
@@ -1794,21 +1833,45 @@ fn update_post_defer_watch(
     stmt: &Stmt,
     deferred_name: &str,
     watch: &mut std::collections::HashSet<String>,
+    inner_shadows: &mut Vec<std::collections::HashSet<String>>,
     rebound_self: &mut bool,
 ) {
-    let mut handle_bind = |target: &str, val: Option<&Expr>| {
+    let in_nested_scope = !inner_shadows.is_empty();
+    let mut handle_bind = |target: &str, val: Option<&Expr>, is_local_decl: bool| {
         if target == "_" {
             return;
         }
         let Some(v) = val else {
             return;
         };
+        let is_shadowed = inner_shadows.iter().any(|s| s.contains(target));
         let reads_watched = watch
             .iter()
+            .filter(|w| !inner_shadows.iter().any(|s| s.contains(*w)))
             .any(|w| ck.value_reads_storage_of(st, v, w));
+        if is_local_decl && in_nested_scope {
+            if reads_watched {
+                if let Some(top) = inner_shadows.last_mut() {
+                    top.remove(target);
+                }
+                watch.insert(target.to_string());
+            } else if let Some(top) = inner_shadows.last_mut() {
+                top.insert(target.to_string());
+            }
+            return;
+        }
+        if is_shadowed {
+            if reads_watched {
+                for layer in inner_shadows.iter_mut() {
+                    layer.remove(target);
+                }
+                watch.insert(target.to_string());
+            }
+            return;
+        }
         if reads_watched {
             watch.insert(target.to_string());
-        } else {
+        } else if !in_nested_scope {
             watch.remove(target);
             if target == deferred_name {
                 *rebound_self = true;
@@ -1820,7 +1883,7 @@ fn update_post_defer_watch(
         Stmt::Local(l) => {
             for (i, target) in l.names.iter().enumerate() {
                 let val = l.values.get(i).or_else(|| l.values.first());
-                handle_bind(target, val);
+                handle_bind(target, val, true);
             }
         }
         Stmt::Assign {
@@ -1832,7 +1895,7 @@ fn update_post_defer_watch(
             for (i, t) in targets.iter().enumerate() {
                 if let hy_syntax::PlaceKind::Ident(target) = &t.kind {
                     let val = values.get(i).or_else(|| values.first());
-                    handle_bind(target, val);
+                    handle_bind(target, val, false);
                 }
             }
         }
@@ -2094,6 +2157,99 @@ fn main() {
     defer report(shared)
     shared = map[string]int{}
     task worker(move alias)
+}
+"#;
+        assert_eq!(codes(src), vec!["HYB-E3003"]);
+    }
+
+    #[test]
+    fn reject_nested_block_deferred_closure_capturing_binding_moved_later_issue_1393() {
+        let src = r#"import "fmt"
+
+fn worker(owned map[string]int) {
+    owned["k"] = 2
+}
+
+fn main() {
+    shared := map[string]int{"k": 1}
+    if true {
+        defer (fn() {
+            fmt.println(shared["k"])
+        })()
+    }
+    task worker(move shared)
+}
+"#;
+        assert_eq!(codes(src), vec!["HYB-E3003"]);
+    }
+
+    #[test]
+    fn reject_defer_followed_by_inner_shadow_or_branch_rebind_then_outer_move_issue_1393() {
+        let src_shadow = r#"import "fmt"
+
+fn worker(owned map[string]int) {
+    owned["k"] = 2
+}
+
+fn report(m map[string]int) {
+    fmt.println(m["k"])
+}
+
+fn main() {
+    shared := map[string]int{"k": 1}
+    defer report(shared)
+    if true {
+        shared := map[string]int{"k": 2}
+        fmt.println(shared["k"])
+    }
+    task worker(move shared)
+}
+"#;
+        assert_eq!(codes(src_shadow), vec!["HYB-E3003"]);
+
+        let src_branch = r#"import "fmt"
+
+fn worker(owned map[string]int) {
+    owned["k"] = 2
+}
+
+fn report(m map[string]int) {
+    fmt.println(m["k"])
+}
+
+fn main() {
+    shared := map[string]int{"k": 1}
+    defer report(shared)
+    if false {
+        shared = map[string]int{"k": 2}
+    }
+    task worker(move shared)
+}
+"#;
+        assert_eq!(codes(src_branch), vec!["HYB-E3003"]);
+    }
+
+    #[test]
+    fn reject_defer_with_deep_alias_chain_moved_later_issue_1393() {
+        let src = r#"import "fmt"
+
+fn worker(owned map[string]int) {
+    owned["k"] = 2
+}
+
+fn report(m map[string]int) {
+    fmt.println(m["k"])
+}
+
+fn main() {
+    shared := map[string]int{"k": 1}
+    defer report(shared)
+    a1 := shared; a2 := a1; a3 := a2; a4 := a3
+    a5 := a4; a6 := a5; a7 := a6; a8 := a7
+    a9 := a8; a10 := a9; a11 := a10; a12 := a11
+    a13 := a12; a14 := a13; a15 := a14; a16 := a15
+    a17 := a16
+    task worker(move a17)
 }
 "#;
         assert_eq!(codes(src), vec!["HYB-E3003"]);
