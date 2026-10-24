@@ -170,7 +170,12 @@ def smoke(repro_rel: str, expected: str, rust_tests: list[str]) -> tuple[bool, s
     outp = (r.stdout or "") + (r.stderr or "")
     if r.returncode == 0:
         return False, "repro still ACCEPTs — candidate ineffective"
-    if expected and expected not in outp:
+    if r.returncode != 1:
+        return False, (f"checker failed (exit {r.returncode}); expected rejection exit 1:\n"
+                       + outp[-600:])
+    if expected and not re.search(
+        rf"(?<![\w-]){re.escape(expected)}(?![\w-])", outp
+    ):
         return False, f"repro rejected without {expected}; tail:\n" + outp[-600:]
     SMOKE_DIR.mkdir(parents=True, exist_ok=True)
     for c in ACCEPT_CONTROLS:
