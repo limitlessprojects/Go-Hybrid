@@ -487,6 +487,68 @@ impl Emitter {
         Ok((format_str, args))
     }
 
+    /// Arguments of a format-consuming `fmt` call whose format parameter
+    /// sits at `fmt_idx`. An interpolated FORMAT argument is lowered so
+    /// that interpolated VALUES are never read as verbs:
+    ///   * last argument — splice: `"{a}={b}\n"` → `"%v=%v\n", a, b`
+    ///     (literal `%` escaped, exactly as before);
+    ///   * followed by explicit arguments — the literal text stays the
+    ///     format (its verbs consume the explicit arguments) and each
+    ///     interpolated value is rendered and `%`-escaped at run time, so a
+    ///     value such as `"100%sure"` prints verbatim instead of eating an
+    ///     argument (`fmt.printf("{name}: %d\n", n)`).
+    /// Interps in any other position are ordinary string values.
+    fn emit_format_call_args(
+        &mut self,
+        args: &[CallArg],
+        fmt_idx: usize,
+    ) -> Result<Vec<String>, EmitError> {
+        let mut out = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            if i == fmt_idx {
+                if let Expr::Interp { parts, .. } = &a.value {
+                    if i + 1 == args.len() {
+                        let (fmt_str, interp_args) = self.interp_parts(parts)?;
+                        out.push(go_quote(&fmt_str));
+                        out.extend(interp_args);
+                    } else {
+                        out.push(self.interp_as_format_with_args(parts)?);
+                    }
+                    continue;
+                }
+            }
+            out.push(self.emit_call_arg(a)?);
+        }
+        Ok(out)
+    }
+
+    /// `"{name}: %d\n"` (format followed by explicit args) →
+    /// `strings.ReplaceAll(fmt.Sprint(name), "%", "%%") + ": %d\n"`.
+    fn interp_as_format_with_args(
+        &mut self,
+        parts: &[InterpPart],
+    ) -> Result<String, EmitError> {
+        let mut pieces = Vec::new();
+        for p in parts {
+            match p {
+                InterpPart::Lit(l) => pieces.push(go_quote(l)),
+                InterpPart::Expr(x) => {
+                    self.use_package("fmt");
+                    self.use_package("strings");
+                    let v = self.emit_expr(x, 0)?;
+                    pieces.push(format!(
+                        "strings.ReplaceAll(fmt.Sprint({}), \"%\", \"%%\")",
+                        v
+                    ));
+                }
+            }
+        }
+        if pieces.is_empty() {
+            return Ok("\"\"".to_string());
+        }
+        Ok(pieces.join(" + "))
+    }
+
     /// A struct literal's keyed fields plus, for a user struct, the N5
     /// allocation of every map-carrying field the literal leaves at its
     /// zero value (`bag{}` → `bag{counts: map[string]int{}}`, issue #645).
@@ -1161,8 +1223,12 @@ impl Emitter {
                 MemberSpecial::StderrCall(go_name) => {
                     self.use_package("os");
                     let mut parts = vec!["os.Stderr".to_string()];
-                    for a in args {
-                        parts.push(self.emit_call_arg(a)?);
+                    if go_name == "Fprintf" {
+                        parts.extend(self.emit_format_call_args(args, 0)?);
+                    } else {
+                        for a in args {
+                            parts.push(self.emit_call_arg(a)?);
+                        }
                     }
                     Ok(format!("{}.{}({})", pkg, go_name, parts.join(", ")))
                 }
@@ -1214,23 +1280,17 @@ impl Emitter {
         // `fmt.fprintf(w, "{a}+{b}={a+b}\n")` must splice the interp's
         // arguments into the call — `fmt.Fprintf(w, "%v+%v=%v\n", a, b, a+b)`.
         // (Wrapping the whole interp in Sprintf would print the %v's as
-        // literals — Fprintf's format param consumes them.)
-        if (pkg == "fmt" && (name == "fprintf" || name == "printf")) && !args.is_empty() {
-            if let Expr::Interp { parts, .. } = &args[args.len() - 1].value {
-                let (fmt_str, interp_args) = self.interp_parts(parts)?;
-                let mut call_args = Vec::new();
-                for a in &args[..args.len() - 1] {
-                    call_args.push(self.emit_call_arg(a)?);
-                }
-                call_args.push(go_quote(&fmt_str));
-                call_args.extend(interp_args);
-                return Ok(format!(
-                    "{}.{}({})",
-                    pkg,
-                    to_go_name(name),
-                    call_args.join(", ")
-                ));
-            }
+        // literals — Fprintf's format param consumes them.) Only the
+        // argument in the FORMAT position is treated this way: an interp
+        // passed as a value (`fmt.printf("%s\n", "{x}")`) stays a string.
+        if let Some(fmt_idx) = format_param_index(pkg, name) {
+            let call_args = self.emit_format_call_args(args, fmt_idx)?;
+            return Ok(format!(
+                "{}.{}({})",
+                pkg,
+                to_go_name(name),
+                call_args.join(", ")
+            ));
         }
 
         let mut parts = Vec::new();
@@ -1243,6 +1303,16 @@ impl Emitter {
             to_go_name(name),
             parts.join(", ")
         ))
+    }
+}
+
+/// Index of the FORMAT parameter of a format-consuming `fmt` call
+/// (`fmt.eprintf` is handled with the stderr family).
+fn format_param_index(pkg: &str, name: &str) -> Option<usize> {
+    match (pkg, name) {
+        ("fmt", "printf" | "sprintf" | "errorf") => Some(0),
+        ("fmt", "fprintf" | "appendf") => Some(1),
+        _ => None,
     }
 }
 
