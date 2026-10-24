@@ -273,6 +273,17 @@ pub(crate) struct FnState {
     /// rebind time; consumed at the CALL site so an insert inside the body
     /// counts as an A3 event when the call sits in a live slot-loan window.
     pub closure_mutates: HashMap<String, HashSet<String>>,
+    /// Local closure binding -> parameter indices whose storage the closure
+    /// body may mutate (A3 map insert/delete). Presence of a key indicates a
+    /// locally analyzed closure literal (an empty set means parameters are
+    /// read-only); absence on a closure-typed binding fails closed.
+    pub closure_param_mutates: HashMap<String, HashSet<usize>>,
+    /// Saved closure-mutation summaries for outer scopes when entering block
+    /// scopes so inner shadowing defines (`f := wrap(f)`) do not leak or
+    /// reuse outer summaries, while conditional rebinds of outer bindings
+    /// merge conservatively at block exit.
+    pub closure_mutate_scopes: Vec<HashMap<String, HashSet<String>>>,
+    pub closure_param_scopes: Vec<HashMap<String, HashSet<usize>>>,
     /// Local closure binding -> `(params, named_results, body)` for
     /// interprocedural return-origin and multi-value return sharing analysis.
     pub closure_fnlits: HashMap<
@@ -309,6 +320,10 @@ impl FnState {
         self.alias_scopes.push(self.aliases.clone());
         self.share_scopes.push(self.may_share.clone());
         self.shadow_link_scopes.push(self.shadow_links.clone());
+        self.closure_mutate_scopes
+            .push(self.closure_mutates.clone());
+        self.closure_param_scopes
+            .push(self.closure_param_mutates.clone());
         self.fnlit_scopes.push(Vec::new());
     }
 
@@ -433,9 +448,54 @@ impl FnState {
                 }
             }
         }
+        let inner_closure_mutates = std::mem::take(&mut self.closure_mutates);
+        let inner_closure_params = std::mem::take(&mut self.closure_param_mutates);
+        if let Some(mut outer_cm) = self.closure_mutate_scopes.pop() {
+            for (k, roots) in inner_closure_mutates {
+                if popped_scope.contains_key(&k) {
+                    continue;
+                }
+                let entry = outer_cm.entry(k).or_default();
+                for r in roots {
+                    let (root_ident, suffix) = match r.find('.') {
+                        Some(i) => (&r[..i], &r[i..]),
+                        None => (r.as_str(), ""),
+                    };
+                    let resolved = crate::freeze::resolve_alias(self, root_ident);
+                    if !popped_scope.contains_key(&resolved) {
+                        entry.insert(format!("{resolved}{suffix}"));
+                    }
+                    for peer in self.share_group(root_ident) {
+                        if !popped_scope.contains_key(&peer) {
+                            entry.insert(format!("{peer}{suffix}"));
+                        }
+                        let peer_root = crate::freeze::resolve_alias(self, &peer);
+                        if !popped_scope.contains_key(&peer_root) {
+                            entry.insert(format!("{peer_root}{suffix}"));
+                        }
+                    }
+                    if !popped_scope.contains_key(root_ident) {
+                        entry.insert(r);
+                    }
+                }
+            }
+            self.closure_mutates = outer_cm;
+        }
         self.scopes.pop();
         if let Some(outer_shadows) = self.shadow_link_scopes.pop() {
             self.shadow_links = outer_shadows;
+        }
+        if let Some(outer_cp) = self.closure_param_scopes.pop() {
+            let mut merged_cp = HashMap::new();
+            for (k, mut outer_set) in outer_cp {
+                if popped_scope.contains_key(&k) {
+                    merged_cp.insert(k, outer_set);
+                } else if let Some(inner_set) = inner_closure_params.get(&k) {
+                    outer_set.extend(inner_set.iter().copied());
+                    merged_cp.insert(k, outer_set);
+                }
+            }
+            self.closure_param_mutates = merged_cp;
         }
         if let Some(outer_aliases) = self.alias_scopes.pop() {
             self.aliases = outer_aliases;

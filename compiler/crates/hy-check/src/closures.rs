@@ -360,11 +360,6 @@ fn collect_stmt_direct_fnlits<'a>(
 ) {
     let mut flits = Vec::new();
     crate::walk::own_fnlits(stmt, &mut flits);
-    if let Stmt::Assign { targets, .. } = stmt {
-        for t in targets {
-            collect_place_direct_fnlits(t, &mut flits);
-        }
-    }
     for flit in flits {
         if let Expr::FnLit {
             params,
@@ -374,19 +369,6 @@ fn collect_stmt_direct_fnlits<'a>(
         } = crate::model::unwrap_parens(flit)
         {
             push_nested_closure(st, params, results, body, nested);
-        }
-    }
-}
-
-fn collect_place_direct_fnlits<'a>(place: &'a hy_syntax::Place, out: &mut Vec<&'a Expr>) {
-    match &place.kind {
-        hy_syntax::PlaceKind::Ident(_) => {}
-        hy_syntax::PlaceKind::Index { base, index } => {
-            collect_place_direct_fnlits(base, out);
-            crate::walk::expr_fnlits(index, out);
-        }
-        hy_syntax::PlaceKind::Field { base, .. } | hy_syntax::PlaceKind::AddrOf { base } => {
-            collect_place_direct_fnlits(base, out);
         }
     }
 }
@@ -529,8 +511,15 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 }
             } else if l.names.len() == l.values.len() {
                 let pre_st = st.clone();
+                let closure_entries: Vec<crate::loans::ClosureMutationEntry> = l
+                    .values
+                    .iter()
+                    .map(|v| ck.compute_closure_mutations(st, v, true))
+                    .collect();
                 let mut overwritten = Vec::new();
-                for (name, value) in l.names.iter().zip(l.values.iter()) {
+                for ((name, value), centry) in
+                    l.names.iter().zip(l.values.iter()).zip(closure_entries)
+                {
                     overwritten.push(name.clone());
                     let moved_non_owned = crate::model::move_operand_ident(value)
                         .and_then(|src| ck.lookup_binding(&pre_st, &src))
@@ -557,6 +546,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                                 b.non_owned_origin = Some(origin);
                             }
                         }
+                        ck.apply_closure_mutations(st, name, centry, true);
                         ck.record_move_const_and_a3_loans(st, name, value, 0);
                         continue;
                     }
@@ -658,8 +648,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     // and cannot bypass O5.1 / O5.4 move restrictions.
                     ck.record_storage_from_snapshot(st, &pre_st, name, value, &overwritten, true, false);
                     ck.record_move_const_and_a3_loans(st, name, value, 0);
-
-                    ck.record_closure_mutations(st, name, value);
+                    ck.apply_closure_mutations(st, name, centry, true);
                     if let Some(origin) = shadowed_origin.or(moved_non_owned) {
                         if let Some(b) = st.env_lookup_mut(name) {
                             if b.non_owned_origin.is_none() {
