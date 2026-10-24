@@ -13,7 +13,24 @@
 
 use crate::model::{unwrap_parens, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::{BinOp, Decl, Expr, LitKind, UnOp};
+use hy_syntax::{BinOp, Decl, Expr, LitKind, TypeExpr, UnOp};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConstTargetKind {
+    Str,
+    Bool,
+    Numeric,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConstValKind {
+    Str,
+    Bool,
+    Numeric,
+    /// Untyped local scalar `const` whose `Binding` carries `TypeShape::Primitive`
+    /// without a resolved `TypeExpr` (numeric or boolean, never string).
+    AnyPrimitive,
+}
 
 impl<'a> Checker<'a> {
     /// When `value` would be emitted as a Go `const` initializer but is not
@@ -32,7 +49,10 @@ impl<'a> Checker<'a> {
         if st.is_none() {
             visiting.push(name.to_string());
         }
-        if self.expr_is_constant_inner(value, st, &mut visiting, 0) {
+        if self
+            .expr_const_kind(value, st, &mut visiting, 0)
+            .is_some()
+        {
             return;
         }
         let span = value.span();
@@ -51,142 +71,147 @@ impl<'a> Checker<'a> {
         );
     }
 
-    /// Compile-time constant expression under the narrow MVP rules that
+    /// Compile-time constant expression kind under the narrow MVP rules that
     /// match what Go's `const` accepts for the shapes Hybrid emits.
-    fn expr_is_constant_inner(
+    fn expr_const_kind(
         &self,
         e: &Expr,
         st: Option<&FnState>,
         visiting: &mut Vec<String>,
         ref_depth: usize,
-    ) -> bool {
+    ) -> Option<ConstValKind> {
         if ref_depth > 32 {
-            return false;
+            return None;
         }
         match unwrap_parens(e) {
-            Expr::Lit { kind, .. } => !matches!(kind, LitKind::Nil),
+            Expr::Lit { kind, .. } => match kind {
+                LitKind::Nil => None,
+                LitKind::Str(_) | LitKind::RawStr(_) => Some(ConstValKind::Str),
+                LitKind::Bool(_) => Some(ConstValKind::Bool),
+                LitKind::Int(_) | LitKind::Float(_) | LitKind::Char(_) => {
+                    Some(ConstValKind::Numeric)
+                }
+            },
             Expr::Unary {
-                op: UnOp::Neg | UnOp::Not,
+                op: UnOp::Neg,
                 operand,
                 ..
-            } => self.expr_is_constant_inner(operand, st, visiting, ref_depth),
-            Expr::Unary { op: UnOp::Addr, .. } => false,
-            Expr::Binary { lhs, rhs, .. } => {
-                self.expr_is_constant_inner(lhs, st, visiting, ref_depth)
-                    && self.expr_is_constant_inner(rhs, st, visiting, ref_depth)
+            } => {
+                let k = self.expr_const_kind(operand, st, visiting, ref_depth)?;
+                matches!(k, ConstValKind::Numeric | ConstValKind::AnyPrimitive)
+                    .then_some(ConstValKind::Numeric)
             }
-            Expr::Ident { name, .. } => {
-                self.ident_is_constant(name, st, visiting, ref_depth + 1)
+            Expr::Unary {
+                op: UnOp::Not,
+                operand,
+                ..
+            } => {
+                let k = self.expr_const_kind(operand, st, visiting, ref_depth)?;
+                matches!(k, ConstValKind::Bool | ConstValKind::AnyPrimitive)
+                    .then_some(ConstValKind::Bool)
             }
-            // Typed conversion of a constant (`int8(42)`, `byte(0xff)`) or
-            // `len("const_str")`. A call to a real function (`get_val()`) or
-            // shadowed local binding is never constant.
+            Expr::Unary { op: UnOp::Addr, .. } => None,
+            Expr::Binary { op, lhs, rhs, .. } => {
+                let lk = self.expr_const_kind(lhs, st, visiting, ref_depth)?;
+                let rk = self.expr_const_kind(rhs, st, visiting, ref_depth)?;
+                match op {
+                    BinOp::Add => match (lk, rk) {
+                        (ConstValKind::Str, ConstValKind::Str) => Some(ConstValKind::Str),
+                        (
+                            ConstValKind::Numeric | ConstValKind::AnyPrimitive,
+                            ConstValKind::Numeric | ConstValKind::AnyPrimitive,
+                        ) => Some(ConstValKind::Numeric),
+                        _ => None,
+                    },
+                    BinOp::Sub
+                    | BinOp::Mul
+                    | BinOp::Div
+                    | BinOp::Mod
+                    | BinOp::BitAnd
+                    | BinOp::BitOr
+                    | BinOp::BitXor
+                    | BinOp::Shl
+                    | BinOp::Shr => match (lk, rk) {
+                        (
+                            ConstValKind::Numeric | ConstValKind::AnyPrimitive,
+                            ConstValKind::Numeric | ConstValKind::AnyPrimitive,
+                        ) => Some(ConstValKind::Numeric),
+                        _ => None,
+                    },
+                    BinOp::And | BinOp::Or => match (lk, rk) {
+                        (
+                            ConstValKind::Bool | ConstValKind::AnyPrimitive,
+                            ConstValKind::Bool | ConstValKind::AnyPrimitive,
+                        ) => Some(ConstValKind::Bool),
+                        _ => None,
+                    },
+                    BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                        Some(ConstValKind::Bool)
+                    }
+                }
+            }
+            Expr::Ident { name, .. } => self.ident_const_kind(name, st, visiting, ref_depth + 1),
+            // Typed conversion of a compatible constant (`int8(42)`, `byte(0xff)`,
+            // `string("abc")`, `bool(true)`) or `len("const_str")`. Integer-to-UTF-8
+            // `string(65)` and cross-family conversions (`bool(1)`, `int("ok")`) are
+            // rejected by Go in `const` initializers.
             Expr::Call { callee, args, .. } => {
-                let Some(ty_name) = conversion_callee_name(callee) else {
-                    return false;
-                };
+                let ty_name = conversion_callee_name(callee)?;
                 if st.is_some_and(|s| s.env_lookup(ty_name).is_some()) {
-                    return false;
+                    return None;
                 }
                 if self.fns.contains_key(ty_name) || self.structs.contains_key(ty_name) {
-                    return false;
+                    return None;
                 }
                 if args.len() != 1 || args[0].spread {
-                    return false;
+                    return None;
                 }
                 if ty_name == "len" {
                     if self.type_aliases.contains_key("len") {
-                        return false;
+                        return None;
                     }
-                    return self.expr_is_constant_inner(&args[0].value, st, visiting, ref_depth)
-                        && self.is_const_string_expr(&args[0].value, st, ref_depth);
+                    let arg_kind =
+                        self.expr_const_kind(&args[0].value, st, visiting, ref_depth)?;
+                    return (arg_kind == ConstValKind::Str).then_some(ConstValKind::Numeric);
                 }
-                if !self.is_const_conversion_target(ty_name) {
-                    return false;
+                let target = self.const_conversion_target_kind(ty_name)?;
+                let arg_kind = self.expr_const_kind(&args[0].value, st, visiting, ref_depth)?;
+                match (target, arg_kind) {
+                    (ConstTargetKind::Str, ConstValKind::Str) => Some(ConstValKind::Str),
+                    (
+                        ConstTargetKind::Bool,
+                        ConstValKind::Bool | ConstValKind::AnyPrimitive,
+                    ) => Some(ConstValKind::Bool),
+                    (
+                        ConstTargetKind::Numeric,
+                        ConstValKind::Numeric | ConstValKind::AnyPrimitive,
+                    ) => Some(ConstValKind::Numeric),
+                    _ => None,
                 }
-                self.expr_is_constant_inner(&args[0].value, st, visiting, ref_depth)
             }
             // Everything else (field calls, index, receive, try, interp,
             // move, addr-of, composites nested under non-composite forms…)
             // is run-time.
-            _ => false,
+            _ => None,
         }
     }
 
-    fn is_const_conversion_target(&self, name: &str) -> bool {
+    fn const_conversion_target_kind(&self, name: &str) -> Option<ConstTargetKind> {
         if let Some(ty) = self.type_aliases.get(name) {
-            let resolved = self.resolve_type_alias(ty);
-            if let hy_syntax::TypeExpr::Named { name: target, .. } = resolved {
-                return !self.structs.contains_key(target.as_str())
-                    && is_conversion_type_name(&target);
-            }
-            return false;
+            return self.const_target_kind_of_type(ty);
         }
-        is_conversion_type_name(name)
+        conversion_target_kind_name(name)
     }
 
-    fn is_const_string_conversion_target(&self, name: &str, st: Option<&FnState>) -> bool {
-        if st.is_some_and(|s| s.env_lookup(name).is_some())
-            || self.fns.contains_key(name)
-            || self.structs.contains_key(name)
-        {
-            return false;
-        }
-        if let Some(ty) = self.type_aliases.get(name) {
-            let resolved = self.resolve_type_alias(ty);
-            return matches!(
-                resolved,
-                hy_syntax::TypeExpr::Named { name: target, .. }
-                    if target == "string" && !self.structs.contains_key("string")
-            );
-        }
-        name == "string"
-    }
-
-    fn is_const_string_expr(&self, e: &Expr, st: Option<&FnState>, ref_depth: usize) -> bool {
-        if ref_depth > 32 {
-            return false;
-        }
-        match unwrap_parens(e) {
-            Expr::Lit {
-                kind: LitKind::Str(_) | LitKind::RawStr(_),
-                ..
-            } => true,
-            Expr::Binary {
-                op: BinOp::Add,
-                lhs,
-                rhs,
-                ..
-            } => {
-                self.is_const_string_expr(lhs, st, ref_depth)
-                    && self.is_const_string_expr(rhs, st, ref_depth)
+    fn const_target_kind_of_type(&self, ty: &TypeExpr) -> Option<ConstTargetKind> {
+        let resolved = self.resolve_type_alias(ty);
+        if let TypeExpr::Named { name: target, .. } = resolved {
+            if self.structs.contains_key(target.as_str()) {
+                return None;
             }
-            Expr::Ident { name, .. } => {
-                if let Some(st) = st {
-                    if let Some(b) = st.env_lookup(name) {
-                        return b.immutable && matches!(b.shape, TypeShape::Str);
-                    }
-                }
-                if let Some(cdecl) = self.file_const_decl(name) {
-                    if let Some(ty) = &cdecl.ty {
-                        if !matches!(self.shape_of_type(ty), TypeShape::Str) {
-                            return false;
-                        }
-                    }
-                    return self.is_const_string_expr(&cdecl.value, None, ref_depth + 1);
-                }
-                false
-            }
-            Expr::Call { callee, args, .. } => {
-                let Some(ty_name) = conversion_callee_name(callee) else {
-                    return false;
-                };
-                self.is_const_string_conversion_target(ty_name, st)
-                    && args.len() == 1
-                    && !args[0].spread
-            }
-            _ => false,
+            return conversion_target_kind_name(&target);
         }
+        None
     }
 
     fn file_const_decl(&self, name: &str) -> Option<&hy_syntax::ConstDecl> {
@@ -196,42 +221,65 @@ impl<'a> Checker<'a> {
         })
     }
 
-    fn ident_is_constant(
+    fn ident_const_kind(
         &self,
         name: &str,
         st: Option<&FnState>,
         visiting: &mut Vec<String>,
         ref_depth: usize,
-    ) -> bool {
+    ) -> Option<ConstValKind> {
         if ref_depth > 32 {
-            return false;
+            return None;
         }
         // Local bindings and parameters shadow file-level constants.
         if let Some(st) = st {
             if let Some(b) = st.env_lookup(name) {
-                // Only scalar/string `const` bindings are Go compile-time
-                // constants; composite `const`s lower to Go `var`.
-                return b.immutable && matches!(b.shape, TypeShape::Primitive | TypeShape::Str);
+                if !b.immutable {
+                    return None;
+                }
+                return match b.shape {
+                    TypeShape::Str => Some(ConstValKind::Str),
+                    TypeShape::Primitive => match b
+                        .ty
+                        .as_ref()
+                        .and_then(|t| self.const_target_kind_of_type(t))
+                    {
+                        Some(ConstTargetKind::Str) => Some(ConstValKind::Str),
+                        Some(ConstTargetKind::Bool) => Some(ConstValKind::Bool),
+                        Some(ConstTargetKind::Numeric) => Some(ConstValKind::Numeric),
+                        None => Some(ConstValKind::AnyPrimitive),
+                    },
+                    _ => None,
+                };
             }
         }
         if visiting.iter().any(|v| v == name) {
-            return false;
+            return None;
         }
         if let Some(cdecl) = self.file_const_decl(name) {
             if is_composite_lit(&cdecl.value) {
-                return false;
+                return None;
             }
-            if let Some(ty) = &cdecl.ty {
+            let declared_kind = if let Some(ty) = &cdecl.ty {
                 if !matches!(self.shape_of_type(ty), TypeShape::Primitive | TypeShape::Str) {
-                    return false;
+                    return None;
                 }
-            }
+                self.const_target_kind_of_type(ty)
+            } else {
+                None
+            };
             visiting.push(name.to_string());
-            let ok = self.expr_is_constant_inner(&cdecl.value, None, visiting, ref_depth);
+            let inner = self.expr_const_kind(&cdecl.value, None, visiting, ref_depth);
             visiting.pop();
-            return ok;
+            let inner = inner?;
+            return Some(match declared_kind {
+                Some(ConstTargetKind::Str) => ConstValKind::Str,
+                Some(ConstTargetKind::Bool) => ConstValKind::Bool,
+                Some(ConstTargetKind::Numeric) => ConstValKind::Numeric,
+                None => inner,
+            });
         }
-        false
+        None
     }
 }
 
@@ -249,42 +297,22 @@ fn conversion_callee_name(callee: &Expr) -> Option<&str> {
     }
 }
 
+fn conversion_target_kind_name(name: &str) -> Option<ConstTargetKind> {
+    match name {
+        "string" => Some(ConstTargetKind::Str),
+        "bool" => Some(ConstTargetKind::Bool),
+        "byte" | "rune" | "char" | "int" | "int8" | "int16" | "int32" | "int64" | "uint"
+        | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr" | "float32" | "float64" | "f32"
+        | "f64" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "isize"
+        | "usize" => Some(ConstTargetKind::Numeric),
+        _ => None,
+    }
+}
+
 /// Type names Hybrid spells that Go accepts as conversion targets in a
 /// `const` initializer (`const x = int8(42)`).
 pub(crate) fn is_conversion_type_name(name: &str) -> bool {
-    matches!(
-        name,
-        "bool"
-            | "string"
-            | "byte"
-            | "rune"
-            | "char"
-            | "int"
-            | "int8"
-            | "int16"
-            | "int32"
-            | "int64"
-            | "uint"
-            | "uint8"
-            | "uint16"
-            | "uint32"
-            | "uint64"
-            | "uintptr"
-            | "float32"
-            | "float64"
-            | "f32"
-            | "f64"
-            | "i8"
-            | "i16"
-            | "i32"
-            | "i64"
-            | "u8"
-            | "u16"
-            | "u32"
-            | "u64"
-            | "isize"
-            | "usize"
-    )
+    conversion_target_kind_name(name).is_some()
 }
 
 fn span_hint(span: Span) -> String {
