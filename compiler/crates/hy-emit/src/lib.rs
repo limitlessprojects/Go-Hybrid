@@ -546,6 +546,7 @@ pub struct Emitter {
     /// and user type alias → its target, for zero values that allocate.
     n5_structs: BTreeMap<String, Vec<FieldDecl>>,
     n5_aliases: BTreeMap<String, TypeExpr>,
+    chan_elem_ty: BTreeMap<String, TypeExpr>,
 }
 
 pub(crate) struct ScopeSnapshot {
@@ -554,6 +555,7 @@ pub(crate) struct ScopeSnapshot {
     var_ty: BTreeMap<String, (String, bool)>,
     var_struct: BTreeMap<String, String>,
     pointer_vars: BTreeSet<String>,
+    chan_elem_ty: BTreeMap<String, TypeExpr>,
 }
 
 impl Emitter {
@@ -592,6 +594,7 @@ impl Emitter {
             explicit_imports: BTreeMap::new(),
             n5_structs: BTreeMap::new(),
             n5_aliases: BTreeMap::new(),
+            chan_elem_ty: BTreeMap::new(),
         }
     }
 
@@ -606,6 +609,7 @@ impl Emitter {
             var_ty: self.var_ty.clone(),
             var_struct: self.var_struct.clone(),
             pointer_vars: self.pointer_vars.clone(),
+            chan_elem_ty: self.chan_elem_ty.clone(),
         }
     }
 
@@ -615,6 +619,7 @@ impl Emitter {
         self.var_ty = saved.var_ty;
         self.var_struct = saved.var_struct;
         self.pointer_vars = saved.pointer_vars;
+        self.chan_elem_ty = saved.chan_elem_ty;
     }
 
     pub(crate) fn shadow_local_name(&mut self, name: &str) {
@@ -624,6 +629,7 @@ impl Emitter {
             self.var_ty.remove(name);
             self.var_struct.remove(name);
             self.pointer_vars.remove(name);
+            self.chan_elem_ty.remove(name);
         }
     }
 
@@ -1205,6 +1211,7 @@ impl Emitter {
         self.var_ty.clear();
         self.pointer_vars.clear();
         self.local_vars.clear();
+        self.chan_elem_ty.clear();
         self.temp_n = 0;
         self.try_temps.clear();
         self.loop_labels.clear();
@@ -1523,12 +1530,43 @@ impl Emitter {
         }
     }
 
+    pub(crate) fn resolve_emit_alias<'b>(&'b self, mut ty: &'b TypeExpr) -> &'b TypeExpr {
+        for _ in 0..16 {
+            if let TypeExpr::Named { name, .. } = ty {
+                if let Some(target) = self.n5_aliases.get(name) {
+                    ty = target;
+                    continue;
+                }
+            }
+            break;
+        }
+        ty
+    }
+
+    pub(crate) fn register_inferred_ty(&mut self, name: &str, ty: &TypeExpr) {
+        if name == "_" {
+            return;
+        }
+        let resolved = self.resolve_emit_alias(ty).clone();
+        if matches!(resolved, TypeExpr::Pointer { .. }) {
+            self.pointer_vars.insert(name.to_string());
+        }
+        if let Some(kind) = self.binding_kind_of_ty(&resolved) {
+            self.bindings.insert(name.to_string(), kind);
+        }
+        self.register_var_ty(name, &resolved);
+    }
+
     /// Receiver typing (Batch I): a var/param whose type is shape-known
     /// dotted (`atomic.int64`) lands in var_ty with its pointer-ness; one
     /// whose type is a user struct (`pool_stats`, value or pointer) lands
     /// in var_struct — `stats.mu.lock()` types through struct_fields.
-    fn register_var_ty(&mut self, name: &str, ty: &TypeExpr) {
-        let (base, ptr) = match ty {
+    pub(crate) fn register_var_ty(&mut self, name: &str, ty: &TypeExpr) {
+        let resolved = self.resolve_emit_alias(ty).clone();
+        if let TypeExpr::Chan { elem, .. } = &resolved {
+            self.chan_elem_ty.insert(name.to_string(), (**elem).clone());
+        }
+        let (base, ptr) = match &resolved {
             TypeExpr::Pointer { to, .. } => (base_ty_name(to), true),
             t => (base_ty_name(t), false),
         };
