@@ -68,19 +68,19 @@ jobs:
             echo "Pinned toolchains: Go $(go version | awk '{print $3}'), $(rustc --version | awk '{print $2}')"
             echo
           } > /tmp/preflight.md
-          if go build ./... ; then
+          if (cd examples/gomod-integration && go build ./...) ; then
             echo "- go build: **pass**" >> /tmp/preflight.md
           else
             echo "- go build: **FAIL**" >> /tmp/preflight.md
             exit 1
           fi
-          if go vet ./... ; then
+          if (cd examples/gomod-integration && go vet ./...) ; then
             echo "- go vet: **pass**" >> /tmp/preflight.md
           else
             echo "- go vet: **FAIL**" >> /tmp/preflight.md
             exit 1
           fi
-          if cargo build -p hyb --quiet ; then
+          if cargo build --manifest-path compiler/Cargo.toml -p hyb --quiet ; then
             echo "- classifier build (hyb): **pass**" >> /tmp/preflight.md
           else
             echo "- classifier build (hyb): **FAIL**" >> /tmp/preflight.md

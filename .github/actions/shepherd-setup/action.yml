@@ -38,8 +38,8 @@ runs:
           ~/.cargo/registry
           ~/.cargo/git
           ~/.cache/go-build
-          target
-        key: shepherd-${{ runner.os }}-go${{ inputs.go-version }}-rust${{ inputs.rust-version }}-${{ hashFiles('Cargo.lock', '**/go.sum') }}
+          compiler/target
+        key: shepherd-${{ runner.os }}-go${{ inputs.go-version }}-rust${{ inputs.rust-version }}-${{ hashFiles('compiler/Cargo.lock', '**/go.mod', '**/go.sum') }}
         restore-keys: |
           shepherd-${{ runner.os }}-go${{ inputs.go-version }}-rust${{ inputs.rust-version }}-
           shepherd-${{ runner.os }}-

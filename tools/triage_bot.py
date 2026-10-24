@@ -222,7 +222,8 @@ def collect(cfg, gh, args):
             "behind_by": behind_by,
             "overlap_risk": sorted(overlap_paths)[:8],
             "tests_included": any(
-                "tests/" in p or "/corpus" in p or p.endswith("_reject.hy") or p.endswith("_accept.hy")
+                "tests/" in p or "/corpus" in p or "test_" in p
+                or p.endswith(("_reject.hy", "_accept.hy", "_test.go", "_test.rs"))
                 for p in paths),
         }
 
