@@ -247,6 +247,7 @@ fn check_one_closure(
         let shape = ck.shape_of_type(&r.ty);
         if let Some(name) = &r.name {
             if name != "_" {
+                ck.check_zero_value_named_result(name, &r.ty, r.ty.span());
                 cst.env.insert(
                     name.clone(),
                     Binding {

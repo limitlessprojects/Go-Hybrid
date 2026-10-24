@@ -382,6 +382,16 @@ impl Emitter {
                         .unwrap_or_else(|| w.to_string());
                     self.handler_writer = Some(name);
                 }
+                let saved_in_main_closure = self.in_main_closure;
+                self.in_main_closure = false;
+                let (next_opt_res, next_conv_res, next_err_rets) =
+                    self.compute_result_return_state(results, true);
+                let saved_option_result =
+                    std::mem::replace(&mut self.cur_option_result, next_opt_res);
+                let saved_fn_conv_result =
+                    std::mem::replace(&mut self.cur_fn_conv_result, next_conv_res);
+                let saved_fn_error_returns =
+                    std::mem::replace(&mut self.cur_fn_error_returns, next_err_rets);
                 self.fnlit_depth += 1;
                 // Labels do not cross func boundaries: a labeled break/continue
                 // must find its loop INSIDE the literal — reset the depth so
@@ -412,6 +422,9 @@ impl Emitter {
                 let main_body = std::mem::take(&mut self.body);
                 let saved_loans = std::mem::take(&mut self.loan_frames);
                 let saved_inherit = self.branch_inherit.take();
+                self.indent += 1;
+                self.emit_n5_named_result_inits(results);
+                self.indent -= 1;
                 let body_res = self.emit_block_body(&body.stmts);
                 self.branch_inherit = saved_inherit;
                 self.loan_frames = saved_loans;
@@ -421,6 +434,10 @@ impl Emitter {
                 self.fnlit_depth -= 1;
                 self.for_depth = saved_for_depth;
                 self.handler_writer = saved_writer;
+                self.in_main_closure = saved_in_main_closure;
+                self.cur_option_result = saved_option_result;
+                self.cur_fn_conv_result = saved_fn_conv_result;
+                self.cur_fn_error_returns = saved_fn_error_returns;
                 self.restore_scope(saved_scope);
                 body_res?;
                 out.push_str(&closure_body);

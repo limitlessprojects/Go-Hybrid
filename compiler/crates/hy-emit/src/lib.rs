@@ -1209,41 +1209,11 @@ impl Emitter {
             .unwrap_or(false);
         let main_needs_wrapper = is_main && (!f.results.is_empty() || body_has_try);
 
-        // `return none` lowers to the declared option result's zero value.
-        self.cur_option_result = None;
-        // Batch E: a single conversion-target result (`fn logging(…) http.handler`)
-        // makes `return fn(…)` wrap in the conversion (HandlerFunc).
-        self.cur_fn_conv_result = None;
-        if f.results.len() == 1 && f.results[0].name.is_none() {
-            let rt = self.type_text(&f.results[0].ty);
-            if rt.starts_with("option[") {
-                self.cur_option_result = Some(rt);
-            }
-            if let Some(conv) = self.result_conv_key(&f.results[0].ty) {
-                self.cur_fn_conv_result = Some(conv);
-            }
-        }
-
-        // E3 in an error-result fn (package mode, example 09): the
-        // propagation tail returns the zero results + the error.
-        self.cur_fn_error_returns = None;
-        if !is_main && !f.results.is_empty() && !main_needs_wrapper {
-            let last_is_err = matches!(
-                &f.results.last().unwrap().ty,
-                TypeExpr::Named { name, .. } if name == "error"
-            );
-            if last_is_err {
-                let mut texts = Vec::new();
-                for (i, r) in f.results.iter().enumerate() {
-                    if i == f.results.len() - 1 {
-                        texts.push(String::new()); // filled by propagate_error
-                    } else {
-                        texts.push(self.zero_value(&r.ty));
-                    }
-                }
-                self.cur_fn_error_returns = Some(texts);
-            }
-        }
+        let (opt_res, conv_res, err_rets) =
+            self.compute_result_return_state(&f.results, !is_main && !main_needs_wrapper);
+        self.cur_option_result = opt_res;
+        self.cur_fn_conv_result = conv_res;
+        self.cur_fn_error_returns = err_rets;
 
         for r in &f.results {
             if let Some(name) = &r.name {
@@ -1319,6 +1289,7 @@ impl Emitter {
             self.in_main_closure = true;
             self.emit_hints_from_params(&f.params);
             if let Some(body) = &f.body {
+                self.emit_n5_named_result_inits(&f.results);
                 // The closure-body level is already pushed above;
                 // emit_block_body adds its own, so drop one first or every
                 // wrapper body line renders one tab deeper than gofmt.
@@ -1394,10 +1365,68 @@ impl Emitter {
         // hints write no lines; no bump is needed anywhere here.
         self.emit_hints_from_params(&f.params);
         if let Some(body) = &f.body {
+            self.indent += 1;
+            self.emit_n5_named_result_inits(&f.results);
+            self.indent -= 1;
             self.emit_block_body(&body.stmts)?;
         }
         self.push("}");
         Ok(())
+    }
+
+    pub(crate) fn compute_result_return_state(
+        &mut self,
+        results: &[FnResult],
+        allow_error_returns: bool,
+    ) -> (Option<String>, Option<&'static str>, Option<Vec<String>>) {
+        let mut opt_res = None;
+        let mut conv_res = None;
+        if results.len() == 1 {
+            let rt = self.type_text(&results[0].ty);
+            if rt.starts_with("option[") {
+                opt_res = Some(rt);
+            }
+            if results[0].name.is_none() {
+                if let Some(conv) = self.result_conv_key(&results[0].ty) {
+                    conv_res = Some(conv);
+                }
+            }
+        }
+        let mut err_rets = None;
+        if allow_error_returns && !results.is_empty() {
+            let last_is_err = matches!(
+                &results.last().unwrap().ty,
+                TypeExpr::Named { name, .. } if name == "error"
+            );
+            if last_is_err {
+                let mut texts = Vec::new();
+                for (i, r) in results.iter().enumerate() {
+                    if i == results.len() - 1 {
+                        texts.push(String::new()); // filled by propagate_error
+                    } else {
+                        texts.push(self.zero_value(&r.ty));
+                    }
+                }
+                err_rets = Some(texts);
+            }
+        }
+        (opt_res, conv_res, err_rets)
+    }
+
+    /// N5: named return parameters whose type is a map or map-carrying struct
+    /// start initialized to their allocated Hybrid zero value at function or
+    /// closure entry so writes (`m[k] = v`) before `return` do not panic on a
+    /// nil Go map.
+    pub(crate) fn emit_n5_named_result_inits(&mut self, results: &[FnResult]) {
+        for r in results {
+            if let Some(name) = &r.name {
+                if name != "_" {
+                    if let Some(init) = self.n5_zero_init(&r.ty) {
+                        self.push(&format!("{} = {}", name, init));
+                    }
+                }
+            }
+        }
     }
 
     fn main_ret_vars(&self, f: &FnDecl) -> String {
@@ -1646,7 +1675,7 @@ impl Emitter {
                 InterpPart::Expr(x) => self.expr_has_try(x),
                 InterpPart::Lit(_) => false,
             }),
-            Expr::FnLit { body, .. } => self.block_has_try(body),
+            Expr::FnLit { .. } => false,
             Expr::Paren { inner, .. } => self.expr_has_try(inner),
             _ => false,
         }
