@@ -1,0 +1,9 @@
+{
+  "issue": 1196,
+  "surfaces": [
+    "README.md",
+    "GUARANTEES.md",
+    "Makefile"
+  ],
+  "reject_denominator_drift": true
+}
