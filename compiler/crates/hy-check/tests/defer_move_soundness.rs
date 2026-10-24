@@ -266,3 +266,107 @@ fn main() {
         c
     );
 }
+
+#[test]
+fn defer_arg_select_move_send_in_nested_block_and_after_rebind_rejects_e3003() {
+    let src = "\
+fn report(m map[string]int) int {
+    return m[\"task\"]
+}
+
+fn main() {
+    ch := make(chan map[string]int, 2)
+    if true {
+        shared := map[string]int{\"task\": 1}
+        defer report(shared)
+        select {
+        ch <- move shared:
+        }
+    }
+    top := map[string]int{\"task\": 2}
+    alias := top
+    defer report(top)
+    top = map[string]int{}
+    select {
+    ch <- move alias:
+    }
+}
+";
+    let r = check(src);
+    let c = error_codes(&r);
+    assert_eq!(
+        c,
+        vec!["HYB-E3003".to_string(), "HYB-E3003".to_string()],
+        "expected two HYB-E3003 diagnostics for select move-send after defer, got: {:?}",
+        c
+    );
+}
+
+#[test]
+fn defer_arg_field_move_send_and_expr_move_in_nested_block_rejects_e3003() {
+    let src = "\
+struct box {
+    shared map[string]int
+}
+
+fn report(m map[string]int) int {
+    return m[\"task\"]
+}
+
+fn consume(m map[string]int) {
+    m[\"task\"]++
+}
+
+fn main() {
+    ch := make(chan map[string]int, 1)
+    if true {
+        b := box{shared: map[string]int{\"task\": 1}}
+        defer report(b.shared)
+        ch <- move b.shared
+    }
+    if true {
+        s := map[string]int{\"task\": 2}
+        defer report(s)
+        consume(move s)
+    }
+}
+";
+    let r = check(src);
+    let c = error_codes(&r);
+    let e3003_count = c.iter().filter(|code| *code == "HYB-E3003").count();
+    assert_eq!(
+        e3003_count,
+        2,
+        "expected two HYB-E3003 diagnostics for field move-send and call-expr move after defer, got: {:?}",
+        c
+    );
+}
+
+#[test]
+fn defer_arg_range_iterate_peer_moved_after_rebind_rejects_e3003() {
+    let src = "\
+fn report(m map[string]int) int {
+    return m[\"task\"]
+}
+
+fn worker(m map[string]int) {
+    m[\"task\"]++
+}
+
+fn main() {
+    items := []map[string]int{map[string]int{\"task\": 1}}
+    defer report(items[0])
+    for _, v in items {
+        items = []map[string]int{}
+        task worker(move v)
+    }
+}
+";
+    let r = check(src);
+    let c = error_codes(&r);
+    assert!(
+        c.contains(&"HYB-E3003".to_string()),
+        "expected HYB-E3003 when range peer of deferred collection is moved after rebind, got: {:?}",
+        c
+    );
+}
