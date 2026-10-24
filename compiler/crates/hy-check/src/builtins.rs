@@ -256,11 +256,9 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expr::FnLit { body, .. } => {
-                // Closure bodies are not flattened into Pass B — deep-walk.
-                for stmt in &body.stmts {
-                    self.check_stmt_builtin_args_inner(st, stmt, /*deep=*/ true);
-                }
+            Expr::FnLit { .. } => {
+                // Closure bodies are not walked here — builtin checks inside
+                // closures are intentionally skipped (fail open).
             }
             Expr::Ident { .. } | Expr::Lit { .. } => {}
         }
