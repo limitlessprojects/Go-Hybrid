@@ -621,54 +621,94 @@ impl<'a> Checker<'a> {
             return;
         }
         let arg = unwrap_parens(&args[0].value);
-        // `[]byte("abc")` — a slice type-as-value called with one argument
-        // (the standing type-as-value encoding; see hy-emit's conversion
-        // branch for the emission half of issue #228).
+        let bare_callee = unwrap_parens(callee);
+        let callee_is_paren = matches!(callee, Expr::Paren { .. });
+        // `[]byte("abc")` or `([]int)("abc")` — a slice type-as-value called
+        // with one argument (the standing type-as-value encoding; see
+        // hy-emit's conversion branch for the emission half of issue #228).
         if let Expr::SliceLit {
             elem: Some(t),
             items,
             ..
-        } = callee
+        } = bare_callee
         {
-            if items.is_empty() && callee.as_array_lit().is_none() {
+            if items.is_empty() && bare_callee.as_array_lit().is_none() {
                 self.check_slice_conversion(t, arg, span);
                 return;
             }
         }
-        let Expr::Ident { name, .. } = callee else {
+        let Expr::Ident { name, .. } = bare_callee else {
             return;
         };
-        if !is_conversion_target(name) {
-            return;
+        // Resolve type aliases (`type my_int = int`, `type my_slice = []int`).
+        let mut resolved_target = name.clone();
+        let mut is_alias = false;
+        if !is_conversion_target(&resolved_target) {
+            if let Some(aliased_ty) = self.type_aliases.get(name).cloned() {
+                let resolved_ty = self.resolve_type_alias(&aliased_ty);
+                match resolved_ty {
+                    TypeExpr::Named {
+                        name: inner_name, ..
+                    } if is_conversion_target(&inner_name) => {
+                        resolved_target = inner_name;
+                        is_alias = true;
+                    }
+                    TypeExpr::Slice { elem, .. } => {
+                        self.check_slice_conversion(&elem, arg, span);
+                        return;
+                    }
+                    _ => return,
+                }
+            } else {
+                return;
+            }
         }
-        let Some(c) = conv_const(arg) else {
+        let Some(c) = self.conv_const(arg, 0) else {
             return; // non-constant operand: run-time conversion (SPEC X4)
         };
-        self.check_conv_against_target(name, &c, arg, span);
+        let skips_sub64_fold =
+            callee_is_paren || is_alias || !constconv_folds_expr(arg);
+        self.check_conv_against_target(
+            name,
+            &resolved_target,
+            skips_sub64_fold,
+            &c,
+            arg,
+            span,
+        );
     }
 
     fn check_slice_conversion(&mut self, elem: &TypeExpr, arg: &Expr, span: Span) {
-        let TypeExpr::Named { name: slice_elem, .. } = elem else {
+        let resolved_elem = self.resolve_type_alias(elem);
+        let TypeExpr::Named {
+            name: resolved_slice_elem,
+            ..
+        } = &resolved_elem
+        else {
             return; // []T with a non-named element + a run-time operand
         };
-        match conv_const(arg) {
+        let display_elem = match elem {
+            TypeExpr::Named { name, .. } => name.as_str(),
+            _ => resolved_slice_elem.as_str(),
+        };
+        match self.conv_const(arg, 0) {
             Some(ConvConst::Str) => {
                 // Go allows string -> []byte / []rune (and their aliases)
                 // only; every other element type is a compile error.
                 if !matches!(
-                    slice_elem.as_str(),
+                    resolved_slice_elem.as_str(),
                     "u8" | "byte" | "uint8" | "i32" | "int32" | "rune"
                 ) {
                     self.emit_const_conversion_error(
                         span,
                         format!(
                             "a string constant cannot be converted to a `{}` slice (HYB-E6006)",
-                            slice_elem
+                            display_elem
                         ),
                         vec![
                             format!(
                                 "why: Go only allows string -> []byte / []rune conversions; `[]{}(\"…\")` fails to build (`cannot convert ... to type []{}`), so an accepted Hybrid program would emit unbuildable Go (issue #228)",
-                                slice_elem, slice_elem
+                                display_elem, display_elem
                             ),
                             "fix: convert to `[]byte` (or `[]rune` for text) first, or use a run-time operand whose type matches the target slice".to_string(),
                         ],
@@ -681,12 +721,12 @@ impl<'a> Checker<'a> {
                     format!(
                         "a {} constant cannot be converted to a `{}` slice (HYB-E6006)",
                         c.kind_name(),
-                        slice_elem
+                        display_elem
                     ),
                     vec![
                         format!(
                             "why: Go has no constant-to-slice conversion; `[]{}({})` fails to build (`invalid operation: cannot convert ...`), so an accepted Hybrid program would emit unbuildable Go (issue #228)",
-                            slice_elem,
+                            display_elem,
                             arg.render()
                         ),
                         "fix: build the slice explicitly (e.g. `[]{}{{{}}}` or `make([]{}, n)` with a variable length)".to_string(),
@@ -697,27 +737,36 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_conv_against_target(&mut self, target: &str, c: &ConvConst, arg: &Expr, span: Span) {
-        if let Some((lo, hi)) = fixed_width_int_range(target) {
+    fn check_conv_against_target(
+        &mut self,
+        display_target: &str,
+        resolved_target: &str,
+        skips_sub64_fold: bool,
+        c: &ConvConst,
+        arg: &Expr,
+        span: Span,
+    ) {
+        if let Some((lo, hi)) = fixed_width_int_range(resolved_target) {
             match c {
                 ConvConst::Int(v) => {
                     if *v < lo || *v > hi {
-                        if is_64bit_int_target(target) {
-                            // 64-bit targets skip the emitter's X4 fold —
-                            // nothing rewrites this, Go rejects it outright.
+                        if is_64bit_int_target(resolved_target) || skips_sub64_fold {
+                            // 64-bit targets, parenthesized/aliased callees, and
+                            // non-literal constant operands (e.g. `const N = 300; u8(N)`)
+                            // skip the emitter's X4 fold — Go rejects them outright.
                             self.emit_const_conversion_error(
                                 span,
                                 format!(
                                     "constant `{}` overflows `{}` in a conversion (HYB-E6006)",
                                     arg.render(),
-                                    target
+                                    display_target
                                 ),
                                 vec![
                                     format!(
                                         "why: Go rejects `{}({})` at compile time (`constant ... overflows {}`), so an accepted Hybrid program would emit unbuildable Go (issue #228)",
-                                        target,
+                                        display_target,
                                         arg.render(),
-                                        target
+                                        display_target
                                     ),
                                     format!(
                                         "fix: use a constant in [{}, {}], or widen the target type",
@@ -726,7 +775,7 @@ impl<'a> Checker<'a> {
                                 ],
                             );
                         }
-                        // sub-64 targets: the emitter's SPEC X4 fold rewrites
+                        // sub-64 literal targets: the emitter's SPEC X4 fold rewrites
                         // the constant (u8(300) == 44) — accepted on purpose.
                     }
                 }
@@ -740,14 +789,14 @@ impl<'a> Checker<'a> {
                             format!(
                                 "rune constant `{}` is out of range for `{}` in a conversion (HYB-E6006)",
                                 arg.render(),
-                                target
+                                display_target
                             ),
                             vec![
                                 format!(
                                     "why: Go rejects `{}({})` at compile time (the code point does not fit `{}`), so an accepted Hybrid program would emit unbuildable Go (issue #228)",
-                                    target,
+                                    display_target,
                                     arg.render(),
-                                    target
+                                    display_target
                                 ),
                                 format!(
                                     "fix: use a rune in [{}, {}], or convert from a variable if truncation is intended",
@@ -764,12 +813,12 @@ impl<'a> Checker<'a> {
                             format!(
                                 "constant `{}` is not representable in `{}` in a conversion (HYB-E6006)",
                                 arg.render(),
-                                target
+                                display_target
                             ),
                             vec![
                                 format!(
                                     "why: Go only converts an untyped float constant to `{}` when it has no fractional part and fits the range (`cannot convert ...` / `overflows`), so an accepted Hybrid program would emit unbuildable Go (issue #228)",
-                                    target
+                                    display_target
                                 ),
                                 format!(
                                     "fix: use an integer constant in [{}, {}], or bind the value to a variable first",
@@ -787,14 +836,14 @@ impl<'a> Checker<'a> {
                         format!(
                             "integer constant `{}` does not fit `{}` in a conversion (HYB-E6006)",
                             arg.render(),
-                            target
+                            display_target
                         ),
                         vec![
                             format!(
                                 "why: Go rejects `{}({})` at compile time (`constant ... overflows {}`), so an accepted Hybrid program would emit unbuildable Go (issue #228)",
-                                target,
+                                display_target,
                                 arg.render(),
-                                target
+                                display_target
                             ),
                             format!(
                                 "fix: use a constant in [{}, {}], or widen the target type",
@@ -804,12 +853,12 @@ impl<'a> Checker<'a> {
                     );
                 }
                 ConvConst::Str | ConvConst::Bool | ConvConst::Nil => {
-                    self.emit_conv_kind_error(target, c, arg, span);
+                    self.emit_conv_kind_error(display_target, c, arg, span);
                 }
             }
             return;
         }
-        match target {
+        match resolved_target {
             // float targets: every i128 fits f64; f32's max (3.4e38)
             // exceeds i128's max (1.7e38), so integer/runes always fit.
             // Past-i128 literals carry their f64 reading and still have to
@@ -817,32 +866,32 @@ impl<'a> Checker<'a> {
             "f32" | "f64" | "float32" | "float64" => match c {
                 ConvConst::Float(f) | ConvConst::Huge { f, .. } => {
                     let overflows = !f.is_finite()
-                        || (is_f32_target(target) && f.abs() > f32::MAX as f64);
+                        || (is_f32_target(resolved_target) && f.abs() > f32::MAX as f64);
                     if overflows {
                         self.emit_const_conversion_error(
                             span,
                             format!(
                                 "constant `{}` overflows `{}` in a conversion (HYB-E6006)",
                                 arg.render(),
-                                target
+                                display_target
                             ),
                             vec![
                                 format!(
                                     "why: Go rejects `{}({})` at compile time (`constant ... overflows {}`), so an accepted Hybrid program would emit unbuildable Go (issue #228)",
-                                    target,
+                                    display_target,
                                     arg.render(),
-                                    target
+                                    display_target
                                 ),
                                 format!(
                                     "fix: use a constant within `{}` range, or widen the target type to `f64`",
-                                    target
+                                    display_target
                                 ),
                             ],
                         );
                     }
                 }
                 ConvConst::Str | ConvConst::Bool | ConvConst::Nil => {
-                    self.emit_conv_kind_error(target, c, arg, span)
+                    self.emit_conv_kind_error(display_target, c, arg, span)
                 }
                 ConvConst::Int(_) | ConvConst::Char(_) => {}
             },
@@ -864,12 +913,14 @@ impl<'a> Checker<'a> {
                     self.emit_const_conversion_error(
                         span,
                         format!(
-                            "integer constant `{}` does not fit the conversion to `string` (HYB-E6006)",
-                            arg.render()
+                            "integer constant `{}` does not fit the conversion to `{}` (HYB-E6006)",
+                            arg.render(),
+                            display_target
                         ),
                         vec![
                             format!(
-                                "why: Go rejects `string({})` at compile time (`constant overflow` — string conversions accept integer constants below 2^512), so an accepted Hybrid program would emit unbuildable Go (issue #228)",
+                                "why: Go rejects `{}({})` at compile time (`constant overflow` — string conversions accept integer constants below 2^512), so an accepted Hybrid program would emit unbuildable Go (issue #228)",
+                                display_target,
                                 arg.render()
                             ),
                             "fix: use a smaller constant (below 2^512), or convert from a variable".to_string(),
@@ -877,8 +928,17 @@ impl<'a> Checker<'a> {
                     );
                 }
                 ConvConst::Float(_) | ConvConst::Bool | ConvConst::Nil => {
-                    self.emit_conv_kind_error(target, c, arg, span)
+                    self.emit_conv_kind_error(display_target, c, arg, span)
                 }
+            },
+            "bool" => match c {
+                ConvConst::Bool => {}
+                ConvConst::Int(_)
+                | ConvConst::Huge { .. }
+                | ConvConst::Float(_)
+                | ConvConst::Char(_)
+                | ConvConst::Str
+                | ConvConst::Nil => self.emit_conv_kind_error(display_target, c, arg, span),
             },
             _ => {}
         }
@@ -910,16 +970,671 @@ impl<'a> Checker<'a> {
             .push(Diagnostic::error("HYB-E6006", self.path.clone(), span, msg).with_notes(notes));
     }
 
+    fn conv_const(&self, e: &Expr, depth: u32) -> Option<ConvConst> {
+        if depth > 32 {
+            return None;
+        }
+        match unwrap_parens(e) {
+            Expr::Lit { kind, .. } => Some(match kind {
+                LitKind::Int(s) => match parse_int_lit(s) {
+                    Some(ConstInt::Value(v)) => ConvConst::Int(v),
+                    Some(ConstInt::PosOverflow) | Some(ConstInt::NegOverflow) | None => {
+                        ConvConst::Huge {
+                            f: huge_int_as_f64(s),
+                            lt_512: lit_below_2_512(s),
+                        }
+                    }
+                },
+                LitKind::Float(s) => ConvConst::Float(s.parse::<f64>().unwrap_or(f64::INFINITY)),
+                LitKind::Char(c) => ConvConst::Char(*c as i32),
+                LitKind::Str(_) | LitKind::RawStr(_) => ConvConst::Str,
+                LitKind::Bool(_) => ConvConst::Bool,
+                LitKind::Nil => ConvConst::Nil,
+            }),
+            Expr::Ident { name, span } => {
+                if name == "true" || name == "false" {
+                    return Some(ConvConst::Bool);
+                }
+                if name == "nil" {
+                    return Some(ConvConst::Nil);
+                }
+                match self.resolve_scoped_const_for_conv(name, span.start) {
+                    ScopedConvBinding::ShadowedByRuntimeVar => return None,
+                    ScopedConvBinding::LocalConst { ty, val } => {
+                        let c = self.conv_const(val, depth + 1)?;
+                        return Some(self.coerce_conv_const_for_decl_ty(c, ty.as_ref()));
+                    }
+                    ScopedConvBinding::None => {}
+                }
+                if let Some(val) = self.const_values.get(name.as_str()) {
+                    let c = self.conv_const(val, depth + 1)?;
+                    let decl_ty = self.consts.get(name.as_str()).and_then(|b| b.ty.as_ref());
+                    return Some(self.coerce_conv_const_for_decl_ty(c, decl_ty));
+                }
+                None
+            }
+            Expr::Unary { op, operand, .. } => {
+                let inner = self.conv_const(unwrap_parens(operand), depth + 1)?;
+                match op {
+                    UnOp::Neg => match inner {
+                        ConvConst::Int(v) => Some(match v.checked_neg() {
+                            Some(n) => ConvConst::Int(n),
+                            None => ConvConst::Huge {
+                                f: -(v as f64),
+                                lt_512: true,
+                            },
+                        }),
+                        ConvConst::Char(c) => Some(ConvConst::Int(-(c as i128))),
+                        ConvConst::Float(f) => Some(ConvConst::Float(-f)),
+                        ConvConst::Huge { f, lt_512 } => Some(ConvConst::Huge { f: -f, lt_512 }),
+                        other => Some(other),
+                    },
+                    UnOp::Not => match inner {
+                        ConvConst::Bool => Some(ConvConst::Bool),
+                        _ => None,
+                    },
+                    UnOp::Addr => None,
+                }
+            }
+            Expr::Binary { op, lhs, rhs, .. } => {
+                let l = self.conv_const(lhs, depth + 1)?;
+                let r = self.conv_const(rhs, depth + 1)?;
+                match op {
+                    BinOp::Eq
+                    | BinOp::Ne
+                    | BinOp::Lt
+                    | BinOp::Le
+                    | BinOp::Gt
+                    | BinOp::Ge
+                    | BinOp::And
+                    | BinOp::Or => Some(ConvConst::Bool),
+                    BinOp::Add if matches!((&l, &r), (ConvConst::Str, ConvConst::Str)) => {
+                        Some(ConvConst::Str)
+                    }
+                    BinOp::Add
+                    | BinOp::Sub
+                    | BinOp::Mul
+                    | BinOp::Div
+                    | BinOp::Mod
+                    | BinOp::BitAnd
+                    | BinOp::BitOr
+                    | BinOp::BitXor
+                    | BinOp::Shl
+                    | BinOp::Shr => eval_conv_binary(*op, l, r),
+                }
+            }
+            _ => None,
+        }
+    }
 
+    fn coerce_conv_const_for_decl_ty(
+        &self,
+        c: ConvConst,
+        decl_ty: Option<&TypeExpr>,
+    ) -> ConvConst {
+        let Some(ty) = decl_ty else {
+            return c;
+        };
+        let resolved = self.resolve_type_alias(ty);
+        if let TypeExpr::Named { name, .. } = resolved {
+            if matches!(name.as_str(), "f32" | "f64" | "float32" | "float64") {
+                match c {
+                    ConvConst::Int(v) => return ConvConst::Float(v as f64),
+                    ConvConst::Char(v) => return ConvConst::Float(v as f64),
+                    ConvConst::Huge { f, .. } => return ConvConst::Float(f),
+                    other => return other,
+                }
+            }
+        }
+        c
+    }
+
+    fn resolve_scoped_const_for_conv(
+        &self,
+        name: &str,
+        use_pos: hy_diag::Pos,
+    ) -> ScopedConvBinding<'a> {
+        for decl in &self.file.decls {
+            if let hy_syntax::Decl::Fn(f) = decl {
+                if conv_span_contains(f.span, use_pos) {
+                    let mut found = ScopedConvBinding::None;
+                    if let Some(r) = &f.receiver {
+                        if r.name == name {
+                            found = ScopedConvBinding::ShadowedByRuntimeVar;
+                        }
+                    }
+                    for p in &f.params {
+                        if p.name == name {
+                            found = ScopedConvBinding::ShadowedByRuntimeVar;
+                        }
+                    }
+                    for res in &f.results {
+                        if res.name.as_deref() == Some(name) {
+                            found = ScopedConvBinding::ShadowedByRuntimeVar;
+                        }
+                    }
+                    if let Some(body) = &f.body {
+                        scan_block_for_conv_binding(body, name, use_pos, &mut found);
+                    }
+                    return found;
+                }
+            }
+        }
+        ScopedConvBinding::None
+    }
 }
 
+enum ScopedConvBinding<'a> {
+    None,
+    ShadowedByRuntimeVar,
+    LocalConst {
+        ty: &'a Option<TypeExpr>,
+        val: &'a Expr,
+    },
+}
 
-/// A literal-constant conversion operand (the literal-only scope shared with
-/// E6001/E6002). Anything else — idents, binary ops, calls — is out of
-/// scope: it is either run-time (SPEC X4) or another pass's business.
+fn conv_span_contains(span: Span, pos: hy_diag::Pos) -> bool {
+    (span.start.line, span.start.col) <= (pos.line, pos.col)
+        && (pos.line, pos.col) <= (span.end.line, span.end.col)
+}
+
+fn conv_pos_le(a: hy_diag::Pos, b: hy_diag::Pos) -> bool {
+    (a.line, a.col) <= (b.line, b.col)
+}
+
+fn scan_block_for_conv_binding<'a>(
+    block: &'a hy_syntax::Block,
+    name: &str,
+    use_pos: hy_diag::Pos,
+    found: &mut ScopedConvBinding<'a>,
+) {
+    if !conv_span_contains(block.span, use_pos) {
+        return;
+    }
+    for stmt in &block.stmts {
+        if !conv_pos_le(stmt.span().start, use_pos) {
+            break;
+        }
+        scan_stmt_for_conv_binding(stmt, name, use_pos, found);
+    }
+}
+
+fn scan_stmt_for_conv_binding<'a>(
+    stmt: &'a Stmt,
+    name: &str,
+    use_pos: hy_diag::Pos,
+    found: &mut ScopedConvBinding<'a>,
+) {
+    match stmt {
+        Stmt::Local(l) => {
+            if conv_pos_le(l.span.end, use_pos) {
+                for (idx, n) in l.names.iter().enumerate() {
+                    if n == name {
+                        if matches!(l.kind, hy_syntax::LocalKind::Const) {
+                            if let Some(val) = l.values.get(idx) {
+                                *found = ScopedConvBinding::LocalConst { ty: &l.ty, val };
+                            }
+                        } else {
+                            *found = ScopedConvBinding::ShadowedByRuntimeVar;
+                        }
+                    }
+                }
+            }
+            for v in &l.values {
+                if conv_span_contains(v.span(), use_pos) {
+                    scan_expr_for_conv_binding(v, name, use_pos, found);
+                }
+            }
+        }
+        Stmt::Assign { values, .. } | Stmt::Return { values, .. } => {
+            for v in values {
+                if conv_span_contains(v.span(), use_pos) {
+                    scan_expr_for_conv_binding(v, name, use_pos, found);
+                }
+            }
+        }
+        Stmt::Expr { expr, .. } | Stmt::Defer { call: expr, .. } => {
+            if conv_span_contains(expr.span(), use_pos) {
+                scan_expr_for_conv_binding(expr, name, use_pos, found);
+            }
+        }
+        Stmt::Send { chan, value, .. } => {
+            if conv_span_contains(chan.span(), use_pos) {
+                scan_expr_for_conv_binding(chan, name, use_pos, found);
+            }
+            if conv_span_contains(value.span(), use_pos) {
+                scan_expr_for_conv_binding(value, name, use_pos, found);
+            }
+        }
+        Stmt::Task { callee, args, .. } => {
+            if conv_span_contains(callee.span(), use_pos) {
+                scan_expr_for_conv_binding(callee, name, use_pos, found);
+            }
+            for a in args {
+                if conv_span_contains(a.value.span(), use_pos) {
+                    scan_expr_for_conv_binding(&a.value, name, use_pos, found);
+                }
+            }
+        }
+        Stmt::If {
+            init,
+            cond,
+            then,
+            otherwise,
+            span,
+        } => {
+            if conv_span_contains(*span, use_pos) {
+                if let Some(init_stmt) = init {
+                    if conv_pos_le(init_stmt.span().start, use_pos) {
+                        scan_stmt_for_conv_binding(init_stmt, name, use_pos, found);
+                    }
+                }
+                if conv_span_contains(cond.span(), use_pos) {
+                    scan_expr_for_conv_binding(cond, name, use_pos, found);
+                }
+                if conv_span_contains(then.span, use_pos) {
+                    scan_block_for_conv_binding(then, name, use_pos, found);
+                } else if let Some(other) = otherwise {
+                    if conv_span_contains(other.span(), use_pos) {
+                        scan_stmt_for_conv_binding(other, name, use_pos, found);
+                    }
+                }
+            }
+        }
+        Stmt::For { kind, body, span } => {
+            if conv_span_contains(*span, use_pos) {
+                match kind {
+                    ForKind::While { cond } => {
+                        if conv_span_contains(cond.span(), use_pos) {
+                            scan_expr_for_conv_binding(cond, name, use_pos, found);
+                        }
+                    }
+                    ForKind::Range { var, lo, hi, .. } => {
+                        if conv_span_contains(lo.span(), use_pos) {
+                            scan_expr_for_conv_binding(lo, name, use_pos, found);
+                        }
+                        if conv_span_contains(hi.span(), use_pos) {
+                            scan_expr_for_conv_binding(hi, name, use_pos, found);
+                        }
+                        if conv_span_contains(body.span, use_pos) && var == name {
+                            *found = ScopedConvBinding::ShadowedByRuntimeVar;
+                        }
+                    }
+                    ForKind::Iterate { vars, expr } => {
+                        if conv_span_contains(expr.span(), use_pos) {
+                            scan_expr_for_conv_binding(expr, name, use_pos, found);
+                        }
+                        if conv_span_contains(body.span, use_pos)
+                            && vars.iter().any(|v| v == name)
+                        {
+                            *found = ScopedConvBinding::ShadowedByRuntimeVar;
+                        }
+                    }
+                    ForKind::Infinite => {}
+                }
+                if conv_span_contains(body.span, use_pos) {
+                    scan_block_for_conv_binding(body, name, use_pos, found);
+                }
+            }
+        }
+        Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+            if conv_span_contains(body.span, use_pos) {
+                scan_block_for_conv_binding(body, name, use_pos, found);
+            }
+        }
+        Stmt::Match {
+            subject,
+            arms,
+            span,
+        } => {
+            if conv_span_contains(*span, use_pos) {
+                if conv_span_contains(subject.span(), use_pos) {
+                    scan_expr_for_conv_binding(subject, name, use_pos, found);
+                }
+                for arm in arms {
+                    let in_guard = arm
+                        .guard
+                        .as_ref()
+                        .is_some_and(|g| conv_span_contains(g.span(), use_pos));
+                    let in_body = conv_span_contains(arm.body.span, use_pos);
+                    if in_guard || in_body {
+                        if let hy_syntax::MatchPattern::Path {
+                            binding: Some(b), ..
+                        } = &arm.pattern
+                        {
+                            if b == name {
+                                *found = ScopedConvBinding::ShadowedByRuntimeVar;
+                            }
+                        }
+                        if let Some(g) = &arm.guard {
+                            if in_guard {
+                                scan_expr_for_conv_binding(g, name, use_pos, found);
+                            }
+                        }
+                        if in_body {
+                            scan_block_for_conv_binding(&arm.body, name, use_pos, found);
+                        }
+                    }
+                }
+            }
+        }
+        Stmt::Select { arms, span } => {
+            if conv_span_contains(*span, use_pos) {
+                for arm in arms {
+                    match &arm.kind {
+                        SelectArmKind::Send { chan, value, .. } => {
+                            if conv_span_contains(chan.span(), use_pos) {
+                                scan_expr_for_conv_binding(chan, name, use_pos, found);
+                            }
+                            if conv_span_contains(value.span(), use_pos) {
+                                scan_expr_for_conv_binding(value, name, use_pos, found);
+                            }
+                        }
+                        SelectArmKind::Recv { chan, .. } => {
+                            if conv_span_contains(chan.span(), use_pos) {
+                                scan_expr_for_conv_binding(chan, name, use_pos, found);
+                            }
+                        }
+                        SelectArmKind::Default => {}
+                    }
+                    if conv_span_contains(arm.body.span, use_pos) {
+                        if let SelectArmKind::Recv { names, .. } = &arm.kind {
+                            if names.iter().any(|n| n == name) {
+                                *found = ScopedConvBinding::ShadowedByRuntimeVar;
+                            }
+                        }
+                        scan_block_for_conv_binding(&arm.body, name, use_pos, found);
+                    }
+                }
+            }
+        }
+        Stmt::Break { .. } | Stmt::Continue { .. } => {}
+    }
+}
+
+fn scan_expr_for_conv_binding<'a>(
+    expr: &'a Expr,
+    name: &str,
+    use_pos: hy_diag::Pos,
+    found: &mut ScopedConvBinding<'a>,
+) {
+    match expr {
+        Expr::FnLit {
+            params,
+            results,
+            body,
+            span,
+        } => {
+            if conv_span_contains(*span, use_pos) {
+                for p in params {
+                    if p.name == name {
+                        *found = ScopedConvBinding::ShadowedByRuntimeVar;
+                    }
+                }
+                for r in results {
+                    if r.name.as_deref() == Some(name) {
+                        *found = ScopedConvBinding::ShadowedByRuntimeVar;
+                    }
+                }
+                if conv_span_contains(body.span, use_pos) {
+                    scan_block_for_conv_binding(body, name, use_pos, found);
+                }
+            }
+        }
+        Expr::Binary { lhs, rhs, .. } | Expr::Index { base: lhs, index: rhs, .. } => {
+            if conv_span_contains(lhs.span(), use_pos) {
+                scan_expr_for_conv_binding(lhs, name, use_pos, found);
+            }
+            if conv_span_contains(rhs.span(), use_pos) {
+                scan_expr_for_conv_binding(rhs, name, use_pos, found);
+            }
+        }
+        Expr::Unary { operand, .. }
+        | Expr::AddrOf { operand, .. }
+        | Expr::Move { operand, .. }
+        | Expr::Try { operand, .. }
+        | Expr::Paren { inner: operand, .. }
+        | Expr::Field { base: operand, .. }
+        | Expr::Receive { chan: operand, .. } => {
+            if conv_span_contains(operand.span(), use_pos) {
+                scan_expr_for_conv_binding(operand, name, use_pos, found);
+            }
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            if conv_span_contains(base.span(), use_pos) {
+                scan_expr_for_conv_binding(base, name, use_pos, found);
+            }
+            if let Some(lo) = lo {
+                if conv_span_contains(lo.span(), use_pos) {
+                    scan_expr_for_conv_binding(lo, name, use_pos, found);
+                }
+            }
+            if let Some(hi) = hi {
+                if conv_span_contains(hi.span(), use_pos) {
+                    scan_expr_for_conv_binding(hi, name, use_pos, found);
+                }
+            }
+        }
+        Expr::Call { callee, args, .. } => {
+            if conv_span_contains(callee.span(), use_pos) {
+                scan_expr_for_conv_binding(callee, name, use_pos, found);
+            }
+            for a in args {
+                if conv_span_contains(a.value.span(), use_pos) {
+                    scan_expr_for_conv_binding(&a.value, name, use_pos, found);
+                }
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for f in fields {
+                if conv_span_contains(f.value.span(), use_pos) {
+                    scan_expr_for_conv_binding(&f.value, name, use_pos, found);
+                }
+            }
+        }
+        Expr::SliceLit { items, .. } => {
+            for i in items {
+                if conv_span_contains(i.span(), use_pos) {
+                    scan_expr_for_conv_binding(i, name, use_pos, found);
+                }
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                if conv_span_contains(k.span(), use_pos) {
+                    scan_expr_for_conv_binding(k, name, use_pos, found);
+                }
+                if conv_span_contains(v.span(), use_pos) {
+                    scan_expr_for_conv_binding(v, name, use_pos, found);
+                }
+            }
+        }
+        Expr::Interp { parts, .. } => {
+            for p in parts {
+                if let InterpPart::Expr(e) = p {
+                    if conv_span_contains(e.span(), use_pos) {
+                        scan_expr_for_conv_binding(e, name, use_pos, found);
+                    }
+                }
+            }
+        }
+        Expr::Ident { .. } | Expr::Lit { .. } => {}
+    }
+}
+
+/// True when `hy-emit::constconv::fold_constant` can fold `expr` as a literal-only
+/// integer expression (no `const` identifiers, no floats).
+fn constconv_folds_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Paren { inner, .. } => constconv_folds_expr(inner),
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => constconv_folds_expr(operand),
+        Expr::Lit {
+            kind: LitKind::Int(s),
+            ..
+        } => matches!(parse_int_lit(s), Some(ConstInt::Value(_))),
+        Expr::Lit {
+            kind: LitKind::Char(_),
+            ..
+        } => true,
+        Expr::Binary { op, lhs, rhs, .. } => {
+            matches!(
+                op,
+                BinOp::Add
+                    | BinOp::Sub
+                    | BinOp::Mul
+                    | BinOp::Div
+                    | BinOp::Mod
+                    | BinOp::BitAnd
+                    | BinOp::BitOr
+                    | BinOp::BitXor
+                    | BinOp::Shl
+                    | BinOp::Shr
+            ) && constconv_folds_expr(lhs)
+                && constconv_folds_expr(rhs)
+        }
+        _ => false,
+    }
+}
+
+fn eval_conv_binary(op: BinOp, l: ConvConst, r: ConvConst) -> Option<ConvConst> {
+    let as_int = |c: &ConvConst| -> Option<i128> {
+        match c {
+            ConvConst::Int(v) => Some(*v),
+            ConvConst::Char(v) => Some(*v as i128),
+            _ => None,
+        }
+    };
+    if let (Some(a), Some(b)) = (as_int(&l), as_int(&r)) {
+        return match op {
+            BinOp::Add => Some(match a.checked_add(b) {
+                Some(v) => ConvConst::Int(v),
+                None => ConvConst::Huge {
+                    f: (a as f64) + (b as f64),
+                    lt_512: true,
+                },
+            }),
+            BinOp::Sub => Some(match a.checked_sub(b) {
+                Some(v) => ConvConst::Int(v),
+                None => ConvConst::Huge {
+                    f: (a as f64) - (b as f64),
+                    lt_512: true,
+                },
+            }),
+            BinOp::Mul => Some(match a.checked_mul(b) {
+                Some(v) => ConvConst::Int(v),
+                None => {
+                    let f = (a as f64) * (b as f64);
+                    ConvConst::Huge {
+                        f,
+                        lt_512: f.is_finite() && f.abs() < 2f64.powi(512),
+                    }
+                }
+            }),
+            BinOp::Div => {
+                if b == 0 {
+                    None
+                } else {
+                    Some(match a.checked_div(b) {
+                        Some(v) => ConvConst::Int(v),
+                        None => ConvConst::Huge {
+                            f: -(a as f64),
+                            lt_512: true,
+                        },
+                    })
+                }
+            }
+            BinOp::Mod => {
+                if b == 0 {
+                    None
+                } else {
+                    a.checked_rem(b).map(ConvConst::Int)
+                }
+            }
+            BinOp::BitAnd => Some(ConvConst::Int(a & b)),
+            BinOp::BitOr => Some(ConvConst::Int(a | b)),
+            BinOp::BitXor => Some(ConvConst::Int(a ^ b)),
+            BinOp::Shl => {
+                if b < 0 {
+                    return None;
+                }
+                let sh = u32::try_from(b).unwrap_or(u32::MAX);
+                if a == 0 {
+                    return Some(ConvConst::Int(0));
+                }
+                if sh < 127 {
+                    if let Some(v) = a.checked_shl(sh) {
+                        // Ensure sign did not flip (`1i128 << 127` is negative).
+                        if (a > 0 && v > 0 && (v >> sh) == a)
+                            || (a < 0 && v < 0 && (v >> sh) == a)
+                        {
+                            return Some(ConvConst::Int(v));
+                        }
+                    }
+                }
+                let shift_f = if sh > 1024 {
+                    f64::INFINITY
+                } else {
+                    2f64.powi(sh as i32)
+                };
+                let f = (a as f64) * shift_f;
+                let abs_a = a.unsigned_abs();
+                let bit_len = 128 - abs_a.leading_zeros();
+                let lt_512 = sh.saturating_add(bit_len) <= 512;
+                Some(ConvConst::Huge { f, lt_512 })
+            }
+            BinOp::Shr => {
+                if b < 0 {
+                    return None;
+                }
+                let sh = u32::try_from(b).ok()?;
+                if sh >= 127 {
+                    Some(ConvConst::Int(if a < 0 { -1 } else { 0 }))
+                } else {
+                    a.checked_shr(sh).map(ConvConst::Int)
+                }
+            }
+            _ => None,
+        };
+    }
+    let as_float = |c: &ConvConst| -> Option<f64> {
+        match c {
+            ConvConst::Float(f) => Some(*f),
+            ConvConst::Int(v) => Some(*v as f64),
+            ConvConst::Char(v) => Some(*v as f64),
+            ConvConst::Huge { f, .. } => Some(*f),
+            _ => None,
+        }
+    };
+    if matches!(l, ConvConst::Float(_))
+        || matches!(r, ConvConst::Float(_))
+        || matches!((&l, &r), (ConvConst::Huge { .. }, _) | (_, ConvConst::Huge { .. }))
+    {
+        let lf = as_float(&l)?;
+        let rf = as_float(&r)?;
+        return match op {
+            BinOp::Add => Some(ConvConst::Float(lf + rf)),
+            BinOp::Sub => Some(ConvConst::Float(lf - rf)),
+            BinOp::Mul => Some(ConvConst::Float(lf * rf)),
+            BinOp::Div => {
+                if rf == 0.0 {
+                    None
+                } else {
+                    Some(ConvConst::Float(lf / rf))
+                }
+            }
+            _ => None,
+        };
+    }
+    None
+}
+
 enum ConvConst {
     Int(i128),
-    /// Integer literal past i128 (or past u128) — carries its `f64` reading
+    /// Integer literal/expression past i128 — carries its `f64` reading
     /// so float targets can still decide (`f64(10^40)` is fine, `f32(10^40)`
     /// overflows f32), plus whether the value is strictly below 2^512
     /// (Go's verified boundary: `string(2^512 - 1)` builds,
@@ -942,49 +1657,6 @@ impl ConvConst {
             ConvConst::Bool => "boolean",
             ConvConst::Nil => "nil",
         }
-    }
-}
-
-fn conv_const(e: &Expr) -> Option<ConvConst> {
-    match unwrap_parens(e) {
-        Expr::Lit { kind, .. } => Some(match kind {
-            LitKind::Int(s) => match parse_int_lit(s) {
-                // ConstInt (issue #297): PosOverflow/NegOverflow literals are
-                // past i128 — the Huge f64 reading still decides float and
-                // 2^512-boundary string targets exactly as the None case did.
-                Some(ConstInt::Value(v)) => ConvConst::Int(v),
-                Some(ConstInt::PosOverflow) | Some(ConstInt::NegOverflow) | None => {
-                    ConvConst::Huge {
-                        f: huge_int_as_f64(s),
-                        lt_512: lit_below_2_512(s),
-                    }
-                }
-            },
-            LitKind::Float(s) => ConvConst::Float(s.parse::<f64>().unwrap_or(f64::INFINITY)),
-            LitKind::Char(c) => ConvConst::Char(*c as i32),
-            LitKind::Str(_) | LitKind::RawStr(_) => ConvConst::Str,
-            LitKind::Bool(_) => ConvConst::Bool,
-            LitKind::Nil => ConvConst::Nil,
-        }),
-        Expr::Unary {
-            op: UnOp::Neg,
-            operand,
-            ..
-        } => match conv_const(unwrap_parens(operand))? {
-            ConvConst::Int(v) => Some(match v.checked_neg() {
-                Some(n) => ConvConst::Int(n),
-                None => ConvConst::Huge {
-                    // only reachable for `-i128::MIN` — |2^127| well under
-                    // 2^512 and inside f64/f32 range both.
-                    f: -(v as f64),
-                    lt_512: true,
-                },
-            }),
-            ConvConst::Float(f) => Some(ConvConst::Float(-f)),
-            ConvConst::Huge { f, lt_512 } => Some(ConvConst::Huge { f: -f, lt_512 }),
-            other => Some(other),
-        },
-        _ => None,
     }
 }
 
@@ -1030,7 +1702,7 @@ fn huge_int_as_f64(s: &str) -> f64 {
 /// True when `name` is a built-in conversion target of `Type(const)` calls.
 fn is_conversion_target(name: &str) -> bool {
     fixed_width_int_range(name).is_some()
-        || matches!(name, "f32" | "f64" | "float32" | "float64" | "string")
+        || matches!(name, "f32" | "f64" | "float32" | "float64" | "string" | "bool")
 }
 
 /// Targets the emitter's SPEC X4 fold skips (`bits >= 64`) — constants here
