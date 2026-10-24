@@ -489,6 +489,30 @@ impl<'a> Lexer<'a> {
                     break;
                 }
             }
+            let mut has_frac = false;
+            if self.at(0) == Some('.') && self.at(1) != Some('.') {
+                has_frac = true;
+                s.push('.');
+                self.bump();
+                while let Some(c) = self.at(0) {
+                    if c == '_' || c.is_ascii_alphanumeric() {
+                        if c != '_' {
+                            s.push(c);
+                        }
+                        self.bump();
+                    } else if matches!(c, '+' | '-')
+                        && s.chars()
+                            .last()
+                            .map(|p| matches!(p, 'p' | 'P' | 'e' | 'E'))
+                            .unwrap_or(false)
+                    {
+                        s.push(c);
+                        self.bump();
+                    } else {
+                        break;
+                    }
+                }
+            }
             let digits = &s[2..];
             if digits.is_empty() {
                 self.escape_diag(
@@ -496,6 +520,14 @@ impl<'a> Lexer<'a> {
                     false,
                     format!(
                         "malformed 0{base} integer literal: expected at least one digit after `0{base}`"
+                    ),
+                );
+            } else if has_frac {
+                self.escape_diag(
+                    start,
+                    false,
+                    format!(
+                        "malformed 0{base} integer literal `{s}`: fractional part is not permitted on `0{base}` literals"
                     ),
                 );
             } else if let Some(bad) = digits.chars().find(|&c| match base {
