@@ -640,6 +640,55 @@ impl<'a> Collector<'a> {
         for r in &f.results {
             self.ty(&r.ty);
         }
+        if f.receiver.is_none() {
+            if f.name == "main" {
+                if !f.params.is_empty() {
+                    self.emit_e1002(
+                        f.span,
+                        format!(
+                            "`main` function cannot take parameters — Go refuses `func main must have no arguments and no return values` (HYB-E1002)"
+                        ),
+                        "`main` must have no arguments; command-line arguments are accessed via `os.args`",
+                    );
+                }
+                if !f.type_params.is_empty() {
+                    self.emit_e1002(
+                        f.span,
+                        format!(
+                            "`main` function cannot declare type parameters — Go refuses `func main must have no type parameters` (HYB-E1002)"
+                        ),
+                        "`main` entry point cannot declare type parameters",
+                    );
+                }
+            } else if f.name == "init" {
+                if !f.params.is_empty() || !f.results.is_empty() {
+                    let reason = if !f.params.is_empty() && !f.results.is_empty() {
+                        "cannot take parameters or return values"
+                    } else if !f.params.is_empty() {
+                        "cannot take parameters"
+                    } else {
+                        "cannot return values"
+                    };
+                    self.emit_e1002(
+                        f.span,
+                        format!(
+                            "`init` function {} — Go refuses `func init must have no arguments and no return values` (HYB-E1002)",
+                            reason
+                        ),
+                        "`init` runs automatically at package initialization and must have signature `fn init()` with no arguments and no return values",
+                    );
+                }
+                if !f.type_params.is_empty() {
+                    self.emit_e1002(
+                        f.span,
+                        format!(
+                            "`init` function cannot declare type parameters — Go refuses `func init must have no type parameters` (HYB-E1002)"
+                        ),
+                        "`init` function cannot declare type parameters",
+                    );
+                }
+            }
+        }
         let result_kinds: Vec<OpKind> = f
             .results
             .iter()
@@ -4782,5 +4831,56 @@ fn main() {
             "unexpected diagnostics: {:?}",
             r.diagnostics
         );
+    }
+
+    #[test]
+    fn rejects_invalid_main_and_init_signatures_issue_1411() {
+        // Regressions from issue #1411
+        for src in [
+            // 1. main with a parameter — main_params.hy
+            "fn main(a int) {}\n",
+            // 2. init with a parameter — init_params.hy
+            "fn init(a int) {}\nfn main() {}\n",
+            // 3. init with a result — init_result.hy
+            "fn init() int {\n    return 0\n}\nfn main() {}\n",
+            // 4. init with both parameters and results
+            "fn init(a int) int {\n    return a\n}\nfn main() {}\n",
+            // 5. main with type parameters
+            "fn main[t any]() {}\n",
+            // 6. init with type parameters
+            "fn init[t any]() {}\nfn main() {}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                error_codes(&r).contains(&"HYB-E1002".to_string()),
+                "expected HYB-E1002, got {:?} for:\n{src}",
+                error_codes(&r)
+            );
+        }
+
+        // Controls: valid main/init, methods named main/init, and result-bearing main
+        for src in [
+            // Ordinary empty main
+            "fn main() {}\n",
+            // Ordinary empty init + main
+            "fn init() {}\nfn main() {}\n",
+            // Intentional Hybrid exit contract: main with result
+            "fn main() int {\n    return 0\n}\n",
+            "fn main() (code int, err error) {\n    return 0, nil\n}\n",
+            // Methods named main or init on receiver types are allowed in Go
+            "struct worker {}\nfn (w *worker) main(a int) {}\nfn main() {}\n",
+            "struct worker {}\nfn (w *worker) init(a int) int {\n    return a\n}\nfn main() {}\n",
+            // Ordinary functions with parameters and results
+            "fn add(a int, b int) int {\n    return a + b\n}\nfn main() {}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(
+                r.verdict,
+                Verdict::Accept,
+                "unexpected reject for control:\n{src}\ndiagnostics: {:?}",
+                r.diagnostics
+            );
+        }
     }
 }
