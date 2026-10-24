@@ -723,9 +723,53 @@ impl<'a> Checker<'a> {
     // ------------------------------------------------------------------
 
     fn check_equality(&mut self, st: &FnState, lhs: &Expr, rhs: &Expr, span: Span) {
-        // `x == nil` is the nil-comparison surface (E4001/N1 own its
-        // validity) — every nilable type is comparable to nil in Go.
+        // `x == nil` is a comparison, not a binding: E4001/N1 enforce nil
+        // validity at declarations, assignments, returns and spawn
+        // arguments, but none of those sites see a comparison, so `nil` here
+        // used to skip the rule entirely. A nil literal is only comparable to
+        // a type that HAS a nil value; against `int`, `string`, `bool`,
+        // a struct or an array, Go rejects the program (`invalid operation:
+        // … == nil (mismatched types … and untyped nil)`) — issue #1567.
         if Checker::is_nil_literal(lhs) || Checker::is_nil_literal(rhs) {
+            let other = if Checker::is_nil_literal(lhs) { rhs } else { lhs };
+            // `nil == nil`: neither side has a type, and Go rejects the
+            // comparison outright (`invalid operation: nil == nil (operator
+            // == not defined on untyped nil)`). There is no declared type to
+            // report against, so this is the untyped-nil leg (E4003).
+            if Checker::is_nil_literal(other) {
+                let msg = "`nil == nil` compares two untyped nils: Go rejects the comparison (`operator == not defined on untyped nil`)".to_string();
+                let notes = vec![
+                    "why: nil has exactly two homes (N1) — `error` and the foreign-Go perimeter (N2) — and both must be visible in a DECLARED type; an untyped nil has no type to compare".to_string(),
+                    "fix: compare the value whose absence you mean (`var e error = nil; e == nil`), or use `option[T]` and compare against `none` (N3)".to_string(),
+                ];
+                self.diags.push(
+                    Diagnostic::error("HYB-E4003", self.path.clone(), span, msg)
+                        .with_notes(notes),
+                );
+                return;
+            }
+            let shape = self.nil_compare_shape(st, other);
+            let Some((noun, ty)) = Self::non_nilable_shape(&shape) else {
+                return;
+            };
+            let msg = format!(
+                "`nil` is not a valid value for a comparison against `{}` ({}): {} has no nil (N1)",
+                other.render(),
+                ty,
+                noun
+            );
+            let notes = vec![
+                "why: Go rejects `== nil` / `!= nil` unless the other operand is a pointer, chan, func, map, slice or interface (`invalid operation: … mismatched types … and untyped nil`), so an accepted Hybrid program would emit unbuildable Go (issue #1567)".to_string(),
+                match &shape {
+                    TypeShape::Str => "fix: compare with the empty string `\"\"` — a zero string is the empty string (N3)".to_string(),
+                    TypeShape::Array(_) => "fix: compare the elements you care about, or use a slice if absence is the meaning (N4)".to_string(),
+                    TypeShape::Struct(_) => "fix: compare the fields you care about, or carry absence with `option[T]` (N3)".to_string(),
+                    _ => "fix: compare with the type's zero value (`0`, `0.0`, `false`) — a Hybrid primitive has no nil (N3)".to_string(),
+                },
+            ];
+            self.diags.push(
+                Diagnostic::error("HYB-E4001", self.path.clone(), span, msg).with_notes(notes),
+            );
             return;
         }
         let l = self.equality_shape(st, lhs);
@@ -777,6 +821,42 @@ impl<'a> Checker<'a> {
             }
         }
         self.shape_of_expr(st, e)
+    }
+
+    /// Shape of the non-nil operand of a nil comparison. A binding carries
+    /// the type it was DECLARED with (`ty`) next to the shape inferred from
+    /// its initializer; the declared type wins, because `var a any = 1` is an
+    /// interface value even though the initializer's shape is `Primitive`.
+    /// Resolving `any` back through `shape_of_type` yields `Unknown`, which
+    /// `non_nilable_shape` fails open on — exactly right, since an interface
+    /// is comparable to nil.
+    fn nil_compare_shape(&self, st: &FnState, e: &Expr) -> TypeShape {
+        if let Expr::Ident { name, .. } = unwrap_parens(e) {
+            if let Some(b) = self.lookup_binding(st, name) {
+                if let Some(ty) = &b.ty {
+                    return self.shape_of_type(ty);
+                }
+                return b.shape.clone();
+            }
+        }
+        self.shape_of_expr(st, e)
+    }
+
+    /// `Some((noun, type text))` only when the shape provably has NO nil
+    /// value in Go. Primitives, strings, structs and arrays are value types:
+    /// `0 == nil`, `"s" == nil` and `s{} == nil` are all compile errors.
+    /// Everything else (pointer, chan, func, map, slice, interface/foreign,
+    /// handles, `Unknown`) may be nil or is unresolved — `None`, fail-open,
+    /// the same policy `incomparable_noun` uses.
+    fn non_nilable_shape(shape: &TypeShape) -> Option<(&'static str, String)> {
+        match shape {
+            TypeShape::Primitive => Some(("primitive", "primitive".to_string())),
+            TypeShape::Str => Some(("string", "string".to_string())),
+            TypeShape::Struct(Some(name)) => Some(("struct", name.clone())),
+            TypeShape::Struct(None) => Some(("struct", "struct".to_string())),
+            TypeShape::Array(elem) => Some(("array", format!("array of {}", elem.render()))),
+            _ => None,
+        }
     }
 
     /// `Some(noun)` when a `==` over this shape is provably illegal in
