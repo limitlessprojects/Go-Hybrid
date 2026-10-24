@@ -15,7 +15,7 @@
 //! one merely leaves the old emission, which Go rejects as it does today.
 
 use hy_syntax::{
-    Block, Expr, ForKind, InterpPart, MatchPattern, PlaceKind, SelectArmKind, Stmt, TypeExpr,
+    BinOp, Block, Expr, ForKind, InterpPart, MatchPattern, PlaceKind, SelectArmKind, Stmt, TypeExpr,
 };
 
 /// Does `body` reference `name` anywhere that is not shadowed by an inner
@@ -203,7 +203,8 @@ fn stmt_reads(s: &Stmt, target: &str) -> bool {
                         return true;
                     }
                     if var == target {
-                        return *inclusive && expr_reads(hi, target);
+                        return (*inclusive && expr_reads(hi, target))
+                            || (!*inclusive && expr_reads_before_range_var(hi, target));
                     }
                     if expr_reads(hi, target) {
                         return true;
@@ -330,5 +331,177 @@ fn stmt_reads(s: &Stmt, target: &str) -> bool {
             }
             false
         }
+    }
+}
+
+/// Mirrors `Emitter::hoist_tries_expr` for an exclusive range bound `hi` when
+/// the range variable shadows `target`: `hoist_tries_expr(hi)` runs BEFORE
+/// `for <var> := <lo>; <var> < <hi>; <var>++`, so any subexpression hoisted out
+/// of `hi` resolves `target` against the outer binding rather than `<var>`.
+fn expr_reads_before_range_var(e: &Expr, target: &str) -> bool {
+    match e {
+        Expr::Try { operand, .. } => expr_reads(operand, target),
+        Expr::Binary { op, lhs, rhs, .. } => {
+            if matches!(op, BinOp::And | BinOp::Or) && crate::Emitter::expr_has_hoistable_try(rhs) {
+                expr_reads(e, target)
+            } else if crate::Emitter::expr_has_hoistable_try(rhs) {
+                expr_reads_in_hoisted_order(lhs, target)
+                    || expr_reads_before_range_var(rhs, target)
+            } else {
+                expr_reads_before_range_var(lhs, target)
+            }
+        }
+        Expr::Unary { operand, .. }
+        | Expr::AddrOf { operand, .. }
+        | Expr::Move { operand, .. }
+        | Expr::Paren { inner: operand, .. }
+        | Expr::Field { base: operand, .. }
+        | Expr::Receive { chan: operand, .. } => expr_reads_before_range_var(operand, target),
+        Expr::Interp { parts, .. } => parts.iter().enumerate().any(|(idx, p)| match p {
+            InterpPart::Expr(x) => {
+                let later_has_try = parts[idx + 1..].iter().any(|rest| {
+                    matches!(rest, InterpPart::Expr(rx) if crate::Emitter::expr_has_hoistable_try(rx))
+                });
+                if later_has_try {
+                    expr_reads_in_hoisted_order(x, target)
+                } else {
+                    expr_reads_before_range_var(x, target)
+                }
+            }
+            InterpPart::Lit(_) => false,
+        }),
+        Expr::Call { callee, args, .. } => {
+            let any_arg_has_try = args
+                .iter()
+                .any(|a| crate::Emitter::expr_has_hoistable_try(&a.value));
+            let callee_reads = if any_arg_has_try {
+                match callee.as_ref() {
+                    Expr::Field { base, .. } => expr_reads_in_hoisted_order(base, target),
+                    Expr::Call { .. } => expr_reads_in_hoisted_order(callee, target),
+                    _ => expr_reads_before_range_var(callee, target),
+                }
+            } else {
+                expr_reads_before_range_var(callee, target)
+            };
+            callee_reads
+                || args.iter().enumerate().any(|(idx, a)| {
+                    let later_has_try = args[idx + 1..]
+                        .iter()
+                        .any(|rest| crate::Emitter::expr_has_hoistable_try(&rest.value));
+                    if later_has_try {
+                        expr_reads_in_hoisted_order(&a.value, target)
+                    } else {
+                        expr_reads_before_range_var(&a.value, target)
+                    }
+                })
+        }
+        Expr::Index { base, index, .. } => {
+            if crate::Emitter::expr_has_hoistable_try(index) {
+                expr_reads_in_hoisted_order(base, target)
+                    || expr_reads_before_range_var(index, target)
+            } else {
+                expr_reads_before_range_var(base, target)
+            }
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            let lo_try = lo
+                .as_deref()
+                .is_some_and(crate::Emitter::expr_has_hoistable_try);
+            let hi_try = hi
+                .as_deref()
+                .is_some_and(crate::Emitter::expr_has_hoistable_try);
+            let base_reads = if lo_try || hi_try {
+                expr_reads_in_hoisted_order(base, target)
+            } else {
+                expr_reads_before_range_var(base, target)
+            };
+            let lo_reads = lo.as_deref().is_some_and(|l| {
+                if hi_try {
+                    expr_reads_in_hoisted_order(l, target)
+                } else {
+                    expr_reads_before_range_var(l, target)
+                }
+            });
+            let hi_reads = hi
+                .as_deref()
+                .is_some_and(|h| expr_reads_before_range_var(h, target));
+            base_reads || lo_reads || hi_reads
+        }
+        Expr::StructLit { fields, .. } => fields.iter().enumerate().any(|(idx, f)| {
+            let later_has_try = fields[idx + 1..]
+                .iter()
+                .any(|rest| crate::Emitter::expr_has_hoistable_try(&rest.value));
+            if later_has_try {
+                expr_reads_in_hoisted_order(&f.value, target)
+            } else {
+                expr_reads_before_range_var(&f.value, target)
+            }
+        }),
+        Expr::SliceLit { items, .. } => items.iter().enumerate().any(|(idx, item)| {
+            let later_has_try = items[idx + 1..]
+                .iter()
+                .any(crate::Emitter::expr_has_hoistable_try);
+            if later_has_try {
+                expr_reads_in_hoisted_order(item, target)
+            } else {
+                expr_reads_before_range_var(item, target)
+            }
+        }),
+        Expr::MapLit { entries, .. } => entries.iter().enumerate().any(|(idx, (k, v))| {
+            let later_entry_try = entries[idx + 1..].iter().any(|(rk, rv)| {
+                crate::Emitter::expr_has_hoistable_try(rk)
+                    || crate::Emitter::expr_has_hoistable_try(rv)
+            });
+            let key_reads = if crate::Emitter::expr_has_hoistable_try(v) || later_entry_try {
+                expr_reads_in_hoisted_order(k, target)
+            } else {
+                expr_reads_before_range_var(k, target)
+            };
+            let val_reads = if later_entry_try {
+                expr_reads_in_hoisted_order(v, target)
+            } else {
+                expr_reads_before_range_var(v, target)
+            };
+            key_reads || val_reads
+        }),
+        Expr::FnLit { .. } | Expr::Lit { .. } | Expr::Ident { .. } => false,
+    }
+}
+
+fn expr_reads_in_hoisted_order(e: &Expr, target: &str) -> bool {
+    if expr_reads_before_range_var(e, target) {
+        return true;
+    }
+    let inner = crate::Emitter::peel_parens(e);
+    expr_has_call_or_recv(inner) && expr_reads(e, target)
+}
+
+fn expr_has_call_or_recv(e: &Expr) -> bool {
+    match e {
+        Expr::Call { .. } | Expr::Receive { .. } | Expr::Try { .. } => true,
+        Expr::Binary { lhs, rhs, .. } => expr_has_call_or_recv(lhs) || expr_has_call_or_recv(rhs),
+        Expr::Unary { operand, .. }
+        | Expr::AddrOf { operand, .. }
+        | Expr::Move { operand, .. }
+        | Expr::Paren { inner: operand, .. }
+        | Expr::Field { base: operand, .. } => expr_has_call_or_recv(operand),
+        Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+            InterpPart::Expr(x) => expr_has_call_or_recv(x),
+            InterpPart::Lit(_) => false,
+        }),
+        Expr::Index { base, index, .. } => {
+            expr_has_call_or_recv(base) || expr_has_call_or_recv(index)
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            expr_has_call_or_recv(base)
+                || lo.as_deref().is_some_and(expr_has_call_or_recv)
+                || hi.as_deref().is_some_and(expr_has_call_or_recv)
+        }
+        Expr::StructLit { fields, .. } => fields.iter().any(|f| expr_has_call_or_recv(&f.value)),
+        Expr::SliceLit { items, .. } => items.iter().any(expr_has_call_or_recv),
+        Expr::MapLit { entries, .. } => entries
+            .iter()
+            .any(|(k, v)| expr_has_call_or_recv(k) || expr_has_call_or_recv(v)),
+        Expr::FnLit { .. } | Expr::Lit { .. } | Expr::Ident { .. } => false,
     }
 }
