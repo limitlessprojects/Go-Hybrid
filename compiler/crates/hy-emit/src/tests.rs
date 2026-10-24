@@ -2997,3 +2997,85 @@ fn main() {}
     assert!(go6.contains("func read_url() int {"));
     assert!(go6.contains("func read_u_r_l() int {"));
 }
+
+#[test]
+fn mixed_named_and_unnamed_results_emit_uniformly_named_issue_1415() {
+    // 1. Named result followed by unnamed result
+    let src1 = "\
+fn helper() (code int, string) {
+    return 0, \"ok\"
+}
+fn main() {
+    code, text := helper()
+    fmt.println(code, text)
+}
+";
+    let go1 = emit(src1);
+    assert!(
+        go1.contains("func helper() (code int, hyR1 string)"),
+        "expected uniformly named results for (code int, string), got:\n{}",
+        go1
+    );
+
+    // 2. Unnamed result followed by named result
+    let src2 = "\
+fn helper() (int, text string) {
+    return 0, \"ok\"
+}
+fn main() {
+    code, text := helper()
+    fmt.println(code, text)
+}
+";
+    let go2 = emit(src2);
+    assert!(
+        go2.contains("func helper() (hyR0 int, text string)"),
+        "expected uniformly named results for (int, text string), got:\n{}",
+        go2
+    );
+
+    // 3. Closure literal with mixed results
+    let src3 = "\
+fn main() {
+    f := fn() (code int, string) {
+        return 0, \"ok\"
+    }
+    c, s := f()
+    fmt.println(c, s)
+}
+";
+    let go3 = emit(src3);
+    assert!(
+        go3.contains("func() (code int, hyR1 string)"),
+        "expected uniformly named closure results, got:\n{}",
+        go3
+    );
+
+    // 4. Fully unnamed control
+    let src4 = "\
+fn helper() (int, string) {
+    return 0, \"ok\"
+}
+fn main() {}
+";
+    let go4 = emit(src4);
+    assert!(
+        go4.contains("func helper() (int, string)"),
+        "expected fully unnamed results preserved, got:\n{}",
+        go4
+    );
+
+    // 5. Fully named control
+    let src5 = "\
+fn helper() (code int, text string) {
+    return 0, \"ok\"
+}
+fn main() {}
+";
+    let go5 = emit(src5);
+    assert!(
+        go5.contains("func helper() (code int, text string)"),
+        "expected fully named results preserved, got:\n{}",
+        go5
+    );
+}

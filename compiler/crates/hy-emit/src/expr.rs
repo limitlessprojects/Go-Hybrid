@@ -396,14 +396,7 @@ impl Emitter {
                 // Block): emitted verbatim so `fn() int {…}` lowers to
                 // `func() int {…}`.
                 if !results.is_empty() {
-                    let rs = results
-                        .iter()
-                        .map(|r| match &r.name {
-                            Some(n) => format!("{} {}", n, self.type_text(&r.ty)),
-                            None => self.type_text(&r.ty),
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                    let rs = self.format_results_signature(results);
                     out.push_str(&format!("({}) ", rs));
                 }
                 out.push_str("{\n");

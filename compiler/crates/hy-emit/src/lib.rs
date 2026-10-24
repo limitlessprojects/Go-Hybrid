@@ -1394,15 +1394,8 @@ impl Emitter {
                 }
             }
             2 => {
-                let mut parts: Vec<String> = Vec::new();
-                for r in &f.results {
-                    let ty = self.type_text(&r.ty);
-                    match &r.name {
-                        Some(n) => parts.push(format!("{} {}", n, ty)),
-                        None => parts.push(ty),
-                    }
-                }
-                self.push_raw(&format!(" ({}) {{\n", parts.join(", ")));
+                let rs = self.format_results_signature(&f.results);
+                self.push_raw(&format!(" ({}) {{\n", rs));
             }
             n => {
                 return Err(EmitError::unsupported(format!(
@@ -1450,6 +1443,37 @@ impl Emitter {
         }
         parts.push("hyErr error".to_string());
         format!("({})", parts.join(", "))
+    }
+
+    pub(crate) fn format_results_signature(&mut self, results: &[FnResult]) -> String {
+        let any_named = results.iter().any(|r| r.name.is_some());
+        let mut parts: Vec<String> = Vec::new();
+        let mut used_names: std::collections::HashSet<String> = results
+            .iter()
+            .filter_map(|r| r.name.clone())
+            .collect();
+        for (i, r) in results.iter().enumerate() {
+            let ty = self.type_text(&r.ty);
+            if any_named {
+                let name = match &r.name {
+                    Some(n) => n.clone(),
+                    None => {
+                        let mut candidate = format!("hyR{}", i);
+                        let mut count = 0;
+                        while used_names.contains(&candidate) {
+                            candidate = format!("hyR{}_{}", i, count);
+                            count += 1;
+                        }
+                        used_names.insert(candidate.clone());
+                        candidate
+                    }
+                };
+                parts.push(format!("{} {}", name, ty));
+            } else {
+                parts.push(ty);
+            }
+        }
+        parts.join(", ")
     }
 
     fn emit_params(&mut self, params: &[Param]) {
