@@ -127,12 +127,22 @@ impl<'a> Checker<'a> {
     fn resolve_call(&self, st: &FnState, cr: &CallRef) -> Resolved {
         match cr.callee {
             Expr::Field { base, name, .. } => {
-                if let Expr::Ident { name: b, .. } = &**base {
+                if let Expr::Ident { name: b, .. } = crate::model::unwrap_parens(base) {
                     if self.lookup_binding(st, b).is_none() && self.known_package(b) {
                         return Resolved::Package {
                             pkg: b.clone(),
                             method: name.clone(),
                         };
+                    }
+                    if self.lookup_binding(st, b).is_none() {
+                        let assoc = format!(
+                            "{}.{}",
+                            Self::base_named_type_str(b),
+                            Self::base_named_type_str(name)
+                        );
+                        if self.fns.contains_key(assoc.as_str()) {
+                            return Resolved::Fn { name: assoc };
+                        }
                     }
                 }
                 if let Some(root) = base.root_ident() {
@@ -297,11 +307,25 @@ impl<'a> Checker<'a> {
                 }
                 self.check_call_const_writes(st, cr, &HashSet::new());
                 self.record_callee_param_stores(st, cr);
-                if self.fns.contains_key(&name) {
+                let head = Self::base_named_type_str(&name).to_string();
+                let is_local_shadow = self.lookup_binding(st, &name).is_some()
+                    || (head != name && self.lookup_binding(st, &head).is_some());
+                let fn_key = if !is_local_shadow {
+                    if self.fns.contains_key(&name) {
+                        Some(name.clone())
+                    } else if self.fns.contains_key(head.as_str()) {
+                        Some(head.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some(fk) = fn_key {
                     // A3 #111: the callee may insert/delete through the
                     // argument — that event runs inside THIS call site's
                     // window when the call is within it.
-                    self.check_a3_call_conflict(st, cr, idx, &name);
+                    self.check_a3_call_conflict(st, cr, idx, &fk);
                     // A7 borrow-by-default: a handle passed to a Hybrid
                     // function is lent for the call only
                     self.lend_handle_args(st, cr, idx, None);
@@ -313,7 +337,10 @@ impl<'a> Checker<'a> {
                         // A3 #111 form 4: a local closure whose body mutates a
                         // captured binding — event attributed to this call site.
                         self.check_a3_closure_call(st, cr, idx, &name);
-                    } else if !A3_PURE_FNS.contains(&name.as_str()) && name != "delete" {
+                    } else if !A3_PURE_FNS.contains(&name.as_str())
+                        && !A3_PURE_FNS.contains(&head.as_str())
+                        && name != "delete"
+                    {
                         // Unresolved callee (e.g. a `fn(...)` parameter or local
                         // function variable): fail-closed on any map argument
                         // that conflicts with a live slot loan.
@@ -585,6 +612,7 @@ impl<'a> Checker<'a> {
         if live.is_empty() {
             return;
         }
+        let head = Self::base_named_type_str(name);
         let mut conflict_paths: Vec<String> = Vec::new();
         for (i, a) in cr.args.iter().enumerate() {
             let mut aroots = Vec::new();
@@ -594,7 +622,7 @@ impl<'a> Checker<'a> {
                 if !live.iter().any(|p| a3_paths_conflict(st, p, &arg_path)) {
                     continue;
                 }
-                let Some(decl) = self.fns.get(name) else {
+                let Some(decl) = self.fns.get(name).or_else(|| self.fns.get(head)).copied() else {
                     continue;
                 };
                 match decl.params.get(i) {
@@ -672,18 +700,19 @@ impl<'a> Checker<'a> {
             return;
         }
         let recv_sname = match recv {
-            TypeShape::Struct(Some(s)) => Some(s.clone()),
+            TypeShape::Struct(Some(s)) => Some(Self::base_named_type_str(s).to_string()),
             TypeShape::Pointer(inner) => match &**inner {
-                TypeShape::Struct(Some(s)) => Some(s.clone()),
+                TypeShape::Struct(Some(s)) => Some(Self::base_named_type_str(s).to_string()),
                 _ => None,
             },
             _ => None,
         };
+        let method_head = Self::base_named_type_str(method);
         let verb = format!("mutation via `{}`", cr.callee.render());
         let callee_path = walk::expr_path(cr.callee).unwrap_or_else(|| root.to_string());
         if let Some(sname) = recv_sname {
             let found_decl = self.file.decls.iter().find_map(|d| match d {
-                hy_syntax::Decl::Fn(f) if f.name == method => {
+                hy_syntax::Decl::Fn(f) if f.name == method_head => {
                     let r = f.receiver.as_ref()?;
                     let b = Self::base_named_type(&r.ty)?;
                     (b == sname).then_some(f)
@@ -708,19 +737,21 @@ impl<'a> Checker<'a> {
                     }
                 }
                 for (i, a) in cr.args.iter().enumerate() {
-                    let Some(arg_path) = walk::expr_path(&a.value) else {
-                        continue;
-                    };
-                    if !live.iter().any(|p| a3_paths_conflict(st, p, &arg_path)) {
-                        continue;
-                    };
-                    let mutates = match decl.params.get(i) {
-                        Some(p) => self.fn_mutates_param(decl, &p.name, 0),
-                        None => true,
-                    };
-                    if mutates {
-                        self.emit_a3_if_live(st, &arg_path, cr.span, idx, &verb);
-                        return;
+                    let mut aroots = Vec::new();
+                    collect_ref_roots(&a.value, &mut aroots);
+                    let arg_path_opt = walk::expr_path(&a.value);
+                    for arg_path in arg_path_opt.into_iter().chain(aroots) {
+                        if !live.iter().any(|p| a3_paths_conflict(st, p, &arg_path)) {
+                            continue;
+                        }
+                        let mutates = match decl.params.get(i) {
+                            Some(p) => self.fn_mutates_param(decl, &p.name, 0),
+                            None => true,
+                        };
+                        if mutates {
+                            self.emit_a3_if_live(st, &arg_path, cr.span, idx, &verb);
+                            return;
+                        }
                     }
                 }
                 return;
@@ -756,12 +787,14 @@ impl<'a> Checker<'a> {
         }
         let verb = format!("mutation via `{}`", cr.callee.render());
         for a in cr.args {
-            let Some(arg_path) = walk::expr_path(&a.value) else {
-                continue;
-            };
-            if live.iter().any(|p| a3_paths_conflict(st, p, &arg_path)) {
-                self.emit_a3_if_live(st, &arg_path, cr.span, idx, &verb);
-                return;
+            let mut aroots = Vec::new();
+            collect_ref_roots(&a.value, &mut aroots);
+            let arg_path_opt = walk::expr_path(&a.value);
+            for arg_path in arg_path_opt.into_iter().chain(aroots) {
+                if live.iter().any(|p| a3_paths_conflict(st, p, &arg_path)) {
+                    self.emit_a3_if_live(st, &arg_path, cr.span, idx, &verb);
+                    return;
+                }
             }
         }
     }
@@ -977,15 +1010,16 @@ impl<'a> Checker<'a> {
             collect_ref_roots(&a.value, &mut roots);
             roots.iter().any(|r| r == param)
         };
-        match cr.callee {
+        match unwrap_parens(cr.callee) {
             Expr::Ident { name, .. } => {
                 if name == "delete" || name == "clear" {
                     return cr.args.first().map(&arg_root_is_param).unwrap_or(false);
                 }
-                if A3_PURE_FNS.contains(&name.as_str()) {
+                let head = Self::base_named_type_str(name);
+                if A3_PURE_FNS.contains(&name.as_str()) || A3_PURE_FNS.contains(&head) {
                     return false;
                 }
-                if let Some(decl) = self.fns.get(name) {
+                if let Some(decl) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)).copied() {
                     for (i, a) in cr.args.iter().enumerate() {
                         if !arg_root_is_param(a) {
                             continue;
@@ -1005,9 +1039,33 @@ impl<'a> Checker<'a> {
                 // passing the parameter fails closed
                 cr.args.iter().any(&arg_root_is_param)
             }
-            Expr::Field { base, .. } => {
-                if let Expr::Ident { name: pkg, .. } = &**base {
+            Expr::Field { base, name: method_name, .. } => {
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
                     if A3_PURE_PKGS.contains(&pkg.as_str()) {
+                        return false;
+                    }
+                    let pkg_head = Self::base_named_type_str(pkg);
+                    let method_head = Self::base_named_type_str(method_name);
+                    let assoc_key = format!("{pkg_head}.{method_head}");
+                    if let Some(decl) = self
+                        .fns
+                        .get(&format!("{pkg}.{method_name}"))
+                        .or_else(|| self.fns.get(&assoc_key))
+                        .copied()
+                    {
+                        for (i, a) in cr.args.iter().enumerate() {
+                            if !arg_root_is_param(a) {
+                                continue;
+                            }
+                            match decl.params.get(i) {
+                                Some(p) => {
+                                    if self.fn_mutates_param(decl, &p.name, depth + 1) {
+                                        return true;
+                                    }
+                                }
+                                None => return true,
+                            }
+                        }
                         return false;
                     }
                 }
@@ -1076,7 +1134,12 @@ impl<'a> Checker<'a> {
                 {
                     st.closure_defs.insert(name.to_string(), def);
                 }
-                if let Some(existing_fnlit) = st.closure_fnlits.get(src).cloned() {
+                if let Some(existing_fnlit) = st
+                    .closure_fnlits
+                    .get(src)
+                    .or_else(|| st.closure_fnlits.get(&resolved))
+                    .cloned()
+                {
                     st.closure_fnlits.insert(name.to_string(), existing_fnlit);
                 }
                 let inherited = st
@@ -1098,19 +1161,50 @@ impl<'a> Checker<'a> {
                     return;
                 }
                 let mut mutated_roots = HashSet::new();
-                if let Expr::Ident { name: fn_name, .. } = unwrap_parens(callee) {
-                    if let Some(decl) = self.fns.get(fn_name) {
-                        for (i, a) in args.iter().enumerate() {
-                            let mutates = match decl.params.get(i) {
-                                Some(p) => self.fn_mutates_param(decl, &p.name, 0),
-                                None => true,
-                            };
-                            if mutates {
-                                let mut r = Vec::new();
-                                collect_ref_roots(&a.value, &mut r);
-                                mutated_roots.extend(r);
-                            }
+                let callee_decl = match unwrap_parens(callee) {
+                    Expr::Ident { name: fn_name, .. } => {
+                        let head = Self::base_named_type_str(fn_name);
+                        self.fns
+                            .get(fn_name.as_str())
+                            .or_else(|| self.fns.get(head))
+                            .copied()
+                    }
+                    Expr::Field {
+                        base,
+                        name: method_name,
+                        ..
+                    } => {
+                        if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                            let pkg_head = Self::base_named_type_str(pkg);
+                            let method_head = Self::base_named_type_str(method_name);
+                            let assoc_key = format!("{pkg_head}.{method_head}");
+                            self.fns
+                                .get(&format!("{pkg}.{method_name}"))
+                                .or_else(|| self.fns.get(&assoc_key))
+                                .copied()
+                        } else {
+                            None
                         }
+                    }
+                    _ => None,
+                };
+                if let Some(decl) = callee_decl {
+                    for (i, a) in args.iter().enumerate() {
+                        let mutates = match decl.params.get(i) {
+                            Some(p) => self.fn_mutates_param(decl, &p.name, 0),
+                            None => true,
+                        };
+                        if mutates {
+                            let mut r = Vec::new();
+                            collect_ref_roots(&a.value, &mut r);
+                            mutated_roots.extend(r);
+                        }
+                    }
+                } else {
+                    for a in args {
+                        let mut r = Vec::new();
+                        collect_ref_roots(&a.value, &mut r);
+                        mutated_roots.extend(r);
                     }
                 }
                 if !mutated_roots.is_empty() {
@@ -1296,7 +1390,7 @@ impl<'a> Checker<'a> {
             let mut calls = Vec::new();
             walk::own_calls(stmt, &mut calls);
             for cr in &calls {
-                match cr.callee {
+                match unwrap_parens(cr.callee) {
                     Expr::Ident { name, .. } => {
                         if name == "delete" || name == "clear" {
                             if let Some(first) = cr.args.first() {
@@ -1312,10 +1406,11 @@ impl<'a> Checker<'a> {
                             }
                             continue;
                         }
-                        if A3_PURE_FNS.contains(&name.as_str()) {
+                        let head = Self::base_named_type_str(name);
+                        if A3_PURE_FNS.contains(&name.as_str()) || A3_PURE_FNS.contains(&head) {
                             continue;
                         }
-                        if let Some(decl) = self.fns.get(name) {
+                        if let Some(decl) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)).copied() {
                             for (i, a) in cr.args.iter().enumerate() {
                                 let mut roots = Vec::new();
                                 collect_ref_roots(&a.value, &mut roots);
@@ -2852,6 +2947,7 @@ impl<'a> Checker<'a> {
     )> {
         match crate::model::unwrap_parens(cr.callee) {
             Expr::Ident { name, .. } => {
+                let head = Self::base_named_type_str(name);
                 if name == "copy"
                     || name == "delete"
                     || name == "clear"
@@ -2861,11 +2957,19 @@ impl<'a> Checker<'a> {
                     || name == "new"
                     || name == "close"
                     || A3_PURE_FNS.contains(&name.as_str())
+                    || A3_PURE_FNS.contains(&head)
                 {
                     return None;
                 }
+                if head != name && self.lookup_binding(st, head).is_some() {
+                    return None;
+                }
                 if self.lookup_binding(st, name).is_some() {
-                    let (params, results, body) = st.closure_defs.get(name.as_str())?;
+                    let resolved = crate::freeze::resolve_alias(st, name);
+                    let (params, results, body) = st
+                        .closure_defs
+                        .get(name.as_str())
+                        .or_else(|| st.closure_defs.get(&resolved))?;
                     let mut slots = Vec::new();
                     let mut bound: HashSet<String> =
                         params.iter().map(|p| p.name.clone()).collect();
@@ -2883,7 +2987,10 @@ impl<'a> Checker<'a> {
                     self.append_outer_binding_slots(st, &mut bound, true, &mut slots);
                     return Some((slots, std::borrow::Cow::Owned(body.clone())));
                 }
-                let decl = *self.fns.get(name.as_str())?;
+                let decl = *self
+                    .fns
+                    .get(name.as_str())
+                    .or_else(|| self.fns.get(head))?;
                 let body = decl.body.as_ref()?;
                 let mut slots = Vec::new();
                 let mut bound: HashSet<String> =
@@ -2907,9 +3014,37 @@ impl<'a> Checker<'a> {
                 name: method_name,
                 ..
             } => {
+                let method_head = Self::base_named_type_str(method_name);
                 if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) {
-                    if self.lookup_binding(st, pkg).is_none() && self.known_package(pkg) {
-                        return None;
+                    if self.lookup_binding(st, pkg).is_none() {
+                        if self.known_package(pkg) {
+                            return None;
+                        }
+                        let pkg_head = Self::base_named_type_str(pkg);
+                        let assoc_key = format!("{pkg_head}.{method_head}");
+                        if let Some(&decl) = self
+                            .fns
+                            .get(&format!("{pkg}.{method_name}"))
+                            .or_else(|| self.fns.get(&assoc_key))
+                        {
+                            let body = decl.body.as_ref()?;
+                            let mut slots = Vec::new();
+                            let mut bound: HashSet<String> =
+                                decl.params.iter().map(|p| p.name.clone()).collect();
+                            bound.extend(decl.results.iter().filter_map(|r| r.name.clone()));
+                            for (i, p) in decl.params.iter().enumerate() {
+                                if let Some(arg) = cr.args.get(i) {
+                                    slots.push((
+                                        p.name.clone(),
+                                        self.shape_of_type(&p.ty),
+                                        Some(p.ty.clone()),
+                                        CalleeSlotSource::Arg(&arg.value),
+                                    ));
+                                }
+                            }
+                            self.append_outer_binding_slots(st, &mut bound, false, &mut slots);
+                            return Some((slots, std::borrow::Cow::Borrowed(body)));
+                        }
                     }
                 }
                 let recv_struct = match self.shape_of_expr(st, base) {
@@ -2926,13 +3061,14 @@ impl<'a> Checker<'a> {
                 };
                 let decl = if let Some(s) = recv_struct {
                     self.method_decls
-                        .get(&(s, method_name.clone()))
+                        .get(&(s.clone(), method_name.clone()))
+                        .or_else(|| self.method_decls.get(&(s, method_head.to_string())))
                         .copied()
                 } else {
                     let mut matching = self
                         .method_decls
                         .iter()
-                        .filter(|((_, m), _)| m == method_name)
+                        .filter(|((_, m), _)| m == method_name || m == method_head)
                         .map(|(_, d)| *d);
                     let first = matching.next()?;
                     if matching.next().is_some() {
@@ -4158,13 +4294,20 @@ impl<'a> Checker<'a> {
     {
         match unwrap_parens(callee) {
             Expr::Ident { name, .. } => {
-                if let Some((params, results, body)) = st.closure_fnlits.get(name.as_str()) {
+                let resolved = crate::freeze::resolve_alias(st, name);
+                if let Some((params, results, body)) = st
+                    .closure_fnlits
+                    .get(name.as_str())
+                    .or_else(|| st.closure_fnlits.get(&resolved))
+                {
                     return Some((params.clone(), results.clone(), body));
                 }
-                if self.lookup_binding(st, name).is_some() {
+                let head = Self::base_named_type_str(name);
+                if self.lookup_binding(st, name).is_some()
+                    || (head != name && self.lookup_binding(st, head).is_some())
+                {
                     return None;
                 }
-                let head = Self::base_named_type_str(name);
                 let decl = self
                     .fns
                     .get(name.as_str())
@@ -4188,12 +4331,36 @@ impl<'a> Checker<'a> {
                 name: method_name,
                 ..
             } => {
+                let head = Self::base_named_type_str(method_name);
                 if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
-                    if self.lookup_binding(st, pkg).is_none() && self.known_package(pkg) {
-                        return None;
+                    if self.lookup_binding(st, pkg).is_none() {
+                        if self.known_package(pkg) {
+                            return None;
+                        }
+                        let pkg_head = Self::base_named_type_str(pkg);
+                        let assoc_key = format!("{pkg_head}.{head}");
+                        if let Some(&decl) = self
+                            .fns
+                            .get(&format!("{pkg}.{method_name}"))
+                            .or_else(|| self.fns.get(&assoc_key))
+                        {
+                            let body = decl.body.as_ref()?;
+                            let params = decl
+                                .params
+                                .iter()
+                                .map(|p| (p.name.clone(), Some(p.ty.clone())))
+                                .collect();
+                            let results = decl
+                                .results
+                                .iter()
+                                .filter_map(|r| {
+                                    r.name.as_ref().map(|n| (n.clone(), Some(r.ty.clone())))
+                                })
+                                .collect();
+                            return Some((params, results, body));
+                        }
                     }
                 }
-                let head = Self::base_named_type_str(method_name);
                 let recv_struct = self
                     .ty_of_expr(st, base)
                     .map(|t| self.resolve_type_alias(&t))
@@ -4211,12 +4378,15 @@ impl<'a> Checker<'a> {
                         _ => None,
                     });
                 let decl = if let Some(s) = recv_struct {
-                    self.method_decls.get(&(s, head.to_string())).copied()
+                    self.method_decls
+                        .get(&(s.clone(), method_name.clone()))
+                        .or_else(|| self.method_decls.get(&(s, head.to_string())))
+                        .copied()
                 } else {
                     let mut matching = self
                         .method_decls
                         .iter()
-                        .filter(|((_, m), _)| m == head)
+                        .filter(|((_, m), _)| m == method_name || m == head)
                         .map(|(_, d)| *d);
                     let first = matching.next()?;
                     if matching.next().is_some() {
@@ -6469,10 +6639,12 @@ impl<'a> Checker<'a> {
     pub(crate) fn check_call_const_writes(&mut self, st: &FnState, cr: &CallRef, declared: &HashSet<String>) {
         let callee = crate::model::unwrap_parens(cr.callee);
         if let Expr::Ident { name, .. } = callee {
+            let head = Self::base_named_type_str(name);
             if name == "delete"
                 || name == "copy"
                 || name == "clear"
                 || A3_PURE_FNS.contains(&name.as_str())
+                || A3_PURE_FNS.contains(&head)
             {
                 return;
             }
@@ -6484,10 +6656,11 @@ impl<'a> Checker<'a> {
             ..
         } = callee
         {
+            let method_head = Self::base_named_type_str(method_name);
             let recv_base = match self.shape_of_expr(st, base) {
-                TypeShape::Struct(Some(s)) => Some(s),
+                TypeShape::Struct(Some(s)) => Some(Self::base_named_type_str(&s).to_string()),
                 TypeShape::Pointer(inner) => match *inner {
-                    TypeShape::Struct(Some(s)) => Some(s),
+                    TypeShape::Struct(Some(s)) => Some(Self::base_named_type_str(&s).to_string()),
                     _ => None,
                 },
                 _ => None,
@@ -6495,7 +6668,8 @@ impl<'a> Checker<'a> {
             if let Some(rname) = recv_base {
                 if let Some(decl) = self
                     .method_decls
-                    .get(&(rname, method_name.clone()))
+                    .get(&(rname.clone(), method_name.clone()))
+                    .or_else(|| self.method_decls.get(&(rname, method_head.to_string())))
                     .copied()
                 {
                     if let Some(r) = &decl.receiver {
@@ -6522,7 +6696,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-            } else if method_name == "pop"
+            } else if method_head == "pop"
                 && cr.args.is_empty()
                 && matches!(
                     self.shape_of_expr(st, base),
@@ -6558,9 +6732,14 @@ impl<'a> Checker<'a> {
 
             let (param_is_ptr, mutates) = match callee {
                 Expr::Ident { name, .. } => {
-                    if declared.contains(name) {
+                    let head = Self::base_named_type_str(name);
+                    if declared.contains(name) || declared.contains(head) {
                         (false, true)
-                    } else if let Some(decl) = self.fns.get(name) {
+                    } else if head != name && self.lookup_binding(st, head).is_some() {
+                        (false, true)
+                    } else if let Some(decl) =
+                        self.fns.get(name).or_else(|| self.fns.get(head)).copied()
+                    {
                         match decl.params.get(i) {
                             Some(p) => {
                                 let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
@@ -6593,6 +6772,7 @@ impl<'a> Checker<'a> {
                     name: method_name,
                     ..
                 } => {
+                    let method_head = Self::base_named_type_str(method_name);
                     let is_pkg = match crate::model::unwrap_parens(base) {
                         Expr::Ident { name: pkg, .. } => {
                             self.lookup_binding(st, pkg).is_none() && self.known_package(pkg)
@@ -6610,17 +6790,20 @@ impl<'a> Checker<'a> {
                     } else if matches!(self.shape_of_expr(st, callee), TypeShape::Closure) {
                         (false, true)
                     } else {
-                        let recv_base = match self.shape_of_expr(st, base) {
-                            TypeShape::Struct(Some(s)) => Some(s),
-                            TypeShape::Pointer(inner) => match *inner {
-                                TypeShape::Struct(Some(s)) => Some(s),
-                                _ => None,
-                            },
+                        let assoc_decl = match crate::model::unwrap_parens(base) {
+                            Expr::Ident { name: pkg, .. }
+                                if self.lookup_binding(st, pkg).is_none() =>
+                            {
+                                let pkg_head = Self::base_named_type_str(pkg);
+                                let assoc_key = format!("{pkg_head}.{method_head}");
+                                self.fns
+                                    .get(&format!("{pkg}.{method_name}"))
+                                    .or_else(|| self.fns.get(&assoc_key))
+                                    .copied()
+                            }
                             _ => None,
                         };
-                        if let Some(decl) = recv_base.and_then(|rb| {
-                            self.method_decls.get(&(rb, method_name.clone())).copied()
-                        }) {
+                        if let Some(decl) = assoc_decl {
                             match decl.params.get(i) {
                                 Some(p) => {
                                     let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
@@ -6630,7 +6813,35 @@ impl<'a> Checker<'a> {
                                 None => (false, true),
                             }
                         } else {
-                            (false, false)
+                            let recv_base = match self.shape_of_expr(st, base) {
+                                TypeShape::Struct(Some(s)) => {
+                                    Some(Self::base_named_type_str(&s).to_string())
+                                }
+                                TypeShape::Pointer(inner) => match *inner {
+                                    TypeShape::Struct(Some(s)) => {
+                                        Some(Self::base_named_type_str(&s).to_string())
+                                    }
+                                    _ => None,
+                                },
+                                _ => None,
+                            };
+                            if let Some(decl) = recv_base.and_then(|rb| {
+                                self.method_decls
+                                    .get(&(rb.clone(), method_name.clone()))
+                                    .or_else(|| self.method_decls.get(&(rb, method_head.to_string())))
+                                    .copied()
+                            }) {
+                                match decl.params.get(i) {
+                                    Some(p) => {
+                                        let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                                            || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_));
+                                        (is_ptr, self.fn_mutates_const_param(decl, &p.name, 0))
+                                    }
+                                    None => (false, true),
+                                }
+                            } else {
+                                (false, false)
+                            }
                         }
                     }
                 }
@@ -6644,7 +6855,14 @@ impl<'a> Checker<'a> {
                     }
                     None => (false, true),
                 },
-                _ => (false, false),
+                Expr::Index { .. } | Expr::Call { .. } => (false, true),
+                _ => {
+                    if matches!(self.shape_of_expr(st, callee), TypeShape::Closure) {
+                        (false, true)
+                    } else {
+                        (false, false)
+                    }
+                }
             };
 
             let const_name = self.const_arg_root(st, &a.value, declared).or_else(|| {
@@ -6957,6 +7175,7 @@ impl<'a> Checker<'a> {
         let callee = crate::model::unwrap_parens(cr.callee);
         match callee {
             Expr::Ident { name, .. } => {
+                let head = Self::base_named_type_str(name);
                 if name == "copy" {
                     if cr.args.len() >= 2
                         && Self::expr_reaches_const_aliases(&cr.args[1].value, aliases)
@@ -6969,7 +7188,7 @@ impl<'a> Checker<'a> {
                     }
                     return;
                 }
-                if let Some(decl) = self.fns.get(name) {
+                if let Some(decl) = self.fns.get(name).or_else(|| self.fns.get(head)).copied() {
                     let Some(body) = &decl.body else {
                         return;
                     };
@@ -6997,8 +7216,45 @@ impl<'a> Checker<'a> {
                 name: method_name,
                 ..
             } => {
+                let method_head = Self::base_named_type_str(method_name);
+                if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) {
+                    let pkg_head = Self::base_named_type_str(pkg);
+                    let assoc_key = format!("{pkg_head}.{method_head}");
+                    if let Some(&decl) = self
+                        .fns
+                        .get(&format!("{pkg}.{method_name}"))
+                        .or_else(|| self.fns.get(&assoc_key))
+                    {
+                        if let Some(body) = &decl.body {
+                            let slots: Vec<(&str, TypeShape, Option<&hy_syntax::TypeExpr>)> = decl
+                                .params
+                                .iter()
+                                .map(|p| (p.name.as_str(), self.shape_of_type(&p.ty), Some(&p.ty)))
+                                .collect();
+                            for (dst_idx, src_idx) in
+                                self.collect_callee_param_stores(&slots, body, 0)
+                            {
+                                if dst_idx < cr.args.len()
+                                    && src_idx < cr.args.len()
+                                    && Self::expr_reaches_const_aliases(
+                                        &cr.args[src_idx].value,
+                                        aliases,
+                                    )
+                                {
+                                    if let Some(dst_root) =
+                                        crate::model::unwrap_parens(&cr.args[dst_idx].value)
+                                            .root_ident()
+                                    {
+                                        aliases.insert(dst_root.to_string());
+                                    }
+                                }
+                            }
+                            return;
+                        }
+                    }
+                }
                 for ((_, m), decl) in &self.method_decls {
-                    if m != method_name {
+                    if m != method_name && m != method_head {
                         continue;
                     }
                     let Some(body) = &decl.body else {
@@ -7176,13 +7432,14 @@ impl<'a> Checker<'a> {
             |a: &hy_syntax::CallArg| Self::expr_reaches_const_aliases(&a.value, aliases);
         match crate::model::unwrap_parens(cr.callee) {
             Expr::Ident { name, .. } => {
+                let head = Self::base_named_type_str(name);
                 if name == "delete" || name == "copy" || name == "clear" {
                     return cr.args.first().map(&arg_reaches_alias).unwrap_or(false);
                 }
-                if A3_PURE_FNS.contains(&name.as_str()) {
+                if A3_PURE_FNS.contains(&name.as_str()) || A3_PURE_FNS.contains(&head) {
                     return false;
                 }
-                if let Some(decl) = self.fns.get(name) {
+                if let Some(decl) = self.fns.get(name).or_else(|| self.fns.get(head)).copied() {
                     for (i, a) in cr.args.iter().enumerate() {
                         if !arg_reaches_alias(a) {
                             continue;
@@ -7205,19 +7462,42 @@ impl<'a> Checker<'a> {
                 name: method_name,
                 ..
             } => {
-                if let Expr::Ident { name: pkg, .. } = &**base {
+                let method_head = Self::base_named_type_str(method_name);
+                if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) {
                     if A3_PURE_PKGS.contains(&pkg.as_str()) {
+                        return false;
+                    }
+                    let pkg_head = Self::base_named_type_str(pkg);
+                    let assoc_key = format!("{pkg_head}.{method_head}");
+                    if let Some(&decl) = self
+                        .fns
+                        .get(&format!("{pkg}.{method_name}"))
+                        .or_else(|| self.fns.get(&assoc_key))
+                    {
+                        for (i, a) in cr.args.iter().enumerate() {
+                            if !arg_reaches_alias(a) {
+                                continue;
+                            }
+                            match decl.params.get(i) {
+                                Some(p) => {
+                                    if self.fn_mutates_const_param(decl, &p.name, depth + 1) {
+                                        return true;
+                                    }
+                                }
+                                None => return true,
+                            }
+                        }
                         return false;
                     }
                 }
                 let matching: Vec<&FnDecl> = self
                     .method_decls
                     .iter()
-                    .filter(|((_, m), _)| m == method_name)
+                    .filter(|((_, m), _)| m == method_name || m == method_head)
                     .map(|(_, d)| *d)
                     .collect();
                 if Self::expr_reaches_const_aliases(base, aliases)
-                    && ((method_name == "pop"
+                    && ((method_head == "pop"
                         && cr.args.is_empty()
                         && !matches!(crate::model::unwrap_parens(base), Expr::Ident { .. }))
                         || matching.is_empty()
