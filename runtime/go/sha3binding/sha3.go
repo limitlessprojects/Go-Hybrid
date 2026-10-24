@@ -2,66 +2,68 @@ package sha3binding
 
 import (
 	"errors"
-	"runtime"
-	"unsafe"
 
 	"hybrid.program/hybridge"
 )
 
-// The binding's error surface (Spike 5's sentinel shape): Go-side constants,
-// mapped from the C-ABI status word — wrap-on-demand, ≤1 allocation (E5).
 var (
 	ErrDigest = errors.New("sha3: digest256 failed")
 	ErrABI    = errors.New("sha3: hyrt ABI handshake mismatch (rebuild the runtime)")
 )
 
+const abiWordExpected = 0x68795f61626931
+
 func init() {
-	// SMALL class (guard 1024, row 4): the abi-word probe is a constant
-	// return — zero recursion, zero heap, a handful of bytes of frame.
-	if w := hybridge.Cross1S(FnAbiWord, 0); w != abiWordExpected {
+	bridge, err := hybridge.GetWasmBridge()
+	if err != nil || bridge.HyAbiWord() != abiWordExpected {
 		panic(ErrABI.Error())
 	}
 }
 
-// Digest256 computes SHA3-256(data) — the pinned-borrow protocol in full:
-//
-//	pin data's backing array → cross (ptr, len, out) → unpin + KeepAlive.
-//
-// The 32-byte digest buffer is GO-owned (allocated here, written by Rust
-// through the pinned pointer during the call; the pointer is never
-// retained — abi-types.md §2). Empty input is legal (SHA3 of the empty
-// string); the nil-data leg passes 0/0.
 func Digest256(data []byte) ([]byte, error) {
-	out := make([]byte, 32)
-	var p runtime.Pinner
-	var dataPtr uintptr
-	if len(data) > 0 {
-		dataPtr = uintptr(unsafe.Pointer(&data[0]))
-		p.Pin(&data[0])
-	}
-	p.Pin(&out[0])
-	// SMALL class (guard 1024, row 4): Keccak-f[1600] absorb/squeeze is a
-	// fixed 200-byte state permutation in a loop — no recursion, no
-	// input-proportional stack (interfaces/descriptors.md sha3 rows).
-	st := hybridge.Cross3S(FnDigest256, dataPtr, uintptr(len(data)),
-		uintptr(unsafe.Pointer(&out[0])))
-	p.Unpin()
-	runtime.KeepAlive(&p)
-	runtime.KeepAlive(data)
-	runtime.KeepAlive(out)
-	if st != 0 {
+	bridge, err := hybridge.GetWasmBridge()
+	if err != nil {
 		return nil, ErrDigest
 	}
-	return out, nil
+
+	arena := hybridge.GetOwnHandle(len(data) + 32 + 64)
+	defer hybridge.ReleaseOwnHandle(arena)
+
+	var dataPtr uint32
+	if len(data) > 0 {
+		var inputSlice []byte
+		dataPtr, inputSlice, err = arena.Alloc(len(data))
+		if err != nil {
+			return nil, ErrDigest
+		}
+		copy(inputSlice, data)
+		bridge.Memory().Write(dataPtr, inputSlice)
+	}
+
+	outPtr, _, err := arena.Alloc(32)
+	if err != nil {
+		return nil, ErrDigest
+	}
+
+	st, err := bridge.HySha3Digest256(dataPtr, uint32(len(data)), outPtr)
+	if err != nil || st != 0 {
+		return nil, ErrDigest
+	}
+
+	outBytes, ok := bridge.Memory().Read(outPtr, 32)
+	if !ok {
+		return nil, ErrDigest
+	}
+
+	res := make([]byte, 32)
+	copy(res, outBytes)
+	return res, nil
 }
 
-// StreamChecksum runs `iters` SHA3-256 permutations INSIDE Rust (one
-// boundary crossing — the hot-loop shape example 10 demonstrates) and
-// returns the deterministic fold. No pointers cross. SMALL class (guard
-// 1024, row 4): the callee's stack use is a CONSTANT (one permutation's
-// frame; the loop carries no growth) — bounded-stack callee, and now
-// eligible on SHALLOW stacks too.
 func StreamChecksum(iters, seed uint64) (uint64, error) {
-	v := hybridge.Cross2S(FnStreamChecksum, uintptr(iters), uintptr(seed))
-	return v, nil
+	bridge, err := hybridge.GetWasmBridge()
+	if err != nil {
+		return 0, ErrDigest
+	}
+	return bridge.HySha3StreamChecksum(iters, seed)
 }
