@@ -327,7 +327,10 @@ fn build_tables(ck: &mut Checker<'_>) {
             }
             Decl::Fn(f) => {
                 if let Some(r) = &f.receiver {
-                    ck.check_type_expr(&r.ty);
+                    // The receiver has its own E2007 arm (#1575): keep the
+                    // unknown-type walk out of it so one mistake is one
+                    // diagnostic.
+                    ck.check_receiver_type_expr(&r.ty);
                 }
                 for p in &f.params {
                     ck.check_type_expr(&p.ty);
@@ -1623,10 +1626,12 @@ mod tests {
         // channel — the same idiom as fc_select_recv_unknown_element above),
         // not an undefined factory call: HYB-E1001 owns names nothing
         // declares, so it would (correctly) become the first error here.
+        // Issue #1583: an undeclared BARE type is now a buildability error,
+        // so the unresolvable element type is a dotted root nothing resolves.
         let r_unknown = check(
             "fn send_val(v any) {}\n\
              fn main() {\n\
-               ch := make(chan mystery, 1)\n\
+               ch := make(chan widgets.value, 1)\n\
                u := <-ch\n\
                task send_val(move u)\n\
              }",
@@ -2289,11 +2294,15 @@ mod tests {
         // element type) instead of the old undefined-name placeholder —
         // HYB-E1001 rejects a name nothing declares, which is a different
         // (and also correct) claim than the managed-hatch claim under test.
+        // Issue #1583: a BARE undeclared type is now a buildability error
+        // (it cannot survive `go build`), so "unresolvable element type" is
+        // spelled with a dotted root that no table resolves — the same shape
+        // a real foreign type with a missing import has.
         let r = check(
             "fn handle(x int) { fmt.println(x) }\n\
              fn main() {\n\
                managed(\"test-only handler; name shape pinned by the fixture\", \"other\") {\n\
-                 ch := make(chan mystery, 1)\n\
+                 ch := make(chan widgets.value, 1)\n\
                  v := <-ch\n\
                  task handle(v)\n\
                }\n\
