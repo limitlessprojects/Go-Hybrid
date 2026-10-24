@@ -195,13 +195,56 @@ pub fn emit_go_package(
 }
 
 /// Which rust-binding packages does the emitted Go call? (`hyb build`
-/// assembles those into the build workspace.) Scans for the binding roots'
-/// call prefix — the emitter only emits `<root>.` for KNOWN crates, so the
-/// scan is exact, never heuristic.
+/// assembles those into the build workspace.) Inspects the top-level Go
+/// `import` block rather than raw body text so string literals, raw strings,
+/// or user identifiers containing `<root>.` never pull in unused CGo bindings.
 pub fn used_binding_roots(go_src: &str) -> Vec<&'static str> {
+    let mut imported_paths: Vec<&str> = Vec::new();
+    let mut in_import_block = false;
+    for line in go_src.lines() {
+        let trimmed = line.trim();
+        if !in_import_block {
+            if trimmed == "import (" {
+                in_import_block = true;
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("import ") {
+                if let Some(p) = rest
+                    .trim()
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                {
+                    imported_paths.push(p);
+                }
+                break;
+            }
+            if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("package ") {
+                continue;
+            }
+            break;
+        }
+        if trimmed == ")" {
+            break;
+        }
+        let Some(idx) = trimmed.find('"') else {
+            continue;
+        };
+        if let Some(p) = trimmed[idx..]
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+        {
+            imported_paths.push(p);
+        }
+    }
     shapes::RUST_CRATES
         .iter()
-        .filter(|c| go_src.contains(&format!("{}.", c.binding_root)))
+        .filter(|c| {
+            imported_paths.iter().any(|p| {
+                *p == c.binding_root
+                    || p.rsplit_once('/')
+                        .is_some_and(|(_, tail)| tail == c.binding_root)
+            })
+        })
         .map(|c| c.binding_root)
         .collect()
 }
@@ -1376,7 +1419,7 @@ impl Emitter {
             self.push("}");
             self.use_package("fmt");
             self.use_package("os");
-            self.use_package("path/filepath");
+            self.use_package("filepath");
             return Ok(());
         }
 
