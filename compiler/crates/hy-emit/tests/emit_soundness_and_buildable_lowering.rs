@@ -328,3 +328,69 @@ fn main() {
     );
 }
 
+
+#[test]
+fn test_channel_receive_and_range_element_propagation_issue_1456() {
+    let src = r#"
+import "os"
+
+struct holder { ch chan int }
+struct node { v int }
+fn take_ptr(n *node) { _ = n.v }
+
+fn run(outer chan chan int, files chan *os.file, nodes chan *node, h holder) {
+    c1 := <-outer
+    for x in c1 { _ = x }
+    select {
+        f := <-files: { _ = f.close() }
+        n := <-nodes: { take_ptr(n) }
+        default: {}
+    }
+    for w in <-outer { _ = w }
+    for q in h.ch { _ = q }
+}
+
+fn main() {}
+"#;
+    let go = emit_src(src);
+    assert!(
+        go.contains("for x := range c1 {"),
+        "expected single-variable range for received channel c1, got:\n{go}"
+    );
+    assert!(
+        !go.contains("for _, x := range c1 {"),
+        "unexpected two-variable range for received channel c1, got:\n{go}"
+    );
+    assert!(
+        go.contains("case f := <-files:"),
+        "expected select receive for files, got:\n{go}"
+    );
+    assert!(
+        go.contains("_ = f.Close()"),
+        "expected normalized Close() method for foreign file handle, got:\n{go}"
+    );
+    assert!(
+        go.contains("take_ptr(n)"),
+        "expected pointer arg passed directly to take_ptr, got:\n{go}"
+    );
+    assert!(
+        !go.contains("take_ptr(&n)"),
+        "must not double-address pointer variable &n, got:\n{go}"
+    );
+    assert!(
+        go.contains("for w := range <-outer {"),
+        "expected single-variable range for <-outer, got:\n{go}"
+    );
+    assert!(
+        !go.contains("for _, w := range <-outer {"),
+        "unexpected two-variable range for <-outer, got:\n{go}"
+    );
+    assert!(
+        go.contains("for q := range h.ch {"),
+        "expected single-variable range for struct channel field h.ch, got:\n{go}"
+    );
+    assert!(
+        !go.contains("for _, q := range h.ch {"),
+        "unexpected two-variable range for struct channel field h.ch, got:\n{go}"
+    );
+}
