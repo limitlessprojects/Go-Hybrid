@@ -651,6 +651,25 @@ impl<'a> Checker<'a> {
                 match self.resolve_type_alias(&base_ty) {
                     TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => Some(*elem),
                     TypeExpr::Map { value, .. } => Some(*value),
+                    TypeExpr::Pointer { to, .. } => match self.resolve_type_alias(&to) {
+                        TypeExpr::Array { elem, .. } => Some(*elem),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }
+            Expr::Slice { base, span, .. } => {
+                let base_ty = self.ty_of_expr(st, base)?;
+                match self.resolve_type_alias(&base_ty) {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+                        Some(TypeExpr::Slice { elem, span: *span })
+                    }
+                    TypeExpr::Pointer { to, .. } => match self.resolve_type_alias(&to) {
+                        TypeExpr::Array { elem, .. } => {
+                            Some(TypeExpr::Slice { elem, span: *span })
+                        }
+                        _ => None,
+                    },
                     _ => None,
                 }
             }
@@ -722,7 +741,7 @@ impl<'a> Checker<'a> {
                             span: *span,
                         });
                     }
-                    if name == "make" {
+                    if name == "make" || name == "append" {
                         return args.first().and_then(|a| self.ty_of_expr(st, &a.value));
                     }
                     if args.len() == 1 {
