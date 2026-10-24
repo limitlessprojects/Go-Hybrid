@@ -136,6 +136,19 @@ impl<'a> Checker<'a> {
     }
 
     fn non_integer_bound_kind(&self, st: &FnState, expr: &Expr) -> Option<String> {
+        self.non_integer_bound_kind_inner(st, expr, 0, false)
+    }
+
+    fn non_integer_bound_kind_inner(
+        &self,
+        st: &FnState,
+        expr: &Expr,
+        depth: usize,
+        file_scope: bool,
+    ) -> Option<String> {
+        if depth > 16 {
+            return None;
+        }
         match unwrap_parens(expr) {
             Expr::Lit {
                 kind: LitKind::Float(_),
@@ -164,7 +177,9 @@ impl<'a> Checker<'a> {
                 if matches!(op, hy_syntax::UnOp::Not) {
                     return Some("bool".to_string());
                 }
-                if let Some(k) = self.non_integer_bound_kind(st, operand) {
+                if let Some(k) =
+                    self.non_integer_bound_kind_inner(st, operand, depth + 1, file_scope)
+                {
                     return Some(k);
                 }
             }
@@ -185,8 +200,8 @@ impl<'a> Checker<'a> {
                     return Some("bool".to_string());
                 }
                 if let Some(k) = self
-                    .non_integer_bound_kind(st, lhs)
-                    .or_else(|| self.non_integer_bound_kind(st, rhs))
+                    .non_integer_bound_kind_inner(st, lhs, depth + 1, file_scope)
+                    .or_else(|| self.non_integer_bound_kind_inner(st, rhs, depth + 1, file_scope))
                 {
                     return Some(k);
                 }
@@ -197,7 +212,16 @@ impl<'a> Checker<'a> {
             }
             _ => {}
         }
-        if let Some(ty) = self.ty_of_expr(st, expr) {
+        let ty_opt = if file_scope {
+            if let Expr::Ident { name, .. } = unwrap_parens(expr) {
+                self.consts.get(name.as_str()).and_then(|b| b.ty.clone())
+            } else {
+                None
+            }
+        } else {
+            self.ty_of_expr(st, expr)
+        };
+        if let Some(ty) = ty_opt {
             let resolved = self.resolve_type_alias(&ty);
             if let TypeExpr::Named { name, .. } = &resolved {
                 if matches!(
@@ -216,35 +240,17 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        // Issue #827: an untyped const identifier carries no type
-        // ascription, so `ty_of_expr`/`shape_of_expr` see nothing. Resolve
-        // the initializer through the file const map (#998 pattern) and
-        // classify the literal. Block-scoped consts stay fail-open (no
-        // const-value map in FnState — the #998 precedent).
         if let Expr::Ident { name, .. } = unwrap_parens(expr) {
-            if st.env_lookup(name).is_none() {
+            if file_scope || st.env_lookup(name).is_none() {
                 if let Some(init) = self.const_values.get(name.as_str()) {
-                    match unwrap_parens(init) {
-                        Expr::Lit {
-                            kind: LitKind::Float(_),
-                            ..
-                        } => return Some("float".to_string()),
-                        Expr::Lit {
-                            kind: LitKind::Bool(_),
-                            ..
-                        } => return Some("bool".to_string()),
-                        Expr::Lit {
-                            kind: LitKind::Str(_) | LitKind::RawStr(_),
-                            ..
-                        } => return Some("string".to_string()),
-                        Expr::Lit {
-                            kind: LitKind::Nil,
-                            ..
-                        } => return Some("nil".to_string()),
-                        _ => {}
+                    if let Some(k) = self.non_integer_bound_kind_inner(st, init, depth + 1, true) {
+                        return Some(k);
                     }
                 }
             }
+        }
+        if file_scope {
+            return None;
         }
         let shape = self.shape_of_expr(st, expr);
         match shape {
@@ -387,7 +393,48 @@ impl<'a> Checker<'a> {
     /// HYB-E3005 (O4.9), exactly as the send (#77) and receive (#409)
     /// sides treat an unknown operand. A TYPE contract, not a sendability
     /// doubt — `managed` does not suppress it.
+    fn expr_option_desc(&self, st: &FnState, expr: &Expr) -> Option<String> {
+        let e = unwrap_parens(expr);
+        if let Expr::Call { callee, args, .. } = e {
+            if matches!(unwrap_parens(callee), Expr::Ident { name, .. } if name == "some")
+                && args.len() == 1
+                && !args[0].spread
+                && st.env_lookup("some").is_none()
+                && !self.fns.contains_key("some")
+            {
+                return Some("option[...]".to_string());
+            }
+        }
+        let ty = self.ty_of_expr(st, e).or_else(|| {
+            if let Expr::Ident { name, .. } = e {
+                let root = crate::freeze::resolve_alias(st, name);
+                self.lookup_binding(st, &root).and_then(|b| b.ty.clone())
+            } else {
+                None
+            }
+        })?;
+        let resolved = self.resolve_type_alias(&ty);
+        matches!(resolved, TypeExpr::Option { .. }).then(|| resolved.render())
+    }
+
     pub(crate) fn check_range_iterable(&mut self, st: &FnState, expr: &Expr, span: Span) {
+        // `shape_of_type` unwraps `option[T]` to `T` for sendability, so guard
+        // `option[...]` values before shape classification — Go cannot `range`
+        // over the emitted `option[v]` struct.
+        if let Some(opt_desc) = self.expr_option_desc(st, expr) {
+            let msg = format!(
+                "`{}` ({opt_desc}) is not iterable — `for x in e` iterates slices, arrays, strings, maps, and channels (LX13)",
+                expr.render()
+            );
+            let notes = vec![
+                "why: `option[T]` lowers to a wrapper struct (`cannot range over`), even when `T` is itself iterable".to_string(),
+                "fix: unwrap or `match` the option before iterating its inner collection".to_string(),
+            ];
+            self.diags.push(
+                Diagnostic::error("HYB-E2009", self.path.clone(), span, msg).with_notes(notes),
+            );
+            return;
+        }
         // Go: "array, pointer to array, slice, string, map, or channel" —
         // only pointer-to-ARRAY is rangeable (`*struct` / `*slice` /
         // `*string` are not), so normalize exactly one Pointer level for
