@@ -1492,14 +1492,20 @@ impl Emitter {
                 }
                 self.push("}")
             }
-            Some(Stmt::If {
-                init,
-                cond,
-                then,
-                otherwise,
-                ..
-            }) => {
-                if init
+            Some(
+                else_if @ Stmt::If {
+                    init,
+                    cond,
+                    then,
+                    otherwise,
+                    ..
+                },
+            ) => {
+                if self.branch_inherit.is_some() {
+                    self.push("} else {");
+                    self.emit_block_body(std::slice::from_ref(else_if))?;
+                    self.push("}");
+                } else if init
                     .as_deref()
                     .map(Self::stmt_has_hoistable_try)
                     .unwrap_or(false)
@@ -1631,6 +1637,13 @@ impl Emitter {
 
     fn flush_loans_for_return(&mut self) {
         let mut stores: Vec<(String, String)> = Vec::new();
+        if let Some(inherited) = &self.branch_inherit {
+            for entry in inherited {
+                if !entry.0.is_empty() {
+                    stores.push(entry.clone());
+                }
+            }
+        }
         for frame in self.loan_frames.iter().rev() {
             if frame.first().map(|(n, _)| n.is_empty()).unwrap_or(false) {
                 continue;
@@ -1646,6 +1659,13 @@ impl Emitter {
 
     fn flush_loans_for_loop(&mut self, labeled: bool) {
         let mut stores: Vec<(String, String)> = Vec::new();
+        if let Some(inherited) = &self.branch_inherit {
+            for entry in inherited {
+                if !entry.0.is_empty() {
+                    stores.push(entry.clone());
+                }
+            }
+        }
         for frame in self.loan_frames.iter().rev() {
             if frame.first().map(|(n, _)| n.is_empty()).unwrap_or(false) {
                 if !labeled || !frame[0].1.is_empty() {
@@ -2546,10 +2566,15 @@ impl Emitter {
                             && !Self::remaining_stmts_use_loan(rest, name)
                             && Self::stmt_has_boundary_using(st, name, root)
                         {
-                            if Self::stmt_must_pre_flush_loan(st, name, root) {
-                                pre_flush.push(frame.remove(i));
+                            let must_pre_flush = Self::stmt_must_pre_flush_loan(st, name, root);
+                            let entry = frame.remove(i);
+                            if must_pre_flush {
+                                pre_flush.push(entry);
                             } else {
-                                handoff.push(frame.remove(i));
+                                if matches!(st, Stmt::For { .. }) {
+                                    pre_flush.push(entry.clone());
+                                }
+                                handoff.push(entry);
                             }
                         } else {
                             i += 1;
@@ -2647,32 +2672,45 @@ impl Emitter {
                 Self::select_arm_binds(&a.kind, name)
                     || matches!(
                         &a.kind,
-                        SelectArmKind::Send { value, .. } if Self::expr_mentions_ident(value, root)
+                        SelectArmKind::Send { value, .. }
+                            if Self::expr_mentions_ident(value, root)
+                                || Self::expr_has_boundary_using(value, root)
                     )
             }),
-            Stmt::For { kind, .. } => Self::for_binder_shadows(kind, name),
+            Stmt::For { kind, body, .. } => {
+                Self::for_binder_shadows(kind, name) || !Self::block_mentions_ident(body, name)
+            }
             _ => false,
         }
     }
 
-    /// #546: does `st` (recursively) contain a task spawn, channel send,
-    /// select send, `delete`/`clear`, direct write/move touching `root`, or
-    /// a branch block that uses `name` and subsequently reads `root`?
+    /// #546 / #830: does `st` (recursively) contain a task spawn, channel send,
+    /// select send, `delete`/`clear`, direct write/move touching `root` (or an
+    /// alias), or a branch block that uses `name` (in its header or statements)
+    /// and subsequently reads `root`?
     fn stmt_has_boundary_using(st: &Stmt, name: &str, root: &str) -> bool {
+        Self::stmt_has_boundary_using_with_seen(st, name, root, false)
+    }
+
+    fn stmt_has_boundary_using_with_seen(
+        st: &Stmt,
+        name: &str,
+        root: &str,
+        seen_loan_use: bool,
+    ) -> bool {
         if root.is_empty() {
             return false;
         }
-        let in_block = |b: &Block| {
-            let mut seen_loan_use = false;
+        let in_block = |b: &Block, mut seen: bool| {
             for s in &b.stmts {
-                if seen_loan_use && Self::stmt_mentions_ident(s, root) {
+                if seen && Self::stmt_mentions_ident(s, root) {
                     return true;
                 }
-                if Self::stmt_has_boundary_using(s, name, root) {
+                if Self::stmt_has_boundary_using_with_seen(s, name, root, seen) {
                     return true;
                 }
                 if Self::stmt_mentions_ident(s, name) {
-                    seen_loan_use = true;
+                    seen = true;
                 }
             }
             false
@@ -2680,16 +2718,27 @@ impl Emitter {
         match st {
             Stmt::Task { callee, args, .. } => {
                 Self::expr_mentions_ident(callee, root)
-                    || args
-                        .iter()
-                        .any(|a| Self::expr_mentions_ident(&a.value, root))
+                    || Self::expr_has_boundary_using(callee, root)
+                    || args.iter().any(|a| {
+                        Self::expr_mentions_ident(&a.value, root)
+                            || Self::expr_has_boundary_using(&a.value, root)
+                    })
             }
-            Stmt::Send { value, .. } => Self::expr_mentions_ident(value, root),
-            Stmt::Defer { call, .. } => Self::expr_mentions_ident(call, root),
+            Stmt::Send { chan, value, .. } => {
+                Self::expr_mentions_ident(chan, root)
+                    || Self::expr_mentions_ident(value, root)
+                    || Self::expr_has_boundary_using(chan, root)
+                    || Self::expr_has_boundary_using(value, root)
+            }
+            Stmt::Defer { call, .. } => {
+                Self::expr_mentions_ident(call, root) || Self::expr_has_boundary_using(call, root)
+            }
             Stmt::Assign {
                 targets, values, ..
             } => {
-                targets.iter().any(|t| t.root() == root)
+                targets
+                    .iter()
+                    .any(|t| t.root() == root || matches!(t.kind, PlaceKind::Index { .. }))
                     || values.iter().any(|v| Self::expr_has_boundary_using(v, root))
             }
             Stmt::Local(l) => l
@@ -2702,28 +2751,114 @@ impl Emitter {
             Stmt::Expr { expr, .. } => Self::expr_has_boundary_using(expr, root),
             Stmt::If {
                 init,
+                cond,
                 then,
                 otherwise,
                 ..
             } => {
-                init.as_deref()
-                    .map(|i| Self::stmt_has_boundary_using(i, name, root))
-                    .unwrap_or(false)
-                    || in_block(then)
-                    || otherwise
+                let init_has = init.as_deref().is_some_and(|i| {
+                    (seen_loan_use && Self::stmt_mentions_ident(i, root))
+                        || Self::stmt_has_boundary_using_with_seen(i, name, root, seen_loan_use)
+                });
+                let seen_after_init = seen_loan_use
+                    || init
                         .as_deref()
-                        .map(|o| Self::stmt_has_boundary_using(o, name, root))
-                        .unwrap_or(false)
+                        .is_some_and(|i| Self::stmt_mentions_ident(i, name));
+                let cond_has = (seen_after_init && Self::expr_mentions_ident(cond, root))
+                    || Self::expr_has_boundary_using(cond, root);
+                let shadows = init
+                    .as_deref()
+                    .is_some_and(|i| Self::local_declares(i, name));
+                let seen_after_header =
+                    seen_after_init || (!shadows && Self::expr_mentions_ident(cond, name));
+                init_has
+                    || cond_has
+                    || in_block(then, seen_after_header)
+                    || otherwise.as_deref().is_some_and(|o| {
+                        Self::stmt_has_boundary_using_with_seen(o, name, root, seen_after_header)
+                    })
             }
-            Stmt::For { body, .. } => in_block(body),
-            Stmt::Block { block, .. } => in_block(block),
-            Stmt::Managed { body, .. } => in_block(body),
-            Stmt::Match { arms, .. } => arms.iter().any(|a| in_block(&a.body)),
+            Stmt::For { kind, body, .. } => {
+                let kind_mentions_root = match kind {
+                    ForKind::Infinite => false,
+                    ForKind::While { cond } => Self::expr_mentions_ident(cond, root),
+                    ForKind::Range { lo, hi, .. } => {
+                        Self::expr_mentions_ident(lo, root) || Self::expr_mentions_ident(hi, root)
+                    }
+                    ForKind::Iterate { expr, .. } => Self::expr_mentions_ident(expr, root),
+                };
+                let kind_mentions_name = match kind {
+                    ForKind::Infinite => false,
+                    ForKind::While { cond } => Self::expr_mentions_ident(cond, name),
+                    ForKind::Range { lo, hi, .. } => {
+                        Self::expr_mentions_ident(lo, name) || Self::expr_mentions_ident(hi, name)
+                    }
+                    ForKind::Iterate { expr, .. } => Self::expr_mentions_ident(expr, name),
+                };
+                let kind_has_boundary = match kind {
+                    ForKind::Infinite => false,
+                    ForKind::While { cond } => Self::expr_has_boundary_using(cond, root),
+                    ForKind::Range { lo, hi, .. } => {
+                        Self::expr_has_boundary_using(lo, root)
+                            || Self::expr_has_boundary_using(hi, root)
+                    }
+                    ForKind::Iterate { expr, .. } => Self::expr_has_boundary_using(expr, root),
+                };
+                let seen_after_header = seen_loan_use || kind_mentions_name;
+                (seen_loan_use && kind_mentions_root)
+                    || kind_has_boundary
+                    || in_block(body, seen_after_header)
+            }
+            Stmt::Block { block, .. } => in_block(block, seen_loan_use),
+            Stmt::Managed { body, .. } => in_block(body, seen_loan_use),
+            Stmt::Match { subject, arms, .. } => {
+                let subj_has = (seen_loan_use && Self::expr_mentions_ident(subject, root))
+                    || Self::expr_has_boundary_using(subject, root);
+                let seen_after_subj = seen_loan_use || Self::expr_mentions_ident(subject, name);
+                subj_has
+                    || arms.iter().any(|a| {
+                        let shadowed = matches!(
+                            &a.pattern,
+                            MatchPattern::Path {
+                                binding: Some(b),
+                                ..
+                            } if b == name
+                        );
+                        let guard_has = a.guard.as_ref().is_some_and(|g| {
+                            (seen_after_subj && Self::expr_mentions_ident(g, root))
+                                || Self::expr_has_boundary_using(g, root)
+                        });
+                        let seen_after_guard = seen_after_subj
+                            || (!shadowed
+                                && a.guard
+                                    .as_ref()
+                                    .is_some_and(|g| Self::expr_mentions_ident(g, name)));
+                        guard_has || in_block(&a.body, seen_after_guard)
+                    })
+            }
             Stmt::Select { arms, .. } => arms.iter().any(|a| {
-                matches!(
-                    &a.kind,
-                    SelectArmKind::Send { value, .. } if Self::expr_mentions_ident(value, root)
-                ) || in_block(&a.body)
+                let head_has = match &a.kind {
+                    SelectArmKind::Recv { chan, .. } => {
+                        (seen_loan_use && Self::expr_mentions_ident(chan, root))
+                            || Self::expr_has_boundary_using(chan, root)
+                    }
+                    SelectArmKind::Send { chan, value, .. } => {
+                        Self::expr_mentions_ident(chan, root)
+                            || Self::expr_mentions_ident(value, root)
+                            || Self::expr_has_boundary_using(chan, root)
+                            || Self::expr_has_boundary_using(value, root)
+                    }
+                    SelectArmKind::Default => false,
+                };
+                let head_uses_name = match &a.kind {
+                    SelectArmKind::Recv { chan, .. } => Self::expr_mentions_ident(chan, name),
+                    SelectArmKind::Send { chan, value, .. } => {
+                        Self::expr_mentions_ident(chan, name)
+                            || Self::expr_mentions_ident(value, name)
+                    }
+                    SelectArmKind::Default => false,
+                };
+                head_has || in_block(&a.body, seen_loan_use || head_uses_name)
             }),
             _ => false,
         }
@@ -2731,15 +2866,12 @@ impl Emitter {
 
     fn expr_has_boundary_using(e: &Expr, root: &str) -> bool {
         match e {
-            Expr::Move { operand, .. } => Self::expr_mentions_ident(operand, root),
+            Expr::Move { .. } => true,
             Expr::Call { callee, args, .. } => {
                 let is_delete_or_clear = matches!(
                     callee.as_ref(),
                     Expr::Ident { name, .. } if name == "delete" || name == "clear"
-                ) && args
-                    .first()
-                    .map(|a| Self::expr_mentions_ident(&a.value, root))
-                    .unwrap_or(false);
+                ) && !args.is_empty();
                 is_delete_or_clear
                     || Self::expr_has_boundary_using(callee, root)
                     || args
