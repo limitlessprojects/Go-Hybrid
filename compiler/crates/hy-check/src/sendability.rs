@@ -315,6 +315,30 @@ impl<'a> Checker<'a> {
             // everything else (calls, receives, arithmetic, try, paren):
             // classify the result shape
             _ => {
+                let unwrapped = unwrap_parens(expr);
+                let (call_expr, is_try) = match unwrapped {
+                    Expr::Try { operand, .. } => (unwrap_parens(operand), true),
+                    other => (other, false),
+                };
+                if let Expr::Call { callee, .. } = call_expr {
+                    if let Some(results) = self.call_result_tys(st, callee) {
+                        let avail = if is_try {
+                            results.len().saturating_sub(1)
+                        } else {
+                            results.len()
+                        };
+                        if avail >= 2 {
+                            for ty in &results[..avail] {
+                                let shape = self.shape_of_type(ty);
+                                let outcome = self.outcome_for_shape(&shape, &expr.render());
+                                if !matches!(outcome, Outcome::Ok) {
+                                    return outcome;
+                                }
+                            }
+                            return Outcome::Ok;
+                        }
+                    }
+                }
                 let shape = self.shape_of_expr(st, expr);
                 self.outcome_for_shape(&shape, &expr.render())
             }
