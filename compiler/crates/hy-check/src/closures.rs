@@ -1241,6 +1241,13 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                             ck.extend_map_slot_loan_to_alias(st, name, val, idx);
                         }
                     }
+                } else if l.values.len() == 1 && l.names.len() > 1 {
+                    let shapes = ck.multi_value_shapes(st, &l.values[0], l.names.len());
+                    for (name, shape) in l.names.iter().zip(shapes.iter()) {
+                        if shape.is_reference_alias() {
+                            ck.extend_map_slot_loan_to_alias(st, name, &l.values[0], idx);
+                        }
+                    }
                 }
             }
             Stmt::Assign {
@@ -1270,6 +1277,18 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                                 });
                             } else {
                                 ck.extend_map_slot_loan_to_alias(st, name, v, idx);
+                            }
+                        }
+                    }
+                } else if *op == hy_syntax::AssignOp::Assign
+                    && values.len() == 1
+                    && targets.len() > 1
+                {
+                    let shapes = ck.multi_value_shapes(st, &values[0], targets.len());
+                    for (t, shape) in targets.iter().zip(shapes.iter()) {
+                        if let hy_syntax::PlaceKind::Ident(name) = &t.kind {
+                            if shape.is_reference_alias() {
+                                ck.extend_map_slot_loan_to_alias(st, name, &values[0], idx);
                             }
                         }
                     }

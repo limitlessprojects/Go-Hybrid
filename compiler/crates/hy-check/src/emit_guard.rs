@@ -368,6 +368,12 @@ impl<'a> Checker<'a> {
                 let ty = l.ty.clone().or_else(|| self.ty_of_expr(st, val));
                 self.define_binding(st, name, shape, ty, immutable, false, is_let);
             }
+        } else if l.values.len() == 1 && l.names.len() > 1 {
+            let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
+            let tys = self.multi_value_tys(st, &l.values[0], l.names.len());
+            for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
+                self.define_binding(st, name, shape, ty, immutable, false, is_let);
+            }
         }
     }
 
