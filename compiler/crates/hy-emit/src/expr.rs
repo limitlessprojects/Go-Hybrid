@@ -11,7 +11,8 @@
 use hy_syntax::*;
 
 use super::{
-    go_quote, special_member, to_go_name, BindingKind, EmitError, Emitter, MemberSpecial,
+    go_quote, sanitize_ident, special_member, to_go_name, BindingKind, EmitError, Emitter,
+    MemberSpecial,
 };
 
 use super::shapes::{
@@ -129,9 +130,9 @@ impl Emitter {
                 let (head, type_args) = split_type_args(name);
                 if let Some(ta) = type_args {
                     let translated = self.translate_type_args_suffix(ta);
-                    return Ok(format!("{}{}", head, translated));
+                    return Ok(format!("{}{}", sanitize_ident(head), translated));
                 }
-                Ok(name.clone())
+                Ok(sanitize_ident(name).to_string())
             }
 
             Expr::Lit { kind, .. } => Ok(self.lit_text(kind)),
@@ -512,7 +513,7 @@ impl Emitter {
         let mut parts = Vec::new();
         for f in fields {
             let v = self.emit_expr(&f.value, 0)?;
-            parts.push(format!("{}: {}", f.name, v));
+            parts.push(format!("{}: {}", sanitize_ident(&f.name), v));
         }
         Ok(parts.join(", "))
     }

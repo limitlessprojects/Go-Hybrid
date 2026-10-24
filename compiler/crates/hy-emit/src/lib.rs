@@ -268,6 +268,16 @@ const GO_BUILTIN_TYPES: &[&str] = &[
 /// Standard Go initialisms (SPEC M4: `io.eof` → `io.EOF`,
 /// `http.status_ok` → `http.StatusOK`, `time.rfc3339` → `time.RFC3339`,
 /// `strings.to_valid_utf8` → `strings.ToValidUTF8`).
+/// Mangles identifiers that are Go keywords but legal Hybrid identifiers (e.g. `default` per LX14).
+#[inline]
+pub(crate) fn sanitize_ident(name: &str) -> &str {
+    if name == "default" {
+        "default_"
+    } else {
+        name
+    }
+}
+
 fn go_initialism(seg: &str) -> Option<&'static str> {
     Some(match seg {
         "acl" => "ACL",
@@ -796,7 +806,7 @@ impl Emitter {
                 }
                 Decl::TypeAlias(t) => {
                     let ty = self.type_text(&t.ty);
-                    self.push(&format!("type {} = {}", t.name, ty));
+                    self.push(&format!("type {} = {}", sanitize_ident(&t.name), ty));
                 }
                 Decl::Fn(f) => self.emit_fn(f)?,
             }
@@ -890,6 +900,7 @@ impl Emitter {
     }
 
     fn emit_struct(&mut self, s: &StructDecl) -> Result<(), EmitError> {
+        let s_name = sanitize_ident(&s.name);
         if !s.type_params.is_empty() {
             // Generic struct (example-07 surface): Go requires a constraint on
             // every type parameter (`type box[t any] struct {`). Without a
@@ -902,20 +913,26 @@ impl Emitter {
                 Self::collect_comparable_in_ty(&f.ty, &param_names, &mut comparable_params);
             }
             let params = self.format_type_params(&s.type_params, &comparable_params);
-            self.push(&format!("type {}[{}] struct {{", s.name, params));
+            self.push(&format!("type {}[{}] struct {{", s_name, params));
         } else {
-            self.push(&format!("type {} struct {{", s.name));
+            self.push(&format!("type {} struct {{", s_name));
         }
         self.indent += 1;
         // gofmt aligns consecutive field declarations: names padded to the
         // longest, types in one column. Do it here so emitted output is
         // gofmt-canonical without a post-pass.
-        let width = s.fields.iter().map(|f| f.name.len()).max().unwrap_or(0);
+        let width = s
+            .fields
+            .iter()
+            .map(|f| sanitize_ident(&f.name).len())
+            .max()
+            .unwrap_or(0);
         for f in &s.fields {
             // Our own struct fields stay snake_case (M4 normalizes FOREIGN
             // names, never ours).
+            let fname = sanitize_ident(&f.name);
             let ty = self.type_text(&f.ty);
-            self.push(&format!("{:<width$} {}", f.name, ty, width = width));
+            self.push(&format!("{:<width$} {}", fname, ty, width = width));
         }
         self.indent -= 1;
         self.push("}");
@@ -1218,6 +1235,8 @@ impl Emitter {
         let go_name =
             if self.export_pub && f.is_pub && f.receiver.is_none() && !f.name.contains('.') {
                 to_go_name(&f.name)
+            } else if f.name == "default" {
+                "default_".to_string()
             } else {
                 f.name.replace('.', "_")
             };
@@ -1389,7 +1408,7 @@ impl Emitter {
                 let r = &f.results[0];
                 let ty = self.type_text(&r.ty);
                 match &r.name {
-                    Some(n) => self.push_raw(&format!(" ({} {}) {{\n", n, ty)),
+                    Some(n) => self.push_raw(&format!(" ({} {}) {{\n", sanitize_ident(n), ty)),
                     None => self.push_raw(&format!(" {} {{\n", ty)),
                 }
             }
@@ -1426,13 +1445,13 @@ impl Emitter {
             && results.iter().any(|r| r.name.is_none());
         let mut used: BTreeSet<String> = results
             .iter()
-            .filter_map(|r| r.name.clone())
+            .filter_map(|r| r.name.as_deref().map(sanitize_ident).map(str::to_string))
             .collect();
         let mut parts = Vec::with_capacity(results.len());
         for (i, r) in results.iter().enumerate() {
             let ty = self.type_text(&r.ty);
             match &r.name {
-                Some(n) => parts.push(format!("{} {}", n, ty)),
+                Some(n) => parts.push(format!("{} {}", sanitize_ident(n), ty)),
                 None if mixed => {
                     let base = format!("hyR{}", i);
                     let mut name = base.clone();
@@ -1460,7 +1479,13 @@ impl Emitter {
                 .results
                 .iter()
                 .enumerate()
-                .map(|(i, r)| r.name.clone().unwrap_or_else(|| format!("hyR{}", i)))
+                .map(|(i, r)| {
+                    r.name
+                        .as_deref()
+                        .map(sanitize_ident)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("hyR{}", i))
+                })
                 .collect();
             names.join(", ") + ", hyErr"
         }
@@ -1471,7 +1496,12 @@ impl Emitter {
     fn main_closure_sig(&mut self, f: &FnDecl) -> String {
         let mut parts: Vec<String> = Vec::new();
         for (i, r) in f.results.iter().enumerate() {
-            let n = r.name.clone().unwrap_or_else(|| format!("hyR{}", i));
+            let n = r
+                .name
+                .as_deref()
+                .map(sanitize_ident)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("hyR{}", i));
             let ty = self.type_text(&r.ty);
             parts.push(format!("{} {}", n, ty));
         }
@@ -1486,7 +1516,7 @@ impl Emitter {
                 rendered.push_str(", ");
             }
             let ty = self.type_text(&p.ty);
-            rendered.push_str(&format!("{} {}", p.name, ty));
+            rendered.push_str(&format!("{} {}", sanitize_ident(&p.name), ty));
         }
         self.push_raw(&rendered);
     }
@@ -1821,7 +1851,7 @@ impl Emitter {
             // (`u16` -> `uint16`); anything else stays verbatim. Issue #147.
             match shapes::go_primitive_name(name) {
                 Some(go) => go.to_string(),
-                None => name.to_string(),
+                None => sanitize_ident(name).to_string(),
             }
         }
     }

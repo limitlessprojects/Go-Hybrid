@@ -328,3 +328,66 @@ fn main() {
     );
 }
 
+#[test]
+fn default_keyword_identifier_mangles_to_default_underscore_issue_1167() {
+    let go = emit_src(
+        "\
+struct default {
+    default int
+}
+
+fn default(default int) default {
+    default := make(chan int, 1)
+    default <- 7
+    v := <-default
+    s := default{default: default}
+    select {
+        x := <-default:
+            _ = x
+        default:
+            _ = v
+    }
+    return s
+}
+
+fn main() {
+    _ = default(1)
+}
+",
+    );
+
+    // Identifiers named `default` (Go keyword) must be mangled to `default_`
+    assert!(
+        go.contains("type default_ struct {"),
+        "struct name default must emit default_, got:\n{go}"
+    );
+    assert!(
+        go.contains("default_ int"),
+        "struct field default must emit default_ int, got:\n{go}"
+    );
+    assert!(
+        go.contains("func default_(default_ int) default_ {"),
+        "fn and param named default must emit default_, got:\n{go}"
+    );
+    assert!(
+        go.contains("default_ := make(chan int, 1)"),
+        "local define named default must emit default_, got:\n{go}"
+    );
+    assert!(
+        go.contains("default_ <- 7"),
+        "send to default must emit default_ <- 7, got:\n{go}"
+    );
+    assert!(
+        go.contains("<-default_"),
+        "receive from default must emit <-default_, got:\n{go}"
+    );
+    assert!(
+        go.contains("default_{default_: default_}"),
+        "struct literal and field init must emit default_, got:\n{go}"
+    );
+    // Crucial: select arm `default:` must NOT be mangled!
+    assert!(
+        go.contains("default:"),
+        "select default arm must remain default:, got:\n{go}"
+    );
+}

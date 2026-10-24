@@ -28,7 +28,7 @@ use std::collections::BTreeSet;
 
 use hy_syntax::*;
 
-use super::Emitter;
+use super::{sanitize_ident, Emitter};
 
 /// Nested-struct depth guard. Go value types are acyclic (a struct cannot
 /// contain itself by value), so this only bounds pathological inputs.
@@ -86,7 +86,7 @@ impl Emitter {
                 continue;
             }
             if let Some(init) = self.n5_zero_init_at(&f.ty, depth) {
-                out.push(format!("{}: {}", f.name, init));
+                out.push(format!("{}: {}", sanitize_ident(&f.name), init));
             }
         }
         out
