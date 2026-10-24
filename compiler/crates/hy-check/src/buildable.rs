@@ -365,6 +365,12 @@ struct Collector<'a> {
     scopes: Vec<HashMap<String, Option<usize>>>,
     /// Parallel lexical scope stack tracking resolved operand kinds (#425).
     kind_scopes: Vec<HashMap<String, OpKind>>,
+    /// One layer per open scope, tracking `for ... in` element bindings
+    /// whose kind is copy-semantics storage (`struct`/`array`). The emitter
+    /// lowers them to Go's `for _, x := range xs`, so writes through the
+    /// binding mutate the per-iteration copy and the collection never sees
+    /// them — hy-check rejects those writes instead (#1480).
+    copy_var_scopes: Vec<HashSet<String>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
     /// Result kinds of the function whose body is currently being walked
@@ -401,6 +407,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             ck,
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
+            copy_var_scopes: Vec::new(),
             file_consts: HashMap::new(),
             fn_results: Vec::new(),
             fn_results_all_named: false,
@@ -458,11 +465,13 @@ impl<'a> Collector<'a> {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.kind_scopes.push(HashMap::new());
+        self.copy_var_scopes.push(HashSet::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.kind_scopes.pop();
+        self.copy_var_scopes.pop();
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -1070,6 +1079,19 @@ impl<'a> Collector<'a> {
                         // reject as unused (PR #536).
                         for (v, k) in vars.iter().zip(iter_kinds) {
                             self.define_elidable(v, *span);
+                            // #1480: a struct/array element binding is a
+                            // per-iteration copy at emission (`for _, x :=
+                            // range xs`), so every write through it is
+                            // silently dropped. Record the binding so the
+                            // write places and the pointer-receiver call
+                            // below reject instead of certifying the pass.
+                            if v != "_"
+                                && matches!(k, OpKind::Struct(_) | OpKind::Array(_))
+                            {
+                                if let Some(top) = self.copy_var_scopes.last_mut() {
+                                    top.insert(v.clone());
+                                }
+                            }
                             self.bind_kind(v, k);
                         }
                     }
@@ -1251,12 +1273,69 @@ impl<'a> Collector<'a> {
                         "strings in Go are immutable; string elements cannot be assigned or updated",
                     );
                 }
+                self.check_range_copy_write(p);
                 self.place_read(p);
             }
             PlaceKind::Field { .. } | PlaceKind::AddrOf { .. } => {
+                self.check_range_copy_write(p);
                 self.place_read(p);
             }
         }
+    }
+
+    /// #1480: is `name` a `for ... in` binding over copy-semantics storage?
+    fn is_copy_semantic_range_var(&self, name: &str) -> bool {
+        self.copy_var_scopes
+            .iter()
+            .rev()
+            .any(|layer| layer.contains(name))
+    }
+
+    /// #1480: root name of a write place that provably lands in a
+    /// per-iteration range-element copy. The base chain is walked down to
+    /// the root; every step must stay inside copy-semantics storage:
+    /// * stepping through a pointer field or an unknown kind redirects into
+    ///   (or may redirect into) shared storage — fail open, no diagnostic;
+    /// * `slice`/`map`/`string` element writes reach the shared collection
+    ///   and stay legal; an `array` element of the copy is itself a copy.
+    fn copy_place_root(&self, p: &Place) -> Option<String> {
+        match &p.kind {
+            PlaceKind::Ident(n) => {
+                if self.is_copy_semantic_range_var(n) {
+                    Some(n.clone())
+                } else {
+                    None
+                }
+            }
+            PlaceKind::Field { base, .. } => match self.kind_of_place(base) {
+                OpKind::Unknown | OpKind::Pointer(_) => None,
+                _ => self.copy_place_root(base),
+            },
+            PlaceKind::Index { base, .. } => match self.kind_of_place(base) {
+                OpKind::Unknown | OpKind::Pointer(_) | OpKind::Slice(_) | OpKind::Map(..) => None,
+                OpKind::Str => None,
+                _ => self.copy_place_root(base),
+            },
+            PlaceKind::AddrOf { .. } => None,
+        }
+    }
+
+    /// #1480: `x.f = v`, `x.f += v`, `x[i] = v` … where `x` is a
+    /// struct/array element of a `for x in xs` loop are silently dropped at
+    /// runtime (the binding is a per-iteration copy). The pass must not
+    /// certify them.
+    fn check_range_copy_write(&mut self, p: &Place) {
+        let Some(root) = self.copy_place_root(p) else {
+            return;
+        };
+        self.emit_e1002(
+            p.span,
+            format!(
+                "cannot mutate `{}` through range element `{root}` — `{root}` is a per-iteration copy of the element, so the write is silently dropped (HYB-E1002)",
+                p.render()
+            ),
+            "assign through the collection instead: `for i in 0..len(xs) { xs[i].… }`, or iterate a slice of pointers and mutate through the pointer",
+        );
     }
 
     fn emit_let_reassign_error(&mut self, name: &str, span: Span) {
@@ -4176,6 +4255,25 @@ impl<'a> Collector<'a> {
                         ),
                         "assign the value to a local variable first (`v := ...; v.method()`), store `*T` pointers, or declare a value receiver `(self T)`",
                     );
+                } else if ptr_recv {
+                    // #1480 Form C: a range-element copy IS addressable (Go
+                    // emits `(&x).Bump()` on the per-iteration local), so the
+                    // non-addressable rule above cannot catch it — the call
+                    // builds and the mutation is silently dropped instead.
+                    if let Expr::Ident { name: var, .. } = unwrap_parens(base) {
+                        if self.is_copy_semantic_range_var(var) {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot call pointer-receiver method `{}` on range element `{}` — `{}` is a per-iteration copy, so the mutation is silently dropped (HYB-E1002)",
+                                    name,
+                                    base.render(),
+                                    base.render()
+                                ),
+                                "call it through the collection index instead: `for i in 0..len(xs) { xs[i].method() }`, or iterate a slice of pointers and call through the pointer",
+                            );
+                        }
+                    }
                 }
             }
         }
