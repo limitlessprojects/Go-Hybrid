@@ -59,6 +59,7 @@ jobs:
           python3 -m unittest discover -s tools -p test_differential_verdict_markers.py -v
           python3 -m unittest discover -s tools -p test_check_test_registration.py -v
           python3 -m unittest discover -s tools -p test_package_version.py -v
+          python3 -m unittest discover -s tools -p test_package_cross_compiler.py -v
           python3 -m unittest discover -s tools -p test_corpus_utf8.py -v
           # Fail closed if any tools/**/test_*.py is matched by no -p pattern
           # above: a suite outside this list would pass CI by never running.

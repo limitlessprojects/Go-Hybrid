@@ -71,7 +71,7 @@ command -v go >/dev/null || { echo "go not on PATH" >&2; exit 1; }
 echo "==> building hyrt staticlib (crate-local)"
 ( cd "$REPO_ROOT/runtime/rust/hyrt" && \
   if [ -n "$RUST_TARGET" ]; then \
-      env CARGO_BUILD_JOBS=2 $CROSS_ENV cargo build --release --target "$RUST_TARGET" --quiet; \
+      env CARGO_BUILD_JOBS=2 "$CROSS_ENV" cargo build --release --target "$RUST_TARGET" --quiet; \
   else \
       CARGO_BUILD_JOBS=2 cargo build --release --quiet; fi )
 
@@ -80,7 +80,7 @@ echo "==> building hyrt staticlib (crate-local)"
 echo "==> building hyb (release)"
 ( cd "$REPO_ROOT/compiler" && \
   if [ -n "$RUST_TARGET" ]; then \
-      env CARGO_BUILD_JOBS=2 $CROSS_ENV cargo build --release -p hyb --target "$RUST_TARGET" --quiet; \
+      env CARGO_BUILD_JOBS=2 "$CROSS_ENV" cargo build --release -p hyb --target "$RUST_TARGET" --quiet; \
   else \
       cargo build --release -p hyb --quiet; fi )
 HYB_BIN="$REPO_ROOT/compiler/target/release/hyb"
@@ -153,9 +153,27 @@ IFS="$OLDIFS"
 #       call_arm64.s (GOARCH=arm64 selects it), and the run drives real
 #       trampoline crossings (fast + pooled-deep paths) under qemu.
 #       A linux/arm64 asset whose bridge smoke fails must not ship.
-CROSS_GO_ENV=""
+# Keep each optional environment assignment in its own shell argument. A
+# compiler path may contain whitespace or glob characters, including on Windows.
+set --
 if [ "$PKG_OS/$ARCH" = "linux/arm64" ] && [ -n "$RUST_TARGET" ]; then
-    CROSS_GO_ENV="GOARCH=arm64 CGO_ENABLED=1 CC=$CROSS_CC"
+    # Go parses CC as a quoted command, unlike Cargo's linker executable path.
+    # Its parser accepts either quote kind, with no escaping inside the quotes.
+    GO_CC="$CROSS_CC"
+    case "$GO_CC" in
+        *[[:space:]]* | \"* | \'*)
+            case "$GO_CC" in
+                *"'"*)
+                    case "$GO_CC" in
+                        *'"'*) echo "Go CC cannot quote a compiler path containing both quote kinds" >&2; exit 1 ;;
+                    esac
+                    GO_CC="\"$GO_CC\""
+                    ;;
+                *) GO_CC="'$GO_CC'" ;;
+            esac
+            ;;
+    esac
+    set -- GOARCH=arm64 CGO_ENABLED=1 "CC=$GO_CC"
     QEMU_RUNNER="${QEMU_RUNNER:-qemu-aarch64}"
     # qemu-user-static (the fleet's package) ships *-static names only
     first="${QEMU_RUNNER%% *}"
@@ -166,7 +184,7 @@ if [ "$PKG_OS/$ARCH" = "linux/arm64" ] && [ -n "$RUST_TARGET" ]; then
         fi
     fi
 fi
-if ( cd "$SMOKE" && env PATH="$RUSTLESS_PATH" $CROSS_GO_ENV $QEMU_RUNNER \
+if ( cd "$SMOKE" && env PATH="$RUSTLESS_PATH" "$@" $QEMU_RUNNER \
         "$SMOKE/hybrid-${VER}/$HYB_OUT_NAME" build \
         "$REPO_ROOT/examples/01-hello/program.hy" -o "$SMOKE/hello" ) \
     && $QEMU_RUNNER "$SMOKE/hello" > "$SMOKE/out.txt" 2>&1 \
@@ -184,7 +202,7 @@ fi
 # and the Darwin stack pool; a bridge-free hello cannot detect either failure.
 if { [ "$PKG_OS/$ARCH" = "linux/arm64" ] && [ -n "$RUST_TARGET" ]; } || [ "$PKG_OS" = "darwin" ]; then
     echo "==> bridge smoke from the tarball (serde_json crossing on $PKG_OS/$ARCH)"
-    if ( cd "$SMOKE" && env PATH="$RUSTLESS_PATH" $CROSS_GO_ENV $QEMU_RUNNER \
+    if ( cd "$SMOKE" && env PATH="$RUSTLESS_PATH" "$@" $QEMU_RUNNER \
             "$SMOKE/hybrid-${VER}/$HYB_OUT_NAME" build \
             "$REPO_ROOT/examples/05-json-transform/program.hy" -o "$SMOKE/json" ) \
         && $QEMU_RUNNER "$SMOKE/json" > "$SMOKE/json.txt" 2>&1 \
