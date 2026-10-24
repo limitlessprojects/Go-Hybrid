@@ -6,6 +6,7 @@ members = [
     "crates/hy-check",
     "crates/hy-emit",
     "crates/hyb",
+    "crates/hy-wasm",
 ]
 
 # Go-Hybrid compiler workspace — PLAN.md 2026-10-11 decision:

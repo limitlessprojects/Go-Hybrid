@@ -1,0 +1,855 @@
+{
+  "Kind": "single-file-after-write request proxy, NOT gopls/LSP",
+  "TimestampUTC": "2026-10-23T08:32:04Z",
+  "OS": "linux",
+  "Arch": "amd64",
+  "Go": "go1.26.9",
+  "CPUs": 5,
+  "GOMAXPROCS": 2,
+  "Files": 25,
+  "Edits": 100,
+  "Warmup": 10,
+  "FixtureSHA256": "972c48b086eb3182a721d7a73f8fc9604d1d292ff84148fcf9f04198f29da8ed",
+  "WASMSHA256": "8758adb0366f479e68b1402bdc9e3cb5f1f958c96b7e27d93272a350b23769d9",
+  "NativeSHA256": "2cbc0cfa2aa25140d2e6f12fb9118e537f44efb9241bfb4d7706dcae15216d98",
+  "WASMBytes": 1714571,
+  "NativeBytes": 4070040,
+  "ColdWASMInitMS": 601.347698,
+  "ColdReusedInitMS": 616.794891,
+  "Native": {
+    "Min": 1.391682,
+    "P50": 1.742706,
+    "P90": 2.232416,
+    "P95": 2.570464,
+    "P99": 3.706351,
+    "Mean": 1.8460603999999996
+  },
+  "InProcess": {
+    "Min": 2.165285,
+    "P50": 2.76683,
+    "P90": 3.612424,
+    "P95": 3.893633,
+    "P99": 6.005418,
+    "Mean": 2.9721061100000004
+  },
+  "ReusedGuest": {
+    "Min": 1.480335,
+    "P50": 1.810732,
+    "P90": 2.20919,
+    "P95": 2.389948,
+    "P99": 2.718908,
+    "Mean": 1.8607579999999997
+  },
+  "NativeOverInProcessP50": 0.629856550637372,
+  "NativeOverReusedP50": 0.9624317679258996,
+  "Samples": [
+    {
+      "Edit": 1,
+      "File": "file-000.hy",
+      "First": "native",
+      "NativeMS": 1.883782,
+      "InProcessMS": 2.719012,
+      "ExperimentalReusedMS": 2.651462
+    },
+    {
+      "Edit": 2,
+      "File": "file-001.hy",
+      "First": "embedded",
+      "NativeMS": 1.881884,
+      "InProcessMS": 2.520019,
+      "ExperimentalReusedMS": 1.577321
+    },
+    {
+      "Edit": 3,
+      "File": "file-002.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.447611,
+      "InProcessMS": 8.846393,
+      "ExperimentalReusedMS": 2.074999
+    },
+    {
+      "Edit": 4,
+      "File": "file-003.hy",
+      "First": "native",
+      "NativeMS": 1.59656,
+      "InProcessMS": 2.340048,
+      "ExperimentalReusedMS": 2.20919
+    },
+    {
+      "Edit": 5,
+      "File": "file-004.hy",
+      "First": "embedded",
+      "NativeMS": 1.821699,
+      "InProcessMS": 4.723541,
+      "ExperimentalReusedMS": 1.890501
+    },
+    {
+      "Edit": 6,
+      "File": "file-005.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.518553,
+      "InProcessMS": 3.557288,
+      "ExperimentalReusedMS": 1.839766
+    },
+    {
+      "Edit": 7,
+      "File": "file-006.hy",
+      "First": "native",
+      "NativeMS": 2.409472,
+      "InProcessMS": 2.475551,
+      "ExperimentalReusedMS": 1.840106
+    },
+    {
+      "Edit": 8,
+      "File": "file-007.hy",
+      "First": "embedded",
+      "NativeMS": 2.050843,
+      "InProcessMS": 2.5148,
+      "ExperimentalReusedMS": 1.861558
+    },
+    {
+      "Edit": 9,
+      "File": "file-008.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.439925,
+      "InProcessMS": 3.893633,
+      "ExperimentalReusedMS": 1.712625
+    },
+    {
+      "Edit": 10,
+      "File": "file-009.hy",
+      "First": "native",
+      "NativeMS": 1.688558,
+      "InProcessMS": 2.402481,
+      "ExperimentalReusedMS": 1.810732
+    },
+    {
+      "Edit": 11,
+      "File": "file-010.hy",
+      "First": "embedded",
+      "NativeMS": 1.554487,
+      "InProcessMS": 2.477905,
+      "ExperimentalReusedMS": 1.938625
+    },
+    {
+      "Edit": 12,
+      "File": "file-011.hy",
+      "First": "experimental-reused",
+      "NativeMS": 2.431395,
+      "InProcessMS": 4.385407,
+      "ExperimentalReusedMS": 2.043152
+    },
+    {
+      "Edit": 13,
+      "File": "file-012.hy",
+      "First": "native",
+      "NativeMS": 2.121804,
+      "InProcessMS": 3.046439,
+      "ExperimentalReusedMS": 1.963271
+    },
+    {
+      "Edit": 14,
+      "File": "file-013.hy",
+      "First": "embedded",
+      "NativeMS": 1.892284,
+      "InProcessMS": 2.491766,
+      "ExperimentalReusedMS": 1.832765
+    },
+    {
+      "Edit": 15,
+      "File": "file-014.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.391682,
+      "InProcessMS": 3.405255,
+      "ExperimentalReusedMS": 1.562158
+    },
+    {
+      "Edit": 16,
+      "File": "file-015.hy",
+      "First": "native",
+      "NativeMS": 1.575839,
+      "InProcessMS": 2.627791,
+      "ExperimentalReusedMS": 2.083803
+    },
+    {
+      "Edit": 17,
+      "File": "file-016.hy",
+      "First": "embedded",
+      "NativeMS": 2.194449,
+      "InProcessMS": 2.201128,
+      "ExperimentalReusedMS": 1.717602
+    },
+    {
+      "Edit": 18,
+      "File": "file-017.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.631492,
+      "InProcessMS": 2.959473,
+      "ExperimentalReusedMS": 1.869441
+    },
+    {
+      "Edit": 19,
+      "File": "file-018.hy",
+      "First": "native",
+      "NativeMS": 1.694307,
+      "InProcessMS": 2.239867,
+      "ExperimentalReusedMS": 1.585193
+    },
+    {
+      "Edit": 20,
+      "File": "file-019.hy",
+      "First": "embedded",
+      "NativeMS": 1.581147,
+      "InProcessMS": 2.472847,
+      "ExperimentalReusedMS": 1.480335
+    },
+    {
+      "Edit": 21,
+      "File": "file-020.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.641047,
+      "InProcessMS": 2.808122,
+      "ExperimentalReusedMS": 1.564672
+    },
+    {
+      "Edit": 22,
+      "File": "file-021.hy",
+      "First": "native",
+      "NativeMS": 1.945364,
+      "InProcessMS": 3.061752,
+      "ExperimentalReusedMS": 1.707217
+    },
+    {
+      "Edit": 23,
+      "File": "file-022.hy",
+      "First": "embedded",
+      "NativeMS": 2.190619,
+      "InProcessMS": 5.357363,
+      "ExperimentalReusedMS": 2.718908
+    },
+    {
+      "Edit": 24,
+      "File": "file-023.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.592854,
+      "InProcessMS": 3.185443,
+      "ExperimentalReusedMS": 2.40813
+    },
+    {
+      "Edit": 25,
+      "File": "file-024.hy",
+      "First": "native",
+      "NativeMS": 2.609713,
+      "InProcessMS": 2.803214,
+      "ExperimentalReusedMS": 1.909881
+    },
+    {
+      "Edit": 26,
+      "File": "file-000.hy",
+      "First": "embedded",
+      "NativeMS": 3.953943,
+      "InProcessMS": 2.380118,
+      "ExperimentalReusedMS": 1.594858
+    },
+    {
+      "Edit": 27,
+      "File": "file-001.hy",
+      "First": "experimental-reused",
+      "NativeMS": 2.398987,
+      "InProcessMS": 3.7646,
+      "ExperimentalReusedMS": 3.034872
+    },
+    {
+      "Edit": 28,
+      "File": "file-002.hy",
+      "First": "native",
+      "NativeMS": 1.610841,
+      "InProcessMS": 3.211247,
+      "ExperimentalReusedMS": 2.440167
+    },
+    {
+      "Edit": 29,
+      "File": "file-003.hy",
+      "First": "embedded",
+      "NativeMS": 2.232416,
+      "InProcessMS": 2.666338,
+      "ExperimentalReusedMS": 1.680977
+    },
+    {
+      "Edit": 30,
+      "File": "file-004.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.672439,
+      "InProcessMS": 3.734168,
+      "ExperimentalReusedMS": 1.873787
+    },
+    {
+      "Edit": 31,
+      "File": "file-005.hy",
+      "First": "native",
+      "NativeMS": 1.878854,
+      "InProcessMS": 2.989394,
+      "ExperimentalReusedMS": 2.298365
+    },
+    {
+      "Edit": 32,
+      "File": "file-006.hy",
+      "First": "embedded",
+      "NativeMS": 1.881158,
+      "InProcessMS": 2.821241,
+      "ExperimentalReusedMS": 1.825494
+    },
+    {
+      "Edit": 33,
+      "File": "file-007.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.9155,
+      "InProcessMS": 3.152989,
+      "ExperimentalReusedMS": 1.712504
+    },
+    {
+      "Edit": 34,
+      "File": "file-008.hy",
+      "First": "native",
+      "NativeMS": 1.763521,
+      "InProcessMS": 2.625737,
+      "ExperimentalReusedMS": 1.826025
+    },
+    {
+      "Edit": 35,
+      "File": "file-009.hy",
+      "First": "embedded",
+      "NativeMS": 1.820908,
+      "InProcessMS": 2.590965,
+      "ExperimentalReusedMS": 2.350653
+    },
+    {
+      "Edit": 36,
+      "File": "file-010.hy",
+      "First": "experimental-reused",
+      "NativeMS": 2.570464,
+      "InProcessMS": 3.369495,
+      "ExperimentalReusedMS": 1.676861
+    },
+    {
+      "Edit": 37,
+      "File": "file-011.hy",
+      "First": "native",
+      "NativeMS": 1.708418,
+      "InProcessMS": 2.76683,
+      "ExperimentalReusedMS": 1.800216
+    },
+    {
+      "Edit": 38,
+      "File": "file-012.hy",
+      "First": "embedded",
+      "NativeMS": 1.846035,
+      "InProcessMS": 2.851807,
+      "ExperimentalReusedMS": 1.711983
+    },
+    {
+      "Edit": 39,
+      "File": "file-013.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.798553,
+      "InProcessMS": 2.994401,
+      "ExperimentalReusedMS": 1.794457
+    },
+    {
+      "Edit": 40,
+      "File": "file-014.hy",
+      "First": "native",
+      "NativeMS": 1.547076,
+      "InProcessMS": 2.721652,
+      "ExperimentalReusedMS": 2.143182
+    },
+    {
+      "Edit": 41,
+      "File": "file-015.hy",
+      "First": "embedded",
+      "NativeMS": 1.901088,
+      "InProcessMS": 2.673629,
+      "ExperimentalReusedMS": 2.335631
+    },
+    {
+      "Edit": 42,
+      "File": "file-016.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.9425,
+      "InProcessMS": 3.247628,
+      "ExperimentalReusedMS": 1.76891
+    },
+    {
+      "Edit": 43,
+      "File": "file-017.hy",
+      "First": "native",
+      "NativeMS": 2.030473,
+      "InProcessMS": 2.847465,
+      "ExperimentalReusedMS": 1.883681
+    },
+    {
+      "Edit": 44,
+      "File": "file-018.hy",
+      "First": "embedded",
+      "NativeMS": 1.7428,
+      "InProcessMS": 2.245266,
+      "ExperimentalReusedMS": 1.933517
+    },
+    {
+      "Edit": 45,
+      "File": "file-019.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.484421,
+      "InProcessMS": 3.25249,
+      "ExperimentalReusedMS": 1.691293
+    },
+    {
+      "Edit": 46,
+      "File": "file-020.hy",
+      "First": "native",
+      "NativeMS": 1.441337,
+      "InProcessMS": 2.88725,
+      "ExperimentalReusedMS": 1.976381
+    },
+    {
+      "Edit": 47,
+      "File": "file-021.hy",
+      "First": "embedded",
+      "NativeMS": 2.026276,
+      "InProcessMS": 3.025949,
+      "ExperimentalReusedMS": 1.713556
+    },
+    {
+      "Edit": 48,
+      "File": "file-022.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.428066,
+      "InProcessMS": 2.719418,
+      "ExperimentalReusedMS": 1.52352
+    },
+    {
+      "Edit": 49,
+      "File": "file-023.hy",
+      "First": "native",
+      "NativeMS": 1.588347,
+      "InProcessMS": 2.472457,
+      "ExperimentalReusedMS": 1.798343
+    },
+    {
+      "Edit": 50,
+      "File": "file-024.hy",
+      "First": "embedded",
+      "NativeMS": 1.848028,
+      "InProcessMS": 2.493699,
+      "ExperimentalReusedMS": 1.507466
+    },
+    {
+      "Edit": 51,
+      "File": "file-000.hy",
+      "First": "experimental-reused",
+      "NativeMS": 3.706351,
+      "InProcessMS": 2.986995,
+      "ExperimentalReusedMS": 1.881519
+    },
+    {
+      "Edit": 52,
+      "File": "file-001.hy",
+      "First": "native",
+      "NativeMS": 1.630171,
+      "InProcessMS": 2.701622,
+      "ExperimentalReusedMS": 1.833266
+    },
+    {
+      "Edit": 53,
+      "File": "file-002.hy",
+      "First": "embedded",
+      "NativeMS": 1.768158,
+      "InProcessMS": 2.684967,
+      "ExperimentalReusedMS": 1.833195
+    },
+    {
+      "Edit": 54,
+      "File": "file-003.hy",
+      "First": "experimental-reused",
+      "NativeMS": 2.047723,
+      "InProcessMS": 2.704616,
+      "ExperimentalReusedMS": 1.701698
+    },
+    {
+      "Edit": 55,
+      "File": "file-004.hy",
+      "First": "native",
+      "NativeMS": 1.787157,
+      "InProcessMS": 2.985529,
+      "ExperimentalReusedMS": 1.690962
+    },
+    {
+      "Edit": 56,
+      "File": "file-005.hy",
+      "First": "embedded",
+      "NativeMS": 1.662529,
+      "InProcessMS": 2.951006,
+      "ExperimentalReusedMS": 1.862049
+    },
+    {
+      "Edit": 57,
+      "File": "file-006.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.599334,
+      "InProcessMS": 6.005418,
+      "ExperimentalReusedMS": 1.578543
+    },
+    {
+      "Edit": 58,
+      "File": "file-007.hy",
+      "First": "native",
+      "NativeMS": 1.985815,
+      "InProcessMS": 2.290253,
+      "ExperimentalReusedMS": 1.721157
+    },
+    {
+      "Edit": 59,
+      "File": "file-008.hy",
+      "First": "embedded",
+      "NativeMS": 1.739035,
+      "InProcessMS": 2.744806,
+      "ExperimentalReusedMS": 2.079036
+    },
+    {
+      "Edit": 60,
+      "File": "file-009.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.461016,
+      "InProcessMS": 3.22603,
+      "ExperimentalReusedMS": 1.853005
+    },
+    {
+      "Edit": 61,
+      "File": "file-010.hy",
+      "First": "native",
+      "NativeMS": 1.625584,
+      "InProcessMS": 2.165285,
+      "ExperimentalReusedMS": 1.802701
+    },
+    {
+      "Edit": 62,
+      "File": "file-011.hy",
+      "First": "embedded",
+      "NativeMS": 1.528037,
+      "InProcessMS": 2.461961,
+      "ExperimentalReusedMS": 1.581968
+    },
+    {
+      "Edit": 63,
+      "File": "file-012.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.881122,
+      "InProcessMS": 3.421333,
+      "ExperimentalReusedMS": 1.688528
+    },
+    {
+      "Edit": 64,
+      "File": "file-013.hy",
+      "First": "native",
+      "NativeMS": 1.764903,
+      "InProcessMS": 2.539518,
+      "ExperimentalReusedMS": 1.757122
+    },
+    {
+      "Edit": 65,
+      "File": "file-014.hy",
+      "First": "embedded",
+      "NativeMS": 1.578402,
+      "InProcessMS": 2.54054,
+      "ExperimentalReusedMS": 1.977302
+    },
+    {
+      "Edit": 66,
+      "File": "file-015.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.519508,
+      "InProcessMS": 3.197256,
+      "ExperimentalReusedMS": 1.87651
+    },
+    {
+      "Edit": 67,
+      "File": "file-016.hy",
+      "First": "native",
+      "NativeMS": 1.467837,
+      "InProcessMS": 2.393489,
+      "ExperimentalReusedMS": 1.878724
+    },
+    {
+      "Edit": 68,
+      "File": "file-017.hy",
+      "First": "embedded",
+      "NativeMS": 2.583634,
+      "InProcessMS": 2.66092,
+      "ExperimentalReusedMS": 1.716961
+    },
+    {
+      "Edit": 69,
+      "File": "file-018.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.595738,
+      "InProcessMS": 3.351819,
+      "ExperimentalReusedMS": 1.713196
+    },
+    {
+      "Edit": 70,
+      "File": "file-019.hy",
+      "First": "native",
+      "NativeMS": 1.551202,
+      "InProcessMS": 2.794311,
+      "ExperimentalReusedMS": 1.919071
+    },
+    {
+      "Edit": 71,
+      "File": "file-020.hy",
+      "First": "embedded",
+      "NativeMS": 1.891089,
+      "InProcessMS": 2.464039,
+      "ExperimentalReusedMS": 1.640743
+    },
+    {
+      "Edit": 72,
+      "File": "file-021.hy",
+      "First": "experimental-reused",
+      "NativeMS": 2.050969,
+      "InProcessMS": 3.768178,
+      "ExperimentalReusedMS": 1.512601
+    },
+    {
+      "Edit": 73,
+      "File": "file-022.hy",
+      "First": "native",
+      "NativeMS": 1.697319,
+      "InProcessMS": 2.596699,
+      "ExperimentalReusedMS": 1.735616
+    },
+    {
+      "Edit": 74,
+      "File": "file-023.hy",
+      "First": "embedded",
+      "NativeMS": 1.529216,
+      "InProcessMS": 2.847836,
+      "ExperimentalReusedMS": 1.662877
+    },
+    {
+      "Edit": 75,
+      "File": "file-024.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.700283,
+      "InProcessMS": 2.624309,
+      "ExperimentalReusedMS": 1.924168
+    },
+    {
+      "Edit": 76,
+      "File": "file-000.hy",
+      "First": "native",
+      "NativeMS": 1.605677,
+      "InProcessMS": 2.945292,
+      "ExperimentalReusedMS": 1.730008
+    },
+    {
+      "Edit": 77,
+      "File": "file-001.hy",
+      "First": "embedded",
+      "NativeMS": 1.873333,
+      "InProcessMS": 2.796349,
+      "ExperimentalReusedMS": 1.87832
+    },
+    {
+      "Edit": 78,
+      "File": "file-002.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.521058,
+      "InProcessMS": 2.951962,
+      "ExperimentalReusedMS": 1.823588
+    },
+    {
+      "Edit": 79,
+      "File": "file-003.hy",
+      "First": "native",
+      "NativeMS": 1.468605,
+      "InProcessMS": 2.295927,
+      "ExperimentalReusedMS": 2.092642
+    },
+    {
+      "Edit": 80,
+      "File": "file-004.hy",
+      "First": "embedded",
+      "NativeMS": 1.713582,
+      "InProcessMS": 2.388056,
+      "ExperimentalReusedMS": 1.664439
+    },
+    {
+      "Edit": 81,
+      "File": "file-005.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.74532,
+      "InProcessMS": 3.110896,
+      "ExperimentalReusedMS": 1.744879
+    },
+    {
+      "Edit": 82,
+      "File": "file-006.hy",
+      "First": "native",
+      "NativeMS": 1.666672,
+      "InProcessMS": 2.346994,
+      "ExperimentalReusedMS": 2.389948
+    },
+    {
+      "Edit": 83,
+      "File": "file-007.hy",
+      "First": "embedded",
+      "NativeMS": 2.154284,
+      "InProcessMS": 2.372141,
+      "ExperimentalReusedMS": 1.63229
+    },
+    {
+      "Edit": 84,
+      "File": "file-008.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.652942,
+      "InProcessMS": 3.738929,
+      "ExperimentalReusedMS": 1.849287
+    },
+    {
+      "Edit": 85,
+      "File": "file-009.hy",
+      "First": "native",
+      "NativeMS": 2.271871,
+      "InProcessMS": 2.614816,
+      "ExperimentalReusedMS": 1.658931
+    },
+    {
+      "Edit": 86,
+      "File": "file-010.hy",
+      "First": "embedded",
+      "NativeMS": 1.617208,
+      "InProcessMS": 2.554755,
+      "ExperimentalReusedMS": 1.722586
+    },
+    {
+      "Edit": 87,
+      "File": "file-011.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.747523,
+      "InProcessMS": 3.525183,
+      "ExperimentalReusedMS": 1.704949
+    },
+    {
+      "Edit": 88,
+      "File": "file-012.hy",
+      "First": "native",
+      "NativeMS": 3.144852,
+      "InProcessMS": 3.097861,
+      "ExperimentalReusedMS": 2.117328
+    },
+    {
+      "Edit": 89,
+      "File": "file-013.hy",
+      "First": "embedded",
+      "NativeMS": 2.066663,
+      "InProcessMS": 2.322737,
+      "ExperimentalReusedMS": 1.680132
+    },
+    {
+      "Edit": 90,
+      "File": "file-014.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.432361,
+      "InProcessMS": 3.612424,
+      "ExperimentalReusedMS": 1.952842
+    },
+    {
+      "Edit": 91,
+      "File": "file-015.hy",
+      "First": "native",
+      "NativeMS": 1.742706,
+      "InProcessMS": 2.383508,
+      "ExperimentalReusedMS": 1.802336
+    },
+    {
+      "Edit": 92,
+      "File": "file-016.hy",
+      "First": "embedded",
+      "NativeMS": 1.671119,
+      "InProcessMS": 2.515156,
+      "ExperimentalReusedMS": 1.690808
+    },
+    {
+      "Edit": 93,
+      "File": "file-017.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.442501,
+      "InProcessMS": 2.90782,
+      "ExperimentalReusedMS": 1.656206
+    },
+    {
+      "Edit": 94,
+      "File": "file-018.hy",
+      "First": "native",
+      "NativeMS": 1.500102,
+      "InProcessMS": 2.718501,
+      "ExperimentalReusedMS": 1.879302
+    },
+    {
+      "Edit": 95,
+      "File": "file-019.hy",
+      "First": "embedded",
+      "NativeMS": 1.708144,
+      "InProcessMS": 2.466984,
+      "ExperimentalReusedMS": 1.844054
+    },
+    {
+      "Edit": 96,
+      "File": "file-020.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.753933,
+      "InProcessMS": 2.666277,
+      "ExperimentalReusedMS": 1.682616
+    },
+    {
+      "Edit": 97,
+      "File": "file-021.hy",
+      "First": "native",
+      "NativeMS": 2.224841,
+      "InProcessMS": 2.912853,
+      "ExperimentalReusedMS": 2.080143
+    },
+    {
+      "Edit": 98,
+      "File": "file-022.hy",
+      "First": "embedded",
+      "NativeMS": 2.035166,
+      "InProcessMS": 2.443389,
+      "ExperimentalReusedMS": 1.754454
+    },
+    {
+      "Edit": 99,
+      "File": "file-023.hy",
+      "First": "experimental-reused",
+      "NativeMS": 1.952081,
+      "InProcessMS": 3.504011,
+      "ExperimentalReusedMS": 1.638871
+    },
+    {
+      "Edit": 100,
+      "File": "file-024.hy",
+      "First": "native",
+      "NativeMS": 1.721545,
+      "InProcessMS": 2.886284,
+      "ExperimentalReusedMS": 2.232211
+    }
+  ],
+  "Limitations": [
+    "Not stock gopls, not unsaved buffers, not editor keystroke-to-diagnostic latency.",
+    "Each request checks the edited file only, not all 25 workspace files.",
+    "Durations begin after the write; native includes subprocess, file read and envelope decode; embedded receives in-memory source bytes.",
+    "Cold WASM initialization is separate from warm Engine.Check timings.",
+    "The experimental reused guest is strictly sequential and not a production instance pool; cancellation, concurrency and lifetime safety remain unproven.",
+    "One fixture and one CI machine are insufficient for population-level performance or memory claims."
+  ]
+}

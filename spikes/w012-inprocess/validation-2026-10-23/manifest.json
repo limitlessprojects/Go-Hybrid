@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "record_kind": "local same-checkout validation and measurements",
+  "source_head_sha": "0dfd117f86eab9e47789adc5ebe30b84d32a6462",
+  "base_sha": "7d63d5fc25ceb525c2d0f6ec89a4ad608a6a5011",
+  "source_tree": "a691dfcfa1282c113dffd5ca5467eff061651cb4",
+  "toolchains": {
+    "go": "1.26.9",
+    "rust": "1.99.0",
+    "node": "24.19.0",
+    "wazero": "1.9.0"
+  },
+  "host": {
+    "os": "linux",
+    "arch": "amd64",
+    "visible_cpus": 5,
+    "gomaxprocs": 2,
+    "cargo_build_jobs": 2
+  },
+  "artifacts": {
+    "wasm": {
+      "sha256": "8758adb0366f479e68b1402bdc9e3cb5f1f958c96b7e27d93272a350b23769d9",
+      "bytes": 1714571
+    },
+    "native": {
+      "sha256": "2cbc0cfa2aa25140d2e6f12fb9118e537f44efb9241bfb4d7706dcae15216d98",
+      "bytes": 4070040
+    }
+  },
+  "files": [
+    {
+      "path": "w012-edit-benchmark.json",
+      "sha256": "650d23b2e44db20f5d59d238bd8c197b7b2e7d76e52c48db705bdf3cef5061ff",
+      "size_bytes": 20633,
+      "timestamp_utc": "2026-10-23T08:32:04Z",
+      "sample_count": 100
+    },
+    {
+      "path": "w012-cold-cache-first.json",
+      "sha256": "bf03a559a80e7aa9447e35e83ef95aa6c66e359270b06ea93ffa0c8a9e5bf797",
+      "size_bytes": 2237,
+      "timestamp_utc": "2026-10-23T08:34:16Z",
+      "sample_count": 2
+    },
+    {
+      "path": "w012-cold-cache-second.json",
+      "sha256": "f8eeac05c9411a493652f8b747622b017bc1482a682fe8b3847570c3e3a2c43a",
+      "size_bytes": 2209,
+      "timestamp_utc": "2026-10-23T08:34:16Z",
+      "sample_count": 2
+    }
+  ],
+  "commands": {
+    "native": "cargo build --locked --release -j2 -p hyb",
+    "wasm": "RUSTFLAGS= cargo build --locked --release -j2 -p hy-wasm --target wasm32-unknown-unknown",
+    "parity": "node test_wasm_parity.js",
+    "race": "go test -race -count=1 -v ./...",
+    "vet": "go vet ./...",
+    "bench": "go run ./cmd/editbench -root ../.. -files 25 -edits 100 -warmup 10 -output PATH",
+    "cache": "go build -o PATH ./cmd/editbench; two separate executions with same initially empty HYBRID_W012_CACHE_DIR, -root ../.. -files 2 -edits 2 -warmup 1"
+  },
+  "results": {
+    "corpus_expected_verdicts": "126/126",
+    "native_wasm_complete_envelopes": "126/126",
+    "go_wrapper_modeled_fields": "126/126",
+    "full_go_race": "pass outside filesystem sandbox",
+    "go_vet": "pass",
+    "go_only_consumer": "pass with cargo/rustc command names poisoned"
+  },
+  "environment_failures": {
+    "wasm_missing_target": "Initial build E0463; installed pinned wasm32-unknown-unknown target, unchanged build passed.",
+    "sandbox_vcs": "Initial full race and go-build consumer commands failed VCS stamping exit 128. Go build -x selected injected outer /workspace/.git metadata. Unchanged commands passed outside filesystem sandbox; no buildvcs override or Go wrapper."
+  },
+  "scope": "One local host; after-write single changed-file proxy. No IDE, full-workspace, production RSS, long-soak, packaging, or cross-platform result. Hosted compiler/quick/W012 evidence is separate.",
+  "head_associated_hosted_checks": {
+    "head": "0dfd117f86eab9e47789adc5ebe30b84d32a6462",
+    "checks": [
+      {
+        "name": "preflight",
+        "conclusion": "SKIPPED",
+        "url": "https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39924581055/job/120317725086"
+      },
+      {
+        "name": "quick",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39924581060/job/120317723451"
+      },
+      {
+        "name": "analyzer-parity",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39924581079/job/120317723743"
+      },
+      {
+        "name": "compiler",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39924581060/job/120317723716"
+      },
+      {
+        "name": "go-only-consumer",
+        "conclusion": "SUCCESS",
+        "url": "https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39924581079/job/120318747742"
+      }
+    ],
+    "scope": "Head-associated check statuses; workflow checkout/merge identity is distinct from the bare head and should be read from the individual checkout logs."
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "record_kind": "archived GitHub Actions measurements",
+  "repository": "limitlessprojects/Go-Hybrid",
+  "pull_request_url": "https://github.com/limitlessprojects/Go-Hybrid/pull/556",
+  "workflow_run_id": 39195170609,
+  "workflow_run_url": "https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39195170609",
+  "job_id": 117876286217,
+  "job_url": "https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39195170609/job/117876286217",
+  "source_head_sha": "6dafd4973114fe35c77133db89c19828a0ad07b6",
+  "tested_merge_sha": "b49e0606be4746d90cb5399ebdb04166024676b5",
+  "then_base_sha": "aa4a9d91b5edecd2bff37eba23fdd7befe60bd56",
+  "archived_at_utc": "2026-10-19T06:09:41Z",
+  "raw_json_preserved_byte_for_byte": true,
+  "archive_digests_verified_against": "GitHub Actions artifact API digest metadata",
+  "archive_extraction": "Only the exact expected JSON basenames were accepted; symlinks, directories, traversal names, and oversized entries were rejected.",
+  "scope": "Historical measurements for the source and merge SHAs above; no rebenchmark or later-head validation is implied.",
+  "artifacts": [
+    {
+      "id": 12161826108,
+      "name": "w012-request-latency-raw",
+      "archive_sha256": "f8ed7df03472f308427a8e6b6c0ddb55f4a16169d7b4363b7e29b22c08a7c41a",
+      "archive_size_bytes": 3429,
+      "created_at_utc": "2026-10-19T03:34:22Z",
+      "original_expires_at_utc": "2026-10-26T03:34:21Z",
+      "url": "https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39195170609/artifacts/12161826108",
+      "api_url": "https://api.github.com/repos/limitlessprojects/Go-Hybrid/actions/artifacts/12161826108",
+      "files": [
+        {
+          "path": "w012-edit-benchmark.json",
+          "size_bytes": 20617,
+          "sha256": "03120eecaab9d5d336e4e9ab76f12d7eb6ea9e6bf63023c0cb1f2e18cae1f064",
+          "sample_count": 100,
+          "measurement_timestamp_utc": "2026-10-19T03:34:19Z"
+        }
+      ]
+    },
+    {
+      "id": 12161412052,
+      "name": "w012-cross-process-cache-timings",
+      "archive_sha256": "998c6f8ee0a4e7f7b9af5b359c08e15cc0dd1754628540c9c4c8094f23e2da97",
+      "archive_size_bytes": 2420,
+      "created_at_utc": "2026-10-19T03:34:21Z",
+      "original_expires_at_utc": "2026-10-26T03:34:20Z",
+      "url": "https://github.com/limitlessprojects/Go-Hybrid/actions/runs/39195170609/artifacts/12161412052",
+      "api_url": "https://api.github.com/repos/limitlessprojects/Go-Hybrid/actions/artifacts/12161412052",
+      "files": [
+        {
+          "path": "w012-cold-cache-first.json",
+          "size_bytes": 2205,
+          "sha256": "e23f92a11279b8b317462efa7da5c3b6e0d50724181bce7288d57d44349aee62",
+          "sample_count": 2,
+          "measurement_timestamp_utc": "2026-10-19T03:34:20Z"
+        },
+        {
+          "path": "w012-cold-cache-second.json",
+          "size_bytes": 2212,
+          "sha256": "6d76dd27868b3fb825215981e9a3485366494ee61805e5b736e15da8700b514a",
+          "sample_count": 2,
+          "measurement_timestamp_utc": "2026-10-19T03:34:20Z"
+        }
+      ]
+    }
+  ]
+}
