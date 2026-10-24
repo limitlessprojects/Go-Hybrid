@@ -239,7 +239,11 @@ impl Emitter {
                                     )));
                                 }
                             };
+                            let recv_elem_ty = self.chan_elem_ty_of_expr(chan);
                             self.shadow_local_names(names);
+                            if let (Some(first), Some(ty)) = (names.first(), recv_elem_ty) {
+                                self.register_inferred_ty(first, &ty);
+                            }
                             self.push(&head);
                         }
                         SelectArmKind::Send { chan, value, .. } => {
@@ -1029,6 +1033,33 @@ impl Emitter {
         } else {
             Vec::new()
         };
+        let mut inferred_tys: Vec<(String, TypeExpr)> = Vec::new();
+        if values.len() == 1 {
+            if let Expr::Receive { chan, .. } = Self::peel_parens(&values[0]) {
+                if let (Some(first), Some(ty)) = (names.first(), self.chan_elem_ty_of_expr(chan)) {
+                    inferred_tys.push((first.clone(), ty));
+                }
+            } else if names.len() == 1 {
+                if let Some(elem) = self.chan_elem_ty_of_expr(&values[0]) {
+                    inferred_tys.push((
+                        names[0].clone(),
+                        TypeExpr::Chan {
+                            dir: hy_syntax::ChanDir::Both,
+                            elem: Box::new(elem),
+                            span: values[0].span(),
+                        },
+                    ));
+                }
+            }
+        } else if names.len() == values.len() {
+            for (n, v) in names.iter().zip(values) {
+                if let Expr::Receive { chan, .. } = Self::peel_parens(v) {
+                    if let Some(ty) = self.chan_elem_ty_of_expr(chan) {
+                        inferred_tys.push((n.clone(), ty));
+                    }
+                }
+            }
+        }
         self.shadow_local_names(names);
         if let Some(kind) = single_hint {
             if kind != BindingKind::Plain {
@@ -1042,6 +1073,9 @@ impl Emitter {
             if name != "_" && is_ptr {
                 self.pointer_vars.insert(name.clone());
             }
+        }
+        for (name, ty) in inferred_tys {
+            self.register_inferred_ty(&name, &ty);
         }
     }
 
@@ -1117,6 +1151,9 @@ impl Emitter {
     /// make(chan ...), or a function returning a channel). Channel ranges in
     /// Go permit only one iteration variable and bind the received value directly.
     fn is_channel_expr(&self, e: &Expr) -> bool {
+        if self.chan_elem_ty_of_expr(e).is_some() {
+            return true;
+        }
         match e {
             Expr::Ident { name, .. } => {
                 matches!(self.bindings.get(name), Some(BindingKind::Chan))
@@ -1126,6 +1163,46 @@ impl Emitter {
                 self.binding_kind_of(e) == BindingKind::Chan
             }
             _ => false,
+        }
+    }
+
+    fn chan_elem_ty_of_expr(&self, e: &Expr) -> Option<TypeExpr> {
+        match Self::peel_parens(e) {
+            Expr::Ident { name, .. } => self.chan_elem_ty.get(name).cloned(),
+            Expr::Try { operand, .. } | Expr::Move { operand, .. } => {
+                self.chan_elem_ty_of_expr(operand)
+            }
+            Expr::Receive { chan, .. } => {
+                let elem = self.chan_elem_ty_of_expr(chan)?;
+                match self.resolve_emit_alias(&elem) {
+                    TypeExpr::Chan { elem, .. } => Some((**elem).clone()),
+                    _ => None,
+                }
+            }
+            Expr::Field { base, name, .. } => {
+                let Expr::Ident { name: vn, .. } = Self::peel_parens(base) else {
+                    return None;
+                };
+                let sn = self.var_struct.get(vn)?;
+                let f = self.n5_structs.get(sn)?.iter().find(|f| f.name == *name)?;
+                match self.resolve_emit_alias(&f.ty) {
+                    TypeExpr::Chan { elem, .. } => Some((**elem).clone()),
+                    _ => None,
+                }
+            }
+            Expr::Call { callee, args, .. } => {
+                if matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "make") {
+                    if let Some(Expr::StructLit { ty: Some(t), .. }) =
+                        args.first().map(|a| Self::peel_parens(&a.value))
+                    {
+                        if let TypeExpr::Chan { elem, .. } = self.resolve_emit_alias(t) {
+                            return Some((**elem).clone());
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
         }
     }
 
@@ -1810,7 +1887,11 @@ impl Emitter {
                             // hint check.
                             let over_chan = self.is_channel_expr(expr);
                             if over_chan {
+                                let iter_elem_ty = self.chan_elem_ty_of_expr(expr);
                                 self.shadow_local_names(vars);
+                                if let Some(ty) = iter_elem_ty {
+                                    self.register_inferred_ty(&vars[0], &ty);
+                                }
                                 format!("for {} := range {} {{", vars[0], e)
                             } else {
                                 // A rust-handle slice (ForeignTy binding)
