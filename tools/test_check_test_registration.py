@@ -12,6 +12,7 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -54,6 +55,110 @@ class PatternExtractionTests(unittest.TestCase):
             guard.is_registered_direct("tests/test_install_runtime.py", workflow))
         self.assertFalse(
             guard.is_registered_direct("tests/test_install_runtime_extra.py", workflow))
+
+    def test_unfiltered_direct_options_and_paths_still_register(self):
+        for path, command in (
+            ("tests/test_live.py", "python3 tests/test_live.py -vqbcf --locals"),
+            ("tests/test_live.py", "python3 -B -W ignore -X dev -- ./tests/test_live.py -v"),
+            ("tests/-k suite/test_live.py", "python3 'tests/-k suite/test_live.py' -v"),
+            ("tests/test_live.py", "run: 'python3 tests/test_live.py -v'"),
+            ("tests/test_live.py", "python3 tests/test_live.py # -k test_pass"),
+            ("tests/test_live.py", "python3 tests/test_live.py; echo -k test_pass"),
+            ("tests/test_live.py", "python3 tests/test_live.py && echo -k test_pass"),
+        ):
+            with self.subTest(command=command):
+                self.assertTrue(guard.is_registered_direct(path, command))
+
+    def test_direct_filters_remain_visible_around_redirections(self):
+        path = "tests/test_live.py"
+        for arguments in (
+            path + " > output -k test_pass",
+            path + " -k test_pass > output",
+            path + " -k > output test_pass",
+            path + " >> output -vbqktest_pass",
+            path + " 2> errors -ktest_pass",
+            path + " 2>&1 -k test_pass",
+            path + " < input -k test_pass",
+            path + " <> input -k test_pass",
+            path + " >| output -k test_pass",
+            path + " &> output -k test_pass",
+            path + " &>> output -k test_pass",
+            path + " 3<&0 -k test_pass",
+            path + " > first 2> second -k test_pass",
+            "> output " + path + " -k test_pass",
+            "2> errors ./" + path + " -k test_pass",
+        ):
+            with self.subTest(arguments=arguments):
+                filtered = "python3 -B " + arguments
+                self.assertFalse(guard.is_registered_direct(path, filtered))
+                self.assertTrue(guard.is_registered_direct(
+                    path, filtered + "\npython3 " + path + " > complete\n"))
+
+    def test_direct_redirection_targets_and_later_commands_are_not_filters(self):
+        path = "tests/test_live.py"
+        for arguments in (
+            path + " > -k",
+            path + " >> -ktest_pass",
+            path + " 2> '-vk test_pass'",
+            path + " < -k",
+            path + " 2>&1",
+            path + " &> -k",
+            path + " &>> -k",
+            path + " >| -k",
+            "> output " + path + " -v",
+            "2> errors ./" + path + " -v",
+            path + " > output # -k test_pass",
+            path + " > output; echo -k test_pass",
+            path + " > output && echo -k test_pass",
+            path + " > output || echo -k test_pass",
+            path + " > output | echo -k test_pass",
+            path + " > output & echo -k test_pass",
+        ):
+            with self.subTest(arguments=arguments):
+                self.assertTrue(guard.is_registered_direct(path, "python3 -B " + arguments))
+        for separator in (";", "&&", "||", "|", "&"):
+            with self.subTest(separator=separator):
+                self.assertFalse(guard.is_registered_direct(path,
+                    "python3 " + path + " > output -k test_pass " + separator +
+                    " python3 " + path))
+
+    def test_unsupported_or_incomplete_direct_redirections_do_not_register(self):
+        for suffix in (">", "2>", "> ; echo done", "<< EOF", "<<< text", ">(echo data)"):
+            with self.subTest(suffix=suffix):
+                self.assertFalse(guard.is_registered_direct(
+                    "tests/test_live.py", "python3 tests/test_live.py " + suffix))
+
+    def test_direct_descriptors_require_unquoted_adjacent_numbers(self):
+        path = "tests/test_live.py"
+        for number in ("2 ", "'2'", '"2"', r"\2", '2""'):
+            with self.subTest(number=number):
+                self.assertFalse(guard.is_registered_direct(path,
+                    "python3 -B " + number + "> output " + path))
+        self.assertTrue(guard.is_registered_direct(path,
+            "python3 -B 2> output " + path))
+        self.assertFalse(guard.is_registered_direct(path,
+            "python3 -B 2> output " + path + " -k test_pass"))
+
+    def test_combined_redirects_do_not_take_descriptor_prefixes(self):
+        path = "tests/test_live.py"
+        for operator in ("&>", "&>>"):
+            with self.subTest(operator=operator):
+                self.assertFalse(guard.is_registered_direct(path,
+                    "python3 -B 2" + operator + " output " + path))
+                self.assertTrue(guard.is_registered_direct(path,
+                    "python3 -B " + operator + " output " + path))
+
+    def test_direct_quoted_punctuation_targets_are_words(self):
+        path = "tests/test_live.py"
+        for target in ("'&'", "';'", "'>'", "'<'", "'>>'", "'&&'", "'|'", "'('",
+                       r"\&", r"\>", "'&'\"\"", "'file name'"):
+            with self.subTest(target=target):
+                complete = "python3 " + path + " > " + target
+                self.assertTrue(guard.is_registered_direct(path, complete))
+                self.assertFalse(guard.is_registered_direct(path, complete + " -k test_pass"))
+                self.assertTrue(guard.is_registered_direct(path, complete + "; echo -k test_pass"))
+        self.assertTrue(guard.is_registered_direct(path,
+            'run: "python3 ' + path + ' > \'&\'"'))
 
     # --- explicit-invocation parsing (from pr-600, fixes #596) ---
 
@@ -153,6 +258,156 @@ class RegistrationTests(unittest.TestCase):
             ["tests/test_install_checksums.py"])
         missing = guard.unregistered(root, text)
         self.assertEqual([rel for rel, _ in missing], ["tests/test_install_checksums.py"])
+
+    def test_direct_name_filter_cannot_hide_a_failing_regression(self):
+        path = "tests/test_direct_filter.py"
+        complete = "python3 " + path + "\n"
+        root, _ = self.build(complete, [path])
+        (root / path).write_text(
+            "import unittest\n"
+            "class DirectTests(unittest.TestCase):\n"
+            "    def test_failure(self): self.fail('direct regression ran')\n"
+            "    def test_pass(self): pass\n"
+            "if __name__ == '__main__': unittest.main()\n",
+            encoding="utf-8")
+        command = [sys.executable, path]
+        control = subprocess.run(command, cwd=root, capture_output=True,
+                                 text=True, timeout=15)
+        self.assertEqual(control.returncode, 1, control.stderr)
+        self.assertIn("Ran 2 tests", control.stderr)
+        self.assertIn("direct regression ran", control.stderr)
+        for options, count in (
+            (["-k", "test_pass"], 1),
+            (["-ktest_pass"], 1),
+            (["-vk", "test_pass"], 1),
+            (["-qktest_pass"], 1),
+            (["-bfck", "test_pass"], 1),
+            (["-vbqfk", "test_pass"], 1),
+            (["-k", "never_matches", "-k", "test_pass"], 1),
+            (["-k", "test_pass", "-k", "never_matches"], 1),
+            (["-k", "never_matches"], 0),
+        ):
+            with self.subTest(options=options):
+                selected = subprocess.run(command + options, cwd=root,
+                                          capture_output=True, text=True, timeout=15)
+                # Python 3.12+ reports an empty selection with exit 5; a
+                # passing subset still exits zero while omitting the failure.
+                expected = 5 if count == 0 and sys.version_info >= (3, 12) else 0
+                self.assertEqual(selected.returncode, expected, selected.stderr)
+                self.assertIn(f"Ran {count} test", selected.stderr)
+                self.assertNotIn("direct regression ran", selected.stderr)
+                filtered = complete.rstrip() + " " + " ".join(options) + "\n"
+                self.assertEqual([rel for rel, _ in guard.unregistered(root, filtered)],
+                                 [path])
+                self.assertEqual(guard.unregistered(root, filtered + complete), [])
+
+    def test_redirected_direct_filter_cannot_hide_a_failing_regression(self):
+        path = "tests/test_redirected.py"
+        root, _ = self.build("", [path])
+        (root / path).write_text(
+            "import unittest\n"
+            "class RedirectedTests(unittest.TestCase):\n"
+            "    def test_failure(self): self.fail('redirected regression ran')\n"
+            "    def test_pass(self): pass\n"
+            "if __name__ == '__main__': unittest.main()\n", encoding="utf-8")
+        for suffix, options, count in (
+            ("> -k", [], 2),
+            ("> output -k test_pass", ["-k", "test_pass"], 1),
+            ("-k test_pass > output", ["-k", "test_pass"], 1),
+            ("-k > output test_pass", ["-k", "test_pass"], 1),
+            ("> output -vbqktest_pass", ["-vbqktest_pass"], 1),
+        ):
+            with self.subTest(suffix=suffix):
+                # Fixed Python argv plus a stdio handle reproduces redirection
+                # without executing an arbitrary shell command in the test.
+                with (root / "output").open("w", encoding="utf-8") as output:
+                    actual = subprocess.run([sys.executable, path] + options,
+                                            cwd=root, stdout=output, stderr=subprocess.PIPE,
+                                            text=True, timeout=15)
+                self.assertEqual(actual.returncode, 1 if count == 2 else 0, actual.stderr)
+                self.assertIn(f"Ran {count} test", actual.stderr)
+                if count == 2:
+                    self.assertIn("redirected regression ran", actual.stderr)
+                else:
+                    self.assertNotIn("redirected regression ran", actual.stderr)
+                workflow = "python3 " + path + " " + suffix + "\n"
+                self.assertEqual([rel for rel, _ in guard.unregistered(root, workflow)],
+                                 [] if count == 2 else [path])
+
+    @unittest.skipIf(os.name == "nt", "fixed POSIX shell fixture")
+    def test_real_shell_preserves_numeric_entry_and_quoted_target_boundaries(self):
+        path = "tests/test_lexical.py"
+        root, _ = self.build("", [path])
+        (root / "2").write_text("print('OTHER_NUMERIC_ENTRY')\n", encoding="utf-8")
+        (root / path).write_text(
+            "import unittest\nclass Cases(unittest.TestCase):\n"
+            "    def test_failure(self): self.fail('LEXICAL_FAILURE_RAN')\n"
+            "    def test_pass(self): pass\n"
+            "if __name__ == '__main__': unittest.main()\n", encoding="utf-8")
+        outputs = ("numeric.output", "stderr.output", "&", ";", ">", "out", "errors")
+        for arguments, count, registered in (
+            ("2 > numeric.output " + path, 0, False),
+            ("'2'> numeric.output " + path, 0, False),
+            ('"2"> numeric.output ' + path, 0, False),
+            (r"\2> numeric.output " + path, 0, False),
+            ('2""> numeric.output ' + path, 0, False),
+            ("2> stderr.output " + path, 2, True),
+            (path + " > '&'", 2, True),
+            (path + r" > \&", 2, True),
+            (path + " > ';' -k test_pass", 1, False),
+            (path + " > '&' -k test_pass", 1, False),
+            (path + " -k > '>' test_pass", 1, False),
+            (path + " > out 2>&1", 2, True),
+            ("2> errors " + path + " -k test_pass", 1, False),
+        ):
+            with self.subTest(arguments=arguments):
+                for output in outputs:
+                    (root / output).unlink(missing_ok=True)
+                command = shlex.quote(sys.executable) + " -B " + arguments
+                actual = subprocess.run(["/bin/sh", "-c", command], cwd=root,
+                                        capture_output=True, text=True, timeout=15)
+                text = actual.stdout + actual.stderr + "".join(
+                    (root / output).read_text() for output in outputs if (root / output).exists())
+                self.assertEqual(actual.returncode, 1 if count == 2 else 0, text)
+                if count == 0:
+                    self.assertIn("OTHER_NUMERIC_ENTRY", text)
+                    self.assertNotIn("Ran ", text)
+                else:
+                    self.assertIn(f"Ran {count} test", text)
+                self.assertEqual("LEXICAL_FAILURE_RAN" in text, count == 2)
+                missing = guard.unregistered(root, "python3 -B " + arguments)
+                self.assertEqual([rel for rel, _ in missing], [] if registered else [path])
+
+    @unittest.skipUnless(os.path.isfile("/bin/bash"), "fixed Bash redirection fixture")
+    def test_bash_combined_redirect_keeps_numeric_entry(self):
+        path = "tests/test_combined.py"
+        root, _ = self.build("", [path])
+        (root / "2").write_text("print('COMBINED_NUMERIC_ENTRY')\n", encoding="utf-8")
+        (root / path).write_text(
+            "import unittest\nclass Cases(unittest.TestCase):\n"
+            "    def test_failure(self): self.fail('COMBINED_FAILURE_RAN')\n"
+            "    def test_pass(self): pass\n"
+            "if __name__ == '__main__': unittest.main()\n", encoding="utf-8")
+        for operator in ("&>", "&>>"):
+            for prefix, options, count in (("2", "", 0), ("", "", 2), ("", " -k test_pass", 1)):
+                with self.subTest(operator=operator, prefix=prefix, options=options):
+                    output = root / "combined.log"
+                    output.unlink(missing_ok=True)
+                    arguments = prefix + operator + " combined.log " + path + options
+                    actual = subprocess.run(
+                        ["/bin/bash", "--noprofile", "--norc", "-c",
+                         shlex.quote(sys.executable) + " -B " + arguments],
+                        cwd=root, capture_output=True, text=True, timeout=15)
+                    text = actual.stdout + actual.stderr + output.read_text()
+                    self.assertEqual(actual.returncode, 1 if count == 2 else 0, text)
+                    if count == 0:
+                        self.assertIn("COMBINED_NUMERIC_ENTRY", text)
+                        self.assertNotIn("Ran ", text)
+                    else:
+                        self.assertIn(f"Ran {count} test", text)
+                    self.assertEqual("COMBINED_FAILURE_RAN" in text, count == 2)
+                    missing = guard.unregistered(root, "python3 -B " + arguments)
+                    self.assertEqual([rel for rel, _ in missing], [] if count == 2 else [path])
 
     def test_both_halves_are_checked_together(self):
         workflow = "          python3 -m unittest discover -s tools -p test_x.py\n"
@@ -307,6 +562,12 @@ class GuardMisuseTests(unittest.TestCase):
         self.assertEqual(
             self.run_main("python3 -m unittest discover -s tools -p test_x.py\n",
                           ["tools/test_x.py", "tools/test_y.py"]), 1)
+
+    def test_filtered_direct_script_exits_one_until_complete_call_exists(self):
+        path = "tests/test_live.py"
+        filtered = "python3 -B ./" + path + " -vk test_pass\n"
+        self.assertEqual(self.run_main(filtered, [path]), 1)
+        self.assertEqual(self.run_main(filtered + "python3 " + path + "\n", [path]), 0)
 
     def test_matching_orphan_outside_discovery_directory_exits_one(self):
         self.assertEqual(

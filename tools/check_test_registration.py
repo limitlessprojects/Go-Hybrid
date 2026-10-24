@@ -16,7 +16,8 @@ reference it, and fails closed on any file no reference reaches:
                          package directories, and match PATTERN (a glob such
                          as `test_job*.py` covers a family)
   tests/**/test_*.py  run directly, e.g. `python3 tests/test_install_runtime.py`
-                      -> the path must be the invoked Python entry point
+                      -> the path must be the invoked Python entry point,
+                         without unittest `-k` name filtering
 
 Only explicit single-line Python invocations count. Comments, echoed text,
 step names, interpreter flags, chained later commands, and paths passed as
@@ -50,7 +51,63 @@ def shell_words(line):
     return list(lexer)
 
 
-def python_commands(workflow_text):
+def direct_shell_words(line):
+    """Retain literal spelling and operator provenance for direct commands."""
+    word = re.compile(r'''(?:[^ \t\r\n;&|<>()'"\\]+|'[^']*'|"(?:\\.|[^"\\])*"|\\.)+''')
+    punctuation = re.compile(r"[;&|<>()]+")
+    tokens = []
+    index = 0
+    while index < len(line):
+        if line[index] in " \t\r\n":
+            index += 1
+            continue
+        if line[index] == "#":
+            break
+        operator = punctuation.match(line, index)
+        match = operator or word.match(line, index)
+        if match is None:
+            raise ValueError("unsupported or incomplete shell word")
+        raw = match.group()
+        value = raw if operator else shlex.split(raw)[0]
+        tokens.append((value, bool(operator), raw, index, match.end()))
+        index = match.end()
+    return tokens
+
+
+def direct_command_arguments(tokens):
+    """Keep the first command's arguments around supported redirections.
+
+    Redirection targets are not Python arguments. Unsupported shell syntax
+    cannot certify a direct suite; this never executes or expands shell text.
+    """
+    redirections = {">", ">>", "<", "<>", ">|", ">&", "<&", "&>", "&>>"}
+    # Bash combined-stream redirects never take an IO-number prefix.
+    descriptor_redirections = redirections - {"&>", "&>>"}
+    arguments = []
+    index = 0
+    while index < len(tokens):
+        token, operator, raw, _start, end = tokens[index]
+        if (not operator and re.fullmatch(r"[0-9]+", raw)
+                and index + 1 < len(tokens) and end == tokens[index + 1][3]
+                and tokens[index + 1][1] and tokens[index + 1][0] in descriptor_redirections):
+            index += 1  # Optional source file descriptor, e.g. 2> or 3<&.
+            token, operator, _raw, _start, _end = tokens[index]
+        if operator and token in redirections:
+            if (index + 1 == len(tokens)
+                    or tokens[index + 1][1] or not tokens[index + 1][0]):
+                return []
+            index += 2  # Skip the operator and its filename/descriptor.
+        elif operator:
+            if "<" in token or ">" in token:
+                return []  # No heredocs, here-strings, or process substitution.
+            break  # A later simple command never supplies Python arguments.
+        else:
+            arguments.append(token)
+            index += 1
+    return arguments
+
+
+def python_commands(workflow_text, *, direct=False):
     """Yield arguments of explicit, single-line Python invocations."""
     for line in workflow_text.splitlines():
         line = line.strip()
@@ -61,15 +118,22 @@ def python_commands(workflow_text):
             tokens = shell_words(line)
             # A quoted YAML run scalar wraps the whole shell command.
             if inline_run and len(tokens) == 1:
-                tokens = shell_words(tokens[0])
+                line = tokens[0]
+                tokens = shell_words(line)
+            if direct:
+                direct_tokens = direct_shell_words(line)
+                tokens = [token[0] for token in direct_tokens]
         except ValueError:
             continue
         if tokens and PYTHON_RE.fullmatch(tokens[0]):
             # Only the first simple command is covered. A following echo's
             # -p flag must never become another unittest discovery pattern.
-            end = next((i for i, token in enumerate(tokens)
-                        if token and all(c in ";&|<>()" for c in token)), len(tokens))
-            arguments = tokens[1:end]
+            if direct:
+                arguments = direct_command_arguments(direct_tokens[1:])
+            else:
+                end = next((i for i, token in enumerate(tokens)
+                            if token and all(c in ";&|<>()" for c in token)), len(tokens))
+                arguments = tokens[1:end]
             while arguments:
                 option = arguments[0]
                 if PYTHON_FLAGS_RE.fullmatch(option):
@@ -146,9 +210,11 @@ def is_reached_discover(root, relpath, start, pattern):
 
 
 def is_registered_direct(relpath, workflow_text):
-    """A script must be the Python entry point, not a comment or argument."""
+    """Require a direct entry point without name-filtered partial coverage."""
     return any(arguments and arguments[0] in (relpath, "./" + relpath)
-               for arguments in python_commands(workflow_text))
+               and not any(re.match(r"^-[vqbfc]*k", argument)
+                           for argument in arguments[1:])
+               for arguments in python_commands(workflow_text, direct=True))
 
 
 def find_test_files(root, directory):
