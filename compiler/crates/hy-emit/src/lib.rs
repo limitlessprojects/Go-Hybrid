@@ -661,16 +661,6 @@ impl Emitter {
                 _ => None,
             })
             .collect();
-        self.n5_structs = file
-            .decls
-            .iter()
-            .filter_map(|d| match d {
-                Decl::Struct(s) if s.type_params.is_empty() => {
-                    Some((s.name.clone(), s.fields.clone()))
-                }
-                _ => None,
-            })
-            .collect();
         self.n5_aliases = file
             .decls
             .iter()
@@ -679,6 +669,7 @@ impl Emitter {
                 _ => None,
             })
             .collect();
+        self.populate_n5_structs(file);
         self.ptr_returning_fns = file
             .fns()
             .filter(|f| {
@@ -866,6 +857,135 @@ impl Emitter {
         Ok(())
     }
 
+    fn populate_n5_structs(&mut self, file: &File) {
+        self.n5_structs.clear();
+        let mut generic_structs: Vec<&StructDecl> = Vec::new();
+        for d in &file.decls {
+            if let Decl::Struct(s) = d {
+                if s.type_params.is_empty() {
+                    self.n5_structs.insert(s.name.clone(), s.fields.clone());
+                } else {
+                    let mut comp = BTreeSet::new();
+                    for (i, p) in s.type_params.iter().enumerate() {
+                        let c = p.constraint.as_deref().or_else(|| {
+                            s.type_params[i + 1..]
+                                .iter()
+                                .find_map(|next| next.constraint.as_deref())
+                        });
+                        if c == Some("comparable") {
+                            comp.insert(p.name.clone());
+                        }
+                    }
+                    let key = Self::format_n5_struct_key(&s.name, &s.type_params, &comp);
+                    self.n5_structs.insert(key, s.fields.clone());
+                    generic_structs.push(s);
+                }
+            }
+        }
+        // Fixed-point propagation across generic struct fields and methods so
+        // `struct wrapper[k, v] { inner table[k, v] }` and methods like
+        // `fn (s *set_buf[t]) unique() map[t]bool` propagate `comparable` onto
+        // the declaring struct's type parameters (#722).
+        for _ in 0..8 {
+            let mut changed = false;
+            for s in &generic_structs {
+                let param_names: BTreeSet<String> =
+                    s.type_params.iter().map(|p| p.name.clone()).collect();
+                let mut comp = self.struct_comparable_params(&s.name);
+                let prev_len = comp.len();
+                for f in &s.fields {
+                    self.collect_comparable_in_ty(&f.ty, &param_names, &mut comp);
+                }
+                for fn_decl in file.fns() {
+                    let Some(recv) = &fn_decl.receiver else {
+                        continue;
+                    };
+                    let Some((recv_head, recv_tparams)) = Self::receiver_generic_spec(&recv.ty)
+                    else {
+                        continue;
+                    };
+                    if recv_head != s.name || recv_tparams.len() != s.type_params.len() {
+                        continue;
+                    }
+                    let method_param_names: BTreeSet<String> =
+                        recv_tparams.iter().cloned().collect();
+                    let mut method_comp = BTreeSet::new();
+                    self.collect_comparable_in_fn_parts(
+                        fn_decl,
+                        &method_param_names,
+                        &mut method_comp,
+                    );
+                    for (idx, r_tp) in recv_tparams.iter().enumerate() {
+                        if method_comp.contains(r_tp) {
+                            comp.insert(s.type_params[idx].name.clone());
+                        }
+                    }
+                }
+                if comp.len() != prev_len {
+                    let prefix = format!("{}[", s.name);
+                    self.n5_structs.retain(|k, _| !k.starts_with(&prefix));
+                    let key = Self::format_n5_struct_key(&s.name, &s.type_params, &comp);
+                    self.n5_structs.insert(key, s.fields.clone());
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    fn format_n5_struct_key(
+        name: &str,
+        type_params: &[TypeParam],
+        comp: &BTreeSet<String>,
+    ) -> String {
+        let specs = type_params
+            .iter()
+            .map(|p| {
+                if comp.contains(&p.name) {
+                    format!("{}:comparable", p.name)
+                } else {
+                    p.name.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("{}[{}]", name, specs)
+    }
+
+    fn struct_comparable_params(&self, name: &str) -> BTreeSet<String> {
+        let Some((specs, _)) = self.generic_struct_entry(name) else {
+            return BTreeSet::new();
+        };
+        specs
+            .into_iter()
+            .filter_map(|(p, is_comp)| if is_comp { Some(p) } else { None })
+            .collect()
+    }
+
+    fn receiver_generic_spec(mut ty: &TypeExpr) -> Option<(String, Vec<String>)> {
+        while let TypeExpr::Pointer { to, .. } = ty {
+            ty = to;
+        }
+        let TypeExpr::Named { name, .. } = ty else {
+            return None;
+        };
+        let trimmed = name.trim();
+        let open = trimmed.find('[')?;
+        if open == 0 || !trimmed.ends_with(']') {
+            return None;
+        }
+        let head = trimmed[..open].trim().to_string();
+        let inner = &trimmed[open + 1..trimmed.len() - 1];
+        let params = Self::split_top_level_type_args(inner)
+            .into_iter()
+            .map(|p| p.split_whitespace().next().unwrap_or("").trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect();
+        Some((head, params))
+    }
+
     fn emit_struct(&mut self, s: &StructDecl) -> Result<(), EmitError> {
         if !s.type_params.is_empty() {
             // Generic struct (example-07 surface): Go requires a constraint on
@@ -874,9 +994,9 @@ impl Emitter {
             // type `[t]struct{}` (`undefined: t`, issue #722).
             let param_names: BTreeSet<String> =
                 s.type_params.iter().map(|p| p.name.clone()).collect();
-            let mut comparable_params = BTreeSet::new();
+            let mut comparable_params = self.struct_comparable_params(&s.name);
             for f in &s.fields {
-                Self::collect_comparable_in_ty(&f.ty, &param_names, &mut comparable_params);
+                self.collect_comparable_in_ty(&f.ty, &param_names, &mut comparable_params);
             }
             let params = self.format_type_params(&s.type_params, &comparable_params);
             self.push(&format!("type {}[{}] struct {{", s.name, params));
@@ -938,84 +1058,188 @@ impl Emitter {
             .join(", ")
     }
 
+    fn collect_comparable_in_fn_parts(
+        &self,
+        f: &FnDecl,
+        param_names: &BTreeSet<String>,
+        out: &mut BTreeSet<String>,
+    ) {
+        let mut var_tys: BTreeMap<String, TypeExpr> = BTreeMap::new();
+        if let Some(recv) = &f.receiver {
+            self.collect_comparable_in_ty(&recv.ty, param_names, out);
+            var_tys.insert(recv.name.clone(), recv.ty.clone());
+        }
+        for p in &f.params {
+            self.collect_comparable_in_ty(&p.ty, param_names, out);
+            var_tys.insert(p.name.clone(), p.ty.clone());
+        }
+        for r in &f.results {
+            self.collect_comparable_in_ty(&r.ty, param_names, out);
+            if let Some(n) = &r.name {
+                var_tys.insert(n.clone(), r.ty.clone());
+            }
+        }
+        if let Some(body) = &f.body {
+            self.collect_comparable_in_block(body, param_names, &mut var_tys, out);
+        }
+    }
+
+    fn collect_value_comparable_in_ty(
+        &self,
+        ty: &TypeExpr,
+        param_names: &BTreeSet<String>,
+        out: &mut BTreeSet<String>,
+    ) {
+        match ty {
+            TypeExpr::Named { name, .. } => {
+                let trimmed = name.trim();
+                if param_names.contains(trimmed) {
+                    out.insert(trimmed.to_string());
+                    return;
+                }
+                if let Some(alias_ty) = self.n5_aliases.get(trimmed) {
+                    self.collect_value_comparable_in_ty(alias_ty, param_names, out);
+                    return;
+                }
+                if let Some(open) = trimmed.find('[') {
+                    if open > 0 && trimmed.ends_with(']') {
+                        let head = trimmed[..open].trim();
+                        let inner = &trimmed[open + 1..trimmed.len() - 1];
+                        if head == "option" || self.generic_struct_entry(head).is_some() {
+                            for a in Self::split_top_level_type_args(inner) {
+                                let arg_ty = Self::parse_type_arg_str(a, ty);
+                                self.collect_value_comparable_in_ty(&arg_ty, param_names, out);
+                            }
+                        }
+                    }
+                }
+            }
+            TypeExpr::Option { elem, .. } | TypeExpr::Array { elem, .. } => {
+                self.collect_value_comparable_in_ty(elem, param_names, out);
+            }
+            TypeExpr::Pointer { .. }
+            | TypeExpr::Slice { .. }
+            | TypeExpr::Map { .. }
+            | TypeExpr::Chan { .. }
+            | TypeExpr::Fn { .. } => {}
+        }
+    }
+
     fn collect_comparable_in_ty(
+        &self,
         ty: &TypeExpr,
         param_names: &BTreeSet<String>,
         out: &mut BTreeSet<String>,
     ) {
         match ty {
             TypeExpr::Map { key, value, .. } => {
-                if let TypeExpr::Named { name, .. } = key.as_ref() {
-                    if param_names.contains(name) {
-                        out.insert(name.clone());
-                    }
-                }
-                Self::collect_comparable_in_ty(key, param_names, out);
-                Self::collect_comparable_in_ty(value, param_names, out);
+                self.collect_value_comparable_in_ty(key, param_names, out);
+                self.collect_comparable_in_ty(key, param_names, out);
+                self.collect_comparable_in_ty(value, param_names, out);
             }
             TypeExpr::Named { name, .. } => {
-                if let Some(inner) = name.strip_prefix("set[").and_then(|s| s.strip_suffix(']')) {
-                    let elem = inner.trim();
-                    if param_names.contains(elem) {
-                        out.insert(elem.to_string());
+                let trimmed = name.trim();
+                if let Some(alias_ty) = self.n5_aliases.get(trimmed) {
+                    self.collect_comparable_in_ty(alias_ty, param_names, out);
+                    return;
+                }
+                if let Some(inner) = trimmed.strip_prefix("set[").and_then(|s| s.strip_suffix(']'))
+                {
+                    let elem_ty = Self::parse_type_arg_str(inner, ty);
+                    self.collect_value_comparable_in_ty(&elem_ty, param_names, out);
+                    self.collect_comparable_in_ty(&elem_ty, param_names, out);
+                    return;
+                }
+                if let Some(open) = trimmed.find('[') {
+                    if open > 0 && trimmed.ends_with(']') {
+                        let head = trimmed[..open].trim();
+                        let inner = &trimmed[open + 1..trimmed.len() - 1];
+                        let parsed_args: Vec<TypeExpr> = Self::split_top_level_type_args(inner)
+                            .into_iter()
+                            .map(|a| Self::parse_type_arg_str(a, ty))
+                            .collect();
+                        for arg_ty in &parsed_args {
+                            self.collect_comparable_in_ty(arg_ty, param_names, out);
+                        }
+                        if let Some((specs, _)) = self.generic_struct_entry(head) {
+                            for ((_, is_comp), arg_ty) in specs.into_iter().zip(parsed_args.iter())
+                            {
+                                if is_comp {
+                                    self.collect_value_comparable_in_ty(arg_ty, param_names, out);
+                                }
+                            }
+                        }
                     }
                 }
             }
-            TypeExpr::Pointer { to, .. } => Self::collect_comparable_in_ty(to, param_names, out),
+            TypeExpr::Pointer { to, .. } => self.collect_comparable_in_ty(to, param_names, out),
             TypeExpr::Slice { elem, .. }
             | TypeExpr::Array { elem, .. }
             | TypeExpr::Chan { elem, .. }
             | TypeExpr::Option { elem, .. } => {
-                Self::collect_comparable_in_ty(elem, param_names, out);
+                self.collect_comparable_in_ty(elem, param_names, out);
             }
             TypeExpr::Fn {
                 params, results, ..
             } => {
                 for p in params {
-                    Self::collect_comparable_in_ty(&p.ty, param_names, out);
+                    self.collect_comparable_in_ty(&p.ty, param_names, out);
                 }
                 for r in results {
-                    Self::collect_comparable_in_ty(r, param_names, out);
+                    self.collect_comparable_in_ty(r, param_names, out);
                 }
             }
         }
     }
 
     fn collect_comparable_in_block(
+        &self,
         b: &Block,
         param_names: &BTreeSet<String>,
+        var_tys: &mut BTreeMap<String, TypeExpr>,
         out: &mut BTreeSet<String>,
     ) {
         for s in &b.stmts {
-            Self::collect_comparable_in_stmt(s, param_names, out);
+            self.collect_comparable_in_stmt(s, param_names, var_tys, out);
         }
     }
 
     fn collect_comparable_in_stmt(
+        &self,
         s: &Stmt,
         param_names: &BTreeSet<String>,
+        var_tys: &mut BTreeMap<String, TypeExpr>,
         out: &mut BTreeSet<String>,
     ) {
         match s {
             Stmt::Local(l) => {
                 if let Some(ty) = &l.ty {
-                    Self::collect_comparable_in_ty(ty, param_names, out);
+                    self.collect_comparable_in_ty(ty, param_names, out);
+                    for n in &l.names {
+                        var_tys.insert(n.clone(), ty.clone());
+                    }
+                } else if l.names.len() == l.values.len() {
+                    for (n, v) in l.names.iter().zip(l.values.iter()) {
+                        if let Some(inferred) = self.infer_expr_ty_for_comparable(v, var_tys) {
+                            var_tys.insert(n.clone(), inferred);
+                        }
+                    }
                 }
                 for v in &l.values {
-                    Self::collect_comparable_in_expr(v, param_names, out);
+                    self.collect_comparable_in_expr(v, param_names, var_tys, out);
                 }
             }
             Stmt::Assign { values, .. } | Stmt::Return { values, .. } => {
                 for v in values {
-                    Self::collect_comparable_in_expr(v, param_names, out);
+                    self.collect_comparable_in_expr(v, param_names, var_tys, out);
                 }
             }
             Stmt::Expr { expr, .. } | Stmt::Defer { call: expr, .. } => {
-                Self::collect_comparable_in_expr(expr, param_names, out);
+                self.collect_comparable_in_expr(expr, param_names, var_tys, out);
             }
             Stmt::Send { chan, value, .. } => {
-                Self::collect_comparable_in_expr(chan, param_names, out);
-                Self::collect_comparable_in_expr(value, param_names, out);
+                self.collect_comparable_in_expr(chan, param_names, var_tys, out);
+                self.collect_comparable_in_expr(value, param_names, var_tys, out);
             }
             Stmt::If {
                 init,
@@ -1025,127 +1249,203 @@ impl Emitter {
                 ..
             } => {
                 if let Some(i) = init {
-                    Self::collect_comparable_in_stmt(i, param_names, out);
+                    self.collect_comparable_in_stmt(i, param_names, var_tys, out);
                 }
-                Self::collect_comparable_in_expr(cond, param_names, out);
-                Self::collect_comparable_in_block(then, param_names, out);
+                self.collect_comparable_in_expr(cond, param_names, var_tys, out);
+                self.collect_comparable_in_block(then, param_names, var_tys, out);
                 if let Some(o) = otherwise {
-                    Self::collect_comparable_in_stmt(o, param_names, out);
+                    self.collect_comparable_in_stmt(o, param_names, var_tys, out);
                 }
             }
             Stmt::For { kind, body, .. } => {
                 match kind {
                     ForKind::While { cond } => {
-                        Self::collect_comparable_in_expr(cond, param_names, out);
+                        self.collect_comparable_in_expr(cond, param_names, var_tys, out);
                     }
                     ForKind::Range { lo, hi, .. } => {
-                        Self::collect_comparable_in_expr(lo, param_names, out);
-                        Self::collect_comparable_in_expr(hi, param_names, out);
+                        self.collect_comparable_in_expr(lo, param_names, var_tys, out);
+                        self.collect_comparable_in_expr(hi, param_names, var_tys, out);
                     }
                     ForKind::Iterate { expr, .. } => {
-                        Self::collect_comparable_in_expr(expr, param_names, out);
+                        self.collect_comparable_in_expr(expr, param_names, var_tys, out);
                     }
                     ForKind::Infinite => {}
                 }
-                Self::collect_comparable_in_block(body, param_names, out);
+                self.collect_comparable_in_block(body, param_names, var_tys, out);
             }
             Stmt::Block { block, .. } | Stmt::Managed { body: block, .. } => {
-                Self::collect_comparable_in_block(block, param_names, out);
+                self.collect_comparable_in_block(block, param_names, var_tys, out);
             }
             Stmt::Task { callee, args, .. } => {
-                Self::collect_comparable_in_expr(callee, param_names, out);
+                self.collect_comparable_in_expr(callee, param_names, var_tys, out);
                 for a in args {
-                    Self::collect_comparable_in_expr(&a.value, param_names, out);
+                    self.collect_comparable_in_expr(&a.value, param_names, var_tys, out);
                 }
             }
             Stmt::Match { subject, arms, .. } => {
-                Self::collect_comparable_in_expr(subject, param_names, out);
+                self.collect_comparable_in_expr(subject, param_names, var_tys, out);
+                let is_option_match = arms.iter().any(|a| {
+                    matches!(
+                        &a.pattern,
+                        MatchPattern::Path { segments, .. }
+                            if segments.len() == 1 && (segments[0] == "some" || segments[0] == "none")
+                    )
+                });
+                if !is_option_match {
+                    if let Some(sub_ty) = self.infer_expr_ty_for_comparable(subject, var_tys) {
+                        self.collect_value_comparable_in_ty(&sub_ty, param_names, out);
+                    }
+                }
                 for a in arms {
                     if let Some(g) = &a.guard {
-                        Self::collect_comparable_in_expr(g, param_names, out);
+                        self.collect_comparable_in_expr(g, param_names, var_tys, out);
                     }
-                    Self::collect_comparable_in_block(&a.body, param_names, out);
+                    self.collect_comparable_in_block(&a.body, param_names, var_tys, out);
                 }
             }
             Stmt::Select { arms, .. } => {
                 for a in arms {
-                    Self::collect_comparable_in_block(&a.body, param_names, out);
+                    self.collect_comparable_in_block(&a.body, param_names, var_tys, out);
                 }
             }
             Stmt::Break { .. } | Stmt::Continue { .. } => {}
         }
     }
 
+    fn is_nil_lit(mut e: &Expr) -> bool {
+        while let Expr::Paren { inner, .. } = e {
+            e = inner;
+        }
+        matches!(e, Expr::Lit { kind: LitKind::Nil, .. })
+    }
+
+    fn infer_expr_ty_for_comparable(
+        &self,
+        mut e: &Expr,
+        var_tys: &BTreeMap<String, TypeExpr>,
+    ) -> Option<TypeExpr> {
+        while let Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } = e {
+            e = inner;
+        }
+        match e {
+            Expr::Ident { name, .. } => var_tys.get(name.as_str()).cloned(),
+            Expr::Field { base, name, .. } => {
+                let mut base_ty = self.infer_expr_ty_for_comparable(base, var_tys)?;
+                while let TypeExpr::Pointer { to, .. } = base_ty {
+                    base_ty = *to;
+                }
+                let TypeExpr::Named { name: sname, .. } = base_ty else {
+                    return None;
+                };
+                let fields = self.n5_resolve_struct_fields(&sname)?;
+                fields
+                    .into_iter()
+                    .find(|f| &f.name == name)
+                    .map(|f| f.ty)
+            }
+            Expr::StructLit { ty: Some(t), .. } => Some(t.clone()),
+            _ => None,
+        }
+    }
+
     fn collect_comparable_in_expr(
+        &self,
         e: &Expr,
         param_names: &BTreeSet<String>,
+        var_tys: &mut BTreeMap<String, TypeExpr>,
         out: &mut BTreeSet<String>,
     ) {
         match e {
-            Expr::MapLit { key, value, entries, .. } => {
-                if let TypeExpr::Named { name, .. } = key.as_ref() {
-                    if param_names.contains(name) {
-                        out.insert(name.clone());
-                    }
-                }
-                Self::collect_comparable_in_ty(key, param_names, out);
-                Self::collect_comparable_in_ty(value, param_names, out);
+            Expr::MapLit {
+                key,
+                value,
+                entries,
+                ..
+            } => {
+                self.collect_value_comparable_in_ty(key, param_names, out);
+                self.collect_comparable_in_ty(key, param_names, out);
+                self.collect_comparable_in_ty(value, param_names, out);
                 for (k, v) in entries {
-                    Self::collect_comparable_in_expr(k, param_names, out);
-                    Self::collect_comparable_in_expr(v, param_names, out);
+                    self.collect_comparable_in_expr(k, param_names, var_tys, out);
+                    self.collect_comparable_in_expr(v, param_names, var_tys, out);
                 }
             }
             Expr::StructLit { ty, fields, .. } => {
                 if let Some(t) = ty {
-                    Self::collect_comparable_in_ty(t, param_names, out);
+                    self.collect_comparable_in_ty(t, param_names, out);
                 }
                 for f in fields {
-                    Self::collect_comparable_in_expr(&f.value, param_names, out);
+                    self.collect_comparable_in_expr(&f.value, param_names, var_tys, out);
                 }
             }
             Expr::SliceLit { elem, items, .. } => {
                 if let Some(t) = elem {
-                    Self::collect_comparable_in_ty(t, param_names, out);
+                    self.collect_comparable_in_ty(t, param_names, out);
                 }
                 for i in items {
-                    Self::collect_comparable_in_expr(i, param_names, out);
+                    self.collect_comparable_in_expr(i, param_names, var_tys, out);
                 }
             }
             Expr::Call { callee, args, .. } => {
-                Self::collect_comparable_in_expr(callee, param_names, out);
+                if let Expr::Ident { name, span } = callee.as_ref() {
+                    if name == "new" && args.len() == 1 {
+                        if let Some(new_ty) = Self::new_arg_type_expr(&args[0].value) {
+                            self.collect_comparable_in_ty(&new_ty, param_names, out);
+                        }
+                    } else if name.contains('[') {
+                        let span_src = TypeExpr::Named {
+                            name: name.clone(),
+                            span: *span,
+                        };
+                        let callee_ty = Self::parse_type_arg_str(name, &span_src);
+                        self.collect_comparable_in_ty(&callee_ty, param_names, out);
+                    }
+                }
+                self.collect_comparable_in_expr(callee, param_names, var_tys, out);
                 for a in args {
-                    Self::collect_comparable_in_expr(&a.value, param_names, out);
+                    self.collect_comparable_in_expr(&a.value, param_names, var_tys, out);
                 }
             }
-            Expr::Binary { lhs, rhs, .. } => {
-                Self::collect_comparable_in_expr(lhs, param_names, out);
-                Self::collect_comparable_in_expr(rhs, param_names, out);
+            Expr::Binary { op, lhs, rhs, .. } => {
+                if matches!(op, BinOp::Eq | BinOp::Ne)
+                    && !Self::is_nil_lit(lhs)
+                    && !Self::is_nil_lit(rhs)
+                {
+                    if let Some(lty) = self.infer_expr_ty_for_comparable(lhs, var_tys) {
+                        self.collect_value_comparable_in_ty(&lty, param_names, out);
+                    }
+                    if let Some(rty) = self.infer_expr_ty_for_comparable(rhs, var_tys) {
+                        self.collect_value_comparable_in_ty(&rty, param_names, out);
+                    }
+                }
+                self.collect_comparable_in_expr(lhs, param_names, var_tys, out);
+                self.collect_comparable_in_expr(rhs, param_names, var_tys, out);
             }
             Expr::Unary { operand, .. }
             | Expr::AddrOf { operand, .. }
             | Expr::Move { operand, .. }
             | Expr::Try { operand, .. }
             | Expr::Paren { inner: operand, .. } => {
-                Self::collect_comparable_in_expr(operand, param_names, out);
+                self.collect_comparable_in_expr(operand, param_names, var_tys, out);
             }
             Expr::Receive { chan, .. } => {
-                Self::collect_comparable_in_expr(chan, param_names, out);
+                self.collect_comparable_in_expr(chan, param_names, var_tys, out);
             }
             Expr::Index { base, index, .. } => {
-                Self::collect_comparable_in_expr(base, param_names, out);
-                Self::collect_comparable_in_expr(index, param_names, out);
+                self.collect_comparable_in_expr(base, param_names, var_tys, out);
+                self.collect_comparable_in_expr(index, param_names, var_tys, out);
             }
             Expr::Slice { base, lo, hi, .. } => {
-                Self::collect_comparable_in_expr(base, param_names, out);
+                self.collect_comparable_in_expr(base, param_names, var_tys, out);
                 if let Some(l) = lo {
-                    Self::collect_comparable_in_expr(l, param_names, out);
+                    self.collect_comparable_in_expr(l, param_names, var_tys, out);
                 }
                 if let Some(h) = hi {
-                    Self::collect_comparable_in_expr(h, param_names, out);
+                    self.collect_comparable_in_expr(h, param_names, var_tys, out);
                 }
             }
             Expr::Field { base, .. } => {
-                Self::collect_comparable_in_expr(base, param_names, out);
+                self.collect_comparable_in_expr(base, param_names, var_tys, out);
             }
             Expr::FnLit {
                 params,
@@ -1153,18 +1453,23 @@ impl Emitter {
                 body,
                 ..
             } => {
+                let mut inner_tys = var_tys.clone();
                 for p in params {
-                    Self::collect_comparable_in_ty(&p.ty, param_names, out);
+                    self.collect_comparable_in_ty(&p.ty, param_names, out);
+                    inner_tys.insert(p.name.clone(), p.ty.clone());
                 }
                 for r in results {
-                    Self::collect_comparable_in_ty(&r.ty, param_names, out);
+                    self.collect_comparable_in_ty(&r.ty, param_names, out);
+                    if let Some(n) = &r.name {
+                        inner_tys.insert(n.clone(), r.ty.clone());
+                    }
                 }
-                Self::collect_comparable_in_block(body, param_names, out);
+                self.collect_comparable_in_block(body, param_names, &mut inner_tys, out);
             }
             Expr::Interp { parts, .. } => {
                 for p in parts {
                     if let InterpPart::Expr(x) = p {
-                        Self::collect_comparable_in_expr(x, param_names, out);
+                        self.collect_comparable_in_expr(x, param_names, var_tys, out);
                     }
                 }
             }
@@ -1291,15 +1596,7 @@ impl Emitter {
                 let param_names: BTreeSet<String> =
                     f.type_params.iter().map(|p| p.name.clone()).collect();
                 let mut comparable_params = BTreeSet::new();
-                for p in &f.params {
-                    Self::collect_comparable_in_ty(&p.ty, &param_names, &mut comparable_params);
-                }
-                for r in &f.results {
-                    Self::collect_comparable_in_ty(&r.ty, &param_names, &mut comparable_params);
-                }
-                if let Some(body) = &f.body {
-                    Self::collect_comparable_in_block(body, &param_names, &mut comparable_params);
-                }
+                self.collect_comparable_in_fn_parts(f, &param_names, &mut comparable_params);
                 let params = self.format_type_params(&f.type_params, &comparable_params);
                 self.push_raw(&format!("func {}[{}]({}", go_name, params, ""));
             }

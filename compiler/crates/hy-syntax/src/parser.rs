@@ -2256,12 +2256,42 @@ impl Parser {
         let mut has_comma = false;
         let mut type_shaped = false;
         let mut index_shaped = false;
+        let mut only_type_syntax = false;
+        let mut has_brace = false;
         let mut k = self.pos;
         while k < self.toks.len() {
             match &self.toks[k].tok {
-                Tok::Punct("[") | Tok::Punct("(") | Tok::Punct("{") => depth += 1,
+                Tok::Punct("[") => {
+                    if depth >= 1 {
+                        let next_is_close =
+                            matches!(self.toks.get(k + 1).map(|t| &t.tok), Some(Tok::Punct("]")));
+                        let prev_is_map = k > 0
+                            && matches!(
+                                self.toks.get(k - 1).map(|t| &t.tok),
+                                Some(Tok::Ident(s)) if s == "map"
+                            );
+                        if next_is_close || prev_is_map {
+                            only_type_syntax = true;
+                            type_shaped = true;
+                        }
+                    }
+                    depth += 1;
+                }
+                Tok::Punct("(") => depth += 1,
+                Tok::Punct("{") => {
+                    if depth >= 1 {
+                        has_brace = true;
+                    }
+                    depth += 1;
+                }
                 Tok::Punct("]") => {
                     if depth == 1 {
+                        if (has_comma || (only_type_syntax && !has_brace))
+                            && type_shaped
+                            && !index_shaped
+                        {
+                            return true;
+                        }
                         let after = self.toks.get(k + 1).map(|t| &t.tok);
                         if !matches!(after, Some(Tok::Punct("(")) | Some(Tok::Punct("{"))) {
                             return false;
@@ -2271,8 +2301,23 @@ impl Parser {
                     depth -= 1;
                 }
                 Tok::Punct(",") if depth == 1 => has_comma = true,
-                Tok::Ident(_) | Tok::Kw("chan") | Tok::Kw("fn") if depth >= 1 => {
-                    type_shaped = true
+                Tok::Kw("chan") | Tok::Kw("fn") if depth >= 1 => {
+                    only_type_syntax = true;
+                    type_shaped = true;
+                }
+                Tok::Ident(_) if depth >= 1 => type_shaped = true,
+                Tok::Punct("*") if depth >= 1 => {
+                    let prev_starts_type = k > 0
+                        && matches!(
+                            self.toks.get(k - 1).map(|t| &t.tok),
+                            Some(Tok::Punct("[")) | Some(Tok::Punct(",")) | Some(Tok::Punct("*"))
+                        );
+                    if prev_starts_type {
+                        only_type_syntax = true;
+                        type_shaped = true;
+                    } else if depth == 1 {
+                        index_shaped = true;
+                    }
                 }
                 Tok::Punct("<-") if depth >= 1 => {
                     let prev_is_chan = k > 0
@@ -2280,6 +2325,7 @@ impl Parser {
                     let next_is_chan =
                         matches!(self.toks.get(k + 1).map(|t| &t.tok), Some(Tok::Kw("chan")));
                     if prev_is_chan || next_is_chan {
+                        only_type_syntax = true;
                         type_shaped = true;
                     } else if depth == 1 {
                         index_shaped = true;

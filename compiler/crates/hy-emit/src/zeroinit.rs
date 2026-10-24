@@ -18,13 +18,11 @@
 //!     struct field)              → `var b bag = bag{counts: map[string]int{}}`
 //!   * `bag{}` / `bag{name: "x"}` → the unkeyed map fields are added
 //!   * `new(bag)`                 → `&bag{counts: map[string]int{}}`
-//!
-//! Generic structs (`box[t]{}`) keep Go's zero value: their field types
-//! need the literal's type arguments substituted, which the folded
-//! `box[int]` name does not carry structurally. Arrays of such structs and
-//! `make([]bag, n)` elements are likewise not covered by this lowering.
+//!   * `var b box[u8]` / `box[u8]{}` / `new(box[u8])` → type arguments are
+//!     substituted into the generic struct's fields so map-carrying generic
+//!     structs allocate their zero-value maps as well (#645 / #722).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use hy_syntax::*;
 
@@ -48,7 +46,7 @@ impl Emitter {
         match self.n5_resolve_alias(ty) {
             TypeExpr::Map { .. } => Some(format!("{}{{}}", self.type_text(ty))),
             TypeExpr::Named { name, .. } => {
-                let fields = self.n5_structs.get(&name)?.clone();
+                let fields = self.n5_resolve_struct_fields(&name)?;
                 let extra = self.n5_missing_fields_at(&fields, &BTreeSet::new(), depth + 1);
                 if extra.is_empty() {
                     None
@@ -62,12 +60,11 @@ impl Emitter {
 
     /// `name: init` entries for the map-carrying fields of the struct
     /// literal type `ty` that the literal does not key itself (`given`).
-    /// Empty for anything that is not a non-generic user struct.
     pub(crate) fn n5_missing_fields(&mut self, ty: &TypeExpr, given: &[FieldInit]) -> Vec<String> {
         let TypeExpr::Named { name, .. } = self.n5_resolve_alias(ty) else {
             return Vec::new();
         };
-        let Some(fields) = self.n5_structs.get(&name).cloned() else {
+        let Some(fields) = self.n5_resolve_struct_fields(&name) else {
             return Vec::new();
         };
         let given: BTreeSet<String> = given.iter().map(|f| f.name.clone()).collect();
@@ -92,40 +89,295 @@ impl Emitter {
         out
     }
 
-    /// `new(T)` where T's zero value needs N5 allocation → `&T{…}`. The
-    /// parser encodes the type argument as a bare identifier (`new(bag)`)
-    /// or as an empty type-as-value literal (`new(map[string]int)`).
-    pub(crate) fn n5_new(&mut self, args: &[CallArg]) -> Option<String> {
-        let [arg] = args else { return None };
-        let ty = match &arg.value {
-            Expr::Ident { name, span } => TypeExpr::Named {
-                name: name.clone(),
+    /// Look up the declared fields of `name`, substituting concrete type
+    /// arguments when `name` is an instantiated generic struct (`box[u8]`,
+    /// `table[string, bag]`).
+    pub(crate) fn n5_resolve_struct_fields(&self, name: &str) -> Option<Vec<FieldDecl>> {
+        let name = name.trim();
+        if let Some(fields) = self.n5_structs.get(name) {
+            return Some(fields.clone());
+        }
+        let open = name.find('[')?;
+        if open == 0 || !name.ends_with(']') {
+            return None;
+        }
+        let head = name[..open].trim();
+        let inner = &name[open + 1..name.len() - 1];
+        let type_args = Self::split_top_level_type_args(inner);
+        let (param_specs, fields) = self.generic_struct_entry(head)?;
+        if param_specs.len() != type_args.len() {
+            return None;
+        }
+        let Some(first_field) = fields.first() else {
+            return Some(Vec::new());
+        };
+        let mut subst = BTreeMap::new();
+        for ((param_name, _), arg_str) in param_specs.into_iter().zip(type_args.into_iter()) {
+            subst.insert(
+                param_name,
+                Self::parse_type_arg_str(arg_str, &first_field.ty),
+            );
+        }
+        Some(
+            fields
+                .iter()
+                .map(|f| FieldDecl {
+                    name: f.name.clone(),
+                    ty: Self::subst_type_expr(&f.ty, &subst),
+                    span: f.span,
+                })
+                .collect(),
+        )
+    }
+
+    /// Look up a generic struct `head` in `self.n5_structs` (encoded under key
+    /// `"head[p1,p2:comparable]"`), returning `((param_name, is_comparable)[], fields)`.
+    pub(crate) fn generic_struct_entry(
+        &self,
+        head: &str,
+    ) -> Option<(Vec<(String, bool)>, &Vec<FieldDecl>)> {
+        for (k, fields) in &self.n5_structs {
+            let Some(rest) = k.strip_prefix(head).and_then(|r| r.strip_prefix('[')) else {
+                continue;
+            };
+            let Some(params_str) = rest.strip_suffix(']') else {
+                continue;
+            };
+            let specs: Vec<(String, bool)> = params_str
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|entry| match entry.strip_suffix(":comparable") {
+                    Some(p) => (p.trim().to_string(), true),
+                    None => (entry.to_string(), false),
+                })
+                .collect();
+            return Some((specs, fields));
+        }
+        None
+    }
+
+    pub(crate) fn parse_type_arg_str(s: &str, span_src: &TypeExpr) -> TypeExpr {
+        let span = span_src.span();
+        let s = s.trim();
+        if let Some(rest) = s.strip_prefix('*') {
+            return TypeExpr::Pointer {
+                to: Box::new(Self::parse_type_arg_str(rest, span_src)),
+                span,
+            };
+        }
+        if let Some(rest) = s.strip_prefix("[]") {
+            return TypeExpr::Slice {
+                elem: Box::new(Self::parse_type_arg_str(rest, span_src)),
+                span,
+            };
+        }
+        if let Some(rest) = s.strip_prefix("<-chan ") {
+            return TypeExpr::Chan {
+                dir: ChanDir::Recv,
+                elem: Box::new(Self::parse_type_arg_str(rest, span_src)),
+                span,
+            };
+        }
+        if let Some(rest) = s.strip_prefix("chan<- ") {
+            return TypeExpr::Chan {
+                dir: ChanDir::Send,
+                elem: Box::new(Self::parse_type_arg_str(rest, span_src)),
+                span,
+            };
+        }
+        if let Some(rest) = s.strip_prefix("chan ") {
+            return TypeExpr::Chan {
+                dir: ChanDir::Both,
+                elem: Box::new(Self::parse_type_arg_str(rest, span_src)),
+                span,
+            };
+        }
+        if let Some(rest) = s.strip_prefix("map[") {
+            if let Some((k_s, v_s)) = Self::split_bracket_prefix(rest) {
+                return TypeExpr::Map {
+                    key: Box::new(Self::parse_type_arg_str(k_s, span_src)),
+                    value: Box::new(Self::parse_type_arg_str(v_s, span_src)),
+                    span,
+                };
+            }
+        }
+        if let Some(inner) = s.strip_prefix("option[").and_then(|r| r.strip_suffix(']')) {
+            return TypeExpr::Option {
+                elem: Box::new(Self::parse_type_arg_str(inner, span_src)),
+                span,
+            };
+        }
+        TypeExpr::Named {
+            name: s.to_string(),
+            span,
+        }
+    }
+
+    pub(crate) fn subst_type_expr(
+        ty: &TypeExpr,
+        subst: &BTreeMap<String, TypeExpr>,
+    ) -> TypeExpr {
+        match ty {
+            TypeExpr::Named { name, span } => {
+                let trimmed = name.trim();
+                if let Some(rep) = subst.get(trimmed) {
+                    return rep.clone();
+                }
+                if let Some(open) = trimmed.find('[') {
+                    if open > 0 && trimmed.ends_with(']') {
+                        let head = &trimmed[..open];
+                        let inner = &trimmed[open + 1..trimmed.len() - 1];
+                        let args = Self::split_top_level_type_args(inner)
+                            .into_iter()
+                            .map(|a| {
+                                let parsed = Self::parse_type_arg_str(a, ty);
+                                Self::subst_type_expr(&parsed, subst).render()
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        return TypeExpr::Named {
+                            name: format!("{}[{}]", head, args),
+                            span: *span,
+                        };
+                    }
+                }
+                TypeExpr::Named {
+                    name: name.clone(),
+                    span: *span,
+                }
+            }
+            TypeExpr::Pointer { to, span } => TypeExpr::Pointer {
+                to: Box::new(Self::subst_type_expr(to, subst)),
                 span: *span,
             },
+            TypeExpr::Slice { elem, span } => TypeExpr::Slice {
+                elem: Box::new(Self::subst_type_expr(elem, subst)),
+                span: *span,
+            },
+            TypeExpr::Array { len, elem, span } => TypeExpr::Array {
+                len: len.clone(),
+                elem: Box::new(Self::subst_type_expr(elem, subst)),
+                span: *span,
+            },
+            TypeExpr::Map { key, value, span } => TypeExpr::Map {
+                key: Box::new(Self::subst_type_expr(key, subst)),
+                value: Box::new(Self::subst_type_expr(value, subst)),
+                span: *span,
+            },
+            TypeExpr::Chan { dir, elem, span } => TypeExpr::Chan {
+                dir: *dir,
+                elem: Box::new(Self::subst_type_expr(elem, subst)),
+                span: *span,
+            },
+            TypeExpr::Option { elem, span } => TypeExpr::Option {
+                elem: Box::new(Self::subst_type_expr(elem, subst)),
+                span: *span,
+            },
+            TypeExpr::Fn {
+                params,
+                results,
+                span,
+            } => TypeExpr::Fn {
+                params: params
+                    .iter()
+                    .map(|p| Param {
+                        name: p.name.clone(),
+                        ty: Self::subst_type_expr(&p.ty, subst),
+                        span: p.span,
+                    })
+                    .collect(),
+                results: results
+                    .iter()
+                    .map(|r| Self::subst_type_expr(r, subst))
+                    .collect(),
+                span: *span,
+            },
+        }
+    }
+
+    /// Extract a `TypeExpr` from `new(T)`'s argument expression.
+    pub(crate) fn new_arg_type_expr(mut val: &Expr) -> Option<TypeExpr> {
+        while let Expr::Paren { inner, .. } = val {
+            val = inner;
+        }
+        match val {
+            Expr::Ident { name, span } => Some(TypeExpr::Named {
+                name: name.clone(),
+                span: *span,
+            }),
+            Expr::Field { base, name, span } => {
+                if let TypeExpr::Named { name: b, .. } = Self::new_arg_type_expr(base)? {
+                    Some(TypeExpr::Named {
+                        name: format!("{}.{}", b, name),
+                        span: *span,
+                    })
+                } else {
+                    None
+                }
+            }
+            Expr::Index { base, index, span } => {
+                let TypeExpr::Named { name: b, .. } = Self::new_arg_type_expr(base)? else {
+                    return None;
+                };
+                let idx_ty = Self::new_arg_type_expr(index)?;
+                Some(TypeExpr::Named {
+                    name: format!("{}[{}]", b, idx_ty.render()),
+                    span: *span,
+                })
+            }
             Expr::StructLit {
                 ty: Some(t),
                 fields,
                 ..
-            } if fields.is_empty() => t.clone(),
+            } if fields.is_empty() => Some(t.clone()),
+            Expr::SliceLit {
+                elem: Some(t),
+                items,
+                span,
+            } if items.is_empty() && val.as_array_lit().is_none() => Some(TypeExpr::Slice {
+                elem: t.clone(),
+                span: *span,
+            }),
             Expr::MapLit {
                 key,
                 value,
                 entries,
                 span,
-            } if entries.is_empty() => TypeExpr::Map {
+            } if entries.is_empty() => Some(TypeExpr::Map {
                 key: key.clone(),
                 value: value.clone(),
                 span: *span,
-            },
-            _ => return None,
-        };
+            }),
+            _ => None,
+        }
+    }
+
+    /// `new(T)` where T is a struct whose zero value needs N5 allocation → `&T{…}`.
+    pub(crate) fn n5_new(&mut self, args: &[CallArg]) -> Option<String> {
+        let [arg] = args else { return None };
+        let ty = Self::new_arg_type_expr(&arg.value)?;
         if let TypeExpr::Named { name, .. } = &ty {
+            let head = name.split('[').next().unwrap_or(name.as_str()).trim();
             // A local value named like a type is not a type argument.
-            if self.local_vars.contains(name) {
+            if self.local_vars.contains(head) {
                 return None;
             }
         }
-        self.n5_zero_init(&ty).map(|init| format!("&{}", init))
+        let TypeExpr::Named {
+            name: resolved_name,
+            ..
+        } = self.n5_resolve_alias(&ty)
+        else {
+            return None;
+        };
+        let fields = self.n5_resolve_struct_fields(&resolved_name)?;
+        let extra = self.n5_missing_fields_at(&fields, &BTreeSet::new(), 1);
+        if extra.is_empty() {
+            None
+        } else {
+            Some(format!("&{}{{{}}}", self.type_text(&ty), extra.join(", ")))
+        }
     }
 
     /// Follow user type aliases (`type counts = map[string]int`) to the

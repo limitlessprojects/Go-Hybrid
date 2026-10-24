@@ -134,3 +134,80 @@ fn main() {}
         "expected no HYB-E1001 on fn signature referencing param/receiver scope, got: {diags:?}"
     );
 }
+
+#[test]
+fn new_validates_generic_struct_type_arguments_and_accepts_instantiated_722() {
+    let valid = r#"
+struct box[t] {
+    v t
+}
+
+struct pair[a, b] {
+    first  a
+    second b
+}
+
+fn main() {
+    p1 := new(box[u8])
+    p2 := new(pair[u8, i16])
+    _ = p1.v
+    _ = p2.first
+}
+"#;
+    let ok_diags = check(valid);
+    assert!(
+        ok_diags.is_empty(),
+        "expected 0 diagnostics on valid new(box[u8]) and new(pair[u8, i16]), got: {ok_diags:?}"
+    );
+
+    let uninstantiated = r#"
+struct box[t] {
+    v t
+}
+
+fn main() {
+    p := new(box)
+    _ = p
+}
+"#;
+    let d1 = check(uninstantiated);
+    assert!(
+        d1.iter().any(|d| d.code == "HYB-E1002"
+            && d.message.contains("cannot use generic struct `box` without type arguments")),
+        "expected HYB-E1002 on uninstantiated new(box), got: {d1:?}"
+    );
+
+    let wrong_arity = r#"
+struct box[t] {
+    v t
+}
+
+fn main() {
+    p := new(box[int, string])
+    _ = p
+}
+"#;
+    let d2 = check(wrong_arity);
+    assert!(
+        d2.iter().any(|d| d.code == "HYB-E1002"
+            && d.message.contains("wrong number of type arguments for `box`")),
+        "expected HYB-E1002 on wrong-arity new(box[int, string]), got: {d2:?}"
+    );
+
+    let non_generic = r#"
+struct plain {
+    v int
+}
+
+fn main() {
+    p := new(plain[int])
+    _ = p
+}
+"#;
+    let d3 = check(non_generic);
+    assert!(
+        d3.iter().any(|d| d.code == "HYB-E1002"
+            && d.message.contains("`plain` is not a generic type")),
+        "expected HYB-E1002 on new(plain[int]), got: {d3:?}"
+    );
+}
