@@ -232,6 +232,9 @@ pub(crate) struct FnState {
     /// shadowed outer binding at `depth` as moved.
     pub shadow_links: HashMap<String, HashSet<(String, usize)>>,
     pub shadow_link_scopes: Vec<HashMap<String, HashSet<(String, usize)>>>,
+    pub binding_state_scopes: Vec<Vec<(usize, String, Option<MoveInfo>, Option<String>)>>,
+    pub borrow_binding_scopes: Vec<HashSet<String>>,
+    pub closure_mutate_scopes: Vec<HashMap<String, HashSet<String>>>,
     /// Block scopes, innermost last (issue #14): a define inside a nested
     /// block lands in the top layer and DIES at block exit, so an inner
     /// `m := 1` can no longer overwrite the outer `m`'s binding and launder
@@ -305,6 +308,23 @@ pub(crate) struct FnState {
 impl FnState {
     /// Enter a block scope (walk.rs's Push events).
     pub(crate) fn scope_push(&mut self) {
+        let mut snap_states = Vec::new();
+        for (k, b) in &self.env {
+            snap_states.push((0, k.clone(), b.moved.clone(), b.non_owned_origin.clone()));
+        }
+        for (i, layer) in self.scopes.iter().enumerate() {
+            for (k, b) in layer {
+                snap_states.push((
+                    i + 1,
+                    k.clone(),
+                    b.moved.clone(),
+                    b.non_owned_origin.clone(),
+                ));
+            }
+        }
+        self.binding_state_scopes.push(snap_states);
+        self.borrow_binding_scopes.push(self.borrow_bindings.clone());
+        self.closure_mutate_scopes.push(self.closure_mutates.clone());
         self.scopes.push(HashMap::new());
         self.alias_scopes.push(self.aliases.clone());
         self.share_scopes.push(self.may_share.clone());
@@ -521,6 +541,32 @@ impl FnState {
                             }
                         }
                     }
+                }
+            }
+        }
+        if let Some(prev_states) = self.binding_state_scopes.pop() {
+            for (depth, name, prev_moved, prev_origin) in prev_states {
+                if let Some(b) = self.binding_at_depth_mut(depth, &name) {
+                    if b.moved.is_none() && prev_moved.is_some() {
+                        b.moved = prev_moved;
+                    }
+                    if b.non_owned_origin.is_none() && prev_origin.is_some() {
+                        b.non_owned_origin = prev_origin;
+                    }
+                }
+            }
+        }
+        if let Some(prev_borrows) = self.borrow_binding_scopes.pop() {
+            for k in prev_borrows {
+                if self.env_lookup(&k).is_some() {
+                    self.borrow_bindings.insert(k);
+                }
+            }
+        }
+        if let Some(prev_mutates) = self.closure_mutate_scopes.pop() {
+            for (k, vs) in prev_mutates {
+                if self.env_lookup(&k).is_some() {
+                    self.closure_mutates.entry(k).or_default().extend(vs);
                 }
             }
         }
