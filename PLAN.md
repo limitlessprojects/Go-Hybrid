@@ -1,5 +1,9 @@
 # Hybrid Language: Development Plan
 
+- Contributor CI follow-up (#1570, 2026-10-24): fork run 40129786500 passed the full compiler job (workspace, corpus, differential, runtime hygiene and examples). Quick CI caught the new regression's Python-version assumption: empty unittest selections return 5 on Python 3.12+. The regression now checks that result explicitly and additionally proves a passing subset exits zero while hiding a failing test on every version. Rerun pending; no full-green claim.
+
+- Contributor validation (2026-10-24): discovery with unittest `-k` can run zero tests and return success. The registration guard now requires an unfiltered invocation; regressions cover separate/attached/repeated filters and short-option clusters, plus a real failing suite skipped by the filter. Targeted Python suite: 34 passed on Windows and Linux; repository registration: 32 files / 29 patterns passed. Rust workspace, corpus and differential checks were not run in this Windows environment and remain required before final review.
+
 - Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15

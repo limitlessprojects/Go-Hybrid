@@ -24,6 +24,13 @@ SPEC.loader.exec_module(guard)
 
 
 class PatternExtractionTests(unittest.TestCase):
+    def test_name_filtered_discovery_does_not_certify_a_suite(self):
+        for option in ("-k never_matches", "-knever_matches", "-vknever_matches",
+                       "-qk never_matches", "-k test_one -k test_two"):
+            with self.subTest(option=option):
+                self.assertEqual(guard.registered_patterns(
+                    "python3 -m unittest discover -s tools -p test_live.py " + option), [])
+
     def test_quoted_and_bare_patterns_are_both_read(self):
         workflow = (
             "          python3 -m unittest discover -s tools/fuzz -p 'test_hyfuzz.py'\n"
@@ -106,6 +113,38 @@ class PatternExtractionTests(unittest.TestCase):
 
 
 class RegistrationTests(unittest.TestCase):
+    def test_real_name_filter_can_skip_every_failing_test(self):
+        root, text = self.build(
+            "python3 -m unittest discover -s tools -p test_live.py -k never_matches\n",
+            ["tools/test_live.py"])
+        (root / "tools/test_live.py").write_text(
+            "import unittest\nclass Tests(unittest.TestCase):\n"
+            "    def test_failure(self): self.fail('filtered regression ran')\n"
+            "    def test_pass(self): pass\n",
+            encoding="utf-8")
+        command = [sys.executable, "-m", "unittest", "discover", "-s", "tools", "-p", "test_live.py"]
+        # Python 3.12+ rejects an empty selection, but a passing subset still
+        # exits zero while hiding this file's failing regression on all versions.
+        for pattern, count, code in (
+                ("never_matches", 0, 5 if sys.version_info >= (3, 12) else 0),
+                ("test_pass", 1, 0)):
+            with self.subTest(pattern=pattern):
+                skipped = subprocess.run(command + ["-k", pattern], cwd=root,
+                                         capture_output=True, text=True, timeout=15)
+                self.assertEqual(skipped.returncode, code, skipped.stderr)
+                self.assertIn(f"Ran {count} test", skipped.stderr)
+                filtered = text.replace("never_matches", pattern)
+                self.assertEqual([rel for rel, _ in guard.unregistered(root, filtered)],
+                                 ["tools/test_live.py"])
+        exercised = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=15)
+        self.assertNotEqual(exercised.returncode, 0)
+        self.assertIn("Ran 2 tests", exercised.stderr)
+        self.assertIn("filtered regression ran", exercised.stderr)
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text)], ["tools/test_live.py"])
+        # A separate complete invocation still registers the file.
+        self.assertEqual(guard.unregistered(root, text +
+            "python3 -m unittest discover -s tools -p test_live.py\n"), [])
+
     def build(self, workflow, suites):
         """Write a temp root with `suites` and return (root, workflow_text)."""
         temporary = tempfile.TemporaryDirectory(prefix="hybrid-registration-")

@@ -18,8 +18,10 @@ reference it, and fails closed on any file no reference reaches:
   tests/**/test_*.py  run directly, e.g. `python3 tests/test_install_runtime.py`
                       -> the path must be the invoked Python entry point
 
-Only explicit single-line Python invocations count. Comments, echoed text,
-step names, interpreter flags, chained later commands, and paths passed as
+Only explicit single-line Python invocations count. Name-filtered discovery
+(`-k`) does not certify a complete suite: it may run none of the file's tests.
+Comments, echoed text, step names, interpreter flags, chained later commands,
+and paths passed as
 arguments to other scripts register nothing. This is not a general
 shell/YAML interpreter.
 
@@ -101,6 +103,12 @@ def registered_discoveries(workflow_text):
     discoveries = []
     for arguments in python_commands(workflow_text):
         if arguments[:3] != ["-m", "unittest", "discover"]:
+            continue
+        # A basename match only establishes discovery, not execution of the
+        # suite. unittest's -k/-kPATTERN can hide failing tests while selected
+        # passing tests return success. Require an unfiltered invocation as evidence;
+        # do not import arbitrary test modules to guess which methods match.
+        if any(re.match(r"^-[vqbfc]*k", argument) for argument in arguments[3:]):
             continue
         start, pattern = ".", None
         for index, argument in enumerate(arguments[3:], 3):
