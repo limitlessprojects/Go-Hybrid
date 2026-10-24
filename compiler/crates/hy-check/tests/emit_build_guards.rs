@@ -371,6 +371,81 @@ fn same_method_name_on_different_types_stays_accepted() {
     accepts_without(SAME_METHOD_NAME_DIFFERENT_TYPES_OK, "HYB-E1003");
 }
 
+const ASSOC_FN_COLLIDES_WITH_FN_ORDER_1: &str = "\
+struct counter {
+    n int
+}
+fn counter.make() counter {
+    return counter{n: 1}
+}
+fn counter_make() int {
+    return 2
+}
+fn main() {
+    c := counter.make()
+    fmt.println(c.n, counter_make())
+}
+";
+
+const ASSOC_FN_COLLIDES_WITH_FN_ORDER_2: &str = "\
+struct counter {
+    n int
+}
+fn counter_make() int {
+    return 2
+}
+fn counter.make() counter {
+    return counter{n: 1}
+}
+fn main() {
+    c := counter.make()
+    fmt.println(c.n, counter_make())
+}
+";
+
+const ASSOC_FN_COLLIDES_WITH_ASSOC_FN: &str = "\
+fn a.b_c() int {
+    return 1
+}
+fn a_b.c() int {
+    return 2
+}
+fn main() {
+    fmt.println(a.b_c(), a_b.c())
+}
+";
+
+const ASSOC_FN_CONTROL: &str = "\
+struct counter {
+    n int
+}
+fn counter.make() counter {
+    return counter{n: 1}
+}
+fn main() {
+    c := counter.make()
+    fmt.println(c.n)
+}
+";
+
+const ORDINARY_UNDERSCORE_FN_CONTROL: &str = "\
+fn counter_make() int {
+    return 2
+}
+fn main() {
+    fmt.println(counter_make())
+}
+";
+
+#[test]
+fn assoc_fn_collision_with_ordinary_fn_is_rejected_issue_1417() {
+    rejects_with(ASSOC_FN_COLLIDES_WITH_FN_ORDER_1, "HYB-E1003");
+    rejects_with(ASSOC_FN_COLLIDES_WITH_FN_ORDER_2, "HYB-E1003");
+    rejects_with(ASSOC_FN_COLLIDES_WITH_ASSOC_FN, "HYB-E1003");
+    accepts_without(ASSOC_FN_CONTROL, "HYB-E1003");
+    accepts_without(ORDINARY_UNDERSCORE_FN_CONTROL, "HYB-E1003");
+}
+
 // ---------------------------------------------------------------------------
 // D — invalid receivers (HYB-E2007)
 // ---------------------------------------------------------------------------

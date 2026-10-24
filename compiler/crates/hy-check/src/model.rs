@@ -710,6 +710,7 @@ pub(crate) struct Checker<'a> {
     /// share one namespace in Go — a second declaration of the same name is
     /// `X redeclared in this block`. Keyed by name, value = declaring kind.
     pub pkg_names: HashMap<String, &'static str>,
+    pub emitted_pkg_names: HashMap<String, (String, &'static str)>,
     /// Declared methods (issue #201-C): (receiver base type, method name) —
     /// methods live in the receiver's method set, not package scope, so
     /// `box.get` twice is an error while `fn get` + `box.get` is legal.
@@ -756,6 +757,7 @@ impl<'a> Checker<'a> {
             const_values: HashMap::new(),
             packages: HashSet::new(),
             pkg_names: HashMap::new(),
+            emitted_pkg_names: HashMap::new(),
             methods: HashSet::new(),
             diags: Vec::new(),
             managed_blocks: 0,

@@ -846,29 +846,39 @@ impl<'a> Checker<'a> {
     /// in any of those kinds, is `X redeclared in this block` — the
     /// emitted module would not build (issue #201-C).
     pub(crate) fn declare_pkg_name(&mut self, name: &str, kind: &'static str, span: Span) {
-        if let Some(prev) = self.pkg_names.get(name) {
-            let msg = format!(
-                "`{name}` redeclared in this block — first declared as a {prev}, now as a {kind} (HYB-E1003)",
-                name = name,
-                prev = prev,
-                kind = kind
-            );
+        let emitted = name.replace('.', "_");
+        if let Some((prev_source, prev_kind)) = self.emitted_pkg_names.get(&emitted) {
+            let msg = if prev_source == name {
+                format!(
+                    "`{name}` redeclared in this block — first declared as a {prev_kind}, now as a {kind} (HYB-E1003)",
+                    name = name,
+                    prev_kind = prev_kind,
+                    kind = kind
+                )
+            } else {
+                format!(
+                    "`{name}` lowers to `{emitted}` which collides with `{prev_source}` (first declared as a {prev_kind}) (HYB-E1003)",
+                    name = name,
+                    emitted = emitted,
+                    prev_source = prev_source,
+                    prev_kind = prev_kind
+                )
+            };
             self.diags.push(
                 Diagnostic::error("HYB-E1003", self.path.clone(), span, msg).with_notes(vec![
                     format!(
-                        "why: Go keeps a single package block for fns, consts, structs, enums, and types — a second `{kind}` named `{name}` is `{name} redeclared in this block`, so an accepted Hybrid program would emit unbuildable Go (issue #201)",
-                        kind = kind,
-                        name = name
+                        "why: Go keeps a single package block for fns, consts, structs, enums, and types — `{emitted}` would be redeclared in this block (issue #201, #1417)",
+                        emitted = emitted
                     ),
                     format!(
-                        "fix: rename one of the `{name}` declarations — methods may share a name across receiver types (they live in the receiver's method set, not package scope)",
-                        name = name
+                        "fix: rename one of the declarations so their emitted package-level names do not collide"
                     ),
                 ]),
             );
             return;
         }
         self.pkg_names.insert(name.to_string(), kind);
+        self.emitted_pkg_names.insert(emitted, (name.to_string(), kind));
     }
 
     /// Register a method: validate the receiver (issue #201-D) and
