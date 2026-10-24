@@ -108,3 +108,27 @@ fn ordinary_interpolation_and_format_calls_keep_their_semantics() {
             .as_bytes(),
     );
 }
+
+#[test]
+fn interpolated_values_in_format_position_are_never_read_as_verbs() {
+    check_build_run(
+        "format-position-values",
+        r#"    name := "100%sure"
+    fmt.printf("{name}: %d\n", value)
+    fmt.fprintf(os.stdout, "{name} %d\n", value)
+    fmt.println(fmt.sprintf("{name}"))
+    fmt.println(fmt.errorf("bad {name}: %d", value))
+    fmt.printf("{name}\n")"#,
+        b"100%sure: 7\n100%sure 7\n100%sure\nbad 100%sure: 7\n100%sure\n",
+    );
+}
+
+#[test]
+fn interpolation_passed_as_a_printf_value_stays_a_string() {
+    check_build_run(
+        "format-value-argument",
+        r#"    fmt.printf("%s|\n", "{value}")
+    fmt.fprintf(os.stdout, "%s|%d\n", "{value}", value)"#,
+        b"7|\n7|7\n",
+    );
+}
