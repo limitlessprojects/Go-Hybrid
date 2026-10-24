@@ -286,3 +286,12 @@ fn parenthesized_and_aliased_make_preserves_share_and_closure_checks() {
     assert_has(&alias_make_copy_share, "HYB-E3003");
 }
 
+#[test]
+fn make_array_lit_rejected_hyb_e2005() {
+    let r1 = check("fn main() {\n    _ = make([4]int{}, 4)\n}\n");
+    assert_has(&r1, "HYB-E2005");
+
+    let r2 = check("fn main() {\n    _ = make(([4]int{}), 4)\n}\n");
+    assert_has(&r2, "HYB-E2005");
+}
+

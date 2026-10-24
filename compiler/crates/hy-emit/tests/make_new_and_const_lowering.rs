@@ -59,3 +59,11 @@ fn emit_parenthesized_composite_const_rewritten_to_var() {
         go
     );
 }
+
+#[test]
+fn emit_new_array_preserves_array_type() {
+    let go = emit("fn main() {\n    p1 := new([4]u8{})\n    p2 := new(([4]u8{}))\n    fmt.println(p1, p2)\n}\n")
+        .expect("must emit");
+    assert!(go.contains("new([4]uint8)"), "got:\n{}", go);
+    assert!(!go.contains("new([][4]uint8)"), "got:\n{}", go);
+}

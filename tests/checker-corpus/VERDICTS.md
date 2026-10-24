@@ -1082,5 +1082,5 @@ companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.
 
 `make([]T, n)` / `make([]T, n, c)` elements (and the spare capacity a reslice exposes), `make([]map[K]V, n)` elements, and `[N]T` arrays (var, literal, const length, partial literal) are N5 zero values: their maps allocate, so the first write works instead of panicking `assignment to entry in nil map`. No check-site; ACCEPT with a byte-exact EXPECTED-OUTPUT.
 
-With this registration the corpus is **127 programs: ACCEPT 39 ·
-ACCEPT-MANAGED 2 · REJECT 86** — main's 126 plus this one.
+With this registration the corpus is **128 programs: ACCEPT 40 ·
+ACCEPT-MANAGED 2 · REJECT 86** — main's 127 plus this one.

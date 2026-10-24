@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 127 programs — ACCEPT 39 · ACCEPT-MANAGED 2 · REJECT 86 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
-**Current registered corpus: 127 programs — ACCEPT 39 · ACCEPT-MANAGED 2 · REJECT 86 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 128 programs — ACCEPT 40 · ACCEPT-MANAGED 2 · REJECT 86 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 128 programs — ACCEPT 40 · ACCEPT-MANAGED 2 · REJECT 86 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -314,5 +314,5 @@ first write. The fixture pins all of them in one program with a byte-exact
 produced by a READ (a missing map element, a closed-channel receive) have no
 allocation site and are deliberately NOT pinned here.
 
-With this registration the corpus is **127 programs: ACCEPT 39 ·
-ACCEPT-MANAGED 2 · REJECT 86** — main's 126 plus this one.
+With this registration the corpus is **128 programs: ACCEPT 40 ·
+ACCEPT-MANAGED 2 · REJECT 86** — main's 127 plus this one.
