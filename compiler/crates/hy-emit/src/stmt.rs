@@ -856,6 +856,7 @@ impl Emitter {
     /// contract, the E6 main-closure return, an error-result fn's
     /// zero-results return (package mode), or a clean error.
     fn propagate_error(&mut self, err_temp: &str) -> Result<(), EmitError> {
+        self.flush_loans_for_return();
         if let Some(w) = self.handler_writer.clone() {
             self.use_package("http");
             self.push(&format!(
@@ -920,12 +921,8 @@ impl Emitter {
             self.push(&format!("{} := {}", names.join(", "), call_text));
             self.push(&format!("if {} != nil {{", temp));
             self.indent += 1;
-            self.use_package("http");
-            self.push(&format!(
-                "http.Error({}, {}.Error(), http.StatusBadRequest)",
-                w, temp
-            ));
-            self.push("return");
+            let _ = w;
+            self.propagate_error(&temp)?;
             self.indent -= 1;
             self.push("}");
             self.hint_from_values(&l.names, std::slice::from_ref(call));
@@ -1122,9 +1119,7 @@ impl Emitter {
                 matches!(self.bindings.get(name), Some(BindingKind::Chan))
             }
             Expr::Paren { inner, .. } => self.is_channel_expr(inner),
-            Expr::Call { .. } | Expr::Try { .. } => {
-                self.binding_kind_of(e) == BindingKind::Chan
-            }
+            Expr::Call { .. } | Expr::Try { .. } => self.binding_kind_of(e) == BindingKind::Chan,
             _ => false,
         }
     }
@@ -1153,9 +1148,7 @@ impl Emitter {
                 }
                 false
             }
-            Expr::Call { .. } | Expr::Try { .. } => {
-                self.binding_kind_of(e) == BindingKind::Set
-            }
+            Expr::Call { .. } | Expr::Try { .. } => self.binding_kind_of(e) == BindingKind::Set,
             _ => false,
         }
     }
@@ -1210,7 +1203,9 @@ impl Emitter {
             && targets
                 .iter()
                 .all(|t| matches!(&t.kind, PlaceKind::Ident(_)))
-            && values.iter().any(|v| Self::as_slot_loan_operand(v).is_some())
+            && values
+                .iter()
+                .any(|v| Self::as_slot_loan_operand(v).is_some())
         {
             for (idx, v) in values.iter().enumerate() {
                 let later_has_try = values[idx + 1..].iter().any(Self::expr_has_hoistable_try);
@@ -1823,10 +1818,11 @@ impl Emitter {
                                     Expr::Try { .. } => Some(e.clone()),
                                     _ => None,
                                 };
-                                let elem_ty = range_name.and_then(|n| match self.bindings.get(&n) {
-                                    Some(BindingKind::ForeignTy(t)) => Some(*t),
-                                    _ => None,
-                                });
+                                let elem_ty =
+                                    range_name.and_then(|n| match self.bindings.get(&n) {
+                                        Some(BindingKind::ForeignTy(t)) => Some(*t),
+                                        _ => None,
+                                    });
                                 self.shadow_local_names(vars);
                                 if let Some(t) = elem_ty {
                                     self.bindings
@@ -1957,8 +1953,188 @@ impl Emitter {
     // Return (wrapper-aware)
     // -----------------------------------------------------------------------
 
-    fn emit_return(&mut self, values: &[Expr]) -> Result<(), EmitError> {
+    fn expr_mentions_unhoisted_ident(&self, e: &Expr, target: &str) -> bool {
+        if self.expr_temps.contains_key(&(e as *const Expr as usize)) {
+            return false;
+        }
+        match e {
+            Expr::Try { span, .. }
+                if self.try_temps.contains_key(&(span.start.line, span.start.col)) =>
+            {
+                false
+            }
+            Expr::Ident { name, .. } => name == target,
+            Expr::Lit { .. } | Expr::FnLit { .. } => false,
+            Expr::Binary { lhs, rhs, .. } => {
+                self.expr_mentions_unhoisted_ident(lhs, target)
+                    || self.expr_mentions_unhoisted_ident(rhs, target)
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Receive { chan: operand, .. }
+            | Expr::Field { base: operand, .. }
+            | Expr::Paren { inner: operand, .. } => {
+                self.expr_mentions_unhoisted_ident(operand, target)
+            }
+            Expr::Call { callee, args, .. } => {
+                self.expr_mentions_unhoisted_ident(callee, target)
+                    || args
+                        .iter()
+                        .any(|a| self.expr_mentions_unhoisted_ident(&a.value, target))
+            }
+            Expr::Index { base, index, .. } => {
+                self.expr_mentions_unhoisted_ident(base, target)
+                    || self.expr_mentions_unhoisted_ident(index, target)
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                self.expr_mentions_unhoisted_ident(base, target)
+                    || lo
+                        .as_ref()
+                        .is_some_and(|x| self.expr_mentions_unhoisted_ident(x, target))
+                    || hi
+                        .as_ref()
+                        .is_some_and(|x| self.expr_mentions_unhoisted_ident(x, target))
+            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| self.expr_mentions_unhoisted_ident(&f.value, target)),
+            Expr::SliceLit { items, .. } => {
+                e.as_array_lit()
+                    .and_then(|(len, _, _)| len)
+                    .is_some_and(|l| self.expr_mentions_unhoisted_ident(l, target))
+                    || items
+                        .iter()
+                        .any(|x| self.expr_mentions_unhoisted_ident(x, target))
+            }
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
+                self.expr_mentions_unhoisted_ident(k, target)
+                    || self.expr_mentions_unhoisted_ident(v, target)
+            }),
+            Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                InterpPart::Lit(_) => false,
+                InterpPart::Expr(x) => self.expr_mentions_unhoisted_ident(x, target),
+            }),
+        }
+    }
+
+    fn expr_has_unhoisted_call(&self, e: &Expr) -> bool {
+        if self.expr_temps.contains_key(&(e as *const Expr as usize)) {
+            return false;
+        }
+        match e {
+            Expr::Try { span, .. }
+                if self.try_temps.contains_key(&(span.start.line, span.start.col)) =>
+            {
+                false
+            }
+            Expr::Call { .. } => true,
+            Expr::Lit { .. } | Expr::Ident { .. } | Expr::FnLit { .. } => false,
+            Expr::Binary { lhs, rhs, .. } => {
+                self.expr_has_unhoisted_call(lhs) || self.expr_has_unhoisted_call(rhs)
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Receive { chan: operand, .. }
+            | Expr::Field { base: operand, .. }
+            | Expr::Paren { inner: operand, .. } => self.expr_has_unhoisted_call(operand),
+            Expr::Index { base, index, .. } => {
+                self.expr_has_unhoisted_call(base) || self.expr_has_unhoisted_call(index)
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                self.expr_has_unhoisted_call(base)
+                    || lo.as_ref().is_some_and(|x| self.expr_has_unhoisted_call(x))
+                    || hi.as_ref().is_some_and(|x| self.expr_has_unhoisted_call(x))
+            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| self.expr_has_unhoisted_call(&f.value)),
+            Expr::SliceLit { items, .. } => {
+                e.as_array_lit()
+                    .and_then(|(len, _, _)| len)
+                    .is_some_and(|l| self.expr_has_unhoisted_call(l))
+                    || items.iter().any(|x| self.expr_has_unhoisted_call(x))
+            }
+            Expr::MapLit { entries, .. } => entries
+                .iter()
+                .any(|(k, v)| self.expr_has_unhoisted_call(k) || self.expr_has_unhoisted_call(v)),
+            Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+                InterpPart::Lit(_) => false,
+                InterpPart::Expr(x) => self.expr_has_unhoisted_call(x),
+            }),
+        }
+    }
+
+    fn values_mention_active_loan(&self, values: &[Expr]) -> bool {
+        if !values.iter().any(|v| self.expr_has_unhoisted_call(v)) {
+            return false;
+        }
+        for frame in &self.loan_frames {
+            if frame.first().map(|(n, _)| n.is_empty()).unwrap_or(false) {
+                continue;
+            }
+            for (loan_name, _) in frame {
+                if !loan_name.is_empty()
+                    && values
+                        .iter()
+                        .any(|v| self.expr_mentions_unhoisted_ident(v, loan_name))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn single_call_return_arity(&self, expr: &Expr) -> Option<usize> {
+        if let Some((n, _)) = self.call_results(expr) {
+            return Some(n);
+        }
+        let mut cur = expr;
+        while let Expr::Paren { inner, .. } = cur {
+            cur = inner;
+        }
+        let Expr::Call { callee, .. } = cur else {
+            return None;
+        };
+        let mut c = callee.as_ref();
+        while let Expr::Paren { inner, .. } = c {
+            c = inner;
+        }
+        match c {
+            Expr::Ident { name, .. } => self.fn_shapes.get(name.as_str()).map(|(n, _, _, _)| *n),
+            Expr::Field { name, .. } => self.fn_shapes.get(name.as_str()).map(|(n, _, _, _)| *n),
+            _ => None,
+        }
+    }
+
+    fn hoist_return_exprs_before_flush(&mut self, vs: &mut Vec<String>, values: &[Expr]) {
+        if values.len() == 1 && vs.len() == 1 {
+            if let Some(arity) = self.single_call_return_arity(&values[0]) {
+                if arity > 1 {
+                    let temps: Vec<String> =
+                        (0..arity).map(|_| self.next_temp("hyRet")).collect();
+                    self.push(&format!("{} := {}", temps.join(", "), vs[0]));
+                    *vs = temps;
+                    self.flush_loans_for_return();
+                    return;
+                }
+            }
+        }
+        for v_str in vs.iter_mut() {
+            if v_str != "nil" {
+                let tmp = self.next_temp("hyRet");
+                self.push(&format!("{} := {}", tmp, v_str));
+                *v_str = tmp;
+            }
+        }
         self.flush_loans_for_return();
+    }
+
+    fn emit_return(&mut self, values: &[Expr]) -> Result<(), EmitError> {
         for (idx, v) in values.iter().enumerate() {
             let later_has_try = values[idx + 1..].iter().any(Self::expr_has_hoistable_try);
             if later_has_try {
@@ -1967,13 +2143,24 @@ impl Emitter {
                 self.hoist_tries_expr(v)?;
             }
         }
+        let defer_loan_flush = self.values_mention_active_loan(values);
+        if !defer_loan_flush {
+            self.flush_loans_for_return();
+        }
         // Inside a function literal the closure owns the return — plain.
         if self.fnlit_depth > 0 {
-            let vs = values
+            let mut vs = values
                 .iter()
                 .map(|v| self.emit_expr(v, 0))
                 .collect::<Result<Vec<_>, _>>()?;
-            self.push(&format!("return {}", vs.join(", ")));
+            if defer_loan_flush {
+                self.hoist_return_exprs_before_flush(&mut vs, values);
+            }
+            if vs.is_empty() {
+                self.push("return");
+            } else {
+                self.push(&format!("return {}", vs.join(", ")));
+            }
             return Ok(());
         }
         // Inside the main wrapper closure: explicit returns carry `nil` for
@@ -1981,13 +2168,19 @@ impl Emitter {
         // and returns the current hyErr — exactly the E3 desugar's shape.
         if self.in_main_closure {
             if values.is_empty() {
+                if defer_loan_flush {
+                    self.flush_loans_for_return();
+                }
                 self.push("return");
                 return Ok(());
             }
-            let vs = values
+            let mut vs = values
                 .iter()
                 .map(|v| self.emit_expr(v, 0))
                 .collect::<Result<Vec<_>, _>>()?;
+            if defer_loan_flush {
+                self.hoist_return_exprs_before_flush(&mut vs, values);
+            }
             self.push(&format!("return {}, nil", vs.join(", ")));
             return Ok(());
         }
@@ -1996,6 +2189,9 @@ impl Emitter {
         if let Some(key) = self.cur_fn_conv_result {
             if values.len() == 1 && matches!(values[0], Expr::FnLit { .. }) {
                 if let Some(conv) = lookup_conversion(key) {
+                    if defer_loan_flush {
+                        self.flush_loans_for_return();
+                    }
                     self.pending_fnlit_conv = Some(conv);
                     let lit = self.emit_expr(&values[0], 0)?;
                     self.pending_fnlit_conv = None;
@@ -2040,6 +2236,9 @@ impl Emitter {
             } else {
                 vs.push(self.emit_expr(v, 0)?);
             }
+        }
+        if defer_loan_flush {
+            self.hoist_return_exprs_before_flush(&mut vs, values);
         }
         // A short return in an error-result fn fills the remaining slots
         // with their zero texts (13: `return v` in a (value, error) fn →
@@ -2345,8 +2544,7 @@ impl Emitter {
                 self.shadow_local_name(binding);
                 let arm_res = (|| -> Result<(), EmitError> {
                     let g = arm.guard.as_ref().unwrap();
-                    let guard_reads =
-                        *binding != "_" && crate::rangebind::expr_reads(g, binding);
+                    let guard_reads = *binding != "_" && crate::rangebind::expr_reads(g, binding);
                     if guard_reads {
                         self.push(&format!("{} := {}.val", binding, temp));
                     }
@@ -2451,8 +2649,7 @@ impl Emitter {
             let needs_key_snapshot = match index.as_ref() {
                 Expr::Lit { .. } => false,
                 Expr::Ident { name, .. } => {
-                    name == loan_var
-                        || rest.iter().any(|s| Self::stmt_modifies_ident(s, name))
+                    name == loan_var || rest.iter().any(|s| Self::stmt_modifies_ident(s, name))
                 }
                 _ => true,
             };
@@ -2690,7 +2887,9 @@ impl Emitter {
                 targets, values, ..
             } => {
                 targets.iter().any(|t| t.root() == root)
-                    || values.iter().any(|v| Self::expr_has_boundary_using(v, root))
+                    || values
+                        .iter()
+                        .any(|v| Self::expr_has_boundary_using(v, root))
             }
             Stmt::Local(l) => l
                 .values
@@ -2747,8 +2946,7 @@ impl Emitter {
                         .any(|a| Self::expr_has_boundary_using(&a.value, root))
             }
             Expr::Binary { lhs, rhs, .. } => {
-                Self::expr_has_boundary_using(lhs, root)
-                    || Self::expr_has_boundary_using(rhs, root)
+                Self::expr_has_boundary_using(lhs, root) || Self::expr_has_boundary_using(rhs, root)
             }
             Expr::Unary { operand, .. }
             | Expr::AddrOf { operand, .. }
@@ -2772,9 +2970,9 @@ impl Emitter {
             Expr::StructLit { fields, .. } => fields
                 .iter()
                 .any(|f| Self::expr_has_boundary_using(&f.value, root)),
-            Expr::SliceLit { items, .. } => items
-                .iter()
-                .any(|x| Self::expr_has_boundary_using(x, root)),
+            Expr::SliceLit { items, .. } => {
+                items.iter().any(|x| Self::expr_has_boundary_using(x, root))
+            }
             Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
                 Self::expr_has_boundary_using(k, root) || Self::expr_has_boundary_using(v, root)
             }),
@@ -2811,7 +3009,9 @@ impl Emitter {
                     && targets
                         .iter()
                         .all(|t| matches!(&t.kind, PlaceKind::Ident(_)))
-                    && values.iter().any(|v| Self::as_slot_loan_operand(v).is_some()) =>
+                    && values
+                        .iter()
+                        .any(|v| Self::as_slot_loan_operand(v).is_some()) =>
                 {
                     if values.iter().any(|v| Self::expr_mentions_ident(v, name)) {
                         return true;
@@ -2845,18 +3045,15 @@ impl Emitter {
                 targets
                     .iter()
                     .any(|t| Self::place_mentions_ident(t, target))
-                    || values
-                        .iter()
-                        .any(|v| Self::expr_mentions_ident(v, target))
+                    || values.iter().any(|v| Self::expr_mentions_ident(v, target))
             }
             Stmt::Expr { expr, .. } => Self::expr_mentions_ident(expr, target),
             Stmt::Send { chan, value, .. } => {
-                Self::expr_mentions_ident(chan, target)
-                    || Self::expr_mentions_ident(value, target)
+                Self::expr_mentions_ident(chan, target) || Self::expr_mentions_ident(value, target)
             }
-            Stmt::Return { values, .. } => values
-                .iter()
-                .any(|v| Self::expr_mentions_ident(v, target)),
+            Stmt::Return { values, .. } => {
+                values.iter().any(|v| Self::expr_mentions_ident(v, target))
+            }
             Stmt::If {
                 init,
                 cond,
@@ -2872,7 +3069,9 @@ impl Emitter {
                 let init_mentions = init
                     .as_ref()
                     .is_some_and(|i| Self::stmt_mentions_ident(i, target));
-                let shadows = init.as_ref().is_some_and(|i| Self::local_declares(i, target));
+                let shadows = init
+                    .as_ref()
+                    .is_some_and(|i| Self::local_declares(i, target));
                 init_mentions
                     || (!shadows
                         && (Self::expr_mentions_ident(cond, target)
@@ -2997,8 +3196,7 @@ impl Emitter {
                 Self::place_mentions_ident(base, target)
             }
             PlaceKind::Index { base, index } => {
-                Self::place_mentions_ident(base, target)
-                    || Self::expr_mentions_ident(index, target)
+                Self::place_mentions_ident(base, target) || Self::expr_mentions_ident(index, target)
             }
         }
     }
@@ -3008,8 +3206,7 @@ impl Emitter {
             Expr::Ident { name, .. } => name == target,
             Expr::Lit { .. } => false,
             Expr::Binary { lhs, rhs, .. } => {
-                Self::expr_mentions_ident(lhs, target)
-                    || Self::expr_mentions_ident(rhs, target)
+                Self::expr_mentions_ident(lhs, target) || Self::expr_mentions_ident(rhs, target)
             }
             Expr::Unary { operand, .. }
             | Expr::AddrOf { operand, .. }
@@ -3025,8 +3222,7 @@ impl Emitter {
                         .any(|a| Self::expr_mentions_ident(&a.value, target))
             }
             Expr::Index { base, index, .. } => {
-                Self::expr_mentions_ident(base, target)
-                    || Self::expr_mentions_ident(index, target)
+                Self::expr_mentions_ident(base, target) || Self::expr_mentions_ident(index, target)
             }
             Expr::Slice { base, lo, hi, .. } => {
                 Self::expr_mentions_ident(base, target)
@@ -3044,9 +3240,7 @@ impl Emitter {
                 e.as_array_lit()
                     .and_then(|(len, _, _)| len)
                     .is_some_and(|l| Self::expr_mentions_ident(l, target))
-                    || items
-                        .iter()
-                        .any(|x| Self::expr_mentions_ident(x, target))
+                    || items.iter().any(|x| Self::expr_mentions_ident(x, target))
             }
             Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
                 Self::expr_mentions_ident(k, target) || Self::expr_mentions_ident(v, target)
@@ -3062,9 +3256,7 @@ impl Emitter {
                 // body (`fn() (n int) { n = 5 }` under a live slot loan `n`
                 // assigns the RESULT, never the loan).
                 let binds = params.iter().any(|p| p.name == target)
-                    || results
-                        .iter()
-                        .any(|r| r.name.as_deref() == Some(target));
+                    || results.iter().any(|r| r.name.as_deref() == Some(target));
                 !binds && Self::block_mentions_ident(body, target)
             }
             Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
