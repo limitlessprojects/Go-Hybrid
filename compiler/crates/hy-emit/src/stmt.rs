@@ -857,6 +857,7 @@ impl Emitter {
     /// zero-results return (package mode), or a clean error.
     fn propagate_error(&mut self, err_temp: &str) -> Result<(), EmitError> {
         if let Some(w) = self.handler_writer.clone() {
+            self.flush_loans_for_return();
             self.use_package("http");
             self.push(&format!(
                 "http.Error({}, {}.Error(), http.StatusBadRequest)",
@@ -866,11 +867,13 @@ impl Emitter {
             return Ok(());
         }
         if self.in_main_closure {
+            self.flush_loans_for_return();
             self.push(&format!("hyErr = {}", err_temp));
             self.push("return");
             return Ok(());
         }
         if let Some(mut rets) = self.cur_fn_error_returns.clone() {
+            self.flush_loans_for_return();
             let n = rets.len() - 1;
             rets[n] = err_temp.to_string();
             self.push(&format!("return {}", rets.join(", ")));
@@ -920,12 +923,8 @@ impl Emitter {
             self.push(&format!("{} := {}", names.join(", "), call_text));
             self.push(&format!("if {} != nil {{", temp));
             self.indent += 1;
-            self.use_package("http");
-            self.push(&format!(
-                "http.Error({}, {}.Error(), http.StatusBadRequest)",
-                w, temp
-            ));
-            self.push("return");
+            let _ = w;
+            self.propagate_error(&temp)?;
             self.indent -= 1;
             self.push("}");
             self.hint_from_values(&l.names, std::slice::from_ref(call));
@@ -1957,8 +1956,169 @@ impl Emitter {
     // Return (wrapper-aware)
     // -----------------------------------------------------------------------
 
-    fn emit_return(&mut self, values: &[Expr]) -> Result<(), EmitError> {
+    fn expr_mentions_unhoisted_ident(&self, e: &Expr, target: &str) -> bool {
+        if self.expr_temps.contains_key(&(e as *const Expr as usize)) {
+            return false;
+        }
+        match e {
+            Expr::Try { span, .. }
+                if self.try_temps.contains_key(&(span.start.line, span.start.col)) =>
+            {
+                false
+            }
+            Expr::Ident { name, .. } => name == target,
+            Expr::Lit { .. } | Expr::FnLit { .. } => false,
+            Expr::Binary { lhs, rhs, .. } => {
+                self.expr_mentions_unhoisted_ident(lhs, target)
+                    || self.expr_mentions_unhoisted_ident(rhs, target)
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Receive { chan: operand, .. }
+            | Expr::Field { base: operand, .. }
+            | Expr::Paren { inner: operand, .. } => {
+                self.expr_mentions_unhoisted_ident(operand, target)
+            }
+            Expr::Call { callee, args, .. } => {
+                self.expr_mentions_unhoisted_ident(callee, target)
+                    || args
+                        .iter()
+                        .any(|a| self.expr_mentions_unhoisted_ident(&a.value, target))
+            }
+            Expr::Index { base, index, .. } => {
+                self.expr_mentions_unhoisted_ident(base, target)
+                    || self.expr_mentions_unhoisted_ident(index, target)
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                self.expr_mentions_unhoisted_ident(base, target)
+                    || lo
+                        .as_ref()
+                        .is_some_and(|x| self.expr_mentions_unhoisted_ident(x, target))
+                    || hi
+                        .as_ref()
+                        .is_some_and(|x| self.expr_mentions_unhoisted_ident(x, target))
+            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| self.expr_mentions_unhoisted_ident(&f.value, target)),
+            Expr::SliceLit { items, .. } => items
+                .iter()
+                .any(|x| self.expr_mentions_unhoisted_ident(x, target)),
+            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
+                self.expr_mentions_unhoisted_ident(k, target)
+                    || self.expr_mentions_unhoisted_ident(v, target)
+            }),
+            _ => Self::expr_mentions_ident(e, target),
+        }
+    }
+
+    fn expr_has_unhoisted_call(&self, e: &Expr) -> bool {
+        if self.expr_temps.contains_key(&(e as *const Expr as usize)) {
+            return false;
+        }
+        match e {
+            Expr::Try { span, .. }
+                if self.try_temps.contains_key(&(span.start.line, span.start.col)) =>
+            {
+                false
+            }
+            Expr::Call { .. } => true,
+            Expr::Lit { .. } | Expr::Ident { .. } | Expr::FnLit { .. } => false,
+            Expr::Binary { lhs, rhs, .. } => {
+                self.expr_has_unhoisted_call(lhs) || self.expr_has_unhoisted_call(rhs)
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Receive { chan: operand, .. }
+            | Expr::Field { base: operand, .. }
+            | Expr::Paren { inner: operand, .. } => self.expr_has_unhoisted_call(operand),
+            Expr::Index { base, index, .. } => {
+                self.expr_has_unhoisted_call(base) || self.expr_has_unhoisted_call(index)
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                self.expr_has_unhoisted_call(base)
+                    || lo.as_ref().is_some_and(|x| self.expr_has_unhoisted_call(x))
+                    || hi.as_ref().is_some_and(|x| self.expr_has_unhoisted_call(x))
+            }
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| self.expr_has_unhoisted_call(&f.value)),
+            Expr::SliceLit { items, .. } => {
+                items.iter().any(|x| self.expr_has_unhoisted_call(x))
+            }
+            Expr::MapLit { entries, .. } => entries
+                .iter()
+                .any(|(k, v)| self.expr_has_unhoisted_call(k) || self.expr_has_unhoisted_call(v)),
+            _ => false,
+        }
+    }
+
+    fn values_mention_active_loan(&self, values: &[Expr]) -> bool {
+        if !values.iter().any(|v| self.expr_has_unhoisted_call(v)) {
+            return false;
+        }
+        for frame in &self.loan_frames {
+            if frame.first().map(|(n, _)| n.is_empty()).unwrap_or(false) {
+                continue;
+            }
+            for (loan_name, _) in frame {
+                if values
+                    .iter()
+                    .any(|v| self.expr_mentions_unhoisted_ident(v, loan_name))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn single_call_return_arity(&self, mut expr: &Expr) -> Option<usize> {
+        while let Expr::Paren { inner, .. } = expr {
+            expr = inner;
+        }
+        let Expr::Call { callee, .. } = expr else {
+            return None;
+        };
+        let mut c = callee.as_ref();
+        while let Expr::Paren { inner, .. } = c {
+            c = inner;
+        }
+        match c {
+            Expr::Ident { name, .. } => self.fn_shapes.get(name.as_str()).map(|(n, _, _, _)| *n),
+            Expr::Field { name, .. } => self.fn_shapes.get(name.as_str()).map(|(n, _, _, _)| *n),
+            _ => None,
+        }
+    }
+
+    fn hoist_return_exprs_before_flush(&mut self, vs: &mut Vec<String>, values: &[Expr]) {
+        if values.len() == 1 && vs.len() == 1 {
+            if let Some(arity) = self.single_call_return_arity(&values[0]) {
+                if arity > 1 {
+                    let temps: Vec<String> =
+                        (0..arity).map(|_| self.next_temp("hyRet")).collect();
+                    self.push(&format!("{} := {}", temps.join(", "), vs[0]));
+                    *vs = temps;
+                    self.flush_loans_for_return();
+                    return;
+                }
+            }
+        }
+        for v_str in vs.iter_mut() {
+            if v_str != "nil" {
+                let tmp = self.next_temp("hyRet");
+                self.push(&format!("{} := {}", tmp, v_str));
+                *v_str = tmp;
+            }
+        }
         self.flush_loans_for_return();
+    }
+
+    fn emit_return(&mut self, values: &[Expr]) -> Result<(), EmitError> {
         for (idx, v) in values.iter().enumerate() {
             let later_has_try = values[idx + 1..].iter().any(Self::expr_has_hoistable_try);
             if later_has_try {
@@ -1967,13 +2127,24 @@ impl Emitter {
                 self.hoist_tries_expr(v)?;
             }
         }
+        let defer_loan_flush = self.values_mention_active_loan(values);
+        if !defer_loan_flush {
+            self.flush_loans_for_return();
+        }
         // Inside a function literal the closure owns the return — plain.
         if self.fnlit_depth > 0 {
-            let vs = values
+            let mut vs = values
                 .iter()
                 .map(|v| self.emit_expr(v, 0))
                 .collect::<Result<Vec<_>, _>>()?;
-            self.push(&format!("return {}", vs.join(", ")));
+            if defer_loan_flush {
+                self.hoist_return_exprs_before_flush(&mut vs, values);
+            }
+            if vs.is_empty() {
+                self.push("return");
+            } else {
+                self.push(&format!("return {}", vs.join(", ")));
+            }
             return Ok(());
         }
         // Inside the main wrapper closure: explicit returns carry `nil` for
@@ -1981,13 +2152,19 @@ impl Emitter {
         // and returns the current hyErr — exactly the E3 desugar's shape.
         if self.in_main_closure {
             if values.is_empty() {
+                if defer_loan_flush {
+                    self.flush_loans_for_return();
+                }
                 self.push("return");
                 return Ok(());
             }
-            let vs = values
+            let mut vs = values
                 .iter()
                 .map(|v| self.emit_expr(v, 0))
                 .collect::<Result<Vec<_>, _>>()?;
+            if defer_loan_flush {
+                self.hoist_return_exprs_before_flush(&mut vs, values);
+            }
             self.push(&format!("return {}, nil", vs.join(", ")));
             return Ok(());
         }
@@ -1996,6 +2173,9 @@ impl Emitter {
         if let Some(key) = self.cur_fn_conv_result {
             if values.len() == 1 && matches!(values[0], Expr::FnLit { .. }) {
                 if let Some(conv) = lookup_conversion(key) {
+                    if defer_loan_flush {
+                        self.flush_loans_for_return();
+                    }
                     self.pending_fnlit_conv = Some(conv);
                     let lit = self.emit_expr(&values[0], 0)?;
                     self.pending_fnlit_conv = None;
@@ -2040,6 +2220,9 @@ impl Emitter {
             } else {
                 vs.push(self.emit_expr(v, 0)?);
             }
+        }
+        if defer_loan_flush {
+            self.hoist_return_exprs_before_flush(&mut vs, values);
         }
         // A short return in an error-result fn fills the remaining slots
         // with their zero texts (13: `return v` in a (value, error) fn →
