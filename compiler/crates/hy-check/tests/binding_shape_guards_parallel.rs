@@ -122,3 +122,53 @@ fn valid_parallel_forms_stay_legal() {
         "fn main() {\n    code, body := http.get(\"/x\")?\n    fmt.println(code, body)\n}\n",
     );
 }
+
+#[test]
+fn multi_value_assign_and_same_scope_redefine_type_conflict_reject() {
+    // Multi-target assignment from a multi-return call with mismatched target types
+    assert_code(
+        "fn two_strings() (string, string) { return \"a\", \"b\" }\nfn main() {\n    var a int\n    var b int\n    a, b = two_strings()\n    _ = a\n    _ = b\n}\n",
+        "HYB-E1002",
+    );
+    // Multi-target assignment from map comma-ok lookup into non-bool second target
+    assert_code(
+        "fn main() {\n    m := map[string]int{\"a\": 1}\n    var v int\n    var ok int\n    v, ok = m[\"a\"]\n    _ = v\n    _ = ok\n}\n",
+        "HYB-E1002",
+    );
+    // Multi-target assignment from channel comma-ok receive into non-bool second target
+    assert_code(
+        "fn main() {\n    ch := make(chan int, 1)\n    var v int\n    var ok string\n    v, ok = <-ch\n    _ = v\n    _ = ok\n}\n",
+        "HYB-E1002",
+    );
+    // Same-scope `:=` re-declaration assigning incompatible type to existing variable
+    assert_code(
+        "fn main() {\n    a := 1\n    a, b := \"hello\", 2\n    _ = a\n    _ = b\n}\n",
+        "HYB-E1002",
+    );
+    // Triple-return call `a, b, c := triple()` propagates 3rd result kind
+    assert_code(
+        "fn triple() (int, int, string) { return 1, 2, \"s\" }\nfn main() {\n    a, b, c := triple()\n    var x int = c\n    _ = a\n    _ = b\n    _ = x\n}\n",
+        "HYB-E1002",
+    );
+    // Try-unwrapped multi-return call `a, b := pair_err()?` propagates result kinds
+    assert_code(
+        "fn pair_err() (int, string, error) { return 1, \"s\", nil }\nfn run() error {\n    a, b := pair_err()?\n    var x int = b\n    _ = a\n    _ = x\n    return nil\n}\nfn main() {}\n",
+        "HYB-E1002",
+    );
+    // Forwarded multi-value call to function or method with mismatched parameter types / arity
+    assert_code(
+        "fn two_strings() (string, string) { return \"a\", \"b\" }\nfn take_ints(x int, y int) {\n    _ = x\n    _ = y\n}\nfn main() {\n    take_ints(two_strings())\n}\n",
+        "HYB-E1002",
+    );
+    assert_code(
+        "struct sink { n int }\nfn (s sink) one(x int) {\n    _ = s.n\n    _ = x\n}\nfn two_ints() (int, int) { return 1, 2 }\nfn main() {\n    s := sink{ n: 0 }\n    s.one(two_ints())\n}\n",
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn multi_value_assign_and_forwarded_method_call_positive_controls() {
+    assert_ok(
+        "struct sink { n int }\nfn (s sink) pair(x int, y string) {\n    _ = s.n\n    _ = x\n    _ = y\n}\nfn mixed() (int, string) { return 1, \"ok\" }\nfn main() {\n    s := sink{ n: 0 }\n    s.pair(mixed())\n    var a int\n    var b string\n    a, b = mixed()\n    a, c := 2, true\n    _ = a\n    _ = b\n    _ = c\n}\n",
+    );
+}
