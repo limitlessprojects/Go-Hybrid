@@ -1,4 +1,4 @@
-use hy_syntax::ast::*;
+use hy_syntax::*;
 
 fn mangle_ident(name: &mut String) {
     if name == "default" {
