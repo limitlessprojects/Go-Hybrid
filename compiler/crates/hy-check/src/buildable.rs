@@ -1196,9 +1196,76 @@ impl<'a> Collector<'a> {
 
     // -- places (assignment targets) ----------------------------------------
 
+    fn check_ident_assignment_target(&mut self, name: &str, span: Span) -> bool {
+        if name == "_" {
+            return true;
+        }
+        // A binding in any enclosing scope shadows package-scope symbols
+        if self
+            .scopes
+            .iter()
+            .rev()
+            .any(|layer| layer.contains_key(name))
+        {
+            return true;
+        }
+        // Function declaration
+        let head = Checker::base_named_type_str(name);
+        if self.ck.fns.contains_key(name) || self.ck.fns.contains_key(head) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot assign to {} (neither addressable nor a map index expression) (HYB-E1002)",
+                    name
+                ),
+                "functions are not assignable variables; store to a local variable or field instead",
+            );
+            return false;
+        }
+        // Imported package
+        if self.ck.packages.contains(name) {
+            self.emit_e1002(
+                span,
+                format!("use of package {} not in selector (HYB-E1002)", name),
+                "an imported package cannot be assigned to; qualify a member of the package with a selector (e.g. `pkg.Member`)",
+            );
+            return false;
+        }
+        // Go built-in function
+        const GO_BUILTINS: &[&str] = &[
+            "append", "cap", "clear", "close", "complex", "copy", "delete", "imag", "len", "make",
+            "max", "min", "new", "panic", "print", "println", "real", "recover",
+        ];
+        if GO_BUILTINS.contains(&name) {
+            self.emit_e1002(
+                span,
+                format!("{} (built-in) must be called (HYB-E1002)", name),
+                "built-in functions cannot be assigned to; call the function instead or bind a local variable",
+            );
+            return false;
+        }
+        // Predeclared type or declared struct/enum/type alias
+        if crate::resolve::is_predeclared_type_name(name)
+            || self.ck.structs.contains_key(name)
+            || self.ck.enums.contains_key(name)
+            || self.ck.type_aliases.contains_key(name)
+        {
+            self.emit_e1002(
+                span,
+                format!("{} (type) is not an expression (HYB-E1002)", name),
+                "a type name cannot be assigned to; declare a variable of this type instead",
+            );
+            return false;
+        }
+        true
+    }
+
     fn place(&mut self, p: &Place, op: AssignOp) {
         match &p.kind {
             PlaceKind::Ident(n) => {
+                if !self.check_ident_assignment_target(n, p.span) {
+                    return;
+                }
                 // A bare `x = v` store is the ONE target form Go does not
                 // count as a read; `x++`, `x += 1` and every non-ident
                 // target (`x[k] = v`, `x.f = v`, `&x`) read the root.
