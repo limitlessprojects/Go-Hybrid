@@ -320,7 +320,6 @@ impl<'a> Checker<'a> {
                 let src_bad = matches!(
                     src_k,
                     TypeShape::Primitive
-                        | TypeShape::Str
                         | TypeShape::Atomic
                         | TypeShape::Struct(_)
                         | TypeShape::Pointer(_)
@@ -329,6 +328,7 @@ impl<'a> Checker<'a> {
                         | TypeShape::OwnHandle(_)
                         | TypeShape::BorrowHandle(_)
                         | TypeShape::ForeignOpaque(_)
+                        | TypeShape::Map(_, _)
                         | TypeShape::Unknown
                 );
                 if dst_bad || src_bad {
