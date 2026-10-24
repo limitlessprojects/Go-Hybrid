@@ -117,6 +117,7 @@ jobs:
           python3 tests/test_install_runtime.py
           python3 tests/test_install_checksums.py
           python3 tests/test_install_upgrade.py
+          python3 tests/test_env_sh.py
 
   # The compiler (lands with MVP-0): pinned toolchains, full test suite,
   # corpus verdict agreement, and the walking-skeleton examples end-to-end.

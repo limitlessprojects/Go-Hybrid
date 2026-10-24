@@ -29,17 +29,49 @@ export HEAVY_LOCK="/tmp/heavy.lock"
 
 # Verify pins quickly: `source tools/env.sh && tools/env.sh --check`
 check() {
-  go version 2>/dev/null | rg -q "$PINNED_GO" || echo "WARN: go != $PINNED_GO"
-  rustc --version 2>/dev/null | rg -q "$PINNED_RUST" || echo "WARN: rustc != $PINNED_RUST"
-  df -h / | tail -1
-  free -m | head -2
+  local status=0
+  local go_out rust_out
+
+  go_out="$(go version 2>/dev/null)" || go_out=""
+  if [[ -z "$go_out" ]]; then
+    echo "WARN: go missing (expected $PINNED_GO)"
+    status=1
+  elif [[ " $go_out " != *" $PINNED_GO "* ]]; then
+    echo "WARN: go != $PINNED_GO (got: $go_out)"
+    status=1
+  fi
+
+  rust_out="$(rustc --version 2>/dev/null)" || rust_out=""
+  if [[ -z "$rust_out" ]]; then
+    echo "WARN: rustc missing (expected $PINNED_RUST)"
+    status=1
+  elif [[ " $rust_out " != *" $PINNED_RUST "* ]]; then
+    echo "WARN: rustc != $PINNED_RUST (got: $rust_out)"
+    status=1
+  fi
+
+  df -h / 2>/dev/null | tail -1 || true
+  free -m 2>/dev/null | head -2 || true
+  return "$status"
 }
 
 # ==== inline check when invoked directly ====
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-  echo "Go:      $(go version 2>/dev/null || echo MISSING)"
-  echo "Rust:    $(rustc --version 2>/dev/null || echo MISSING)"
-  echo "Cargo:   $(cargo --version 2>/dev/null || echo MISSING)"
-  echo "Kaggle:  $($KAGGLE_CLI --version 2>/dev/null || echo MISSING)"
-  echo "Cores:   $(nproc)   Disk: $(df -h / | tail -1 | awk '{print $4}') free"
+  case "${1:-}" in
+    --check)
+      check
+      exit $?
+      ;;
+    "")
+      echo "Go:      $(go version 2>/dev/null || echo MISSING)"
+      echo "Rust:    $(rustc --version 2>/dev/null || echo MISSING)"
+      echo "Cargo:   $(cargo --version 2>/dev/null || echo MISSING)"
+      echo "Kaggle:  $($KAGGLE_CLI --version 2>/dev/null || echo MISSING)"
+      echo "Cores:   $(nproc 2>/dev/null || echo 1)   Disk: $(df -h / 2>/dev/null | tail -1 | awk '{print $4}' || echo UNKNOWN) free"
+      ;;
+    *)
+      echo "usage: tools/env.sh [--check]" >&2
+      exit 2
+      ;;
+  esac
 fi
