@@ -453,11 +453,26 @@ impl<'a> Checker<'a> {
             } => (operand.as_ref(), *span),
             _ => return None,
         };
-        match unwrap_parens(operand) {
-            Expr::Index { base, .. } if matches!(self.shape_of_expr(st, base), TypeShape::Map(..)) => {
-                Some(span)
+        if self.has_map_index_root(st, operand) {
+            Some(span)
+        } else {
+            None
+        }
+    }
+
+    fn has_map_index_root(&self, st: &FnState, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Index { base, .. } => {
+                if matches!(self.shape_of_expr(st, base), TypeShape::Map(..)) {
+                    true
+                } else {
+                    self.has_map_index_root(st, base)
+                }
             }
-            _ => None,
+            Expr::Field { base, .. } => {
+                self.has_map_index_root(st, base)
+            }
+            _ => false,
         }
     }
 
