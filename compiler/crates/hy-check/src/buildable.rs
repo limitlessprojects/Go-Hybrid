@@ -347,6 +347,10 @@ struct Define {
     used: bool,
     written: bool,
     elidable: bool,
+    /// #922: a fn-local `const` declared WITHOUT a type annotation
+    /// (`const k = 1`) — Go keeps it untyped, so it participates in
+    /// untyped-constant adaptation; `const k int = 1` is typed `int`.
+    untyped_const: bool,
 }
 
 struct Collector<'a> {
@@ -484,6 +488,107 @@ impl<'a> Collector<'a> {
         self.file_consts.get(name).cloned()
     }
 
+    /// #922 — cross-kind operand conflict for arithmetic (`+ - * /`) and
+    /// ordered comparisons (`< <= > >=`): the two operand kinds differ and
+    /// Go's only implicit numeric conversion — untyped-constant adaptation —
+    /// cannot bridge them. `1 + 2.5` (both untyped) and `f + 1` (int const
+    /// adapts to `float64`) build; `x + f`, `f + x`, and `x + 2.5` (untyped
+    /// float const against a typed `int`) are `mismatched types` in Go.
+    /// Non-numeric pairs are left to the family checks in the arms
+    /// themselves (string + int etc.), and an `Unknown` side fails open —
+    /// same posture as `kinds_conflict`.
+    ///
+    /// NOTE (dedupe when it lands): companion PR #1447 (issue #1112) adds
+    /// `Collector::is_untyped_constant` — a near-identical syntactic
+    /// untyped-constant walk minus `LitKind::Float`. Whichever PR merges
+    /// second should collapse the two into one helper (the `kinds_conflict`
+    /// / PR #620 duplicate-helper precedent at the top of this file).
+    fn numeric_adapt_conflict(&self, lk: &OpKind, rk: &OpKind, lhs: &Expr, rhs: &Expr) -> bool {
+        if !lk.is_numeric() || !rk.is_numeric() || lk == rk {
+            return false;
+        }
+        let l_untyped = self.is_untyped_numeric_const(lhs);
+        let r_untyped = self.is_untyped_numeric_const(rhs);
+        if l_untyped && r_untyped {
+            return false;
+        }
+        // Exactly one untyped constant: it adopts the typed side's type,
+        // which Go permits only int-const → float64. A float const against
+        // a typed `int` (`x + 2.5`) is the mismatched direction.
+        match (lk, rk) {
+            (OpKind::Float, OpKind::Int) => !r_untyped,
+            (OpKind::Int, OpKind::Float) => !l_untyped,
+            _ => true,
+        }
+    }
+
+    /// Is `e` an untyped numeric constant (#922)? Structural and
+    /// conservative: int/rune/float literals, a unary minus over one,
+    /// arithmetic over two, and a reference to an untyped `const` — the
+    /// carriers of Go's constant adaptation. Everything else (variables,
+    /// calls, receives, index, field) is typed by construction, so it
+    /// answers `false`, which keeps `numeric_adapt_conflict` stricter,
+    /// never looser, than a plain kind comparison.
+    fn is_untyped_numeric_const(&self, e: &Expr) -> bool {
+        match unwrap_parens(e) {
+            Expr::Lit {
+                kind,
+                ..
+            } => matches!(
+                kind,
+                LitKind::Int(_) | LitKind::Float(_) | LitKind::Char(_)
+            ),
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => self.is_untyped_numeric_const(operand),
+            Expr::Move {
+                operand, ..
+            }
+            | Expr::Try {
+                operand, ..
+            } => self.is_untyped_numeric_const(operand),
+            Expr::Binary {
+                lhs, rhs, ..
+            } => self.is_untyped_numeric_const(lhs) && self.is_untyped_numeric_const(rhs),
+            Expr::Ident {
+                name, ..
+            } => self.is_untyped_const_binding(name),
+            _ => false,
+        }
+    }
+
+    /// Does `name` resolve to an untyped `const` (#922)? A fn-local `const`
+    /// comes from the define table (its `LocalDecl.ty` records the
+    /// annotation, so `const k int = 3` is typed exactly like a variable
+    /// while `const k = 3` stays untyped); a file-level `const` comes from
+    /// the declaration list — and only when declared WITHOUT a type
+    /// annotation. Params, receivers, `:=` and `var` bindings are typed
+    /// values. See the `numeric_adapt_conflict` dedupe NOTE: PR #1447's
+    /// `is_const_binding` is the same rule minus the `untyped_const` field.
+    fn is_untyped_const_binding(&self, name: &str) -> bool {
+        for layer in self.scopes.iter().rev() {
+            if let Some(entry) = layer.get(name) {
+                return match entry {
+                    Some(id) => {
+                        self.defines[*id].kind == LocalKind::Const
+                            && self.defines[*id].untyped_const
+                    }
+                    None => false,
+                };
+            }
+        }
+        if !self.file_consts.contains_key(name) {
+            return false;
+        }
+        self.ck
+            .file
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Const(cd) if cd.name == name && cd.ty.is_none()))
+    }
+
     /// A `for`-iterate or `select`-receive binding is elided to `_` at
     /// emission when completely untouched, but if the body assigns to it
     /// (`v = ...`) without ever reading it, the emitter must keep the binding
@@ -506,6 +611,7 @@ impl<'a> Collector<'a> {
             used: false,
             written: false,
             elidable: true,
+            untyped_const: false,
         });
         top.insert(name.to_string(), Some(id));
     }
@@ -917,6 +1023,7 @@ impl<'a> Collector<'a> {
                 used: false,
                 written: false,
                 elidable: false,
+                untyped_const: l.kind == LocalKind::Const && l.ty.is_none(),
             });
             top.insert(name.clone(), Some(id));
         }
@@ -2955,6 +3062,19 @@ impl<'a> Collector<'a> {
                         ),
                         "ordered comparisons (`<`, `<=`, `>`, `>=`) require two numeric values or two strings",
                     );
+                } else if self.numeric_adapt_conflict(&lk, &rk, lhs, rhs) {
+                    // #922: `x < f` — two numeric but mismatched concrete types.
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid operation `{}`: operator `{}` requires matching operand types, found `{}` and `{}` (HYB-E1002)",
+                            span_expr_label(lhs, op_str, rhs),
+                            op_str,
+                            lk.label(),
+                            rk.label()
+                        ),
+                        "ordered comparisons between `int` and `float64` values need an explicit conversion",
+                    );
                 }
             }
             // B3: `+` accepts numeric+numeric or string+string.
@@ -2974,6 +3094,18 @@ impl<'a> Collector<'a> {
                             rk.label()
                         ),
                         "`+` requires two numeric operands or two strings; use string interpolation `\"{x}{s}\"` to format mixed values",
+                    );
+                } else if self.numeric_adapt_conflict(&lk, &rk, lhs, rhs) {
+                    // #922: `x + f` — two numeric but mismatched concrete types.
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid operation `{}`: `+` requires matching operand types, found `{}` and `{}` (HYB-E1002)",
+                            span_expr_label(lhs, "+", rhs),
+                            lk.label(),
+                            rk.label()
+                        ),
+                        "`+` between `int` and `float64` values needs an explicit conversion",
                     );
                 }
             }
@@ -2997,6 +3129,19 @@ impl<'a> Collector<'a> {
                             rk.label()
                         ),
                         "arithmetic `-`, `*`, `/` require numeric operands",
+                    );
+                } else if self.numeric_adapt_conflict(&lk, &rk, lhs, rhs) {
+                    // #922: `x - f` / `x * 2.5` — mismatched concrete numeric types.
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid operation `{}`: operator `{}` requires matching operand types, found `{}` and `{}` (HYB-E1002)",
+                            span_expr_label(lhs, op_str, rhs),
+                            op_str,
+                            lk.label(),
+                            rk.label()
+                        ),
+                        "arithmetic between `int` and `float64` values needs an explicit conversion",
                     );
                 }
             }
