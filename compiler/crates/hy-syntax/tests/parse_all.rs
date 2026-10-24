@@ -1,7 +1,7 @@
 //! Integration test: EVERY must-parse file parses cleanly.
 //!
 
-//!   * tests/checker-corpus/*.hy            (129 programs — the checker corpus;
+//!   * tests/checker-corpus/*.hy            (130 programs — the checker corpus;
 //!     61-string-escape-fail-closed.hy is the corpus's first PARSE-reject
 //!     fixture and is pinned to fail closed instead)
 //!   * spikes/spike6-ownership/work/*.hy    (10 programs — Tier-0 rewrites)

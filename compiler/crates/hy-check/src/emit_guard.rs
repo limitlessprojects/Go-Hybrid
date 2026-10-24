@@ -896,6 +896,76 @@ impl<'a> Checker<'a> {
         self.pkg_names.insert(name.to_string(), kind);
     }
 
+    /// Issue #1575: the method receiver BASE TYPE must name a type declared
+    /// in this file. `declare_method` owns the other E2007 arms (primitive,
+    /// alias, pointer-to-pointer, anonymous), but it runs in pass 1 where a
+    /// legal forward reference (`fn (x *later) …` above `struct later`) is
+    /// not registered yet, so it cannot reject a name that resolves to
+    /// nothing. This pass-2 walk closes that arm:
+    ///
+    ///   fn (x *missing) m()        -> go build: undefined: missing
+    ///   fn (x *serde_json.value) m() -> go build: cannot define new methods
+    ///                                  on non-local type
+    pub(crate) fn check_receiver_type_declared(&mut self, f: &FnDecl) {
+        let Some(r) = &f.receiver else { return };
+        // Only a plain named base reaches this arm. A pointer-to-pointer or
+        // an anonymous receiver type already has its `declare_method` E2007.
+        let TypeExpr::Named { name, .. } = &r.ty else {
+            return;
+        };
+        let base = Self::base_named_type_str(name);
+        // `struct marker {}` is a legal receiver, but the shape table skips
+        // zero-field structs (#722), so consult the package-name table too.
+        if self.structs.contains_key(base)
+            || self.pkg_names.get(base) == Some(&"struct")
+            || self.enums.contains_key(base)
+        {
+            return;
+        }
+        // `declare_method` already rejected these with a precise message.
+        if self.type_aliases.contains_key(base) || is_primitive_receiver(base) {
+            return;
+        }
+        let recv_full = if r.is_pointer {
+            format!("*{}", r.ty.render())
+        } else {
+            r.ty.render()
+        };
+        let (reason, fix) = if name.contains('.') {
+            (
+                format!(
+                    "Go refuses `cannot define new methods on non-local type`: `{}` is a foreign type, and a method's receiver must be declared in the same file as the method",
+                    name
+                ),
+                "declare the method inside the file that declares the receiver type, or make it a plain fn that takes the value as a parameter".to_string(),
+            )
+        } else {
+            (
+                format!(
+                    "Go refuses `undefined: {}`: nothing in this file declares a type named `{}` (a receiver can name a struct or enum declared here, in any order)",
+                    name, base
+                ),
+                format!(
+                    "declare `struct {} {{ … }}` (or the enum) in this file, or make it a plain fn `fn {}(...)`",
+                    base, f.name
+                ),
+            )
+        };
+        let msg = format!(
+            "invalid receiver type `{}` for method `{}.{}` — {} (HYB-E2007)",
+            recv_full, recv_full, f.name, reason
+        );
+        self.diags.push(
+            Diagnostic::error("HYB-E2007", self.path.clone(), r.ty.span(), msg).with_notes(vec![
+                format!(
+                    "why: the emitted Go would fail to build (`undefined: {}` / `cannot define new methods on non-local type`), so an accepted Hybrid program would not survive `go build` (issue #1575, GUARANTEES row 13 BUILDABLE)",
+                    name
+                ),
+                format!("fix: {}", fix),
+            ]),
+        );
+    }
+
     /// Register a method: validate the receiver (issue #201-D) and
     /// detect duplicate methods on the same receiver type (issue #201-C).
     pub(crate) fn declare_method(&mut self, f: &FnDecl) {
