@@ -1,0 +1,6 @@
+G3 — determinism across clean builds (same pinned flags, same machine)
+build A contract_sha256: eb8888981e5950248fd476ce8404ef36551c4e099d068e8847728e878bf13292
+build C contract_sha256: eb8888981e5950248fd476ce8404ef36551c4e099d068e8847728e878bf13292
+artifact sha256 build A: d8dbd1824be4c86c5fc21905b09d6daebd996d65a9a534379fd02942f0a2352c
+artifact sha256 build C: d8dbd1824be4c86c5fc21905b09d6daebd996d65a9a534379fd02942f0a2352c
+per-symbol records identical: True

@@ -1,0 +1,1006 @@
+{
+  "artifact": {
+    "base_commit": "78e04dc93bd343b54579d5d8014c03f5b1450278",
+    "crate": "hyrt",
+    "file": "libhyrt.a",
+    "functions_with_frames": 1992,
+    "members": 346,
+    "objects": 346,
+    "sha256": "d8dbd1824be4c86c5fc21905b09d6daebd996d65a9a534379fd02942f0a2352c",
+    "toolchain": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1 | cargo 1.99.0 (5f94df478 2026-08-27) | RUSTFLAGS=\"-Z emit-stack-sizes -C debuginfo=2\" RUSTC_BOOTSTRAP=1"
+  },
+  "contract_sha256": "eb8888981e5950248fd476ce8404ef36551c4e099d068e8847728e878bf13292",
+  "schema": "hy.ffi.cert/v1",
+  "symbols": {
+    "hy_json_array_get": {
+      "abi": {
+        "arity": 3,
+        "params": [
+          "u64",
+          "u64",
+          "ptr"
+        ],
+        "ret": "i32"
+      },
+      "effects": {
+        "blocking": true,
+        "may_callback": true,
+        "may_retain_ptr": false,
+        "source": "restricted-wrapper-subset"
+      },
+      "frame_bytes": 136,
+      "stack": {
+        "blocking_callees": [
+          "_RNvMNtNtNtNtCsgHYyB3hU8Ec_3std3sys4sync5mutex5futexNtB2_5Mutex4wake"
+        ],
+        "bytes": 176,
+        "class": "DEEP",
+        "class_bytes_only": "SMALL",
+        "class_strict": "DEEP",
+        "external_callees": [
+          "_RNvNtNtNtCsgHYyB3hU8Ec_3std6thread7current2id2ID",
+          "_Unwind_Resume",
+          "close",
+          "memcpy"
+        ],
+        "forcing": [
+          "recursion",
+          "indirect-dispatch",
+          "missing-frame x25",
+          "external-callee x4"
+        ],
+        "got_indirected": false,
+        "indirect_call": true,
+        "missing_frames": [
+          "_RINvMNtNtCs1C1lLj4PWSY_5alloc2io5errorNtNtNtCsevLNFiNqfJP_4core2io5error5Error3newReECsgHYyB3hU8Ec_3std",
+          "_RNvCsdtSMxSA38aw_7___rustc11___rdl_alloc",
+          "_RNvCsdtSMxSA38aw_7___rustc17rust_begin_unwind",
+          "_RNvMNtNtNtNtCsgHYyB3hU8Ec_3std3sys4sync5mutex5futexNtB2_5Mutex4wake",
+          "_RNvMsa_NtCsevLNFiNqfJP_4core3fmtNtB5_9Formatter12pad_integral",
+          "_RNvMsa_NtCsevLNFiNqfJP_4core3fmtNtB5_9Formatter3pad",
+          "_RNvMsa_NtCsevLNFiNqfJP_4core3fmtNtB5_9Formatter9write_str",
+          "_RNvMsn_NtCs1C1lLj4PWSY_5alloc4syncINtB5_3ArcNtNtNtCsgHYyB3hU8Ec_3std6thread9spawnhook9SpawnHookE9drop_slowBM_"
+        ],
+        "recursive": true
+      }
+    },
+    "hy_json_array_len": {
+      "abi": {
+        "arity": 2,
+        "params": [
+          "u64",
+          "ptr"
+        ],
+        "ret": "i32"
+      },
+      "effects": {
+        "blocking": false,
+        "may_callback": true,
+        "may_retain_ptr": false,
+        "source": "restricted-wrapper-subset"
+      },
+      "frame_bytes": 40,
+      "stack": {
+        "blocking_callees": [],
+        "bytes": 64,
+        "class": "DEEP",
+        "class_bytes_only": "SMALL",
+        "class_strict": "DEEP",
+        "external_callees": [
+          "_RNvNtNtNtCsgHYyB3hU8Ec_3std6thread7current2id2ID",
+          "_RNvNvNtNtNtCsc3wbSpLCCeb_6memchr4arch6x86_646memchr11memrchr_raw2FN",
+          "_Unwind_Resume",
+          "close"
+        ],
+        "forcing": [
+          "recursion",
+          "indirect-dispatch",
+          "missing-frame x5",
+          "external-callee x4"
+        ],
+        "got_indirected": false,
+        "indirect_call": true,
+        "missing_frames": [
+          "_RNvCsdtSMxSA38aw_7___rustc11___rdl_alloc",
+          "_RNvMsn_NtCs1C1lLj4PWSY_5alloc4syncINtB5_3ArcNtNtNtCsgHYyB3hU8Ec_3std6thread9spawnhook9SpawnHookE9drop_slowBM_",
+          "_RNvNtCs1C1lLj4PWSY_5alloc7raw_vec12handle_error",
+          "_RNvXs9_NtNtCsevLNFiNqfJP_4core2io5errorNtB5_6CustomNtNtNtB9_3ops4drop4Drop4drop",
+          "_RNvXs_NvMs_NtNtCs1C1lLj4PWSY_5alloc3ffi5c_strNtB9_7CString3newRShNtB4_11SpecNewImpl13spec_new_impl"
+        ],
+        "recursive": true
+      }
+    },
+    "hy_json_array_push_string": {
+      "abi": {
+        "arity": 3,
+        "params": [
+          "u64",
+          "u64",
+          "u64"
+        ],
+        "ret": "i32"
+      },
+      "effects": {
+        "blocking": false,
+        "may_callback": true,
+        "may_retain_ptr": true,
+        "source": "restricted-wrapper-subset"
+      },
+      "frame_bytes": 88,
+      "stack": {
+        "blocking_callees": [],
+        "bytes": 128,
+        "class": "DEEP",
+        "class_bytes_only": "SMALL",
+        "class_strict": "DEEP",
+        "external_callees": [
+          "_RNvNtNtCsgHYyB3hU8Ec_3std9panicking11panic_count18GLOBAL_PANIC_COUNT",
+          "_RNvNtNtNtCsgHYyB3hU8Ec_3std6thread7current2id2ID",
+          "_RNvNvNtNtNtCsc3wbSpLCCeb_6memchr4arch6x86_646memchr11memrchr_raw2FN",
+          "_Unwind_Resume",
+          "close",
+          "memmove"
+        ],
+        "forcing": [
+          "recursion",
+          "indirect-dispatch",
+          "missing-frame x19",
+          "external-callee x6"
+        ],
+        "got_indirected": false,
+        "indirect_call": true,
+        "missing_frames": [
+          "_RNvCsdtSMxSA38aw_7___rustc11___rdl_alloc",
+          "_RNvCsdtSMxSA38aw_7___rustc17rust_begin_unwind",
+          "_RNvMsa_NtCsevLNFiNqfJP_4core3fmtNtB5_9Formatter12pad_integral",
+          "_RNvMsa_NtCsevLNFiNqfJP_4core3fmtNtB5_9Formatter3pad",
+          "_RNvMsa_NtCsevLNFiNqfJP_4core3fmtNtB5_9Formatter9write_str",
+          "_RNvMsn_NtCs1C1lLj4PWSY_5alloc4syncINtB5_3ArcNtNtNtCsgHYyB3hU8Ec_3std6thread9spawnhook9SpawnHookE9drop_slowBM_",
+          "_RNvNtCs1C1lLj4PWSY_5alloc5alloc18handle_alloc_error",
+          "_RNvNtCs1C1lLj4PWSY_5alloc7raw_vec12handle_error"
+        ],
+        "recursive": true
+      }
+    },
+    "hy_json_get_array": {
+      "abi": {
+        "arity": 4,
+        "params": [
+          "u64",
+          "u64",
+          "u64",
+          "ptr"
+        ],
+        "ret": "i32"
+      },
+      "effects": {
+        "blocking": false,
+        "may_callback": true,
+        "may_retain_ptr": true,
+        "source": "restricted-wrapper-subset"
+      },
+      "frame_bytes": 120,
+      "stack": {
+        "blocking_callees": [],
+        "bytes": 784,
+        "class": "DEEP",
+        "class_bytes_only": "SMALL",
+        "class_strict": "DEEP",
+        "external_callees": [
+          "_RNvNtNtNtCsgHYyB3hU8Ec_3std6thread7current2id2ID",
+          "_Unwind_Resume",
+          "close",
+          "memcmp",
+          "memcpy"
+        ],
+        "forcing": [
+          "recursion",
+          "indirect-dispatch",
+          "missing-frame x23",
+          "external-callee x5"
+        ],
+        "got_indirected": false,
+        "indirect_call": true,
+        "missing_frames": [
+          "_RNvCsdtSMxSA38aw_7___rustc11___rdl_alloc",
+          "_RNvCsdtSMxSA38aw_7___rustc17rust_begin_unwind",
+          "_RNvMsa_NtCsevLNFiNqfJP_4core3fmtNtB5_9Formatter12pad_integral",
+          "_RNvMsa_NtCsevLNFiNqfJP_4core3fmtNtB5_9Formatter3pad",
+          "_RNvMsa_NtCsevLNFiNqfJP_4core3fmtNtB5_9Formatter9write_str",
+          "_RNvMsn_NtCs1C1lLj4PWSY_5alloc4syncINtB5_3ArcNtNtNtCsgHYyB3hU8Ec_3std6thread9spawnhook9SpawnHookE9drop_slowBM_",
+          "_RNvNtCs1C1lLj4PWSY_5alloc7raw_vec12handle_error",
+          "_RNvNtCsevLNFiNqfJP_4core3fmt5write"
+        ],
+        "recursive": true
+      }
+    },
+    "hy_json_get_int": {
+      "abi": {
+        "arity": 4,
+        "params": [
+          "u64",
+          "u64",
+          "u64",
+          "ptr"
+        ],
+        "ret": "i32"
+      },
+      "effects": {
+        "blocking": true,
+        "may_callback": true,
+        "may_retain_ptr": true,
+        "source": "restricted-wrapper-subset"
+      },
+      "frame_bytes": 88,
+      "stack": {
+        "blocking_callees": [
+          "_RNvMNtNtNtNtCsgHYyB3hU8Ec_3std3sys4sync5mutex5futexNtB2_5Mutex4wake"
+        ],
+        "bytes": 752,
+        "class": "DEEP",
+        "class_bytes_only": "SMALL",
+        "class_strict": "DEEP",
+        "external_callees": [
+          "_RNvNtNtNtCsgHYyB3hU8Ec_3std6thread7current2id2ID",
+          "_Unwind_Resume",
+          "close",
+          "memcmp"
+        ],
+        "forcing": [
+          "recursion",
+          "indirect-dispatch",
+          "missing-frame x12",
+          "external-callee x4"
+        ],
+        "got_indirected": false,
+        "indirect_call": true,
+        "missing_frames": [
+          "_RNvCsdtSMxSA38aw_7___rustc11___rdl_alloc",
+          "_RNvMNtNtNtNtCsgHYyB3hU8Ec_3std3sys4sync5mutex5futexNtB2_5Mutex4wake",
+          "_RNvMsa_NtCsevLNFiNqfJP_4core3fmtNtB5_9Formatter12pad_integral",
+          "_RNvMsn_NtCs1C1lLj4PWSY_5alloc4syncINtB5_3ArcNtNtNtCsgHYyB3hU8Ec_3std6thread9spawnhook9SpawnHookE9drop_slowBM_",
+          "_RNvNtCs1C1lLj4PWSY_5alloc7raw_vec12handle_error",
+          "_RNvNtCsevLNFiNqfJP_4core9panicking18panic_bounds_check",
+          "_RNvNtCsevLNFiNqfJP_4core9panicking5panic",
+          "_RNvNtCsevLNFiNqfJP_4core9panicking9panic_fmt"
+        ],
+        "recursive": true
+      }
+    },
+    "hy_json_get_string": {
+      "abi": {
+        "arity": 4,
+        "params": [
+          "u64",
+          "u64",
+          "u64",
+          "ptr"
+        ],
+        "ret": "i32"
+      },
+      "effects": {
+        "blocking": false,
+        "may_callback": true,
+        "may_retain_ptr": true,
+        "source": "restricted-wrapper-subset"
+      },
+      "frame_bytes": 104,
+      "stack": {
+        "blocking_callees": [],
+        "bytes": 768,
+        "class": "DEEP",
+        "class_bytes_only": "SMALL",
+        "class_strict": "DEEP",
+        "external_callees": [
+          "_RNvNtNtNtCsgHYyB3hU8Ec_3std6thread7current2id2ID",
+          "_RNvXsi_NtNtNtCsevLNFiNqfJP_4core3fmt3num3impjNtB9_7Display3fmt",
+          "_Unwind_Resume",
+          "close",
+          "memcmp"
+        ],
+        "forcing": [
+          "recursion",
+          "indirect-dispatch",
+          "missing-frame x13",
+          "external-callee x5"
+        ],
+        "got_indirected": false,
+        "indirect_call": true,
+        "missing_frames": [
+          "_RNvCsdtSMxSA38aw_7___rustc11___rdl_alloc",
+          "_RNvMsa_NtCsevLNFiNqfJP_4core3fmtNtB5_9Formatter12pad_integral",
+          "_RNvMsn_NtCs1C1lLj4PWSY_5alloc4syncINtB5_3ArcNtNtNtCsgHYyB3hU8Ec_3std6thread9spawnhook9SpawnHookE9drop_slowBM_",
+          "_RNvNtCs1C1lLj4PWSY_5alloc7raw_vec12handle_error",
+          "_RNvNtCsevLNFiNqfJP_4core9panicking18panic_bounds_check",
+          "_RNvNtCsevLNFiNqfJP_4core9panicking5panic",
+          "_RNvNtCsevLNFiNqfJP_4core9panicking9panic_fmt",
+          "_RNvNtNtCs1C1lLj4PWSY_5alloc2io5error21custom_owner_from_box"
+        ],
+        "recursive": true
+      }
+    },
+    "hy_json_live_count": {
+      "abi": {
+        "arity": 1,
+        "params": [
+          "ptr"
+        ],
+        "ret": "i32"
+      },
+      "effects": {
+        "blocking": true,
+        "may_callback": true,
+        "may_retain_ptr": false,
+        "source": "restricted-wrapper-subset"
+      },
+      "frame_bytes": 40,
+      "stack": {
+        "blocking_callees": [
+          "_RNvMNtNtNtNtCsgHYyB3hU8Ec_3std3sys4sync5mutex5futexNtB2_5Mutex14lock_contended"
+        ],
+        "bytes": 48,
+        "class": "DEEP",
+        "class_bytes_only": "SMALL",
+        "class_strict": "DEEP",
+        "external_callees": [
+          "_RNvNtCsT2ZCs9R5tw_10serde_json2de5POW10",
+          "_RNvNtNtNtCsgHYyB3hU8Ec_3std6thread7current2id2ID",
+          "_Unwind_Resume",
+          "close",
+          "gettid"
+        ],
+        "forcing": [
+          "recursion",
+          "indirect-dispatch",
+          "missing-frame x7",
+          "external-callee x5"
+        ],
+        "got_indirected": false,
+        "indirect_call": true,
+        "missing_frames": [
+          "_RNvCsdtSMxSA38aw_7___rustc11___rdl_alloc",
+          "_RNvMNtNtNtNtCsgHYyB3hU8Ec_3std3sys4sync5mutex5futexNtB2_5Mutex14lock_contended",
+          "_RNvMsn_NtCs1C1lLj4PWSY_5alloc4syncINtB5_3ArcNtNtNtCsgHYyB3hU8Ec_3std6thread9spawnhook9SpawnHookE9drop_slowBM_",
+          "_RNvNtCs1C1lLj4PWSY_5alloc7raw_vec12handle_error",
+          "_RNvNtNtCsgHYyB3hU8Ec_3std9panicking11panic_count17is_zero_slow_path",
+          "_RNvXs9_NtNtCsevLNFiNqfJP_4core2io5errorNtB5_6CustomNtNtNtB9_3ops4drop4Drop4drop",
+          "_RNvXs_NvMs_NtNtCs1C1lLj4PWSY_5alloc3ffi5c_strNtB9_7CString3newRShNtB4_11SpecNewImpl13spec_new_impl"
+        ],
+        "recursive": true
+      }
+    },
+    "hy_json_new_array": {
+      "abi": {
+        "arity": 1,
+        "params": [
+          "ptr"
+        ],
+        "ret": "i32"
+      },
+      "effects": {
+        "blocking": false,
+        "may_callback": true,
+        "may_retain_ptr": false,
+        "source": "restricted-wrapper-subset"
+      },
+      "frame_bytes": 56,
+      "stack": {
+        "blocking_callees": [],
+        "bytes": 80,
+        "class": "DEEP",
+        "class_bytes_only": "SMALL",
+        "class_strict": "DEEP",
+        "external_callees": [
+          "_RNvNtCsT2ZCs9R5tw_10serde_json2de5POW10",
+          "_RNvNtNtNtCsgHYyB3hU8Ec_3std6thread7current2id2ID",
+          "_RNvNvNtNtNtCsc3wbSpLCCeb_6memchr4arch6x86_646memchr11memrchr_raw2FN",
+          "_Unwind_Resume",
+          "close"
+        ],
+        "forcing": [
+          "recursion",
+          "indirect-dispatch",
+          "missing-frame x6",
+          "external-callee x5"
+        ],
+        "got_indirected": false,
+        "indirect_call": true,
+        "missing_frames": [
+          "_RNvCsdtSMxSA38aw_7___rustc11___rdl_alloc",
+          "_RNvMsn_NtCs1C1lLj4PWSY_5alloc4syncINtB5_3ArcNtNtNtCsgHYyB3hU8Ec_3std6thread9spawnhook9SpawnHookE9drop_slowBM_",
+          "_RNvNtCs1C1lLj4PWSY_5alloc7raw_vec12handle_error",
+          "_RNvNtNtCsgHYyB3hU8Ec_3std9panicking11panic_count17is_zero_slow_path",
+          "_RNvXs9_NtNtCsevLNFiNqfJP_4core2io5errorNtB5_6CustomNtNtNtB9_3ops4drop4Drop4drop",
+          "_RNvXs_NvMs_NtNtCs1C1lLj4PWSY_5alloc3ffi5c_strNtB9_7CString3newRShNtB4_11SpecNewImpl13spec_new_impl"
+        ],
+        "recursive": true
+      }
+    },
+    "hy_json_new_object": {
+      "abi": {
+        "arity": 1,
+        "params": [
+          "ptr"
+        ],
+        "ret": "i32"
+      },
+      "effects": {
+        "blocking": false,
+        "may_callback": true,
+        "may_retain_ptr": false,
+        "source": "restricted-wrapper-subset"
+      },
+      "frame_bytes": 56,
+      "stack": {
+        "blocking_callees": [],
+        "bytes": 80,
+        "class": "DEEP",
+        "class_bytes_only": "SMALL",
+        "class_strict": "DEEP",
+        "external_callees": [
+          "_RNvNtNtNtCsgHYyB3hU8Ec_3std6thread7current2id2ID",
+          "_RNvNvNtNtNtCsc3wbSpLCCeb_6memchr4arch6x86_646memchr11memrchr_raw2FN",
+          "_Unwind_Resume",
+          "close"
+        ],
+        "forcing": [
+          "recursion",
+          "indirect-dispatch",
+          "missing-frame x5",
+          "external-callee x4"
+        ],
+        "got_indirected": false,
+        "indirect_call": true,
+        "missing_frames": [
+          "_RNvCsdtSMxSA38aw_7___rustc11___rdl_alloc",
+          "_RNvMsn_NtCs1C1lLj4PWSY_5alloc4syncINtB5_3ArcNtNtNtCsgHYyB3hU8Ec_3std6thread9spawnhook9SpawnHookE9drop_slowBM_",
+          "_RNvNtCs1C1lLj4PWSY_5alloc7raw_vec12handle_error",
+          "_RNvXs9_NtNtCsevLNFiNqfJP_4core2io5errorNtB5_6CustomNtNtNtB9_3ops4drop4Drop4drop",
+          "_RNvXs_NvMs_NtNtCs1C1lLj4PWSY_5alloc3ffi5c_strNtB9_7CString3newRShNtB4_11SpecNewImpl13spec_new_impl"
+        ],
+        "recursive": true
+      }
+    },
+    "hy_json_parse": {
+      "abi": {
+        "arity": 3,
+        "params": [
+          "u64",
+          "u64",
+          "ptr"
+        ],
+        "ret": "i32"
+      },
+      "effects": {
+        "blocking": true,
+        "may_callback": true,
+        "may_retain_ptr": true,
+        "source": "restricted-wrapper-subset"
+      },
+      "frame_bytes": 200,
+      "stack": {
+        "blocking_callees": [
+          "_RNvMNtNtNtNtCsgHYyB3hU8Ec_3std3sys4sync5mutex5futexNtB2_5Mutex14lock_contended",
+          "_RNvMNtNtNtNtCsgHYyB3hU8Ec_3std3sys4sync5mutex5futexNtB2_5Mutex4wake"
+        ],
+        "bytes": 224,
+        "class": "DEEP",
+        "class_bytes_only": "SMALL",
+        "class_strict": "DEEP",
+        "external_callees": [
+          "_RNvNtNtNtCsgHYyB3hU8Ec_3std6thread7current2id2ID",
+          "_RNvNvNtNtNtCsc3wbSpLCCeb_6memchr4arch6x86_646memchr11memrchr_raw2FN",
+          "_Unwind_Resume",
+          "close",
+          "gettid",
+          "memcpy",
+          "memmove"
+        ],
+        "forcing": [
+          "recursion",
+          "indirect-dispatch",
+          "missing-frame x26",
+          "external-callee x7"
+        ],
+        "got_indirected": false,
+        "indirect_call": true,
+        "missing_frames": [
+          "_RNvCsdtSMxSA38aw_7___rustc11___rdl_alloc",
+          "_RNvCsdtSMxSA38aw_7___rustc17rust_begin_unwind",
+          "_RNvMNtNtNtNtCsgHYyB3hU8Ec_3std3sys4sync5mutex5futexNtB2_5Mutex14lock_contended",
+          "_RNvMNtNtNtNtCsgHYyB3hU8Ec_3std3sys4sync5mutex5futexNtB2_5Mutex4wake",
+          "_RNvMsa_NtCsevLNFiNqfJP_4core3fmtNtB5_9Formatter12pad_integral",
+          "_RNvMsa_NtCsevLNFiNqfJP_4core3fmtNtB5_9Formatter3pad",
+          "_RNvMsa_NtCsevLNFiNqfJP_4core3fmtNtB5_9Formatter9write_str",
+          "_RNvMsn_NtCs1C1lLj4PWSY_5alloc4syncINtB5_3ArcNtNtNtCsgHYyB3hU8Ec_3std6thread9spawnhook9SpawnHookE9drop_slowBM_"
+        ],
+        "recursive": true
+      }
+    },
+    "hy_json_release": {
+      "abi": {
+        "arity": 1,
+        "params": [
+          "u64"
+        ],
+        "ret": "i32"
+      },
+      "effects": {
+        "blocking": false,
+        "may_callback": true,
+        "may_retain_ptr": false,
+        "source": "restricted-wrapper-subset"
+      },
+      "frame_bytes": 40,
+      "stack": {
+        "blocking_callees": [],
+        "bytes": 64,
+        "class": "DEEP",
+        "class_bytes_only": "SMALL",
+        "class_strict": "DEEP",
+        "external_callees": [
+          "_RNvNtNtNtCsgHYyB3hU8Ec_3std6thread7current2id2ID",
+          "_RNvNvNtNtNtCsc3wbSpLCCeb_6memchr4arch6x86_646memchr11memrchr_raw2FN",
+          "_Unwind_Resume",
+          "close"
+        ],
+        "forcing": [
+          "recursion",
+          "indirect-dispatch",
+          "missing-frame x6",
+          "external-callee x4"
+        ],
+        "got_indirected": false,
+        "indirect_call": true,
+        "missing_frames": [
+          "_RNvCsdtSMxSA38aw_7___rustc11___rdl_alloc",
+          "_RNvMsn_NtCs1C1lLj4PWSY_5alloc4syncINtB5_3ArcNtNtNtCsgHYyB3hU8Ec_3std6thread9spawnhook9SpawnHookE9drop_slowBM_",
+          "_RNvNtCs1C1lLj4PWSY_5alloc7raw_vec12handle_error",
+          "_RNvNtNtCsgHYyB3hU8Ec_3std9panicking11panic_count17is_zero_slow_path",
+          "_RNvXs9_NtNtCsevLNFiNqfJP_4core2io5errorNtB5_6CustomNtNtNtB9_3ops4drop4Drop4drop",
+          "_RNvXs_NvMs_NtNtCs1C1lLj4PWSY_5alloc3ffi5c_strNtB9_7CString3newRShNtB4_11SpecNewImpl13spec_new_impl"
+        ],
+        "recursive": true
+      }
+    },
+    "hy_json_set": {
+      "abi": {
+        "arity": 4,
+        "params": [
+          "u64",
+          "u64",
+          "u64",
+          "u64"
+        ],
+        "ret": "i32"
+      },
+      "effects": {
+        "blocking": true,
+        "may_callback": true,
+        "may_retain_ptr": true,
+        "source": "restricted-wrapper-subset"
+      },
+      "frame_bytes": 184,
+      "stack": {
+        "blocking_callees": [
+          "_RNvMNtNtNtNtCsgHYyB3hU8Ec_3std3sys4sync5mutex5futexNtB2_5Mutex4wake"
+        ],
+        "bytes": 208,
+        "class": "DEEP",
+        "class_bytes_only": "SMALL",
+        "class_strict": "DEEP",
+        "external_callees": [
+          "_RNvNtNtCsgHYyB3hU8Ec_3std9panicking11panic_count18GLOBAL_PANIC_COUNT",
+          "_RNvNtNtNtCsgHYyB3hU8Ec_3std6thread7current2id2ID",
+          "_RNvNvNtNtNtCsc3wbSpLCCeb_6memchr4arch6x86_646memchr11memrchr_raw2FN",
+          "_Unwind_Resume",
+          "close"
+        ],
+        "forcing": [
+          "recursion",
+          "indirect-dispatch",
+          "missing-frame x18",
+          "external-callee x5"
+        ],
+        "got_indirected": false,
+        "indirect_call": true,
+        "missing_frames": [
+          "_RNvCsdtSMxSA38aw_7___rustc11___rdl_alloc",
+          "_RNvCsdtSMxSA38aw_7___rustc17rust_begin_unwind",
+          "_RNvMNtNtNtNtCsgHYyB3hU8Ec_3std3sys4sync5mutex5futexNtB2_5Mutex4wake",
+          "_RNvMsa_NtCsevLNFiNqfJP_4core3fmtNtB5_9Formatter12pad_integral",
+          "_RNvMsa_NtCsevLNFiNqfJP_4core3fmtNtB5_9Formatter3pad",
+          "_RNvMsn_NtCs1C1lLj4PWSY_5alloc4syncINtB5_3ArcNtNtNtCsgHYyB3hU8Ec_3std6thread9spawnhook9SpawnHookE9drop_slowBM_",
+          "_RNvNtCs1C1lLj4PWSY_5alloc7raw_vec12handle_error",
+          "_RNvNtCsevLNFiNqfJP_4core6option13unwrap_failed"
+        ],
+        "recursive": true
+      }
+    },
+    "hy_json_to_string_pretty": {
+      "abi": {
+        "arity": 4,
+        "params": [
+          "u64",
+          "ptr",
+          "usize",
+          "ptr"
+        ],
+        "ret": "i32"
+      },
+      "effects": {
+        "blocking": true,
+        "may_callback": true,
+        "may_retain_ptr": false,
+        "source": "restricted-wrapper-subset"
+      },
+      "frame_bytes": 136,
+      "stack": {
+        "blocking_callees": [
+          "_RNvMNtNtNtNtCsgHYyB3hU8Ec_3std3sys4sync5mutex5futexNtB2_5Mutex14lock_contended",
+          "_RNvMNtNtNtNtCsgHYyB3hU8Ec_3std3sys4sync5mutex5futexNtB2_5Mutex4wake"
+        ],
+        "bytes": 176,
+        "class": "DEEP",
+        "class_bytes_only": "SMALL",
+        "class_strict": "DEEP",
+        "external_callees": [
+          "_RNvNtNtNtCsgHYyB3hU8Ec_3std6thread7current2id2ID",
+          "_RNvNvNtNtNtCsc3wbSpLCCeb_6memchr4arch6x86_646memchr11memrchr_raw2FN",
+          "_Unwind_Resume",
+          "close",
+          "gettid",
+          "memcpy"
+        ],
+        "forcing": [
+          "recursion",
+          "indirect-dispatch",
+          "missing-frame x20",
+          "external-callee x6"
+        ],
+        "got_indirected": false,
+        "indirect_call": true,
+        "missing_frames": [
+          "_RNvCsdtSMxSA38aw_7___rustc11___rdl_alloc",
+          "_RNvCsdtSMxSA38aw_7___rustc17rust_begin_unwind",
+          "_RNvMNtNtNtNtCsgHYyB3hU8Ec_3std3sys4sync5mutex5futexNtB2_5Mutex14lock_contended",
+          "_RNvMNtNtNtNtCsgHYyB3hU8Ec_3std3sys4sync5mutex5futexNtB2_5Mutex4wake",
+          "_RNvMsa_NtCsevLNFiNqfJP_4core3fmtNtB5_9Formatter12pad_integral",
+          "_RNvMsa_NtCsevLNFiNqfJP_4core3fmtNtB5_9Formatter3pad",
+          "_RNvMsa_NtCsevLNFiNqfJP_4core3fmtNtB5_9Formatter9write_str",
+          "_RNvMsn_NtCs1C1lLj4PWSY_5alloc4syncINtB5_3ArcNtNtNtCsgHYyB3hU8Ec_3std6thread9spawnhook9SpawnHookE9drop_slowBM_"
+        ],
+        "recursive": true
+      }
+    },
+    "hy_json_value_text": {
+      "abi": {
+        "arity": 4,
+        "params": [
+          "u64",
+          "ptr",
+          "usize",
+          "ptr"
+        ],
+        "ret": "i32"
+      },
+      "effects": {
+        "blocking": false,
+        "may_callback": true,
+        "may_retain_ptr": false,
+        "source": "restricted-wrapper-subset"
+      },
+      "frame_bytes": 120,
+      "stack": {
+        "blocking_callees": [],
+        "bytes": 144,
+        "class": "DEEP",
+        "class_bytes_only": "SMALL",
+        "class_strict": "DEEP",
+        "external_callees": [
+          "_RNvNtNtNtCsgHYyB3hU8Ec_3std6thread7current2id2ID",
+          "_RNvNvNtNtNtCsc3wbSpLCCeb_6memchr4arch6x86_646memchr11memrchr_raw2FN",
+          "_Unwind_Resume",
+          "close"
+        ],
+        "forcing": [
+          "recursion",
+          "indirect-dispatch",
+          "missing-frame x5",
+          "external-callee x4"
+        ],
+        "got_indirected": false,
+        "indirect_call": true,
+        "missing_frames": [
+          "_RNvCsdtSMxSA38aw_7___rustc11___rdl_alloc",
+          "_RNvMsn_NtCs1C1lLj4PWSY_5alloc4syncINtB5_3ArcNtNtNtCsgHYyB3hU8Ec_3std6thread9spawnhook9SpawnHookE9drop_slowBM_",
+          "_RNvNtCs1C1lLj4PWSY_5alloc7raw_vec12handle_error",
+          "_RNvXs9_NtNtCsevLNFiNqfJP_4core2io5errorNtB5_6CustomNtNtNtB9_3ops4drop4Drop4drop",
+          "_RNvXs_NvMs_NtNtCs1C1lLj4PWSY_5alloc3ffi5c_strNtB9_7CString3newRShNtB4_11SpecNewImpl13spec_new_impl"
+        ],
+        "recursive": true
+      }
+    },
+    "hy_nop": {
+      "abi": {
+        "arity": 1,
+        "params": [
+          "u64"
+        ],
+        "ret": "u64"
+      },
+      "effects": {
+        "blocking": false,
+        "may_callback": false,
+        "may_retain_ptr": false,
+        "source": "restricted-wrapper-subset"
+      },
+      "frame_bytes": 0,
+      "stack": {
+        "blocking_callees": [],
+        "bytes": 0,
+        "class": "SMALL",
+        "class_bytes_only": "SMALL",
+        "class_strict": "SMALL",
+        "external_callees": [],
+        "forcing": [],
+        "got_indirected": false,
+        "indirect_call": false,
+        "missing_frames": [],
+        "recursive": false
+      }
+    },
+    "hy_regex_is_match": {
+      "abi": {
+        "arity": 4,
+        "params": [
+          "ptr",
+          "usize",
+          "ptr",
+          "usize"
+        ],
+        "ret": "i64"
+      },
+      "effects": {
+        "blocking": false,
+        "may_callback": true,
+        "may_retain_ptr": false,
+        "source": "restricted-wrapper-subset"
+      },
+      "frame_bytes": 248,
+      "stack": {
+        "blocking_callees": [],
+        "bytes": 272,
+        "class": "DEEP",
+        "class_bytes_only": "SMALL",
+        "class_strict": "DEEP",
+        "external_callees": [
+          "_RNvNtNtNtCsgHYyB3hU8Ec_3std6thread7current2id2ID",
+          "_RNvNvNtNtNtCsc3wbSpLCCeb_6memchr4arch6x86_646memchr11memrchr_raw2FN",
+          "_RNvXsi_NtNtNtCsevLNFiNqfJP_4core3fmt3num3impjNtB9_7Display3fmt",
+          "_Unwind_Resume",
+          "close",
+          "memcpy",
+          "memmove"
+        ],
+        "forcing": [
+          "recursion",
+          "indirect-dispatch",
+          "missing-frame x26",
+          "external-callee x7"
+        ],
+        "got_indirected": false,
+        "indirect_call": true,
+        "missing_frames": [
+          "_RNvCsdtSMxSA38aw_7___rustc11___rdl_alloc",
+          "_RNvCsdtSMxSA38aw_7___rustc17rust_begin_unwind",
+          "_RNvMsa_NtCsevLNFiNqfJP_4core3fmtNtB5_9Formatter12pad_integral",
+          "_RNvMsa_NtCsevLNFiNqfJP_4core3fmtNtB5_9Formatter3pad",
+          "_RNvMsa_NtCsevLNFiNqfJP_4core3fmtNtB5_9Formatter9write_str",
+          "_RNvMsn_NtCs1C1lLj4PWSY_5alloc4syncINtB5_3ArcNtNtNtCsgHYyB3hU8Ec_3std6thread9spawnhook9SpawnHookE9drop_slowBM_",
+          "_RNvNtCs1C1lLj4PWSY_5alloc5alloc18handle_alloc_error",
+          "_RNvNtCs1C1lLj4PWSY_5alloc7raw_vec12handle_error"
+        ],
+        "recursive": true
+      }
+    },
+    "hy_regex_is_valid": {
+      "abi": {
+        "arity": 2,
+        "params": [
+          "ptr",
+          "usize"
+        ],
+        "ret": "i64"
+      },
+      "effects": {
+        "blocking": false,
+        "may_callback": true,
+        "may_retain_ptr": false,
+        "source": "restricted-wrapper-subset"
+      },
+      "frame_bytes": 40,
+      "stack": {
+        "blocking_callees": [],
+        "bytes": 64,
+        "class": "DEEP",
+        "class_bytes_only": "SMALL",
+        "class_strict": "DEEP",
+        "external_callees": [
+          "_RNvNtNtNtCsgHYyB3hU8Ec_3std6thread7current2id2ID",
+          "_RNvNvNtNtNtCsc3wbSpLCCeb_6memchr4arch6x86_646memchr11memrchr_raw2FN",
+          "_Unwind_Resume",
+          "close"
+        ],
+        "forcing": [
+          "recursion",
+          "indirect-dispatch",
+          "missing-frame x5",
+          "external-callee x4"
+        ],
+        "got_indirected": false,
+        "indirect_call": true,
+        "missing_frames": [
+          "_RNvCsdtSMxSA38aw_7___rustc11___rdl_alloc",
+          "_RNvMsn_NtCs1C1lLj4PWSY_5alloc4syncINtB5_3ArcNtNtNtCsgHYyB3hU8Ec_3std6thread9spawnhook9SpawnHookE9drop_slowBM_",
+          "_RNvNtCs1C1lLj4PWSY_5alloc7raw_vec12handle_error",
+          "_RNvXs9_NtNtCsevLNFiNqfJP_4core2io5errorNtB5_6CustomNtNtNtB9_3ops4drop4Drop4drop",
+          "_RNvXs_NvMs_NtNtCs1C1lLj4PWSY_5alloc3ffi5c_strNtB9_7CString3newRShNtB4_11SpecNewImpl13spec_new_impl"
+        ],
+        "recursive": true
+      }
+    },
+    "hy_sha3_digest256": {
+      "abi": {
+        "arity": 3,
+        "params": [
+          "ptr",
+          "usize",
+          "ptr"
+        ],
+        "ret": "i32"
+      },
+      "effects": {
+        "blocking": false,
+        "may_callback": true,
+        "may_retain_ptr": false,
+        "source": "restricted-wrapper-subset"
+      },
+      "frame_bytes": 776,
+      "stack": {
+        "blocking_callees": [],
+        "bytes": 800,
+        "class": "DEEP",
+        "class_bytes_only": "SMALL",
+        "class_strict": "DEEP",
+        "external_callees": [
+          "_RNvNtNtNtCsfcEfTeXs4u0_14regex_automata4util4pool5inner7COUNTER",
+          "_RNvNtNtNtCsgHYyB3hU8Ec_3std6thread7current2id2ID",
+          "_RNvNvNtNtNtCsc3wbSpLCCeb_6memchr4arch6x86_646memchr11memrchr_raw2FN",
+          "_Unwind_Resume",
+          "close"
+        ],
+        "forcing": [
+          "recursion",
+          "indirect-dispatch",
+          "missing-frame x6",
+          "external-callee x5"
+        ],
+        "got_indirected": false,
+        "indirect_call": true,
+        "missing_frames": [
+          "_RNvCsdtSMxSA38aw_7___rustc11___rdl_alloc",
+          "_RNvMsn_NtCs1C1lLj4PWSY_5alloc4syncINtB5_3ArcNtNtNtCsgHYyB3hU8Ec_3std6thread9spawnhook9SpawnHookE9drop_slowBM_",
+          "_RNvNtCs1C1lLj4PWSY_5alloc7raw_vec12handle_error",
+          "_RNvNtNtCsgHYyB3hU8Ec_3std9panicking11panic_count17is_zero_slow_path",
+          "_RNvXs9_NtNtCsevLNFiNqfJP_4core2io5errorNtB5_6CustomNtNtNtB9_3ops4drop4Drop4drop",
+          "_RNvXs_NvMs_NtNtCs1C1lLj4PWSY_5alloc3ffi5c_strNtB9_7CString3newRShNtB4_11SpecNewImpl13spec_new_impl"
+        ],
+        "recursive": true
+      }
+    },
+    "hy_sha3_stream_checksum": {
+      "abi": {
+        "arity": 2,
+        "params": [
+          "u64",
+          "u64"
+        ],
+        "ret": "u64"
+      },
+      "effects": {
+        "blocking": true,
+        "may_callback": true,
+        "may_retain_ptr": false,
+        "source": "restricted-wrapper-subset"
+      },
+      "frame_bytes": 408,
+      "stack": {
+        "blocking_callees": [
+          "_RNvMNtNtNtNtCsgHYyB3hU8Ec_3std3sys4sync5mutex5futexNtB2_5Mutex14lock_contended"
+        ],
+        "bytes": 408,
+        "class": "DEEP",
+        "class_bytes_only": "SMALL",
+        "class_strict": "DEEP",
+        "external_callees": [
+          "_RNvNtNtNtCsgHYyB3hU8Ec_3std6thread7current2id2ID",
+          "_Unwind_Resume",
+          "close",
+          "gettid"
+        ],
+        "forcing": [
+          "recursion",
+          "indirect-dispatch",
+          "missing-frame x6",
+          "external-callee x4"
+        ],
+        "got_indirected": false,
+        "indirect_call": true,
+        "missing_frames": [
+          "_RNvCsdtSMxSA38aw_7___rustc11___rdl_alloc",
+          "_RNvMNtNtNtNtCsgHYyB3hU8Ec_3std3sys4sync5mutex5futexNtB2_5Mutex14lock_contended",
+          "_RNvMsn_NtCs1C1lLj4PWSY_5alloc4syncINtB5_3ArcNtNtNtCsgHYyB3hU8Ec_3std6thread9spawnhook9SpawnHookE9drop_slowBM_",
+          "_RNvNtCs1C1lLj4PWSY_5alloc7raw_vec12handle_error",
+          "_RNvXs9_NtNtCsevLNFiNqfJP_4core2io5errorNtB5_6CustomNtNtNtB9_3ops4drop4Drop4drop",
+          "_RNvXs_NvMs_NtNtCs1C1lLj4PWSY_5alloc3ffi5c_strNtB9_7CString3newRShNtB4_11SpecNewImpl13spec_new_impl"
+        ],
+        "recursive": true
+      }
+    },
+    "hyrt_abi_word": {
+      "abi": {
+        "arity": 0,
+        "params": [],
+        "ret": "u64"
+      },
+      "effects": {
+        "blocking": false,
+        "may_callback": false,
+        "may_retain_ptr": false,
+        "source": "restricted-wrapper-subset"
+      },
+      "frame_bytes": 0,
+      "stack": {
+        "blocking_callees": [],
+        "bytes": 0,
+        "class": "SMALL",
+        "class_bytes_only": "SMALL",
+        "class_strict": "SMALL",
+        "external_callees": [],
+        "forcing": [],
+        "got_indirected": false,
+        "indirect_call": false,
+        "missing_frames": [],
+        "recursive": false
+      }
+    },
+    "hyrt_stack_alignment_probe": {
+      "abi": {
+        "arity": 0,
+        "params": [],
+        "ret": "u64"
+      },
+      "effects": {
+        "blocking": false,
+        "may_callback": false,
+        "may_retain_ptr": false,
+        "source": "restricted-wrapper-subset"
+      },
+      "frame_bytes": 0,
+      "stack": {
+        "blocking_callees": [],
+        "bytes": 0,
+        "class": "SMALL",
+        "class_bytes_only": "SMALL",
+        "class_strict": "SMALL",
+        "external_callees": [],
+        "forcing": [],
+        "got_indirected": false,
+        "indirect_call": false,
+        "missing_frames": [],
+        "recursive": false
+      }
+    }
+  }
+}
