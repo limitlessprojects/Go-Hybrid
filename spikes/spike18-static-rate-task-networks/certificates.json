@@ -1,0 +1,79 @@
+[
+  {
+    "fixture": 0,
+    "schedule": [
+      "source",
+      "scale",
+      "sink"
+    ],
+    "capacities": [
+      1,
+      1
+    ],
+    "firings": {
+      "source": 1,
+      "scale": 1,
+      "sink": 1
+    },
+    "token_payload_bytes": 16
+  },
+  {
+    "fixture": 1,
+    "schedule": [
+      "p",
+      "p",
+      "p",
+      "join",
+      "join",
+      "sink",
+      "sink"
+    ],
+    "capacities": [
+      6,
+      2
+    ],
+    "firings": {
+      "p": 3,
+      "join": 2,
+      "sink": 2
+    },
+    "token_payload_bytes": 64
+  },
+  {
+    "fixture": 2,
+    "schedule": [
+      "left",
+      "right",
+      "join",
+      "sink"
+    ],
+    "capacities": [
+      1,
+      1,
+      1
+    ],
+    "firings": {
+      "left": 1,
+      "right": 1,
+      "join": 1,
+      "sink": 1
+    },
+    "token_payload_bytes": 24
+  },
+  {
+    "fixture": 3,
+    "schedule": [
+      "double",
+      "sum"
+    ],
+    "capacities": [
+      1,
+      1
+    ],
+    "firings": {
+      "double": 1,
+      "sum": 1
+    },
+    "token_payload_bytes": 16
+  }
+]
