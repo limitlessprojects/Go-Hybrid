@@ -659,6 +659,10 @@ impl Emitter {
     // -----------------------------------------------------------------------
 
     fn emit_file(&mut self, file: &File) -> Result<String, EmitError> {
+        let mut sanitized_file = file.clone();
+        kw_default::sanitize_go_kw_file(&mut sanitized_file, self.export_pub);
+        let file = &sanitized_file;
+
         // Associated-fn registry (call sites mangle `pkg.name[...]` to
         // `pkg_name[...]` — Go has no dotted identifiers).
         self.assoc_fns = file
@@ -1949,3 +1953,4 @@ pub mod expr;
 pub mod stmt;
 #[cfg(test)]
 mod tests;
+mod kw_default;
