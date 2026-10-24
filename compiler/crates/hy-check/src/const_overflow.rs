@@ -18,6 +18,12 @@ use hy_diag::{Diagnostic, Span};
 use hy_syntax::{BinOp, CallArg, Expr, ForKind, InterpPart, LitKind, Place, PlaceKind, SelectArmKind, Stmt, TypeExpr, UnOp};
 use std::collections::HashMap;
 
+enum LocalConstLookup<'b> {
+    Unbound,
+    ShadowedByVar,
+    LocalConst(&'b Option<TypeExpr>, &'b Expr, hy_diag::Pos),
+}
+
 impl<'a> Checker<'a> {
     /// When `ty` is a fixed-width integer and `value` is an integer
     /// constant (literal or folded constant expression) outside that
@@ -76,7 +82,7 @@ impl<'a> Checker<'a> {
         let Some((lo, hi)) = fixed_width_int_range(ty_name) else {
             return;
         };
-        match const_int_fold_with(value, &self.const_values, 0, st) {
+        match self.const_int_fold_in_fn(value, 0, st) {
             ConstFold::NotConst => {}
             ConstFold::TooBig => {
                 let span = value.span();
@@ -139,32 +145,43 @@ impl<'a> Checker<'a> {
         // Issue #201-B: a float constant is never assignable to an integer
         // type in Go — `var x int = 2.5` fails with `(truncated)` (and a
         // magnitude that cannot fit fails with `(overflows)`).
-        if let Some(f) = const_float_value(value) {
-            let span = value.span();
-            let msg = format!(
-                "float constant `{}` assigned to integer type `{}` of `{}` (HYB-E6002)",
-                value.render(),
-                ty_name,
-                name
-            );
-            let notes = vec![
-                format!(
-                    "why: Go rejects a float constant as an `{}` value (`cannot use … as {} value (truncated)`), so an accepted Hybrid program would emit unbuildable Go (issue #201)",
-                    ty_name, ty_name
-                ),
-                format!(
-                    "fix: drop the fractional part (`{}` → `{}`), use a float declared type, or convert from a variable if rounding is intentional",
+        let is_lit_float = const_float_value(value).is_some();
+        let folded_float = const_float_value(value).or_else(|| {
+            if self.is_float_const_expr_in_fn(value, 0, st) {
+                self.const_float_fold(value, st)
+            } else {
+                None
+            }
+        });
+        if let Some(f) = folded_float {
+            if is_lit_float || !f.is_finite() || f.fract() != 0.0 || f < lo as f64 || f > hi as f64
+            {
+                let span = value.span();
+                let msg = format!(
+                    "float constant `{}` assigned to integer type `{}` of `{}` (HYB-E6002)",
                     value.render(),
-                    integer_of_float(f)
-                ),
-                format!(
-                    "note: the declared type was written here ({})",
-                    span_hint(*ty_span)
-                ),
-            ];
-            self.diags.push(
-                Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
-            );
+                    ty_name,
+                    name
+                );
+                let notes = vec![
+                    format!(
+                        "why: Go rejects a float constant as an `{}` value (`cannot use … as {} value (truncated)`), so an accepted Hybrid program would emit unbuildable Go (issue #201)",
+                        ty_name, ty_name
+                    ),
+                    format!(
+                        "fix: drop the fractional part (`{}` → `{}`), use a float declared type, or convert from a variable if rounding is intentional",
+                        value.render(),
+                        integer_of_float(f)
+                    ),
+                    format!(
+                        "note: the declared type was written here ({})",
+                        span_hint(*ty_span)
+                    ),
+                ];
+                self.diags.push(
+                    Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
+                );
+            }
         }
     }
 
@@ -229,7 +246,7 @@ impl<'a> Checker<'a> {
         let Some((lo, hi)) = fixed_width_int_range(ty_name) else {
             return;
         };
-        match const_int_fold_with(value, &self.const_values, 0, st) {
+        match self.const_int_fold_in_fn(value, 0, st) {
             ConstFold::NotConst => {}
             ConstFold::TooBig => {
                 let span = value.span();
@@ -289,31 +306,42 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
-        if const_float_value(value).is_some() {
-            let span = value.span();
-            let msg = format!(
-                "float constant `{}` assigned to integer type `{}` of `{}` (HYB-E6002)",
-                value.render(),
-                ty_name,
-                target
-            );
-            let notes = vec![
-                format!(
-                    "why: Go rejects a float constant as an `{}` value (`cannot use … as {} value (truncated)`), so an accepted Hybrid program would emit unbuildable Go (issue #300)",
-                    ty_name, ty_name
-                ),
-                format!(
-                    "fix: convert explicitly at runtime if truncation is intentional (`x := {}; {} = {}(x)`)",
-                    value.render(), target, ty_name
-                ),
-                format!(
-                    "note: the declared type was written here ({})",
-                    span_hint(*ty_span)
-                ),
-            ];
-            self.diags.push(
-                Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
-            );
+        let is_lit_float = const_float_value(value).is_some();
+        let folded_float = const_float_value(value).or_else(|| {
+            if self.is_float_const_expr_in_fn(value, 0, st) {
+                self.const_float_fold(value, st)
+            } else {
+                None
+            }
+        });
+        if let Some(f) = folded_float {
+            if is_lit_float || !f.is_finite() || f.fract() != 0.0 || f < lo as f64 || f > hi as f64
+            {
+                let span = value.span();
+                let msg = format!(
+                    "float constant `{}` assigned to integer type `{}` of `{}` (HYB-E6002)",
+                    value.render(),
+                    ty_name,
+                    target
+                );
+                let notes = vec![
+                    format!(
+                        "why: Go rejects a float constant as an `{}` value (`cannot use … as {} value (truncated)`), so an accepted Hybrid program would emit unbuildable Go (issue #300)",
+                        ty_name, ty_name
+                    ),
+                    format!(
+                        "fix: convert explicitly at runtime if truncation is intentional (`x := {}; {} = {}(x)`)",
+                        value.render(), target, ty_name
+                    ),
+                    format!(
+                        "note: the declared type was written here ({})",
+                        span_hint(*ty_span)
+                    ),
+                ];
+                self.diags.push(
+                    Diagnostic::error("HYB-E6002", self.path.clone(), span, msg).with_notes(notes),
+                );
+            }
         }
     }
 
@@ -326,7 +354,7 @@ impl<'a> Checker<'a> {
         st: Option<&FnState>,
     ) {
         let (lo, hi) = target_int_range();
-        match const_int_fold_with(value, &self.const_values, 0, st) {
+        match self.const_int_fold_in_fn(value, 0, st) {
             ConstFold::NotConst => return,
             ConstFold::Val(v) if v >= lo && v <= hi => return,
             ConstFold::Val(_) | ConstFold::TooBig => {}
@@ -359,7 +387,7 @@ impl<'a> Checker<'a> {
         value: &Expr,
         st: Option<&FnState>,
     ) {
-        if !is_float_const_expr(value, &self.const_values, 0, st) {
+        if !self.is_float_const_expr_in_fn(value, 0, st) {
             return;
         }
         if let Some(f) = self.const_float_fold(value, st) {
@@ -386,7 +414,601 @@ impl<'a> Checker<'a> {
 
     /// Fold a constant float expression (literals, identifiers, unary, binary).
     pub(crate) fn const_float_fold(&self, e: &Expr, st: Option<&FnState>) -> Option<f64> {
-        const_float_fold_with(e, &self.const_values, 0, st)
+        self.const_float_fold_in_fn(e, 0, st)
+    }
+
+    fn const_int_fold_in_fn(&self, e: &Expr, depth: u32, st: Option<&FnState>) -> ConstFold {
+        if self.file.decls.is_empty() {
+            return const_int_fold_with(e, &self.const_values, depth, st);
+        }
+        if depth >= 16 {
+            return ConstFold::NotConst;
+        }
+        match unwrap_parens(e) {
+            Expr::Lit {
+                kind: LitKind::Int(s),
+                ..
+            } => match parse_int_lit(s) {
+                Some(ConstInt::Value(v)) => ConstFold::Val(v),
+                Some(ConstInt::PosOverflow | ConstInt::NegOverflow) => ConstFold::TooBig,
+                None => ConstFold::NotConst,
+            },
+            Expr::Lit {
+                kind: LitKind::Char(c),
+                ..
+            } => ConstFold::Val(*c as i128),
+            Expr::Ident { name, span } => {
+                let Some((decl_ty, val)) = self.resolve_const_ident_at(name, span.start, st) else {
+                    return ConstFold::NotConst;
+                };
+                if let Some(ty) = decl_ty {
+                    let resolved = self.resolve_type_alias(ty);
+                    if let TypeExpr::Named { name: tname, .. } = &resolved {
+                        if is_float_type(tname).is_some()
+                            || matches!(tname.as_str(), "bool" | "string" | "error")
+                        {
+                            return ConstFold::NotConst;
+                        }
+                    }
+                }
+                self.const_int_fold_in_fn(val, depth + 1, None)
+            }
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => match self.const_int_fold_in_fn(operand, depth + 1, st) {
+                ConstFold::Val(v) => v.checked_neg().map(ConstFold::Val).unwrap_or(ConstFold::TooBig),
+                ConstFold::NotConst => ConstFold::NotConst,
+                ConstFold::TooBig => ConstFold::TooBig,
+            },
+            Expr::Binary { op, lhs, rhs, .. } => {
+                let l = self.const_int_fold_in_fn(lhs, depth + 1, st);
+                let r = self.const_int_fold_in_fn(rhs, depth + 1, st);
+                fold_bin(*op, l, r)
+            }
+            _ => ConstFold::NotConst,
+        }
+    }
+
+    fn const_float_fold_in_fn(&self, e: &Expr, depth: u32, st: Option<&FnState>) -> Option<f64> {
+        if self.file.decls.is_empty() {
+            return const_float_fold_with(e, &self.const_values, depth, st);
+        }
+        if depth >= 16 {
+            return None;
+        }
+        match unwrap_parens(e) {
+            Expr::Lit {
+                kind: LitKind::Float(s),
+                ..
+            } => {
+                let clean: String = s.chars().filter(|c| *c != '_').collect();
+                clean.parse::<f64>().ok()
+            }
+            Expr::Lit {
+                kind: LitKind::Int(s),
+                ..
+            } => {
+                let clean: String = s.chars().filter(|c| *c != '_').collect();
+                if let Some(ConstInt::Value(v)) = parse_int_lit(s) {
+                    Some(v as f64)
+                } else if let Ok(f) = clean.parse::<f64>() {
+                    Some(f)
+                } else {
+                    None
+                }
+            }
+            Expr::Lit {
+                kind: LitKind::Char(c),
+                ..
+            } => Some(*c as u32 as f64),
+            Expr::Ident { name, span } => {
+                let (decl_ty, val) = self.resolve_const_ident_at(name, span.start, st)?;
+                if let Some(ty) = decl_ty {
+                    let resolved = self.resolve_type_alias(ty);
+                    if let TypeExpr::Named { name: tname, .. } = &resolved {
+                        if matches!(tname.as_str(), "bool" | "string" | "error") {
+                            return None;
+                        }
+                    }
+                }
+                self.const_float_fold_in_fn(val, depth + 1, None)
+            }
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => self.const_float_fold_in_fn(operand, depth + 1, st).map(|v| -v),
+            Expr::Binary { op, lhs, rhs, .. } => {
+                let l = self.const_float_fold_in_fn(lhs, depth + 1, st)?;
+                let r = self.const_float_fold_in_fn(rhs, depth + 1, st)?;
+                match op {
+                    BinOp::Add => Some(l + r),
+                    BinOp::Sub => Some(l - r),
+                    BinOp::Mul => Some(l * r),
+                    BinOp::Div => {
+                        if r == 0.0 {
+                            None
+                        } else {
+                            Some(l / r)
+                        }
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn is_float_const_expr_in_fn(&self, e: &Expr, depth: u32, st: Option<&FnState>) -> bool {
+        if self.file.decls.is_empty() {
+            return is_float_const_expr(e, &self.const_values, depth, st);
+        }
+        if depth >= 16 {
+            return false;
+        }
+        match unwrap_parens(e) {
+            Expr::Lit {
+                kind: LitKind::Float(_),
+                ..
+            } => true,
+            Expr::Lit { .. } => false,
+            Expr::Ident { name, span } => {
+                let Some((decl_ty, val)) = self.resolve_const_ident_at(name, span.start, st) else {
+                    return false;
+                };
+                if let Some(ty) = decl_ty {
+                    let resolved = self.resolve_type_alias(ty);
+                    if let TypeExpr::Named { name: tname, .. } = &resolved {
+                        return is_float_type(tname).is_some();
+                    }
+                    return false;
+                }
+                self.is_float_const_expr_in_fn(val, depth + 1, None)
+            }
+            Expr::Unary { operand, .. } => self.is_float_const_expr_in_fn(operand, depth + 1, st),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.is_float_const_expr_in_fn(lhs, depth + 1, st)
+                    || self.is_float_const_expr_in_fn(rhs, depth + 1, st)
+            }
+            _ => false,
+        }
+    }
+
+    /// Resolve `name` at `use_pos` to either the innermost active block-scoped
+    /// `const` declaration or the file-level `const` declaration, returning
+    /// `None` when `name` is shadowed by a runtime variable, parameter,
+    /// receiver, named result, or loop/match/select binding.
+    fn resolve_const_ident_at(
+        &self,
+        name: &str,
+        use_pos: hy_diag::Pos,
+        st: Option<&FnState>,
+    ) -> Option<(&'a Option<TypeExpr>, &'a Expr)> {
+        if matches!(name, "true" | "false" | "nil") {
+            return None;
+        }
+        for decl in &self.file.decls {
+            if let hy_syntax::Decl::Fn(f) = decl {
+                if Self::pos_in_span(f.span, use_pos) {
+                    let mut state = LocalConstLookup::Unbound;
+                    if f.receiver.as_ref().is_some_and(|r| r.name == name)
+                        || f.params.iter().any(|p| p.name == name)
+                        || f.results.iter().any(|r| r.name.as_deref() == Some(name))
+                    {
+                        state = LocalConstLookup::ShadowedByVar;
+                    }
+                    if let Some(body) = &f.body {
+                        Self::scan_block_for_const_lookup(body, name, use_pos, &mut state);
+                    }
+                    match state {
+                        LocalConstLookup::LocalConst(ty, val, decl_pos) => {
+                            if (decl_pos.line, decl_pos.col) == (use_pos.line, use_pos.col) {
+                                return None;
+                            }
+                            return Some((ty, val));
+                        }
+                        LocalConstLookup::ShadowedByVar => return None,
+                        LocalConstLookup::Unbound => break,
+                    }
+                }
+            }
+        }
+        if let Some(st) = st {
+            if st.env_lookup(name).is_some() {
+                return None;
+            }
+        }
+        self.file.decls.iter().find_map(|d| match d {
+            hy_syntax::Decl::Const(c) if c.name == name => {
+                if Self::pos_in_span(c.span, use_pos) {
+                    None
+                } else {
+                    Some((&c.ty, &c.value))
+                }
+            }
+            _ => None,
+        })
+    }
+
+    fn pos_in_span(span: Span, pos: hy_diag::Pos) -> bool {
+        (span.start.line, span.start.col) <= (pos.line, pos.col)
+            && (pos.line, pos.col) <= (span.end.line, span.end.col)
+    }
+
+    fn stmt_span_of(stmt: &Stmt) -> Span {
+        match stmt {
+            Stmt::Local(l) => l.span,
+            Stmt::Assign { span, .. }
+            | Stmt::Expr { span, .. }
+            | Stmt::Send { span, .. }
+            | Stmt::If { span, .. }
+            | Stmt::For { span, .. }
+            | Stmt::Return { span, .. }
+            | Stmt::Task { span, .. }
+            | Stmt::Managed { span, .. }
+            | Stmt::Match { span, .. }
+            | Stmt::Defer { span, .. }
+            | Stmt::Break { span, .. }
+            | Stmt::Continue { span, .. }
+            | Stmt::Block { span, .. }
+            | Stmt::Select { span, .. } => *span,
+        }
+    }
+
+    fn scan_block_for_const_lookup<'b>(
+        block: &'b hy_syntax::Block,
+        name: &str,
+        use_pos: hy_diag::Pos,
+        state: &mut LocalConstLookup<'b>,
+    ) {
+        if !Self::pos_in_span(block.span, use_pos) {
+            return;
+        }
+        for stmt in &block.stmts {
+            let s = Self::stmt_span_of(stmt);
+            if Self::pos_in_span(s, use_pos) {
+                Self::scan_stmt_for_const_lookup(stmt, name, use_pos, state);
+                return;
+            }
+            if (s.end.line, s.end.col) <= (use_pos.line, use_pos.col) {
+                Self::apply_stmt_const_lookup(stmt, name, state);
+            }
+        }
+    }
+
+    fn apply_stmt_const_lookup<'b>(
+        stmt: &'b Stmt,
+        name: &str,
+        state: &mut LocalConstLookup<'b>,
+    ) {
+        if let Stmt::Local(l) = stmt {
+            if let Some(idx) = l.names.iter().position(|n| n == name) {
+                if matches!(l.kind, hy_syntax::LocalKind::Const) {
+                    if let Some(val) = l.values.get(idx) {
+                        *state = LocalConstLookup::LocalConst(&l.ty, val, l.span.start);
+                    } else {
+                        *state = LocalConstLookup::ShadowedByVar;
+                    }
+                } else {
+                    *state = LocalConstLookup::ShadowedByVar;
+                }
+            }
+        }
+    }
+
+    fn scan_stmt_for_const_lookup<'b>(
+        stmt: &'b Stmt,
+        name: &str,
+        use_pos: hy_diag::Pos,
+        state: &mut LocalConstLookup<'b>,
+    ) {
+        match stmt {
+            Stmt::Local(l) => {
+                for v in &l.values {
+                    if Self::pos_in_span(v.span(), use_pos) {
+                        Self::scan_expr_for_const_lookup(v, name, use_pos, state);
+                        return;
+                    }
+                }
+            }
+            Stmt::Assign { targets, values, .. } => {
+                for t in targets {
+                    if Self::pos_in_span(t.span, use_pos) {
+                        Self::scan_place_for_const_lookup(t, name, use_pos, state);
+                        return;
+                    }
+                }
+                for v in values {
+                    if Self::pos_in_span(v.span(), use_pos) {
+                        Self::scan_expr_for_const_lookup(v, name, use_pos, state);
+                        return;
+                    }
+                }
+            }
+            Stmt::Return { values, .. } => {
+                for v in values {
+                    if Self::pos_in_span(v.span(), use_pos) {
+                        Self::scan_expr_for_const_lookup(v, name, use_pos, state);
+                        return;
+                    }
+                }
+            }
+            Stmt::Expr { expr, .. } | Stmt::Defer { call: expr, .. } => {
+                if Self::pos_in_span(expr.span(), use_pos) {
+                    Self::scan_expr_for_const_lookup(expr, name, use_pos, state);
+                }
+            }
+            Stmt::Send { chan, value, .. } => {
+                if Self::pos_in_span(chan.span(), use_pos) {
+                    Self::scan_expr_for_const_lookup(chan, name, use_pos, state);
+                } else if Self::pos_in_span(value.span(), use_pos) {
+                    Self::scan_expr_for_const_lookup(value, name, use_pos, state);
+                }
+            }
+            Stmt::Task { callee, args, .. } => {
+                if Self::pos_in_span(callee.span(), use_pos) {
+                    Self::scan_expr_for_const_lookup(callee, name, use_pos, state);
+                    return;
+                }
+                for a in args {
+                    if Self::pos_in_span(a.value.span(), use_pos) {
+                        Self::scan_expr_for_const_lookup(&a.value, name, use_pos, state);
+                        return;
+                    }
+                }
+            }
+            Stmt::If {
+                init,
+                cond,
+                then,
+                otherwise,
+                ..
+            } => {
+                if let Some(init_stmt) = init {
+                    let is = Self::stmt_span_of(init_stmt);
+                    if Self::pos_in_span(is, use_pos) {
+                        Self::scan_stmt_for_const_lookup(init_stmt, name, use_pos, state);
+                        return;
+                    }
+                    if (is.end.line, is.end.col) <= (use_pos.line, use_pos.col) {
+                        Self::apply_stmt_const_lookup(init_stmt, name, state);
+                    }
+                }
+                if Self::pos_in_span(cond.span(), use_pos) {
+                    Self::scan_expr_for_const_lookup(cond, name, use_pos, state);
+                    return;
+                }
+                if Self::pos_in_span(then.span, use_pos) {
+                    Self::scan_block_for_const_lookup(then, name, use_pos, state);
+                    return;
+                }
+                if let Some(other) = otherwise {
+                    if Self::pos_in_span(Self::stmt_span_of(other), use_pos) {
+                        Self::scan_stmt_for_const_lookup(other, name, use_pos, state);
+                    }
+                }
+            }
+            Stmt::For { kind, body, .. } => {
+                match kind {
+                    ForKind::While { cond } => {
+                        if Self::pos_in_span(cond.span(), use_pos) {
+                            Self::scan_expr_for_const_lookup(cond, name, use_pos, state);
+                            return;
+                        }
+                    }
+                    ForKind::Range { var, lo, hi, .. } => {
+                        if Self::pos_in_span(lo.span(), use_pos) {
+                            Self::scan_expr_for_const_lookup(lo, name, use_pos, state);
+                            return;
+                        }
+                        if Self::pos_in_span(hi.span(), use_pos) {
+                            Self::scan_expr_for_const_lookup(hi, name, use_pos, state);
+                            return;
+                        }
+                        if var == name {
+                            *state = LocalConstLookup::ShadowedByVar;
+                        }
+                    }
+                    ForKind::Iterate { vars, expr } => {
+                        if Self::pos_in_span(expr.span(), use_pos) {
+                            Self::scan_expr_for_const_lookup(expr, name, use_pos, state);
+                            return;
+                        }
+                        if vars.iter().any(|v| v == name) {
+                            *state = LocalConstLookup::ShadowedByVar;
+                        }
+                    }
+                    ForKind::Infinite => {}
+                }
+                if Self::pos_in_span(body.span, use_pos) {
+                    Self::scan_block_for_const_lookup(body, name, use_pos, state);
+                }
+            }
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+                Self::scan_block_for_const_lookup(body, name, use_pos, state);
+            }
+            Stmt::Match { subject, arms, .. } => {
+                if Self::pos_in_span(subject.span(), use_pos) {
+                    Self::scan_expr_for_const_lookup(subject, name, use_pos, state);
+                    return;
+                }
+                for arm in arms {
+                    let in_guard = arm
+                        .guard
+                        .as_ref()
+                        .is_some_and(|g| Self::pos_in_span(g.span(), use_pos));
+                    let in_body = Self::pos_in_span(arm.body.span, use_pos);
+                    if in_guard || in_body {
+                        if let hy_syntax::MatchPattern::Path {
+                            binding: Some(b), ..
+                        } = &arm.pattern
+                        {
+                            if b == name {
+                                *state = LocalConstLookup::ShadowedByVar;
+                            }
+                        }
+                        if let Some(g) = &arm.guard {
+                            if in_guard {
+                                Self::scan_expr_for_const_lookup(g, name, use_pos, state);
+                                return;
+                            }
+                        }
+                        if in_body {
+                            Self::scan_block_for_const_lookup(&arm.body, name, use_pos, state);
+                        }
+                        return;
+                    }
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                for arm in arms {
+                    match &arm.kind {
+                        SelectArmKind::Send { chan, value, .. } => {
+                            if Self::pos_in_span(chan.span(), use_pos) {
+                                Self::scan_expr_for_const_lookup(chan, name, use_pos, state);
+                                return;
+                            }
+                            if Self::pos_in_span(value.span(), use_pos) {
+                                Self::scan_expr_for_const_lookup(value, name, use_pos, state);
+                                return;
+                            }
+                        }
+                        SelectArmKind::Recv { chan, .. } => {
+                            if Self::pos_in_span(chan.span(), use_pos) {
+                                Self::scan_expr_for_const_lookup(chan, name, use_pos, state);
+                                return;
+                            }
+                        }
+                        SelectArmKind::Default => {}
+                    }
+                    if Self::pos_in_span(arm.body.span, use_pos) {
+                        if let SelectArmKind::Recv { names, .. } = &arm.kind {
+                            if names.iter().any(|n| n == name) {
+                                *state = LocalConstLookup::ShadowedByVar;
+                            }
+                        }
+                        Self::scan_block_for_const_lookup(&arm.body, name, use_pos, state);
+                        return;
+                    }
+                }
+            }
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        }
+    }
+
+    fn scan_place_for_const_lookup<'b>(
+        place: &'b Place,
+        name: &str,
+        use_pos: hy_diag::Pos,
+        state: &mut LocalConstLookup<'b>,
+    ) {
+        match &place.kind {
+            PlaceKind::Ident(_) => {}
+            PlaceKind::Index { base, index } => {
+                if Self::pos_in_span(base.span, use_pos) {
+                    Self::scan_place_for_const_lookup(base, name, use_pos, state);
+                } else if Self::pos_in_span(index.span(), use_pos) {
+                    Self::scan_expr_for_const_lookup(index, name, use_pos, state);
+                }
+            }
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                if Self::pos_in_span(base.span, use_pos) {
+                    Self::scan_place_for_const_lookup(base, name, use_pos, state);
+                }
+            }
+        }
+    }
+
+    fn scan_expr_for_const_lookup<'b>(
+        expr: &'b Expr,
+        name: &str,
+        use_pos: hy_diag::Pos,
+        state: &mut LocalConstLookup<'b>,
+    ) {
+        if !Self::pos_in_span(expr.span(), use_pos) {
+            return;
+        }
+        match expr {
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => {
+                for p in params {
+                    if Self::pos_in_span(p.ty.span(), use_pos) {
+                        return;
+                    }
+                }
+                for r in results {
+                    if Self::pos_in_span(r.ty.span(), use_pos) {
+                        return;
+                    }
+                }
+                if params.iter().any(|p| p.name == name)
+                    || results.iter().any(|r| r.name.as_deref() == Some(name))
+                {
+                    *state = LocalConstLookup::ShadowedByVar;
+                }
+                if Self::pos_in_span(body.span, use_pos) {
+                    Self::scan_block_for_const_lookup(body, name, use_pos, state);
+                }
+            }
+            Expr::Binary { lhs, rhs, .. } | Expr::Index { base: lhs, index: rhs, .. } => {
+                Self::scan_expr_for_const_lookup(lhs, name, use_pos, state);
+                Self::scan_expr_for_const_lookup(rhs, name, use_pos, state);
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Paren { inner: operand, .. }
+            | Expr::Field { base: operand, .. }
+            | Expr::Receive { chan: operand, .. } => {
+                Self::scan_expr_for_const_lookup(operand, name, use_pos, state);
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                Self::scan_expr_for_const_lookup(base, name, use_pos, state);
+                if let Some(lo) = lo {
+                    Self::scan_expr_for_const_lookup(lo, name, use_pos, state);
+                }
+                if let Some(hi) = hi {
+                    Self::scan_expr_for_const_lookup(hi, name, use_pos, state);
+                }
+            }
+            Expr::Call { callee, args, .. } => {
+                Self::scan_expr_for_const_lookup(callee, name, use_pos, state);
+                for a in args {
+                    Self::scan_expr_for_const_lookup(&a.value, name, use_pos, state);
+                }
+            }
+            Expr::StructLit { fields, .. } => {
+                for f in fields {
+                    Self::scan_expr_for_const_lookup(&f.value, name, use_pos, state);
+                }
+            }
+            Expr::SliceLit { items, .. } => {
+                for i in items {
+                    Self::scan_expr_for_const_lookup(i, name, use_pos, state);
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    Self::scan_expr_for_const_lookup(k, name, use_pos, state);
+                    Self::scan_expr_for_const_lookup(v, name, use_pos, state);
+                }
+            }
+            Expr::Interp { parts, .. } => {
+                for p in parts {
+                    if let InterpPart::Expr(e) = p {
+                        Self::scan_expr_for_const_lookup(e, name, use_pos, state);
+                    }
+                }
+            }
+            Expr::Ident { .. } | Expr::Lit { .. } => {}
+        }
     }
 
     // -----------------------------------------------------------------------
