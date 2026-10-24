@@ -269,20 +269,21 @@ impl<'a> Checker<'a> {
                 // Their scopes differ from `st`: a closure-local shadow of a
                 // file const is invisible to env_lookup, so resolution fails
                 // open on every name the body defines (issue #758 guard).
-                {
-                    let mut defined = std::collections::HashSet::new();
-                    for p in params {
-                        defined.insert(p.name.clone());
-                    }
-                    for stmt in &body.stmts {
-                        stmt_defined_names(stmt, &mut defined);
-                    }
-                    self.zd_defined = defined;
+                // Preserve any enclosing closure's `zd_defined` set across
+                // nested closures (issue #1613).
+                let prev_defined = self.zd_defined.clone();
+                let mut defined = prev_defined.clone();
+                for p in params {
+                    defined.insert(p.name.clone());
                 }
+                for stmt in &body.stmts {
+                    stmt_defined_names(stmt, &mut defined);
+                }
+                self.zd_defined = defined;
                 for stmt in &body.stmts {
                     self.check_stmt_const_zero_divisor_inner(st, stmt, /*deep=*/ true);
                 }
-                self.zd_defined.clear();
+                self.zd_defined = prev_defined;
             }
             Expr::Ident { .. } | Expr::Lit { .. } => {}
         }
@@ -488,6 +489,10 @@ fn expr_defined_names(expr: &Expr, out: &mut std::collections::HashSet<String>) 
         | Expr::Paren { inner: operand, .. }
         | Expr::Field { base: operand, .. }
         | Expr::Receive { chan: operand, .. } => expr_defined_names(operand, out),
+        Expr::Binary { lhs, rhs, .. } => {
+            expr_defined_names(lhs, out);
+            expr_defined_names(rhs, out);
+        }
         Expr::Index { base, index, .. } => {
             expr_defined_names(base, out);
             expr_defined_names(index, out);
@@ -726,7 +731,39 @@ fn divisor_int_fold(
             let r = divisor_int_fold(rhs, consts, st, defined, depth + 1);
             crate::const_overflow::fold_bin(*op, l, r)
         }
+        _ if expr_mentions_defined(e, defined) => ConstFold::NotConst,
         _ => const_int_fold_with(e, consts, depth, Some(st)),
+    }
+}
+
+fn expr_mentions_defined(e: &Expr, defined: &std::collections::HashSet<String>) -> bool {
+    if defined.is_empty() {
+        return false;
+    }
+    match unwrap_parens(e) {
+        Expr::Ident { name, .. } => defined.contains(name),
+        Expr::Unary { operand, .. }
+        | Expr::AddrOf { operand, .. }
+        | Expr::Move { operand, .. }
+        | Expr::Try { operand, .. }
+        | Expr::Field { base: operand, .. }
+        | Expr::Receive { chan: operand, .. } => expr_mentions_defined(operand, defined),
+        Expr::Binary { lhs, rhs, .. } => {
+            expr_mentions_defined(lhs, defined) || expr_mentions_defined(rhs, defined)
+        }
+        Expr::Index { base, index, .. } => {
+            expr_mentions_defined(base, defined) || expr_mentions_defined(index, defined)
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            expr_mentions_defined(base, defined)
+                || lo.as_deref().is_some_and(|l| expr_mentions_defined(l, defined))
+                || hi.as_deref().is_some_and(|h| expr_mentions_defined(h, defined))
+        }
+        Expr::Call { callee, args, .. } => {
+            expr_mentions_defined(callee, defined)
+                || args.iter().any(|a| expr_mentions_defined(&a.value, defined))
+        }
+        _ => false,
     }
 }
 
@@ -762,10 +799,12 @@ fn divisor_float_conv_zero(
                     if divisor_int_fold_is_zero(a, consts, st, defined) {
                         return true;
                     }
-                    if matches!(
-                        crate::const_overflow::const_float_fold_with(a, consts, 0, Some(st)),
-                        Some(f) if f == 0.0
-                    ) {
+                    if !expr_mentions_defined(a, defined)
+                        && matches!(
+                            crate::const_overflow::const_float_fold_with(a, consts, 0, Some(st)),
+                            Some(f) if f == 0.0
+                        )
+                    {
                         return true;
                     }
                 }
@@ -783,6 +822,9 @@ fn divisor_float_fold_is_zero(
 ) -> bool {
     if divisor_float_conv_zero(e, consts, st, defined, 0) {
         return true;
+    }
+    if expr_mentions_defined(e, defined) {
+        return false;
     }
     matches!(
         crate::const_overflow::const_float_fold_with(e, consts, 0, Some(st)),
