@@ -21,6 +21,101 @@ JOB = importlib.util.module_from_spec(JOB_SPEC)
 JOB_SPEC.loader.exec_module(JOB)
 
 
+class GitRemoteCredentialTests(unittest.TestCase):
+    """Exercise real Git config with fake credentials and offline API requests."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.repo = Path(directory.name)
+        # Do not read ambient credentials, Git URL rewrites or repository selectors.
+        environment = {
+            "PATH": os.environ.get("PATH", os.defpath),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+        }
+        self.environment = patch.dict(os.environ, environment, clear=True)
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        repo_patch = patch.object(JOB, "REPO_DIR", str(self.repo))
+        repo_patch.start()
+        self.addCleanup(repo_patch.stop)
+
+    def set_remote(self, remote):
+        subprocess.run(["git", "-C", str(self.repo), "config",
+                        "remote.origin.url", remote], check=True)
+
+    def test_https_username_password_uses_only_token_for_api_authentication(self):
+        for username in ("octocat", "x-access-token"):
+            with self.subTest(username=username):
+                self.set_remote("https://{}:ghp_offline_fixture@github.com/example/repo.git".format(username))
+                requests = []
+
+                def offline_response(request, timeout):
+                    requests.append(request)
+                    return io.BytesIO(b'{"ok": true}')
+
+                with patch.object(JOB.urllib.request, "urlopen", side_effect=offline_response):
+                    self.assertEqual(JOB.gh_api("/repos/example/repo"), {"ok": True})
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(requests[0].full_url,
+                                 "https://api.github.com/repos/example/repo")
+                self.assertEqual(requests[0].get_header("Authorization"),
+                                 "token ghp_offline_fixture")
+
+    def test_token_only_remote_remains_supported(self):
+        self.set_remote("https://ghp_offline_fixture@github.com/example/repo.git")
+        self.assertEqual(JOB.gh_token(), "ghp_offline_fixture")
+
+    def test_percent_encoded_credentials_are_decoded(self):
+        for remote in (
+            "https://octocat:ghp%5Foffline%5Ffixture@github.com/example/repo.git",
+            "https://ghp%5Foffline%5Ffixture@github.com/example/repo.git",
+        ):
+            with self.subTest(remote=remote):
+                self.set_remote(remote)
+                self.assertEqual(JOB.gh_token(), "ghp_offline_fixture")
+
+    def test_environment_tokens_keep_precedence(self):
+        self.set_remote("https://octocat:remote_fixture@github.com/example/repo.git")
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "github_fixture", "GH_TOKEN": "gh_fixture"}):
+            self.assertEqual(JOB.gh_token(), "github_fixture")
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "", "GH_TOKEN": "gh_fixture"}):
+            self.assertEqual(JOB.gh_token(), "gh_fixture")
+
+    def test_only_github_https_origin_is_a_token_source(self):
+        for remote in (
+            "https://fixture@github.com.example.invalid/example/repo.git",
+            "https://fixture@github.com:444/example/repo.git",
+            "https://example.invalid/https://fixture@github.com/example/repo.git",
+            "http://fixture@github.com/example/repo.git",
+            "ssh://fixture@github.com/example/repo.git",
+        ):
+            with self.subTest(remote=remote):
+                self.set_remote(remote)
+                self.assertIsNone(JOB.gh_token())
+
+    def test_default_https_port_and_case_insensitive_host_are_supported(self):
+        self.set_remote("https://octocat:ghp_offline_fixture@GITHUB.COM:443/example/repo.git")
+        self.assertEqual(JOB.gh_token(), "ghp_offline_fixture")
+
+    def test_absent_empty_or_malformed_remote_credentials_are_ignored(self):
+        self.assertIsNone(JOB.gh_token())  # No origin at all.
+        for remote in (
+            "https://github.com/example/repo.git",
+            "git@github.com:example/repo.git",
+            "https://octocat:@github.com/example/repo.git",
+            "https://:fixture@github.com/example/repo.git",
+            "https://fixture@github.com:invalid/example/repo.git",
+            "https://fixture@[github.com/example/repo.git",
+            "https://octocat:fixture%0Ainjected@github.com/example/repo.git",
+        ):
+            with self.subTest(remote=remote):
+                self.set_remote(remote)
+                self.assertIsNone(JOB.gh_token())
+
+
 class ActionsDispatchArgumentTests(unittest.TestCase):
     def call_dispatch(self, *args):
         return subprocess.run(

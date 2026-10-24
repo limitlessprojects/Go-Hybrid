@@ -19,13 +19,13 @@ no artifacts, or no summary.json), 2 = usage error.
 import json
 import math
 import os
-import re
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -48,9 +48,23 @@ def gh_token():
     env_tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     if env_tok:
         return env_tok
-    _, out = sh("git remote get-url origin", cwd=REPO_DIR)
-    m = re.search(r"https://([^@]+)@github.com", out)
-    return m.group(1) if m else None
+    rc, out = sh("git remote get-url origin", cwd=REPO_DIR)
+    if rc != 0 or any(c.isspace() for c in out):
+        return None
+    try:
+        remote = urllib.parse.urlsplit(out)
+        if (remote.scheme != "https" or remote.hostname != "github.com"
+                or remote.port not in (None, 443) or not remote.username):
+            return None
+        # Git's usual HTTPS form is username:token; older local setups use
+        # token@github.com. Userinfo as a whole is not an API token.
+        encoded = remote.password if remote.password is not None else remote.username
+        token = urllib.parse.unquote(encoded, errors="strict")
+    except ValueError:
+        return None  # Malformed URL/port or credential encoding.
+    if not token or any(ord(c) <= 32 or ord(c) >= 127 for c in token):
+        return None
+    return token
 
 
 def gh_api(path, data=None, method=None):
