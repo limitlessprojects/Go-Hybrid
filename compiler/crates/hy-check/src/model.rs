@@ -62,6 +62,17 @@ impl TypeShape {
     /// value crossing the site is the channel itself). `Unknown` is
     /// deliberately ABSENT: an unproven shape must not pass as safe (the
     /// O4.9 fail-closed boundary — HYB-E3005).
+    ///
+    /// `Struct(_)` and `Array(_)` deliberately return `false` here (issue #723):
+    ///   1. This predicate also gates alias/freeze/loan tracking in `freeze.rs`,
+    ///      `loans.rs`, and `closures.rs`, where composite bindings must be
+    ///      tracked for local slice-backing-array views (`s := a[:]`), O8 slot
+    ///      loans (`n := &p.f`), and embedded reference fields.
+    ///   2. At spawn/send boundaries (`sendability.rs`), fresh composite
+    ///      literals are checked structurally via `classify_composite` (O4.6)
+    ///      and `const` value composites cross via `shape_is_const_sendable`
+    ///      (Class 4), whereas mutable composite bindings travel via `move`
+    ///      (Class 3) so any local aliases/views are frozen.
     pub(crate) fn is_sendable_by_type(&self) -> bool {
         match self {
             TypeShape::Primitive | TypeShape::Str | TypeShape::Atomic | TypeShape::Chan(_) => true,

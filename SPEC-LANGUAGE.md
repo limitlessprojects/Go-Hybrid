@@ -1537,6 +1537,15 @@ jobs <- job{input: v, data: shared_map}            // reject: HYB-E3002 — `sha
                                                    // referenced by the literal
 ```
 
+*Composite literals vs. named composite bindings (#723):* O4.6's structural pass
+applies to **fresh composite literals** (`pair{a: 1, b: 2}`, `[2]int{1, 2}`),
+which have no prior local binding that could alias their storage. A **named
+mutable struct or array binding** (`var p pair`, `a := [2]int{1, 2}`) can be
+aliased locally by a slice view (`s := a[:]`, corpus 53) or an O8 slot loan
+(`n := &p.a`), so Tier 0 requires `move p` / `move a` (Class 3, which freezes the
+source binding and any slice views) or a `const` binding (`const p = ...`, Class
+4 via `shape_is_const_sendable` when all fields/elements are pure value copies).
+
 **O4.9 — The fail-closed boundary (rule FC; human directive 2026-10-13,
 resolves Finding 1 of the customer-feedback review).** A value whose type
 the checker **cannot resolve** — an unresolvable name, a binding whose
