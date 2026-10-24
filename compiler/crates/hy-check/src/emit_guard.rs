@@ -1339,8 +1339,70 @@ impl<'a> Checker<'a> {
                 ]),
             );
         }
-        // 4) Anything else (calls, `pkg.CONST`, arithmetic over idents) —
+        // 4) `len`/`cap` over an operand that can never be an array. Go folds
+        // `len(s)`/`cap(s)` to a constant only when `s` is an array or a
+        // pointer to an array (and `len(s)` when `s` is a string *constant*),
+        // so a channel, slice, map, struct, or a string/primitive *variable*
+        // operand is never a constant array length — the fail-open below must
+        // not cover it (issue #1133).
+        if let Some((builtin, operand, kind)) = self.nonconst_len_cap_operand(st, len) {
+            let msg = format!(
+                "array length `{}` is not a constant — `{}({})` over a {} is not a constant expression in Go (`invalid array length {}`), so the emitted module would not build (HYB-E6004)",
+                len.render(),
+                builtin,
+                operand,
+                kind,
+                len.render()
+            );
+            self.diags.push(
+                Diagnostic::error("HYB-E6004", self.path.clone(), span, msg).with_notes(vec![
+                    "why: Go's array length must be a constant, and `len`/`cap` are constant only over an array, a pointer to an array, or a string constant (issue #1133)".to_string(),
+                    "fix: use a literal or `const` length, or declare a slice (`[]T`) for a dynamic size".to_string(),
+                ]),
+            );
+            return;
+        }
+
+        // 5) Anything else (calls, `pkg.CONST`, arithmetic over idents) —
         // fail open: those can be legal constant expressions in Go.
+    }
+
+    fn nonconst_len_cap_operand(
+        &self,
+        st: Option<&FnState>,
+        expr: &Expr,
+    ) -> Option<(&'static str, String, &'static str)> {
+        let st = st?;
+        let mut calls = Vec::new();
+        collect_len_cap_calls(expr, &mut calls);
+        for (builtin, arg) in calls {
+            let Expr::Ident { name, .. } = unwrap_parens(arg) else {
+                continue; // calls/selectors/literals: no proof, keep fail-open
+            };
+            if name.is_empty() {
+                continue;
+            }
+            let Some(b) = st.env_lookup(name) else {
+                continue; // not a local binding: cannot prove, keep fail-open
+            };
+            let kind = match &b.shape {
+                TypeShape::Array(_) => continue,
+                TypeShape::Pointer(inner) if matches!(**inner, TypeShape::Array(_)) => continue,
+                TypeShape::Chan(_) => "channel",
+                TypeShape::Slice(_) => "slice",
+                TypeShape::Map(_, _) => "map",
+                TypeShape::Str if !b.immutable || b.is_let => "string variable",
+                TypeShape::Str => continue,
+                TypeShape::Primitive if !b.immutable || b.is_let => "primitive variable",
+                TypeShape::Primitive => continue,
+                TypeShape::Struct(_) => "struct value",
+                TypeShape::Closure => "function value",
+                TypeShape::Atomic => "atomic value",
+                _ => continue, // Unknown / handles: keep fail-open
+            };
+            return Some((builtin, name.clone(), kind));
+        }
+        None
     }
 
     fn file_const_is_valid_array_len(&self, name: &str, depth: usize) -> bool {
@@ -2600,4 +2662,36 @@ fn is_primitive_receiver(name: &str) -> bool {
             | "char"
             | "error"
     )
+}
+
+
+fn collect_len_cap_calls<'a>(expr: &'a Expr, out: &mut Vec<(&'static str, &'a Expr)>) {
+    match unwrap_parens(expr) {
+        Expr::Call { callee, args, .. } => {
+            if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                let builtin = match name.as_str() {
+                    "len" => Some("len"),
+                    "cap" => Some("cap"),
+                    _ => None,
+                };
+                if let Some(b) = builtin {
+                    if args.len() == 1 && !args[0].spread {
+                        out.push((b, &args[0].value));
+                    }
+                }
+            }
+            collect_len_cap_calls(callee, out);
+            for a in args {
+                collect_len_cap_calls(&a.value, out);
+            }
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_len_cap_calls(lhs, out);
+            collect_len_cap_calls(rhs, out);
+        }
+        Expr::Unary { operand, .. } | Expr::AddrOf { operand, .. } => {
+            collect_len_cap_calls(operand, out);
+        }
+        _ => {}
+    }
 }
