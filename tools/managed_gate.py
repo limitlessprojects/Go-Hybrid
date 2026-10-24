@@ -14,12 +14,25 @@ count as new (deliberate: moving a hatch is a review event too).
 """
 import json
 import os
+import posixpath
 import re
 import subprocess
 import sys
 import tempfile
 
 VALID = {"mutex", "atomic", "actor", "finalizer", "interop", "other"}
+
+
+def normalize_prog_path(prog: str) -> str:
+    """Return a canonical path key for a source program."""
+    if not isinstance(prog, str):
+        return ""
+    raw = prog.strip()
+    if not raw:
+        return ""
+    if os.name == "nt" and os.path.isabs(raw):
+        return os.path.normpath(raw)
+    return posixpath.normpath(raw.replace("\\", "/"))
 
 
 def _mask_comments_and_strings(src: str) -> str:
@@ -80,19 +93,57 @@ def _mask_comments_and_strings(src: str) -> str:
 
 
 def scan_managed_lines(src: str) -> list[int]:
-    """Return 1-based line numbers of lexical `managed (` occurrences outside comments/strings."""
+    """Return 1-based line numbers of lexical `managed (...) {` blocks outside comments/strings."""
     masked = _mask_comments_and_strings(src)
-    return [
-        1 + masked.count("\n", 0, m.start())
-        for m in re.finditer(r"\bmanaged\s*\(", masked)
-    ]
+    lines = []
+    n = len(masked)
+    for m in re.finditer(r"\bmanaged\s*\(", masked):
+        prefix = masked[:m.start()].rstrip()
+        if prefix.endswith(".") or re.search(r"\bfn(?:\s*\([^()]*\))?$", prefix):
+            continue
+        line_start = masked.rfind("\n", 0, m.start()) + 1
+        line_prefix = masked[line_start:m.start()].rstrip()
+        if line_prefix.endswith((
+            ".", "=", "!", "&", "|", "+", "-", "*", "/", "%", "<", ">", ",", "(", "["
+        )):
+            continue
+        if re.search(
+            r"\b(?:fn(?:\s*\([^()]*\))?|let|var|const|return|if|for|match)\s*$",
+            line_prefix,
+        ):
+            continue
+        open_paren = m.end() - 1
+        depth = 0
+        j = open_paren
+        while j < n:
+            if masked[j] == "(":
+                depth += 1
+            elif masked[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        if depth != 0:
+            continue
+        k = j + 1
+        while k < n and masked[k].isspace():
+            k += 1
+        if k >= n or masked[k] != "{":
+            continue
+        lines.append(1 + masked.count("\n", 0, m.start()))
+    return lines
 
 
 def audit(hyb, prog):
-    r = subprocess.run(
-        [hyb, "check", prog, "--json", "--report-managed"],
-        capture_output=True, text=True, timeout=120,
-    )
+    prog = normalize_prog_path(prog)
+    try:
+        r = subprocess.run(
+            [hyb, "check", prog, "--json", "--report-managed"],
+            capture_output=True, text=True, timeout=120,
+        )
+    except OSError as e:
+        print(f"GATE ERROR: {prog}: failed to execute checker {hyb}: {e}")
+        sys.exit(2)
     # Fail closed on a checker failure (issue #53): a rejected or malformed
     # program has no trustworthy managed-block inventory. Treating that as
     # "zero blocks" reported PASS and — in --rebaseline mode — could replace
@@ -122,16 +173,34 @@ def audit(hyb, prog):
         sys.exit(2)
     blocks = []
     for b in reported:
-        category = b.get("category") if isinstance(b, dict) else None
+        if not isinstance(b, dict):
+            print(f"GATE ERROR: {prog}: malformed managed block entry {b!r}")
+            sys.exit(2)
+        category = b.get("category")
         if not isinstance(category, str) or category not in VALID:
             print(f"GATE ERROR: {prog}: category {category!r} outside the closed set")
+            sys.exit(2)
+        reason = b.get("reason")
+        if not isinstance(reason, str):
+            print(f"GATE ERROR: {prog}: missing or non-string managed block reason {reason!r}")
+            sys.exit(2)
+        tickets = b.get("tickets")
+        if tickets is not None and (
+            not isinstance(tickets, list)
+            or not all(isinstance(t, str) for t in tickets)
+        ):
+            print(f"GATE ERROR: {prog}: malformed managed block tickets {tickets!r}")
             sys.exit(2)
         blocks.append(b)
     # line numbers: lexically scan the source for `managed (` tokens outside
     # comments and string literals (issue #119; the JSON report is
     # source-ordered, so pairing by lexical order is stable for a single file).
-    with open(prog, encoding="utf-8") as f:
-        lines = scan_managed_lines(f.read())
+    try:
+        with open(prog, encoding="utf-8") as f:
+            lines = scan_managed_lines(f.read())
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"GATE ERROR: {prog}: cannot read source file: {e}")
+        sys.exit(2)
     # Never guess a location or collapse several reports into a shared `?`
     # key, and reject multiple managed blocks on the same line (file:line keys
     # cannot distinguish them).
@@ -180,10 +249,55 @@ def main():
         print(f"GATE ERROR: {baseline_path}: baseline must be a JSON object, got {type(baseline).__name__}")
         sys.exit(2)
 
+    version = baseline.get("version")
+    if type(version) is not int or version != 1:
+        print(f"GATE ERROR: {baseline_path}: baseline version must be 1, got {version!r}")
+        sys.exit(2)
+
     base = baseline.setdefault("blocks", {})
     if not isinstance(base, dict):
         print(f"GATE ERROR: {baseline_path}: baseline blocks must be a JSON object, got {type(base).__name__}")
         sys.exit(2)
+
+    normalized_base = {}
+    for k, v in base.items():
+        if not isinstance(k, str) or ":" not in k:
+            print(f"GATE ERROR: {baseline_path}: invalid baseline block key {k!r}")
+            sys.exit(2)
+        prog_part, line_part = k.rsplit(":", 1)
+        norm_prog = normalize_prog_path(prog_part)
+        if not prog_part.strip() or not norm_prog or norm_prog == "." or not re.fullmatch(r"\d+", line_part):
+            print(f"GATE ERROR: {baseline_path}: invalid baseline block key {k!r}")
+            sys.exit(2)
+        if not isinstance(v, dict) or not isinstance(v.get("reason"), str):
+            print(f"GATE ERROR: {baseline_path}: invalid baseline block entry for {k!r}")
+            sys.exit(2)
+        if "category" in v and (not isinstance(v["category"], str) or v["category"] not in VALID):
+            print(f"GATE ERROR: {baseline_path}: invalid baseline block category for {k!r}")
+            sys.exit(2)
+        if "tickets" in v and (
+            not isinstance(v["tickets"], list)
+            or not all(isinstance(t, str) for t in v["tickets"])
+        ):
+            print(f"GATE ERROR: {baseline_path}: invalid baseline block tickets for {k!r}")
+            sys.exit(2)
+        canon_key = f"{norm_prog}:{int(line_part)}"
+        if canon_key in normalized_base and normalized_base[canon_key] != v:
+            print(f"GATE ERROR: {baseline_path}: conflicting duplicate baseline key {canon_key!r}")
+            sys.exit(2)
+        normalized_base[canon_key] = v
+    base = normalized_base
+    baseline["blocks"] = base
+
+    normalized_progs = []
+    for p in progs:
+        np = normalize_prog_path(p)
+        if not np or np == ".":
+            print(f"GATE ERROR: invalid source file path {p!r}")
+            sys.exit(2)
+        if np not in normalized_progs:
+            normalized_progs.append(np)
+    progs = normalized_progs
 
     current = {}
     for prog in progs:
