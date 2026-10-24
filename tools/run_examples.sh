@@ -170,7 +170,11 @@ run_example() {
         if [ "$ok" -eq 1 ]; then PASS="$PASS $name"; else FAIL=1; fi
         ;;
     *)
-        note "SKIP $name (not in the MVP-0 emittable set)"
+        # An explicitly requested example that builds but has no runtime
+        # oracle must not be reported as a pass: that would print
+        # "examples: ALL PASS" without ever checking program output.
+        note "FAIL $name (unsupported acceptance example; no runtime oracle)"
+        FAIL=1
         ;;
     esac
 }
