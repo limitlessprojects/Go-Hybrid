@@ -24,7 +24,41 @@ def step(name, code, hard=False, timeout=10):
 
 
 class RunnerRedactionTests(unittest.TestCase):
-    def test_segmented_secret_keys_and_credential_values(self):
+    def test_secret_markers_and_credential_values_are_redacted(self):
+        secret_keys = {
+            key: 'fake-value' for key in (
+                'PAT', 'GITHUB_PAT', 'GH-PAT', 'API_KEY', 'CLIENT_KEY',
+                'TOKEN', 'SECRET', 'PASSWORD', 'CREDENTIAL', 'CLIENTCREDENTIAL',
+            )
+        }
+        credential_values = {
+            'value-{}'.format(idx): 'prefix-{}example'.format(prefix)
+            for idx, prefix in enumerate(
+                ('ghp_', 'gho_', 'ghs_', 'ghr_', 'github_pat_', 'KGAT_'))
+        }
+        redacted = runner.redact({
+            **secret_keys, **credential_values, 'EMPTY_PAT': '',
+        })
+
+        for key, value in secret_keys.items():
+            self.assertEqual(redacted[key], '[REDACTED len={}]'.format(len(value)))
+        for key, value in credential_values.items():
+            self.assertEqual(redacted[key], '[REDACTED len={}]'.format(len(value)))
+        self.assertEqual(redacted['EMPTY_PAT'], '[EMPTY]')
+
+    def test_key_segments_with_trailing_qualifiers_are_redacted(self):
+        secret_keys = {
+            key: 'unprefixed-secret-value' for key in (
+                'CI_API_KEY_BASE64', 'GITHUB_SSH_KEY_B64', 'MY_KEY_FILE',
+            )
+        }
+
+        redacted = runner.redact(secret_keys)
+
+        for key, value in secret_keys.items():
+            self.assertEqual(redacted[key], '[REDACTED len={}]'.format(len(value)))
+
+    def test_path_and_nonsecret_names_remain_unredacted(self):
         paths = {
             'GITHUB_PATH': '/tmp/github-path',
             'GITHUB_EVENT_PATH': '/tmp/event.json',
@@ -35,28 +69,8 @@ class RunnerRedactionTests(unittest.TestCase):
             'GITHUB_DISPATCH_TYPE': 'workflow_dispatch',
             'COMPATIBILITY': 'preserve-me',
         }
-        secret_keys = {
-            key: 'fake-value' for key in (
-                'PAT', 'GITHUB_PAT', 'GH-PAT', 'API_KEY', 'CLIENT_KEY',
-                'TOKEN', 'SECRET', 'PASSWORD', 'CREDENTIAL',
-            )
-        }
-        credential_values = {
-            'value-{}'.format(idx): 'prefix-{}example'.format(prefix)
-            for idx, prefix in enumerate(
-                ('ghp_', 'gho_', 'ghs_', 'ghr_', 'github_pat_', 'KGAT_'))
-        }
-        redacted = runner.redact({
-            **paths, **secret_keys, **credential_values, 'EMPTY_PAT': '',
-        })
 
-        for key, value in paths.items():
-            self.assertEqual(redacted[key], value)
-        for key, value in secret_keys.items():
-            self.assertEqual(redacted[key], '[REDACTED len={}]'.format(len(value)))
-        for key, value in credential_values.items():
-            self.assertEqual(redacted[key], '[REDACTED len={}]'.format(len(value)))
-        self.assertEqual(redacted['EMPTY_PAT'], '[EMPTY]')
+        self.assertEqual(runner.redact(paths), paths)
 
 
 class RunnerFailureTests(unittest.TestCase):

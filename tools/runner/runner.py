@@ -130,12 +130,15 @@ def env_report():
 # Env values that look secret-ish are masked in reports (R10 hygiene).
 # Lesson 2026-10-12: Kaggle embeds ephemeral session JWTs (KAGGLE_DATA_PROXY_TOKEN,
 # KAGGLE_USER_SECRETS_TOKEN) in kernel env; they leaked into committed summaries once.
-_SECRET_KEY = ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "_KEY", "API_KEY", "PAT")
+_SECRET_KEY = (
+    "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "_KEY", "API_KEY", "PAT", "KEY"
+)
 _SECRET_KEY_SEGMENTS = frozenset(
     marker for marker in _SECRET_KEY if not marker.startswith("_") and "_" not in marker
 )
-_SECRET_KEY_SUFFIXES = tuple(_SECRET_KEY_SEGMENTS) + tuple(
-    marker + "S" for marker in _SECRET_KEY_SEGMENTS
+_SECRET_KEY_SUFFIX_MARKERS = _SECRET_KEY_SEGMENTS - {"KEY"}
+_SECRET_KEY_SUFFIXES = tuple(_SECRET_KEY_SUFFIX_MARKERS) + tuple(
+    marker + "S" for marker in _SECRET_KEY_SUFFIX_MARKERS
 )
 _CREDENTIAL_VALUE_PREFIXES = ("ghp_", "gho_", "ghs_", "ghr_", "github_pat_", "KGAT_")
 
