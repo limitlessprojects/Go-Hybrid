@@ -105,6 +105,54 @@ class RuntimeHazardTests(unittest.TestCase):
         self.assert_result(self.run_case(
             stderr="panic: unexpected nil pointer\n", hazard="(explanation only)"), 1)
 
+    def test_unregistered_captured_go_fatal_preserves_diagnostic_and_tail(self):
+        # Captured from corpus 02 on Go 1.26.9; replayed without a hazard
+        # registration so it must still fail. No native race is rerun.
+        stderr = 'fatal error: concurrent map writes\n\ngoroutine 7 [running]:\ninternal/runtime/maps.fatal({0x4cabfa?, 0x0?})\n\t/workspace/shared/toolchains/go-1.26.9/go/src/runtime/panic.go:1181 +0x18\nmain.tally(...)\n\t/workspace/shared/emitter-native-checks/managed-diagnostic/program.go:21\ncreated by main.main in goroutine 1\n\t/workspace/shared/emitter-native-checks/managed-diagnostic/program.go:33 +0x8c\n'
+        result = self.run_case(stderr=stderr, hazard=None)
+        self.assert_result(result, 1)
+        self.assertIn("fatal error: concurrent map writes", result.stdout)
+        self.assertIn(stderr[-60:], result.stdout)
+        self.assertIn("... [truncated] ...", result.stdout)
+
+    def test_failure_excerpt_boundaries_and_stdout_fallback(self):
+        for length in (0, 1, 199, 200, 201, 10000):
+            for stream in ("stderr", "stdout"):
+                with self.subTest(length=length, stream=stream):
+                    output = ("HEAD" + "x" * max(0, length - 8) + "TAIL")[:length]
+                    build = subprocess.CompletedProcess([], 0, "", "")
+                    run = subprocess.CompletedProcess(
+                        [], 2, output if stream == "stdout" else "",
+                        output if stream == "stderr" else "")
+                    with patch.object(HARNESS_MOD.subprocess, "run", side_effect=[build, run]), \
+                         patch.object(HARNESS_MOD.os.path, "exists", return_value=True):
+                        ok, detail = HARNESS_MOD.build_and_run("hyb", "case.hy", ".")
+                    self.assertFalse(ok)
+                    self.assertTrue(detail.startswith("run exit 2: "))
+                    excerpt = detail[len("run exit 2: "):]
+                    self.assertLessEqual(len(excerpt), 200)
+                    if length <= 200:
+                        self.assertEqual(excerpt, output)
+                    else:
+                        self.assertTrue(excerpt.startswith(output[:100]))
+                        self.assertTrue(excerpt.endswith(output[-60:]))
+                        self.assertIn("... [truncated] ...", excerpt)
+
+    def test_long_unrelated_panic_stays_failure_with_hazard_in_tail(self):
+        stderr = "panic: unrelated error\n" + "frame\n" * 100 + "concurrent map writes\n"
+        result = self.run_case(stderr=stderr)
+        self.assert_result(result, 1)
+        self.assertIn("panic: unrelated error", result.stdout)
+        self.assertIn("concurrent map writes", result.stdout)
+
+    def test_failure_excerpt_keeps_unicode_and_stderr_precedence(self):
+        stderr = "panic: 错误\n" + "界" * 500 + "尾部\n"
+        result = self.run_case(stderr=stderr, stdout="stdout must not replace stderr")
+        self.assert_result(result, 1)
+        self.assertIn("panic: 错误", result.stdout)
+        self.assertIn("尾部", result.stdout)
+        self.assertNotIn("stdout must not replace stderr", result.stdout)
+
     def test_successful_program_is_allowed(self):
         self.assert_result(self.run_case(exit_code=0), 0)
 

@@ -239,7 +239,14 @@ def build_and_run(bin_path, hy_path, workdir, hazards=(), expected_output=None):
         if go_fatal_exit and documented_runtime_hazard(run.stderr, hazards):
             detail = "documented RUNTIME-HAZARD fatal (pre-registered)"
         else:
-            return False, f"run exit {run.returncode}: {(run.stderr or run.stdout)[-200:]}"
+            # Keep the diagnostic head as well as the final stack context.
+            # This is display-only: hazard matching above uses full stderr.
+            output = run.stderr or run.stdout
+            if len(output) > 200:
+                marker = "\n... [truncated] ...\n"
+                tail_size = 200 - 100 - len(marker)
+                output = output[:100] + marker + output[-tail_size:]
+            return False, f"run exit {run.returncode}: {output}"
     if expected_output is not None:
         stdout = run.stdout.replace("\r\n", "\n")
         if stdout not in (expected_output, expected_output + "\n"):
