@@ -1,4 +1,4 @@
-use hy_emit::emit_go;
+use hy_emit::{emit_go, emit_go_package};
 use hy_syntax::parse_file;
 
 fn emit_src(src: &str) -> String {
@@ -326,5 +326,62 @@ fn main() {
         !go.contains("2.fmt"),
         "must not fold 2. into 2.fmt, got:\n{go}"
     );
+}
+
+#[test]
+fn package_export_collision_detects_initialism_splitting_issue_1421() {
+    let src = "pub fn read_url() int { return 1 }\npub fn read_u_r_l() int { return 2 }\n";
+    let ast = hy_syntax::parse_file("demo.hy", src).expect("parses");
+    let err = emit_go_package(&ast, "demo", "demo").unwrap_err();
+    assert!(
+        err.message.contains("public functions `read_url` and `read_u_r_l` both normalize to exported Go identifier `ReadURL` in package mode"),
+        "expected collision diagnostic, got: {}",
+        err.message
+    );
+
+    // Declaration order must not change collision detection
+    let src_rev = "pub fn read_u_r_l() int { return 2 }\npub fn read_url() int { return 1 }\n";
+    let ast_rev = hy_syntax::parse_file("demo.hy", src_rev).expect("parses");
+    let err_rev = emit_go_package(&ast_rev, "demo", "demo").unwrap_err();
+    assert!(
+        err_rev.message.contains("both normalize to exported Go identifier `ReadURL` in package mode"),
+        "expected reverse collision diagnostic, got: {}",
+        err_rev.message
+    );
+}
+
+#[test]
+fn package_export_collision_detects_repeated_underscores_issue_1421() {
+    let src = "pub fn read_url() int { return 1 }\npub fn read__url() int { return 2 }\n";
+    let ast = hy_syntax::parse_file("demo.hy", src).expect("parses");
+    let err = emit_go_package(&ast, "demo", "demo").unwrap_err();
+    assert!(
+        err.message.contains("public functions `read_url` and `read__url` both normalize to exported Go identifier `ReadURL` in package mode"),
+        "expected repeated underscore collision diagnostic, got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn package_export_allows_single_export_and_private_functions_issue_1421() {
+    // Single export works
+    let src_single = "pub fn read_url() int { return 1 }\n";
+    let ast_single = hy_syntax::parse_file("demo.hy", src_single).expect("parses");
+    let go_single = emit_go_package(&ast_single, "demo", "demo").expect("emits single export");
+    assert!(go_single.contains("func ReadURL() int"));
+
+    // Private functions are not exported, so distinct source names don't collide
+    let src_priv = "fn read_url() int { return 1 }\nfn read_u_r_l() int { return 2 }\n";
+    let ast_priv = hy_syntax::parse_file("demo.hy", src_priv).expect("parses");
+    let go_priv = emit_go_package(&ast_priv, "demo", "demo").expect("emits private functions");
+    assert!(go_priv.contains("func read_url() int"));
+    assert!(go_priv.contains("func read_u_r_l() int"));
+
+    // Binary mode (emit_go) does not export, so lowercase functions don't collide
+    let src_bin = "pub fn read_url() int { return 1 }\npub fn read_u_r_l() int { return 2 }\nfn main() {}\n";
+    let ast_bin = hy_syntax::parse_file("main.hy", src_bin).expect("parses");
+    let go_bin = emit_go(&ast_bin).expect("emits binary mode");
+    assert!(go_bin.contains("func read_url() int"));
+    assert!(go_bin.contains("func read_u_r_l() int"));
 }
 

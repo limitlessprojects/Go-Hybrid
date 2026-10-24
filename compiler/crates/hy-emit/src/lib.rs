@@ -164,6 +164,25 @@ pub fn emit_go_package(
     pkg_name: &str,
     binding_prefix: &str,
 ) -> Result<String, EmitError> {
+    // Soundness check (issue #1421): verify that package-mode export
+    // normalization is injective. If two distinct public functions map to
+    // the same Go identifier, fail-closed before writing unbuildable Go.
+    let mut exported_fns: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
+    for f in file.fns() {
+        if f.is_pub && f.receiver.is_none() && !f.name.contains('.') {
+            let go_name = to_go_name(&f.name);
+            if let Some(&first) = exported_fns.get(&go_name) {
+                return Err(EmitError {
+                    message: format!(
+                        "public functions `{}` and `{}` both normalize to exported Go identifier `{}` in package mode",
+                        first, f.name, go_name
+                    ),
+                });
+            }
+            exported_fns.insert(go_name, &f.name);
+        }
+    }
+
     let mut em = Emitter::new();
     em.package_name = pkg_name.to_string();
     em.binding_prefix = binding_prefix.to_string();
