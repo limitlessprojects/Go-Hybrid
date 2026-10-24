@@ -930,6 +930,7 @@ impl<'a> Collector<'a> {
             }
             Stmt::Expr { expr, .. } => self.expr(expr),
             Stmt::Send { chan, value, .. } => {
+                self.check_single_value_position(value, "a channel send", /*binding_position=*/ true);
                 self.expr(chan);
                 self.expr(value);
             }
@@ -1079,6 +1080,7 @@ impl<'a> Collector<'a> {
                     self.push_scope();
                     match &arm.kind {
                         SelectArmKind::Send { chan, value, .. } => {
+                            self.check_single_value_position(value, "a channel send", /*binding_position=*/ true);
                             self.expr(chan);
                             self.expr(value);
                         }
@@ -1194,7 +1196,11 @@ impl<'a> Collector<'a> {
                 let base_expr = place_as_expr(base);
                 self.check_index_kind(&base.render(), base_expr.as_ref(), &bk, index, &ik, p.span);
             }
-            PlaceKind::Field { base, .. } => self.place_read(base),
+            PlaceKind::Field { base, name } => {
+                self.place_read(base);
+                let bk = self.kind_of_place(base);
+                self.check_field_assignment(base, &bk, name, p.span);
+            }
             PlaceKind::AddrOf { base } => self.place_read(base),
         }
     }
@@ -1277,6 +1283,7 @@ impl<'a> Collector<'a> {
                         "an `any` value must be asserted to a concrete type before its fields can be read",
                     );
                 }
+                self.check_field_access(base, name, *span);
                 // #778: a Field BASE is a QUALIFIER position, not a value
                 // position, so the type-name check must not fire on it. Two
                 // legal spellings put a type name there:
@@ -1339,6 +1346,7 @@ impl<'a> Collector<'a> {
                     self.ty(t);
                 }
                 for f in fields {
+                    self.check_single_value_position(&f.value, "a struct field", /*binding_position=*/ true);
                     self.expr(&f.value);
                 }
                 self.check_struct_literal(ty.as_ref(), fields, *span);
@@ -1348,6 +1356,7 @@ impl<'a> Collector<'a> {
                     self.ty(t);
                 }
                 for i in items {
+                    self.check_single_value_position(i, "a slice literal element", /*binding_position=*/ true);
                     self.expr(i);
                 }
                 if let Some((_, inner_elem, _)) = e.as_array_lit() {
@@ -1365,6 +1374,8 @@ impl<'a> Collector<'a> {
                 self.ty(key);
                 self.ty(value);
                 for (k, v) in entries {
+                    self.check_single_value_position(k, "a map key", /*binding_position=*/ true);
+                    self.check_single_value_position(v, "a map value", /*binding_position=*/ true);
                     self.expr(k);
                     self.expr(v);
                 }
@@ -2092,6 +2103,133 @@ impl<'a> Collector<'a> {
             }
         }
         let _ = span;
+    }
+
+    /// Go refuses member access on undefined fields/methods and non-struct types
+    /// (`<base>.<name> undefined (type <T> has no field or method <name>)`).
+    fn check_field_access(&mut self, base: &Expr, name: &str, span: Span) {
+        self.check_single_value_position(base, "a field selector", /*binding_position=*/ true);
+        let bk = self.kind_of_expr(base);
+        if matches!(bk, OpKind::Interface) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot select field `{}` on a value of type `any` — Go refuses `{}.{} undefined (type any has no field or method {})` (HYB-E1002)",
+                    name,
+                    base.render(),
+                    name,
+                    name
+                ),
+                "an `any` value must be asserted to a concrete type before its fields can be read",
+            );
+            return;
+        }
+        if !is_fully_resolved(&bk) {
+            return;
+        }
+        if let Some(sname) = self.struct_base_name(&bk) {
+            let has_field = self.struct_field_kind(&bk, name).is_some();
+            let has_method = self
+                .ck
+                .method_decls
+                .contains_key(&(sname.clone(), name.to_string()));
+            if !has_field && !has_method {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`{}` has no field or method `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                        base.render(),
+                        name,
+                        bk.label(),
+                        base.render(),
+                        name
+                    ),
+                    "only members declared on the type or defined in a method with that receiver can be selected",
+                );
+            }
+        } else if !LOWERED_METHOD_INTRINSICS.contains(&name) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "`{}` has no field or method `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                    base.render(),
+                    name,
+                    bk.label(),
+                    base.render(),
+                    name
+                ),
+                "non-struct types have no fields; only struct types declare fields",
+            );
+        }
+    }
+
+    /// Go refuses assigning to methods or non-existent fields
+    /// (`cannot assign to method <name>` or `<base>.<name> undefined`).
+    fn check_field_assignment(&mut self, base: &Place, bk: &OpKind, name: &str, span: Span) {
+        if matches!(bk, OpKind::Interface) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot select field `{}` on a value of type `any` — Go refuses `{}.{} undefined (type any has no field or method {})` (HYB-E1002)",
+                    name,
+                    base.render(),
+                    name,
+                    name
+                ),
+                "an `any` value must be asserted to a concrete type before its fields can be written",
+            );
+            return;
+        }
+        if !is_fully_resolved(bk) {
+            return;
+        }
+        if let Some(sname) = self.struct_base_name(bk) {
+            let has_field = self.struct_field_kind(bk, name).is_some();
+            if !has_field {
+                let has_method = self
+                    .ck
+                    .method_decls
+                    .contains_key(&(sname.clone(), name.to_string()));
+                if has_method {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "cannot assign to method `{}` on `{}` — Go refuses `cannot assign to method {}` (HYB-E1002)",
+                            name,
+                            base.render(),
+                            name
+                        ),
+                        "methods cannot be assigned to; only mutable struct fields can be assigned",
+                    );
+                } else {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`{}` has no field `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                            base.render(),
+                            name,
+                            bk.label(),
+                            base.render(),
+                            name
+                        ),
+                        "only fields declared on the struct can be assigned to",
+                    );
+                }
+            }
+        } else {
+            self.emit_e1002(
+                span,
+                format!(
+                    "`{}` has no field `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                    base.render(),
+                    name,
+                    bk.label(),
+                    base.render(),
+                    name
+                ),
+                "non-struct types have no fields; only struct types declare fields",
+            );
+        }
     }
 
     /// #682 U13 — a type conversion takes exactly one argument. Go refuses
@@ -3844,8 +3982,19 @@ impl<'a> Collector<'a> {
                     // generic is the common case; `LOWERED_METHOD_INTRINSICS`
                     // covers the other one, a name `hy-emit` lowers to a
                     // prelude call rather than a Go method.
-                    if is_fully_resolved(&bk) && !LOWERED_METHOD_INTRINSICS.contains(&name.as_str())
-                    {
+                    if matches!(bk, OpKind::Interface) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "cannot select field `{}` on a value of type `any` — Go refuses `{}.{} undefined (type any has no field or method {})` (HYB-E1002)",
+                                name,
+                                base.render(),
+                                name,
+                                name
+                            ),
+                            "an `any` value must be asserted to a concrete type before its fields can be read",
+                        );
+                    } else if is_fully_resolved(&bk) && !LOWERED_METHOD_INTRINSICS.contains(&name.as_str()) {
                         self.emit_e1002(
                             span,
                             format!(
