@@ -260,31 +260,34 @@ def propose(issue_no: int, round_no: int, repro_src: str, expected: str,
     # session-side utility; a session may register a fixture post-landing.
     rec = {"kind": "candidate", "round": round_no, "family": fam,
            "variant": cand["name"]}
+    # Every exit after mutation must restore the clean input tree, including
+    # subprocess timeouts, launch/I/O errors, and interrupts. Let the caller
+    # record unexpected failures; never leave the next round a partial patch.
     try:
-        apply_candidate(cand)
-    except RuntimeError as e:
-        rec["result"] = f"anchor-failure: {e}"
+        try:
+            apply_candidate(cand)
+        except RuntimeError as e:
+            rec["result"] = f"anchor-failure: {e}"
+            _trace(issue_no, rec)
+            return (f"specialized brain: template anchor rotted against HEAD — "
+                    f"{e} (candidate {cand['name']}). No diff proposed; the "
+                    f"family needs re-derivation against the new tree.")
+        ok, evidence = smoke(repro_rel, expected, cand.get("rust_tests", []))
+        rec["result"] = "green" if ok else f"smoke-fail: {evidence[:300]}"
         _trace(issue_no, rec)
+        if not ok:
+            return (f"specialized brain: candidate '{cand['name']}' failed "
+                    f"internal pre-verification — {evidence[:600]} No diff "
+                    f"proposed this round.")
+        # green: capture diffs BEFORE reverting
+        diffs = []
+        touched = {p for p, *_ in cand["edits"]} | {p for p, _ in cand["new_files"]}
+        for path in sorted(touched):
+            diffs.append(diff_of(path, (ROOT / path).read_text()))
+        rationale = cand["rationale"]
+        return ("```diff\n" + "\n".join(diffs) + "\n```\n\n" + rationale)
+    finally:
         revert_tree()
-        return (f"specialized brain: template anchor rotted against HEAD — "
-                f"{e} (candidate {cand['name']}). No diff proposed; the "
-                f"family needs re-derivation against the new tree.")
-    ok, evidence = smoke(repro_rel, expected, cand.get("rust_tests", []))
-    rec["result"] = "green" if ok else f"smoke-fail: {evidence[:300]}"
-    _trace(issue_no, rec)
-    if not ok:
-        revert_tree()
-        return (f"specialized brain: candidate '{cand['name']}' failed "
-                f"internal pre-verification — {evidence[:600]} No diff "
-                f"proposed this round.")
-    # green: capture diffs BEFORE reverting
-    diffs = []
-    touched = {p for p, *_ in cand["edits"]} | {p for p, _ in cand["new_files"]}
-    for path in sorted(touched):
-        diffs.append(diff_of(path, (ROOT / path).read_text()))
-    revert_tree()
-    rationale = cand["rationale"]
-    return ("```diff\n" + "\n".join(diffs) + "\n```\n\n" + rationale)
 
 
 def selftest() -> int:
