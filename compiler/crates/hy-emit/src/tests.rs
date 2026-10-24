@@ -519,6 +519,41 @@ fn named_results_on_plain_fn() {
 }
 
 #[test]
+fn mixed_results_on_plain_fn_are_uniformly_named() {
+    let go = emit("fn f() (code int, string) {\n    return 3, \"ok\"\n}\n");
+    assert!(
+        go.contains("func f() (code int, hyR1 string) {"),
+        "named-then-unnamed results must remain buildable:\n{}",
+        go
+    );
+
+    let go = emit("fn f() (int, text string) {\n    return 3, \"ok\"\n}\n");
+    assert!(
+        go.contains("func f() (hyR0 int, text string) {"),
+        "unnamed-then-named results must retain their types:\n{}",
+        go
+    );
+}
+
+#[test]
+fn mixed_results_on_fn_literal_are_uniformly_named() {
+    let go = emit(
+        "fn main() {\n    f := fn() (code int, string) {\n        return 3, \"ok\"\n    }\n}\n",
+    );
+    assert!(
+        go.contains("func() (code int, hyR1 string) {"),
+        "function literals use the same Go result-list rules:\n{}",
+        go
+    );
+}
+
+#[test]
+fn fully_unnamed_results_keep_their_compact_emission() {
+    let go = emit("fn f() (int, string) {\n    return 3, \"ok\"\n}\n");
+    assert!(go.contains("func f() (int, string) {"), ":\n{}", go);
+}
+
+#[test]
 fn method_receiver_and_struct_methods() {
     let go = emit("struct g {\n    n int\n}\n\nfn (p *g) add(x int) {\n    p.n += x\n}\n");
     assert!(go.contains("func (p *g) add(x int) {"), ":\n{}", go);
@@ -2908,3 +2943,92 @@ fn m4_initialism_mapping_for_foreign_go_names_issue_658() {
     assert!(go.contains("strings.ToValidUTF8(\"a\", \"b\")"), "expected strings.ToValidUTF8, got:\n{}", go);
 }
 
+
+#[test]
+fn package_mode_export_normalization_collision_issue_1421() {
+    let check_collision = |src: &str, expected_msg_part: &str| {
+        let file = parse_file("t.hy", src).expect("parse");
+        match super::emit_go_package(&file, "demo", "demo") {
+            Ok(go) => panic!("expected collision error, got:\n{}", go),
+            Err(e) => {
+                assert!(
+                    e.message.contains(expected_msg_part),
+                    "expected '{}' in error, got: {}",
+                    expected_msg_part,
+                    e.message
+                );
+            }
+        }
+    };
+
+    // 1. Initialism splitting collision: read_url vs read_u_r_l
+    let src1 = "\
+pub fn read_url() int {
+    return 1
+}
+pub fn read_u_r_l() int {
+    return 2
+}
+";
+    check_collision(src1, "exported function name collision: `read_url` and `read_u_r_l` both normalize to `ReadURL` in package mode");
+
+    // 2. Declaration order independent: read_u_r_l then read_url
+    let src2 = "\
+pub fn read_u_r_l() int {
+    return 2
+}
+pub fn read_url() int {
+    return 1
+}
+";
+    check_collision(src2, "exported function name collision: `read_u_r_l` and `read_url` both normalize to `ReadURL` in package mode");
+
+    // 3. Repeated underscore collision: read_url vs read__url
+    let src3 = "\
+pub fn read_url() int {
+    return 1
+}
+pub fn read__url() int {
+    return 3
+}
+";
+    check_collision(src3, "exported function name collision: `read_url` and `read__url` both normalize to `ReadURL` in package mode");
+
+    // 4. Control: single public function succeeds in package mode
+    let src4 = "\
+pub fn read_url() int {
+    return 1
+}
+";
+    let file4 = parse_file("t.hy", src4).expect("parse");
+    let go4 = super::emit_go_package(&file4, "demo", "demo").expect("emit package");
+    assert!(go4.contains("func ReadURL() int {"));
+
+    // 5. Control: private functions with colliding normalized names do not export in package mode
+    let src5 = "\
+fn read_url() int {
+    return 1
+}
+fn read_u_r_l() int {
+    return 2
+}
+";
+    let file5 = parse_file("t.hy", src5).expect("parse");
+    let go5 = super::emit_go_package(&file5, "demo", "demo").expect("emit package");
+    assert!(go5.contains("func read_url() int {"));
+    assert!(go5.contains("func read_u_r_l() int {"));
+
+    // 6. Control: ordinary binary mode (emit_go) is unaffected
+    let src6 = "\
+pub fn read_url() int {
+    return 1
+}
+pub fn read_u_r_l() int {
+    return 2
+}
+fn main() {}
+";
+    let go6 = emit(src6);
+    assert!(go6.contains("func read_url() int {"));
+    assert!(go6.contains("func read_u_r_l() int {"));
+}

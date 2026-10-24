@@ -510,6 +510,9 @@ interop in example 05's Go-side surface).
 copy; `*T` receivers take a unique-write loan on the receiver for the call
 (O3). Method sets follow Go: a type's method set determines interface
 satisfaction (I2).
+Selecting a `*T` method, including a bound method value or a `task` callee,
+requires a pointer or an addressable value; a map read, call result, or
+struct literal cannot supply the implicit address-of.
 
 ### 2.5 Enums and sum types — the #1 r/golang request
 

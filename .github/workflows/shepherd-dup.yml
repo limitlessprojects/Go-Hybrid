@@ -1,0 +1,70 @@
+# W4 — duplicate cluster closer (plan §3 W4). Reuses the union-find clusters
+# classify() already computes. Two phases, strictly separated:
+#   Phase A (propose only — runs at dry-run): comment on each older cluster
+#     member "superseded by #N — propose close" + label bot:dup-of:#N.
+#   Phase B (auto-close — live mode + --phase-b input ONLY, and all three
+#     conditions must hold): member labeled >= dup.grace_days ago, survivor
+#     carries bot:verified, and a patch-id sweep (git cherry) shows the member
+#     has NO unique commits. The cluster's designated survivor is never
+#     closed. Credit travels: every close comment thanks the author and links
+#     the survivor per the repo's dup policy (land strongest, credit both).
+name: shepherd-dup
+
+on:
+  schedule:
+    - cron: "41 3 * * 1" # weekly Monday reconcile
+  workflow_dispatch:
+    inputs:
+      phase_b:
+        description: "Enable Phase B auto-close (still requires SHEPHERD_MODE=live)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: shepherd-dup
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  dup:
+    if: >-
+      github.actor != 'github-actions[bot]' ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SHEPHERD_MODE: ${{ vars.SHEPHERD_MODE || 'dry-run' }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout (pinned v4, full history for git cherry)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Gate (Phase A is comment/label => dry-run suffices)
+        run: python3 tools/shepherd.py gate --require dry-run
+
+      - name: Scan + classify (fresh clusters)
+        run: python3 tools/triage_bot.py --token-env GITHUB_TOKEN scan --out /tmp/triage --jobs 8
+
+      - name: W4 duplicate-cluster pass
+        run: |
+          if [ "${{ github.event.inputs.phase_b || 'false' }}" = "true" ]; then
+            python3 tools/shepherd.py gate --require live
+            python3 tools/shepherd.py --token-env GITHUB_TOKEN dup --from-scan /tmp/triage/TRIAGE.json \
+              --phase-b
+          else
+            python3 tools/shepherd.py --token-env GITHUB_TOKEN dup --from-scan /tmp/triage/TRIAGE.json
+          fi
+
+      - name: W7 session log
+        if: always()
+        run: python3 tools/shepherd.py --token-env GITHUB_TOKEN log --event dup-pass --note "phase A/B pass complete"

@@ -977,3 +977,101 @@ verdict agreement, tripwire not fired**.
 
 With this registration the corpus is **113 programs: ACCEPT 35 ·
 ACCEPT-MANAGED 2 · REJECT 76** — main's 105 plus these four.
+
+## Bounty-track registration — 2026-10-19: constant index past a fixed array's length (BUILDABLE, Row 13)
+
+`check_index_kind` bounded the constant index of the STRING form (`s[10]` on
+`const s = "abc"`) but not the fixed-array form: `a[5]` on `[3]int` checked
+clean (0 diagnostics) and the emitted Go then failed `go build` with
+`invalid argument: index 5 out of bounds [0:3]`. The rule now reads the array's
+declared length (through alias resolution) and compares the folded constant
+index against it.
+
+| program | verdict | rule | diagnostic | rationale |
+|---|---|---|---|---|
+| array-const-index-past-length-reject | REJECT | BUILDABLE | `HYB-E1002` | `var a [3]int` then `a[5]`: a constant index past a fixed array's length. The length lives in the type, so `var`/`let`/`:=` bindings and `[3]int` parameters are bounded as well; the fixture's own `a[2]` lines stay clean, and `control-slice-index-past-length` keeps the slice form ACCEPT — a slice's length is not part of its type, so no constant bound is decidable there |
+
+The rule lives in the array branch of
+`hy-check/src/buildable.rs::check_index_kind` (over `const_array_len_at`),
+pinned by `hy-check/tests/array_const_index_bounds.rs` (8 tests: the boundary
+`a[3]`, the typed-literal and parameter forms, the string sibling, and the
+in-bounds / slice / long-array controls). The reject was reproduced as a real
+`go build` failure on the pre-fix tree, and `a[2]`, `xs[300]` and `[300]int8`
+were verified ACCEPT, before this fixture was committed.
+
+Reproduction (branch tree, pinned rustc 1.99.0 / go1.26.9):
+`python3 tools/corpus_harness.py --bin compiler/target/debug/hyb` reports
+**114/114 verdict agreement, tripwire not fired**.
+
+With this registration the corpus is **114 programs: ACCEPT 35 ·
+ACCEPT-MANAGED 2 · REJECT 77** — main's 113 plus this one.
+
+
+## Additive corpus registration — 2026-10-21: named-const assignment overflow + var-array assignment index bound (issues #998/#999)
+
+Two REJECT fixtures, both oracle-found (W-023, INVARIANT-4) and both landing in
+the same round as their fixes:
+
+1. **`typed-const-assign-overflow-reject.hy`** (issue #998, HYB-E6002): the
+   assignment twin of the W10 declaration fold — `x = k` with
+   `const k = 70000` on `var x int16` passed `hyb check` with 0 diagnostics
+   while the literal form (`n = 300`) rejected; the assign-side fold saw the
+   named const as `NotConst`. The fix shares the declaration path's
+   const-map fold (`const_int_fold_with`). Local controls: `x = 5` (fits)
+   and `y = k` into `int32` (fits) stay clean in-fixture.
+2. **`array-const-index-assign-reject.hy`** (issue #999, HYB-E1002): the
+   write-path twin of the #910 read-path rule — `a[300] = 1` on
+   `var a [2]int` passed clean because `place_read` passed no base
+   expression to `check_index_kind`, silently disabling the length lookup
+   for every store form. The fix mirrors the base place into expression
+   form. Local control: `a[1] = 1` stays clean in-fixture; the slice fence
+   stays `control-slice-index-past-length.hy`.
+
+Both rejects were reproduced as real `go build` failures by the oracle runs
+pre-fix (accepted on main d7ab63a and ec3fe0b), and both flip to REJECT on
+the fixed tree (pinned rustc 1.99.0 / go1.26.9). The Ghost-Fork counterfactual
+experiment additionally applied both fix patches to a disposable worktree at
+the pre-fix tip and observed the repro flip (reports 12-scoring, session-31).
+
+`python3 tools/corpus_harness.py --bin <fixed hyb>` reports **122/122 verdict
+agreement, tripwire not fired**.
+
+With this registration the corpus is **122 programs: ACCEPT 38 ·
+ACCEPT-MANAGED 2 · REJECT 82** — main's 120 plus these two.
+
+-------------------------------------------------------------------------------
+
+### tests/checker-corpus/const-zero-divisor-const-forms-reject.hy (issue #758) — REJECT
+
+// The divisor predicate only inspected inline literals (`is_int_literal_zero`,
+
+
+-------------------------------------------------------------------------------
+
+### range-bound-type-forms-reject (issue #827) — REJECT
+
+// `non_integer_bound_kind` missed nil / bool-result operators / AddrOf,
+
+With this registration the corpus is **124 programs: ACCEPT 38 ·
+ACCEPT-MANAGED 2 · REJECT 84** — main's 122 plus these two, landed
+
+-------------------------------------------------------------------------------
+
+### multivalue-bind-source-count-reject (issue #929) — REJECT
+
+receive/map-index over two names, slice-index multi-name, select-recv 3 names, and 1-result calls bound to 2+ names — all rejected fail-closed before emission (T23 + BUILDABLE)
+
+With this registration the corpus is **125 programs: ACCEPT 38 ·
+ACCEPT-MANAGED 2 · REJECT 85** — main's 124 plus this one.
+
+-------------------------------------------------------------------------------
+
+### parallel-bind-count-and-decl-type-reject (issue #905) — REJECT
+
+parallel decl/assign count mismatches, provably-single sources bound to several names, typed-decl initializer conflicts, positional parallel-assign kind conflicts — all rejected fail-closed (BUILDABLE)
+
+With this registration the corpus is **126 programs: ACCEPT 38 ·
+ACCEPT-MANAGED 2 · REJECT 86** — main's 125 plus this one.
+by the autonomous pipeline (bundles author-758 / author-827, landings
+0107658 / d0a2db5). Sibling-take credit: sonson0910's stale-base
+companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.

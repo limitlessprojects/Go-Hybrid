@@ -260,6 +260,14 @@ fn build_tables(ck: &mut Checker<'_>) {
                     ck.declare_method(f);
                 } else {
                     ck.declare_pkg_name(&f.name, "fn", f.span);
+                    if f.name.contains('.') {
+                        // hy-emit lowers an associated `Type.name` to the
+                        // package-level Go identifier `Type_name`. Check that
+                        // emitted name too, or an ordinary `Type_name` decl
+                        // passes here and collides only at `go build`.
+                        let emitted_name = f.name.replace('.', "_");
+                        ck.declare_pkg_name(&emitted_name, "fn", f.span);
+                    }
                     ck.fns.insert(f.name.clone(), f);
                 }
             }
@@ -538,7 +546,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
 
         // Issue #149: `/` or `%` by a literal 0 must not be accepted —
         // Go refuses to compile the emitted expression.
-        ck.check_stmt_const_zero_divisor(stmt);
+        ck.check_stmt_const_zero_divisor(&st, stmt);
 
         // Issue #201: expression/type guards (incomparable `==`,
         // constant negative shifts, local array-length ascriptions).

@@ -369,17 +369,89 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
+            "panic" => {
+                if args.len() != 1 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`panic` requires exactly 1 argument, found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                }
+            }
+            "recover" => {
+                if !args.is_empty() {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`recover` takes no arguments, found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                }
+            }
+            "min" => {
+                if args.is_empty() {
+                    self.emit_builtin(
+                        span,
+                        "`min` requires at least 1 argument, found 0 (HYB-E2005)".to_string(),
+                    );
+                }
+            }
+            "max" => {
+                if args.is_empty() {
+                    self.emit_builtin(
+                        span,
+                        "`max` requires at least 1 argument, found 0 (HYB-E2005)".to_string(),
+                    );
+                }
+            }
+            "real" => {
+                if args.len() != 1 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`real` requires exactly 1 complex argument, found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                }
+            }
+            "imag" => {
+                if args.len() != 1 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`imag` requires exactly 1 complex argument, found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                }
+            }
+            "complex" => {
+                if args.len() != 2 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`complex` requires exactly 2 arguments (real, imag), found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                }
+            }
             _ => {}
         }
     }
 
     fn classify_make_target(&self, e: &Expr) -> MakeTargetKind {
-        match unwrap_parens(e) {
+        let unwrapped = unwrap_parens(e);
+        match unwrapped {
             Expr::SliceLit {
                 elem: Some(_),
                 items,
                 ..
-            } if items.is_empty() => MakeTargetKind::Slice,
+            } if items.is_empty() && unwrapped.as_array_lit().is_none() => MakeTargetKind::Slice,
             Expr::MapLit { entries, .. } if entries.is_empty() => MakeTargetKind::Map,
             Expr::StructLit {
                 ty: Some(hy_syntax::TypeExpr::Chan { .. }),

@@ -1,0 +1,18 @@
+{
+  "issue": 905,
+  "expected_code": null,
+  "basis": "author-stage v0 brain=specialized rounds=1",
+  "status": "landed",
+  "gates": {
+    "baseline": "ACCEPT",
+    "patched": "REJECT (any code)",
+    "acceptControls": [
+      "tests/checker-corpus/control-uint8-max.hy",
+      "tests/checker-corpus/control-composite-literal-in-range.hy"
+    ],
+    "rounds": 1
+  },
+  "premiseNote": "repro sanitized session-side 2026-10-22: the issue's verbatim fence omits reads so the pre-existing never-read rule rejects it at every commit (never a clean baseline); `_ =` reads added, class shapes untouched. autoland's baseline gate caught it (AUTOLAND-STALE-PREMISE).",
+  "landedSha": "3f671b370d447f9fd0cf9abfaa187bb7118dc34a",
+  "landedAt": "2026-10-21T21:01:30Z"
+}

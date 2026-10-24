@@ -1,0 +1,51 @@
+name: queue-sweeper
+
+# Doctrine change 2026-10-24 (AUTOMATION.md rule 2): the queue drains itself.
+# Closes unprotected PRs older than SWEEPER_MIN_AGE_DAYS (default 5) as
+# not-planned, each with a written reopen-path reply. Protected labels:
+# triage:wildcard-hold / triage:pareto / triage:keep (+ config-listed numbers).
+# Runs after the daily triage board (04:30 UTC) so fresh land-candidates get
+# their protection label before the sweep.
+
+on:
+  schedule:
+    - cron: "15 5 * * *"
+  workflow_dispatch:
+    inputs:
+      dry:
+        description: "Dry run only (list what would close)"
+        type: boolean
+        default: false
+      min_age:
+        description: "Min PR age in days before closing (default 5)"
+        required: false
+        default: "5"
+
+permissions:
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: queue-sweeper
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Sweep the queue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SWEEPER_MIN_AGE_DAYS: ${{ inputs.min_age || '5' }}
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry }}" = "true" ]; then
+            ARGS="--dry"
+          fi
+          python3 tools/queue_sweeper.py $ARGS

@@ -45,9 +45,9 @@
 
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
-    AssignOp, BinOp, Block, CallArg, Decl, Expr, FieldInit, File, FnDecl, ForKind, InterpPart,
-    LitKind, LocalDecl, LocalKind, MatchPattern, Place, PlaceKind, SelectArmKind, Stmt, TypeExpr,
-    UnOp,
+    AssignOp, BinOp, Block, CallArg, Decl, Expr, FieldInit, File, FnDecl, FnResult, ForKind,
+    InterpPart, LitKind, LocalDecl, LocalKind, MatchPattern, Param, Place, PlaceKind, SelectArmKind,
+    Stmt, TypeExpr, UnOp,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -61,7 +61,7 @@ use crate::model::{as_addr_of, unwrap_parens, Checker};
 /// `Unknown` stays permissive (fail-open for operand checks; concurrency
 /// boundaries remain fail-closed in `sendability.rs`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum OpKind {
+pub(crate) enum OpKind {
     Unknown,
     /// A known interface type (`any`) — #682 U9-U12.
     ///
@@ -153,8 +153,6 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         // (`var f float64 = 1` builds). The kind model cannot tell an untyped
         // constant from an `int` variable, so this direction must stay allowed
         // or the check would reject buildable programs.
-        // No value is involved; the count check owns that case.
-        (Void, _) | (_, Void) => false,
         // An untyped int constant is assignable to a float result
         // (`fn f() float64 { return 1 }` builds). The kind model cannot tell
         // an untyped constant from an `int` variable, so this direction must
@@ -174,6 +172,96 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         (Fn(..), Fn(..)) => false,
         // Everything else is a shape or scalar-family mismatch Go refuses.
         _ => true,
+    }
+}
+
+/// Is `e` provably a single-value expression (the #905/#903 binding-count
+/// class)?
+///
+/// Conservative: `true` only for shapes that cannot yield two values in
+/// any context. Calls, receives, and index expressions are excluded —
+/// their counts are owned by the source-count rules (tuple.rs T23 and the
+/// #926 void-position rule) — and an unresolved shape fails open.
+fn is_definitely_single_value(e: &Expr) -> bool {
+    match unwrap_parens(e) {
+        Expr::Lit { .. }
+        | Expr::Ident { .. }
+        | Expr::Binary { .. }
+        | Expr::Unary { .. }
+        | Expr::AddrOf { .. }
+        | Expr::Field { .. }
+        | Expr::Interp { .. }
+        | Expr::Slice { .. }
+        | Expr::StructLit { .. }
+        | Expr::SliceLit { .. }
+        | Expr::MapLit { .. }
+        | Expr::FnLit { .. } => true,
+        // NOTE: `Expr::Try` is deliberately NOT here — `f()?` on a
+        // (T1, T2, error) call yields TWO values after the unwrap (the
+        // accept-corpus program 10-a5-http-handler-capture pins
+        // `code, body := httptest.get(...)?` as legal), so a Try is a
+        // source-count question, not a provably-single value.
+        Expr::Move { operand, .. } => is_definitely_single_value(operand),
+        _ => false,
+    }
+}
+
+/// Symmetrical conflict check for equality operators (`==`, `!=`).
+///
+/// Untyped numeric constants adapt between integer and floating types
+/// in Go comparisons (`1 == 1.0` builds), so numeric families do not
+/// conflict. Across different families (e.g. numeric vs string/bool,
+/// pointer vs scalar), Go never permits comparison.
+fn equality_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
+    if a.is_numeric() && b.is_numeric() {
+        return false;
+    }
+    kinds_conflict(a, b) && kinds_conflict(b, a)
+}
+
+/// Does a type conversion `target(arg)` fail because the two types are incompatible in Go?
+///
+/// In Go, type conversions `T(x)` require compatible types:
+/// - A struct cannot be converted from a non-struct (or unrelated struct).
+/// - A bool cannot be converted to or from any other type.
+/// - Numeric types (int, float) cannot convert to/from string, slice, map, chan, struct.
+/// - Strings can only convert to/from integer (rune), byte/rune slices, or strings.
+/// - Maps and channels cannot convert to/from scalars.
+fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
+    use OpKind::*;
+    match (target, arg) {
+        // Fail-open: unresolved or interface (any(x) is valid in Go)
+        (Unknown, _) | (_, Unknown) => false,
+        (Interface, _) => false,
+        (a, b) if a == b => false,
+
+        // Struct targets: Go forbids converting non-structs to structs.
+        (Struct(_), other) if !matches!(other, Unknown | Struct(_)) => true,
+
+        // Bool target: only bool can convert to bool.
+        (Bool, other) if !matches!(other, Unknown | Bool) => true,
+        // Bool argument: bool cannot convert to anything (except bool or interface).
+        (other, Bool) if !matches!(other, Unknown | Bool | Interface) => true,
+
+        // Numeric targets (Int, Float): can convert between Int and Float.
+        // Cannot convert Str, Slice, Map, Chan, Struct to numeric.
+        (Int | Float, Str | Slice(_) | Map(_, _) | Chan(_) | Struct(_)) => true,
+
+        // String target: can convert from Int (rune/byte code point) or Slice (byte/rune slice) or Str.
+        // Cannot convert from Float, Bool, Map, Chan, Struct.
+        (Str, Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
+
+        // Slice target: can convert from Str (to []byte/[]rune), or Slice/Array.
+        // Cannot convert from Int, Float, Bool, Map, Chan, Struct.
+        (Slice(_), Int | Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
+
+        // Map target: cannot convert from Int, Float, Bool, Str, Slice, Chan, Struct.
+        (Map(_, _), Int | Float | Bool | Str | Slice(_) | Chan(_) | Struct(_)) => true,
+
+        // Chan target: cannot convert from Int, Float, Bool, Str, Slice, Map, Struct.
+        (Chan(_), Int | Float | Bool | Str | Slice(_) | Map(_, _) | Struct(_)) => true,
+
+        _ => false,
     }
 }
 
@@ -224,6 +312,30 @@ fn is_fully_resolved(k: &OpKind) -> bool {
 /// callees and never reach this check.
 const LOWERED_METHOD_INTRINSICS: &[&str] = &["pop"];
 
+/// Mirror an assignment-target place back into expression form so the shared
+/// index/slice checks can resolve declared lengths of the base (issue #999).
+/// `None` means "cannot mirror" (address-of bases) — every caller stays
+/// fail-open exactly as before the mirror existed.
+fn place_as_expr(p: &Place) -> Option<Expr> {
+    Some(match &p.kind {
+        PlaceKind::Ident(name) => Expr::Ident {
+            name: name.clone(),
+            span: p.span,
+        },
+        PlaceKind::Index { base, index } => Expr::Index {
+            base: Box::new(place_as_expr(base)?),
+            index: Box::new(index.clone()),
+            span: p.span,
+        },
+        PlaceKind::Field { base, name } => Expr::Field {
+            base: Box::new(place_as_expr(base)?),
+            name: name.clone(),
+            span: p.span,
+        },
+        PlaceKind::AddrOf { .. } => return None,
+    })
+}
+
 /// One function-local binding that Go requires to be read: `:=`/`let`
 /// (checked since #185), `var`/`const` (PR #475), and the elidable
 /// `for`/`select` bindings (PR #536 — only diagnosed when written).
@@ -261,6 +373,10 @@ struct Collector<'a> {
     /// (`return v` in a `(value, error)` fn emits `return v, nil`, the E3
     /// sugar; corpus 13).
     fn_results_error_tail: bool,
+    /// Lexical nesting depth within loops (`for` / `loop`).
+    loop_depth: usize,
+    /// Lexical nesting depth within `select` statements.
+    select_depth: usize,
     defines: Vec<Define>,
     /// Every identifier mentioned in the file plus every dotted type root —
     /// the import-usage set (the emitter's declared-import header needs it).
@@ -282,6 +398,8 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             fn_results: Vec::new(),
             fn_results_all_named: false,
             fn_results_error_tail: false,
+            loop_depth: 0,
+            select_depth: 0,
             defines: Vec::new(),
             roots: HashSet::new(),
             diags: Vec::new(),
@@ -420,6 +538,60 @@ impl<'a> Collector<'a> {
         self.mention(name);
     }
 
+    /// #778 — a TYPE NAME used where a VALUE is required.
+    ///
+    /// `struct holder { n int }` followed by `x := holder` passes `hyb check`
+    /// and the emitter prints the identifier verbatim, so `go build` fails with
+    /// `holder (type) is not an expression`. Go has no value named `holder`,
+    /// so this is not an `Unknown` fail-open case: the shape IS known and the
+    /// value does not exist.
+    ///
+    /// Deliberately narrow, because a type name is a legal operand in a
+    /// CONVERSION (`holder(x)`, `int(3.7)`). The call arm handles its callee
+    /// separately, so this is only reached for a genuine value position.
+    ///
+    /// Fail-open on anything that could be a value: a local/parameter/closure
+    /// binding shadows the type name (`holder := 5` is a legal variable), and
+    /// an unknown name is another rule's business (unused-binding, O4.9).
+    fn check_type_name_in_value_position(&mut self, name: &str, span: Span) {
+        // A binding in any enclosing scope shadows the type name.
+        if self
+            .scopes
+            .iter()
+            .rev()
+            .any(|layer| layer.contains_key(name))
+        {
+            return;
+        }
+        // A file-level const of the same name is a value, not the type.
+        if self.ck.consts.contains_key(name) {
+            return;
+        }
+        // A top-level fn of the same name is callable, not the type.
+        let head = Checker::base_named_type_str(name);
+        if self.ck.fns.contains_key(name) || self.ck.fns.contains_key(head) {
+            return;
+        }
+        // The name must actually resolve to a declared type — a struct, an
+        // enum, a type alias, or a built-in conversion target. Anything else
+        // stays fail-open.
+        let is_declared_type = self.ck.structs.contains_key(name)
+            || self.ck.enums.contains_key(name)
+            || self.ck.type_aliases.contains_key(name)
+            || crate::const_init::is_conversion_type_name(name);
+        if !is_declared_type {
+            return;
+        }
+        self.emit_e1002(
+            span,
+            format!(
+                "`{}` is a type, not a value — Go refuses `{} (type) is not an expression` (HYB-E1002)",
+                name, name
+            ),
+            "a type name can only be used in a type position or as a conversion callee (`T(x)`)",
+        );
+    }
+
     fn write(&mut self, name: &str) {
         for layer in self.scopes.iter().rev() {
             if let Some(entry) = layer.get(name) {
@@ -456,9 +628,78 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_signature_bindings(
+        &mut self,
+        receiver: Option<&str>,
+        params: &[Param],
+        results: &[FnResult],
+        span: Span,
+    ) {
+        let mut seen = HashSet::new();
+        let receiver = receiver.map(|name| (name, span)).into_iter();
+        let params = params.iter().map(|p| (p.name.as_str(), p.span));
+        let results = results
+            .iter()
+            .filter_map(|r| r.name.as_deref().map(|name| (name, r.ty.span())));
+        for (name, name_span) in receiver.chain(params).chain(results) {
+            if name != "_" && !seen.insert(name) {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E1002",
+                        self.path.clone(),
+                        name_span,
+                        format!(
+                            "function signature declares `{name}` more than once — Go refuses `{name} redeclared in this block` (HYB-E1002)"
+                        ),
+                    )
+                    .with_notes(vec![
+                        "receiver, parameter, and named-result identifiers share one function scope; rename the repeated declaration or use `_` for an unused parameter"
+                            .to_string(),
+                    ]),
+                );
+            }
+        }
+    }
+
     // -- declarations --------------------------------------------------------
 
     fn fn_decl(&mut self, f: &FnDecl) {
+        if f.receiver.is_none() {
+            if f.name == "main" && (!f.params.is_empty() || !f.type_params.is_empty()) {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E1002",
+                        self.path.clone(),
+                        f.span,
+                        "`fn main` must have no parameters — Go requires `func main` to have no arguments and no return values (HYB-E1002)".to_string(),
+                    )
+                    .with_notes(vec![
+                        "remove parameters from `fn main()`, or read CLI arguments via `os.args()`".to_string(),
+                    ]),
+                );
+            } else if f.name == "init"
+                && (!f.params.is_empty() || !f.results.is_empty() || !f.type_params.is_empty())
+            {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E1002",
+                        self.path.clone(),
+                        f.span,
+                        "`fn init` must have no parameters and no return values — Go requires `func init` to have no arguments and no return values (HYB-E1002)".to_string(),
+                    )
+                    .with_notes(vec![
+                        "declare `fn init() { ... }` without parameters or return types".to_string(),
+                    ]),
+                );
+            }
+        }
+        self.check_signature_bindings(
+            f.receiver.as_ref().map(|r| r.name.as_str()),
+            &f.params,
+            &f.results,
+            f.span,
+        );
+
         if let Some(r) = &f.receiver {
             self.ty(&r.ty);
         }
@@ -510,7 +751,11 @@ impl<'a> Collector<'a> {
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
+        let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
+        let outer_select = std::mem::replace(&mut self.select_depth, 0);
         self.block_stmts(body);
+        self.loop_depth = outer_loop;
+        self.select_depth = outer_select;
         self.fn_results = outer;
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
@@ -569,6 +814,70 @@ impl<'a> Collector<'a> {
         // multi-value binding and is handled by `infer_local_kinds`.
         if l.names.len() == 1 && l.values.len() == 1 {
             self.check_single_value_position(&l.values[0], "a binding", /*binding_position=*/ true);
+        }
+        // Binding-count guards: a declaration whose value count cannot
+        // match its names fails go build with `assignment mismatch`.
+        if l.values.len() > 1 && l.names.len() != l.values.len() {
+            self.emit_e1002(
+                l.span,
+                format!(
+                    "assignment mismatch: {} variables but {} values (HYB-E1002)",
+                    l.names.len(),
+                    l.values.len()
+                ),
+                "a parallel declaration binds positionally; the name and value counts must match",
+            );
+        }
+        if l.names.len() > 1
+            && l.values.len() == 1
+            && is_definitely_single_value(&l.values[0])
+        {
+            self.emit_e1002(
+                l.span,
+                format!(
+                    "assignment mismatch: {} variables but the initializer yields exactly 1 (HYB-E1002)",
+                    l.names.len()
+                ),
+                "call, receive, and index sources are checked by the source-count rules; a provably single value binds one name",
+            );
+        }
+        // A typed declaration must accept its initializers — Go refuses
+        // `cannot use ... as ... value in variable declaration`.
+        if let Some(t) = &l.ty {
+            let want = self.kind_of_ty(t, 0);
+            if l.values.len() == 1 && l.names.len() == 1 {
+                let vk = self.kind_of_expr(&l.values[0]);
+                if kinds_conflict(&want, &vk) {
+                    self.emit_e1002(
+                        l.span,
+                        format!(
+                            "cannot initialize `{}` (type `{}`) with a value of type `{}` — Go refuses `cannot use ... as {} value in variable declaration` (HYB-E1002)",
+                            l.names[0],
+                            want.label(),
+                            vk.label(),
+                            want.label()
+                        ),
+                        "the declared type is fixed; write an explicit conversion when a conversion is intended",
+                    );
+                }
+            } else if l.values.len() > 1 && l.values.len() == l.names.len() {
+                for (name, v) in l.names.iter().zip(l.values.iter()) {
+                    let vk = self.kind_of_expr(v);
+                    if kinds_conflict(&want, &vk) {
+                        self.emit_e1002(
+                            l.span,
+                            format!(
+                                "cannot initialize `{}` (type `{}`) with a value of type `{}` — Go refuses `cannot use ... as {} value in variable declaration` (HYB-E1002)",
+                                name,
+                                want.label(),
+                                vk.label(),
+                                want.label()
+                            ),
+                            "the declared type is fixed; write an explicit conversion when a conversion is intended",
+                        );
+                    }
+                }
+            }
         }
         // Composed resolution (pr-430 x landed pr-475): #475's track_read
         // set (Define|Let|Var|Const) drives which locals get unused-read
@@ -717,6 +1026,7 @@ impl<'a> Collector<'a> {
                 kind, body, span, ..
             } => {
                 self.push_scope();
+                self.loop_depth += 1;
                 match kind {
                     ForKind::While { cond } => {
                         self.expr(cond);
@@ -744,6 +1054,7 @@ impl<'a> Collector<'a> {
                     ForKind::Infinite => {}
                 }
                 self.block_scoped(body);
+                self.loop_depth -= 1;
                 self.pop_scope();
             }
             Stmt::Return { values, span } => {
@@ -752,10 +1063,22 @@ impl<'a> Collector<'a> {
                 }
                 self.check_return(values, *span);
             }
-            Stmt::Task { callee, args, .. } => {
+            Stmt::Task { callee, args, span } => {
                 self.expr(callee);
                 for a in args {
                     self.expr(&a.value);
+                }
+                match unwrap_parens(callee) {
+                    Expr::Ident { name, .. } => {
+                        self.check_user_fn_arity(name, args, *span);
+                        self.check_user_fn_arg_types(name, args);
+                    }
+                    Expr::Field { base, name, .. } => {
+                        let bk = self.kind_of_expr(base);
+                        self.check_method_arity(&bk, name, args, *span);
+                        self.check_method_arg_types(&bk, name, args);
+                    }
+                    _ => {}
                 }
             }
             Stmt::Managed { body, .. } => self.block_scoped(body),
@@ -786,9 +1109,41 @@ impl<'a> Collector<'a> {
                 // call's. `builtins.rs` owns the "must be a call" half.
                 self.check_defer_arity(call, *span);
             }
-            Stmt::Break { .. } | Stmt::Continue { .. } => {}
+            Stmt::Break { span, label } => {
+                if label.is_none() && self.loop_depth == 0 && self.select_depth == 0 {
+                    self.diags.push(
+                        Diagnostic::error(
+                            "HYB-E1002",
+                            self.path.clone(),
+                            *span,
+                            "break is not in a loop or select statement (HYB-E1002)",
+                        )
+                        .with_notes(vec![
+                            "plain `break` can only be used inside a `for` loop or `select` statement".to_string(),
+                            "move this statement inside a loop or select, or remove it".to_string(),
+                        ]),
+                    );
+                }
+            }
+            Stmt::Continue { span, label } => {
+                if label.is_none() && self.loop_depth == 0 {
+                    self.diags.push(
+                        Diagnostic::error(
+                            "HYB-E1002",
+                            self.path.clone(),
+                            *span,
+                            "continue is not in a loop (HYB-E1002)",
+                        )
+                        .with_notes(vec![
+                            "`continue` can only be used inside a `for` loop".to_string(),
+                            "move this statement inside a loop, or remove it".to_string(),
+                        ]),
+                    );
+                }
+            }
             Stmt::Block { block, .. } => self.block_scoped(block),
             Stmt::Select { arms, .. } => {
+                self.select_depth += 1;
                 for arm in arms {
                     self.push_scope();
                     match &arm.kind {
@@ -813,6 +1168,7 @@ impl<'a> Collector<'a> {
                     self.block_scoped(&arm.body);
                     self.pop_scope();
                 }
+                self.select_depth -= 1;
             }
         }
     }
@@ -852,8 +1208,22 @@ impl<'a> Collector<'a> {
                     self.read(n);
                 }
             }
-            PlaceKind::Index { .. } | PlaceKind::Field { .. } | PlaceKind::AddrOf { .. } => {
-                self.place_read(p)
+            PlaceKind::Index { base, .. } => {
+                let bk = self.kind_of_place(base);
+                if matches!(bk, OpKind::Str) {
+                    self.emit_e1002(
+                        p.span,
+                        format!(
+                            "cannot assign to string index `{}` — strings are immutable (HYB-E1002)",
+                            p.render()
+                        ),
+                        "strings in Go are immutable; string elements cannot be assigned or updated",
+                    );
+                }
+                self.place_read(p);
+            }
+            PlaceKind::Field { .. } | PlaceKind::AddrOf { .. } => {
+                self.place_read(p);
             }
         }
     }
@@ -884,7 +1254,14 @@ impl<'a> Collector<'a> {
                 self.expr(index);
                 let bk = self.kind_of_place(base);
                 let ik = self.kind_of_expr(index);
-                self.check_index_kind(&base.render(), None, &bk, index, &ik, p.span);
+                // Issue #999: pass the base as an expression so the constant
+                // index-bounds rule (fixed-size arrays, constant strings) can
+                // resolve the base's declared length on assignment places —
+                // the read path (`a[i]` in expression position) already does;
+                // the `None` here silently disabled the array-length lookup
+                // for `a[300] = 1` on a var-declared array.
+                let base_expr = place_as_expr(base);
+                self.check_index_kind(&base.render(), base_expr.as_ref(), &bk, index, &ik, p.span);
             }
             PlaceKind::Field { base, .. } => self.place_read(base),
             PlaceKind::AddrOf { base } => self.place_read(base),
@@ -895,7 +1272,11 @@ impl<'a> Collector<'a> {
 
     fn expr(&mut self, e: &Expr) {
         match e {
-            Expr::Ident { name, .. } => self.read(name),
+            Expr::Ident { name, span } => {
+                self.read(name);
+                // #778: a value position, so a type name here cannot build.
+                self.check_type_name_in_value_position(name, *span);
+            }
             Expr::Lit { .. } => {}
             Expr::Interp { parts, .. } => {
                 for p in parts {
@@ -917,7 +1298,10 @@ impl<'a> Collector<'a> {
                 self.expr(operand);
                 self.check_unary_operand(*op, operand, *span);
             }
-            Expr::AddrOf { operand, .. } => self.expr(operand),
+            Expr::AddrOf { operand, span, .. } => {
+                self.expr(operand);
+                self.check_addr_of_operand(operand, *span);
+            }
             Expr::Move { operand, .. } => self.expr(operand),
             Expr::Try { operand, .. } => self.expr(operand),
             Expr::Receive { chan, .. } => self.expr(chan),
@@ -948,6 +1332,7 @@ impl<'a> Collector<'a> {
             // The struct-field lookup below cannot catch it, because an
             // interface is not a struct — so reject the base explicitly.
             Expr::Field { base, name, span } => {
+                self.check_pointer_method_receiver(base, name, *span);
                 if matches!(self.kind_of_expr(base), OpKind::Interface) {
                     self.emit_e1002(
                         *span,
@@ -961,13 +1346,46 @@ impl<'a> Collector<'a> {
                         "an `any` value must be asserted to a concrete type before its fields can be read",
                     );
                 }
-                self.expr(base);
+                // #778: a Field BASE is a QUALIFIER position, not a value
+                // position, so the type-name check must not fire on it. Two
+                // legal spellings put a type name there:
+                //   * `color.red`      — an enum variant
+                //   * `greeting.build` — a method call on the type
+                // (and `fmt.println` is a package root, which is not a type
+                // and never reached this check anyway). A bare `x := colour`
+                // IS a value position and still rejects, pinned in the
+                // fixture. An identifier base is read for used-marking; a
+                // deeper base (a call result, an index) recurses normally.
+                match unwrap_parens(base) {
+                    Expr::Ident { name, .. } => self.read(name),
+                    other => self.expr(other),
+                }
             }
             Expr::Call {
                 callee, args, span, ..
             } => {
-                self.expr(callee);
-                for a in args {
+                // #778: a plain identifier CALLEE is a call position, not a
+                // value position — `holder(x)` is a legal conversion and
+                // `int(3.7)` is a legal built-in one, so the type-name check
+                // must not fire there. `read` still runs, because an unused
+                // local closure called as `f()` has been read.
+                match unwrap_parens(callee) {
+                    Expr::Ident { name, .. } => self.read(name),
+                    other => self.expr(other),
+                }
+                // `new(T)` and `make(T, len, cap)` take a TYPE as their FIRST
+                // argument, so that position is a type position and the
+                // #778 value-position check must not fire there — `new(bag)`
+                // and `make(map[string]int)` are both legal. The remaining
+                // `make` arguments (len, cap) ARE values and still walk.
+                let type_first_arg = matches!(
+                    unwrap_parens(callee),
+                    Expr::Ident { name, .. } if name == "new" || name == "make"
+                );
+                for (i, a) in args.iter().enumerate() {
+                    if type_first_arg && i == 0 {
+                        continue;
+                    }
                     self.expr(&a.value);
                 }
                 // #682 U7: every argument must be exactly one value, except
@@ -1003,6 +1421,8 @@ impl<'a> Collector<'a> {
                 }
                 if let Some((_, inner_elem, _)) = e.as_array_lit() {
                     self.check_array_lit_items(inner_elem, items);
+                } else if let Some(t) = elem {
+                    self.check_slice_lit_items(t, items);
                 }
             }
             Expr::MapLit {
@@ -1017,13 +1437,15 @@ impl<'a> Collector<'a> {
                     self.expr(k);
                     self.expr(v);
                 }
+                self.check_map_lit_entries(key, value, entries);
             }
             Expr::FnLit {
                 params,
                 results,
                 body,
-                ..
+                span,
             } => {
+                self.check_signature_bindings(None, params, results, *span);
                 for p in params {
                     self.ty(&p.ty);
                 }
@@ -1061,7 +1483,11 @@ impl<'a> Collector<'a> {
                 let outer = std::mem::replace(&mut self.fn_results, result_kinds);
                 let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
                 let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
+                let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
+                let outer_select = std::mem::replace(&mut self.select_depth, 0);
                 self.block_stmts(body);
+                self.loop_depth = outer_loop;
+                self.select_depth = outer_select;
                 self.fn_results = outer;
                 self.fn_results_all_named = outer_named;
                 self.fn_results_error_tail = outer_err;
@@ -1389,7 +1815,7 @@ impl<'a> Collector<'a> {
             .map(|(_, ty)| self.kind_of_ty_with_subst(ty, &subst, 0))
     }
 
-    fn kind_of_expr(&self, e: &Expr) -> OpKind {
+    pub(crate) fn kind_of_expr(&self, e: &Expr) -> OpKind {
         match e {
             Expr::Ident { name, .. } => {
                 if let Some(k) = self.lookup_kind(name) {
@@ -1570,7 +1996,7 @@ impl<'a> Collector<'a> {
                     return None;
                 }
                 match name.as_str() {
-                    "len" | "cap" => return Some(vec![OpKind::Int]),
+                    "len" | "cap" | "copy" => return Some(vec![OpKind::Int]),
                     "append" => {
                         let first = args
                             .first()
@@ -1580,7 +2006,8 @@ impl<'a> Collector<'a> {
                     }
                     "make" => return Some(vec![self.make_kind(args)]),
                     "new" => return Some(vec![OpKind::Pointer(Box::new(OpKind::Unknown))]),
-                    "delete" | "close" => return Some(Vec::new()),
+                    "delete" | "close" | "clear" | "panic" => return Some(Vec::new()),
+                    "recover" => return Some(vec![OpKind::Interface]),
                     _ => {}
                 }
                 let conv = self.kind_of_named(name, 0);
@@ -1750,19 +2177,39 @@ impl<'a> Collector<'a> {
         if matches!(k, OpKind::Unknown) {
             return;
         }
-        if args.len() == 1 {
+        if args.len() != 1 {
+            self.emit_e1002(
+                span,
+                format!(
+                    "a conversion to `{}` takes exactly 1 argument, found {} — Go refuses `too many arguments in conversion to {}` (HYB-E1002)",
+                    name,
+                    args.len(),
+                    name
+                ),
+                "a type conversion has the form `T(x)`: exactly one argument",
+            );
             return;
         }
-        self.emit_e1002(
-            span,
-            format!(
-                "a conversion to `{}` takes exactly 1 argument, found {} — Go refuses `too many arguments in conversion to {}` (HYB-E1002)",
-                name,
-                args.len(),
-                name
-            ),
-            "a type conversion has the form `T(x)`: exactly one argument",
-        );
+        let arg = &args[0].value;
+        self.check_single_value_position(arg, "a type conversion", /*binding_position=*/ false);
+        let arg_k = self.kind_of_expr(arg);
+        if conversion_kinds_conflict(&k, &arg_k) {
+            let note = if matches!(k, OpKind::Struct(_)) {
+                "structs cannot be instantiated via function-call conversions; write a struct literal like `T{...}` instead"
+            } else {
+                "in Go, type conversions `T(x)` require compatible types"
+            };
+            self.emit_e1002(
+                arg.span(),
+                format!(
+                    "cannot convert `{}` (type `{}`) to type `{}` (HYB-E1002)",
+                    arg.render(),
+                    arg_k.label(),
+                    name
+                ),
+                note,
+            );
+        }
     }
 
     /// #682 U6/U8 — the number of values a call expression produces, when it is
@@ -1932,7 +2379,17 @@ impl<'a> Collector<'a> {
     /// #577 C9 — method calls (`x.bump(k)`) declare their receiver
     /// separately, so the parameter count is the declared one.
     fn check_method_arity(&mut self, bk: &OpKind, name: &str, args: &[CallArg], span: Span) {
-        let Some(sn) = self.struct_name(bk) else {
+        // #880: a generic receiver carries its type arguments (`cache[int]`,
+        // `*lru_cache[k, v]`) while `method_decls` is keyed by the *base*
+        // name, so the bare `struct_name` lookup missed every instantiated
+        // receiver, early-returned, and exempted all of their method calls
+        // from C9 — the checker accepted calls the emitted Go cannot build
+        // (`not enough arguments in call to c.set`). Fold through
+        // `struct_base_name`, exactly like the `has_method` and C10
+        // (`call_result_kinds`) lookups a few lines above; `sn` is then the
+        // base name, which is also what the diagnostic renders for plain
+        // structs.
+        let Some(sn) = self.struct_base_name(bk) else {
             return;
         };
         let Some(m) = self.ck.method_decls.get(&(sn.clone(), name.to_string())) else {
@@ -1975,6 +2432,85 @@ impl<'a> Collector<'a> {
         );
     }
 
+    fn check_user_fn_arg_types(&mut self, name: &str, args: &[CallArg]) {
+        let head = Checker::base_named_type_str(name);
+        let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
+            return;
+        };
+        if !f.type_params.is_empty() {
+            return;
+        }
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        if f.params.len() != args.len() {
+            return;
+        }
+        for (p, a) in f.params.iter().zip(args.iter()) {
+            let want = self.kind_of_ty(&p.ty, 0);
+            let got = self.kind_of_expr(&a.value);
+            if let OpKind::Pointer(inner) = &want {
+                if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
+                    continue;
+                }
+            }
+            if kinds_conflict(&want, &got) {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
+                        a.value.render(),
+                        got.label(),
+                        want.label(),
+                        name
+                    ),
+                    "argument types must match declared parameter types",
+                );
+            }
+        }
+    }
+
+    fn check_method_arg_types(&mut self, bk: &OpKind, name: &str, args: &[CallArg]) {
+        let Some(sn) = self.struct_base_name(bk).or_else(|| self.struct_name(bk)) else {
+            return;
+        };
+        let Some(m) = self.ck.method_decls.get(&(sn.clone(), name.to_string())) else {
+            return;
+        };
+        if !m.type_params.is_empty() {
+            return;
+        }
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        if m.params.len() != args.len() {
+            return;
+        }
+        for (p, a) in m.params.iter().zip(args.iter()) {
+            let want = self.kind_of_ty(&p.ty, 0);
+            let got = self.kind_of_expr(&a.value);
+            if let OpKind::Pointer(inner) = &want {
+                if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
+                    continue;
+                }
+            }
+            if kinds_conflict(&want, &got) {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}.{}` — Go refuses mismatched argument types (HYB-E1002)",
+                        a.value.render(),
+                        got.label(),
+                        want.label(),
+                        sn,
+                        name
+                    ),
+                    "argument types must match declared parameter types",
+                );
+            }
+        }
+    }
+
     /// #577 C10 — a `return` must supply the enclosing function's result
     /// list: the same number of values, each assignable to its result type.
     /// Go refuses the emitted statement otherwise (Row 13).
@@ -1993,6 +2529,42 @@ impl<'a> Collector<'a> {
                         }
                         return;
                     }
+                    if !res.is_empty()
+                        && self.fn_results_error_tail
+                        && res.len() + 1 == want.len()
+                    {
+                        for (r, w) in res.iter().zip(want.iter()) {
+                            self.report_return_conflict(r, w, values[0].span());
+                        }
+                        return;
+                    }
+                    let (nr, nw) = (res.len(), want.len());
+                    let msg = match (nw, nr) {
+                        (0, _) => format!(
+                            "`return` supplies `{}` with {nr} result{} in a function that declares no results — Go refuses `too many return values` (HYB-E1002)",
+                            callee.render(),
+                            if nr == 1 { "" } else { "s" }
+                        ),
+                        (_, 0) => format!(
+                            "`return` supplies `{}` which returns no value (void) but the signature declares {nw} result{} — Go refuses `{} (no value) used as value in return statement` (HYB-E1002)",
+                            callee.render(),
+                            if nw == 1 { "" } else { "s" },
+                            callee.render()
+                        ),
+                        _ => format!(
+                            "`return` supplies `{}` with {nr} result{} but the signature declares {nw} result{} — Go refuses `{} return values` (HYB-E1002)",
+                            callee.render(),
+                            if nr == 1 { "" } else { "s" },
+                            if nw == 1 { "" } else { "s" },
+                            if nr < nw { "not enough" } else { "too many" }
+                        ),
+                    };
+                    self.emit_e1002(
+                        values[0].span(),
+                        msg,
+                        "a return statement must supply exactly the results the signature declares",
+                    );
+                    return;
                 }
             }
         }
@@ -2214,7 +2786,95 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
-            UnOp::Addr => {}
+            UnOp::Addr => {
+                self.check_addr_of_operand(operand, span);
+            }
+        }
+    }
+
+    /// Go spec §Address operators: operand must be addressable or a composite literal.
+    fn check_addr_of_operand(&mut self, operand: &Expr, span: Span) {
+        if !self.is_addressable_expr(operand) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot take the address of `{}` (HYB-E1002)",
+                    operand.render()
+                ),
+                "the operand of `&` must be addressable (a variable, pointer indirection, field, slice/array element, or composite literal)",
+            );
+        }
+    }
+
+    fn is_imported_pkg_root(&self, name: &str) -> bool {
+        for d in &self.ck.file.decls {
+            if let Decl::Import { path, .. } = d {
+                let root = path.rsplit('/').next().unwrap_or(path.as_str());
+                if root == name {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn is_addressable_expr(&self, e: &Expr) -> bool {
+        match unwrap_parens(e) {
+            Expr::StructLit { .. } | Expr::SliceLit { .. } | Expr::MapLit { .. } => true,
+            Expr::Ident { name, .. } => {
+                if name == "_" {
+                    return false;
+                }
+                for layer in self.scopes.iter().rev() {
+                    if let Some(entry) = layer.get(name) {
+                        return match entry {
+                            Some(id) => self.defines[*id].kind != LocalKind::Const,
+                            None => true,
+                        };
+                    }
+                }
+                if self.file_consts.contains_key(name) {
+                    return false;
+                }
+                if self.ck.fns.contains_key(name) || self.ck.file.fns().any(|f| &f.name == name) {
+                    return false;
+                }
+                if self.is_imported_pkg_root(name) {
+                    return false;
+                }
+                true
+            }
+            Expr::Index { base, .. } => {
+                let bk = self.kind_of_expr(base);
+                match bk {
+                    OpKind::Str => false,
+                    OpKind::Map(_, _) => true,
+                    OpKind::Slice(_) => true,
+                    OpKind::Array(_) => self.is_addressable_expr(base),
+                    OpKind::Pointer(inner) if matches!(*inner, OpKind::Array(_) | OpKind::Slice(_)) => true,
+                    OpKind::Unknown => true,
+                    _ => false,
+                }
+            }
+            Expr::Field { base, .. } => {
+                let bk = self.kind_of_expr(base);
+                match bk {
+                    OpKind::Pointer(_) | OpKind::Unknown => true,
+                    _ => self.is_addressable_expr(base),
+                }
+            }
+            Expr::Slice { .. } => false,
+            Expr::Lit { .. }
+            | Expr::Interp { .. }
+            | Expr::Binary { .. }
+            | Expr::Unary { .. }
+            | Expr::AddrOf { .. }
+            | Expr::Call { .. }
+            | Expr::Try { .. }
+            | Expr::Receive { .. }
+            | Expr::Move { .. }
+            | Expr::FnLit { .. } => false,
+            Expr::Paren { inner, .. } => self.is_addressable_expr(inner),
         }
     }
 
@@ -2229,8 +2889,28 @@ impl<'a> Collector<'a> {
         let lk = self.kind_of_expr(lhs);
         let rk = self.kind_of_expr(rhs);
         match op {
-            // `==` / `!=` are checked by `emit_guard.rs` (HYB-E2006).
-            BinOp::Eq | BinOp::Ne => {}
+            // `==` / `!=`: incomparable shapes (slice, map, func) are rejected
+            // by `emit_guard.rs` (HYB-E2006). Mismatched concrete operand types
+            // are rejected here under HYB-E1002 (rule `BUILDABLE`).
+            BinOp::Eq | BinOp::Ne => {
+                let op_str = if matches!(op, BinOp::Eq) { "==" } else { "!=" };
+                if !Checker::is_nil_literal(lhs)
+                    && !Checker::is_nil_literal(rhs)
+                    && equality_kinds_conflict(&lk, &rk)
+                {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid operation `{}`: operator `{}` requires comparable operands of matching type, found `{}` and `{}` (HYB-E1002)",
+                            span_expr_label(lhs, op_str, rhs),
+                            op_str,
+                            lk.label(),
+                            rk.label()
+                        ),
+                        "equality operators (`==`, `!=`) require operands of matching type",
+                    );
+                }
+            }
             // B4: `&&` and `||` require `bool` operands.
             BinOp::And | BinOp::Or => {
                 let op_str = if matches!(op, BinOp::And) { "&&" } else { "||" };
@@ -2366,6 +3046,16 @@ impl<'a> Collector<'a> {
             return;
         };
         let tk = self.kind_of_place(target);
+        if op != AssignOp::Assign && op != AssignOp::Inc && op != AssignOp::Dec {
+            if targets.len() != 1 || values.len() != 1 {
+                self.emit_e1002(
+                    span,
+                    "compound assignment operator does not support multiple targets or values (HYB-E1002)".to_string(),
+                    "compound assignment operators (`+=`, `-=`, etc.) require exactly one target and one value; write separate statements or use `=` for parallel assignment",
+                );
+                return;
+            }
+        }
         match op {
             // #682 U16: plain `=` requires the value to be assignable to the
             // target. Only the single-target/single-value form is checked
@@ -2400,6 +3090,60 @@ impl<'a> Collector<'a> {
                             "the target's declared type is fixed; write an explicit conversion when a conversion is intended",
                         );
                     }
+                } else if values.len() > 1 && values.len() != targets.len() {
+                    // Binding-count guards: a parallel assignment is
+                    // positional — a count mismatch fails go build with
+                    // `assignment mismatch`.
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "assignment mismatch: {} variables but {} values (HYB-E1002)",
+                            targets.len(),
+                            values.len()
+                        ),
+                        "a parallel assignment binds positionally; the target and value counts must match",
+                    );
+                } else if targets.len() > 1 && values.len() == targets.len() {
+                    // Every positional pair must satisfy the same kind check
+                    // as the single-target form, with the same O8 loan-shape
+                    // fail-open.
+                    for (t, v) in targets.iter().zip(values.iter()) {
+                        if as_addr_of(v)
+                            .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }))
+                        {
+                            continue;
+                        }
+                        let tpk = self.kind_of_place(t);
+                        let vk = self.kind_of_expr(v);
+                        if kinds_conflict(&tpk, &vk) {
+                            self.emit_e1002(
+                                v.span(),
+                                format!(
+                                    "cannot assign a value of type `{}` to `{}` (type `{}`) in parallel assignment — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
+                                    vk.label(),
+                                    t.render(),
+                                    tpk.label(),
+                                    tpk.label()
+                                ),
+                                "each target's declared type is fixed; write an explicit conversion when a conversion is intended",
+                            );
+                        }
+                    }
+                } else if targets.len() > 1 && values.len() == 1 {
+                    // One provably-single value bound to several targets —
+                    // go build refuses with `assignment mismatch`. Call,
+                    // receive, and index sources are owned by the
+                    // source-count rules.
+                    if is_definitely_single_value(&values[0]) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "assignment mismatch: {} variables but the value yields exactly 1 (HYB-E1002)",
+                                targets.len()
+                            ),
+                            "bind one name per value, or use a source that yields one value per target",
+                        );
+                    }
                 }
             }
             AssignOp::Inc | AssignOp::Dec => {
@@ -2425,7 +3169,7 @@ impl<'a> Collector<'a> {
                 let mismatch = tk != OpKind::Unknown
                     && vk != OpKind::Unknown
                     && tk.is_numeric() != vk.is_numeric();
-                if !t_ok || !v_ok || mismatch {
+                if !t_ok || !v_ok || mismatch || kinds_conflict(&tk, &vk) {
                     self.emit_e1002(
                         span,
                         format!(
@@ -2435,26 +3179,33 @@ impl<'a> Collector<'a> {
                             tk.label(),
                             vk.label()
                         ),
-                        "`+=` requires two numeric values or two strings",
+                        "`+=` requires two numeric values or two strings of matching types",
                     );
                 }
             }
             AssignOp::SubAssign | AssignOp::MulAssign | AssignOp::DivAssign => {
                 let Some(val) = values.first() else { return };
                 let vk = self.kind_of_expr(val);
+                let op_sym = match op {
+                    AssignOp::SubAssign => "-=",
+                    AssignOp::MulAssign => "*=",
+                    _ => "/=",
+                };
                 if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float)
+                    || kinds_conflict(&tk, &vk)
                 {
                     self.emit_e1002(
                         span,
                         format!(
-                            "invalid compound assignment on `{}` (type `{}`) and `{}` (type `{}`) (HYB-E1002)",
+                            "invalid compound assignment `{} {} {}` on `{}` and `{}` (HYB-E1002)",
                             target.render(),
-                            tk.label(),
+                            op_sym,
                             val.render(),
+                            tk.label(),
                             vk.label()
                         ),
-                        "`-=`, `*=`, `/=` require numeric operands",
+                        "`-=`, `*=`, `/=` require numeric operands of matching types",
                     );
                 }
             }
@@ -2520,9 +3271,34 @@ impl<'a> Collector<'a> {
             return;
         }
         // For slices, arrays, and strings, the index must be an integer.
+        self.check_single_value_position(index, "an index expression", /*binding_position=*/ false);
+        if let OpKind::Map(key_kind, _) = bk {
+            if **key_kind != OpKind::Unknown
+                && *ik != OpKind::Unknown
+                && kinds_conflict(key_kind, ik)
+            {
+                self.emit_e1002(
+                    index.span(),
+                    format!(
+                        "cannot use `{}` (type `{}`) as `{}` value in map index on `{}` (HYB-E1002)",
+                        index.render(),
+                        ik.label(),
+                        key_kind.label(),
+                        bk.label()
+                    ),
+                    "map index expression must match the map's key type",
+                );
+            }
+            return;
+        }
+        // For slices, arrays, and strings, the index must be an integer.
         let needs_int_idx = matches!(bk, OpKind::Slice(_) | OpKind::Array(_) | OpKind::Str)
             || matches!(bk, OpKind::Pointer(inner) if matches!(**inner, OpKind::Array(_)));
-        if needs_int_idx && !matches!(ik, OpKind::Unknown | OpKind::Int) {
+        // A fixed-size array carries its length in the type, so a constant index
+        // past that length is a compile-time error in Go ([3] on [2]int).
+        let is_array = matches!(bk, OpKind::Array(_))
+            || matches!(bk, OpKind::Pointer(inner) if matches!(**inner, OpKind::Array(_)));
+        if needs_int_idx && !matches!(ik, OpKind::Unknown | OpKind::Int | OpKind::Void) {
             self.emit_e1002(
                 index.span(),
                 format!(
@@ -2560,6 +3336,22 @@ impl<'a> Collector<'a> {
                                     base_str
                                 ),
                                 "a constant index on a constant string must satisfy `0 <= index < len(s)`",
+                            );
+                        }
+                    }
+                } else if is_array {
+                    if let Some(arr_len) =
+                        base_expr.and_then(|b| self.eval_const_array_len_at(b, span.start))
+                    {
+                        if v >= arr_len {
+                            self.emit_e1002(
+                                index.span(),
+                                format!(
+                                    "invalid array index `{}` (out of bounds for a {}-element array) (HYB-E1002)",
+                                    index.render(),
+                                    arr_len
+                                ),
+                                "a constant index on a fixed-size array must satisfy `0 <= index < len(a)`",
                             );
                         }
                     }
@@ -2602,12 +3394,20 @@ impl<'a> Collector<'a> {
         } else {
             None
         };
+        let is_array = matches!(bk, OpKind::Array(_))
+            || matches!(bk, OpKind::Pointer(inner) if matches!(**inner, OpKind::Array(_)));
+        let const_arr_len = if is_array {
+            self.eval_const_array_len_at(base, span.start)
+        } else {
+            None
+        };
         let mut lo_const: Option<i128> = None;
         let mut hi_const: Option<i128> = None;
         for (idx, bound_opt) in [lo, hi].into_iter().enumerate() {
             let Some(bound) = bound_opt else { continue };
+            self.check_single_value_position(bound, "a slice bound", /*binding_position=*/ false);
             let k = self.kind_of_expr(bound);
-            if !matches!(k, OpKind::Unknown | OpKind::Int) {
+            if !matches!(k, OpKind::Unknown | OpKind::Int | OpKind::Void) {
                 self.emit_e1002(
                     bound.span(),
                     format!(
@@ -2640,6 +3440,19 @@ impl<'a> Collector<'a> {
                                     base.render()
                                 ),
                                 "a constant slice bound on a constant string must satisfy `0 <= bound <= len(s)`",
+                            );
+                        }
+                    }
+                    if let Some(arr_len) = const_arr_len {
+                        if v > arr_len {
+                            self.emit_e1002(
+                                bound.span(),
+                                format!(
+                                    "invalid slice index `{}` (out of bounds for a {}-element array) (HYB-E1002)",
+                                    bound.render(),
+                                    arr_len
+                                ),
+                                "a constant slice bound on a fixed-size array must satisfy `0 <= bound <= len(a)`",
                             );
                         }
                     }
@@ -2711,6 +3524,15 @@ impl<'a> Collector<'a> {
         self.ck.const_string_len_at(e, use_pos, 0)
     }
 
+    /// Fixed-size array length, when `e` denotes an array whose length is known
+    /// exactly. Unlike the constant folders this deliberately skips
+    /// `expr_has_non_const_local`: an array's length lives in its type, so a
+    /// `var`/`let` binding (`var a = [3]int{}`) is just as certain as a `const`
+    /// one, and the resolver never falls back to a same-named package constant.
+    fn eval_const_array_len_at(&self, e: &Expr, use_pos: hy_diag::Pos) -> Option<i128> {
+        self.ck.const_array_len_at(e, use_pos, 0)
+    }
+
     fn check_array_lit_items(&mut self, elem_ty: &TypeExpr, items: &[Expr]) {
         let resolved_ty = self.ck.resolve_type_alias(elem_ty);
         let expected = self.kind_of_ty(&resolved_ty, 0);
@@ -2772,17 +3594,221 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_slice_lit_items(&mut self, elem_ty: &TypeExpr, items: &[Expr]) {
+        let resolved_ty = self.ck.resolve_type_alias(elem_ty);
+        let expected = self.kind_of_ty(&resolved_ty, 0);
+        if expected == OpKind::Unknown {
+            return;
+        }
+        for item in items {
+            let bare = unwrap_parens(item);
+            if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
+                continue;
+            }
+            if let Expr::SliceLit {
+                elem: None,
+                items: sub_items,
+                ..
+            } = bare
+            {
+                if let TypeExpr::Array { elem: sub_ty, .. }
+                | TypeExpr::Slice { elem: sub_ty, .. } = &resolved_ty
+                {
+                    self.check_slice_lit_items(sub_ty, sub_items);
+                    continue;
+                }
+            }
+            if let Expr::StructLit {
+                ty: None, fields, ..
+            } = bare
+            {
+                if matches!(expected, OpKind::Struct(_))
+                    || (fields.is_empty()
+                        && matches!(
+                            expected,
+                            OpKind::Array(_) | OpKind::Slice(_) | OpKind::Map(_, _)
+                        ))
+                {
+                    continue;
+                }
+            }
+            let ik = self.kind_of_expr(item);
+            if ik == OpKind::Unknown || ik == expected {
+                continue;
+            }
+            if expected == OpKind::Float
+                && ik == OpKind::Int
+                && crate::const_overflow::const_int_value(item).is_some()
+            {
+                continue;
+            }
+            if !kinds_conflict(&expected, &ik) {
+                continue;
+            }
+            self.emit_e1002(
+                item.span(),
+                format!(
+                    "cannot use `{}` (type `{}`) as `{}` value in slice literal (HYB-E1002)",
+                    item.render(),
+                    ik.label(),
+                    elem_ty.render()
+                ),
+                "every element of a slice composite literal `[]T{...}` must be assignable to the element type `T`",
+            );
+        }
+    }
+
+    fn check_map_lit_entries(
+        &mut self,
+        key_ty: &TypeExpr,
+        val_ty: &TypeExpr,
+        entries: &[(Expr, Expr)],
+    ) {
+        let resolved_key = self.ck.resolve_type_alias(key_ty);
+        let exp_key = self.kind_of_ty(&resolved_key, 0);
+        let resolved_val = self.ck.resolve_type_alias(val_ty);
+        let exp_val = self.kind_of_ty(&resolved_val, 0);
+        for (k, v) in entries {
+            if exp_key != OpKind::Unknown {
+                let kk = self.kind_of_expr(k);
+                if kk != OpKind::Unknown
+                    && kk != exp_key
+                    && !(exp_key == OpKind::Float
+                        && kk == OpKind::Int
+                        && crate::const_overflow::const_int_value(k).is_some())
+                    && kinds_conflict(&exp_key, &kk)
+                {
+                    self.emit_e1002(
+                        k.span(),
+                        format!(
+                            "cannot use `{}` (type `{}`) as `{}` value in map key (HYB-E1002)",
+                            k.render(),
+                            kk.label(),
+                            key_ty.render()
+                        ),
+                        "every key of a map composite literal `map[K]V{...}` must be assignable to the key type `K`",
+                    );
+                }
+            }
+            if exp_val != OpKind::Unknown {
+                let bare_v = unwrap_parens(v);
+                if matches!(bare_v, Expr::Lit { kind: LitKind::Nil, .. }) {
+                    continue;
+                }
+                let vk = self.kind_of_expr(v);
+                if vk != OpKind::Unknown
+                    && vk != exp_val
+                    && !(exp_val == OpKind::Float
+                        && vk == OpKind::Int
+                        && crate::const_overflow::const_int_value(v).is_some())
+                    && kinds_conflict(&exp_val, &vk)
+                {
+                    self.emit_e1002(
+                        v.span(),
+                        format!(
+                            "cannot use `{}` (type `{}`) as `{}` value in map value (HYB-E1002)",
+                            v.render(),
+                            vk.label(),
+                            val_ty.render()
+                        ),
+                        "every value of a map composite literal `map[K]V{...}` must be assignable to the value type `V`",
+                    );
+                }
+            }
+        }
+    }
+
     /// Family D1 & Family E (#425): non-function call check + binding-shaped builtin arg checks.
     fn check_call_operands(&mut self, callee: &Expr, args: &[CallArg], span: Span) {
         let bare = unwrap_parens(callee);
         match bare {
-            // `[]byte("ok")` / `[]rune(s)`: parser encodes slice type conversions as
+            // `[]byte("ok")` / `[]rune(s)`: parser encodes slice and array type conversions as
             // `Call { callee: SliceLit { elem: Some(T), items: [] }, args: [x] }`.
             Expr::SliceLit {
-                elem: Some(_),
+                elem: Some(elem_ty),
                 items,
                 ..
-            } if items.is_empty() && bare.as_array_lit().is_none() => {}
+            } if items.is_empty() => {
+                if let Some((_, _, arr_ty)) = bare.as_array_lit() {
+                    let target_str = arr_ty.render();
+                    if args.len() != 1 {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "a conversion to `{}` takes exactly 1 argument, found {} — Go refuses `too many arguments in conversion to {}` (HYB-E1002)",
+                                target_str,
+                                args.len(),
+                                target_str
+                            ),
+                            "a type conversion has the form `T(x)`: exactly one argument",
+                        );
+                        return;
+                    }
+                    let arg = &args[0].value;
+                    self.check_single_value_position(arg, "a type conversion", false);
+                    let ak = self.kind_of_expr(arg);
+                    if !matches!(ak, OpKind::Unknown | OpKind::Slice(_) | OpKind::Array(_)) {
+                        self.emit_e1002(
+                            arg.span(),
+                            format!(
+                                "cannot convert `{}` (type `{}`) to `{}` (HYB-E1002)",
+                                arg.render(),
+                                ak.label(),
+                                target_str
+                            ),
+                            "array type conversions require a slice or array operand",
+                        );
+                    }
+                    return;
+                }
+                let elem_str = elem_ty.render();
+                let target_str = format!("[]{}", elem_str);
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "a conversion to `{}` takes exactly 1 argument, found {} — Go refuses `too many arguments in conversion to {}` (HYB-E1002)",
+                            target_str,
+                            args.len(),
+                            target_str
+                        ),
+                        "a type conversion has the form `T(x)`: exactly one argument",
+                    );
+                    return;
+                }
+                let arg = &args[0].value;
+                self.check_single_value_position(arg, "a type conversion", false);
+                let ak = self.kind_of_expr(arg);
+                let is_byte_or_rune = matches!(
+                    elem_str.as_str(),
+                    "byte" | "uint8" | "u8" | "rune" | "int32" | "i32"
+                );
+                if is_byte_or_rune {
+                    if !matches!(ak, OpKind::Unknown | OpKind::Str | OpKind::Slice(_)) {
+                        self.emit_e1002(
+                            arg.span(),
+                            format!(
+                                "cannot convert `{}` (type `{}`) to `{}` (HYB-E1002)",
+                                arg.render(),
+                                ak.label(),
+                                target_str
+                            ),
+                            "`[]byte` and `[]rune` conversions require a string or compatible slice operand",
+                        );
+                    }
+                } else if !matches!(ak, OpKind::Unknown | OpKind::Slice(_)) {
+                    self.emit_e1002(
+                        arg.span(),
+                        format!(
+                            "cannot convert `{}` (type `{}`) to `{}` (HYB-E1002)",
+                            arg.render(),
+                            ak.label(),
+                            target_str
+                        ),
+                        "slice type conversions require a string (for `[]byte`/`[]rune`) or compatible slice operand",
+                    );
+                }
+            }
             Expr::Ident { name, .. } => {
                 if let Some(k) = self.lookup_kind(name) {
                     match k {
@@ -2814,6 +3840,7 @@ impl<'a> Collector<'a> {
                         self.check_append_elements(args);
                     }
                     self.check_user_fn_arity(name, args, span);
+                    self.check_user_fn_arg_types(name, args);
                 }
             }
             Expr::Field { base, name, .. } => {
@@ -2842,30 +3869,6 @@ impl<'a> Collector<'a> {
                 // A method has no field entry, so resolve it before the field
                 // lookup: `x.bump()` must reach the arity check even though
                 // `bump` is not a struct field (#577 C9).
-                let head = Checker::base_named_type_str(name);
-                if let OpKind::Struct(Some(sn)) = &bk {
-                    let base_sn = Checker::base_named_type_str(sn);
-                    if let Some(m) = self
-                        .ck
-                        .method_decls
-                        .get(&(base_sn.to_string(), head.to_string()))
-                    {
-                        let ptr_recv = m.receiver.as_ref().is_some_and(|r| r.is_pointer);
-                        if ptr_recv && !self.is_addressable_value_receiver(base) {
-                            self.emit_e1002(
-                                span,
-                                format!(
-                                    "cannot call pointer method `{}` on `{}` (non-addressable `{}` value) — Go refuses taking the address of `{}` (HYB-E1002)",
-                                    name,
-                                    base.render(),
-                                    sn,
-                                    base.render()
-                                ),
-                                "assign the value to a local variable first (`v := ...; v.method()`), store `*T` pointers, or declare a value receiver `(self T)`",
-                            );
-                        }
-                    }
-                }
                 // pr-678: normalize through `struct_base_name` so a generic
                 // instantiation (`cache[int]`, `*lru_cache[k, v]`) resolves to
                 // the base-name key `method_decls` is indexed by — the same
@@ -2929,6 +3932,7 @@ impl<'a> Collector<'a> {
                 }
                 if has_method {
                     self.check_method_arity(&bk, name, args, span);
+                    self.check_method_arg_types(&bk, name, args);
                 }
             }
             _ => {
@@ -3002,6 +4006,36 @@ impl<'a> Collector<'a> {
                 _ => false,
             },
             _ => false,
+        }
+    }
+
+    /// Check method selection too: task callees and bound method values do
+    /// not pass through the ordinary call-arity checker (#656).
+    fn check_pointer_method_receiver(&mut self, base: &Expr, name: &str, span: Span) {
+        let bk = self.kind_of_expr(base);
+        let head = Checker::base_named_type_str(name);
+        if let OpKind::Struct(Some(sn)) = &bk {
+            let base_sn = Checker::base_named_type_str(sn);
+            if let Some(m) = self
+                .ck
+                .method_decls
+                .get(&(base_sn.to_string(), head.to_string()))
+            {
+                let ptr_recv = m.receiver.as_ref().is_some_and(|r| r.is_pointer);
+                if ptr_recv && !self.is_addressable_value_receiver(base) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "cannot select pointer method `{}` on `{}` (non-addressable `{}` value) — Go refuses taking the address of `{}` (HYB-E1002)",
+                            name,
+                            base.render(),
+                            sn,
+                            base.render()
+                        ),
+                        "assign the value to a local variable first (`v := ...; v.method()`), store `*T` pointers, or declare a value receiver `(self T)`",
+                    );
+                }
+            }
         }
     }
 
@@ -3224,6 +4258,88 @@ impl<'a> Collector<'a> {
                             sk.label()
                         ),
                         "the first argument to `append(xs, ...)` must be a slice (`[]T`)",
+                    );
+                }
+            }
+            "copy" => {
+                if args.len() != 2 {
+                    return; // arity handled by builtins.rs
+                }
+                let dst_arg = &args[0].value;
+                let src_arg = &args[1].value;
+                let dk = self.kind_of_expr(dst_arg);
+                let sk = self.kind_of_expr(src_arg);
+
+                if !matches!(dk, OpKind::Unknown | OpKind::Slice(_)) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "first argument to `copy` must be a slice, found `{}` (type `{}`) (HYB-E2005)",
+                            dst_arg.render(),
+                            dk.label()
+                        ),
+                        "the first argument to `copy(dst, src)` must be a slice (`[]T`)",
+                    );
+                    return;
+                }
+
+                if !matches!(sk, OpKind::Unknown | OpKind::Slice(_) | OpKind::Str) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "second argument to `copy` must be a slice or string, found `{}` (type `{}`) (HYB-E2005)",
+                            src_arg.render(),
+                            sk.label()
+                        ),
+                        "the second argument to `copy(dst, src)` must be a slice (`[]T`) or string",
+                    );
+                    return;
+                }
+
+                match (&dk, &sk) {
+                    (OpKind::Slice(dst_elem), OpKind::Slice(src_elem)) => {
+                        if kinds_conflict(dst_elem, src_elem) {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "arguments to `copy` have different element types: `{}` and `{}` (HYB-E1002)",
+                                    dst_elem.label(),
+                                    src_elem.label()
+                                ),
+                                "arguments to `copy` must have identical element types",
+                            );
+                        }
+                    }
+                    (OpKind::Slice(dst_elem), OpKind::Str) => {
+                        if !matches!(**dst_elem, OpKind::Unknown | OpKind::Int) {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot copy string into slice with element type `{}` (HYB-E1002)",
+                                    dst_elem.label()
+                                ),
+                                "copying from a string requires a byte slice destination (`[]byte`)",
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "clear" => {
+                if args.len() != 1 {
+                    return; // arity handled by builtins.rs
+                }
+                let op = &args[0].value;
+                let ak = self.kind_of_expr(op);
+                if !matches!(ak, OpKind::Unknown | OpKind::Slice(_) | OpKind::Map(_, _)) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "cannot clear non-slice/map `{}` (type `{}`) (HYB-E2005)",
+                            op.render(),
+                            ak.label()
+                        ),
+                        "`clear` requires a slice or map operand",
                     );
                 }
             }
