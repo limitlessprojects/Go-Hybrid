@@ -78,6 +78,7 @@ MAX_PATCH_BYTES = 400_000
 DIFF_RE = re.compile(r"```diff\s*\n(.*?)```", re.S)
 HY_RE = re.compile(r"```hy\s*\n(.*?)```", re.S)
 EXPECTED_RE = re.compile(r"HYB-E\d{3,4}")
+HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
 def sh(args, cwd=None, timeout=900, input=None):
@@ -86,11 +87,13 @@ def sh(args, cwd=None, timeout=900, input=None):
 
 
 def gh_token():
-    env = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-    if env:
-        return env
-    out = sh(["git", "remote", "get-url", "origin"], timeout=30).stdout or ""
-    m = re.search(r"https://([^@]+)@github.com", out)
+    for k in ("GITHUB_TOKEN", "GH_TOKEN"):
+        env = (os.environ.get(k) or "").strip()
+        if env:
+            return env
+    r = sh(["git", "remote", "get-url", "origin"], timeout=30)
+    out = (r.stdout or "") if getattr(r, "returncode", 0) == 0 else ""
+    m = re.search(r"https://(?:[^@:/\s]+:)?([^@/\s]+)@github\.com", out)
     if m:
         return m.group(1)
     # session fallback: the token file persists across container resets even
@@ -138,21 +141,87 @@ def chat(messages) -> str:
         return json.loads(r.read().decode())["choices"][0]["message"]["content"]
 
 
+def _clean_diff_path(raw: str, require_ab: bool = True) -> str | None:
+    p = raw.split("\t", 1)[0].strip()
+    if len(p) >= 2 and p.startswith('"') and p.endswith('"'):
+        p = p[1:-1]
+    if p == "/dev/null":
+        return None
+    if p.startswith(("a/", "b/")):
+        return p[2:]
+    if require_ab and not p.startswith("/"):
+        return "/" + p
+    return p
+
+
 def diff_paths(d: str) -> list[str]:
-    paths = []
+    paths: list[str] = []
+    in_hunk = False
+    old_rem = 0
+    new_rem = 0
+
+    def add(p: str | None) -> None:
+        if p and p != "/dev/null" and p not in paths:
+            paths.append(p)
+
     for line in d.splitlines():
-        if line.startswith("+++ "):
-            p = line[4:].strip()
-            if p.startswith("b/"):
-                p = p[2:]
-            if p != "/dev/null":
-                paths.append(p)
+        if line.startswith("@@ "):
+            hm = HUNK_RE.match(line)
+            if hm:
+                old_rem = int(hm.group(2)) if hm.group(2) is not None else 1
+                new_rem = int(hm.group(4)) if hm.group(4) is not None else 1
+                in_hunk = old_rem > 0 or new_rem > 0
+            else:
+                in_hunk = True
+                old_rem = -1
+                new_rem = -1
+            continue
+        if in_hunk:
+            if line == "" or line.startswith((" ", "+", "-", "\\")):
+                if old_rem >= 0:
+                    if line.startswith("-"):
+                        old_rem = max(0, old_rem - 1)
+                    elif line.startswith("+"):
+                        new_rem = max(0, new_rem - 1)
+                    elif line.startswith(" ") or line == "":
+                        old_rem = max(0, old_rem - 1)
+                        new_rem = max(0, new_rem - 1)
+                    if old_rem == 0 and new_rem == 0:
+                        in_hunk = False
+                continue
+            in_hunk = False
+        if line.startswith("diff --git "):
+            rest = line[11:].strip()
+            m = re.match(r'^("?a/[^"]+"?|\S+)\s+("?b/[^"]+"?|\S+)$', rest)
+            if m:
+                add(_clean_diff_path(m.group(1), require_ab=True))
+                add(_clean_diff_path(m.group(2), require_ab=True))
+            elif rest:
+                add("/" + rest)
+        elif line.startswith(("+++ ", "--- ")):
+            add(_clean_diff_path(line[4:], require_ab=True))
+        else:
+            for prefix in ("rename from ", "rename to ", "copy from ", "copy to "):
+                if line.startswith(prefix):
+                    add(_clean_diff_path(line[len(prefix):], require_ab=False))
+                    break
     return paths
 
 
 def scope_ok(d: str) -> bool:
+    for line in d.splitlines():
+        if line.startswith(("new file mode 120000", "new mode 120000", "old mode 120000")):
+            return False
     ps = diff_paths(d)
-    return bool(ps) and all(p.startswith(SCOPE_PREFIXES) for p in ps)
+    return bool(ps) and all(
+        p.startswith(SCOPE_PREFIXES)
+        and ".." not in p.split("/")
+        and "\\" not in p
+        and '"' not in p
+        and not p.startswith("/")
+        and all(ord(c) >= 32 and ord(c) != 127 for c in p)
+        for p in ps
+    )
 
 
 def render_messages(issue: dict, feedback: str, files: list[str]) -> list[dict]:
@@ -379,9 +448,36 @@ def selftest() -> int:
 
     d1 = "+++ b/compiler/crates/hy-check/src/lib.rs\n@@ -1 +1 @@\n-a\n+b\n"
     d2 = "+++ b/README.md\n@@ -1 +1 @@\n-a\n+b\n"
+    d_del = "--- a/.github/workflows/ci.yml\n+++ /dev/null\n+++ b/compiler/crates/hy-check/src/lib.rs\n"
+    d_trav = "+++ b/compiler/../tools/autoland.py\n@@ -1 +1 @@\n-a\n+b\n"
+    d_abs = "+++ /compiler/crates/hy-check/src/lib.rs\n@@ -1 +1 @@\n-a\n+b\n"
+    d_p1 = "--- compiler/tools/autoland.py\n+++ compiler/tools/autoland.py\n@@ -1 +1 @@\n-a\n+b\n"
+    d_hunk = "+++ b/compiler/crates/hy-check/src/lib.rs\n@@ -1,2 +1,2 @@\n--- comment\n-a\n+++ counter\n+b\n"
+    d_rename = "diff --git a/compiler/crates/hy-check/src/lib.rs b/tools/autoland.py\nrename from compiler/crates/hy-check/src/lib.rs\nrename to tools/autoland.py\n"
+    d_quote_ok = '+++ "b/compiler/crates/hy-check/src/lib.rs"\n@@ -1 +1 @@\n-a\n+b\n'
+    d_quote_oct = '+++ "b/compiler/\\056\\056/tools/autoland.py"\n@@ -1 +1 @@\n-a\n+b\n'
+    d_symlink = "diff --git a/compiler/link.rs b/compiler/link.rs\nnew file mode 120000\n--- /dev/null\n+++ b/compiler/link.rs\n"
     check("scope: compiler/ allowed", scope_ok(d1))
     check("scope: README.md rejected", not scope_ok(d2))
+    check("scope: deleted out-of-scope file rejected", not scope_ok(d_del))
+    check("scope: .. traversal rejected", not scope_ok(d_trav))
+    check("scope: leading slash rejected", not scope_ok(d_abs))
+    check("scope: -p1 prefix confusion rejected", not scope_ok(d_p1))
+    check("scope: hunk ---/+++ lines not treated as headers", scope_ok(d_hunk))
+    check("scope: rename to out-of-scope rejected", not scope_ok(d_rename))
+    check("scope: quoted in-scope path allowed", scope_ok(d_quote_ok))
+    check("scope: quoted octal escape rejected", not scope_ok(d_quote_oct))
+    check("scope: symlink mode 120000 rejected", not scope_ok(d_symlink))
     check("scope: empty diff rejected", not scope_ok("no diff here"))
+    saved_env = {k: os.environ.pop(k, None) for k in ("GITHUB_TOKEN", "GH_TOKEN")}
+    try:
+        tok = gh_token()
+        check("gh_token: CompletedProcess stdout read without env token",
+              tok is None or isinstance(tok, str))
+    finally:
+        for k, v in saved_env.items():
+            if v is not None:
+                os.environ[k] = v
     body = ('Repro:\n```hy\nfn main() { x := 9223372036854775807 + 1; '
             'fmt.println("{x}") }\n```\nExpect HYB-E6002.')
     check("expected-code regex", EXPECTED_RE.search(body).group(0) == "HYB-E6002")
@@ -412,7 +508,9 @@ def selftest() -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="author-stage v0: issue -> land-queue bundle (never lands)")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    ap.add_argument("--selftest", action="store_true",
+                    help="plumbing self-test (no LLM, no repo mutation)")
+    sub = ap.add_subparsers(dest="cmd")
     pa = sub.add_parser("author", help="author a fix bundle for one issue")
     pa.add_argument("--issue", type=int, required=True)
     pa.add_argument("--out", default=None,
@@ -423,8 +521,10 @@ def main() -> int:
                          "the deterministic class-template fitter (arm A0)")
     sub.add_parser("selftest", help="plumbing self-test (no LLM, no repo mutation)")
     args = ap.parse_args()
-    if args.cmd == "selftest":
+    if args.selftest or args.cmd == "selftest":
         return selftest()
+    if not args.cmd:
+        ap.error("the following arguments are required: cmd")
     out = pathlib.Path(args.out) if args.out else QUEUE / f"author-{args.issue}"
     try:
         return run_author(args.issue, out, args.max_rounds, brain=args.brain)

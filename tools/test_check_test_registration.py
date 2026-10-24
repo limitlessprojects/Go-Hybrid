@@ -317,5 +317,250 @@ class GuardMisuseTests(unittest.TestCase):
     def test_start_directory_escaping_repo_root_is_rejected(self):
         self.assertEqual(self.run_main("python3 -m unittest discover -s .. -p 'test_*.py'\n", ["tools/test_x.py"]), 1)
 
+
+if str(Path(__file__).parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).parent))
+import author_stage
+
+
+class AuthorStageTests(unittest.TestCase):
+    """Regression tests for tools/author_stage.py (#1123: diff_paths, scope_ok, gh_token)."""
+
+    def test_diff_paths_extracts_both_plus_and_minus_headers_and_strips_timestamps(self):
+        diff = (
+            "diff --git a/compiler/crates/hy-check/src/lib.rs b/compiler/crates/hy-check/src/lib.rs\n"
+            "--- a/compiler/crates/hy-check/src/lib.rs\t2026-10-22 12:00:00 +0000\n"
+            "+++ b/compiler/crates/hy-check/src/lib.rs\t2026-10-22 12:00:01 +0000\n"
+            "@@ -1,2 +1,2 @@\n"
+            "--- comment deleted inside hunk\n"
+            "---not-a-header\n"
+            "+++ counter added inside hunk\n"
+            "+++not-a-header\n"
+            "--- /dev/null\t1970-01-01 00:00:00 +0000\n"
+            "+++ b/tests/checker-corpus/new_reject.hy\n"
+        )
+        self.assertEqual(
+            author_stage.diff_paths(diff),
+            [
+                "compiler/crates/hy-check/src/lib.rs",
+                "tests/checker-corpus/new_reject.hy",
+            ],
+        )
+
+    def test_diff_paths_ignores_triple_dash_and_plus_inside_hunks(self):
+        in_scope_hunk_with_triple_markers = (
+            "diff --git a/compiler/crates/hy-check/src/lib.rs b/compiler/crates/hy-check/src/lib.rs\n"
+            "--- a/compiler/crates/hy-check/src/lib.rs\n"
+            "+++ b/compiler/crates/hy-check/src/lib.rs\n"
+            "@@ -10,2 +10,2 @@\n"
+            "--- comment that starts with three dashes\n"
+            "-x\n"
+            "+++ comment that starts with three pluses\n"
+            "+y\n"
+        )
+        self.assertEqual(
+            author_stage.diff_paths(in_scope_hunk_with_triple_markers),
+            ["compiler/crates/hy-check/src/lib.rs"],
+        )
+        self.assertTrue(author_stage.scope_ok(in_scope_hunk_with_triple_markers))
+
+    def test_diff_paths_and_scope_ok_extract_git_rename_and_copy_headers(self):
+        rename_diff = (
+            "diff --git a/compiler/crates/hy-check/src/old.rs b/compiler/crates/hy-check/src/new.rs\n"
+            "similarity index 98%\n"
+            "rename from compiler/crates/hy-check/src/old.rs\n"
+            "rename to compiler/crates/hy-check/src/new.rs\n"
+        )
+        self.assertEqual(
+            author_stage.diff_paths(rename_diff),
+            [
+                "compiler/crates/hy-check/src/old.rs",
+                "compiler/crates/hy-check/src/new.rs",
+            ],
+        )
+        self.assertTrue(author_stage.scope_ok(rename_diff))
+
+        copy_diff = (
+            "diff --git a/compiler/crates/hy-check/src/orig.rs b/compiler/crates/hy-check/src/clone.rs\n"
+            "similarity index 100%\n"
+            "copy from compiler/crates/hy-check/src/orig.rs\n"
+            "copy to compiler/crates/hy-check/src/clone.rs\n"
+        )
+        self.assertEqual(
+            author_stage.diff_paths(copy_diff),
+            [
+                "compiler/crates/hy-check/src/orig.rs",
+                "compiler/crates/hy-check/src/clone.rs",
+            ],
+        )
+        self.assertTrue(author_stage.scope_ok(copy_diff))
+
+    def test_scope_ok_rejects_deletions_or_mutations_outside_scope(self):
+        mixed_delete = (
+            "--- a/.github/workflows/ci.yml\n"
+            "+++ /dev/null\n"
+            "--- a/compiler/crates/hy-check/src/lib.rs\n"
+            "+++ b/compiler/crates/hy-check/src/lib.rs\n"
+        )
+        only_delete = (
+            "--- a/.github/workflows/ci.yml\n"
+            "+++ /dev/null\t1970-01-01 00:00:00 +0000\n"
+        )
+        empty_file_delete_git_header_only = (
+            "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n"
+            "deleted file mode 100644\n"
+            "index e69de29..0000000\n"
+        )
+        mode_change_only = (
+            "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n"
+            "old mode 100644\n"
+            "new mode 100755\n"
+        )
+        new_empty_file_only = (
+            "diff --git a/tools/pwned.py b/tools/pwned.py\n"
+            "new file mode 100644\n"
+            "index 0000000..e69de29\n"
+        )
+        binary_patch_only = (
+            "diff --git a/tools/test_pwn.py b/tools/test_pwn.py\n"
+            "new file mode 100644\n"
+            "GIT binary patch\n"
+            "literal 0\n"
+        )
+        rename_to_out_of_scope = (
+            "diff --git a/compiler/crates/hy-check/src/lib.rs b/tools/autoland.py\n"
+            "similarity index 100%\n"
+            "rename from compiler/crates/hy-check/src/lib.rs\n"
+            "rename to tools/autoland.py\n"
+        )
+        copy_to_out_of_scope = (
+            "copy from compiler/crates/hy-check/src/lib.rs\n"
+            "copy to tools/autoland.py\n"
+        )
+        self.assertFalse(author_stage.scope_ok(mixed_delete))
+        self.assertFalse(author_stage.scope_ok(only_delete))
+        self.assertFalse(author_stage.scope_ok(empty_file_delete_git_header_only))
+        self.assertFalse(author_stage.scope_ok(mode_change_only))
+        self.assertFalse(author_stage.scope_ok(new_empty_file_only))
+        self.assertFalse(author_stage.scope_ok(binary_patch_only))
+        self.assertFalse(author_stage.scope_ok(rename_to_out_of_scope))
+        self.assertFalse(author_stage.scope_ok(copy_to_out_of_scope))
+
+    def test_scope_ok_rejects_dotdot_traversal_backslash_leading_slash_p1_and_symlink(self):
+        for bad_diff in (
+            "+++ b/compiler/../tools/autoland.py\n",
+            "--- a/tests/../../.github/workflows/ci.yml\n+++ b/compiler/crates/hy-check/src/lib.rs\n",
+            "+++ b/compiler\\..\\tools\\autoland.py\n",
+            "+++ b/compiler/crates\\lib.rs\n",
+            "+++ /compiler/crates/hy-check/src/lib.rs\n",
+            "+++ b//compiler/crates/hy-check/src/lib.rs\n",
+            "--- compiler/tools/autoland.py\n+++ compiler/tools/autoland.py\n",
+            '+++ "b/.github/workflows/ci.yml"\n',
+            '+++ "b/compiler/\\056\\056/tools/autoland.py"\n',
+            '+++ b/compiler/crates/"hy-check"/src/lib.rs\n',
+            'diff --git "a/compiler/x.rs" "b/tools/autoland.py"\n',
+            "diff --git a/compiler/link.rs b/compiler/link.rs\nnew file mode 120000\n--- /dev/null\n+++ b/compiler/link.rs\n",
+            "+++ b/compiler/crates/hy-check/src/lib\x00.rs\n",
+            "+++ b/compiler/crates/hy-check/src/lib\x1f.rs\n",
+            "+++ b/compiler/crates/hy-check/src/lib\x7f.rs\n",
+        ):
+            with self.subTest(bad_diff=bad_diff):
+                self.assertFalse(author_stage.scope_ok(bad_diff))
+
+    def test_scope_ok_accepts_valid_in_scope_modifications_additions_and_deletions(self):
+        for good_diff in (
+            "--- a/compiler/crates/hy-check/src/lib.rs\n+++ b/compiler/crates/hy-check/src/lib.rs\n",
+            "--- /dev/null\n+++ b/tests/checker-corpus/new_reject.hy\n",
+            "--- a/automation/land-queue/author-1/repro.hy\n+++ /dev/null\n",
+            "--- a/tests/checker-corpus/range..expr.hy\n+++ b/tests/checker-corpus/range..expr.hy\n",
+            '--- "a/compiler/crates/hy-check/src/lib.rs"\n+++ "b/compiler/crates/hy-check/src/lib.rs"\n',
+            "diff --git a/compiler/crates/hy-check/src/a.rs b/compiler/crates/hy-check/src/b.rs\n"
+            "rename from compiler/crates/hy-check/src/a.rs\n"
+            "rename to compiler/crates/hy-check/src/b.rs\n",
+        ):
+            with self.subTest(good_diff=good_diff):
+                self.assertTrue(author_stage.scope_ok(good_diff))
+
+    def test_gh_token_returns_env_token_when_set(self):
+        saved = {k: os.environ.pop(k, None) for k in ("GITHUB_TOKEN", "GH_TOKEN")}
+        try:
+            os.environ["GH_TOKEN"] = "tok_env_fallback"
+            self.assertEqual(author_stage.gh_token(), "tok_env_fallback")
+            os.environ["GITHUB_TOKEN"] = "   \n\t  "
+            self.assertEqual(author_stage.gh_token(), "tok_env_fallback")
+            os.environ["GITHUB_TOKEN"] = "  tok_primary_env \n"
+            self.assertEqual(author_stage.gh_token(), "tok_primary_env")
+        finally:
+            for k in ("GITHUB_TOKEN", "GH_TOKEN"):
+                os.environ.pop(k, None)
+            for k, v in saved.items():
+                if v is not None:
+                    os.environ[k] = v
+
+    def test_gh_token_unpacks_completed_process_stdout_and_checks_returncode(self):
+        saved_env = {k: os.environ.pop(k, None) for k in ("GITHUB_TOKEN", "GH_TOKEN")}
+        orig_sh = author_stage.sh
+        orig_root = author_stage.ROOT
+        try:
+            author_stage.sh = lambda *a, **kw: subprocess.CompletedProcess(
+                args=["git", "remote", "get-url", "origin"],
+                returncode=0,
+                stdout="https://tok_remote_embedded_123@github.com/limitlessprojects/Go-Hybrid.git\n",
+                stderr="",
+            )
+            self.assertEqual(author_stage.gh_token(), "tok_remote_embedded_123")
+
+            author_stage.sh = lambda *a, **kw: subprocess.CompletedProcess(
+                args=["git", "remote", "get-url", "origin"],
+                returncode=0,
+                stdout="https://x-access-token:tok_oauth_456@github.com/limitlessprojects/Go-Hybrid.git\n",
+                stderr="",
+            )
+            self.assertEqual(author_stage.gh_token(), "tok_oauth_456")
+
+            with tempfile.TemporaryDirectory(prefix="hybrid-author-tok-") as tmp:
+                author_stage.ROOT = Path(tmp)
+                author_stage.sh = lambda *a, **kw: subprocess.CompletedProcess(
+                    args=["git", "remote", "get-url", "origin"],
+                    returncode=128,
+                    stdout="https://tok_should_be_ignored_on_nonzero_rc@github.com/limitlessprojects/Go-Hybrid.git\n",
+                    stderr="fatal: not a git repository",
+                )
+                tok = author_stage.gh_token()
+                self.assertNotEqual(tok, "tok_should_be_ignored_on_nonzero_rc")
+                self.assertTrue(tok is None or isinstance(tok, str))
+
+                author_stage.sh = lambda *a, **kw: subprocess.CompletedProcess(
+                    args=["git", "remote", "get-url", "origin"],
+                    returncode=0,
+                    stdout=None,
+                    stderr="",
+                )
+                tok2 = author_stage.gh_token()
+                self.assertTrue(tok2 is None or isinstance(tok2, str))
+        finally:
+            author_stage.sh = orig_sh
+            author_stage.ROOT = orig_root
+            for k, v in saved_env.items():
+                if v is not None:
+                    os.environ[k] = v
+
+    def test_selftest_and_cli_flags_succeed(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(author_stage.selftest(), 0)
+        script = str(Path(__file__).with_name("author_stage.py"))
+        for arg in ("selftest", "--selftest"):
+            with self.subTest(arg=arg):
+                proc = subprocess.run(
+                    [sys.executable, script, arg],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertIn("SELFTEST PASS", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
+
