@@ -295,7 +295,7 @@ fn build_tables(ck: &mut Checker<'_>) {
         match d {
             Decl::Const(c) => {
                 if let Some(ty) = &c.ty {
-                    ck.check_type_expr(ty);
+                    ck.check_decl_type_expr(None, ty);
                     ck.check_local_array_lit_len_match(ty, &c.value);
                     ck.check_const_overflow_init(&c.name, ty, &c.value, None);
                 }
@@ -308,25 +308,24 @@ fn build_tables(ck: &mut Checker<'_>) {
             }
             Decl::Struct(s) => {
                 for f in &s.fields {
-                    ck.check_type_expr(&f.ty);
+                    ck.check_decl_type_expr(None, &f.ty);
                 }
             }
             Decl::Fn(f) => {
-                if let Some(r) = &f.receiver {
-                    ck.check_type_expr(&r.ty);
-                }
+                // Keep receiver position out of check_decl_type_expr (issue #1583):
+                // `fn (x *missing) m()` has its own HYB-E2007 arm in declare_method (issue #1575).
                 for p in &f.params {
-                    ck.check_type_expr(&p.ty);
+                    ck.check_decl_type_expr(None, &p.ty);
                 }
                 for r in &f.results {
-                    ck.check_type_expr(&r.ty);
+                    ck.check_decl_type_expr(None, &r.ty);
                 }
             }
-            Decl::TypeAlias(a) => ck.check_type_expr(&a.ty),
+            Decl::TypeAlias(a) => ck.check_decl_type_expr(None, &a.ty),
             Decl::Enum(e) => {
                 for v in &e.variants {
                     if let Some(p) = &v.payload {
-                        ck.check_type_expr(p);
+                        ck.check_decl_type_expr(None, p);
                     }
                 }
             }
