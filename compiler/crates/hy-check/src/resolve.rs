@@ -92,6 +92,42 @@ impl<'a> Scan<'a> {
         }
     }
 
+    fn check_folded_index_expr(&mut self, bracket_rest: &str, span: Span) {
+        if self.mode != Mode::Check {
+            return;
+        }
+        let Some(inside) = bracket_rest.strip_suffix(']') else {
+            return;
+        };
+        let trimmed = inside.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && !trimmed.chars().next().unwrap().is_ascii_digit()
+        {
+            self.ident(trimmed, span);
+            return;
+        }
+        if let Ok(parsed) =
+            hy_syntax::parse_file(self.path, &format!("fn _hy() {{\n  _ = {trimmed}\n}}"))
+        {
+            let before = self.diags.len();
+            if let Some(hy_syntax::Decl::Fn(f)) = parsed.decls.first() {
+                if let Some(body) = &f.body {
+                    for st in &body.stmts {
+                        self.run_stmt(st);
+                    }
+                }
+            }
+            for d in &mut self.diags[before..] {
+                d.span = span;
+            }
+        }
+    }
+
     fn ident(&mut self, name: &str, span: Span) {
         if self.mode != Mode::Check {
             return;
@@ -103,25 +139,18 @@ impl<'a> Scan<'a> {
             return;
         }
         // `parser.rs` (`fold_type_args`) folds bracketed type arguments (and
-        // single-ident index expressions before `(`) into `Expr::Ident`
+        // type-shaped index expressions before `(`) into `Expr::Ident`
         // (`id[int](42)` -> `Ident("id[int]")`, `m[k](42)` -> `Ident("m[k]")`).
         if let Some((head, rest)) = name.split_once('[') {
             let head_ok = self.allowed.contains(head)
                 || self.packages.contains(head)
                 || crate::foreign::BUILTIN_PACKAGES.contains(&head);
             if head_ok {
-                if !self.file_decls.contains(head) {
-                    if let Some(inside) = rest.strip_suffix(']') {
-                        let trimmed = inside.trim();
-                        if !trimmed.is_empty()
-                            && trimmed
-                                .chars()
-                                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-                            && !trimmed.chars().next().unwrap().is_ascii_digit()
-                        {
-                            self.ident(trimmed, span);
-                        }
-                    }
+                if !self.file_decls.contains(head)
+                    && !self.packages.contains(head)
+                    && !crate::foreign::BUILTIN_PACKAGES.contains(&head)
+                {
+                    self.check_folded_index_expr(rest, span);
                 }
                 return;
             }
@@ -417,6 +446,11 @@ impl<'a> Scan<'a> {
                                     ),
                                 ]),
                             );
+                        } else if matches!(base.as_ref(), Expr::Paren { .. })
+                            && !self.packages.contains(root)
+                            && !crate::foreign::BUILTIN_PACKAGES.contains(&root.as_str())
+                        {
+                            self.run_expr(base);
                         }
                     }
                 } else {
