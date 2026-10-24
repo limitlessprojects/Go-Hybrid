@@ -104,6 +104,46 @@ class PatternExtractionTests(unittest.TestCase):
             "python3 -m unittest discover -s tools -p test_disabled.py -p test_live.py\n"),
             ["test_live.py"])
 
+    def test_malformed_option_value_sequences_are_rejected_issue_1333(self):
+        self.assertEqual(
+            guard.registered_discoveries("python3 -m unittest discover -s -p test_foo.py\n"),
+            [],
+        )
+        self.assertEqual(
+            guard.registered_discoveries("python3 -m unittest discover -s tools -p -v\n"),
+            [],
+        )
+        self.assertFalse(
+            guard.is_registered_direct(
+                "tests/test_live.py",
+                "python3 -W -u tests/test_live.py\n",
+            )
+        )
+        self.assertTrue(
+            guard.is_registered_direct(
+                "tests/test_live.py",
+                "python3 --check-hash-based-pycs=always tests/test_live.py\n",
+            )
+        )
+
+    def test_default_unittest_discover_pattern_and_normalized_direct_paths_issue_1333(self):
+        self.assertEqual(
+            guard.registered_discoveries("python3 -m unittest discover -s tools\n"),
+            [("tools", "test*.py")],
+        )
+        self.assertTrue(
+            guard.is_registered_direct(
+                "tests/test_install_runtime.py",
+                "python3 tests/./test_install_runtime.py\n",
+            )
+        )
+        self.assertTrue(
+            guard.is_registered_direct(
+                "tests/test_install_runtime.py",
+                "python3 tests//test_install_runtime.py\n",
+            )
+        )
+
 
 class RegistrationTests(unittest.TestCase):
     def build(self, workflow, suites):
@@ -313,6 +353,38 @@ class GuardMisuseTests(unittest.TestCase):
             self.run_main("python3 -m unittest discover -s tools/fuzz -p 'test_*.py'\n",
                           ["tools/fuzz/test_control.py", "tools/test_orphan.py"]), 1)
 
+
+    def test_start_directory_escaping_repo_root_is_rejected(self):
+        self.assertEqual(self.run_main("python3 -m unittest discover -s .. -p 'test_*.py'\n", ["tools/test_x.py"]), 1)
+
+    def test_missing_workflow_or_invalid_root_exits_two_issue_1333(self):
+        with tempfile.TemporaryDirectory(prefix="hybrid-guard-err-") as temporary:
+            root = Path(temporary)
+            (root / "tools").mkdir()
+            (root / "tools" / "test_x.py").write_text("# suite\n", encoding="utf-8")
+            original = guard.sys.argv
+            try:
+                guard.sys.argv = [
+                    "check_test_registration.py",
+                    "--workflow",
+                    str(root / "nonexistent.yml"),
+                    "--root",
+                    str(root),
+                ]
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(guard.main(), 2)
+
+                guard.sys.argv = [
+                    "check_test_registration.py",
+                    "--workflow",
+                    str(root / "tools" / "test_x.py"),
+                    "--root",
+                    str(root / "nonexistent_root"),
+                ]
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(guard.main(), 2)
+            finally:
+                guard.sys.argv = original
 
 if __name__ == "__main__":
     unittest.main()

@@ -31,6 +31,7 @@ import argparse
 import fnmatch
 import os
 from pathlib import Path
+import posixpath
 import re
 import shlex
 import sys
@@ -75,8 +76,11 @@ def python_commands(workflow_text):
                 if PYTHON_FLAGS_RE.fullmatch(option):
                     arguments = arguments[1:]
                 elif option in ("-W", "-X", "--check-hash-based-pycs"):
+                    if len(arguments) < 2 or not arguments[1] or arguments[1].startswith("-"):
+                        arguments = []
+                        break
                     arguments = arguments[2:]
-                elif option.startswith(("-W", "-X")):
+                elif option.startswith(("-W", "-X", "--check-hash-based-pycs=")):
                     arguments = arguments[1:]
                 elif option == "--":
                     arguments = arguments[1:]
@@ -102,17 +106,45 @@ def registered_discoveries(workflow_text):
     for arguments in python_commands(workflow_text):
         if arguments[:3] != ["-m", "unittest", "discover"]:
             continue
-        start, pattern = ".", None
-        for index, argument in enumerate(arguments[3:], 3):
-            if argument in ("-s", "--start-directory") and index + 1 < len(arguments):
+        start, pattern = ".", "test*.py"
+        valid = True
+        index = 3
+        while index < len(arguments):
+            argument = arguments[index]
+            if argument in ("-s", "--start-directory"):
+                if index + 1 >= len(arguments) or not arguments[index + 1] or arguments[index + 1].startswith("-"):
+                    valid = False
+                    break
                 start = arguments[index + 1]
-            elif argument in ("-p", "--pattern") and index + 1 < len(arguments):
+                index += 2
+            elif argument in ("-p", "--pattern"):
+                if index + 1 >= len(arguments) or not arguments[index + 1] or arguments[index + 1].startswith("-"):
+                    valid = False
+                    break
                 pattern = arguments[index + 1]
+                index += 2
+            elif argument in ("-t", "--top-level-directory"):
+                if index + 1 >= len(arguments) or not arguments[index + 1] or arguments[index + 1].startswith("-"):
+                    valid = False
+                    break
+                index += 2
             elif argument.startswith("--start-directory="):
-                start = argument.split("=", 1)[1]
+                val = argument.split("=", 1)[1]
+                if not val or val.startswith("-"):
+                    valid = False
+                    break
+                start = val
+                index += 1
             elif argument.startswith("--pattern="):
-                pattern = argument.split("=", 1)[1]
-        if pattern is not None:
+                val = argument.split("=", 1)[1]
+                if not val or val.startswith("-"):
+                    valid = False
+                    break
+                pattern = val
+                index += 1
+            else:
+                index += 1
+        if valid and start and pattern:
             discoveries.append((start, pattern))
     return discoveries
 
@@ -128,9 +160,10 @@ def is_registered_discover(name, patterns):
 
 def is_reached_discover(root, relpath, start, pattern):
     """Mirror discovery's directory boundary without importing test code."""
-    target = (Path(root) / relpath).resolve()
-    start_dir = (Path(root) / start).resolve()
-    if not start_dir.is_dir() or not target.is_relative_to(start_dir):
+    root_dir = Path(root).resolve()
+    target = (root_dir / relpath).resolve()
+    start_dir = (root_dir / start).resolve()
+    if not start_dir.is_dir() or not start_dir.is_relative_to(root_dir) or not target.is_relative_to(start_dir):
         return False
     if not is_registered_discover(target.name, [pattern]):
         return False
@@ -144,10 +177,24 @@ def is_reached_discover(root, relpath, start, pattern):
     return True
 
 
+def _normalize_repo_relpath(raw_path):
+    if not raw_path or raw_path.startswith(("-", "/")):
+        return None
+    normalized = posixpath.normpath(raw_path.replace("\\", "/"))
+    if normalized in ("", ".") or normalized.startswith("../") or normalized == "..":
+        return None
+    return normalized
+
+
 def is_registered_direct(relpath, workflow_text):
     """A script must be the Python entry point, not a comment or argument."""
-    return any(arguments and arguments[0] in (relpath, "./" + relpath)
-               for arguments in python_commands(workflow_text))
+    target = _normalize_repo_relpath(relpath)
+    if target is None:
+        return False
+    return any(
+        arguments and _normalize_repo_relpath(arguments[0]) == target
+        for arguments in python_commands(workflow_text)
+    )
 
 
 def find_test_files(root, directory):
@@ -186,8 +233,18 @@ def main():
                     help="repository root holding the test directories")
     args = ap.parse_args()
 
-    with open(args.workflow, encoding="utf-8") as handle:
-        workflow_text = handle.read()
+    if not os.path.isdir(args.root):
+        print(f"REGISTRATION CHECK ERROR: root directory does not exist: {args.root}",
+              file=sys.stderr)
+        return 2
+
+    try:
+        with open(args.workflow, encoding="utf-8") as handle:
+            workflow_text = handle.read()
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"REGISTRATION CHECK ERROR: cannot read workflow {args.workflow}: {exc}",
+              file=sys.stderr)
+        return 2
 
     patterns = registered_patterns(workflow_text)
     found = (find_test_files(args.root, DISCOVER_DIR)
