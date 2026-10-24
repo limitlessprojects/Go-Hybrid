@@ -1684,18 +1684,21 @@ impl<'a> Checker<'a> {
                     ),
                 };
                 let is_fresh_copy = self.call_returns_fresh_copy(&pre_st, value);
-                let shadowed_const = !is_fresh_copy && self.shape_may_share(&shape)
+                let shadowed_const_origin = if !is_fresh_copy
+                    && self.shape_may_share(&shape)
                     && self.value_reads_storage_of(&pre_st, value, name)
-                    && self
-                        .const_write_root(
-                            &pre_st,
-                            &Place {
-                                kind: PlaceKind::Ident(name.clone()),
-                                span: value.span(),
-                            },
-                        )
-                        .is_some();
-                let immutable = immutable || shadowed_const;
+                {
+                    self.const_write_root(
+                        &pre_st,
+                        &Place {
+                            kind: PlaceKind::Ident(name.clone()),
+                            span: value.span(),
+                        },
+                    )
+                    .map(|croot| format!("`const {}`", croot))
+                } else {
+                    None
+                };
                 self.mark_move_in_value(
                     st,
                     value,
@@ -1708,7 +1711,7 @@ impl<'a> Checker<'a> {
                     || matches!(unwrap_parens(value), Expr::Move { .. })
                 {
                     self.define_binding(st, name, shape, ty, immutable, managed, is_let);
-                    if let Some(origin) = moved_non_owned {
+                    if let Some(origin) = moved_non_owned.or(shadowed_const_origin) {
                         if let Some(b) = st.env_lookup_mut(name) {
                             b.non_owned_origin = Some(origin);
                         }
@@ -1784,7 +1787,7 @@ impl<'a> Checker<'a> {
                     None
                 };
                 self.define_binding(st, name, shape, ty, immutable, managed, is_let);
-                if let Some(origin) = &moved_non_owned {
+                if let Some(origin) = shadowed_const_origin.as_ref().or(moved_non_owned.as_ref()) {
                     if let Some(b) = st.env_lookup_mut(name) {
                         if b.non_owned_origin.is_none() {
                             b.non_owned_origin = Some(origin.clone());
@@ -6279,7 +6282,7 @@ impl<'a> Checker<'a> {
         if l.values.len() == 1 && l.names.len() > 1 {
             let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
             let tys = self.multi_value_tys(st, &l.values[0], l.names.len());
-            let resolved: Vec<(String, TypeShape, Option<hy_syntax::TypeExpr>, bool)> = l
+            let resolved: Vec<(String, TypeShape, Option<hy_syntax::TypeExpr>, Option<String>)> = l
                 .names
                 .iter()
                 .zip(shapes)
@@ -6291,23 +6294,33 @@ impl<'a> Checker<'a> {
                         }
                         (_, s) => (s, ty.or_else(|| l.ty.clone())),
                     };
-                    let shadowed_const = self.shape_may_share(&shape)
+                    let shadowed_const_origin = if self.shape_may_share(&shape)
                         && self.value_reads_storage_of(st, &l.values[0], name)
-                        && self
-                            .const_write_root(
-                                st,
-                                &Place {
-                                    kind: PlaceKind::Ident(name.clone()),
-                                    span: l.values[0].span(),
-                                },
-                            )
-                            .is_some();
-                    (name.clone(), shape, ty, immutable || shadowed_const)
+                    {
+                        self.const_write_root(
+                            st,
+                            &Place {
+                                kind: PlaceKind::Ident(name.clone()),
+                                span: l.values[0].span(),
+                            },
+                        )
+                        .map(|croot| format!("`const {}`", croot))
+                    } else {
+                        None
+                    };
+                    (name.clone(), shape, ty, shadowed_const_origin)
                 })
                 .collect();
-            for (name, shape, ty, is_imm) in resolved {
+            for (name, shape, ty, shadowed_const_origin) in resolved {
                 overwritten.push(name.clone());
-                self.define_binding(st, &name, shape.clone(), ty, is_imm, false, is_let);
+                self.define_binding(st, &name, shape.clone(), ty, immutable, false, is_let);
+                if let Some(origin) = shadowed_const_origin {
+                    if let Some(b) = st.env_lookup_mut(&name) {
+                        if b.non_owned_origin.is_none() {
+                            b.non_owned_origin = Some(origin);
+                        }
+                    }
+                }
                 if move_operand_ident(&l.values[0]).is_none() {
                     self.record_storage_from_snapshot(st, &pre_st, &name, &l.values[0], &overwritten, true, true);
                 }
@@ -6328,18 +6341,29 @@ impl<'a> Checker<'a> {
                 ),
             };
             let is_fresh_copy = self.call_returns_fresh_copy(&pre_st, value);
-                let shadowed_const = !is_fresh_copy && self.shape_may_share(&shape)
+            let shadowed_const_origin = if !is_fresh_copy
+                && self.shape_may_share(&shape)
                 && self.value_reads_storage_of(&pre_st, value, name)
-                && self
-                    .const_write_root(
-                        &pre_st,
-                        &Place {
-                            kind: PlaceKind::Ident(name.clone()),
-                            span: value.span(),
-                        },
-                    )
-                    .is_some();
-            self.define_binding(st, name, shape, ty, immutable || shadowed_const, false, is_let);
+            {
+                self.const_write_root(
+                    &pre_st,
+                    &Place {
+                        kind: PlaceKind::Ident(name.clone()),
+                        span: value.span(),
+                    },
+                )
+                .map(|croot| format!("`const {}`", croot))
+            } else {
+                None
+            };
+            self.define_binding(st, name, shape, ty, immutable, false, is_let);
+            if let Some(origin) = shadowed_const_origin {
+                if let Some(b) = st.env_lookup_mut(name) {
+                    if b.non_owned_origin.is_none() {
+                        b.non_owned_origin = Some(origin);
+                    }
+                }
+            }
             if move_operand_ident(value).is_none() && !is_fresh_copy {
                 self.record_storage_from_snapshot(st, &pre_st, name, value, &overwritten, true, false);
             }
@@ -6369,14 +6393,17 @@ impl<'a> Checker<'a> {
     /// `append(dst, ..)` on a `const` writes nothing back into the `const`
     /// when `dst` has no spare capacity. A `const` composite is
     /// literal-initialized (`cap == len`), so the `const` itself, a field or
-    /// element of it, or an open-ended tail `c[i:]` always reallocates. A
-    /// bounded reslice `c[:k]` / `c[a:b]`, or a local alias of one, may not.
+    /// element of it, or an open-ended tail `c[i:]` always reallocates —
+    /// provided the `const` initializer does not embed a bounded reslice
+    /// (`c[:k]`) or runtime call (`make([]T, len, cap)`). A bounded reslice
+    /// `c[:k]` / `c[a:b]`, or a local alias of one, may not reallocate.
     fn append_dst_reallocates(&self, st: &FnState, dst: &Expr) -> bool {
         let mut cur = crate::model::unwrap_parens(dst);
         loop {
             match cur {
                 Expr::Ident { name, .. } => {
-                    return self.lookup_binding(st, name).is_some_and(|b| b.immutable);
+                    return self.lookup_binding(st, name).is_some_and(|b| b.immutable)
+                        && self.const_binding_has_no_spare_cap(st, name, 0);
                 }
                 Expr::Field { base, .. } | Expr::Index { base, .. } => {
                     cur = crate::model::unwrap_parens(base);
@@ -6384,6 +6411,189 @@ impl<'a> Checker<'a> {
                 Expr::Slice { base, hi: None, .. } => cur = crate::model::unwrap_parens(base),
                 _ => return false,
             }
+        }
+    }
+
+    fn const_binding_has_no_spare_cap(&self, st: &FnState, name: &str, depth: usize) -> bool {
+        if depth > 16 {
+            return false;
+        }
+        if let Some(b) = st.env_lookup(name) {
+            if !b.immutable {
+                return false;
+            }
+            let mut inits = Vec::new();
+            for decl in &self.file.decls {
+                if let hy_syntax::Decl::Fn(f) = decl {
+                    if let Some(body) = &f.body {
+                        Self::collect_local_const_inits_in_block(body, name, &mut inits);
+                    }
+                }
+            }
+            return !inits.is_empty()
+                && inits
+                    .into_iter()
+                    .all(|e| self.const_expr_has_no_spare_cap(Some(st), e, depth + 1));
+        }
+        if !self.consts.get(name).is_some_and(|b| b.immutable) {
+            return false;
+        }
+        let Some(cdecl) = self.file.decls.iter().find_map(|d| match d {
+            hy_syntax::Decl::Const(c) if c.name == name => Some(c),
+            _ => None,
+        }) else {
+            return false;
+        };
+        self.const_expr_has_no_spare_cap(None, &cdecl.value, depth + 1)
+    }
+
+    fn const_expr_has_no_spare_cap(
+        &self,
+        st: Option<&FnState>,
+        expr: &Expr,
+        depth: usize,
+    ) -> bool {
+        if depth > 16 {
+            return false;
+        }
+        match crate::model::unwrap_parens(expr) {
+            Expr::Lit { .. } | Expr::Binary { .. } => true,
+            Expr::Unary { operand, .. } => {
+                self.const_expr_has_no_spare_cap(st, operand, depth + 1)
+            }
+            Expr::SliceLit { items, .. } => items
+                .iter()
+                .all(|it| self.const_expr_has_no_spare_cap(st, it, depth + 1)),
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .all(|f| self.const_expr_has_no_spare_cap(st, &f.value, depth + 1)),
+            Expr::MapLit { entries, .. } => entries.iter().all(|(k, v)| {
+                self.const_expr_has_no_spare_cap(st, k, depth + 1)
+                    && self.const_expr_has_no_spare_cap(st, v, depth + 1)
+            }),
+            Expr::Slice { base, hi: None, .. }
+            | Expr::Field { base, .. }
+            | Expr::Index { base, .. } => self.const_expr_has_no_spare_cap(st, base, depth + 1),
+            Expr::Ident { name, .. } => match st {
+                Some(s) => self.const_binding_has_no_spare_cap(s, name, depth + 1),
+                None => {
+                    if !self.consts.get(name).is_some_and(|b| b.immutable) {
+                        return false;
+                    }
+                    let Some(cdecl) = self.file.decls.iter().find_map(|d| match d {
+                        hy_syntax::Decl::Const(c) if c.name == *name => Some(c),
+                        _ => None,
+                    }) else {
+                        return false;
+                    };
+                    self.const_expr_has_no_spare_cap(None, &cdecl.value, depth + 1)
+                }
+            },
+            _ => false,
+        }
+    }
+
+    fn collect_local_const_inits_in_block<'e>(
+        block: &'e Block,
+        target: &str,
+        out: &mut Vec<&'e Expr>,
+    ) {
+        for stmt in &block.stmts {
+            Self::collect_local_const_inits_in_stmt(stmt, target, out);
+        }
+    }
+
+    fn collect_local_const_inits_in_stmt<'e>(
+        stmt: &'e Stmt,
+        target: &str,
+        out: &mut Vec<&'e Expr>,
+    ) {
+        match stmt {
+            Stmt::Local(l) => {
+                if l.kind == LocalKind::Const && l.names.len() == l.values.len() {
+                    for (n, v) in l.names.iter().zip(l.values.iter()) {
+                        if n == target {
+                            out.push(v);
+                        }
+                    }
+                }
+                for v in &l.values {
+                    Self::collect_local_const_inits_in_expr(v, target, out);
+                }
+            }
+            Stmt::Assign { values, .. } | Stmt::Return { values, .. } => {
+                for v in values {
+                    Self::collect_local_const_inits_in_expr(v, target, out);
+                }
+            }
+            Stmt::Expr { expr, .. } | Stmt::Defer { call: expr, .. } => {
+                Self::collect_local_const_inits_in_expr(expr, target, out);
+            }
+            Stmt::Task { callee, args, .. } => {
+                Self::collect_local_const_inits_in_expr(callee, target, out);
+                for a in args {
+                    Self::collect_local_const_inits_in_expr(&a.value, target, out);
+                }
+            }
+            Stmt::Send { value, .. } => {
+                Self::collect_local_const_inits_in_expr(value, target, out);
+            }
+            Stmt::If {
+                init,
+                then,
+                otherwise,
+                ..
+            } => {
+                if let Some(i) = init {
+                    Self::collect_local_const_inits_in_stmt(i, target, out);
+                }
+                Self::collect_local_const_inits_in_block(then, target, out);
+                if let Some(o) = otherwise {
+                    Self::collect_local_const_inits_in_stmt(o, target, out);
+                }
+            }
+            Stmt::For { body, .. }
+            | Stmt::Managed { body, .. }
+            | Stmt::Block { block: body, .. } => {
+                Self::collect_local_const_inits_in_block(body, target, out);
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    Self::collect_local_const_inits_in_block(&arm.body, target, out);
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                for arm in arms {
+                    Self::collect_local_const_inits_in_block(&arm.body, target, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_local_const_inits_in_expr<'e>(
+        expr: &'e Expr,
+        target: &str,
+        out: &mut Vec<&'e Expr>,
+    ) {
+        match expr {
+            Expr::FnLit { body, .. } => {
+                Self::collect_local_const_inits_in_block(body, target, out);
+            }
+            Expr::Paren { inner, .. }
+            | Expr::Move { operand: inner, .. }
+            | Expr::Try { operand: inner, .. }
+            | Expr::Unary { operand: inner, .. }
+            | Expr::AddrOf { operand: inner, .. } => {
+                Self::collect_local_const_inits_in_expr(inner, target, out);
+            }
+            Expr::Call { callee, args, .. } => {
+                Self::collect_local_const_inits_in_expr(callee, target, out);
+                for a in args {
+                    Self::collect_local_const_inits_in_expr(&a.value, target, out);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -7176,7 +7386,7 @@ impl<'a> Checker<'a> {
             |a: &hy_syntax::CallArg| Self::expr_reaches_const_aliases(&a.value, aliases);
         match crate::model::unwrap_parens(cr.callee) {
             Expr::Ident { name, .. } => {
-                if name == "delete" || name == "copy" || name == "clear" {
+                if name == "delete" || name == "copy" || name == "clear" || name == "append" {
                     return cr.args.first().map(&arg_reaches_alias).unwrap_or(false);
                 }
                 if A3_PURE_FNS.contains(&name.as_str()) {
