@@ -12,8 +12,10 @@ No tokens, no secrets, no pushing — worker output is data.
 """
 import json
 import os
+import shlex
 import subprocess
 import sys
+import tempfile
 import time
 
 # --- injected by tools/job.py at submit time (single data line, runner logic untouched) ---
@@ -21,6 +23,12 @@ JOB_JSON = None  # INJECTED_BY_tools/job.py
 # ---------------------------------------------------------------------------------------
 
 WORK = "/kaggle/working" if os.path.isdir("/kaggle/working") else os.path.abspath("./work")
+UPSTREAM_REPOS = (
+    "https://github.com/limitlessprojects/Go-Hybrid.git",
+    "https://github.com/limitlessprojects/Go-Hybrid",
+    "git@github.com:limitlessprojects/Go-Hybrid.git",
+    "ssh://git@github.com/limitlessprojects/Go-Hybrid.git",
+)
 
 
 def sh(cmd, timeout=600, cwd=None):
@@ -62,17 +70,36 @@ def main():
         json.dump(job, f, indent=2)
 
     # 2. clone the public repo at the pinned SHA
-    repo = job.get("repo", "https://github.com/limitlessprojects/Go-Hybrid.git")
+    repo = job.get("repo", UPSTREAM_REPOS[0])
     sha = job.get("sha", "HEAD")
-    rc, _ = sh("git clone --quiet {} repo 2>&1 | tail -2".format(repo), 300)
+    rc, _ = sh("git clone --quiet -- {} repo".format(shlex.quote(repo)), 300)
     if rc == 0:
-        sh("cd repo && git checkout --quiet {} 2>&1 | tail -2".format(sha), 60)
-    else:
+        rc, _ = sh("git checkout --quiet --detach --end-of-options {}".format(shlex.quote(sha)), 60, cwd="repo")
+    if rc != 0:
+        # The fixed codeload URL is only a fallback for this same repository.
+        # Never replace a failed custom source with unrelated upstream code.
+        if repo not in UPSTREAM_REPOS:
+            print("FATAL: Git preparation failed (exit {}); no archive fallback for this repository".format(rc), flush=True)
+            sys.exit(rc)
         # fall back to codeload tarball (sometimes git is restricted but https works)
-        sh("rm -rf repo && mkdir repo && curl -sL --max-time 240 https://codeload.github.com/limitlessprojects/Go-Hybrid/tar.gz/{} | tar xz --strip-components=1 -C repo".format(sha), 300)
+        print("Git preparation failed (exit {}); trying codeload archive".format(rc), flush=True)
+        rc, _ = sh("rm -rf repo && mkdir repo", 30)
+        if rc == 0:
+            with tempfile.TemporaryDirectory(dir=WORK) as tmp:
+                archive = shlex.quote(os.path.join(tmp, "repo.tar.gz"))
+                url = shlex.quote("https://codeload.github.com/limitlessprojects/Go-Hybrid/tar.gz/" + sha)
+                # Check the downloader separately: tar can succeed on complete
+                # data even when curl reports a transfer failure.
+                rc, _ = sh("curl -fsSL --max-time 240 -o {} {}".format(archive, url), 300)
+                if rc == 0:
+                    rc, _ = sh("tar xzf {} --strip-components=1 -C repo".format(archive), 300)
+        if rc != 0:
+            print("FATAL: repository preparation failed (exit {})".format(rc), flush=True)
+            sys.exit(rc)
 
     # 3. run the repo's runner
-    rc, _ = sh("python3 repo/tools/runner/runner.py {} --results-dir {}/results --repo-dir repo".format(job_path, WORK), 7200)
+    rc, _ = sh("python3 repo/tools/runner/runner.py {} --results-dir {} --repo-dir repo".format(
+        shlex.quote(job_path), shlex.quote(os.path.join(WORK, "results"))), 7200)
 
     # 4. surface summary
     try:

@@ -35,6 +35,7 @@ jobs:
           python3 -m unittest discover -s tools/runner -p test_runner.py -v
           python3 -m unittest discover -s tools -p test_job_cli.py -v
           python3 -m unittest discover -s tools -p test_job_shell_args.py -v
+          python3 -m unittest discover -s tools -p test_worker_script.py -v
           python3 -m unittest discover -s tools -p test_managed_gate.py -v
           python3 -m unittest discover -s tools -p test_differential_loop.py -v
           python3 -m unittest discover -s tools -p test_differential_output.py -v
