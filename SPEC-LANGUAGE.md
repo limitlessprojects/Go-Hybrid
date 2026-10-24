@@ -177,7 +177,10 @@ separators (`1_000_000`). Float: `1.5`, `2.`, `.5`, `1e9`. Rune: `'a'`,
 
 **LX7 — String literals.** Interpreted `"…"`: Go escape set **plus**
 interpolation `{expr}` (T4); `{{` and `}}` escape literal braces. Raw
-`` `…` ``: no escapes, **no interpolation**. Strings are always UTF-8 (T3).
+`` `…` ``: no escapes, **no interpolation**. As in Go, actual carriage
+returns (U+000D) are discarded from raw-string values; line feeds remain.
+This does not remove the interpreted `\r` escape or literal raw backslash-r
+text. Strings are always UTF-8 (T3).
 Malformed escape sequences — a non-hex digit in `\x`/`\u`/`\U`, the
 `\u{…}` rune form inside a string, a surrogate or a value above U+10FFFF —
 are `HYB-E0002` parse errors (rule `LX7`; the rune-literal forms carry
