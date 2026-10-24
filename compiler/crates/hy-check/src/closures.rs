@@ -1202,26 +1202,129 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
     }
 }
 
-/// Check A3 (`HYB-E3102`) for map-slot loans opened inside a closure body.
+/// Check A2 (`HYB-E3101`), A3 (`HYB-E3102`), and A7 (`HYB-E3003` rule `A7`)
+/// for boundary handles and map-slot loans inside a closure body.
 fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block) {
-    use crate::model::{Loan, LoanTarget};
+    use crate::model::{Loan, LoanTarget, MoveKind};
     use crate::walk;
-    let flat = walk::flatten(body);
+    let flat = walk::flatten_with_results(body, &st.named_results);
     let saved_last_use = std::mem::replace(&mut st.last_use, flat.last_use.clone());
     let saved_loop_end = std::mem::replace(&mut st.loop_end, flat.loop_end.clone());
     let saved_loans = std::mem::take(&mut st.loans);
+    let saved_aliases = st.aliases.clone();
+    let saved_may_share = st.may_share.clone();
+    let saved_shadow_links = st.shadow_links.clone();
+    let saved_borrow_bindings = st.borrow_bindings.clone();
+    let saved_env = st.env.clone();
+    let saved_scopes = st.scopes.clone();
+
     for (stmt, idx) in &flat.stmts {
         let idx = *idx;
-        let mut calls = Vec::new();
-        walk::own_calls(stmt, &mut calls);
-        for cr in calls {
-            let mut dummy_consumes = Vec::new();
-            ck.process_call(st, &cr, idx, None, &mut dummy_consumes);
+        let managed = flat.in_managed(idx);
+        if let Some(evs) = flat.events.get(&idx) {
+            for ev in evs {
+                match ev {
+                    walk::ScopeEvent::Push => st.scope_push(),
+                    walk::ScopeEvent::Pop => st.scope_pop(),
+                    walk::ScopeEvent::SelectRecv { names, chan } => {
+                        let elem = match ck.shape_of_expr(st, chan) {
+                            TypeShape::Chan(e) => *e,
+                            _ => TypeShape::Unknown,
+                        };
+                        for (i, n) in names.iter().enumerate() {
+                            let shape = if i == 0 {
+                                elem.clone()
+                            } else {
+                                TypeShape::Primitive
+                            };
+                            ck.define_binding(st, n, shape, None, false, managed, false);
+                        }
+                    }
+                    walk::ScopeEvent::MatchBind { name, subject } => {
+                        ck.bind_match_arm(st, name, subject, managed);
+                    }
+                }
+            }
         }
+
+        // Check use-after-consume (`MoveKind::Consumed`, rule A7) on handles
+        // in statement execution order before this statement's own consuming
+        // calls mark new transfers. Pre-existing consumes from before the
+        // closure started (`saved_env` / `saved_scopes`) are left to
+        // `check_body_boundaries` so they are not double-reported.
+        let mut uses = Vec::new();
+        walk::own_uses_with_results(stmt, &st.named_results, &mut uses);
+        let mut reported_consume = std::collections::HashSet::new();
+        for u in &uses {
+            let pre_consumed = st.scopes.iter().all(|s| !s.contains_key(&u.name))
+                && saved_env
+                    .get(&u.name)
+                    .and_then(|b| b.moved.as_ref())
+                    .is_some_and(|mv| mv.kind == MoveKind::Consumed);
+            if pre_consumed {
+                continue;
+            }
+            if let Some(mv) = ck.lookup_binding(st, &u.name).and_then(|b| b.moved.clone()) {
+                if mv.kind == MoveKind::Consumed && reported_consume.insert(u.name.clone()) {
+                    ck.check_uses(st, std::slice::from_ref(u));
+                }
+            }
+        }
+
+        let mut stmt_consumes = Vec::new();
+        if let Stmt::For {
+            kind: hy_syntax::ForKind::Iterate { expr, .. },
+            ..
+        } = stmt
+        {
+            let loop_end = flat.loop_end_of(idx);
+            let mut calls = Vec::new();
+            walk::expr_calls(expr, &mut calls);
+            for cr in calls {
+                ck.process_call(st, &cr, idx, Some(loop_end), &mut stmt_consumes);
+            }
+        } else {
+            let mut calls = Vec::new();
+            walk::own_calls(stmt, &mut calls);
+            for cr in calls {
+                ck.process_call(st, &cr, idx, None, &mut stmt_consumes);
+            }
+        }
+        if !stmt_consumes.is_empty() {
+            ck.check_same_stmt_consumes(st, &uses, &stmt_consumes);
+        }
+
         match stmt {
             Stmt::Local(l) => {
-                if l.names.len() == l.values.len() {
+                let immutable = l.kind == LocalKind::Const;
+                let is_let = l.kind == LocalKind::Let;
+                if l.values.is_empty() {
+                    let shape = l
+                        .ty
+                        .as_ref()
+                        .map(|t| ck.shape_of_type(t))
+                        .unwrap_or(TypeShape::Unknown);
+                    let ty = l.ty.clone();
+                    for name in &l.names {
+                        ck.define_binding(st, name, shape.clone(), ty.clone(), immutable, managed, is_let);
+                    }
+                } else if l.names.len() == l.values.len() {
+                    let pre_st = st.clone();
+                    let overwritten: Vec<String> = l.names.clone();
                     for (name, val) in l.names.iter().zip(l.values.iter()) {
+                        let inferred = ck.shape_of_expr(&pre_st, val);
+                        let (shape, ty) = match (&l.ty, inferred) {
+                            (Some(t), TypeShape::Unknown) => (ck.shape_of_type(t), Some(t.clone())),
+                            (_, inferred) => (
+                                inferred,
+                                ck.ty_of_expr(&pre_st, val).or_else(|| l.ty.clone()),
+                            ),
+                        };
+                        let is_view = matches!(shape, TypeShape::BorrowHandle(_));
+                        ck.define_binding(st, name, shape, ty, immutable, managed, is_let);
+                        if is_view {
+                            ck.extend_call_loans_to_view(st, val, name, idx);
+                        }
                         if let Some(path) = walk::addr_of_index_base_path(val) {
                             let binding = name.clone();
                             let key = walk::addr_of_index_slot_key(val);
@@ -1239,8 +1342,42 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                             });
                         } else {
                             ck.extend_map_slot_loan_to_alias(st, name, val, idx);
+                            ck.record_storage_from_snapshot(
+                                st,
+                                &pre_st,
+                                name,
+                                val,
+                                &overwritten,
+                                true,
+                                false,
+                            );
+                            ck.record_move_const_and_a3_loans(st, name, val, idx);
                         }
                     }
+                    ck.record_local_borrow_aliases(st, l);
+                } else if l.values.len() == 1 && l.names.len() > 1 {
+                    let pre_st = st.clone();
+                    let shapes = ck.multi_value_shapes(&pre_st, &l.values[0], l.names.len());
+                    let tys = ck.multi_value_tys(&pre_st, &l.values[0], l.names.len());
+                    let overwritten: Vec<String> = l.names.clone();
+                    for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
+                        let is_view = matches!(shape, TypeShape::BorrowHandle(_));
+                        ck.define_binding(st, name, shape, ty, immutable, managed, is_let);
+                        if is_view {
+                            ck.extend_call_loans_to_view(st, &l.values[0], name, idx);
+                        }
+                        ck.record_storage_from_snapshot(
+                            st,
+                            &pre_st,
+                            name,
+                            &l.values[0],
+                            &overwritten,
+                            true,
+                            true,
+                        );
+                        ck.record_move_const_and_a3_loans(st, name, &l.values[0], idx);
+                    }
+                    ck.record_local_borrow_aliases(st, l);
                 }
             }
             Stmt::Assign {
@@ -1250,8 +1387,30 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                 ..
             } => {
                 if *op == hy_syntax::AssignOp::Assign && targets.len() == values.len() {
+                    let pre_st = st.clone();
+                    let overwritten: Vec<String> = targets
+                        .iter()
+                        .filter_map(|t| match &t.kind {
+                            hy_syntax::PlaceKind::Ident(n) => Some(n.clone()),
+                            _ => None,
+                        })
+                        .collect();
                     for (t, v) in targets.iter().zip(values.iter()) {
                         if let hy_syntax::PlaceKind::Ident(name) = &t.kind {
+                            let v_shape = ck.shape_of_expr(&pre_st, v);
+                            let v_ty = ck.ty_of_expr(&pre_st, v);
+                            if let Some(b) = st.env_lookup_mut(name) {
+                                if !matches!(v_shape, TypeShape::Unknown) || b.ty.is_none() {
+                                    b.shape = v_shape.clone();
+                                }
+                                if v_ty.is_some() || b.ty.is_none() {
+                                    b.ty = v_ty;
+                                }
+                                b.moved = None;
+                            }
+                            if matches!(v_shape, TypeShape::BorrowHandle(_)) {
+                                ck.extend_call_loans_to_view(st, v, name, idx);
+                            }
                             if let Some(path) = walk::addr_of_index_base_path(v) {
                                 let binding = name.clone();
                                 let key = walk::addr_of_index_slot_key(v);
@@ -1270,6 +1429,16 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                                 });
                             } else {
                                 ck.extend_map_slot_loan_to_alias(st, name, v, idx);
+                                ck.record_storage_from_snapshot(
+                                    st,
+                                    &pre_st,
+                                    name,
+                                    v,
+                                    &overwritten,
+                                    false,
+                                    false,
+                                );
+                                ck.record_move_const_and_a3_loans(st, name, v, idx);
                             }
                         }
                     }
@@ -1282,9 +1451,43 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                     }
                 }
             }
+            Stmt::For { kind, .. } => match kind {
+                hy_syntax::ForKind::Iterate { vars, expr } => {
+                    let is_chan = matches!(ck.shape_of_expr(st, expr), TypeShape::Chan(_));
+                    let shapes = ck.iterate_var_shapes(st, expr, vars.len());
+                    for (name, shape) in vars.iter().zip(shapes) {
+                        let is_ref = shape.is_reference_alias();
+                        let may_share = ck.shape_may_share(&shape);
+                        ck.define_binding(st, name, shape, None, false, managed, false);
+                        if !is_chan {
+                            if may_share {
+                                ck.record_may_share(st, name, expr);
+                            }
+                            if is_ref {
+                                if let Some(root) = expr.root_ident() {
+                                    if ck.lookup_binding(st, root).is_some() {
+                                        st.aliases.insert(name.clone(), root.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                hy_syntax::ForKind::Range { var, .. } => {
+                    ck.define_binding(st, var, TypeShape::Primitive, None, false, managed, false);
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
+
+    st.scopes = saved_scopes;
+    st.env = saved_env;
+    st.borrow_bindings = saved_borrow_bindings;
+    st.shadow_links = saved_shadow_links;
+    st.may_share = saved_may_share;
+    st.aliases = saved_aliases;
     st.loans = saved_loans;
     st.loop_end = saved_loop_end;
     st.last_use = saved_last_use;
@@ -2097,5 +2300,57 @@ fn main() {
 }
 "#;
         assert_eq!(codes(src), vec!["HYB-E3003"]);
+    }
+
+    #[test]
+    fn reject_closure_local_handle_use_after_consume_a7() {
+        let src = r#"import "rust/flate2"
+
+fn main() {
+    f := fn() {
+        enc := flate2.new_writer()
+        _ = enc.finish()?
+        _ = enc.write("after")?
+    }
+    f()
+}
+"#;
+        let file = parse_file("test.hy", src).expect("parse");
+        let checked = check_file(&file);
+        assert_eq!(checked.diagnostics.len(), 1);
+        assert_eq!(checked.diagnostics[0].code, "HYB-E3003");
+        assert_eq!(checked.diagnostics[0].tier0_rule.as_deref(), Some("A7"));
+    }
+
+    #[test]
+    fn reject_closure_local_borrow_view_mutation_conflict_a2() {
+        let src_view = r#"import "rust/serde_json"
+
+fn main() {
+    f := fn() {
+        doc := serde_json.parse("null")?
+        users := doc.array("users")?
+        doc.set("k", "v")
+        _ = users.int(0)
+    }
+    f()
+}
+"#;
+        assert_eq!(codes(src_view), vec!["HYB-E3101"]);
+
+        let src_loop = r#"import "rust/serde_json"
+
+fn main() {
+    f := fn() {
+        doc := serde_json.parse("null")?
+        for u in doc.array("users")? {
+            doc.set("k", "v")
+            _ = u
+        }
+    }
+    f()
+}
+"#;
+        assert_eq!(codes(src_loop), vec!["HYB-E3101"]);
     }
 }
