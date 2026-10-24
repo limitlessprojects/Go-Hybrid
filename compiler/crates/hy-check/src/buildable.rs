@@ -2879,6 +2879,18 @@ impl<'a> Collector<'a> {
     }
 
     /// Family B3/B4/B5 (#425): binary operator operand-kind checks.
+    /// Returns true when `e` is a numeric literal that can adapt between
+    /// numeric families in Go (`1`, `1.0`, `'a'`, etc.).
+    fn is_numeric_literal(&self, e: &Expr) -> bool {
+        matches!(
+            e,
+            Expr::Lit {
+                kind: LitKind::Int(_) | LitKind::Float(_) | LitKind::Char(_),
+                ..
+            }
+        )
+    }
+
     fn check_binary_operands(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr, span: Span) {
         // #682 U6: an operand must be exactly one value. `two() + 1` is Go's
         // `multiple-value two() (value of type (int, int)) in single-value
@@ -2894,9 +2906,19 @@ impl<'a> Collector<'a> {
             // are rejected here under HYB-E1002 (rule `BUILDABLE`).
             BinOp::Eq | BinOp::Ne => {
                 let op_str = if matches!(op, BinOp::Eq) { "==" } else { "!=" };
+                // Reject mismatched concrete numeric kinds only when neither
+                // operand is a literal (untyped constants adapt between
+                // numeric families in Go: `1 == 1.0`, `f == 1`).
+                let numeric_mismatch = lk != OpKind::Unknown
+                    && rk != OpKind::Unknown
+                    && lk.is_numeric()
+                    && rk.is_numeric()
+                    && lk != rk
+                    && !self.is_numeric_literal(lhs)
+                    && !self.is_numeric_literal(rhs);
                 if !Checker::is_nil_literal(lhs)
                     && !Checker::is_nil_literal(rhs)
-                    && equality_kinds_conflict(&lk, &rk)
+                    && (equality_kinds_conflict(&lk, &rk) || numeric_mismatch)
                 {
                     self.emit_e1002(
                         span,
@@ -2942,7 +2964,9 @@ impl<'a> Collector<'a> {
                 let r_ok = matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
                 let mismatch = lk != OpKind::Unknown
                     && rk != OpKind::Unknown
-                    && lk.is_numeric() != rk.is_numeric();
+                    && (lk.is_numeric() != rk.is_numeric() || lk != rk)
+                    && !self.is_numeric_literal(lhs)
+                    && !self.is_numeric_literal(rhs);
                 if !l_ok || !r_ok || mismatch {
                     self.emit_e1002(
                         span,
@@ -2963,7 +2987,9 @@ impl<'a> Collector<'a> {
                 let r_ok = matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
                 let mismatch = lk != OpKind::Unknown
                     && rk != OpKind::Unknown
-                    && lk.is_numeric() != rk.is_numeric();
+                    && (lk.is_numeric() != rk.is_numeric() || lk != rk)
+                    && !self.is_numeric_literal(lhs)
+                    && !self.is_numeric_literal(rhs);
                 if !l_ok || !r_ok || mismatch {
                     self.emit_e1002(
                         span,
@@ -2986,6 +3012,11 @@ impl<'a> Collector<'a> {
                 };
                 if !matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float)
+                    || (lk != OpKind::Unknown
+                        && rk != OpKind::Unknown
+                        && lk != rk
+                        && !self.is_numeric_literal(lhs)
+                        && !self.is_numeric_literal(rhs))
                 {
                     self.emit_e1002(
                         span,
