@@ -22,10 +22,12 @@ down.
 
 Both classes have occurred on `main` for real.
 
-For markers, only a real conflict BLOCK counts: a `<<<<<<<` line followed
-later by a `>>>>>>>` line. A lone `=======` on its own is NOT reported,
-because a setext heading underline or a horizontal rule is legitimate
-Markdown and this repository uses them.
+For markers, a conflict block starts with at least seven `<` characters
+and ends with at least seven `>` characters. Git permits wider markers via
+`conflict-marker-size` or `git merge-file --marker-size`. An unterminated
+start is also reported. A lone `=======` on its own is NOT reported, because
+a setext heading underline or a horizontal rule is legitimate Markdown and
+this repository uses them.
 
 Stdlib only. Exit codes: 0 = clean, 1 = problems found, 2 = misuse.
 """
@@ -34,8 +36,8 @@ import os
 import re
 import sys
 
-START_RE = re.compile(r"^<<<<<<<(\s|$)")
-END_RE = re.compile(r"^>>>>>>>(\s|$)")
+START_RE = re.compile(r"^<{7,}(\s|$)")
+END_RE = re.compile(r"^>{7,}(\s|$)")
 
 # Directories that are never tracked content.
 SKIP_DIRS = {".git", "target", "node_modules", ".venv", "__pycache__"}

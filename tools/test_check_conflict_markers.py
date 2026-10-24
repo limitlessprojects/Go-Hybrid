@@ -2,6 +2,7 @@
 import importlib.util
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -44,6 +45,31 @@ class MarkerDetectionTests(unittest.TestCase):
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0][1], 2)
 
+    def test_unterminated_wider_start_is_still_reported(self):
+        root = self._tree({"x.md": "a\n<<<<<<<<<< HEAD\nb\n"})
+        hits = list(MOD.scan(str(root)))
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0][1], 2)
+
+    def test_wider_markers_without_labels_are_found(self):
+        root = self._tree({"x.md": "<<<<<<<<<<\na\n==========\nb\n>>>>>>>>>>\n"})
+        hits = list(MOD.scan(str(root)))
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0][1], 1)
+
+    def test_wider_marker_lookalikes_and_separators_are_clean(self):
+        for content in (
+            "Heading\n==========\n",
+            ">>>>>>>>>> main\n",
+            "    <<<<<<<<<< HEAD\n    >>>>>>>>>> main\n",
+            "<<<<<<<<<<not-a-marker\n>>>>>>>>>>not-a-marker\n",
+            "<< value\n>> value\n",
+            "<<<<<< HEAD\n>>>>>> main\n",
+        ):
+            with self.subTest(content=content):
+                root = self._tree({"x.md": content})
+                self.assertEqual(list(MOD.scan(str(root))), [])
+
     def test_lone_end_marker_is_not_reported(self):
         root = self._tree({"x.md": "a\n>>>>>>> main\n"})
         self.assertEqual(list(MOD.scan(str(root))), [])
@@ -63,6 +89,14 @@ class MarkerDetectionTests(unittest.TestCase):
         })
         hits = list(MOD.scan(str(root)))
         self.assertEqual(sorted(h[1] for h in hits), [1, 5])
+
+    def test_two_wider_blocks_are_both_found(self):
+        root = self._tree({
+            "x.md": "<<<<<<<<<< a\n1\n>>>>>>>>>> b\nok\n"
+                    "<<<<<<<< c\n2\n>>>>>>>> d\n",
+        })
+        hits = list(MOD.scan(str(root)))
+        self.assertEqual([h[1] for h in hits], [1, 5])
 
     def test_unknown_extension_is_skipped(self):
         root = self._tree({"weird.xyz": "<<<<<<< HEAD\n>>>>>>> main\n"})
@@ -192,6 +226,29 @@ class CliTests(unittest.TestCase):
             self.assertEqual(res.returncode, 1)
             self.assertIn("broken.yml", res.stderr)
             self.assertIn("conflict marker", res.stderr.lower())
+
+    @unittest.skipUnless(shutil.which("git"), "git is needed to produce real conflict markers")
+    def test_git_generated_conflicts_with_wider_markers_are_rejected(self):
+        for style in ("merge", "diff3", "zdiff3"):
+            for width in (7, 8, 10, 32):
+                with self.subTest(style=style, width=width), tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    for name in ("ours", "base", "theirs"):
+                        (root / name).write_text(f"{name}\n", encoding="utf-8")
+                    command = [
+                        "git", "-c", f"merge.conflictStyle={style}", "merge-file",
+                        "-p", f"--marker-size={width}",
+                        "-L", "ours", "-L", "base", "-L", "theirs",
+                        "ours", "base", "theirs",
+                    ]
+                    merged = subprocess.run(command, cwd=root, capture_output=True,
+                                            text=True, timeout=10)
+                    self.assertEqual(merged.returncode, 1, merged.stderr)
+                    (root / "README.md").write_text(merged.stdout, encoding="utf-8")
+                    result = self._run(root)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertIn("README.md:1:", result.stderr)
+                    self.assertIn("conflict markers: 1 block(s)", result.stderr)
 
     def test_missing_root_is_usage_error(self):
         res = subprocess.run(

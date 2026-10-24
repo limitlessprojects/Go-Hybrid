@@ -1,5 +1,7 @@
 # Hybrid Language: Development Plan
 
+- Contributor queue-reset revalidation (2026-10-24, replaces closed #1383): current main `1f0ff978` still misses Git conflict markers wider than seven characters (12 failing regression subcases). Preserve the original width fix and real-Git merge/diff3/zdiff3 CLI regression; all 30 marker tests pass, including lookalikes and lone-separator controls. Upstream CI remains required.
+
 - Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15
