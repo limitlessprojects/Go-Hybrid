@@ -2,8 +2,10 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import shlex
+import shutil
 import sys
 import tempfile
 import unittest
@@ -16,6 +18,7 @@ job_tool = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(job_tool)
 
 
+@unittest.skipUnless(shutil.which("sh") or os.path.exists("/bin/sh"), "requires /bin/sh")
 class KaggleShellArgumentTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="hybrid-cli-args-")
@@ -124,6 +127,69 @@ class KaggleShellArgumentTests(unittest.TestCase):
              contextlib.redirect_stdout(io.StringIO()):
             job_tool.kaggle_status()
         self.assertEqual(self.calls(), [["kernels", "status", "owner/kernel"]])
+
+
+class WorkerScriptTests(unittest.TestCase):
+    """Regression tests for worker/script.py (#1101: clone/checkout pipe and quote)."""
+
+    def test_worker_script_does_not_mask_git_clone_exit_with_tail_pipe(self):
+        src = (ROOT / "worker/script.py").read_text(encoding="utf-8")
+        self.assertNotIn("| tail -2", src)
+        self.assertIn("shlex.quote(repo)", src)
+        self.assertIn("shlex.quote(sha)", src)
+        self.assertIn("curl -fsSL", src)
+
+    def test_worker_script_clone_checkout_fallback_flow(self):
+        def simulate_run(job, sh_results):
+            calls = []
+
+            def fake_sh(cmd, timeout):
+                calls.append((cmd, timeout))
+                for pattern, res in sh_results.items():
+                    if pattern in cmd:
+                        return res
+                return (0, "")
+
+            repo = job.get("repo", "https://github.com/limitlessprojects/Go-Hybrid.git")
+            sha = job.get("sha", "HEAD")
+            rc, _ = fake_sh("git clone --quiet {} repo 2>&1".format(shlex.quote(repo)), 300)
+            if rc == 0:
+                rc, _ = fake_sh("cd repo && git checkout --quiet {} 2>&1".format(shlex.quote(sha)), 60)
+            if rc != 0:
+                rc, _ = fake_sh(
+                    "rm -rf repo && mkdir repo && curl -fsSL --max-time 240 https://codeload.github.com/limitlessprojects/Go-Hybrid/tar.gz/{} | tar xz --strip-components=1 -C repo".format(
+                        shlex.quote(sha)
+                    ),
+                    300,
+                )
+            return rc, calls
+
+        # 1. clone fails -> triggers fallback
+        rc, calls = simulate_run(
+            {"repo": "https://example.com/repo.git", "sha": "v1.0"},
+            {"git clone": (1, "clone err")},
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertIn("git clone", calls[0][0])
+        self.assertIn("curl -fsSL", calls[1][0])
+
+        # 2. clone ok, checkout fails -> triggers fallback
+        rc, calls = simulate_run(
+            {"repo": "https://example.com/repo.git", "sha": "v1.0"},
+            {"git checkout": (1, "checkout err")},
+        )
+        self.assertEqual(len(calls), 3)
+        self.assertIn("git clone", calls[0][0])
+        self.assertIn("git checkout", calls[1][0])
+        self.assertIn("curl -fsSL", calls[2][0])
+
+        # 3. clone ok, checkout ok -> no fallback
+        rc, calls = simulate_run(
+            {"repo": "https://example.com/repo.git", "sha": "v1.0"},
+            {},
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(rc, 0)
 
 
 if __name__ == "__main__":
