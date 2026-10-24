@@ -196,6 +196,15 @@ class ManagedGateTests(unittest.TestCase):
             {'summary': {'managed': {'managed_blocks': 1, 'blocks': [None]}}},
             {'summary': {'managed': {'managed_blocks': 1,
                                       'blocks': [{'category': []}]}}},
+            {'summary': {'managed': {'managed_blocks': 1,
+                                      'blocks': [{'category': 'other'}]}}
+            },
+            {'summary': {'managed': {'managed_blocks': 1,
+                                      'blocks': [{'category': 'other', 'reason': 123}]}}
+            },
+            {'summary': {'managed': {'managed_blocks': 1,
+                                      'blocks': [{'category': 'other', 'reason': 'ok', 'tickets': 'bad'}]}}
+            },
         ]
         with tempfile.TemporaryDirectory() as directory:
             prog = pathlib.Path(directory) / 'test.hy'
@@ -317,6 +326,87 @@ class ManagedGateTests(unittest.TestCase):
                             self.assertEqual(baseline.read_bytes(), original)
                         self.assertIn('rebaseline:' if rebaseline else 'managed gate: PASS',
                                       output.getvalue())
+
+    def test_fn_method_member_and_non_block_calls_do_not_spoof_managed_lines(self):
+        src = '\n'.join([
+            'fn managed(x int) {',
+            '}',
+            'fn (r *Repo) managed(x int) {',
+            '}',
+            'fn main() {',
+            '  obj.managed("member", "other")',
+            '  obj .',
+            '    managed("multiline member", "other")',
+            '  x := managed(1, 2)',
+            '  if managed(x) {',
+            '  }',
+            '  managed("real_hatch", "other") {',
+            '  }',
+            '}',
+        ])
+        self.assertEqual(gate.scan_managed_lines(src), [12])
+        found = self.audit(src, [block('real_hatch')])
+        self.assertEqual([key.rsplit(':', 1)[1] for key in found], ['12'])
+
+    def test_normalized_prog_paths_match_baseline_and_rebaseline_scope(self):
+        with tempfile.TemporaryDirectory() as directory:
+            old_cwd = os.getcwd()
+            os.chdir(directory)
+            try:
+                Path('a.hy').write_text('managed("ok", "other") {}\n', encoding='utf-8')
+                baseline = Path('baseline.json')
+                baseline.write_text(
+                    json.dumps({'version': 1, 'blocks': {'a.hy:1': block('ok')}}),
+                    encoding='utf-8',
+                )
+                report_one = subprocess.CompletedProcess(
+                    [], 0,
+                    json.dumps({'summary': {'managed': {'managed_blocks': 1, 'blocks': [block('ok')]}}}),
+                    '',
+                )
+                out = io.StringIO()
+                with patch.object(gate.sys, 'argv', ['managed_gate.py', 'hyb', 'baseline.json', './a.hy', 'a.hy']), \
+                     patch.object(gate.subprocess, 'run', return_value=report_one) as run_mock, \
+                     contextlib.redirect_stdout(out):
+                    gate.main()
+                self.assertEqual(run_mock.call_count, 1)
+                self.assertIn('managed gate: PASS', out.getvalue())
+
+                Path('a.hy').write_text('fn main() {}\n', encoding='utf-8')
+                report_zero = subprocess.CompletedProcess(
+                    [], 0,
+                    json.dumps({'summary': {'managed': {'managed_blocks': 0, 'blocks': []}}}),
+                    '',
+                )
+                out_reb = io.StringIO()
+                with patch.object(gate.sys, 'argv', ['managed_gate.py', '--rebaseline', 'hyb', 'baseline.json', './a.hy']), \
+                     patch.object(gate.subprocess, 'run', return_value=report_zero), \
+                     contextlib.redirect_stdout(out_reb):
+                    gate.main()
+                self.assertEqual(json.loads(baseline.read_text(encoding='utf-8'))['blocks'], {})
+            finally:
+                os.chdir(old_cwd)
+
+    def test_invalid_baseline_version_keys_and_entries_fail_closed(self):
+        bad_baselines = [
+            ({'blocks': {}}, 'baseline version must be 1'),
+            ({'version': 2, 'blocks': {}}, 'baseline version must be 1'),
+            ({'version': '1', 'blocks': {}}, 'baseline version must be 1'),
+            ({'version': True, 'blocks': {}}, 'baseline version must be 1'),
+            ({'version': 1, 'blocks': {'no_colon': block('x')}}, 'invalid baseline block key'),
+            ({'version': 1, 'blocks': {':1': block('x')}}, 'invalid baseline block key'),
+            ({'version': 1, 'blocks': {'./:1': block('x')}}, 'invalid baseline block key'),
+            ({'version': 1, 'blocks': {'a.hy:abc': block('x')}}, 'invalid baseline block key'),
+            ({'version': 1, 'blocks': {'a.hy:-1': block('x')}}, 'invalid baseline block key'),
+            ({'version': 1, 'blocks': {'a.hy:1': 'not-an-object'}}, 'invalid baseline block entry'),
+            ({'version': 1, 'blocks': {'a.hy:1': {'category': 'other'}}}, 'invalid baseline block entry'),
+            ({'version': 1, 'blocks': {'a.hy:1': {'reason': 123, 'category': 'other'}}}, 'invalid baseline block entry'),
+            ({'version': 1, 'blocks': {'a.hy:1': {'reason': 'ok', 'category': 'bogus'}}}, 'invalid baseline block category'),
+            ({'version': 1, 'blocks': {'a.hy:1': {'reason': 'ok', 'category': 'other', 'tickets': [123]}}}, 'invalid baseline block tickets'),
+        ]
+        for payload, diag in bad_baselines:
+            with self.subTest(payload=payload):
+                self.assert_invalid_baseline(json.dumps(payload).encode('utf-8'), diag)
 
 
 class AtomicBaselineTests(unittest.TestCase):
