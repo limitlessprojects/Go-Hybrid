@@ -1,4 +1,7 @@
 """Unit tests for tools/runner/runner.py commit PIN SHA validation (Issue #72)."""
+import contextlib
+import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -6,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 class TestRunnerShaValidation(unittest.TestCase):
@@ -323,6 +327,73 @@ class TestRunnerShaValidation(unittest.TestCase):
             self.assertFalse(summary["ok"])
             self.assertEqual([s["name"] for s in summary["steps"]], ["sha-check"])
             self.assertEqual(summary["steps"][0]["exit"], 1)
+
+
+class TestRunnerGitEnvironment(unittest.TestCase):
+    def test_pin_uses_selected_checkout_with_foreign_git_environment(self):
+        runner_path = Path(__file__).resolve().parent / "runner" / "runner.py"
+        spec = importlib.util.spec_from_file_location("runner_git_environment", runner_path)
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        with tempfile.TemporaryDirectory(prefix="runner-git-environment-") as td:
+            root = Path(td)
+            clean_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+            def git(repo, *args):
+                return subprocess.check_output(
+                    ["git", "-C", str(repo), *args], env=clean_env,
+                    text=True, stderr=subprocess.PIPE,
+                ).strip()
+
+            repos = [root / "selected", root / "foreign"]
+            for repo in repos:
+                repo.mkdir()
+                git(repo, "init", "-q", "-b", "main")
+                (repo / "source").write_text(repo.name, encoding="utf-8")
+                git(repo, "add", "source")
+                git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                    "commit", "-qm", repo.name)
+            selected, foreign = repos
+            selected_sha, foreign_sha = (git(repo, "rev-parse", "HEAD") for repo in repos)
+            linked = root / "linked"
+            git(selected, "worktree", "add", "--detach", str(linked), selected_sha)
+            for checkout in (selected, linked):
+                for overrides in (
+                    {"GIT_DIR": str(foreign / ".git")},
+                    {"GIT_COMMON_DIR": str(foreign / ".git")},
+                    {"GIT_DIR": str(foreign / ".git"), "GIT_WORK_TREE": str(foreign)},
+                ):
+                    for want, expected_code in ((selected_sha, 0), (foreign_sha, 1)):
+                        with self.subTest(checkout=checkout.name, variables=tuple(overrides),
+                                          matching=want == selected_sha):
+                            results = root / "results"
+                            marker = root / "executed-source"
+                            marker.unlink(missing_ok=True)
+                            job = root / "job.json"
+                            job.write_text(json.dumps({
+                                "job": "git-environment", "sha": want,
+                                "commands": [{"name": "read-source", "run": [
+                                    sys.executable, "-c",
+                                    "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text("
+                                    "pathlib.Path('source').read_text())", str(marker)], "cwd": "repo"}],
+                            }), encoding="utf-8")
+                            argv = [str(runner_path), str(job), "--repo-dir", str(checkout),
+                                    "--results-dir", str(results)]
+                            with patch.object(sys, "argv", argv), \
+                                    patch.dict(os.environ, {**clean_env, **overrides}, clear=True), \
+                                    patch.object(runner, "env_report", return_value={}), \
+                                    contextlib.redirect_stdout(io.StringIO()):
+                                with self.assertRaises(SystemExit) as stopped:
+                                    runner.main()
+                            summary = json.loads((results / "summary.json").read_text())
+                            self.assertEqual(stopped.exception.code, expected_code, summary)
+                            self.assertEqual(summary["ok"], expected_code == 0)
+                            if expected_code:
+                                self.assertFalse(marker.exists())
+                                self.assertEqual([s["name"] for s in summary["steps"]], ["sha-check"])
+                            else:
+                                self.assertEqual(marker.read_text(), "selected")
+                                self.assertIn(selected_sha, summary["steps"][0]["out_tail"])
 
 
 if __name__ == "__main__":

@@ -204,6 +204,11 @@ def main():
     # an enclosing parent repository.
     if os.path.lexists(os.path.join(repo_dir, ".git")):
         sha_env = dict(os.environ, GIT_CEILING_DIRECTORIES=os.path.dirname(repo_dir))
+        # Git automation may export selectors for a different repository.
+        # Verify the checkout in repo_dir, including its own gitfile links;
+        # keep the caller's environment unchanged for the actual job commands.
+        for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+            sha_env.pop(key, None)
         code, _, out = run_cmd(["git", "rev-parse", "HEAD"], 10, cwd=repo_dir, env=sha_env)
         at = out.strip()
         if code != 0:
