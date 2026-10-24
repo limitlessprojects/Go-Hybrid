@@ -175,6 +175,41 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
     }
 }
 
+/// #1031 — the exact Go spelling of a predeclared numeric type, after the
+/// emitter's SPEC→Go primitive mapping (`shapes::go_primitive_name`) and Go's
+/// own identities (`byte` = `uint8`, `rune` = `int32`).
+///
+/// `OpKind` collapses every integer width into `Int` and both float widths
+/// into `Float`, and `kinds_conflict` must allow `(Float, Int)` because an
+/// untyped int constant is assignable to a float result. A TYPED numeric
+/// value falls through exactly that gap: `n := 3; return n` from
+/// `fn f() float64`, or an `int` param returned from `fn f() int64`, passes
+/// the kind check and then fails `go build` with `cannot use n (variable of
+/// type int) as float64 value in return statement`. This name lets the return
+/// check compare exact types when — and only when — both sides are provably
+/// typed.
+///
+/// `None` for anything that is not a predeclared numeric spelling, and for
+/// `usize`/`isize`/`char`, which have no fixed Go spelling (fail-open).
+fn canonical_numeric_name(name: &str) -> Option<&'static str> {
+    Some(match name.trim() {
+        "int" => "int",
+        "int8" | "i8" => "int8",
+        "int16" | "i16" => "int16",
+        "int32" | "i32" | "rune" => "int32",
+        "int64" | "i64" => "int64",
+        "uint" => "uint",
+        "uint8" | "u8" | "byte" => "uint8",
+        "uint16" | "u16" => "uint16",
+        "uint32" | "u32" => "uint32",
+        "uint64" | "u64" => "uint64",
+        "uintptr" => "uintptr",
+        "float32" | "f32" => "float32",
+        "float64" | "f64" => "float64",
+        _ => return None,
+    })
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -373,6 +408,16 @@ struct Collector<'a> {
     /// (`return v` in a `(value, error)` fn emits `return v, nil`, the E3
     /// sugar; corpus 13).
     fn_results_error_tail: bool,
+    /// #1031 — parallel scope stack: the exact predeclared numeric type of a
+    /// binding when it is provably TYPED (a typed param/result/declaration, or
+    /// a `:=` whose initializer gives it Go's default type). Every binding
+    /// site goes through `bind_kind`, which records `None` first, so an
+    /// unclassified inner binding never inherits an outer binding's type.
+    scalar_scopes: Vec<HashMap<String, Option<&'static str>>>,
+    /// #1031 — exact predeclared numeric type of each result of the enclosing
+    /// signature (`None` = not a predeclared numeric spelling). Swapped
+    /// together with `fn_results`.
+    fn_result_scalars: Vec<Option<&'static str>>,
     /// Lexical nesting depth within loops (`for` / `loop`).
     loop_depth: usize,
     /// Lexical nesting depth within `select` statements.
@@ -398,6 +443,8 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             fn_results: Vec::new(),
             fn_results_all_named: false,
             fn_results_error_tail: false,
+            scalar_scopes: Vec::new(),
+            fn_result_scalars: Vec::new(),
             loop_depth: 0,
             select_depth: 0,
             defines: Vec::new(),
@@ -451,11 +498,13 @@ impl<'a> Collector<'a> {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.kind_scopes.push(HashMap::new());
+        self.scalar_scopes.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.kind_scopes.pop();
+        self.scalar_scopes.pop();
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -472,7 +521,181 @@ impl<'a> Collector<'a> {
             if let Some(top) = self.kind_scopes.last_mut() {
                 top.insert(name.to_string(), kind);
             }
+            // #1031: every binding shadows an outer exact numeric type until
+            // `set_scalar` proves otherwise.
+            if let Some(top) = self.scalar_scopes.last_mut() {
+                top.insert(name.to_string(), None);
+            }
         }
+    }
+
+    /// #1031 — record the exact numeric type of a binding that `bind_kind`
+    /// just made in the current scope.
+    fn set_scalar(&mut self, name: &str, scalar: Option<&'static str>) {
+        if name != "_" {
+            if let Some(top) = self.scalar_scopes.last_mut() {
+                top.insert(name.to_string(), scalar);
+            }
+        }
+    }
+
+    /// #1031 — the exact numeric type of a binding, if provably typed. A name
+    /// that is not a binding (e.g. a file-level const, which may be untyped)
+    /// stays `None`.
+    fn lookup_scalar(&self, name: &str) -> Option<&'static str> {
+        for layer in self.scalar_scopes.iter().rev() {
+            if let Some(s) = layer.get(name) {
+                return *s;
+            }
+        }
+        None
+    }
+
+    /// #1031 — the exact predeclared numeric spelling of a type expression.
+    /// A user-declared struct/enum/alias of that name is not the predeclared
+    /// type, so it fails open.
+    fn scalar_of_ty(&self, ty: &TypeExpr) -> Option<&'static str> {
+        let TypeExpr::Named { name, .. } = ty else {
+            return None;
+        };
+        if self.ck.structs.contains_key(name.as_str())
+            || self.ck.enums.contains_key(name.as_str())
+            || self.ck.type_aliases.contains_key(name.as_str())
+        {
+            return None;
+        }
+        canonical_numeric_name(name)
+    }
+
+    /// #1031 — exact result types of a call whose callee is provably known:
+    /// a non-generic top-level function, or a predeclared numeric conversion
+    /// `T(x)`. A local binding of the callee name shadows both (fail-open).
+    fn call_result_scalars(
+        &self,
+        callee: &Expr,
+        args: &[CallArg],
+    ) -> Option<Vec<Option<&'static str>>> {
+        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+            return None;
+        };
+        if self
+            .scopes
+            .iter()
+            .any(|layer| layer.contains_key(name.as_str()))
+        {
+            return None;
+        }
+        if let Some(fd) = self.ck.fns.get(name.as_str()) {
+            if fd.receiver.is_some() || !fd.type_params.is_empty() {
+                return None;
+            }
+            return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+        }
+        if args.len() == 1
+            && !self.ck.structs.contains_key(name.as_str())
+            && !self.ck.enums.contains_key(name.as_str())
+            && !self.ck.type_aliases.contains_key(name.as_str())
+        {
+            if let Some(s) = canonical_numeric_name(name) {
+                return Some(vec![Some(s)]);
+            }
+        }
+        None
+    }
+
+    /// #1031 — the exact numeric type of a value that is provably TYPED.
+    /// Literals are untyped constants (assignable to any numeric type), so
+    /// they are deliberately `None` here.
+    fn typed_value_scalar(&self, e: &Expr) -> Option<&'static str> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.lookup_scalar(name),
+            // Typed arithmetic keeps its operand type: in any program that
+            // builds, both operands share one type or one is an untyped
+            // constant, so the typed side names the result type. A shift's
+            // result takes the type of its left operand alone.
+            Expr::Binary { op, lhs, rhs, .. } => match op {
+                BinOp::Add
+                | BinOp::Sub
+                | BinOp::Mul
+                | BinOp::Div
+                | BinOp::Mod
+                | BinOp::BitOr
+                | BinOp::BitXor
+                | BinOp::BitAnd => self
+                    .typed_value_scalar(lhs)
+                    .or_else(|| self.typed_value_scalar(rhs)),
+                BinOp::Shl | BinOp::Shr => self.typed_value_scalar(lhs),
+                _ => None,
+            },
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => self.typed_value_scalar(operand),
+            Expr::Call { callee, args, .. } => match self.call_result_scalars(callee, args) {
+                Some(rs) if rs.len() == 1 => rs[0],
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// #1031 — the type a `x := v` / `var x = v` binding takes from its
+    /// initializer: Go's default type for an untyped numeric literal (`int`,
+    /// `float64`), or the initializer's own type when it is typed.
+    fn initializer_scalar(&self, e: &Expr) -> Option<&'static str> {
+        match unwrap_parens(e) {
+            Expr::Lit {
+                kind: LitKind::Int(_),
+                ..
+            } => Some("int"),
+            Expr::Lit {
+                kind: LitKind::Float(_),
+                ..
+            } => Some("float64"),
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => match unwrap_parens(operand) {
+                Expr::Lit {
+                    kind: LitKind::Int(_),
+                    ..
+                } => Some("int"),
+                Expr::Lit {
+                    kind: LitKind::Float(_),
+                    ..
+                } => Some("float64"),
+                _ => self.typed_value_scalar(operand),
+            },
+            other => self.typed_value_scalar(other),
+        }
+    }
+
+    /// #1031 — exact numeric types for the names of a local declaration.
+    fn infer_local_scalars(&self, l: &LocalDecl) -> Vec<Option<&'static str>> {
+        let n = l.names.len();
+        if let Some(ty) = &l.ty {
+            return vec![self.scalar_of_ty(ty); n];
+        }
+        // An untyped `const c = 3` stays an untyped constant: assignable to
+        // any numeric result, so it must not be pinned to `int`.
+        if l.kind == LocalKind::Const {
+            return vec![None; n];
+        }
+        if n == l.values.len() {
+            return l.values.iter().map(|v| self.initializer_scalar(v)).collect();
+        }
+        if n >= 2 && l.values.len() == 1 {
+            if let Expr::Call { callee, args, .. } = unwrap_parens(&l.values[0]) {
+                if let Some(rs) = self.call_result_scalars(callee, args) {
+                    if rs.len() == n {
+                        return rs;
+                    }
+                }
+            }
+        }
+        vec![None; n]
     }
 
     fn lookup_kind(&self, name: &str) -> Option<OpKind> {
@@ -735,12 +958,16 @@ impl<'a> Collector<'a> {
             self.exempt(&p.name);
             let pk = self.kind_of_ty(&p.ty, 0);
             self.bind_kind(&p.name, pk);
+            let ps = self.scalar_of_ty(&p.ty);
+            self.set_scalar(&p.name, ps);
         }
         for r in &f.results {
             if let Some(rname) = &r.name {
                 self.exempt(rname);
                 let rk = self.kind_of_ty(&r.ty, 0);
                 self.bind_kind(rname, rk);
+                let rs = self.scalar_of_ty(&r.ty);
+                self.set_scalar(rname, rs);
             }
         }
         for r in &f.results {
@@ -748,6 +975,9 @@ impl<'a> Collector<'a> {
                 self.exempt(name);
             }
         }
+        let result_scalars: Vec<Option<&'static str>> =
+            f.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+        let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
@@ -759,6 +989,7 @@ impl<'a> Collector<'a> {
         self.fn_results = outer;
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
+        self.fn_result_scalars = outer_scalars;
         self.pop_scope();
     }
 
@@ -884,8 +1115,19 @@ impl<'a> Collector<'a> {
         // tracking; #430's operand-kind inference runs for EVERY name so
         // `kind_of_expr` resolves binding-shaped operands (issue #425).
         let kinds = self.infer_local_kinds(l);
-        for (name, kind) in l.names.iter().zip(kinds) {
+        let scalars = self.infer_local_scalars(l);
+        for ((name, kind), scalar) in l.names.iter().zip(kinds).zip(scalars) {
+            // #1031: a same-scope `:=` re-define keeps the EXISTING variable
+            // (and its type) in Go, so only a fresh binding takes the
+            // initializer's type; a re-define becomes unknown (fail-open).
+            let fresh = !self
+                .scalar_scopes
+                .last()
+                .is_some_and(|top| top.contains_key(name.as_str()));
             self.bind_kind(name, kind);
+            if fresh || l.ty.is_some() {
+                self.set_scalar(name, scalar);
+            }
             if !track_read {
                 self.exempt(name);
                 continue;
@@ -1457,12 +1699,16 @@ impl<'a> Collector<'a> {
                     self.exempt(&p.name);
                     let pk = self.kind_of_ty(&p.ty, 0);
                     self.bind_kind(&p.name, pk);
+                    let ps = self.scalar_of_ty(&p.ty);
+                    self.set_scalar(&p.name, ps);
                 }
                 for r in results {
                     if let Some(rname) = &r.name {
                         self.exempt(rname);
                         let rk = self.kind_of_ty(&r.ty, 0);
                         self.bind_kind(rname, rk);
+                        let rs = self.scalar_of_ty(&r.ty);
+                        self.set_scalar(rname, rs);
                     }
                 }
                 for r in results {
@@ -1480,6 +1726,9 @@ impl<'a> Collector<'a> {
                     results.last().map(|r| &r.ty),
                     Some(TypeExpr::Named { name, .. }) if name == "error"
                 );
+                let result_scalars: Vec<Option<&'static str>> =
+                    results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+                let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
                 let outer = std::mem::replace(&mut self.fn_results, result_kinds);
                 let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
                 let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
@@ -1491,6 +1740,7 @@ impl<'a> Collector<'a> {
                 self.fn_results = outer;
                 self.fn_results_all_named = outer_named;
                 self.fn_results_error_tail = outer_err;
+                self.fn_result_scalars = outer_scalars;
                 self.pop_scope();
             }
             Expr::Paren { inner, .. } => self.expr(inner),
@@ -2523,9 +2773,12 @@ impl<'a> Collector<'a> {
         if values.len() == 1 {
             if let Expr::Call { callee, args, .. } = unwrap_parens(&values[0]) {
                 if let Some(res) = self.call_result_kinds(callee, args) {
+                    let res_scalars = self.call_result_scalars(callee, args);
                     if res.len() == want.len() {
-                        for (r, w) in res.iter().zip(want.iter()) {
+                        for (i, (r, w)) in res.iter().zip(want.iter()).enumerate() {
                             self.report_return_conflict(r, w, values[0].span());
+                            let got_s = res_scalars.as_ref().and_then(|rs| rs.get(i).copied().flatten());
+                            self.report_numeric_return_mismatch(got_s, r, i, values[0].span());
                         }
                         return;
                     }
@@ -2533,8 +2786,10 @@ impl<'a> Collector<'a> {
                         && self.fn_results_error_tail
                         && res.len() + 1 == want.len()
                     {
-                        for (r, w) in res.iter().zip(want.iter()) {
+                        for (i, (r, w)) in res.iter().zip(want.iter()).enumerate() {
                             self.report_return_conflict(r, w, values[0].span());
+                            let got_s = res_scalars.as_ref().and_then(|rs| rs.get(i).copied().flatten());
+                            self.report_numeric_return_mismatch(got_s, r, i, values[0].span());
                         }
                         return;
                     }
@@ -2579,9 +2834,11 @@ impl<'a> Collector<'a> {
             let short_ok = nv < nw
                 && ((nv == 0 && self.fn_results_all_named) || self.fn_results_error_tail);
             if short_ok {
-                for (v, w) in values.iter().zip(want.iter()) {
+                for (i, (v, w)) in values.iter().zip(want.iter()).enumerate() {
                     let got = self.kind_of_expr(v);
                     self.report_return_conflict(&got, w, v.span());
+                    let got_s = self.typed_value_scalar(v);
+                    self.report_numeric_return_mismatch(got_s, &got, i, v.span());
                 }
                 return;
             }
@@ -2607,10 +2864,47 @@ impl<'a> Collector<'a> {
             );
             return;
         }
-        for (v, w) in values.iter().zip(want.iter()) {
+        for (i, (v, w)) in values.iter().zip(want.iter()).enumerate() {
             let got = self.kind_of_expr(v);
             self.report_return_conflict(&got, w, v.span());
+            let got_s = self.typed_value_scalar(v);
+            self.report_numeric_return_mismatch(got_s, &got, i, v.span());
         }
+    }
+
+    /// #1031 — a TYPED numeric value returned into a result of a different
+    /// numeric type (`int` → `float64`, `int` → `int64`, `float32` →
+    /// `float64`, ...). `kinds_conflict` cannot see these: `OpKind` collapses
+    /// the widths, and `(Float, Int)` must stay legal for untyped constants.
+    /// Go has no implicit numeric conversion for typed values, so the emitted
+    /// `return` fails `go build`. Fires only when both exact types are known
+    /// and the kind check has not already reported this value.
+    fn report_numeric_return_mismatch(
+        &mut self,
+        got: Option<&'static str>,
+        got_kind: &OpKind,
+        idx: usize,
+        span: Span,
+    ) {
+        let Some(got) = got else { return };
+        let Some(want) = self.fn_result_scalars.get(idx).copied().flatten() else {
+            return;
+        };
+        if got == want {
+            return;
+        }
+        if let Some(want_kind) = self.fn_results.get(idx) {
+            if kinds_conflict(want_kind, got_kind) {
+                return;
+            }
+        }
+        self.emit_e1002(
+            span,
+            format!(
+                "cannot return a value of type `{got}` from a function declaring `{want}` — Go refuses `cannot use ... (variable of type {got}) as {want} value in return statement` (HYB-E1002)"
+            ),
+            "Go has no implicit conversion between typed numeric values; write an explicit conversion (`float64(n)`) when a conversion is intended",
+        );
     }
 
     fn report_return_conflict(&mut self, got: &OpKind, want: &OpKind, span: Span) {
