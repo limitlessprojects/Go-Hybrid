@@ -24,6 +24,7 @@ Stdlib only. Token: --token-file, $GITHUB_TOKEN, or /home/z/my-project/.gh_token
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -202,7 +203,20 @@ def collect(cfg, gh, args):
             if 0 < behind_by <= overlap_window and merge_base:
                 cmp2 = gh.get("/repos/%s/compare/%s...%s?per_page=250" % (gh.repo, merge_base, main_sha))
                 main_paths = {f["filename"] for f in (cmp2 or {}).get("files", [])}
-                overlap_paths = pset & main_paths
+        # Per-file changed line spans, parsed from the patch we already
+        # fetched (no extra API calls). Used to tell a real duplicate
+        # from two PRs that merely edit the same file (#979).
+        hunk_spans = {}
+        for f in files:
+            spans = []
+            for m in re.finditer(
+                r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", f.get("patch") or "", re.M
+            ):
+                start = int(m.group(1))
+                count = int(m.group(2)) if m.group(2) is not None else 1
+                spans.append((start, start + max(count, 1)))
+            hunk_spans[f["filename"]] = spans
+
         return {
             "number": n,
             "title": pr["title"][:90],
@@ -224,6 +238,7 @@ def collect(cfg, gh, args):
             "tests_included": any(
                 "tests/" in p or "/corpus" in p or p.endswith("_reject.hy") or p.endswith("_accept.hy")
                 for p in paths),
+            "hunk_spans": hunk_spans,
         }
 
     items = []
@@ -260,6 +275,33 @@ def classify(cfg, items):
         return x
 
     sets = [set(i["paths_sample"]) for i in items]  # sample keeps it cheap; sample=12 paths
+    spans = [i.get("hunk_spans") or {} for i in items]
+
+    def shares_changed_lines(a, b):
+        """True when the two change-sets touch at least one identical line.
+
+        File overlap alone is not evidence of a duplicate: nearly every
+        PR here touches one crate source file plus that crate's
+        tests.rs, so two two-file PRs score Jaccard 1.0 on paths while
+        editing unrelated code (#608 edits stmt.rs:1034, #786 edits
+        stmt.rs:1773). Requiring one shared *line* keeps real duplicates
+        and drops shape-only pairs. Falls back to the path test when a
+        patch is unavailable, so a missing patch can never hide a real
+        duplicate (#979).
+        """
+        sa, sb = spans[a], spans[b]
+        if not sa or not sb:
+            return True
+        for path, ra in sa.items():
+            rb = sb.get(path)
+            if not rb:
+                continue
+            for lo1, hi1 in ra:
+                for lo2, hi2 in rb:
+                    if min(hi1, hi2) > max(lo1, lo2):
+                        return True
+        return False
+
     for a in range(len(items)):
         for b in range(a + 1, len(items)):
             if not sets[a] or not sets[b]:
@@ -267,14 +309,18 @@ def classify(cfg, items):
             inter = len(sets[a] & sets[b])
             union = len(sets[a] | sets[b])
             if union and inter / union >= cfg["dup_jaccard"]:
-                parent[find(a)] = find(b)
+                if shares_changed_lines(a, b):
+                    parent[find(a)] = find(b)
     clusters = {}
     for i, it in enumerate(items):
         clusters.setdefault(find(i), []).append(it)
     for members in clusters.values():
         if len(members) < 2:
             continue
-        members.sort(key=lambda x: (-x["additions"], x["number"]))
+        # BOUNTY.md: "the first reporter takes the payout". Earliest
+        # filed wins, not the biggest diff - a later, larger PR must
+        # not inherit the original's slot (#979).
+        members.sort(key=lambda x: (x["created_at"], x["number"]))
         primary = members[0]
         for m in members[1:]:
             m["dup_of"] = primary["number"]

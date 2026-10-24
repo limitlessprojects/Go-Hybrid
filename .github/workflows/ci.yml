@@ -23,7 +23,7 @@ jobs:
         run: |
           set -e
 
-          python3 -m py_compile tools/runner/runner.py tools/job.py worker/script.py tools/corpus_harness.py tools/test_corpus_harness.py tools/test_corpus_utf8.py tools/extract_offsets.py tools/test_extract_offsets.py tools/triage_bot.py tools/shepherd.py
+          python3 -m py_compile tools/runner/runner.py tools/job.py worker/script.py tools/corpus_harness.py tools/test_corpus_harness.py tools/test_corpus_utf8.py tools/extract_offsets.py tools/test_extract_offsets.py tools/triage_bot.py tools/shepherd.py tools/test_triage_bot_dup.py
           # Fail closed on a committed merge-conflict marker: a marker in a
           # tracked file is invisible to the suites but can make the whole
           # workflow unparseable and take every run (and every PR) down.
@@ -60,6 +60,7 @@ jobs:
           python3 -m unittest discover -s tools -p test_check_test_registration.py -v
           python3 -m unittest discover -s tools -p test_package_version.py -v
           python3 -m unittest discover -s tools -p test_corpus_utf8.py -v
+          python3 -m unittest discover -s tools -p test_triage_bot_dup.py -v
           # Fail closed if any tools/**/test_*.py is matched by no -p pattern
           # above: a suite outside this list would pass CI by never running.
           python3 tools/check_test_registration.py
