@@ -236,11 +236,27 @@ impl Emitter {
             }
 
             Expr::SliceLit { elem, items, .. } => {
-                if let Some((_, inner_elem, arr_ty)) = e.as_array_lit() {
+                if let Some((len, inner_elem, arr_ty)) = e.as_array_lit() {
+                    // N5: `[N]T{}` leaves every element at its zero value —
+                    // allocate them like `var a [N]T` (zeroinit.rs).
+                    if items.is_empty() {
+                        if let Some(init) = self.n5_zero_init(arr_ty) {
+                            return Ok(init);
+                        }
+                    }
                     let head = self.type_text(arr_ty);
                     let mut parts = Vec::new();
                     for i in items {
                         parts.push(self.emit_expr_exp(i, 0, Some(inner_elem))?);
+                    }
+                    // A partial literal (`[3]bag{{label: "x"}}`) leaves the
+                    // trailing elements zero: pad them when N is a literal.
+                    if let Some(n) = len.and_then(int_literal_value) {
+                        if parts.len() < n {
+                            if let Some(init) = self.n5_zero_init(inner_elem) {
+                                parts.resize(n, init);
+                            }
+                        }
                     }
                     return Ok(format!("{}{{{}}}", head, parts.join(", ")));
                 }
@@ -939,10 +955,46 @@ impl Emitter {
                 )));
             }
         };
-        let mut parts = vec![ty_text];
+        let mut sizes = Vec::new();
         for a in &args[1..] {
-            parts.push(self.emit_call_arg(a)?);
+            sizes.push(self.emit_call_arg(a)?);
         }
+        // N5: `make([]T, n)` elements are zero values too — allocate their
+        // maps (zeroinit.rs). Go's `make` takes any integer type for the
+        // sizes; the helper takes `int`, so non-literal sizes are converted.
+        let n5_elem = match first_val {
+            Expr::SliceLit {
+                elem: Some(t),
+                items,
+                ..
+            } if items.is_empty() && first.value.as_array_lit().is_none() => Some(t.as_ref().clone()),
+            Expr::Ident { name, span } => match self.n5_resolve_alias(&TypeExpr::Named {
+                name: name.clone(),
+                span: *span,
+            }) {
+                TypeExpr::Slice { elem, .. } => Some(*elem),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(elem) = n5_elem {
+            let sizes: Vec<String> = args[1..]
+                .iter()
+                .zip(&sizes)
+                .map(|(a, s)| match &a.value {
+                    Expr::Lit {
+                        kind: LitKind::Int(_),
+                        ..
+                    } => s.clone(),
+                    _ => format!("int({})", s),
+                })
+                .collect();
+            if let Some(alloc) = self.n5_make_slice(&elem, &sizes) {
+                return Ok(alloc);
+            }
+        }
+        let mut parts = vec![ty_text];
+        parts.extend(sizes);
         Ok(format!("make({})", parts.join(", ")))
     }
 
@@ -1267,5 +1319,17 @@ impl Emitter {
             Ok(t) => t,
             Err(err) => format!("{} /* unsupported: {} */", e.render(), err.message),
         }
+    }
+}
+
+/// The value of a plain decimal integer literal (`3`, `1_000`); None for
+/// anything else (hex, consts, expressions).
+fn int_literal_value(e: &Expr) -> Option<usize> {
+    match e {
+        Expr::Lit {
+            kind: LitKind::Int(s),
+            ..
+        } => s.replace('_', "").parse().ok(),
+        _ => None,
     }
 }
