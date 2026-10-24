@@ -30,6 +30,7 @@ jobs:
           python3 tools/check_conflict_markers.py
           python3 -m unittest discover -s tools -p test_check_conflict_markers.py -v
           python3 -m unittest discover -s tools -p test_shepherd_gate.py -v
+          python3 -m unittest discover -s tools -p test_shepherd_verify_assert.py -v
           python3 -m unittest discover -s tools -p test_check_corpus_census.py -v
           python3 -m unittest discover -s tools/fuzz -p 'test_hyfuzz.py'
           python3 -m unittest discover -s tools/runner -p test_runner.py -v
