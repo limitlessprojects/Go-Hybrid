@@ -371,6 +371,70 @@ class CheckerUtf8Tests(unittest.TestCase):
         self.assertNotIn("Traceback", result.stdout + result.stderr)
 
 
+@unittest.skipUnless(os.name == "posix", "CLI fixture uses POSIX executable scripts")
+class OutputDecodingTests(unittest.TestCase):
+    """Undecodable build/program output fails one case, not the corpus."""
+
+    def run_corpus(self, stage=None, stream="stdout"):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            corpus = root / "corpus"
+            corpus.mkdir()
+            source = ("// EXPECTED-VERDICT: ACCEPT\n"
+                      "// EXPECTED-OUTPUT: caf\u00e9\nfn main() {}\n")
+            for name in ("01-first.hy", "02-second.hy"):
+                (corpus / name).write_text(source, encoding="utf-8")
+            clean = f"#!{sys.executable}\nprint('caf\u00e9')\n"
+            broken = (f"#!{sys.executable}\nimport sys\n"
+                      f"sys.{stream}.buffer.write(bytes([255]))\n"
+                      "print('caf\u00e9')\n")
+            builder = root / "hyb"
+            builder.write_text(
+                f"#!{sys.executable}\nimport pathlib, sys\n"
+                "first = sys.argv[2].endswith('01-first.hy')\n"
+                f"if first and {stage!r} == 'build':\n"
+                f"    sys.{stream}.buffer.write(bytes([255]))\n"
+                f"program = {broken!r} if first and {stage!r} == 'run' else {clean!r}\n"
+                "out = pathlib.Path('a.out')\n"
+                "out.write_text(program, encoding='utf-8')\n"
+                "out.chmod(0o755)\n", encoding="utf-8")
+            builder.chmod(0o755)
+            return subprocess.run(
+                [sys.executable, str(HARNESS), "--bin", str(builder),
+                 "--corpus", str(corpus)], capture_output=True,
+                encoding="utf-8", errors="replace",
+                env=dict(os.environ, PYTHONUTF8="1"), timeout=10)
+
+    def assert_decoding_failure_is_reported(self, stage, stream):
+        result = self.run_corpus(stage, stream)
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 1, output)
+        self.assertIn("FAIL  01-first.hy", output)
+        self.assertIn(f"{stage} output could not be decoded", output)
+        self.assertIn("PASS  02-second.hy", output)
+        self.assertIn("differential accept-side (build+run): 1/2", output)
+        self.assertIn("differential: 1 disagreement(s)", output)
+        self.assertNotIn("Traceback", output)
+
+    def test_build_stdout_decode_error_continues(self):
+        self.assert_decoding_failure_is_reported("build", "stdout")
+
+    def test_build_stderr_decode_error_continues(self):
+        self.assert_decoding_failure_is_reported("build", "stderr")
+
+    def test_program_stdout_decode_error_continues(self):
+        self.assert_decoding_failure_is_reported("run", "stdout")
+
+    def test_program_stderr_decode_error_continues(self):
+        self.assert_decoding_failure_is_reported("run", "stderr")
+
+    def test_valid_unicode_output_still_matches_assertion(self):
+        result = self.run_corpus()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("differential accept-side (build+run): 2/2", result.stdout)
+        self.assertIn("differential: FULL AGREEMENT", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -447,3 +511,5 @@ class TimeoutCorpusTests(unittest.TestCase):
         status, output = self.run_with_timeout(None)
         self.assertEqual(status, 0, output)
         self.assertIn("differential: FULL AGREEMENT", output)
+
+

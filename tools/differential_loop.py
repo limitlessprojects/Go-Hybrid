@@ -218,6 +218,8 @@ def build_and_run(bin_path, hy_path, workdir, hazards=(), expected_output=None):
         )
     except subprocess.TimeoutExpired as exc:
         return False, f"build timed out after {exc.timeout}s"
+    except UnicodeError as exc:
+        return False, f"build output could not be decoded: {exc}"
     if build.returncode != 0:
         return False, "build failed: " + (build.stderr or build.stdout).strip()[-300:]
     binary = os.path.join(workdir, "a.out")
@@ -229,6 +231,8 @@ def build_and_run(bin_path, hy_path, workdir, hazards=(), expected_output=None):
         )
     except subprocess.TimeoutExpired as exc:
         return False, f"run timed out after {exc.timeout}s"
+    except UnicodeError as exc:
+        return False, f"run output could not be decoded: {exc}"
     detail = "exit 0"
     if run.returncode != 0:
         # A Go fatal normally exits 2; GOTRACEBACK=crash aborts on Unix.
