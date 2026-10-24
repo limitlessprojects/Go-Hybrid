@@ -378,6 +378,8 @@ struct Collector<'a> {
     /// Lexical nesting depth within `select` statements.
     select_depth: usize,
     defines: Vec<Define>,
+    /// Range iteration element bindings with struct value types (`for x in xs`).
+    range_struct_elements: Vec<HashSet<String>>,
     /// Every identifier mentioned in the file plus every dotted type root —
     /// the import-usage set (the emitter's declared-import header needs it).
     roots: HashSet<String>,
@@ -401,6 +403,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             loop_depth: 0,
             select_depth: 0,
             defines: Vec::new(),
+            range_struct_elements: Vec::new(),
             roots: HashSet::new(),
             diags: Vec::new(),
             path: ck.path.clone(),
@@ -451,11 +454,81 @@ impl<'a> Collector<'a> {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.kind_scopes.push(HashMap::new());
+        self.range_struct_elements.push(HashSet::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.kind_scopes.pop();
+        self.range_struct_elements.pop();
+    }
+
+    fn mark_range_struct_element(&mut self, name: &str) {
+        if name != "_" {
+            if let Some(top) = self.range_struct_elements.last_mut() {
+                top.insert(name.to_string());
+            }
+        }
+    }
+
+    fn is_range_struct_element(&self, name: &str) -> bool {
+        for layer in self.range_struct_elements.iter().rev() {
+            if layer.contains(name) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn place_touches_range_struct(&self, p: &Place) -> Option<String> {
+        let root = p.root();
+        if !self.is_range_struct_element(root) {
+            return None;
+        }
+        let mut curr = p;
+        loop {
+            match &curr.kind {
+                PlaceKind::Ident(n) if n == root => return Some(root.to_string()),
+                PlaceKind::Field { base, .. } => {
+                    let bk = self.kind_of_place(base);
+                    if matches!(bk, OpKind::Pointer(_) | OpKind::Slice(_) | OpKind::Map(_, _)) {
+                        return None;
+                    }
+                    curr = base;
+                }
+                PlaceKind::Index { base, .. } => {
+                    let bk = self.kind_of_place(base);
+                    if matches!(bk, OpKind::Slice(_) | OpKind::Map(_, _) | OpKind::Pointer(_)) {
+                        return None;
+                    }
+                    curr = base;
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    fn expr_touches_range_struct(&self, e: &Expr) -> bool {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.is_range_struct_element(name),
+            Expr::Field { base, .. } => {
+                let bk = self.kind_of_expr(base);
+                if matches!(bk, OpKind::Pointer(_) | OpKind::Slice(_) | OpKind::Map(_, _)) {
+                    false
+                } else {
+                    self.expr_touches_range_struct(base)
+                }
+            }
+            Expr::Index { base, .. } => {
+                let bk = self.kind_of_expr(base);
+                if matches!(bk, OpKind::Slice(_) | OpKind::Map(_, _) | OpKind::Pointer(_)) {
+                    false
+                } else {
+                    self.expr_touches_range_struct(base)
+                }
+            }
+            _ => false,
+        }
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -1050,6 +1123,16 @@ impl<'a> Collector<'a> {
                             self.define_elidable(v, *span);
                             self.bind_kind(v, k);
                         }
+                        // Issue #1480: track range element value bindings of struct type.
+                        if vars.len() == 1 {
+                            if matches!(self.lookup_kind(&vars[0]), Some(OpKind::Struct(_))) {
+                                self.mark_range_struct_element(&vars[0]);
+                            }
+                        } else if vars.len() >= 2 {
+                            if matches!(self.lookup_kind(&vars[1]), Some(OpKind::Struct(_))) {
+                                self.mark_range_struct_element(&vars[1]);
+                            }
+                        }
                     }
                     ForKind::Infinite => {}
                 }
@@ -1220,9 +1303,34 @@ impl<'a> Collector<'a> {
                         "strings in Go are immutable; string elements cannot be assigned or updated",
                     );
                 }
+                // Issue #1480: mutation of array elements inside a struct range element.
+                if let Some(_) = self.place_touches_range_struct(p) {
+                    self.emit_e1002(
+                        p.span,
+                        format!(
+                            "cannot mutate array element of range element `{}` — `for ... in` iterates struct elements by value copy, so mutations are silently discarded (HYB-E1002)",
+                            p.render()
+                        ),
+                        "iterate by index (`for i in 0..len(xs) { xs[i].field = ... }`) to mutate slice elements in-place",
+                    );
+                }
                 self.place_read(p);
             }
-            PlaceKind::Field { .. } | PlaceKind::AddrOf { .. } => {
+            PlaceKind::Field { .. } => {
+                // Issue #1480: direct field write / compound mutation on struct range element copy.
+                if let Some(_) = self.place_touches_range_struct(p) {
+                    self.emit_e1002(
+                        p.span,
+                        format!(
+                            "cannot mutate field of range element `{}` — `for ... in` iterates struct elements by value copy, so mutations are silently discarded (HYB-E1002)",
+                            p.render()
+                        ),
+                        "iterate by index (`for i in 0..len(xs) { xs[i].field = ... }`) to mutate slice elements in-place",
+                    );
+                }
+                self.place_read(p);
+            }
+            PlaceKind::AddrOf { .. } => {
                 self.place_read(p);
             }
         }
@@ -4022,18 +4130,33 @@ impl<'a> Collector<'a> {
                 .get(&(base_sn.to_string(), head.to_string()))
             {
                 let ptr_recv = m.receiver.as_ref().is_some_and(|r| r.is_pointer);
-                if ptr_recv && !self.is_addressable_value_receiver(base) {
-                    self.emit_e1002(
-                        span,
-                        format!(
-                            "cannot select pointer method `{}` on `{}` (non-addressable `{}` value) — Go refuses taking the address of `{}` (HYB-E1002)",
-                            name,
-                            base.render(),
-                            sn,
-                            base.render()
-                        ),
-                        "assign the value to a local variable first (`v := ...; v.method()`), store `*T` pointers, or declare a value receiver `(self T)`",
-                    );
+                if ptr_recv {
+                    // Issue #1480: calling pointer-receiver method on a range struct element copy silently discards mutation.
+                    if self.expr_touches_range_struct(base) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "cannot call pointer-receiver method `{}` on range element `{}` — `for ... in` iterates struct elements by value copy, so mutations are silently discarded (HYB-E1002)",
+                                name,
+                                base.render()
+                            ),
+                            "iterate by index (`for i in 0..len(xs) { xs[i].method() }`) or slice `*T` pointers instead",
+                        );
+                        return;
+                    }
+                    if !self.is_addressable_value_receiver(base) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "cannot select pointer method `{}` on `{}` (non-addressable `{}` value) — Go refuses taking the address of `{}` (HYB-E1002)",
+                                name,
+                                base.render(),
+                                sn,
+                                base.render()
+                            ),
+                            "assign the value to a local variable first (`v := ...; v.method()`), store `*T` pointers, or declare a value receiver `(self T)`",
+                        );
+                    }
                 }
             }
         }
