@@ -2,6 +2,8 @@
 
 **Current registered corpus: 129 programs — ACCEPT 39 · ACCEPT-MANAGED 2 · REJECT 88 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 **Current registered corpus: 129 programs — ACCEPT 39 · ACCEPT-MANAGED 2 · REJECT 88 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 129 programs — ACCEPT 40 · ACCEPT-MANAGED 2 · REJECT 87 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 129 programs — ACCEPT 40 · ACCEPT-MANAGED 2 · REJECT 87 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
