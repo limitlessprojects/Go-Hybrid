@@ -169,13 +169,16 @@ pub fn check_file(file: &File) -> CheckResult {
 
 fn build_tables(ck: &mut Checker<'_>) {
     let file: &File = ck.file;
+    // Pre-populate packages from imports so package name collision checking is order-independent (#728).
+    for d in &file.decls {
+        if let Decl::Import { path, .. } = d {
+            let root = path.rsplit('/').next().unwrap_or(path.as_str());
+            ck.packages.insert(root.to_string());
+        }
+    }
     for d in &file.decls {
         match d {
-            Decl::Import { path, .. } => {
-                // `import "rust/serde_json"` → package root "serde_json".
-                let root = path.rsplit('/').next().unwrap_or(path.as_str());
-                ck.packages.insert(root.to_string());
-            }
+            Decl::Import { .. } => {}
             Decl::Const(c) => {
                 ck.declare_pkg_name(&c.name, "const", c.span);
                 let b = ck.const_binding(c);
