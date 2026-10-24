@@ -64,7 +64,7 @@ impl TypeShape {
     /// O4.9 fail-closed boundary — HYB-E3005).
     pub(crate) fn is_sendable_by_type(&self) -> bool {
         match self {
-            TypeShape::Primitive | TypeShape::Str | TypeShape::Atomic | TypeShape::Chan(_) => true,
+            TypeShape::Primitive | TypeShape::Str | TypeShape::Chan(_) => true,
             // `&atomic_binding` is the mediated share route (OQ6); a pointer
             // to anything else is a mutable pointee — strict reject.
             TypeShape::Pointer(inner) => matches!(**inner, TypeShape::Atomic),

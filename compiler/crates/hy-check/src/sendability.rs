@@ -134,6 +134,16 @@ impl<'a> Checker<'a> {
                     )],
                 })
             }
+            shape if self.shape_holds_by_value_atomic(shape, &mut Vec::new()) => {
+                Outcome::Rejected(RejectInfo {
+                    value: name.to_string(),
+                    ty: self.binding_ty_str(b),
+                    notes: vec![format!(
+                        "`{}` carries a `sync/atomic` value by value (`sync/atomic.noCopy`) — moving or copying it performs an unsynchronized non-atomic read; share atomics via `&` (`*atomic.*`, OQ6) instead",
+                        name
+                    )],
+                })
+            }
             shape if self.shape_holds_unmovable_leaf(shape, &mut Vec::new()) => {
                 Outcome::Rejected(RejectInfo {
                     value: name.to_string(),
@@ -214,13 +224,37 @@ impl<'a> Checker<'a> {
     /// True when a `const` value of `shape` is a pure value-copy representation
     /// with no shared reference backing, no closure captures, no handles, and
     /// no foreign synchronization/opaque state (Class-4 immutability exemption).
+    pub(crate) fn shape_holds_by_value_atomic(
+        &self,
+        shape: &TypeShape,
+        seen: &mut Vec<String>,
+    ) -> bool {
+        match shape {
+            TypeShape::Atomic => true,
+            TypeShape::Array(elem) => self.shape_holds_by_value_atomic(elem, seen),
+            TypeShape::Struct(Some(sname)) => {
+                if seen.iter().any(|s| s == sname) {
+                    return false;
+                }
+                seen.push(sname.clone());
+                let Some(fields) = self.structs.get(sname) else {
+                    return false;
+                };
+                fields
+                    .iter()
+                    .any(|(_, ty)| self.shape_holds_by_value_atomic(&self.shape_of_type(ty), seen))
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn shape_is_const_sendable(
         &self,
         shape: &TypeShape,
         seen: &mut Vec<String>,
     ) -> bool {
         match shape {
-            TypeShape::Primitive | TypeShape::Str | TypeShape::Atomic | TypeShape::Chan(_) => true,
+            TypeShape::Primitive | TypeShape::Str | TypeShape::Chan(_) => true,
             TypeShape::Array(elem) => self.shape_is_const_sendable(elem, seen),
             TypeShape::Struct(Some(sname)) => {
                 if seen.iter().any(|s| s == sname) {
@@ -360,7 +394,7 @@ impl<'a> Checker<'a> {
                 }),
             });
         }
-        if b.shape.is_sendable_by_type() {
+        if b.shape.is_sendable_by_type() && !b.slot_loan {
             return Outcome::Ok; // classes 1/2
         }
         let ty = self.binding_ty_str(b);
@@ -435,8 +469,8 @@ impl<'a> Checker<'a> {
             });
         }
         match &b.shape {
-            // `&hits` where hits is atomic-typed — the mediated route (OQ6)
-            TypeShape::Atomic => Outcome::Ok,
+            // `&hits` where hits is an unprojected atomic binding — the mediated route (OQ6)
+            TypeShape::Atomic if matches!(unwrap_parens(operand), Expr::Ident { .. }) => Outcome::Ok,
             // `&ch` — channels are share-safe by type
             TypeShape::Chan(_) => Outcome::Ok,
             TypeShape::Struct(Some(sname)) => {

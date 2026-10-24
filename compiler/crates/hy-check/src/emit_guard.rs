@@ -103,8 +103,10 @@ impl<'a> Checker<'a> {
                 }
                 for v in &l.values {
                     self.check_expr_emit_guard(st, v);
-                    // `n := &m[k].f` — the O8 store-back place must build.
                     self.check_slot_loan_operand_addressable(st, v);
+                    if self.expr_copies_atomic_value(st, v) {
+                        self.emit_atomic_value_copy_error(&v.render(), v.span());
+                    }
                 }
                 if deep {
                     if matches!(l.kind, hy_syntax::LocalKind::Const) {
@@ -137,9 +139,20 @@ impl<'a> Checker<'a> {
                     // `m[k].f = v` — a Go map element is not addressable.
                     self.check_assign_target_addressable(st, t);
                 }
+                for t in targets {
+                    if *op == AssignOp::Assign {
+                        let t_shape = self.place_value_shape_emit_guard(st, t);
+                        if self.shape_holds_by_value_atomic(&t_shape, &mut Vec::new()) {
+                            self.emit_atomic_value_copy_error(&t.render(), t.span);
+                        }
+                    }
+                }
                 for v in values {
                     self.check_expr_emit_guard(st, v);
                     self.check_slot_loan_operand_addressable(st, v);
+                    if *op != AssignOp::Assign && self.expr_copies_atomic_value(st, v) {
+                        self.emit_atomic_value_copy_error(&v.render(), v.span());
+                    }
                 }
                 // `x <<= -1` — the compound form of HYB-E6005.
                 if matches!(op, AssignOp::ShlAssign | AssignOp::ShrAssign) && values.len() == 1 {
@@ -241,6 +254,10 @@ impl<'a> Checker<'a> {
                         self.check_const_overflow_init("return statement", &resolved_ty, v, None);
                     }
                     self.check_expr_emit_guard(st, v);
+                    let shape = self.shape_of_expr(st, v);
+                    if self.shape_holds_by_value_atomic(&shape, &mut Vec::new()) {
+                        self.emit_atomic_value_copy_error(&v.render(), v.span());
+                    }
                 }
             }
             Stmt::Task { callee, args, .. } => {
@@ -445,8 +462,14 @@ impl<'a> Checker<'a> {
             Expr::Call { callee, args, .. } => {
                 self.check_call_const_overflow(st, callee, args);
                 self.check_expr_emit_guard(st, callee);
-                for a in args {
+                for (idx, a) in args.iter().enumerate() {
                     self.check_expr_emit_guard(st, &a.value);
+                    let shape = self.shape_of_expr(st, &a.value);
+                    if self.shape_holds_by_value_atomic(&shape, &mut Vec::new())
+                        && !self.call_arg_auto_addresses_atomic(callee, idx, &a.value)
+                    {
+                        self.emit_atomic_value_copy_error(&a.value.render(), a.value.span());
+                    }
                 }
             }
             Expr::StructLit { ty, fields, .. } => {
@@ -2600,4 +2623,72 @@ fn is_primitive_receiver(name: &str) -> bool {
             | "char"
             | "error"
     )
+}
+
+impl<'a> Checker<'a> {
+    fn place_value_shape_emit_guard(&self, st: &FnState, place: &Place) -> TypeShape {
+        if let Some(ty) = self.place_target_ty(st, place) {
+            return self.shape_of_type(&ty);
+        }
+        if let PlaceKind::Ident(name) = &place.kind {
+            if let Some(b) = self.lookup_binding(st, name) {
+                return b.shape.clone();
+            }
+        }
+        TypeShape::Unknown
+    }
+
+    fn expr_copies_atomic_value(&self, st: &FnState, expr: &Expr) -> bool {
+        let e = unwrap_parens(expr);
+        let shape = self.shape_of_expr(st, e);
+        if !self.shape_holds_by_value_atomic(&shape, &mut Vec::new()) {
+            return false;
+        }
+        match e {
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .any(|f| self.expr_copies_atomic_value(st, &f.value)),
+            Expr::SliceLit { items, .. } => items
+                .iter()
+                .any(|it| self.expr_copies_atomic_value(st, it)),
+            _ => true,
+        }
+    }
+
+    fn call_arg_auto_addresses_atomic(&self, callee: &Expr, idx: usize, arg: &Expr) -> bool {
+        let addressable = matches!(
+            unwrap_parens(arg),
+            Expr::Ident { .. } | Expr::Field { .. } | Expr::Index { .. }
+        );
+        if !addressable {
+            return false;
+        }
+        if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+            let head = name.split('[').next().unwrap_or(name);
+            if let Some(sig) = self.fns.get(head) {
+                if let Some(param) = sig.params.get(idx) {
+                    let resolved = self.resolve_type_alias(&param.ty);
+                    return matches!(resolved, TypeExpr::Pointer { .. });
+                }
+            }
+        }
+        false
+    }
+
+    fn emit_atomic_value_copy_error(&mut self, rendered: &str, span: Span) {
+        self.diags.push(
+            Diagnostic::error(
+                "HYB-E1002",
+                self.path.clone(),
+                span,
+                format!(
+                    "copying or overwriting `{rendered}` by value copies `sync/atomic.noCopy` (unsynchronized non-atomic access / `go vet` copylocks)"
+                ),
+            )
+            .with_notes(vec![
+                "Go's scalar `sync/atomic` types embed `sync/atomic.noCopy`: by-value copies and whole-value assignments perform non-atomic reads/writes that race with concurrent `&` atomic operations and fail `go vet`".to_string(),
+                "pass or borrow the atomic by address (`&x` / `*atomic.*`) and read or update it through `.load()`, `.store(...)`, `.swap(...)`, or `.add(...)`".to_string(),
+            ]),
+        );
+    }
 }
