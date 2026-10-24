@@ -130,29 +130,21 @@ def env_report():
 # Env values that look secret-ish are masked in reports (R10 hygiene).
 # Lesson 2026-10-12: Kaggle embeds ephemeral session JWTs (KAGGLE_DATA_PROXY_TOKEN,
 # KAGGLE_USER_SECRETS_TOKEN) in kernel env; they leaked into committed summaries once.
-_SECRET_KEY = (
-    "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "_KEY", "API_KEY", "PAT", "KEY"
+_SECRET_KEY_SUBSTRINGS = (
+    "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "_KEY", "API_KEY"
 )
-_SECRET_KEY_SEGMENTS = frozenset(
-    marker for marker in _SECRET_KEY if not marker.startswith("_") and "_" not in marker
-)
-_SECRET_KEY_SUFFIX_MARKERS = _SECRET_KEY_SEGMENTS - {"KEY"}
-_SECRET_KEY_SUFFIXES = tuple(_SECRET_KEY_SUFFIX_MARKERS) + ("_KEY", "-KEY")
+_PAT_KEY_SEGMENTS = frozenset(("PAT", "PATS"))
 _CREDENTIAL_VALUE_PREFIXES = ("ghp_", "gho_", "ghs_", "ghr_", "github_pat_", "KGAT_")
-
-
-def _singular_secret_marker(marker):
-    return marker[:-1] if marker.endswith("S") else marker
 
 
 def _secret_key_name(key):
     upper = key.upper()
-    segments = upper.replace("-", "_").split("_")
-    if any(_singular_secret_marker(segment) in _SECRET_KEY_SEGMENTS for segment in segments):
+    if any(marker in upper for marker in _SECRET_KEY_SUBSTRINGS):
         return True
-    # Preserve suffix-style names such as CLIENTCREDENTIAL and API_KEY without
-    # matching incidental substrings inside PATH, DISPATCH, or COMPATIBILITY.
-    return _singular_secret_marker(upper).endswith(_SECRET_KEY_SUFFIXES)
+    segments = upper.replace("-", "_").split("_")
+    return any(segment in _PAT_KEY_SEGMENTS for segment in segments) or upper.endswith(
+        ("PAT", "PATS")
+    )
 
 
 def _has_credential_value_prefix(value):

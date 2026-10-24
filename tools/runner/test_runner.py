@@ -58,12 +58,24 @@ class RunnerRedactionTests(unittest.TestCase):
         for key, value in secret_keys.items():
             self.assertEqual(redacted[key], '[REDACTED len={}]'.format(len(value)))
 
+    def test_non_pat_markers_keep_substring_matching(self):
+        secret_keys = {
+            'CI_TOKEN2': 'opaque',
+            'CI_DBPassword_B64': 'encoded',
+        }
+
+        redacted = runner.redact(secret_keys)
+
+        for key, value in secret_keys.items():
+            self.assertEqual(redacted[key], '[REDACTED len={}]'.format(len(value)))
+
     def test_plural_secret_segments_with_trailing_qualifiers_are_redacted(self):
         secret_keys = {
             key: 'marker-value' for key in (
                 'CI_TOKENS_JSON', 'GITHUB_SECRETS_B64', 'KAGGLE_PASSWORDS_JSON',
                 'CI_CREDENTIALS_JSON', 'GITHUB_PATS_B64', 'MY_KEYS_FILE',
-                'CI_API_KEYS_BASE64',
+                'CI_API_KEYS_BASE64', 'CI_API_KEY_BASE64', 'GITHUB_SSH_KEY_B64',
+                'GITHUBPAT',
             )
         }
 
