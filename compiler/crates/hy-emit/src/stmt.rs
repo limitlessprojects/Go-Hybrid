@@ -816,8 +816,8 @@ impl Emitter {
             _ => return None,
         };
         match callee {
-            // rust-crate calls: the descriptor's results field.
-            Expr::Field { base, name, .. } if matches!(base.as_ref(), Expr::Ident { .. }) => {
+            // rust-crate calls, foreign binding methods, and user struct methods.
+            Expr::Field { base, name, .. } => {
                 if let Expr::Ident { name: pkg, .. } = base.as_ref() {
                     if self.is_unshadowed_pkg_root(pkg) {
                         if let Some(desc) = super::shapes::lookup_rust_crate(pkg) {
@@ -840,13 +840,26 @@ impl Emitter {
                         }
                     }
                 }
+                // User-defined methods on structs:
+                if let Expr::Ident { name: vn, .. } = base.as_ref() {
+                    if let Some(sn) = self.var_struct.get(vn) {
+                        if let Some(&(n, e)) = self.method_shapes.get(&(sn.clone(), name.clone())) {
+                            return Some((n, e));
+                        }
+                    }
+                }
+                if let Some(&(n, e)) = self.methods_by_name.get(name.as_str()) {
+                    return Some((n, e));
+                }
                 None
             }
             // User fns: the eagerly collected declared shape.
-            Expr::Ident { name, .. } => self
-                .fn_shapes
-                .get(name.as_str())
-                .map(|(n, err, _, _)| (*n, *err)),
+            Expr::Ident { name, .. } => {
+                let (head, _) = crate::expr::split_type_args(name);
+                self.fn_shapes
+                    .get(head)
+                    .map(|(n, err, _, _)| (*n, *err))
+            }
             _ => None,
         }
     }
