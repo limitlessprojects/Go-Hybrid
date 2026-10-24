@@ -18,7 +18,7 @@ fn rejects_with_e3104(src: &str) {
 }
 
 #[test]
-fn projected_map_element_field_borrow_issue_1046() {
+fn projected_map_element_borrow_struct_field_issue_1046() {
     rejects_with_e3104(
         "struct acct { bal int }\n\
          fn touch(p *int) { _ = p }\n\
@@ -30,7 +30,7 @@ fn projected_map_element_field_borrow_issue_1046() {
 }
 
 #[test]
-fn projected_map_element_array_index_borrow_issue_1046() {
+fn projected_map_element_borrow_nested_array_issue_1046() {
     rejects_with_e3104(
         "struct vec { arr [2]int }\n\
          fn touch(p *int) { _ = p }\n\
