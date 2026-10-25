@@ -5097,6 +5097,12 @@ impl<'a> Checker<'a> {
             && (st.env.contains_key(name)
                 || st.scopes.iter().rev().skip(1).any(|s| s.contains_key(name))
                 || self.consts.contains_key(name));
+        if shadows_outer && st.borrow_bindings.contains(name) {
+            if let Some(outer_borrows) = st.borrow_binding_scopes.last_mut() {
+                outer_borrows.insert(name.to_string());
+            }
+        }
+        st.borrow_bindings.remove(name);
         self.preserve_peers_before_sever(st, name, shadows_outer);
         st.aliases.remove(name);
         st.share_clear(name);
