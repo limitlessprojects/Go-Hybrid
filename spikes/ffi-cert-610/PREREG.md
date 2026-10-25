@@ -168,3 +168,21 @@ contract can be derived from the artifact" is **false as stated** and
   handshake cannot be trusted without a canonicalization step the tool cannot
   perform);
 - any of the six fixtures can still select a fast route.
+
+## 8. Amendment 1 (2026-10-25, after the rebase, before the re-run)
+
+The reported run was on `main` @ `7d63d5fc`. The repo then ran a queue reset and
+this PR was closed as not planned; the branch was rebased onto `main` @
+`1f0ff97` (72 commits later, no conflicts, this spike's own diff unchanged) and
+the whole sequence was re-run.
+
+**Nothing is renegotiated.** The gates in §3, the six fixtures in §4, the wrapper
+subset in §5 and the toolchain pin are exactly as registered; `RESULTS.md` keeps
+the first run's numbers and reports the re-run separately. The commit under test
+moves from `7d63d5f` to `1f0ff97` for the same reason §6 gives for running on
+current `main` rather than the commit the issue cites — but note that
+`contract_sha256` digests the artifact's `base_commit` field, so the digest is
+expected to differ on a new base even when the artifact and the symbol records
+are identical. `RESULTS.md` §"Re-verification" proves the equivalence rather
+than asserting it (normalizing `base_commit` back to `78e04dc` reproduces the
+published `eb888898…`).

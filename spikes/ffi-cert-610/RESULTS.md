@@ -22,6 +22,59 @@ allocation-error path, (b) indirect dispatch, and (c) callees from the
 it is the answer to M1's "if the toolchain cannot prove a stack bound, the
 honest successful result is DEEP".
 
+## Re-verification — 2026-10-25, after the rebase
+
+The PR was closed by the repo's 2026-10-24 queue reset (not a verdict on the
+work) and the branch was rebased onto `main` @ `1f0ff97` — 72 commits later, no
+conflicts, this spike's own diff unchanged (`spikes/ffi-cert-610/` only, no
+compiler/runtime/hand-table edit). Everything below was re-run on that tree to
+check that the published numbers still hold; the original run's text is left
+untouched.
+
+| step | on `1f0ff97` | vs published evidence |
+|---|---|---|
+| `build` (pinned flags) | artifact `d8dbd182…`, 346 members, 1992 functions with frames | **bit-identical artifact** |
+| `extract` | 21 symbols; contract digest `f84a58…` on this base | see the digest note below — **content identical**, normalized digest reproduces `eb888898…` |
+| `extract` ×3 | three clean extracts are byte-identical to each other | determinism holds on the new base too |
+| `verify` | exit **1**, **16** diagnostics, **0** gaps, coverage `21/21` signatures, `19` consumed by Go, `36` call sites | **file identical** to `evidence/g1-verify.json` |
+| `fixtures` | **6/6** rejected | **file identical** to `evidence/fixtures.json` |
+| `report` | artifact table | **file identical** to `evidence/table.md` |
+| `closure_analysis.py` | why the closure leaves the provable set | **file identical** to `evidence/closure-analysis.txt` |
+| `test_hy_ffi_cert.py` | 14 tests | **OK** |
+| G4 — Go bridge in the CI-shaped module | `go vet ./...`, `go build ./...`, `go test ./...` green (hybridge, jsonbinding, regexbinding, sha3binding, hybench, overheadbench); both `TestDeepNesting*` pass; `gofmt -l runtime/go` clean | same |
+
+**Note on the contract digest (G3).** `contract_sha256` is a digest over the
+whole contract object, and that object records `artifact.base_commit` — the
+commit the run happened on. So a re-run on a new base legitimately produces a
+different digest (`f84a58…` here) while nothing about the artifact or the
+symbol records changed. Proven rather than asserted: replacing `base_commit`
+with `78e04dc` in the new contract and re-digesting gives
+**`eb8888981e5950248fd476ce8404ef36551c4e099d068e8847728e878bf13292`** — the
+published value, exactly. Per-symbol records are equal, the artifact is
+bit-identical, and three repeated extracts on this base are byte-identical to
+each other. If the digest is meant to travel between checkouts, `base_commit`
+is the one field that has to leave the canonical form (or be an explicit
+input); that is a design remark for whoever implements the `abi-types.md` §5
+handshake, not a change to this PR.
+
+**G5 cost, spot-checked:** one clean build 17 s, one extract 6 s → 6/17 =
+35%, against the published 34.2% from medians of three. Not re-measured with
+medians here; the number is a single-run sanity check, and the "most of it is
+`objdump`/`readelf` over 346 members" explanation is unchanged.
+
+**Has `main` fixed or absorbed this in the meantime?** Not yet: `#610` is
+still absent from `MOONSHOT.md` (the ledger still ends at W-023), so the
+proposal is still not triaged into the track, and the question in the issue
+(whether a third-party spike earns the M2/ledger half) is still unanswered.
+What *did* change is the money rail: `BOUNTY.md` is now a plan of record and
+Track 3 spells out the wildcard payout — `$250` when the proposal is accepted
+into the ledger, `$250` when its learning is published, "success or failure
+alike". This spike's outcome (fail-closed certificate that can revoke a
+privilege but not grant one, with all six falsifiers rejected) is exactly the
+`failure-with-knowledge` shape that second half names.
+
+Raw capture of this section: `evidence/reverify-2026-10-25.txt`.
+
 ## What was run
 
 ```
