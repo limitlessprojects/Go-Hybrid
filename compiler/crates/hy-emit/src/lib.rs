@@ -536,6 +536,10 @@ pub struct Emitter {
     /// var → (shape-known dotted type, is_pointer): `var hits atomic.int64`
     /// / `hits *atomic.int64` — the MethodFunc receiver's address-of form.
     var_ty: BTreeMap<String, (String, bool)>,
+    /// var → its DECLARED type (any type, not only shape-known ones): a typed
+    /// `var`/param/receiver. Gives `o = none` the target type it needs, which
+    /// `var_ty` (shape-only) does not carry.
+    decl_ty: BTreeMap<String, TypeExpr>,
     /// Variables known to hold a pointer type in the current function frame.
     pointer_vars: BTreeSet<String>,
     /// Local/parameter/receiver/result names bound in the current function frame.
@@ -552,6 +556,10 @@ pub(crate) struct ScopeSnapshot {
     local_vars: BTreeSet<String>,
     bindings: BTreeMap<String, BindingKind>,
     var_ty: BTreeMap<String, (String, bool)>,
+    /// var → its DECLARED type (any type, not only shape-known ones): a typed
+    /// `var`/param/receiver. Gives `o = none` the target type it needs, which
+    /// `var_ty` (shape-only) does not carry.
+    decl_ty: BTreeMap<String, TypeExpr>,
     var_struct: BTreeMap<String, String>,
     pointer_vars: BTreeSet<String>,
 }
@@ -586,6 +594,7 @@ impl Emitter {
             struct_fields: BTreeMap::new(),
             var_struct: BTreeMap::new(),
             var_ty: BTreeMap::new(),
+            decl_ty: BTreeMap::new(),
             pointer_vars: BTreeSet::new(),
             local_vars: BTreeSet::new(),
             ptr_returning_fns: BTreeSet::new(),
@@ -604,6 +613,7 @@ impl Emitter {
             local_vars: self.local_vars.clone(),
             bindings: self.bindings.clone(),
             var_ty: self.var_ty.clone(),
+            decl_ty: self.decl_ty.clone(),
             var_struct: self.var_struct.clone(),
             pointer_vars: self.pointer_vars.clone(),
         }
@@ -613,6 +623,7 @@ impl Emitter {
         self.local_vars = saved.local_vars;
         self.bindings = saved.bindings;
         self.var_ty = saved.var_ty;
+        self.decl_ty = saved.decl_ty;
         self.var_struct = saved.var_struct;
         self.pointer_vars = saved.pointer_vars;
     }
@@ -622,6 +633,7 @@ impl Emitter {
             self.local_vars.insert(name.to_string());
             self.bindings.remove(name);
             self.var_ty.remove(name);
+            self.decl_ty.remove(name);
             self.var_struct.remove(name);
             self.pointer_vars.remove(name);
         }
@@ -1279,6 +1291,7 @@ impl Emitter {
                         self.bindings.insert(name.clone(), kind);
                     }
                     self.register_var_ty(name, &r.ty);
+                    self.decl_ty.insert(name.clone(), r.ty.clone());
                 }
             }
         }
@@ -1295,6 +1308,7 @@ impl Emitter {
                 self.bindings.insert(recv.name.clone(), kind);
             }
             self.register_var_ty(&recv.name, &recv.ty);
+            self.decl_ty.insert(recv.name.clone(), recv.ty.clone());
             if recv.is_pointer {
                 if let Some((_, ptr)) = self.var_ty.get_mut(&recv.name) {
                     *ptr = true;
@@ -1503,6 +1517,7 @@ impl Emitter {
                 self.pointer_vars.insert(p.name.clone());
             }
             self.register_var_ty(&p.name, &p.ty);
+            self.decl_ty.insert(p.name.clone(), p.ty.clone());
         }
     }
 
