@@ -1454,6 +1454,7 @@ impl<'a> Checker<'a> {
                     BinOp::Mod if r != 0 => l.checked_rem(r),
                     BinOp::BitOr => Some(l | r),
                     BinOp::BitAnd => Some(l & r),
+                    BinOp::BitAndNot => Some(l & !r),
                     BinOp::BitXor => Some(l ^ r),
                     BinOp::Shl if (0..128).contains(&r) => l.checked_shl(r as u32),
                     BinOp::Shr if (0..128).contains(&r) => l.checked_shr(r as u32),
@@ -2404,6 +2405,12 @@ impl<'a> Checker<'a> {
                     },
                     BinOp::BitAnd => match (l, r) {
                         (ConstKeyVal::Int(a), ConstKeyVal::Int(b)) => Some(ConstKeyVal::Int(a & b)),
+                        _ => None,
+                    },
+                    BinOp::BitAndNot => match (l, r) {
+                        (ConstKeyVal::Int(a), ConstKeyVal::Int(b)) => {
+                            Some(ConstKeyVal::Int(a & !b))
+                        }
                         _ => None,
                     },
                     BinOp::BitOr => match (l, r) {
