@@ -43,7 +43,7 @@ impl<'a> Checker<'a> {
                 self.check_range_iterable(st, expr, span);
                 if self.diags.len() == before {
                     let shape = self.shape_of_expr(st, expr);
-                    let is_chan = matches!(shape, TypeShape::Chan(_));
+                    let is_chan = matches!(shape, TypeShape::Chan(_) | TypeShape::RecvOnlyChan(_));
                     let is_set = !self.structs.contains_key("set")
                         && matches!(
                             shape,
@@ -505,6 +505,7 @@ impl<'a> Checker<'a> {
             // view the emitter iterates; corpus 05/07/11/12). Corpus-driven,
             // NOT a Go range shape — Go cannot range the view struct itself.
             | TypeShape::BorrowHandle(_) => {}
+<<<<<<< HEAD
             TypeShape::Struct(Some(ref n))
                 if !self.structs.contains_key("set")
                     && (n.starts_with("set[") || n == "set") => {}
@@ -520,6 +521,18 @@ impl<'a> Checker<'a> {
                         }
                     })
                     .or_else(|| self.composite_type_expr(st, expr));
+=======
+            TypeShape::Struct(Some(ref n)) if n.starts_with("set[") || n == "set" => {}
+            TypeShape::Chan(_) | TypeShape::RecvOnlyChan(_) => {
+                let chan_ty = self.ty_of_expr(st, expr).or_else(|| {
+                    if let Expr::Ident { name, .. } = unwrap_parens(expr) {
+                        let root = crate::freeze::resolve_alias(st, name);
+                        self.lookup_binding(st, &root).and_then(|b| b.ty.clone())
+                    } else {
+                        None
+                    }
+                });
+>>>>>>> be860f67 (fix(checker): time.after deadline channels accepted a send — emitted Go did not build)
                 if let Some(ty) = chan_ty {
                     let resolved = self.resolve_type_alias(&ty);
                     if matches!(
