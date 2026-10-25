@@ -3215,6 +3215,21 @@ impl<'a> Collector<'a> {
         );
     }
 
+    /// #1681 — bare `nil` is not a value of any type until Go assigns it a
+    /// context. `kind_of_expr` maps it to `OpKind::Unknown` (fail-open), so
+    /// every built-in arm below must catch it *before* consulting the kind,
+    /// or `len(nil)`, `cap(nil)`, `delete(nil, k)`, `delete(m, nil)` and
+    /// `append(nil, ...)` pass `hyb check` and fail `go build`.
+    fn nil_is_expr(e: &Expr) -> bool {
+        matches!(
+            unwrap_parens(e),
+            Expr::Lit {
+                kind: LitKind::Nil,
+                ..
+            }
+        )
+    }
+
     /// #682 U14/U15 — a struct literal may only name fields the struct
     /// declares, once each, with a value assignable to the field's type. Go
     /// refuses the emitted literal otherwise (`unknown field`, `duplicate
@@ -6368,6 +6383,14 @@ impl<'a> Collector<'a> {
                     return; // arity handled by builtins.rs
                 }
                 let op = &args[0].value;
+                if Self::nil_is_expr(op) {
+                    self.emit_e2005(
+                        span,
+                        "untyped `nil` has no `len` — Go rejects `len(nil)` (`invalid argument: nil for built-in len`) (HYB-E2005)".to_string(),
+                        "`len` needs a string, slice, array, map, or channel value; nil is none of them",
+                    );
+                    return;
+                }
                 if builtins_already_flags_len_cap(op, false) {
                     return;
                 }
@@ -6401,6 +6424,14 @@ impl<'a> Collector<'a> {
                     return; // arity handled by builtins.rs
                 }
                 let op = &args[0].value;
+                if Self::nil_is_expr(op) {
+                    self.emit_e2005(
+                        span,
+                        "untyped `nil` has no `cap` — Go rejects `cap(nil)` (`invalid argument: nil for built-in cap`) (HYB-E2005)".to_string(),
+                        "`cap` needs a slice, array, or channel value; nil is none of them",
+                    );
+                    return;
+                }
                 if builtins_already_flags_len_cap(op, true) {
                     return;
                 }
@@ -6451,6 +6482,14 @@ impl<'a> Collector<'a> {
                 }
                 let map_arg = &args[0].value;
                 let key_arg = &args[1].value;
+                if Self::nil_is_expr(map_arg) {
+                    self.emit_e2005(
+                        span,
+                        "untyped `nil` is not a map — Go rejects `delete(nil, k)` (`invalid argument: nil is not a map`) (HYB-E2005)".to_string(),
+                        "`delete(m, k)` requires a map value as its first argument",
+                    );
+                    return;
+                }
                 let mk = self.kind_of_expr(map_arg);
                 match &mk {
                     // #2474: `delete(s, v)` on a `set[T]` (lowered to
@@ -6482,6 +6521,21 @@ impl<'a> Collector<'a> {
                         let is_untyped_int_to_float = **k_expected == OpKind::Float
                             && kk == OpKind::Int
                             && self.is_untyped_int_const(key_arg);
+                        // `delete(m, nil)` compiles only when the key type can
+                        // hold nil (pointer/map/slice/chan/func/interface);
+                        // a string/int/... key makes Go reject it outright.
+                        if Self::nil_is_expr(key_arg)
+                            && matches!(**k_expected, OpKind::Int | OpKind::Float | OpKind::Bool | OpKind::Str)
+                        {
+                            self.emit_e2005(
+                                span,
+                                format!(
+                                    "cannot use `nil` as `{}` key in `delete` — Go rejects `delete(m, nil)` for this key type (HYB-E2005)",
+                                    k_expected.label()
+                                ),
+                                "only pointer, map, slice, chan, func, or interface key types accept `nil`",
+                            );
+                        }
                         if **k_expected != OpKind::Unknown
                             && kk != OpKind::Unknown
                             && kk != **k_expected
@@ -6523,6 +6577,14 @@ impl<'a> Collector<'a> {
                     return;
                 }
                 let slice_arg = &args[0].value;
+                if Self::nil_is_expr(slice_arg) {
+                    self.emit_e2005(
+                        span,
+                        "untyped `nil` is not a slice — Go rejects `append(nil, ...)` (`invalid append: argument must be a slice; have untyped nil`) (HYB-E2005)".to_string(),
+                        "the first argument to `append(xs, ...)` must be a slice (`[]T`)",
+                    );
+                    return;
+                }
                 let sk = self.kind_of_expr(slice_arg);
                 if !matches!(sk, OpKind::Unknown | OpKind::Slice(_)) {
                     self.emit_e2005(
