@@ -70,3 +70,25 @@ They are disclosed here because they were seen. The gates above do not
 depend on them: H2's 1 ms and 0.5× come from the issue's own "under 1 ms"
 versus "15–40 ms", and H3's floor comparison is a structural question, not a
 number. The reported run is a fresh run with the harness in its final form.
+
+## Amendment 1 (2026-10-25, after the rebase, before the re-run)
+
+This spike's original run was on `main` @ `7d63d5f`. The repo then ran a
+queue reset and the PR was closed as not planned; the branch has been
+rebased onto `main` @ `1f0ff97` (72 commits later, no conflicts, the
+spike's own diff — `spikes/w012-wasi-driver/` only — is unchanged) and
+re-run to check that the verdicts still hold.
+
+**What changed and what did not.** The corpus grew from 126 to 127 programs
+while this PR was closed (`1f0ff97`-era `main` registers a 127th fixture),
+so H1's denominator moves with it. H1's threshold is *zero mismatches over
+the whole corpus* — verdict agreement **and** full-envelope identity for
+both engines — and that threshold is unchanged. The gate text below reads
+"126/126" because that was the corpus at pre-registration time; for this
+re-run it is **127/127**, the same gate on the same population rule.
+
+Nothing else is renegotiated: H2's 1 ms / 0.5×, H3's 0.5× floor ratio and
+H4's 100 ms / 500 ms boundaries stay exactly as registered, and the numbers
+already published in RESULTS.md are left in place as the first run. The
+re-run is reported as its own run, on its own host line, with its own raw
+artifact — not merged into the first run's tables.

@@ -1,7 +1,11 @@
 # W-012 / issue #268 — the stock checker as an in-process WASI module: results
 
 **Status:** gates pre-registered in [PREREG.md](PREREG.md) before the reported
-run. Reported run: 2026-10-23, commit `18e17d4`, one host.
+run. Reported run: 2026-10-23, commit `18e17d4`, one host. **Re-run 2026-10-25**
+on the branch rebased onto `main` @ `1f0ff97` (corpus 127) — same verdicts, see
+["Second run"](#second-run--2026-10-25-after-the-rebase) below; the first run's
+numbers are left untouched.
+
 **Question:** W-012 wants the validator to stop being a subprocess. Is the
 *cheap* endcap enough — the `hyb` binary we already ship, compiled to
 `wasm32-wasip1`, run through `wazero` — or does the win require the
@@ -79,6 +83,62 @@ Cold start: **one-time module compile 982.84 ms** for a 2.4 MB module
 | **H3** | in-process invocation floor ≤ 0.5× native floor | 0.240 ms vs 0.895 ms = 0.27× | **accepted** |
 | **H4** | one-time module compile ≤ 100 ms (falsifier at > 500 ms) | 982.84 ms | **falsified** |
 
+## Second run — 2026-10-25, after the rebase
+
+The PR was closed by the repo's 2026-10-24 queue reset (not a verdict on the
+work), then rebased onto `main` @ `1f0ff97` — 72 commits later, no conflicts,
+the spike's own diff unchanged (`spikes/w012-wasi-driver/` only) — and re-run
+end to end to check that the published verdicts still hold. Amendment 1 in
+[PREREG.md](PREREG.md) records the one material change: the corpus is now
+**127 programs**, so H1's denominator is 127 rather than 126. No threshold moved.
+
+One tree, no compiler change, same method as pre-registered. Host line from the
+harness: `go go1.26.0 on linux/amd64, GOMAXPROCS=4, 4 cpu` (same class as the
+first run's 4-CPU box, not the same machine). Native `hyb` 4,074,744 B, WASI
+module 2,389,305 B.
+
+Verdict parity — **127/127 both engines, 127/127 full-envelope identity**:
+
+| | corpus | native matches | in-process matches | engines agree |
+|---|---|---|---|---|
+| all 127 programs | 127 | **127** | **127** | **127** |
+
+Latency, 300 checks per path, milliseconds:
+
+| engine | p50 | p90 | p99 | min | max | mean |
+|---|---|---|---|---|---|---|
+| native subprocess | **1.528** | **1.973** | **2.684** | 1.038 | 3.319 | 1.577 |
+| in-process WASI | 1.578 | 4.398 | 10.738 | **0.299** | 13.912 | 2.255 |
+
+Invocation floor, 30 probes per path, milliseconds:
+
+| engine | p50 | p90 | min | max |
+|---|---|---|---|---|
+| native subprocess | 0.912 | 1.073 | 0.812 | 1.832 |
+| in-process WASI | **0.184** | 0.865 | 0.100 | 3.226 |
+
+Per-repetition medians: native 1.468 / 1.563 / 1.563 ms; in-process
+1.649 / 1.630 / 1.394 ms. Cold start: one-time module compile **968.26 ms**.
+
+| id | gate (unchanged) | re-run | verdict |
+|----|------------------|--------|---------|
+| **H1** | zero mismatches over the whole corpus, both engines, full-envelope | 127/127 and 127/127 identity | **accepted** |
+| **H2** | in-process p50 ≤ 1 ms *and* ≤ 0.5× native p50 | 1.578 ms; 0.97× native | **falsified** |
+| **H3** | in-process floor ≤ 0.5× native floor | 0.184 ms vs 0.912 ms = 0.20× | **accepted** |
+| **H4** | one-time module compile ≤ 100 ms (falsifier at > 500 ms) | 968.26 ms | **falsified** |
+
+**Nothing in the conclusion moved.** The boundary is still ~5× cheaper
+in-process and the check itself still swallows the saving: p50 is a wash
+(0.97× here, 0.97× in the first run), the tail is still ~4× worse in-process
+(p99 10.738 vs 2.684 ms here, 7.214 vs 2.970 ms in the first run), and the
+~1 s uncached module compile is still the first-diagnostic cost. Two runs on
+two hosts, same four verdicts — the W-012 recommendation stands: the win, if
+any, is a warm instance and a compile cache, not deleting the process.
+
+Raw artifact of this run: `report-2026-10-25.json` (127 parity rows, both
+engines' envelopes, pooled and per-repetition statistics, floors, machine
+string, commit).
+
 ## What this means for W-012
 
 1. **The boundary is not the problem, and it is not the win either.** Spawn
@@ -138,3 +198,6 @@ warm, not from deleting the process.
 `report-2026-10-23.json` — the full report: every parity row
 (per-program expectation, native envelope, in-process envelope), pooled and
 per-repetition statistics, floors, machine string, commit.
+
+`report-2026-10-25.json` — the same report for the post-rebase re-run
+(127 parity rows).
