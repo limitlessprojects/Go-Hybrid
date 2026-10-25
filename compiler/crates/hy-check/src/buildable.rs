@@ -75,6 +75,7 @@ pub(crate) enum OpKind {
     /// any value), and assigning *from* one stays fail-open because type
     /// assertions are not modelled.
     Interface,
+    Error,
     Int,
     Float,
     Bool,
@@ -102,6 +103,7 @@ impl OpKind {
         match self {
             OpKind::Unknown => "unknown".to_string(),
             OpKind::Interface => "any".to_string(),
+            OpKind::Error => "error".to_string(),
             OpKind::Int => "int".to_string(),
             OpKind::Float => "float64".to_string(),
             OpKind::Bool => "bool".to_string(),
@@ -147,6 +149,10 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         // arm below, so every assignment to an `any` target would be rejected.
         // The accept-side corpus controls caught exactly that.
         (Interface, _) | (_, Interface) => false,
+        // Error target accepts custom error structs (Struct(_)) or another Error.
+        // Assigning an Error value to a concrete target stays fail-open.
+        (Error, Struct(_)) => false,
+        (_, Error) => false,
         // No value is involved; a count check owns that case.
         (Void, _) | (_, Void) => false,
         // An untyped int constant is assignable to a float target
@@ -283,7 +289,7 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         // kind model (it may hold anything), so a member lookup on it cannot
         // claim absence — same fail-open as `kinds_conflict`'s Interface arm.
         OpKind::Interface => false,
-        OpKind::Int | OpKind::Float | OpKind::Bool | OpKind::Str => true,
+        OpKind::Int | OpKind::Float | OpKind::Bool | OpKind::Str | OpKind::Error => true,
         OpKind::Void => false,
         // A struct whose NAME did not resolve cannot have its members looked up.
         OpKind::Struct(None) => false,
@@ -1595,6 +1601,7 @@ impl<'a> Collector<'a> {
             // #682 U9-U12: `any` is a resolved interface type, not an
             // unresolved one, so it must not fall through to `Unknown`.
             "any" | "interface{}" => OpKind::Interface,
+            "error" => OpKind::Error,
             "bool" => OpKind::Bool,
             "string" => OpKind::Str,
             "float32" | "float64" | "f32" | "f64" => OpKind::Float,
