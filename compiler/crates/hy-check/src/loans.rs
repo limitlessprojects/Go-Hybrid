@@ -419,47 +419,39 @@ impl<'a> Checker<'a> {
     /// across any enclosing loop whose body uses the loan (`l.created < lp_idx`
     /// and `l.last` falls inside `lp_idx..=lp_end`).
     pub(crate) fn effective_loan_last(&self, st: &FnState, l: &Loan) -> usize {
+        let is_loc = match &l.target { LoanTarget::MapSlot { binding, .. } => if binding.contains("#end") { return l.last; } else { binding.contains("#loc") }, _ => false };
         let mut last = l.last;
         for (&lp_idx, &lp_end) in &st.loop_end {
-            if l.created < lp_end && last >= lp_idx && last <= lp_end {
+            if (!is_loc || l.created < lp_idx) && l.created < lp_end && last >= lp_idx && last <= lp_end {
                 last = last.max(lp_end);
             }
         }
         last
     }
 
-    pub(crate) fn emit_a3_if_live_pub(
-        &mut self,
-        st: &FnState,
-        path: &str,
-        span: Span,
-        idx: usize,
-        verb: &str,
-    ) {
+    pub(crate) fn emit_a3_if_live_pub(&mut self, st: &FnState, path: &str, span: Span, idx: usize, verb: &str) {
         self.emit_a3_if_live(st, path, span, idx, verb);
     }
 
     /// Extend any live `LoanTarget::MapSlot` window when a slot-loan binding
     /// (or an existing alias of one) is copied into `alias_name` (`p := s` or `p = s`).
-    pub(crate) fn extend_map_slot_loan_to_alias(
-        &self,
-        st: &mut FnState,
-        alias_name: &str,
-        val: &Expr,
-        idx: usize,
-    ) {
-        let Expr::Ident { name: src, .. } = unwrap_parens(val) else {
-            return;
-        };
+    pub(crate) fn extend_map_slot_loan_to_alias(&self, st: &mut FnState, pre_st: &FnState, alias_name: &str, val: &Expr, idx: usize) {
+        let Expr::Ident { name: src, .. } = unwrap_parens(val) else { return; };
         let alias_last = st.last_use.get(alias_name).copied().unwrap_or(idx).max(idx);
-        let resolved_src = crate::freeze::resolve_alias(st, src);
-        for loan in &mut st.loans {
-            if let LoanTarget::MapSlot { binding, .. } = &loan.target {
-                if (binding == src || *binding == resolved_src) && loan.created <= idx {
-                    loan.last = loan.last.max(alias_last);
+        let resolved_src = crate::freeze::resolve_alias(pre_st, src);
+        let mut alias_loans = Vec::new();
+        for loan in &pre_st.loans {
+            let eff_last = self.effective_loan_last(pre_st, loan);
+            if let LoanTarget::MapSlot { binding, path, key } = &loan.target {
+                let sfx = if binding.ends_with("#loc") { "#loc" } else { "" };
+                let b = binding.trim_end_matches("#loc").trim_end_matches("#carry");
+                if (b == src || b == resolved_src) && loan.created <= idx && idx <= eff_last {
+                    alias_loans.push(Loan { target: LoanTarget::MapSlot { binding: format!("{}{}", alias_name, sfx), path: path.clone(), key: key.clone() }, created: loan.created, last: alias_last, span: loan.span, desc: loan.desc.clone() });
                 }
             }
         }
+        for al in &alias_loans { if let LoanTarget::MapSlot { binding, .. } = &al.target { st.last_use.insert(binding.clone(), al.last); } }
+        st.loans.extend(alias_loans);
     }
 
     /// Shared A3 emitter for index-assign inserts and `delete` calls.
@@ -488,11 +480,7 @@ impl<'a> Checker<'a> {
         // fire for the SAME call site - same loan, same span. The first,
         // most specific wording wins; a duplicate would only bury the
         // signal the corpus count pins.
-        if self.diags.iter().any(|d| {
-            d.code == "HYB-E3102"
-                && d.span == span
-                && d.message.contains(&format!("loan `{}`", binding))
-        }) {
+        if self.diags.iter().any(|d| d.code == "HYB-E3102" && d.span == span) {
             return;
         }
         let notes = vec![
@@ -516,7 +504,7 @@ impl<'a> Checker<'a> {
     /// overwritten by, or overwrites, the loan's store-back. `owner` is the
     /// binding being (re)loaned, whose own earlier loan does not conflict.
     #[allow(clippy::too_many_arguments)]
-    fn emit_o8_alias_if_live(
+    pub(crate) fn emit_o8_alias_if_live(
         &mut self,
         st: &FnState,
         path: &str,
@@ -526,16 +514,13 @@ impl<'a> Checker<'a> {
         idx: usize,
         what: &str,
     ) {
+        if self.diags.iter().any(|d| d.code == "HYB-E3102" && d.span == span) { return; }
         let Some(loan) = st.loans.iter().find(|l| {
             matches!(&l.target, LoanTarget::MapSlot { binding, path: p, key: k }
-                if owner != Some(binding.as_str())
-                    && a3_paths_conflict(st, p, path)
+                if owner != Some(binding.trim_end_matches("#loc")) && a3_paths_conflict(st, p, path)
                     && !matches!((k.as_deref(), key), (Some(a), Some(b)) if a != b))
-                && l.created <= idx
-                && idx <= l.last
-        }) else {
-            return;
-        };
+                && l.created <= idx && idx <= l.last
+        }) else { return; };
         let LoanTarget::MapSlot { binding, .. } = &loan.target else {
             unreachable!("filtered above");
         };
@@ -1059,7 +1044,7 @@ impl<'a> Checker<'a> {
                 if let Some(&closure_last) = st.last_use.get(name) {
                     for loan in &mut st.loans {
                         if let LoanTarget::MapSlot { binding, .. } = &loan.target {
-                            if caps.iter().any(|c| c == binding) {
+                            if caps.iter().any(|c| c == binding.trim_end_matches("#loc").trim_end_matches("#carry")) {
                                 loan.last = loan.last.max(closure_last);
                             }
                         }
@@ -1418,6 +1403,7 @@ impl<'a> Checker<'a> {
     ) {
         // A3 loan creation: `svc := &e.services[existing]` (including parallel defines)
         if l.names.len() == l.values.len() {
+            let pre_loan_st = st.clone();
             for (name, val) in l.names.iter().zip(l.values.iter()) {
                 self.check_addr_of_const_loan(st, val);
                 if let Some(path) = walk::addr_of_index_base_path(val) {
@@ -1445,7 +1431,7 @@ impl<'a> Checker<'a> {
                         desc: format!("`{} := {}`", binding, val.render()),
                     });
                 } else {
-                    self.extend_map_slot_loan_to_alias(st, name, val, idx);
+                    self.extend_map_slot_loan_to_alias(st, &pre_loan_st, name, val, idx);
                 }
             }
         }
@@ -5249,6 +5235,7 @@ impl<'a> Checker<'a> {
     ) {
         // A3 loan creation on assignment: `x = &m[k]`
         if op == AssignOp::Assign && targets.len() == values.len() {
+            let pre_loan_st = st.clone();
             for (t, v) in targets.iter().zip(values.iter()) {
                 self.check_addr_of_const_loan(st, v);
                 if let PlaceKind::Ident(name) = &t.kind {
@@ -5277,7 +5264,7 @@ impl<'a> Checker<'a> {
                             desc: format!("`{} = {}`", binding, v.render()),
                         });
                     } else {
-                        self.extend_map_slot_loan_to_alias(st, name, v, idx);
+                        self.extend_map_slot_loan_to_alias(st, &pre_loan_st, name, v, idx);
                     }
                     if matches!(self.shape_of_expr(st, v), TypeShape::BorrowHandle(_)) {
                         self.extend_call_loans_to_view(st, v, name, idx);

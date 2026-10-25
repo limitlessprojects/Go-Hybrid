@@ -226,6 +226,8 @@ fn check_one_closure(
     }
     for p in params {
         let shape = ck.shape_of_type(&p.ty);
+        let opn = format!("{}#outer{}_{}", p.name, body.span.start.line, body.span.start.col); let old_p = cst.aliases.remove(&p.name); for v in cst.aliases.values_mut() { if *v == p.name { *v = opn.clone(); } } if let Some(t) = old_p { cst.aliases.insert(opn, t); }
+        cst.share_clear(&p.name);
         cst.env.insert(
             p.name.clone(),
             Binding {
@@ -247,6 +249,8 @@ fn check_one_closure(
         let shape = ck.shape_of_type(&r.ty);
         if let Some(name) = &r.name {
             if name != "_" {
+                let orn = format!("{}#outer{}_{}", name, body.span.start.line, body.span.start.col); let old_n = cst.aliases.remove(name); for v in cst.aliases.values_mut() { if v == name { *v = orn.clone(); } } if let Some(t) = old_n { cst.aliases.insert(orn, t); }
+                cst.share_clear(name);
                 cst.env.insert(
                     name.clone(),
                     Binding {
@@ -267,7 +271,7 @@ fn check_one_closure(
     }
     let mut nested = Vec::new();
     cst.scope_push();
-    check_closure_slot_loans(ck, &mut cst, body);
+    check_closure_slot_loans(ck, &cst, body);
     check_body_boundaries(ck, &mut cst, body, false, &mut nested);
     sync_nested_moves(&cst, &mut nested);
     for nc in nested {
@@ -1203,93 +1207,331 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
 }
 
 /// Check A3 (`HYB-E3102`) for map-slot loans opened inside a closure body.
-fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block) {
+fn scoped_last_use(flat: &crate::walk::FlatInfo<'_>, name: &str, idx: usize, init_d: usize) -> usize {
+    let (mut d, mut sh_d, mut last) = (init_d, None::<usize>, idx);
+    for &(s, i) in &flat.stmts {
+        if i < idx { continue; }
+        if i > idx {
+            if let Some(evs) = flat.events.get(&i) {
+                for ev in evs {
+                    match ev {
+                        crate::walk::ScopeEvent::Push => d += 1,
+                        crate::walk::ScopeEvent::Pop => { d = d.saturating_sub(1); if d == 0 { return last; } if sh_d.is_some_and(|sd| d < sd) { sh_d = None; } }
+                        crate::walk::ScopeEvent::SelectRecv { names, .. } if sh_d.is_none() && names.iter().any(|n| n == name) => sh_d = Some(d),
+                        crate::walk::ScopeEvent::MatchBind { name: n, .. } if sh_d.is_none() && *n == name => sh_d = Some(d),
+                        _ => {}
+                    }
+                }
+            }
+            if sh_d.is_none() {
+                match s {
+                    Stmt::Local(l) if l.names.iter().any(|n| n == name) => {
+                        let mut u = Vec::new();
+                        for v in &l.values { crate::walk::expr_uses(v, &mut u); }
+                        if u.iter().any(|x| x.name == name) { last = i; }
+                        sh_d = Some(d);
+                        continue;
+                    }
+                    Stmt::For { kind: hy_syntax::ForKind::Iterate { vars, expr }, .. } if vars.iter().any(|n| n == name) => {
+                        let mut u = Vec::new();
+                        crate::walk::expr_uses(expr, &mut u);
+                        if u.iter().any(|x| x.name == name) { last = i; }
+                        sh_d = Some(d);
+                        continue;
+                    }
+                    Stmt::For { kind: hy_syntax::ForKind::Range { var, lo, hi, .. }, .. } if var == name => {
+                        let mut u = Vec::new();
+                        crate::walk::expr_uses(lo, &mut u);
+                        crate::walk::expr_uses(hi, &mut u);
+                        if u.iter().any(|x| x.name == name) { last = i; }
+                        sh_d = Some(d);
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if sh_d.is_none() {
+            let mut u = Vec::new();
+            crate::walk::own_uses(s, &mut u);
+            if u.iter().any(|x| x.name == name) { last = i; }
+        }
+    }
+    last
+}
+
+fn shadow_closure_loan(st: &mut FnState, name: &str, idx: usize, flat: &crate::walk::FlatInfo<'_>, lscopes: &mut Vec<(Vec<(usize, String)>, Vec<usize>)>) {
+    if st.scopes.last().is_some_and(|s| !s.contains_key(name)) {
+        let mut d = 1usize;
+        let mut pop_idx = flat.stmts.len();
+        for i in (idx + 1)..=flat.stmts.len() {
+            if let Some(evs) = flat.events.get(&i) {
+                for ev in evs {
+                    match ev {
+                        crate::walk::ScopeEvent::Push => d += 1,
+                        crate::walk::ScopeEvent::Pop => { d -= 1; if d == 0 { pop_idx = i; break; } }
+                        _ => {}
+                    }
+                }
+            }
+            if d == 0 { break; }
+        }
+        for (li, loan) in st.loans.iter_mut().enumerate() {
+            if let crate::model::LoanTarget::MapSlot { binding, .. } = &mut loan.target {
+                if binding == name || *binding == format!("{}#loc", name) || *binding == format!("{}#carry", name) {
+                    if loan.last < pop_idx { loan.last = loan.last.min(idx.saturating_sub(1)); }
+                    if let Some((ren, _)) = lscopes.last_mut() { ren.push((li, binding.clone())); }
+                    let sfx = if binding.ends_with("#loc") { "#loc" } else if binding.ends_with("#carry") { "#carry" } else { "" };
+                    let sid = format!("{}#{}{}", name, loan.created, sfx);
+                    st.last_use.insert(sid.clone(), loan.last);
+                    *binding = sid;
+                }
+            }
+        }
+    }
+}
+
+fn step_closure_slot_stmt(ck: &mut Checker<'_>, st: &mut FnState, flat: &crate::walk::FlatInfo<'_>, stmt: &Stmt, idx: usize, lscopes: &mut Vec<(Vec<(usize, String)>, Vec<usize>)>) {
     use crate::model::{Loan, LoanTarget};
     use crate::walk;
-    let flat = walk::flatten(body);
-    let saved_last_use = std::mem::replace(&mut st.last_use, flat.last_use.clone());
-    let saved_loop_end = std::mem::replace(&mut st.loop_end, flat.loop_end.clone());
-    let saved_loans = std::mem::take(&mut st.loans);
-    for (stmt, idx) in &flat.stmts {
-        let idx = *idx;
-        let mut calls = Vec::new();
-        walk::own_calls(stmt, &mut calls);
-        for cr in calls {
-            let mut dummy_consumes = Vec::new();
-            ck.process_call(st, &cr, idx, None, &mut dummy_consumes);
+    let managed = flat.in_managed(idx);
+    if let Some(evs) = flat.events.get(&idx) {
+        for ev in evs {
+            match ev {
+                walk::ScopeEvent::Push => { lscopes.push((Vec::new(), Vec::new())); st.scope_push(); }
+                walk::ScopeEvent::Pop => {
+                    let popped_keys: Vec<String> = st.scopes.last().map(|s| s.keys().cloned().collect()).unwrap_or_default();
+                    st.scope_pop();
+                    if let Some((ren, inner)) = lscopes.pop() {
+                        for (li, loan) in st.loans.iter_mut().enumerate() {
+                            if let LoanTarget::MapSlot { binding, .. } = &mut loan.target {
+                                let cur_id = binding.trim_end_matches("#loc").trim_end_matches("#carry");
+                                if inner.contains(&li) || (!st.env.contains_key(cur_id) && !st.scopes.iter().any(|s| s.contains_key(cur_id)) && popped_keys.iter().any(|k| k == cur_id)) {
+                                    let orig = cur_id.split('#').next().unwrap_or(cur_id).to_string();
+                                    loan.last = loan.last.min(idx.saturating_sub(1));
+                                    let sid = format!("{}#end{}", orig, loan.created);
+                                    st.last_use.insert(sid.clone(), loan.last);
+                                    *binding = sid;
+                                }
+                            }
+                        }
+                        for (li, orig) in ren.into_iter().rev() {
+                            if let Some(Loan { target: LoanTarget::MapSlot { binding, .. }, .. }) = st.loans.get_mut(li) { if !binding.contains("#end") { *binding = orig; } }
+                        }
+                    }
+                }
+                walk::ScopeEvent::SelectRecv { names, chan } => {
+                    let elem = match ck.shape_of_expr(st, chan) { TypeShape::Chan(e) => *e, _ => TypeShape::Unknown };
+                    for (i, n) in names.iter().enumerate() {
+                        shadow_closure_loan(st, n, idx, flat, lscopes);
+                        ck.define_binding(st, n, if i == 0 { elem.clone() } else { TypeShape::Primitive }, None, false, managed, false);
+                    }
+                }
+                walk::ScopeEvent::MatchBind { name, subject } => { shadow_closure_loan(st, name, idx, flat, lscopes); ck.bind_match_arm(st, name, subject, managed); }
+            }
         }
-        match stmt {
-            Stmt::Local(l) => {
-                if l.names.len() == l.values.len() {
-                    for (name, val) in l.names.iter().zip(l.values.iter()) {
-                        if let Some(path) = walk::addr_of_index_base_path(val) {
-                            let binding = name.clone();
-                            let key = walk::addr_of_index_slot_key(val);
-                            let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
-                            st.loans.push(Loan {
-                                target: LoanTarget::MapSlot {
-                                    binding: binding.clone(),
-                                    path,
-                                    key,
-                                },
-                                created: idx,
-                                last,
-                                span: val.span(),
-                                desc: format!("`{} := {}`", binding, val.render()),
-                            });
+    }
+    let mut calls = Vec::new();
+    walk::own_calls(stmt, &mut calls);
+    for cr in calls { ck.process_call(st, &cr, idx, None, &mut Vec::new()); }
+    match stmt {
+        Stmt::Local(l) => {
+            let (immutable, is_let) = (l.kind == LocalKind::Const, l.kind == LocalKind::Let);
+            if l.values.is_empty() {
+                let shape = l.ty.as_ref().map(|t| ck.shape_of_type(t)).unwrap_or(TypeShape::Unknown);
+                for name in &l.names { shadow_closure_loan(st, name, idx, flat, lscopes); ck.define_binding(st, name, shape.clone(), l.ty.clone(), immutable, managed, is_let); }
+            } else if l.names.len() == l.values.len() {
+                let (pre_st, overwritten) = (st.clone(), l.names.clone());
+                for (name, val) in l.names.iter().zip(l.values.iter()) {
+                    shadow_closure_loan(st, name, idx, flat, lscopes);
+                    let inferred = ck.shape_of_expr(&pre_st, val);
+                    let (shape, ty) = match (&l.ty, inferred) {
+                        (Some(t), TypeShape::Unknown) => (ck.shape_of_type(t), Some(t.clone())),
+                        (_, inf) => (inf, ck.ty_of_expr(&pre_st, val).or_else(|| l.ty.clone())),
+                    };
+                    ck.define_binding(st, name, shape, ty, immutable, managed, is_let);
+                    if let Some(path) = walk::addr_of_index_base_path(val) {
+                        let (binding, key) = (name.clone(), walk::addr_of_index_slot_key(val));
+                        ck.emit_o8_alias_if_live(st, &path, key.as_deref(), Some(&binding), val.span(), idx, "a second slot loan");
+                        let (last, li) = (scoped_last_use(flat, &binding, idx, 1), st.loans.len());
+                        let tag_b = if flat.in_loop(idx) { format!("{}#loc", binding) } else { binding.clone() };
+                        st.last_use.insert(binding.clone(), last);
+                        st.last_use.insert(tag_b.clone(), last);
+                        st.loans.push(Loan { target: LoanTarget::MapSlot { binding: tag_b, path, key }, created: idx, last, span: val.span(), desc: format!("`{} := {}`", binding, val.render()) });
+                        if let Some((_, inner)) = lscopes.last_mut() { inner.push(li); }
+                    } else {
+                        if matches!(crate::model::unwrap_parens(val), hy_syntax::Expr::Ident { .. }) && !pre_st.loans.is_empty() { st.last_use.insert(name.clone(), scoped_last_use(flat, name, idx, 1)); }
+                        let pre_len = st.loans.len();
+                        ck.extend_map_slot_loan_to_alias(st, &pre_st, name, val, idx);
+                        if let Some((_, inner)) = lscopes.last_mut() { inner.extend(pre_len..st.loans.len()); }
+                        ck.record_storage_from_snapshot(st, &pre_st, name, val, &overwritten, true, false);
+                        ck.record_closure_mutations(st, name, val);
+                        if let hy_syntax::Expr::Call { callee, .. } = crate::model::unwrap_parens(val) { if let hy_syntax::Expr::Ident { name: cn, .. } = crate::model::unwrap_parens(callee) { if let Some((_, _, cb)) = st.closure_defs.get(cn).cloned() { for (s, _) in walk::flatten(&cb).stmts { if let Stmt::Return { values: rvs, .. } = s { let mut rs = Vec::new(); for rv in rvs { crate::model::collect_ref_roots(rv, &mut rs); } for r in rs { st.share_edge(name, &r); } } } } } }
+                        if st.env_lookup(name).is_some_and(|b| matches!(b.shape, TypeShape::Closure)) { st.aliases.remove(name); if let Some(ps) = st.may_share.remove(name) { for p in ps { if let Some(s) = st.may_share.get_mut(&p) { s.remove(name); } } } }
+                    }
+                }
+            } else {
+                let (pre_st, overwritten) = (st.clone(), l.names.clone());
+                let shapes = l.values.first().map(|v| ck.multi_value_shapes(&pre_st, v, l.names.len())).unwrap_or_else(|| vec![TypeShape::Unknown; l.names.len()]);
+                let tys = l.values.first().map(|v| ck.multi_value_tys(&pre_st, v, l.names.len())).unwrap_or_else(|| vec![None; l.names.len()]);
+                for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
+                    shadow_closure_loan(st, name, idx, flat, lscopes);
+                    ck.define_binding(st, name, shape, ty, immutable, managed, is_let);
+                    if let Some(v) = l.values.first() { ck.record_storage_from_snapshot(st, &pre_st, name, v, &overwritten, true, true); }
+                }
+            }
+        }
+        Stmt::For { kind, .. } => match kind {
+            hy_syntax::ForKind::Iterate { vars, expr } => {
+                for (name, shape) in vars.iter().zip(ck.iterate_var_shapes(st, expr, vars.len())) {
+                    shadow_closure_loan(st, name, idx, flat, lscopes);
+                    ck.define_binding(st, name, shape, None, false, managed, false);
+                }
+            }
+            hy_syntax::ForKind::Range { var, .. } => { shadow_closure_loan(st, var, idx, flat, lscopes); ck.define_binding(st, var, TypeShape::Primitive, None, false, managed, false); }
+            _ => {}
+        },
+        Stmt::Assign { targets, op, values, .. } => {
+            if *op == hy_syntax::AssignOp::Assign && targets.len() == values.len() {
+                let pre_st = st.clone();
+                let overwritten: Vec<String> = targets.iter().filter_map(|t| match &t.kind { hy_syntax::PlaceKind::Ident(n) => Some(n.clone()), _ => None }).collect();
+                for (t, v) in targets.iter().zip(values.iter()) {
+                    if let hy_syntax::PlaceKind::Ident(name) = &t.kind {
+                        let lsi = st.scopes.iter().rposition(|s| s.contains_key(name)).and_then(|d| d.checked_sub(st.scopes.len().saturating_sub(lscopes.len())));
+                        let init_d = lsi.map(|si| lscopes.len() - si).unwrap_or(lscopes.len() + 1);
+                        let dom = |c: usize| { let mut rd = 0usize; for i in (if flat.loop_end.contains_key(&c) { c + 2 } else { c + 1 })..=idx { if let Some(evs) = flat.events.get(&i) { for ev in evs { match ev { walk::ScopeEvent::Push => rd += 1, walk::ScopeEvent::Pop => rd = rd.saturating_sub(1), _ => {} } } } } rd == 0 };
+                        if let Some(path) = walk::addr_of_index_base_path(v) {
+                            let (binding, key) = (name.clone(), walk::addr_of_index_slot_key(v));
+                            for l in &mut st.loans { if matches!(&l.target, LoanTarget::MapSlot { binding: b, .. } if b == name || *b == format!("{}#loc", name) || *b == format!("{}#carry", name)) && l.created <= idx && dom(l.created) { l.last = l.last.min(idx.saturating_sub(1)); } }
+                            ck.emit_o8_alias_if_live(st, &path, key.as_deref(), Some(&binding), v.span(), idx, "a second slot loan");
+                            let (last, li) = (scoped_last_use(flat, &binding, idx, init_d), st.loans.len());
+                            let tag_b = if flat.in_loop(idx) { format!("{}#loc", binding) } else { binding.clone() };
+                            st.last_use.insert(binding.clone(), last);
+                            st.last_use.insert(tag_b.clone(), last);
+                            st.loans.push(Loan { target: LoanTarget::MapSlot { binding: tag_b, path, key }, created: idx, last, span: v.span(), desc: format!("`{} = {}`", binding, v.render()) });
+                            if let Some(si) = lsi { lscopes[si].1.push(li); }
                         } else {
-                            ck.extend_map_slot_loan_to_alias(st, name, val, idx);
+                            if matches!(crate::model::unwrap_parens(v), hy_syntax::Expr::Ident { .. }) && !pre_st.loans.is_empty() { st.last_use.insert(name.clone(), scoped_last_use(flat, name, idx, init_d)); }
+                            for l in &mut st.loans { if matches!(&l.target, LoanTarget::MapSlot { binding: b, .. } if b == name || *b == format!("{}#loc", name) || *b == format!("{}#carry", name)) && l.created <= idx && dom(l.created) { l.last = l.last.min(idx.saturating_sub(1)); } }
+                            let pre_len = st.loans.len();
+                            ck.extend_map_slot_loan_to_alias(st, &pre_st, name, v, idx);
+                            if let Some(si) = lsi { lscopes[si].1.extend(pre_len..st.loans.len()); }
+                            if !ck.value_reads_storage_of(&pre_st, v, name) { st.aliases.remove(name); st.share_clear(name); }
+                            ck.record_storage_from_snapshot(st, &pre_st, name, v, &overwritten, false, false);
+                            ck.record_closure_mutations(st, name, v);
+                            if let hy_syntax::Expr::Call { callee, .. } = crate::model::unwrap_parens(v) { if let hy_syntax::Expr::Ident { name: cn, .. } = crate::model::unwrap_parens(callee) { if let Some((_, _, cb)) = st.closure_defs.get(cn).cloned() { for (s, _) in walk::flatten(&cb).stmts { if let Stmt::Return { values: rvs, .. } = s { let mut rs = Vec::new(); for rv in rvs { crate::model::collect_ref_roots(rv, &mut rs); } for r in rs { st.share_edge(name, &r); } } } } } }
+                            if st.env_lookup(name).is_some_and(|b| matches!(b.shape, TypeShape::Closure)) { st.aliases.remove(name); if let Some(ps) = st.may_share.remove(name) { for p in ps { if let Some(s) = st.may_share.get_mut(&p) { s.remove(name); } } } }
                         }
                     }
                 }
             }
-            Stmt::Assign {
-                targets,
-                op,
-                values,
-                ..
-            } => {
-                if *op == hy_syntax::AssignOp::Assign && targets.len() == values.len() {
-                    for (t, v) in targets.iter().zip(values.iter()) {
-                        if let hy_syntax::PlaceKind::Ident(name) = &t.kind {
-                            if let Some(path) = walk::addr_of_index_base_path(v) {
-                                let binding = name.clone();
-                                let key = walk::addr_of_index_slot_key(v);
-                                let last =
-                                    st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
-                                st.loans.push(Loan {
-                                    target: LoanTarget::MapSlot {
-                                        binding: binding.clone(),
-                                        path,
-                                        key,
-                                    },
-                                    created: idx,
-                                    last,
-                                    span: v.span(),
-                                    desc: format!("`{} = {}`", binding, v.render()),
-                                });
-                            } else {
-                                ck.extend_map_slot_loan_to_alias(st, name, v, idx);
+            for t in targets {
+                if matches!(t.kind, hy_syntax::PlaceKind::Index { .. }) { if let Some(path) = walk::place_path(t) { ck.emit_a3_if_live_pub(st, &path, t.span, idx, "insert"); } }
+                if let Some((path, key)) = walk::place_field_store_slot(t) { ck.emit_o8_alias_if_live(st, &path, key.as_deref(), None, t.span, idx, "a field store"); }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn check_closure_slot_loans(ck: &mut Checker<'_>, orig_st: &FnState, body: &Block) {
+    use crate::model::LoanTarget;
+    use crate::walk;
+    let flat = walk::flatten(body);
+    let mut local_st = orig_st.clone();
+    let st = &mut local_st;
+    (st.last_use, st.loop_end) = (flat.last_use.clone(), flat.loop_end.clone());
+    st.loans.clear();
+    let closure_hubs: Vec<String> = st.env.iter().chain(st.scopes.iter().flat_map(|s| s.iter()))
+        .filter_map(|(k, b)| matches!(b.shape, TypeShape::Closure).then_some(k.clone())).collect();
+    for ch in closure_hubs { st.aliases.remove(&ch); if let Some(ps) = st.may_share.remove(&ch) { for p in ps { if let Some(s) = st.may_share.get_mut(&p) { s.remove(&ch); } } } }
+
+    let (mut lscopes, mut loop_state) = (Vec::new(), std::collections::HashMap::new());
+    for (stmt, idx) in &flat.stmts {
+        let (idx, d_pre) = (*idx, ck.diags.len());
+        let pre_bindings: std::collections::HashSet<String> = if flat.loop_end.contains_key(&idx) {
+            st.env.keys().chain(st.scopes.iter().flat_map(|s| s.keys())).cloned().collect()
+        } else { std::collections::HashSet::new() };
+        step_closure_slot_stmt(ck, st, &flat, stmt, idx, &mut lscopes);
+        for i in (d_pre..ck.diags.len()).rev() { if ck.diags[i].code != "HYB-E3102" { ck.diags.remove(i); } }
+        if flat.loop_end.contains_key(&idx) { loop_state.insert(idx, (st.scopes.len(), pre_bindings, st.loans.clone(), st.scopes.clone(), st.share_scopes.clone(), st.alias_scopes.clone(), lscopes.clone())); }
+        if flat.in_loop(idx) {
+            let mut lp_starts: Vec<usize> = flat.loop_end.iter().filter_map(|(&lp_idx, &lp_end)| (lp_end == idx).then_some(lp_idx)).collect();
+            lp_starts.sort_unstable_by(|a, b| b.cmp(a));
+            for lp_idx in lp_starts {
+                let lp_end = idx;
+                let (hdr_depth, entry_bindings, entry_loans, hdr_scopes, hdr_share, hdr_alias, hdr_lscopes) = loop_state.get(&lp_idx).cloned()
+                    .unwrap_or_else(|| (st.scopes.len(), std::collections::HashSet::new(), st.loans.clone(), st.scopes.clone(), st.share_scopes.clone(), st.alias_scopes.clone(), lscopes.clone()));
+                let is_loop_local = |b: &str, scopes: &[std::collections::HashMap<String, crate::model::Binding>]| {
+                    let orig = b.split('#').next().unwrap_or(b);
+                    let cur = b.trim_end_matches("#loc").trim_end_matches("#carry");
+                    b.contains("#end") || scopes.get(hdr_depth.saturating_sub(1)..).unwrap_or(&[]).iter().any(|s| s.contains_key(cur)) || !entry_bindings.contains(orig)
+                };
+                for loan in &mut st.loans {
+                    if let LoanTarget::MapSlot { binding, .. } = &loan.target {
+                        if !is_loop_local(binding, &st.scopes) && loan.created >= lp_idx && loan.created <= lp_end {
+                            loan.created = loan.created.min(lp_idx);
+                            loan.last = loan.last.max(lp_end);
+                        }
+                    }
+                }
+                let mut iter_st = st.clone();
+                let mut post_edges: Vec<(String, String)> = Vec::new();
+                for _ in 0..flat.stmts.len().max(4) {
+                    iter_st.scopes = hdr_scopes.clone();
+                    iter_st.share_scopes = hdr_share.clone();
+                    iter_st.alias_scopes = hdr_alias.clone();
+                    iter_st.shadow_link_scopes.truncate(hdr_depth);
+                    let mut carry_loans = entry_loans.clone();
+                    for loan in &st.loans {
+                        if let LoanTarget::MapSlot { binding, .. } = &loan.target {
+                            if !is_loop_local(binding, &st.scopes) && loan.created >= lp_idx && loan.created <= lp_end {
+                                let mut cl = loan.clone();
+                                if let LoanTarget::MapSlot { binding: cb, .. } = &mut cl.target {
+                                    let orig = cb.split('#').next().unwrap_or(cb).to_string();
+                                    *cb = if cl.desc.starts_with(&format!("`{} =", orig)) { orig } else { format!("{}#carry", orig) };
+                                }
+                                carry_loans.push(cl);
                             }
                         }
                     }
-                }
-                for t in targets {
-                    if matches!(t.kind, hy_syntax::PlaceKind::Index { .. }) {
-                        if let Some(path) = walk::place_path(t) {
-                            ck.emit_a3_if_live_pub(st, &path, t.span, idx, "insert");
+                    iter_st.loans = carry_loans;
+                    let (prev_state, mut iter_lscopes) = ((iter_st.aliases.clone(), iter_st.may_share.clone(), st.loans.len()), hdr_lscopes.clone());
+                    for (l_stmt, l_idx) in &flat.stmts {
+                        if *l_idx > lp_idx && *l_idx <= lp_end {
+                            let dlen = ck.diags.len();
+                            step_closure_slot_stmt(ck, &mut iter_st, &flat, l_stmt, *l_idx, &mut iter_lscopes);
+                            for i in (dlen..ck.diags.len()).rev() {
+                                if ck.diags[i].code != "HYB-E3102" { ck.diags.remove(i); }
+                            }
                         }
                     }
+                    for loan in &iter_st.loans {
+                        if let LoanTarget::MapSlot { binding, path, key } = &loan.target {
+                            if !is_loop_local(binding, &iter_st.scopes) && loan.created >= lp_idx && loan.created <= lp_end {
+                                let orig = binding.split('#').next().unwrap_or(binding).to_string();
+                                let last = loan.last.max(lp_end);
+                                if !st.loans.iter().any(|el| matches!(&el.target, LoanTarget::MapSlot { binding: eb, path: ep, key: ek } if eb.split('#').next().unwrap_or(eb) == orig && ep == path && ek == key && el.last >= last)) {
+                                    st.loans.push(crate::model::Loan { target: LoanTarget::MapSlot { binding: orig, path: path.clone(), key: key.clone() }, created: lp_idx, last, span: loan.span, desc: loan.desc.clone() });
+                                }
+                            }
+                        }
+                    }
+                    for (k, v) in iter_st.aliases.iter()
+                        .chain(iter_st.may_share.iter().flat_map(|(k, ps)| ps.iter().map(move |p| (k, p))))
+                    {
+                        if entry_bindings.contains(k) && entry_bindings.contains(v) { post_edges.push((k.clone(), v.clone())); }
+                    }
+                    if (iter_st.aliases.clone(), iter_st.may_share.clone(), st.loans.len()) == prev_state { break; }
+                }
+                for (k, v) in post_edges {
+                    st.share_edge(&k, &v);
+                    for sm in st.share_scopes.iter_mut().take(hdr_depth + 1) { sm.entry(k.clone()).or_default().insert(v.clone()); sm.entry(v.clone()).or_default().insert(k.clone()); }
                 }
             }
-            _ => {}
         }
     }
-    st.loans = saved_loans;
-    st.loop_end = saved_loop_end;
-    st.last_use = saved_last_use;
 }
-
 /// The outermost FnLits reachable from `block`. Closures nested inside other
 /// closures are NOT collected here: check_one_closure finds them while walking
 /// the enclosing closure's body (collect_stmt_direct_fnlits) and checks them
