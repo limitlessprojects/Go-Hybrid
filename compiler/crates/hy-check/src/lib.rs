@@ -2215,6 +2215,45 @@ mod tests {
     }
 
     #[test]
+    fn unknown_dotted_root_rejects_but_locals_and_curated_stay_accepted() {
+        // Issue #1131: a bare dotted root nothing declares and no import
+        // covers passed check, then `go build` said `undefined: widgets`.
+        let r = check("fn main() {\n    fmt.println(widgets.count)\n}\n");
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E1001");
+        assert!(
+            r.diagnostics[0].message.contains("curated allowlist"),
+            "must name the allowlist: {}",
+            r.diagnostics[0].message
+        );
+
+        // A deeper chain reports the innermost root.
+        let deep = check("fn main() {\n    fmt.println(widgets.inner.count)\n}\n");
+        assert_eq!(deep.verdict, Verdict::Reject, "{:?}", deep.diagnostics);
+        assert_eq!(deep.diagnostics[0].code, "HYB-E1001");
+
+        // Controls that must stay accepted.
+        let local = check(
+            "struct req { url string }\nfn main() {\n    var widgets req\n    fmt.println(widgets.url)\n}\n",
+        );
+        assert_eq!(local.verdict, Verdict::Accept, "{:?}", local.diagnostics);
+
+        let param = check(
+            "struct req { url string }\nfn f(widgets req) {\n    fmt.println(widgets.url)\n}\nfn main() { f(req{url: \"x\"}) }\n",
+        );
+        assert_eq!(param.verdict, Verdict::Accept, "{:?}", param.diagnostics);
+
+        let chain = check(
+            "struct b { d int }\nstruct a { b b }\nfn main() {\n    var x a\n    fmt.println(x.b.d)\n}\n",
+        );
+        assert_eq!(chain.verdict, Verdict::Accept, "{:?}", chain.diagnostics);
+
+        // Importless curated root (usage-driven import in the emitter).
+        let curated = check("fn main() {\n    fmt.println(hex.encode(\"ab\"))\n}\n");
+        assert_eq!(curated.verdict, Verdict::Accept, "{:?}", curated.diagnostics);
+    }
+
+    #[test]
     fn fc_unproven_name_via_managed_escapes() {
         // the SAME unproven value inside a managed block escapes through the
         // explicit hatch: warning only, counted — never a silent pass.
