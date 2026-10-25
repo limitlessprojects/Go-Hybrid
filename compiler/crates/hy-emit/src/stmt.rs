@@ -8,6 +8,20 @@ use super::expr::ATOM;
 use super::shapes::lookup_conversion;
 use std::collections::BTreeSet;
 
+/// True when the arm body's TOP-LEVEL statements contain a local define that
+/// redeclares the arm's pattern binding. hy-check treats a match arm body as a
+/// nested scope, so `some(v): { v := v + 1 ... }` is a legal arm-local shadow
+/// there; but the emitter injects `v := temp.val` into the same Go block as
+/// the (inlined) arm body, and Go rejects `v := v + 1` after it with
+/// "no new variables on left side of :=". Only top-level statements count:
+/// nested `Stmt::Block`/`if` bodies already emit their own braces and shadow
+/// legally without any wrapping.
+fn arm_body_redefines_binding(body: &Block, binding: &str) -> bool {
+    body.stmts.iter().any(|s| {
+        matches!(s, Stmt::Local(l) if l.names.iter().any(|n| n == binding))
+    })
+}
+
 impl Emitter {
     pub fn emit_stmt(&mut self, s: &Stmt) -> Result<(), EmitError> {
         match s {
@@ -2729,12 +2743,36 @@ impl Emitter {
                                 self.indent += 1;
                             }
                             let prebound = prebound_guard_var.as_deref() == Some(binding.as_str());
-                            if *binding != "_" && !prebound && crate::rangebind::body_reads(&arm.body, binding) {
+                            // When the arm body's top level redefines the
+                            // pattern binding (`some(v): { v := v + 1 ... }` is
+                            // a legal nested shadow in hy-check), an inlined
+                            // body would collide with the injected
+                            // `binding := temp.val` in the same Go block ("no
+                            // new variables on left side of :="). Keep the
+                            // injection in the arm's Go scope and wrap ONLY the
+                            // body in a nested block; `crate::rangebind::
+                            // body_reads` is shadow-aware, so the injection
+                            // happens only when the body genuinely reads the
+                            // pre-shadow binding. Arms that do not redefine the
+                            // binding keep byte-identical output.
+                            let injects = *binding != "_" && !prebound
+                                && crate::rangebind::body_reads(&arm.body, binding);
+                            let wraps_body =
+                                injects && arm_body_redefines_binding(&arm.body, binding);
+                            if injects {
                                 self.push(&format!("{} := {}.val", binding, temp));
                             } else if !prebound {
                                 self.local_vars.remove(*binding);
                             }
+                            if wraps_body {
+                                self.push("{");
+                                self.indent += 1;
+                            }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                            if wraps_body {
+                                self.indent -= 1;
+                                self.push("}");
+                            }
                             if chain_opened {
                                 self.indent -= 1;
                                 self.push("}");
@@ -2808,12 +2846,31 @@ impl Emitter {
                             self.push("}");
                         }
                         None => {
-                            if *binding != "_" && crate::rangebind::body_reads(&arm.body, binding) {
+                            let injects =
+                                *binding != "_" && crate::rangebind::body_reads(&arm.body, binding);
+                            // Same treatment as the simple chain: keep the
+                            // injected binding in the per-arm Go scope and wrap
+                            // ONLY a redefining arm body in a nested block.
+                            // `body_reads` is shadow-aware (reads after a
+                            // top-level redeclare of the binding do not count),
+                            // so the injection survives only when genuinely
+                            // used.
+                            let wraps_body =
+                                injects && arm_body_redefines_binding(&arm.body, binding);
+                            if injects {
                                 self.push(&format!("{} := {}.val", binding, temp));
                             } else {
                                 self.local_vars.remove(*binding);
                             }
+                            if wraps_body {
+                                self.push("{");
+                                self.indent += 1;
+                            }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                            if wraps_body {
+                                self.indent -= 1;
+                                self.push("}");
+                            }
                         }
                     }
                     Ok(())
