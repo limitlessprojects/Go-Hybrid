@@ -924,7 +924,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         // element shape when the channel resolves; `ok` is a
                         // bool; unresolvable stays Unknown (fail-closed, O4.9)
                         let elem = match ck.shape_of_expr(st, chan) {
-                            TypeShape::Chan(e) => *e,
+                            TypeShape::Chan(e) | TypeShape::RecvOnlyChan(e) => *e,
                             _ => TypeShape::Unknown,
                         };
                         for (i, n) in names.iter().enumerate() {
@@ -1004,7 +1004,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     );
                     sync_nested_moves(st, nested);
                     collect_expr_direct_fnlits(expr, st, nested);
-                    let is_chan = matches!(ck.shape_of_expr(st, expr), TypeShape::Chan(_));
+                    let is_chan = matches!(ck.shape_of_expr(st, expr), TypeShape::Chan(_) | TypeShape::RecvOnlyChan(_));
                     let shapes = ck.iterate_var_shapes(st, expr, vars.len());
                     for (name, shape) in vars.iter().zip(shapes) {
                         let is_ref = shape.is_reference_alias();

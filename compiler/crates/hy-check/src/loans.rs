@@ -7112,7 +7112,7 @@ impl<'a> Checker<'a> {
                         walk::ScopeEvent::Pop => cst.scope_pop(),
                         walk::ScopeEvent::SelectRecv { names, chan } => {
                             let elem = match self.shape_of_expr(&cst, chan) {
-                                TypeShape::Chan(e) => *e,
+                                TypeShape::Chan(e) | TypeShape::RecvOnlyChan(e) => *e,
                                 _ => TypeShape::Unknown,
                             };
                             for (i, n) in names.iter().enumerate() {
@@ -7351,7 +7351,7 @@ impl<'a> Checker<'a> {
                 Stmt::For { kind, .. } => match kind {
                     hy_syntax::ForKind::Iterate { vars, expr } => {
                         let is_chan =
-                            matches!(self.shape_of_expr(&cst, expr), TypeShape::Chan(_));
+                            matches!(self.shape_of_expr(&cst, expr), TypeShape::Chan(_) | TypeShape::RecvOnlyChan(_));
                         let shapes = self.iterate_var_shapes(&cst, expr, vars.len());
                         for (name, shape) in vars.iter().zip(shapes) {
                             let is_ref = shape.is_reference_alias() || shape.is_handle();

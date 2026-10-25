@@ -404,7 +404,7 @@ impl<'a> Checker<'a> {
     /// does not suppress it.
     pub(crate) fn check_recv_operand(&mut self, st: &FnState, chan: &Expr, span: Span) -> bool {
         match self.shape_of_expr(st, chan) {
-            TypeShape::Chan(_) => {
+            TypeShape::Chan(_) | TypeShape::RecvOnlyChan(_) => {
                 if let Some(ty) = self.recv_chan_type_expr(st, chan) {
                     let resolved = self.resolve_type_alias(&ty);
                     if matches!(
