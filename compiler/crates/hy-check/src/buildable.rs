@@ -332,6 +332,11 @@ fn place_as_expr(p: &Place) -> Option<Expr> {
             name: name.clone(),
             span: p.span,
         },
+        PlaceKind::Deref { base } => Expr::Unary {
+            op: UnOp::Deref,
+            operand: Box::new(place_as_expr(base)?),
+            span: p.span,
+        },
         PlaceKind::AddrOf { .. } => return None,
     })
 }
@@ -1222,7 +1227,7 @@ impl<'a> Collector<'a> {
                 }
                 self.place_read(p);
             }
-            PlaceKind::Field { .. } | PlaceKind::AddrOf { .. } => {
+            PlaceKind::Field { .. } | PlaceKind::AddrOf { .. } | PlaceKind::Deref { .. } => {
                 self.place_read(p);
             }
         }
@@ -1265,6 +1270,7 @@ impl<'a> Collector<'a> {
             }
             PlaceKind::Field { base, .. } => self.place_read(base),
             PlaceKind::AddrOf { base } => self.place_read(base),
+            PlaceKind::Deref { base } => self.place_read(base),
         }
     }
 
@@ -1788,6 +1794,10 @@ impl<'a> Collector<'a> {
                 self.struct_field_kind(&bk, name).unwrap_or(OpKind::Unknown)
             }
             PlaceKind::AddrOf { base } => OpKind::Pointer(Box::new(self.kind_of_place(base))),
+            PlaceKind::Deref { base } => match self.kind_of_place(base) {
+                OpKind::Pointer(inner) => *inner,
+                _ => OpKind::Unknown,
+            },
         }
     }
 
@@ -1850,6 +1860,10 @@ impl<'a> Collector<'a> {
             Expr::AddrOf { operand, .. } => OpKind::Pointer(Box::new(self.kind_of_expr(operand))),
             Expr::Unary { op, operand, .. } => match op {
                 UnOp::Addr => OpKind::Pointer(Box::new(self.kind_of_expr(operand))),
+                UnOp::Deref => match self.kind_of_expr(operand) {
+                    OpKind::Pointer(inner) => *inner,
+                    _ => OpKind::Unknown,
+                },
                 UnOp::Not => OpKind::Bool,
                 UnOp::Neg => match self.kind_of_expr(operand) {
                     OpKind::Float => OpKind::Float,
@@ -2789,6 +2803,7 @@ impl<'a> Collector<'a> {
             UnOp::Addr => {
                 self.check_addr_of_operand(operand, span);
             }
+            UnOp::Deref => {}
         }
     }
 

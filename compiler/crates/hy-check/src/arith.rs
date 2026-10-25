@@ -181,7 +181,7 @@ impl<'a> Checker<'a> {
                 self.check_place_const_zero_divisor(st, base);
                 self.check_expr_const_zero_divisor(st, index);
             }
-            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } | PlaceKind::Deref { base } => {
                 self.check_place_const_zero_divisor(st, base)
             }
         }

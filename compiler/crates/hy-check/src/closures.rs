@@ -385,7 +385,7 @@ fn collect_place_direct_fnlits<'a>(place: &'a hy_syntax::Place, out: &mut Vec<&'
             collect_place_direct_fnlits(base, out);
             crate::walk::expr_fnlits(index, out);
         }
-        hy_syntax::PlaceKind::Field { base, .. } | hy_syntax::PlaceKind::AddrOf { base } => {
+        hy_syntax::PlaceKind::Field { base, .. } | hy_syntax::PlaceKind::AddrOf { base } | hy_syntax::PlaceKind::Deref { base } => {
             collect_place_direct_fnlits(base, out);
         }
     }
@@ -1425,6 +1425,7 @@ fn collect_place<'a>(
         }
         hy_syntax::PlaceKind::Field { base, .. } => collect_place(base, out),
         hy_syntax::PlaceKind::AddrOf { base } => collect_place(base, out),
+        hy_syntax::PlaceKind::Deref { base } => collect_place(base, out),
     }
 }
 

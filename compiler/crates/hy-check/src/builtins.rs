@@ -174,7 +174,7 @@ impl<'a> Checker<'a> {
                 self.check_place_builtin_args(base);
                 self.check_expr_builtin_args(index);
             }
-            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } | PlaceKind::Deref { base } => {
                 self.check_place_builtin_args(base);
             }
             PlaceKind::Ident(_) => {}

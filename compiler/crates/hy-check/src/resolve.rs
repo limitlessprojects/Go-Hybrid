@@ -293,6 +293,7 @@ impl<'a> Scan<'a> {
                 self.run_place(base);
                 self.run_expr(index);
             }
+            PlaceKind::Deref { base } => self.run_place(base),
             PlaceKind::Field { base, name } => {
                 if self.mode == Mode::Check {
                     if let PlaceKind::Ident(base_name) = &base.kind {

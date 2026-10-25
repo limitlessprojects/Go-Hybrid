@@ -318,7 +318,7 @@ impl<'a> Checker<'a> {
                 self.check_place_addr_of_loan_projections(st, base, include_direct_ident);
                 self.check_expr_addr_of_loan_projections(st, index, include_direct_ident);
             }
-            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } | PlaceKind::Deref { base } => {
                 self.check_place_addr_of_loan_projections(st, base, include_direct_ident);
             }
         }

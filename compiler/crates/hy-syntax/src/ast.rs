@@ -432,6 +432,10 @@ pub enum PlaceKind {
     AddrOf {
         base: Box<Place>,
     },
+    /// `*p` — pointer dereference in place position.
+    Deref {
+        base: Box<Place>,
+    },
 }
 
 impl Place {
@@ -442,6 +446,7 @@ impl Place {
             PlaceKind::Index { base, .. } => base.root(),
             PlaceKind::Field { base, .. } => base.root(),
             PlaceKind::AddrOf { base } => base.root(),
+            PlaceKind::Deref { base } => base.root(),
         }
     }
 
@@ -456,6 +461,7 @@ impl Place {
             PlaceKind::Index { base, .. } => format!("{}[...]", base.render()),
             PlaceKind::Field { base, name } => format!("{}.{}", base.render(), name),
             PlaceKind::AddrOf { base } => format!("&{}", base.render()),
+            PlaceKind::Deref { base } => format!("*{}", base.render()),
         }
     }
 }
@@ -645,6 +651,8 @@ pub enum UnOp {
     Neg,
     /// `&x` — also spelled `Expr::AddrOf` (both are legal AST).
     Addr,
+    /// `*p` — pointer dereference.
+    Deref,
 }
 
 impl UnOp {
@@ -653,6 +661,7 @@ impl UnOp {
             UnOp::Not => "!",
             UnOp::Neg => "-",
             UnOp::Addr => "&",
+            UnOp::Deref => "*",
         }
     }
 }

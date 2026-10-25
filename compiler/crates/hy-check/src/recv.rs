@@ -242,7 +242,7 @@ impl<'a> Checker<'a> {
                 self.check_place_recv_operands(st, base);
                 self.check_expr_recv_operands(st, index);
             }
-            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } | PlaceKind::Deref { base } => {
                 self.check_place_recv_operands(st, base);
             }
         }
