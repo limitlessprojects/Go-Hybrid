@@ -713,7 +713,7 @@ impl<'a> Checker<'a> {
                     _ => {}
                 }
             } else {
-                crate::walk::own_uses(stmt, &mut uses);
+                crate::walk::own_uses_with_results(stmt, &iter_st.named_results, &mut uses);
                 if let hy_syntax::Stmt::Select { arms, .. } = stmt {
                     for arm in arms {
                         match &arm.kind {
@@ -1397,8 +1397,28 @@ mod tests {
                <-done\n\
              }",
         );
-        assert_eq!(r_iter.verdict, Verdict::Reject, "{:?}", r_iter.diagnostics);
+                assert_eq!(r_iter.verdict, Verdict::Reject, "{:?}", r_iter.diagnostics);
         assert!(r_iter.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
+    }
+
+    #[test]
+    fn loop_backedge_bare_return_checks_moved_named_results() {
+        let r = check(
+            "fn worker(m map[string]int) { m[\"w\"] = 1 }\n\
+             fn leak_on_backedge(flag bool) (out map[string]int) {\n\
+               out = map[string]int{\"k\": 1}\n\
+               for i in 0..2 {\n\
+                 if i == 1 && flag {\n\
+                   return\n\
+                 }\n\
+                 task worker(move out)\n\
+               }\n\
+               out = map[string]int{\"fresh\": 2}\n\
+               return\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3003"));
     }
 }
 
