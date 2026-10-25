@@ -881,6 +881,41 @@ fn generic_struct_and_fn_infer_missing_constraints_722() {
 }
 
 #[test]
+fn generic_type_params_do_not_inherit_later_constraint_742() {
+    // Issue #742: an unconstrained type parameter preceding a constrained one
+    // (`[t, k comparable]`) must emit `t any, k comparable` so instantiating
+    // `t` with a non-comparable slice type (`[]int`) builds cleanly in Go.
+    let go = emit(
+        "struct pair_a[t, k comparable] {\n    items []t\n    index map[k]int\n}\n\nstruct pair_b[t any, k comparable] {\n    items []t\n    index map[k]int\n}\n\nstruct pair_c[t, k] {\n    items []t\n    index map[k]int\n}\n\nstruct pair_d[k comparable, t] {\n    items []t\n    index map[k]int\n}\n\nfn pick[t, k comparable](xs []t, m map[k]int, key k) int {\n    return len(xs) + m[key]\n}\n\nfn main() {\n    pa := pair_a[[]int, string]{ items: [][]int{[]int{1}}, index: map[string]int{\"k\": 2} }\n    pb := pair_b[[]int, string]{ items: pa.items, index: pa.index }\n    pc := pair_c[[]int, string]{ items: pb.items, index: pb.index }\n    pd := pair_d[string, []int]{ items: pc.items, index: pc.index }\n    fmt.println(pick[[]int, string](pd.items, pd.index, \"k\"))\n}\n",
+    );
+    assert!(
+        go.contains("type pair_a[t any, k comparable] struct {"),
+        "expected `type pair_a[t any, k comparable] struct {{` in:\n{}",
+        go
+    );
+    assert!(
+        go.contains("type pair_b[t any, k comparable] struct {"),
+        "expected `type pair_b[t any, k comparable] struct {{` in:\n{}",
+        go
+    );
+    assert!(
+        go.contains("type pair_c[t any, k comparable] struct {"),
+        "expected `type pair_c[t any, k comparable] struct {{` in:\n{}",
+        go
+    );
+    assert!(
+        go.contains("type pair_d[k comparable, t any] struct {"),
+        "expected `type pair_d[k comparable, t any] struct {{` in:\n{}",
+        go
+    );
+    assert!(
+        go.contains("func pick[t any, k comparable](xs []t, m map[k]int, key k) int {"),
+        "expected `func pick[t any, k comparable]` in:\n{}",
+        go
+    );
+}
+
+#[test]
 fn option_match_lowes_to_ok_branch() {
     let go = emit(
         "fn get() option[int] {\n    return some(3)\n}\n\nfn main() {\n    match get() {\n        some(v): fmt.println(\"v={v}\")\n        none:     fmt.println(\"none\")\n    }\n}\n",
