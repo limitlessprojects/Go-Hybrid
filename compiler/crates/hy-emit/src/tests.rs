@@ -1598,6 +1598,20 @@ fn diff_blank_range_for_uses_fresh_temp() {
 }
 
 #[test]
+fn exclusive_range_hoists_upper_bound_once_when_shadowing_loop_var() {
+    // Issue #730: `for n in 0..n` must evaluate `n` in the enclosing scope
+    // once in the parallel for-init before the loop variable `n` shadows it.
+    let go = emit("fn main() {\n    n := 3\n    for n in 0..n {\n        fmt.println(n)\n    }\n}");
+    assert!(
+        go.contains("for n, hyHi0 := 0, n; n < hyHi0; n++ {")
+            && !go.contains("for n := 0; n < n"),
+        "exclusive range must hoist hi in parallel for-init when hi reads loop var:
+{}",
+        go
+    );
+}
+
+#[test]
 fn diff_blank_iterate_emits_for_range() {
     // corpus 17: `for _ in 0..n_probes { s := <-samples }` — the drain form.
     let go = emit("fn main() {\n    done := make(chan bool, 2)\n    for _ in done {\n    }\n}");

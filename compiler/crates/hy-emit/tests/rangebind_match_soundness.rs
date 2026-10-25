@@ -114,8 +114,31 @@ fn main() {
     let file_ex = parse_file("test.hy", src_exclusive).expect("parse exclusive succeeds");
     let go_ex = emit_go(&file_ex).expect("emit exclusive succeeds");
     assert!(
-        go_ex.contains("for i, _ := range xs {"),
-        "exclusive `for v in 0..v` lowers to `for v := 0; v < v; v++` where `v` in `v < v` is the inner `v`, so outer `v` must be blanked:\n{go_ex}"
+        go_ex.contains("for i, v := range xs {")
+            && go_ex.contains("for v, hyHi0 := 0, v; v < hyHi0; v++ {"),
+        "exclusive `for v in 0..v` binds `hyHi0 := v` in parallel for-init so outer `v` is read:\n{go_ex}"
+    );
+
+    let src_exclusive_unused_outer = r#"package main
+
+import "fmt"
+
+fn main() {
+    xs := []int{10, 20}
+    for i, v in xs {
+        fmt.println(i)
+        for v in 0..3 {
+            fmt.println(v)
+        }
+    }
+}
+"#;
+    let file_unused = parse_file("test.hy", src_exclusive_unused_outer).expect("parse succeeds");
+    let go_unused = emit_go(&file_unused).expect("emit succeeds");
+    assert!(
+        go_unused.contains("for i, _ := range xs {")
+            && go_unused.contains("for v := 0; v < 3; v++ {"),
+        "when inner `for v in 0..3` does not read `v` in bounds, outer `v` must be blanked:\n{go_unused}"
     );
 
     let src_inclusive = r#"package main

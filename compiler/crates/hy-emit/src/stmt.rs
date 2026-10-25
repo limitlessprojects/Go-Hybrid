@@ -1775,6 +1775,23 @@ impl Emitter {
                         "for {}, {} := {}, {} <= {}; {}; {}++ {{",
                         v, cont, lo_once, lo_once, hi_once, cont, v
                     )
+                } else if crate::rangebind::expr_reads(hi, var) {
+                    // Issue #730: when `hi` reads the loop variable name `var`
+                    // (`for n in 0..n`), Go's `for n := lo; n < n; n++` scopes
+                    // `n` across the condition so `n < n` reads the newly bound
+                    // inner `n` and stops immediately. Bind the upper bound in
+                    // the parallel init (`for n, hyHi0 := lo, hi; n < hyHi0; n++`)
+                    // so Go evaluates `lo` then `hi` in the outer scope, keeps
+                    // any loop label attached to the `for` statement, and scopes
+                    // `hyHi0` to the loop. Type match is guaranteed by
+                    // `hy-check/src/range_iter.rs::check_range_bound_types`
+                    // (HYB-E2009), which requires `lo` and `hi` to have matching
+                    // integer types whenever `hi` is non-`int`.
+                    let hi_once = self.next_temp("hyHi");
+                    format!(
+                        "for {}, {} := {}, {}; {} < {}; {}++ {{",
+                        v, hi_once, lo_t, hi_t, v, hi_once, v
+                    )
                 } else {
                     format!("for {} := {}; {} < {}; {}++ {{", v, lo_t, v, hi_t, v)
                 }
