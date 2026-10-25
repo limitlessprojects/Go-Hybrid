@@ -6493,6 +6493,7 @@ impl<'a> Checker<'a> {
                 _ => None,
             };
             if let Some(rname) = recv_base {
+                let is_set_recv = Self::base_named_type_str(&rname) == "set";
                 if let Some(decl) = self
                     .method_decls
                     .get(&(rname, method_name.clone()))
@@ -6520,6 +6521,28 @@ impl<'a> Checker<'a> {
                                 hits.push((const_name, base.span()));
                             }
                         }
+                    }
+                } else if is_set_recv
+                    && matches!(method_name.as_str(), "insert" | "remove")
+                {
+                    // `set[T]` methods live in the emitted prelude, not in
+                    // `method_decls`. `insert`/`remove` write the underlying
+                    // map, so a `const` receiver is written (issue #884).
+                    let recv_const = base
+                        .root_ident()
+                        .filter(|root| !declared.contains(*root))
+                        .and_then(|root| {
+                            self.const_write_root(
+                                st,
+                                &Place {
+                                    kind: PlaceKind::Ident(root.to_string()),
+                                    span: base.span(),
+                                },
+                            )
+                        })
+                        .or_else(|| self.const_arg_root(st, base, declared));
+                    if let Some(const_name) = recv_const {
+                        hits.push((const_name, base.span()));
                     }
                 }
             } else if method_name == "pop"
