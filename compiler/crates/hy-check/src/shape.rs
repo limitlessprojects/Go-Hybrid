@@ -88,6 +88,30 @@ impl<'a> Checker<'a> {
         if self.structs.contains_key(base) {
             return TypeShape::Struct(Some(name.to_string()));
         }
+        // User enums: unit-only and value-payload enums are sendable-by-type
+        // (`Primitive`); an enum carrying a non-sendable payload (e.g. a map or
+        // slice) inherits that payload's shape so boundary checks see the interior.
+        if let Some(variants) = self.enum_variants.get(base) {
+            let mut non_sendable = None;
+            let mut has_unknown = false;
+            for (_, payload) in variants {
+                if let Some(pty) = payload {
+                    let pshape = self.shape_of_type_depth(pty, depth + 1);
+                    if matches!(pshape, TypeShape::Unknown) {
+                        has_unknown = true;
+                    } else if !pshape.is_sendable_by_type() && non_sendable.is_none() {
+                        non_sendable = Some(pshape);
+                    }
+                }
+            }
+            if let Some(ns) = non_sendable {
+                return ns;
+            }
+            if has_unknown {
+                return TypeShape::Unknown;
+            }
+            return TypeShape::Primitive;
+        }
         // User type aliases take precedence over predeclared types.
         if let Some(target) = self.type_aliases.get(base) {
             return self.shape_of_type_depth(target, depth + 1);
@@ -221,11 +245,88 @@ impl<'a> Checker<'a> {
     // From expressions
     // -----------------------------------------------------------------------
 
+    /// Resolve `expr` as an unshadowed enum unit variant (`red` or `color.red`),
+    /// returning the declaring enum's name.
+    pub(crate) fn resolve_enum_unit_variant(&self, st: &FnState, expr: &Expr) -> Option<String> {
+        match crate::model::unwrap_parens(expr) {
+            Expr::Ident { name, .. } => {
+                if self.lookup_binding(st, name).is_some() || self.fns.contains_key(name.as_str()) {
+                    return None;
+                }
+                self.enum_variants.iter().find_map(|(ename, vs)| {
+                    vs.iter()
+                        .any(|(v, p)| v == name && p.is_none())
+                        .then(|| ename.clone())
+                })
+            }
+            Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
+                    if self.lookup_binding(st, root).is_none() {
+                        if let Some(vs) = self.enum_variants.get(root.as_str()) {
+                            if vs.iter().any(|(v, p)| v == name && p.is_none()) {
+                                return Some(root.clone());
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve `callee` as an unshadowed enum payload variant constructor
+    /// (`circle` in `circle(5)` or `shape.circle` in `shape.circle(5)`),
+    /// returning `(enum_name, payload_type)`.
+    pub(crate) fn resolve_enum_payload_variant_callee(
+        &self,
+        st: &FnState,
+        callee: &Expr,
+    ) -> Option<(String, TypeExpr)> {
+        match crate::model::unwrap_parens(callee) {
+            Expr::Ident { name, .. } => {
+                if self.lookup_binding(st, name).is_some() || self.fns.contains_key(name.as_str()) {
+                    return None;
+                }
+                self.enum_variants.iter().find_map(|(ename, vs)| {
+                    vs.iter().find_map(|(v, p)| {
+                        if v == name {
+                            p.as_ref().map(|pty| (ename.clone(), pty.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                })
+            }
+            Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
+                    if self.lookup_binding(st, root).is_none() {
+                        if let Some(vs) = self.enum_variants.get(root.as_str()) {
+                            return vs.iter().find_map(|(v, p)| {
+                                if v == name {
+                                    p.as_ref().map(|pty| (root.clone(), pty.clone()))
+                                } else {
+                                    None
+                                }
+                            });
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn shape_of_expr(&self, st: &FnState, expr: &Expr) -> TypeShape {
         match expr {
             Expr::Ident { name, .. } => self
                 .lookup_binding(st, name)
                 .map(|b| b.shape.clone())
+                .or_else(|| {
+                    self.resolve_enum_unit_variant(st, expr)
+                        .map(|ename| self.named_shape(&ename))
+                })
                 .unwrap_or(TypeShape::Unknown),
             Expr::Lit { kind, .. } => match kind {
                 hy_syntax::LitKind::Int(_)
@@ -274,6 +375,9 @@ impl<'a> Checker<'a> {
                 _ => TypeShape::Unknown,
             },
             Expr::Field { base, name, .. } => {
+                if let Some(ename) = self.resolve_enum_unit_variant(st, expr) {
+                    return self.named_shape(&ename);
+                }
                 let base_shape = self.shape_of_expr(st, base);
                 self.field_shape(&base_shape, name)
             }
@@ -331,6 +435,9 @@ impl<'a> Checker<'a> {
     }
 
     fn call_shape(&self, st: &FnState, callee: &Expr, args: &[CallArg]) -> TypeShape {
+        if let Some((ename, _)) = self.resolve_enum_payload_variant_callee(st, callee) {
+            return self.named_shape(&ename);
+        }
         match crate::model::unwrap_parens(callee) {
             Expr::FnLit { results, .. } => results
                 .first()
@@ -835,8 +942,15 @@ impl<'a> Checker<'a> {
             Expr::Move { operand, .. }
             | Expr::Try { operand, .. }
             | Expr::Paren { inner: operand, .. } => self.ty_of_expr(st, operand),
-            Expr::Call { callee, args, span } => match crate::model::unwrap_parens(callee) {
-                Expr::FnLit { results, .. } => results.first().map(|r| r.ty.clone()),
+            Expr::Call { callee, args, span } => {
+                if let Some((ename, _)) = self.resolve_enum_payload_variant_callee(st, callee) {
+                    return Some(TypeExpr::Named {
+                        name: ename,
+                        span: *span,
+                    });
+                }
+                match crate::model::unwrap_parens(callee) {
+                    Expr::FnLit { results, .. } => results.first().map(|r| r.ty.clone()),
                 Expr::Ident { name, .. } => {
                     if let Some(b) = self.lookup_binding(st, name) {
                         if let Some(ty) = &b.ty {
@@ -978,7 +1092,8 @@ impl<'a> Checker<'a> {
                         None
                     }
                 }
-            },
+                }
+            }
             Expr::Binary { op, lhs, rhs, .. } => {
                 if matches!(
                     op,

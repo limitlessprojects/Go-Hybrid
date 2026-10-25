@@ -674,9 +674,11 @@ fn rust_crate_import_errors_cleanly() {
 }
 
 #[test]
-fn enum_decl_errors_cleanly() {
-    let msg = emit_err("enum shape { circle square } fn main() { }");
-    assert!(msg.contains("enum"), "{}", msg);
+fn enum_decl_emits_tagged_struct() {
+    let go = emit("enum shape { circle(int) square }\nfn main() { }");
+    assert!(go.contains("type shape struct {"), "{}", go);
+    assert!(go.contains("tag int"), "{}", go);
+    assert!(go.contains("v0  int"), "{}", go);
 }
 
 #[test]
@@ -3118,4 +3120,117 @@ fn utf8_byte_escapes_emit_exact_utf8_strings_issue_1199() {
         "expected interpolated prefix:é:%v, got:\n{}",
         go
     );
+}
+
+#[test]
+fn issue_1649_enum_declarations_and_variants_emit_buildable_go() {
+    // Repro 1: unused enum declaration
+    let go1 = emit(
+        "\
+enum color {
+    red
+    green
+    blue
+}
+
+fn main() {
+    fmt.println(\"ok\")
+}
+",
+    );
+    assert!(go1.contains("type color struct {\n\ttag int\n}"), "{}", go1);
+
+    // Repro 2: enum in type positions (fn param, struct field, map, slice, option, return)
+    // and bare/qualified unit & payload variants + channel send/receive + equality + match.
+    let go2 = emit(
+        "\
+enum color {
+    red
+    green
+    blue
+}
+
+enum shape {
+    circle(int)
+    square
+}
+
+struct item {
+    c color
+}
+
+fn show(c color) color {
+    return c
+}
+
+fn area(s shape) int {
+    match s {
+        circle(r) => {
+            return r * r
+        }
+        square => {
+            return 1
+        }
+    }
+}
+
+fn main() {
+    var z color
+    c0 := red
+    c1 := color.green
+    s0 := circle(5)
+    s1 := shape.square
+    it := item{c: c0}
+    m := map[string]color{\"a\": c1}
+    sl := []color{c0, c1}
+    var opt option[color] = none
+    opt = some(red)
+    ch := make(chan color, 1)
+    ch <- red
+    got := <-ch
+    if got == red {
+        fmt.println(show(it.c), m[\"a\"], len(sl), opt, z, area(s0), area(s1))
+    }
+}
+",
+    );
+    assert!(go2.contains("c0 := color{tag: 0}"), "{}", go2);
+    assert!(go2.contains("c1 := color{tag: 1}"), "{}", go2);
+    assert!(go2.contains("s0 := shape{tag: 0, v0: 5}"), "{}", go2);
+    assert!(go2.contains("s1 := shape{tag: 1}"), "{}", go2);
+    assert!(go2.contains("ch <- color{tag: 0}"), "{}", go2);
+    assert!(go2.contains("if got == (color{tag: 0}) {"), "{}", go2);
+
+    // Verify `go build` succeeds on both emitted programs when `go` is available.
+    if std::process::Command::new("go")
+        .arg("version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+    {
+        for (idx, go_src) in [(&go1, "repro1"), (&go2, "repro2")].into_iter() {
+            let dir = std::env::temp_dir().join(format!(
+                "hy-emit-1649-{}-{}",
+                go_src,
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("go.mod"), "module test1649\n\ngo 1.21\n").unwrap();
+            std::fs::write(dir.join("main.go"), idx).unwrap();
+            let out = std::process::Command::new("go")
+                .arg("build")
+                .current_dir(&dir)
+                .output()
+                .expect("run go build");
+            let _ = std::fs::remove_dir_all(&dir);
+            assert!(
+                out.status.success(),
+                "go build failed for {}:\n{}\nGo source:\n{}",
+                go_src,
+                String::from_utf8_lossy(&out.stderr),
+                idx
+            );
+        }
+    }
+
 }

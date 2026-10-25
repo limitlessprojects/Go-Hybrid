@@ -293,6 +293,13 @@ fn build_tables(ck: &mut Checker<'_>) {
                     e.name.clone(),
                     e.variants.iter().map(|v| v.name.clone()).collect(),
                 );
+                ck.enum_variants.insert(
+                    e.name.clone(),
+                    e.variants
+                        .iter()
+                        .map(|v| (v.name.clone(), v.payload.clone()))
+                        .collect(),
+                );
                 ck.declare_pkg_name(&e.name, "enum", e.span);
             }
             Decl::TypeAlias(ta) => {
@@ -5249,6 +5256,57 @@ mod tests {
             .filter(|d| d.code == "HYB-E3006")
             .count();
         assert_eq!(e3006_count, 2, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn issue_1649_enum_variants_resolve_at_check_sites() {
+        let ok = check(
+            "enum color {\n\
+               red\n\
+               green\n\
+               blue\n\
+             }\n\
+             enum shape {\n\
+               circle(int)\n\
+               square\n\
+             }\n\
+             fn worker(c color, s shape) {\n\
+               _ = c\n\
+               _ = s\n\
+             }\n\
+             fn main() {\n\
+               ch := make(chan color, 2)\n\
+               ch <- red\n\
+               ch <- color.green\n\
+               c := <-ch\n\
+               ch <- c\n\
+               sch := make(chan shape, 2)\n\
+               sch <- circle(5)\n\
+               sch <- shape.square\n\
+               s := <-sch\n\
+               task worker(c, s)\n\
+             }",
+        );
+        assert_eq!(ok.verdict, Verdict::Accept, "{:?}", ok.diagnostics);
+        assert!(ok.diagnostics.is_empty(), "{:?}", ok.diagnostics);
+
+        let bad_payload = check(
+            "enum msg {\n\
+               empty\n\
+               data(map[string]int)\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 1}\n\
+               ch := make(chan msg, 1)\n\
+               ch <- data(m)\n\
+             }",
+        );
+        assert_eq!(
+            bad_payload.verdict,
+            Verdict::Reject,
+            "{:?}",
+            bad_payload.diagnostics
+        );
     }
 }
 

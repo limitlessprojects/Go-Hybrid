@@ -651,6 +651,12 @@ pub struct Emitter {
     /// and user type alias → its target, for zero values that allocate.
     n5_structs: BTreeMap<String, Vec<FieldDecl>>,
     n5_aliases: BTreeMap<String, TypeExpr>,
+    /// User-declared enums: enum_name → variants `(variant_name, payload_type)`
+    /// in declaration order (`tag == idx`).
+    pub(crate) enums: BTreeMap<String, Vec<(String, Option<TypeExpr>)>>,
+    /// Bare variant name → `(enum_name, tag, payload_type)` for unshadowed
+    /// variant references (`red`, `circle(5)`).
+    pub(crate) bare_variants: BTreeMap<String, (String, usize, Option<TypeExpr>)>,
 }
 
 pub(crate) struct ScopeSnapshot {
@@ -701,6 +707,8 @@ impl Emitter {
             explicit_imports: BTreeMap::new(),
             n5_structs: BTreeMap::new(),
             n5_aliases: BTreeMap::new(),
+            enums: BTreeMap::new(),
+            bare_variants: BTreeMap::new(),
         }
     }
 
@@ -836,6 +844,43 @@ impl Emitter {
                 _ => None,
             })
             .collect();
+        self.enums.clear();
+        self.bare_variants.clear();
+        let mut top_level_names: BTreeSet<String> = BTreeSet::new();
+        for d in &file.decls {
+            match d {
+                Decl::Const(c) => {
+                    top_level_names.insert(c.name.clone());
+                }
+                Decl::Struct(s) => {
+                    top_level_names.insert(s.name.clone());
+                }
+                Decl::Enum(e) => {
+                    top_level_names.insert(e.name.clone());
+                }
+                Decl::TypeAlias(t) => {
+                    top_level_names.insert(t.name.clone());
+                }
+                Decl::Fn(f) if f.receiver.is_none() => {
+                    top_level_names.insert(f.name.clone());
+                }
+                _ => {}
+            }
+        }
+        for d in &file.decls {
+            if let Decl::Enum(e) = d {
+                let mut vs = Vec::new();
+                for (idx, v) in e.variants.iter().enumerate() {
+                    vs.push((v.name.clone(), v.payload.clone()));
+                    if !top_level_names.contains(&v.name) {
+                        self.bare_variants
+                            .entry(v.name.clone())
+                            .or_insert_with(|| (e.name.clone(), idx, v.payload.clone()));
+                    }
+                }
+                self.enums.insert(e.name.clone(), vs);
+            }
+        }
         self.ptr_returning_fns = file
             .fns()
             .filter(|f| f.results.first().is_some_and(|r| self.is_pointer_ty(&r.ty)))
@@ -919,12 +964,7 @@ impl Emitter {
                 }
                 Decl::Const(c) => self.emit_file_const(c)?,
                 Decl::Struct(s) => self.emit_struct(s)?,
-                Decl::Enum(e) => {
-                    return Err(EmitError::unsupported(format!(
-                        "enum `{}` (match/enum emission lands with the match surface)",
-                        e.name
-                    )));
-                }
+                Decl::Enum(e) => self.emit_enum(e)?,
                 Decl::TypeAlias(t) => {
                     let ty = self.type_text(&t.ty);
                     self.push(&format!("type {} = {}", t.name, ty));
@@ -1005,15 +1045,20 @@ impl Emitter {
     }
 
     fn emit_file_const(&mut self, c: &ConstDecl) -> Result<(), EmitError> {
-        let value = self.emit_expr(&c.value, 0)?;
+        let value = self.emit_expr_exp(&c.value, 0, c.ty.as_ref())?;
         // Go's `const` admits only bool/string/number literals. Composite
         // values (slices/maps/structs — 17's `const thresholds = [10, …]`,
-        // 18's seed_urls) lower to `var`: same identifier surface, the
+        // 18's seed_urls, or enum variant literals lowered to Go tagged
+        // structs) lower to `var`: same identifier surface, the
         // immutability contract is the checker's business, not Go's.
         let composite = matches!(
             Self::peel_parens(&c.value),
             Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
-        );
+        ) || self.is_enum_variant_expr(&c.value)
+            || matches!(
+                Self::peel_parens(&c.value),
+                Expr::Ident { name, .. } if name == "none"
+            );
         let kw = if composite { "var" } else { "const" };
         match &c.ty {
             Some(t) => {
@@ -1022,6 +1067,24 @@ impl Emitter {
             }
             None => self.push(&format!("{} {} = {}", kw, c.name, value)),
         }
+        Ok(())
+    }
+
+    fn emit_enum(&mut self, e: &EnumDecl) -> Result<(), EmitError> {
+        self.push(&format!("type {} struct {{", e.name));
+        self.indent += 1;
+        let mut fields: Vec<(String, String)> = vec![("tag".to_string(), "int".to_string())];
+        for (idx, v) in e.variants.iter().enumerate() {
+            if let Some(pty) = &v.payload {
+                fields.push((format!("v{}", idx), self.type_text(pty)));
+            }
+        }
+        let width = fields.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+        for (fname, fty) in &fields {
+            self.push(&format!("{:<width$} {}", fname, fty, width = width));
+        }
+        self.indent -= 1;
+        self.push("}");
         Ok(())
     }
 

@@ -98,13 +98,85 @@ impl Emitter {
                     }
                     _ => {}
                 },
+                Expr::Ident { name, .. }
+                    if name == "none" && !self.local_vars.contains("none") =>
+                {
+                    if matches!(exp, TypeExpr::Option { .. }) {
+                        let head = self.type_text(exp);
+                        return Ok(format!("{}{{}}", head));
+                    }
+                }
                 _ => {}
             }
         }
         self.emit_expr(e, min_prec)
     }
 
+    pub(crate) fn enum_of_variant_expr(&self, e: &Expr) -> Option<String> {
+        match Self::unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                if self.local_vars.contains(name) {
+                    return None;
+                }
+                self.bare_variants.get(name).and_then(|(ename, _, p)| {
+                    if p.is_none() {
+                        Some(ename.clone())
+                    } else {
+                        None
+                    }
+                })
+            }
+            Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: root, .. } = Self::unwrap_parens(base) {
+                    if !self.local_vars.contains(root) {
+                        if let Some(vs) = self.enums.get(root) {
+                            if vs.iter().any(|(v, p)| v == name && p.is_none()) {
+                                return Some(root.clone());
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Expr::Call { callee, args, .. } if args.len() == 1 => match Self::unwrap_parens(callee) {
+                Expr::Ident { name, .. } => {
+                    if self.local_vars.contains(name) || self.fn_shapes.contains_key(name) {
+                        return None;
+                    }
+                    self.bare_variants.get(name).and_then(|(ename, _, p)| {
+                        if p.is_some() {
+                            Some(ename.clone())
+                        } else {
+                            None
+                        }
+                    })
+                }
+                Expr::Field { base, name, .. } => {
+                    if let Expr::Ident { name: root, .. } = Self::unwrap_parens(base) {
+                        if !self.local_vars.contains(root) {
+                            if let Some(vs) = self.enums.get(root) {
+                                if vs.iter().any(|(v, p)| v == name && p.is_some()) {
+                                    return Some(root.clone());
+                                }
+                            }
+                        }
+                    }
+                    None
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_enum_variant_expr(&self, e: &Expr) -> bool {
+        self.enum_of_variant_expr(e).is_some()
+    }
+
     fn top_prec(&self, e: &Expr) -> u8 {
+        if !matches!(e, Expr::Paren { .. }) && self.is_enum_variant_expr(e) {
+            return 0;
+        }
         match e {
             Expr::Binary { op, .. } => bin_prec(*op),
             Expr::Call { callee, args, .. } if args.len() == 1 => {
@@ -130,6 +202,11 @@ impl Emitter {
                     return Err(EmitError::unsupported(
                         "`none` outside a return (MVP-0 lowers `return none` against the declared option result)",
                     ));
+                }
+                if !self.local_vars.contains(name) {
+                    if let Some((ename, tag, None)) = self.bare_variants.get(name) {
+                        return Ok(format!("{}{{tag: {}}}", ename, tag));
+                    }
                 }
                 let (head, type_args) = split_type_args(name);
                 if let Some(ta) = type_args {
@@ -211,6 +288,17 @@ impl Emitter {
                 // same access (issue #618). A non-primary base keeps its
                 // parentheses — `(*p).f` and `(a + b).f` need them.
                 let base = Self::selector_base(base);
+                if let Expr::Ident { name: root, .. } = base {
+                    if !self.local_vars.contains(root) {
+                        if let Some(vs) = self.enums.get(root) {
+                            if let Some((tag, (_, None))) =
+                                vs.iter().enumerate().find(|(_, (v, _))| v == name)
+                            {
+                                return Ok(format!("{}{{tag: {}}}", root, tag));
+                            }
+                        }
+                    }
+                }
                 let b = self.emit_expr(base, ATOM)?;
                 // Package-qualified members register the import.
                 if let Expr::Ident { name: root, .. } = base {
@@ -609,6 +697,9 @@ impl Emitter {
                 return Ok(format!("[]{}", self.type_text(t)));
             }
             _ => {
+                if let Some(ename) = self.enum_of_variant_expr(first) {
+                    return Ok(format!("[]{}", ename));
+                }
                 return Err(EmitError::unsupported(format!(
                     "untyped slice literal of `{}` — spell the element type",
                     first.render()
@@ -866,6 +957,39 @@ impl Emitter {
         if is_new && !self.local_vars.contains("new") && !self.fn_shapes.contains_key("new") {
             if let Some(alloc) = self.n5_new(args) {
                 return Ok(alloc);
+            }
+        }
+
+        // --- enum payload variant constructors: `circle(5)` / `shape.circle(5)` ---
+        if args.len() == 1 && !args[0].spread {
+            match Self::unwrap_parens(callee) {
+                Expr::Ident { name, .. }
+                    if !self.local_vars.contains(name) && !self.fn_shapes.contains_key(name) =>
+                {
+                    if let Some((ename, tag, Some(pty))) = self.bare_variants.get(name).cloned() {
+                        let val = self.emit_expr_exp(&args[0].value, 0, Some(&pty))?;
+                        return Ok(format!("{}{{tag: {}, v{}: {}}}", ename, tag, tag, val));
+                    }
+                }
+                Expr::Field { base, name, .. } => {
+                    if let Expr::Ident { name: root, .. } = Self::unwrap_parens(base) {
+                        if !self.local_vars.contains(root) {
+                            if let Some((tag, pty)) = self.enums.get(root).and_then(|vs| {
+                                vs.iter().enumerate().find_map(|(i, (v, p))| {
+                                    if v == name {
+                                        p.as_ref().map(|pty| (i, pty.clone()))
+                                    } else {
+                                        None
+                                    }
+                                })
+                            }) {
+                                let val = self.emit_expr_exp(&args[0].value, 0, Some(&pty))?;
+                                return Ok(format!("{}{{tag: {}, v{}: {}}}", root, tag, tag, val));
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
 
