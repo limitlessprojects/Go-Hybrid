@@ -3837,7 +3837,7 @@ impl<'a> Checker<'a> {
     /// Extend call-scoped borrow loans opened by the calls inside `value`
     /// to the last use of the view binding `name` (the A2 non-lexical
     /// window for define-stored element views).
-    fn extend_call_loans_to_view(&self, st: &mut FnState, value: &Expr, name: &str, idx: usize) {
+    pub(crate) fn extend_call_loans_to_view(&self, st: &mut FnState, value: &Expr, name: &str, idx: usize) {
         let view_last = st.last_use.get(name).copied().unwrap_or(idx).max(idx);
         let mut calls = Vec::new();
         walk::expr_calls(value, &mut calls);

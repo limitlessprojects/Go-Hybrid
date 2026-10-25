@@ -140,13 +140,15 @@ fn sync_nested_moves(st: &FnState, nested: &mut [NestedClosure<'_>]) {
         }
         let mut active_moves: Vec<(String, crate::model::MoveInfo)> = Vec::new();
         for (k, b) in &st.env {
-            if let Some(mv) = &b.moved {
-                active_moves.push((k.clone(), mv.clone()));
+            if !nc.saved_scopes.iter().any(|s| s.contains_key(k)) {
+                if let Some(mv) = &b.moved {
+                    active_moves.push((k.clone(), mv.clone()));
+                }
             }
         }
         for (depth, scope) in st.scopes.iter().enumerate() {
             for (k, b) in scope {
-                if !nc.overwritten.contains(&(depth, k.clone())) {
+                if !nc.overwritten.contains(&(depth, k.clone())) && !nc.saved_scopes.get(depth + 1..).is_some_and(|ss| ss.iter().any(|s| s.contains_key(k))) {
                     if let Some(mv) = &b.moved {
                         active_moves.push((k.clone(), mv.clone()));
                     }
@@ -267,16 +269,24 @@ fn check_one_closure(
     }
     let mut nested = Vec::new();
     cst.scope_push();
-    check_closure_slot_loans(ck, &mut cst, body);
+    let mut csl_nested = Vec::new();
+    check_closure_slot_loans(ck, &cst, body, &mut csl_nested);
     check_body_boundaries(ck, &mut cst, body, false, &mut nested);
     sync_nested_moves(&cst, &mut nested);
-    for nc in nested {
+    debug_assert_eq!(nested.len(), csl_nested.len());
+    for (nc, cnc) in nested.into_iter().zip(csl_nested.into_iter().map(Some).chain(std::iter::repeat_with(|| None))) {
         let mut snap = cst.clone();
         snap.scopes = nc.saved_scopes;
-        // A nested closure checks against ITS OWN named results: reset the
-        // enclosing closure's seeded state, check_one_closure re-seeds from
-        // nresults (a bare return inside the nested closure must not record
-        // uses for the enclosing closure's result names).
+        if let Some(c) = cnc {
+            let mut seen = std::collections::HashSet::new();
+            for s in c.saved_scopes.iter().rev() {
+                for (k, b) in s {
+                    if seen.insert(k.clone()) && b.moved.as_ref().is_some_and(|m| m.kind == crate::model::MoveKind::Consumed) {
+                        if let Some(sb) = snap.env_lookup_mut(k) { if sb.moved.is_none() { sb.moved = b.moved.clone(); } }
+                    }
+                }
+            }
+        }
         snap.named_results = Vec::new();
         snap.result_shapes = Vec::new();
         for (k, v) in nc.saved_aliases {
@@ -285,12 +295,13 @@ fn check_one_closure(
         for (k, vs) in nc.saved_share {
             snap.may_share.entry(k).or_default().extend(vs);
         }
-        let moved_entries: Vec<(String, crate::model::MoveInfo)> = snap
-            .env
-            .iter()
-            .chain(snap.scopes.iter().flat_map(|s| s.iter()))
-            .filter_map(|(k, b)| b.moved.as_ref().map(|mv| (k.clone(), mv.clone())))
-            .collect();
+        let mut moved_entries: Vec<(String, crate::model::MoveInfo)> = Vec::new();
+        let mut seen_mv = std::collections::HashSet::new();
+        for (k, b) in snap.scopes.iter().rev().flat_map(|s| s.iter()).chain(snap.env.iter()) {
+            if seen_mv.insert(k.clone()) {
+                if let Some(mv) = &b.moved { moved_entries.push((k.clone(), mv.clone())); }
+            }
+        }
         for (moved_name, mv) in moved_entries {
             let root = crate::freeze::resolve_alias(&snap, &moved_name);
             let mut members = vec![moved_name, root.clone()];
@@ -1202,92 +1213,259 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
     }
 }
 
-/// Check A3 (`HYB-E3102`) for map-slot loans opened inside a closure body.
-fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block) {
-    use crate::model::{Loan, LoanTarget};
+/// Check A2 (`HYB-E3101`), A3 (`HYB-E3102`), and A7 (`HYB-E3003` rule `A7`)
+/// for boundary handles and map-slot loans inside a closure body.
+fn check_closure_slot_loans<'a>(ck: &mut Checker<'_>, orig_st: &FnState, body: &'a Block, nested: &mut Vec<NestedClosure<'a>>) {
+    use crate::model::{Loan, LoanTarget, MoveKind};
     use crate::walk;
-    let flat = walk::flatten(body);
-    let saved_last_use = std::mem::replace(&mut st.last_use, flat.last_use.clone());
-    let saved_loop_end = std::mem::replace(&mut st.loop_end, flat.loop_end.clone());
-    let saved_loans = std::mem::take(&mut st.loans);
-    for (stmt, idx) in &flat.stmts {
-        let idx = *idx;
-        let mut calls = Vec::new();
-        walk::own_calls(stmt, &mut calls);
-        for cr in calls {
-            let mut dummy_consumes = Vec::new();
-            ck.process_call(st, &cr, idx, None, &mut dummy_consumes);
-        }
-        match stmt {
-            Stmt::Local(l) => {
-                if l.names.len() == l.values.len() {
-                    for (name, val) in l.names.iter().zip(l.values.iter()) {
-                        if let Some(path) = walk::addr_of_index_base_path(val) {
-                            let binding = name.clone();
-                            let key = walk::addr_of_index_slot_key(val);
-                            let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
-                            st.loans.push(Loan {
-                                target: LoanTarget::MapSlot {
-                                    binding: binding.clone(),
-                                    path,
-                                    key,
-                                },
-                                created: idx,
-                                last,
-                                span: val.span(),
-                                desc: format!("`{} := {}`", binding, val.render()),
-                            });
-                        } else {
-                            ck.extend_map_slot_loan_to_alias(st, name, val, idx);
-                        }
-                    }
-                }
-            }
-            Stmt::Assign {
-                targets,
-                op,
-                values,
-                ..
-            } => {
-                if *op == hy_syntax::AssignOp::Assign && targets.len() == values.len() {
-                    for (t, v) in targets.iter().zip(values.iter()) {
-                        if let hy_syntax::PlaceKind::Ident(name) = &t.kind {
-                            if let Some(path) = walk::addr_of_index_base_path(v) {
-                                let binding = name.clone();
-                                let key = walk::addr_of_index_slot_key(v);
-                                let last =
-                                    st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
-                                st.loans.push(Loan {
-                                    target: LoanTarget::MapSlot {
-                                        binding: binding.clone(),
-                                        path,
-                                        key,
-                                    },
-                                    created: idx,
-                                    last,
-                                    span: v.span(),
-                                    desc: format!("`{} = {}`", binding, v.render()),
-                                });
-                            } else {
-                                ck.extend_map_slot_loan_to_alias(st, name, v, idx);
+    let flat = walk::flatten_with_results(body, &orig_st.named_results);
+    let mut local_st = orig_st.clone();
+    let st = &mut local_st;
+    (st.last_use, st.loop_end) = (flat.last_use.clone(), flat.loop_end.clone());
+    st.loans.clear();
+    let start_diags = ck.diags.len();
+    let pre_outer_spans: Vec<hy_diag::Span> = orig_st.env.values().chain(orig_st.scopes.iter().flat_map(|s| s.values())).filter_map(|b| b.moved.as_ref().map(|m| m.span)).collect();
+    let (mut active_loops, mut reported_backedge, mut scope_moves, mut multi_arms, mut loop_brk_mv) = (Vec::new(), std::collections::HashSet::new(), Vec::new(), Vec::new(), Vec::<std::collections::HashMap<String, Option<crate::model::MoveInfo>>>::new());
+
+    let sync_csl = |st: &FnState, nested: &mut [NestedClosure<'_>]| {
+        for nc in nested.iter_mut() {
+            for (depth, scope) in st.scopes.iter().enumerate() {
+                if depth < nc.saved_scopes.len() {
+                    for (k, b) in scope {
+                        if b.moved.as_ref().is_some_and(|m| m.kind == MoveKind::Consumed)
+                            && !nc.overwritten.contains(&(depth, k.clone()))
+                            && !(depth + 1..nc.saved_scopes.len()).any(|d| nc.saved_scopes[d].contains_key(k))
+                        {
+                            if let Some(sb) = nc.saved_scopes[depth].get_mut(k) {
+                                if sb.moved.is_none() { sb.moved = b.moved.clone(); }
                             }
                         }
                     }
                 }
-                for t in targets {
-                    if matches!(t.kind, hy_syntax::PlaceKind::Index { .. }) {
-                        if let Some(path) = walk::place_path(t) {
-                            ck.emit_a3_if_live_pub(st, &path, t.span, idx, "insert");
+            }
+        }
+    };
+    for (stmt, idx) in &flat.stmts {
+        let (idx, managed) = (*idx, flat.in_managed(*idx));
+        if let Some(evs) = flat.events.get(&idx) {
+            for ev in evs {
+                match ev {
+                    walk::ScopeEvent::Push => {
+                        let snap: std::collections::HashMap<String, Option<crate::model::MoveInfo>> = st.env.iter().chain(st.scopes.iter().flat_map(|s| s.iter())).map(|(k, b)| (k.clone(), b.moved.clone())).collect();
+                        scope_moves.push((snap, false, None::<bool>, std::collections::HashMap::<String, Option<crate::model::MoveInfo>>::new()));
+                        st.scope_push();
+                    }
+                    walk::ScopeEvent::Pop => {
+                        sync_csl(st, nested);
+                        if let Some(top) = st.scopes.last() {
+                            let depth = st.scopes.len() - 1;
+                            for k in top.keys() {
+                                for nc in nested.iter_mut() {
+                                    if depth < nc.saved_scopes.len() && nc.saved_scopes[depth].contains_key(k) {
+                                        for d in 0..=depth { nc.overwritten.insert((d, k.clone())); }
+                                    }
+                                }
+                            }
+                        }
+                        st.scope_pop();
+                        sync_csl(st, nested);
+                        if let Some((entry_mv, diverged, if_has_else, branch_mv)) = scope_moves.pop() {
+                            let cur_depth = scope_moves.len() + 1;
+                            if let Some(has_else) = if_has_else {
+                                for (k, mv) in &entry_mv { if let Some(b) = st.env_lookup_mut(k) { let br = branch_mv.get(k).cloned().flatten(); b.moved = if has_else { br } else { b.moved.clone().or_else(|| mv.clone()).or(br) }; } }
+                                if scope_moves.last().is_some_and(|p| p.2.is_some()) {
+                                    if let Some(parent) = scope_moves.last_mut() { for k in entry_mv.keys() { if let Some(mv) = st.env_lookup(k).and_then(|b| b.moved.clone()) { parent.3.entry(k.clone()).or_insert(Some(mv)); } } }
+                                    for (k, mv) in entry_mv { if let Some(b) = st.env_lookup_mut(&k) { b.moved = mv; } }
+                                }
+                            } else if multi_arms.last().is_some_and(|m: &(usize, usize, bool, std::collections::HashMap<String, Option<crate::model::MoveInfo>>)| m.0 == cur_depth) {
+                                let m = multi_arms.last_mut().unwrap();
+                                if !diverged { for k in entry_mv.keys() { if let Some(mv) = st.env_lookup(k).and_then(|b| b.moved.clone()) { m.3.entry(k.clone()).or_insert(Some(mv)); } } }
+                                m.1 -= 1;
+                                if m.1 == 0 {
+                                    let (_, _, exh, br_mv) = multi_arms.pop().unwrap();
+                                    for (k, mv) in entry_mv { if let Some(b) = st.env_lookup_mut(&k) { let br = br_mv.get(&k).cloned().flatten(); b.moved = if exh { br } else { b.moved.clone().or(mv).or(br) }; } }
+                                } else { for (k, mv) in entry_mv { if let Some(b) = st.env_lookup_mut(&k) { b.moved = mv; } } }
+                            } else if scope_moves.last().is_some_and(|p| p.2.is_some()) {
+                                if !diverged { if let Some(parent) = scope_moves.last_mut() { for k in entry_mv.keys() { if let Some(mv) = st.env_lookup(k).and_then(|b| b.moved.clone()) { parent.3.entry(k.clone()).or_insert(Some(mv)); } } } }
+                                for (k, mv) in entry_mv { if let Some(b) = st.env_lookup_mut(&k) { b.moved = mv; } }
+                            } else {
+                                for (k, mv) in entry_mv { if let Some(b) = st.env_lookup_mut(&k) { if diverged { b.moved = mv; } } }
+                                for (k, mv) in &branch_mv { if let Some(b) = st.env_lookup_mut(k) { if b.moved.is_none() { b.moved = mv.clone(); } } }
+                            }
+                        }
+                    }
+                    walk::ScopeEvent::SelectRecv { names, chan } => {
+                        let elem = match ck.shape_of_expr(st, chan) { TypeShape::Chan(e) => *e, _ => TypeShape::Unknown };
+                        for (i, n) in names.iter().enumerate() { mark_nested_overwritten(st, n, nested); ck.define_binding(st, n, if i == 0 { elem.clone() } else { TypeShape::Primitive }, None, false, managed, false); }
+                    }
+                    walk::ScopeEvent::MatchBind { name, subject } => { mark_nested_overwritten(st, name, nested); ck.bind_match_arm(st, name, subject, managed); }
+                }
+            }
+        }
+        if let Stmt::If { then, otherwise, .. } = stmt {
+            let has_else = !then.stmts.is_empty() && match otherwise.as_deref() { Some(Stmt::If { .. }) => true, Some(Stmt::Block { block, .. }) => !block.stmts.is_empty(), _ => false };
+            if let Some(top) = scope_moves.last_mut() { top.2 = Some(has_else); }
+        }
+        match stmt {
+            Stmt::Match { arms, .. } => {
+                let n = arms.iter().filter(|a| !a.body.stmts.is_empty()).count();
+                let exh = n > 1 && arms.iter().all(|a| !a.body.stmts.is_empty()) && (arms.iter().any(|a| matches!(a.pattern, hy_syntax::MatchPattern::Wildcard)) || (arms.iter().any(|a| matches!(&a.pattern, hy_syntax::MatchPattern::Path { segments, .. } if segments == &["some"])) && arms.iter().any(|a| matches!(&a.pattern, hy_syntax::MatchPattern::Path { segments, .. } if segments == &["none"]))));
+                if n > 0 { multi_arms.push((scope_moves.len() + 1, n, exh, std::collections::HashMap::new())); }
+            }
+            Stmt::Select { arms, .. } => { let n = arms.iter().filter(|a| !a.body.stmts.is_empty()).count(); if n > 0 { multi_arms.push((scope_moves.len() + 1, n, n > 1 && arms.iter().all(|a| !a.body.stmts.is_empty()), std::collections::HashMap::new())); } }
+            _ => {}
+        }
+        if matches!(stmt, Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. }) {
+            let lp_depth = active_loops.last().map(|(_, _, _, sm_d, _, _)| *sm_d).unwrap_or(0);
+            for (d, frame) in scope_moves.iter_mut().enumerate().rev() {
+                if d + 1 <= lp_depth { break; }
+                frame.1 = true;
+                if frame.2.is_some() || multi_arms.last().is_some_and(|m| m.0 == d + 1) { break; }
+            }
+            if matches!(stmt, Stmt::Break { .. }) {
+                let out_d = active_loops.last().map(|(_, _, od, _, _, _)| *od).unwrap_or(0);
+                if let Some(bm) = loop_brk_mv.last_mut() {
+                    for (k, b) in st.env.iter().chain(st.scopes.iter().take(out_d + 1).flat_map(|s| s.iter())) {
+                        if !st.scopes.get(out_d + 1..).unwrap_or(&[]).iter().any(|s| s.contains_key(k)) {
+                            if let Some(mv) = &b.moved { bm.entry(k.clone()).or_insert(Some(mv.clone())); }
                         }
                     }
                 }
             }
+        }
+        if let Stmt::For { body: lbody, .. } = stmt {
+            let pre_moved: std::collections::HashSet<String> = st.env.iter().chain(st.scopes.iter().flat_map(|s| s.iter())).filter(|(_, b)| b.moved.is_some()).map(|(k, _)| k.clone()).collect();
+            active_loops.push((idx, flat.loop_end_of(idx), st.scopes.len().saturating_sub(1), scope_moves.len(), lbody, pre_moved));
+            loop_brk_mv.push(std::collections::HashMap::new());
+        }
+        let (mut uses, mut reported_consume, pre_diags) = (Vec::new(), std::collections::HashSet::new(), ck.diags.len());
+        walk::own_uses_with_results(stmt, &st.named_results, &mut uses);
+        for u in &uses {
+            if !u.is_write {
+                if let Some(mv) = ck.lookup_binding(st, &u.name).and_then(|b| b.moved.clone()) {
+                    if mv.kind == MoveKind::Consumed && !pre_outer_spans.contains(&mv.span) && reported_consume.insert(u.name.clone()) {
+                        ck.check_uses(st, std::slice::from_ref(u));
+                        reported_backedge.insert(u.name.clone());
+                    }
+                }
+            }
+        }
+        let (after_uses, mut stmt_consumes, mut calls) = (ck.diags.len(), Vec::new(), Vec::new());
+        if let Stmt::For { kind: hy_syntax::ForKind::Iterate { expr, .. }, .. } = stmt {
+            walk::expr_calls(expr, &mut calls);
+            for cr in calls { ck.process_call(st, &cr, idx, Some(flat.loop_end_of(idx)), &mut stmt_consumes); }
+        } else {
+            walk::own_calls(stmt, &mut calls);
+            for cr in calls { ck.process_call(st, &cr, idx, None, &mut stmt_consumes); }
+        }
+        sync_csl(st, nested);
+        collect_stmt_direct_fnlits(stmt, st, nested);
+        if after_uses > pre_diags && ck.diags.len() > after_uses { for i in (after_uses..ck.diags.len()).rev() { if ck.diags[i].code == "HYB-E3003" && reported_consume.iter().any(|n| ck.diags[i].message.contains(&format!("`{n}`"))) { ck.diags.remove(i); } } }
+        if !stmt_consumes.is_empty() {
+            let rem: Vec<walk::Use> = uses.iter().filter(|u| !reported_consume.contains(&u.name)).cloned().collect();
+            if !rem.is_empty() { ck.check_same_stmt_consumes(st, &rem, &stmt_consumes); }
+        }
+        match stmt {
+            Stmt::Local(l) => {
+                let (immutable, is_let) = (l.kind == LocalKind::Const, l.kind == LocalKind::Let);
+                if l.values.is_empty() {
+                    let shape = l.ty.as_ref().map(|t| ck.shape_of_type(t)).unwrap_or(TypeShape::Unknown);
+                    for name in &l.names { mark_nested_overwritten(st, name, nested); ck.define_binding(st, name, shape.clone(), l.ty.clone(), immutable, managed, is_let); }
+                } else if l.names.len() == l.values.len() {
+                    let (pre_st, overwritten) = (st.clone(), l.names.clone());
+                    for (name, val) in l.names.iter().zip(l.values.iter()) {
+                        mark_nested_overwritten(st, name, nested);
+                        let inferred = ck.shape_of_expr(&pre_st, val);
+                        let (shape, ty) = match (&l.ty, inferred) { (Some(t), TypeShape::Unknown) => (ck.shape_of_type(t), Some(t.clone())), (_, inf) => (inf, ck.ty_of_expr(&pre_st, val).or_else(|| l.ty.clone())) };
+                        let is_view = matches!(shape, TypeShape::BorrowHandle(_));
+                        ck.define_binding(st, name, shape, ty, immutable, managed, is_let);
+                        if is_view { ck.extend_call_loans_to_view(st, val, name, idx); }
+                        if let Some(path) = walk::addr_of_index_base_path(val) {
+                            let (binding, key) = (name.clone(), walk::addr_of_index_slot_key(val));
+                            let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
+                            st.loans.push(Loan { target: LoanTarget::MapSlot { binding: binding.clone(), path, key }, created: idx, last, span: val.span(), desc: format!("`{} := {}`", binding, val.render()) });
+                        } else { ck.extend_map_slot_loan_to_alias(st, name, val, idx); ck.record_storage_from_snapshot(st, &pre_st, name, val, &overwritten, true, false); ck.record_move_const_and_a3_loans(st, name, val, idx); }
+                    }
+                    ck.record_local_borrow_aliases(st, l);
+                } else {
+                    let (pre_st, overwritten) = (st.clone(), l.names.clone());
+                    let shapes = l.values.first().map(|v| ck.multi_value_shapes(&pre_st, v, l.names.len())).unwrap_or_else(|| vec![TypeShape::Unknown; l.names.len()]);
+                    let tys = l.values.first().map(|v| ck.multi_value_tys(&pre_st, v, l.names.len())).unwrap_or_else(|| vec![None; l.names.len()]);
+                    for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
+                        mark_nested_overwritten(st, name, nested);
+                        let is_view = matches!(shape, TypeShape::BorrowHandle(_));
+                        ck.define_binding(st, name, shape, ty, immutable, managed, is_let);
+                        if let Some(v) = l.values.first() { if is_view { ck.extend_call_loans_to_view(st, v, name, idx); } ck.record_storage_from_snapshot(st, &pre_st, name, v, &overwritten, true, true); ck.record_move_const_and_a3_loans(st, name, v, idx); }
+                    }
+                    ck.record_local_borrow_aliases(st, l);
+                }
+            }
+            Stmt::Assign { targets, op, values, .. } => {
+                if *op == hy_syntax::AssignOp::Assign && targets.len() == values.len() {
+                    let pre_st = st.clone();
+                    let overwritten: Vec<String> = targets.iter().filter_map(|t| match &t.kind { hy_syntax::PlaceKind::Ident(n) => Some(n.clone()), _ => None }).collect();
+                    for (t, v) in targets.iter().zip(values.iter()) {
+                        if let hy_syntax::PlaceKind::Ident(name) = &t.kind {
+                            mark_nested_overwritten(st, name, nested);
+                            let (inferred, inferred_ty) = (ck.shape_of_expr(&pre_st, v), ck.ty_of_expr(&pre_st, v));
+                            let is_view = matches!(inferred, TypeShape::BorrowHandle(_));
+                            if let Some(b) = st.env_lookup_mut(name) { b.moved = None; if !matches!(inferred, TypeShape::Unknown) || b.ty.is_none() { b.shape = inferred; } if inferred_ty.is_some() || b.ty.is_none() { b.ty = inferred_ty; } }
+                            if is_view { ck.extend_call_loans_to_view(st, v, name, idx); }
+                            if let Some(path) = walk::addr_of_index_base_path(v) {
+                                let (binding, key) = (name.clone(), walk::addr_of_index_slot_key(v));
+                                let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
+                                st.loans.push(Loan { target: LoanTarget::MapSlot { binding: binding.clone(), path, key }, created: idx, last, span: v.span(), desc: format!("`{} = {}`", binding, v.render()) });
+                            } else { ck.extend_map_slot_loan_to_alias(st, name, v, idx); ck.record_storage_from_snapshot(st, &pre_st, name, v, &overwritten, false, false); ck.record_move_const_and_a3_loans(st, name, v, idx); }
+                        }
+                    }
+                } else if *op == hy_syntax::AssignOp::Assign && values.len() == 1 && targets.len() > 1 {
+                    let pre_st = st.clone();
+                    let overwritten: Vec<String> = targets.iter().filter_map(|t| match &t.kind { hy_syntax::PlaceKind::Ident(n) => Some(n.clone()), _ => None }).collect();
+                    let (shapes, tys) = (ck.multi_value_shapes(&pre_st, &values[0], targets.len()), ck.multi_value_tys(&pre_st, &values[0], targets.len()));
+                    for ((t, shape), ty) in targets.iter().zip(shapes).zip(tys) {
+                        if let hy_syntax::PlaceKind::Ident(name) = &t.kind {
+                            mark_nested_overwritten(st, name, nested);
+                            let is_view = matches!(shape, TypeShape::BorrowHandle(_));
+                            if let Some(b) = st.env_lookup_mut(name) { b.moved = None; if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() { b.shape = shape; } if ty.is_some() || b.ty.is_none() { b.ty = ty; } }
+                            if is_view { ck.extend_call_loans_to_view(st, &values[0], name, idx); }
+                            ck.record_storage_from_snapshot(st, &pre_st, name, &values[0], &overwritten, false, true);
+                            ck.record_move_const_and_a3_loans(st, name, &values[0], idx);
+                        }
+                    }
+                }
+                for t in targets { if matches!(t.kind, hy_syntax::PlaceKind::Index { .. }) { if let Some(path) = walk::place_path(t) { ck.emit_a3_if_live_pub(st, &path, t.span, idx, "insert"); } } }
+            }
+            Stmt::For { kind, .. } => match kind {
+                hy_syntax::ForKind::Iterate { vars, expr } => {
+                    let is_chan = matches!(ck.shape_of_expr(st, expr), TypeShape::Chan(_));
+                    for (name, shape) in vars.iter().zip(ck.iterate_var_shapes(st, expr, vars.len())) {
+                        mark_nested_overwritten(st, name, nested);
+                        let (is_ref, may_share) = (shape.is_reference_alias(), ck.shape_may_share(&shape));
+                        ck.define_binding(st, name, shape, None, false, managed, false);
+                        if !is_chan { if may_share { ck.record_may_share(st, name, expr); } if is_ref { if let Some(root) = expr.root_ident() { if ck.lookup_binding(st, root).is_some() { st.aliases.insert(name.clone(), root.to_string()); } } } }
+                    }
+                }
+                hy_syntax::ForKind::Range { var, .. } => { mark_nested_overwritten(st, var, nested); ck.define_binding(st, var, TypeShape::Primitive, None, false, managed, false); }
+                _ => {}
+            },
             _ => {}
         }
+        while let Some((_, loop_end, _, _, _, _)) = active_loops.last() {
+            if *loop_end != idx { break; }
+            let (for_idx, loop_end, outer_depth, sm_depth, lbody, mut local_pre) = active_loops.pop().unwrap();
+            for (k, b) in orig_st.env.iter().chain(orig_st.scopes.iter().flat_map(|s| s.iter())) { if b.moved.is_some() { local_pre.insert(k.clone()); } }
+            if for_idx <= loop_end && loop_end < flat.stmts.len() { ck.check_loop_backedge(st, outer_depth, &flat.stmts[for_idx..=loop_end], &flat.events, lbody, &local_pre, &mut reported_backedge); }
+            if let Some(bm) = loop_brk_mv.pop() {
+                for (k, mv) in bm {
+                    if let Some(b) = st.env_lookup_mut(&k) { if b.moved.is_none() { b.moved = mv.clone(); } }
+                    if let Some(f) = scope_moves.get_mut(sm_depth.saturating_sub(1)) { f.3.entry(k).or_insert(mv); }
+                }
+            }
+        }
     }
-    st.loans = saved_loans;
-    st.loop_end = saved_loop_end;
-    st.last_use = saved_last_use;
+    sync_csl(st, nested);
+    let mut seen_e3003: Vec<(Option<String>, hy_diag::Span)> = Vec::new();
+    for i in (start_diags..ck.diags.len()).rev() { if ck.diags[i].code == "HYB-E3003" { let key = (ck.diags[i].tier0_rule.clone(), ck.diags[i].span); if seen_e3003.contains(&key) { ck.diags.remove(i); } else { seen_e3003.push(key); } } }
 }
 
 /// The outermost FnLits reachable from `block`. Closures nested inside other
