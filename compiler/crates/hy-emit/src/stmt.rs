@@ -2173,7 +2173,69 @@ impl Emitter {
                 _ => false,
             };
 
-        if simple_unguarded_chain {
+        let needs_ordered_arms = classified.iter().any(|(k, a)| !matches!(k, ArmKind::Some(_)) && a.guard.is_some())
+            || classified.iter().filter(|(k, _)| matches!(k, ArmKind::NoneArm)).count() > 1
+            || classified.iter().filter(|(k, _)| matches!(k, ArmKind::Wildcard)).count() > 1
+            || classified.iter().position(|(k, _)| matches!(k, ArmKind::Wildcard))
+                .is_some_and(|wi| classified[wi + 1..].iter().any(|(k, _)| !matches!(k, ArmKind::Wildcard)));
+        if needs_ordered_arms {
+            let matched = self.next_temp("hyMatched");
+            self.push(&format!("{} := false", matched));
+            let mut exhausted = false;
+            for (kind, arm) in &classified {
+                let (cond, bind) = match kind {
+                    ArmKind::Some(b) => (format!("!{} && {}.ok", matched, temp), Some(b.as_str())),
+                    ArmKind::NoneArm => (format!("!{} && !{}.ok", matched, temp), None),
+                    ArmKind::Wildcard => (format!("!{}", matched), None),
+                };
+                self.push(&format!("if {} {{", cond));
+                self.indent += 1;
+                let saved = self.save_scope();
+                if let Some(b) = bind { self.shadow_local_name(b); }
+                let res = (|| -> Result<(), EmitError> {
+                    if let Some(g) = &arm.guard {
+                        let greads = bind.is_some_and(|b| b != "_" && crate::rangebind::expr_reads(g, b));
+                        if let Some(b) = bind.filter(|_| greads) { self.push(&format!("{} := {}.val", b, temp)); }
+                        self.hoist_tries_expr(g)?;
+                        let gt = self.emit_expr(g, 0)?;
+                        self.push(&format!("if {} {{", gt));
+                        self.indent += 1;
+                        self.push(&format!("{} = true", matched));
+                        if let Some(b) = bind.filter(|b| *b != "_" && !greads && crate::rangebind::body_reads(&arm.body, b)) {
+                            self.push(&format!("{} := {}.val", b, temp));
+                        }
+                        self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                        self.indent -= 1;
+                        self.push("}");
+                    } else {
+                        self.push(&format!("{} = true", matched));
+                        if let Some(b) = bind.filter(|b| *b != "_" && crate::rangebind::body_reads(&arm.body, b)) {
+                            self.push(&format!("{} := {}.val", b, temp));
+                        }
+                        self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                    }
+                    Ok(())
+                })();
+                self.restore_scope(saved);
+                self.indent -= 1;
+                self.push("}");
+                res?;
+                if matches!(kind, ArmKind::Wildcard) && arm.guard.is_none() { exhausted = true; break; }
+            }
+            if !exhausted {
+                if let Some(inherited) = self.branch_inherit.clone() {
+                    self.push(&format!("if !{} {{", matched));
+                    self.indent += 1;
+                    for (_, store) in inherited { self.push(&store); }
+                    self.indent -= 1;
+                    self.push("}");
+                }
+            }
+            let covers_all = exhausted || (has_unguarded_some && classified.iter().any(|(k, a)| matches!(k, ArmKind::NoneArm) && a.guard.is_none()));
+            if covers_all && classified.iter().all(|(_, a)| matches!(a.body.stmts.last(), Some(Stmt::Return { .. }))) {
+                self.push("panic(\"unreachable\")");
+            }
+        } else if simple_unguarded_chain {
             let else_arm = none_arm.or(wildcard_arm);
             self.push(&format!("if {}.ok {{", temp));
             self.indent += 1;
