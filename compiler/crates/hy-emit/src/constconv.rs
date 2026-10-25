@@ -67,15 +67,37 @@ pub fn parse_int(text: &str) -> Option<i128> {
     if neg { v.checked_neg() } else { Some(v) }
 }
 
-fn const_int_expr(expr: &hy_syntax::Expr) -> Option<i128> {
+pub struct ConstEnv<'a> {
+    pub file: &'a std::collections::BTreeMap<String, hy_syntax::Expr>,
+    pub local: &'a std::collections::BTreeMap<String, hy_syntax::Expr>,
+    pub local_vars: &'a std::collections::BTreeSet<String>,
+}
+
+fn const_int_expr(expr: &hy_syntax::Expr, env: Option<&ConstEnv<'_>>, depth: u32) -> Option<i128> {
     use hy_syntax::{BinOp, Expr, UnOp};
+    if depth > 16 {
+        return None;
+    }
     match expr {
-        Expr::Paren { inner, .. } => const_int_expr(inner),
+        Expr::Paren { inner, .. } => const_int_expr(inner, env, depth),
+        Expr::Ident { name, .. } => {
+            let env = env?;
+            if let Some(e) = env.local.get(name) {
+                return const_int_expr(e, Some(env), depth + 1);
+            }
+            if env.local_vars.contains(name) {
+                return None;
+            }
+            let e = env.file.get(name)?;
+            let empty_l = std::collections::BTreeMap::new();
+            let empty_v = std::collections::BTreeSet::new();
+            const_int_expr(e, Some(&ConstEnv { file: env.file, local: &empty_l, local_vars: &empty_v }), depth + 1)
+        }
         Expr::Unary {
             op: UnOp::Neg,
             operand,
             ..
-        } => const_int_expr(operand)?.checked_neg(),
+        } => const_int_expr(operand, env, depth + 1)?.checked_neg(),
         Expr::Lit {
             kind: LitKind::Int(t),
             ..
@@ -85,8 +107,8 @@ fn const_int_expr(expr: &hy_syntax::Expr) -> Option<i128> {
             ..
         } => Some(*c as u32 as i128),
         Expr::Binary { op, lhs, rhs, .. } => {
-            let l = const_int_expr(lhs)?;
-            let r = const_int_expr(rhs)?;
+            let l = const_int_expr(lhs, env, depth + 1)?;
+            let r = const_int_expr(rhs, env, depth + 1)?;
             match op {
                 BinOp::Add => l.checked_add(r),
                 BinOp::Sub => l.checked_sub(r),
@@ -131,9 +153,9 @@ fn const_int_expr(expr: &hy_syntax::Expr) -> Option<i128> {
     }
 }
 
-fn has_out_of_range_subexpr(expr: &hy_syntax::Expr, bits: u32, signed: bool) -> bool {
+fn has_out_of_range_subexpr(expr: &hy_syntax::Expr, bits: u32, signed: bool, env: Option<&ConstEnv<'_>>) -> bool {
     use hy_syntax::Expr;
-    let Some(v) = const_int_expr(expr) else {
+    let Some(v) = const_int_expr(expr, env, 0) else {
         return false;
     };
     let len = 1i128 << bits;
@@ -148,11 +170,11 @@ fn has_out_of_range_subexpr(expr: &hy_syntax::Expr, bits: u32, signed: bool) -> 
     }
     match expr {
         Expr::Paren { inner, .. } | Expr::Unary { operand: inner, .. } => {
-            has_out_of_range_subexpr(inner, bits, signed)
+            has_out_of_range_subexpr(inner, bits, signed, env)
         }
         Expr::Binary { lhs, rhs, .. } => {
-            has_out_of_range_subexpr(lhs, bits, signed)
-                || has_out_of_range_subexpr(rhs, bits, signed)
+            has_out_of_range_subexpr(lhs, bits, signed, env)
+                || has_out_of_range_subexpr(rhs, bits, signed, env)
         }
         _ => false,
     }
@@ -162,12 +184,17 @@ fn has_out_of_range_subexpr(expr: &hy_syntax::Expr, bits: u32, signed: bool) -> 
 ///
 /// Returns `None` when nothing should change: not an integer constant, an
 /// unknown width, or a value (and all subexpressions) that already fits.
+#[cfg(test)]
 pub fn fold_constant(operand: &hy_syntax::Expr, spec_name: &str) -> Option<i128> {
+    fold_constant_with(operand, spec_name, None)
+}
+
+pub fn fold_constant_with(operand: &hy_syntax::Expr, spec_name: &str, env: Option<&ConstEnv<'_>>) -> Option<i128> {
     let (bits, signed) = width_of(spec_name)?;
     if bits > 64 {
         return None;
     }
-    let v = const_int_expr(operand)?;
+    let v = const_int_expr(operand, env, 0)?;
 
     let len = 1i128 << bits;
     let masked = v & (len - 1);
@@ -177,9 +204,7 @@ pub fn fold_constant(operand: &hy_syntax::Expr, spec_name: &str) -> Option<i128>
         masked
     };
 
-    // Only rewrite what Go would refuse; a fitting value whose sub-operands
-    // also fit in the target width stays verbatim.
-    if v == folded && !has_out_of_range_subexpr(operand, bits, signed) {
+    if v == folded && !has_out_of_range_subexpr(operand, bits, signed, env) {
         None
     } else {
         Some(folded)
