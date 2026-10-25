@@ -2743,22 +2743,39 @@ impl<'a> Checker<'a> {
                         }
                     }
                     let base_ty = self.dir_ty_of_expr(base, env)?;
-                    let recv_base = Self::base_named_type(&self.resolve_type_alias(&base_ty))
-                        .or_else(|| Self::base_named_type(&base_ty))?;
-                    let m = self
-                        .method_decls
-                        .get(&(recv_base, head.to_string()))
-                        .or_else(|| {
-                            Self::base_named_type(&base_ty)
-                                .and_then(|raw| self.method_decls.get(&(raw, head.to_string())))
-                        })?;
-                    let subst = self.fn_subst_for_call(m, name, Some(&base_ty), args, env, true);
-                    Some(
-                        m.results
-                            .iter()
-                            .map(|r| Self::substitute_type_params(&r.ty, &subst))
-                            .collect(),
-                    )
+                    let method = Self::base_named_type(&self.resolve_type_alias(&base_ty))
+                        .or_else(|| Self::base_named_type(&base_ty))
+                        .and_then(|recv_base| {
+                            self.method_decls
+                                .get(&(recv_base, head.to_string()))
+                                .or_else(|| {
+                                    Self::base_named_type(&base_ty).and_then(|raw| {
+                                        self.method_decls.get(&(raw, head.to_string()))
+                                    })
+                                })
+                        });
+                    if let Some(m) = method {
+                        let subst =
+                            self.fn_subst_for_call(m, name, Some(&base_ty), args, env, true);
+                        return Some(
+                            m.results
+                                .iter()
+                                .map(|r| Self::substitute_type_params(&r.ty, &subst))
+                                .collect(),
+                        );
+                    }
+                    // Not a method: `base` may be a struct whose field `name` has a
+                    // `fn` type. Fall back to the field so a multi-return call through
+                    // a function-typed field keeps its result channel directions.
+                    if let Some((_, fty)) = self
+                        .struct_fields_for_type(&base_ty)
+                        .and_then(|fs| fs.into_iter().find(|(n, _)| n == head))
+                    {
+                        if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&fty) {
+                            return Some(results);
+                        }
+                    }
+                    None
                 }
                 other => {
                     let callee_ty = self.dir_ty_of_expr(other, env)?;
