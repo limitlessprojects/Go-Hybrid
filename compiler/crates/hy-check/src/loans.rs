@@ -1975,9 +1975,31 @@ impl<'a> Checker<'a> {
             Expr::Call { callee, args, .. } => {
                 if self.expr_has_borrow_shape(st, e) {
                     if let Expr::Field { base, .. } = unwrap_parens(callee) {
+                        let recv_shape = self.shape_of_expr(st, base);
+                        if !matches!(recv_shape, TypeShape::Pointer(_))
+                            && self.call_receiver_is_pointer(st, callee)
+                        {
+                            if let Some(root) = base.root_ident() {
+                                if self.binding_can_be_borrowed(st, root) {
+                                    out.push(root.to_string());
+                                }
+                            }
+                        }
                         self.collect_expr_addr_of_roots(st, base, out);
                     }
-                    for a in args {
+                    for (idx, a) in args.iter().enumerate() {
+                        if !matches!(unwrap_parens(&a.value), Expr::Move { .. }) {
+                            let arg_shape = self.shape_of_expr(st, &a.value);
+                            if !matches!(arg_shape, TypeShape::Pointer(_))
+                                && self.call_param_is_pointer(st, callee, idx)
+                            {
+                                if let Some(root) = a.value.root_ident() {
+                                    if self.binding_can_be_borrowed(st, root) {
+                                        out.push(root.to_string());
+                                    }
+                                }
+                            }
+                        }
                         self.collect_expr_addr_of_roots(st, &a.value, out);
                     }
                 }
@@ -2007,14 +2029,10 @@ impl<'a> Checker<'a> {
         let inner = unwrap_parens(e);
         if let Expr::Call { callee, .. } = inner {
             if let Some(results) = self.call_result_tys(st, callee) {
-                return results.iter().any(|ty| {
-                    let shape = self.shape_of_type(ty);
-                    field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown)
-                });
+                return results.iter().any(|ty| self.shape_can_hold_borrow(&self.shape_of_type(ty)));
             }
         }
-        let shape = self.shape_of_expr(st, inner);
-        field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown)
+        self.shape_can_hold_borrow(&self.shape_of_expr(st, inner))
     }
 
     pub(crate) fn expr_carries_borrow(&self, st: &FnState, e: &Expr) -> bool {
@@ -2050,6 +2068,25 @@ impl<'a> Checker<'a> {
             .map(|b| self.shape_may_share(&b.shape))
             .unwrap_or(false)
     }
+    pub(crate) fn shape_can_hold_borrow(&self, shape: &TypeShape) -> bool { self.shape_can_hold_borrow_depth(shape, 0, &mut Vec::new()) }
+    fn shape_can_hold_borrow_depth(&self, shape: &TypeShape, d: usize, seen: &mut Vec<String>) -> bool {
+        if field_borrow_kind(shape).is_some() || matches!(shape, TypeShape::Unknown | TypeShape::Closure) || d > 16 { return true; }
+        match shape {
+            TypeShape::Slice(e) | TypeShape::Array(e) | TypeShape::Chan(e) => self.shape_can_hold_borrow_depth(e, d + 1, seen),
+            TypeShape::Map(k, v) => self.shape_can_hold_borrow_depth(k, d + 1, seen) || self.shape_can_hold_borrow_depth(v, d + 1, seen),
+            TypeShape::Struct(Some(n)) => {
+                let b = Self::base_named_type_str(n).to_string();
+                if seen.contains(&b) { return false; }
+                seen.push(b.clone());
+                let res = self.structs.get(&b).map_or(true, |fs| fs.iter().any(|(_, fty)| self.shape_can_hold_borrow_depth(&self.shape_of_type(fty), d + 1, seen)));
+                seen.pop();
+                res
+            }
+            TypeShape::Primitive | TypeShape::Str | TypeShape::Atomic | TypeShape::Pointer(_) | TypeShape::OwnHandle(_) | TypeShape::ForeignOpaque(_) => false,
+            TypeShape::Struct(None) | TypeShape::BorrowHandle(_) | TypeShape::Closure | TypeShape::Unknown => true,
+        }
+    }
+    fn container_can_hold_borrow(&self, st: &FnState, name: &str) -> bool { self.lookup_binding(st, name).is_some_and(|b| self.shape_can_hold_borrow(&b.shape)) }
 
     /// Does `name` denote a mutable composite (including a scalar-field struct
     /// or primitive-element array whose `TypeShape` is `Primitive`) that shares
@@ -2653,10 +2690,30 @@ impl<'a> Checker<'a> {
         collect_ref_roots(&dst.value, &mut dst_roots);
         let mut src_roots = Vec::new();
         collect_ref_roots(&src.value, &mut src_roots);
+        let src_carries_borrow = self.expr_carries_borrow(st, &src.value);
+        let mut src_borrowed = Vec::new();
+        if move_operand_ident(&src.value).is_none() {
+            self.collect_borrowed_roots(st, &src.value, &mut src_borrowed);
+        }
         for d in &dst_roots {
+            let can_hold_borrow = self.container_can_hold_borrow(st, d);
+            if src_carries_borrow && self.binding_may_share(st, d) && can_hold_borrow {
+                st.borrow_bindings.insert(d.clone());
+            }
             for s in &src_roots {
                 if d != s && self.binding_may_share(st, d) && self.binding_may_share(st, s) {
                     st.share_edge(d, s);
+                }
+            }
+            if self.binding_may_share(st, d) && can_hold_borrow {
+                for r in &src_borrowed {
+                    if d != r {
+                        st.share_edge(d, r);
+                        if let Some(orig) = self.lookup_binding(st, r).and_then(|b| b.non_owned_origin.clone()) {
+                            let po = if orig.starts_with("a may-share peer of ") { orig } else { format!("a may-share peer of {}", orig) };
+                            if let Some(db) = st.env_lookup_mut(d) { if db.non_owned_origin.is_none() { db.non_owned_origin = Some(po); } }
+                        }
+                    }
                 }
             }
         }
@@ -2704,7 +2761,7 @@ impl<'a> Checker<'a> {
             if dst_idx == src_idx {
                 continue;
             }
-            let (Some((_, _, _, dst_src)), Some((_, _, _, src_src))) =
+            let (Some((_, _, _, dst_src)), Some((_, src_slot_shape, _, src_src))) =
                 (slots.get(dst_idx), slots.get(src_idx))
             else {
                 continue;
@@ -2747,9 +2804,28 @@ impl<'a> Checker<'a> {
                 }
             };
 
+            let auto_root = match src_src {
+                CalleeSlotSource::Arg(e) if matches!(src_slot_shape, TypeShape::Pointer(_)) && !matches!(self.shape_of_expr(st, e), TypeShape::Pointer(_) | TypeShape::BorrowHandle(_)) && !matches!(unwrap_parens(e), Expr::Move { .. }) => e.root_ident().filter(|r| self.binding_can_be_borrowed(st, r)),
+                _ => None,
+            };
+            let src_carries_borrow = auto_root.is_some() || match src_src {
+                CalleeSlotSource::Arg(src_expr) => self.expr_carries_borrow(st, src_expr),
+                CalleeSlotSource::OuterBinding(name) => st.borrow_bindings.contains(name),
+            };
+            let mut src_borrowed = Vec::new();
+            if let Some(r) = auto_root { src_borrowed.push(r.to_string()); }
+            if let CalleeSlotSource::Arg(src_expr) = src_src {
+                if move_operand_ident(src_expr).is_none() {
+                    self.collect_borrowed_roots(st, src_expr, &mut src_borrowed);
+                }
+            }
             for d in &dst_roots {
                 if !self.binding_may_share(st, d) {
                     continue;
+                }
+                let can_hold_borrow = self.container_can_hold_borrow(st, d);
+                if src_carries_borrow && can_hold_borrow {
+                    st.borrow_bindings.insert(d.clone());
                 }
                 for s in &src_roots {
                     if d != s
@@ -2757,6 +2833,15 @@ impl<'a> Checker<'a> {
                             || self.lookup_binding(st, s).is_some_and(|b| b.immutable))
                     {
                         st.share_edge(d, s);
+                    }
+                }
+                for r in &src_borrowed {
+                    if can_hold_borrow && d != r {
+                        st.share_edge(d, r);
+                        if let Some(orig) = self.lookup_binding(st, r).and_then(|b| b.non_owned_origin.clone()) {
+                            let po = if orig.starts_with("a may-share peer of ") { orig } else { format!("a may-share peer of {}", orig) };
+                            if let Some(db) = st.env_lookup_mut(d) { if db.non_owned_origin.is_none() { db.non_owned_origin = Some(po); } }
+                        }
                     }
                 }
             }
@@ -3707,7 +3792,7 @@ impl<'a> Checker<'a> {
             if name == "_" {
                 continue;
             }
-            let borrow_slot = field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown);
+            let borrow_slot = self.shape_can_hold_borrow(&shape);
             if (l.names.len() == l.values.len() || borrow_slot) && self.expr_carries_borrow(st, value) {
                 st.borrow_bindings.insert(name.clone());
             } else {
@@ -3773,8 +3858,7 @@ impl<'a> Checker<'a> {
                     if name == "_" {
                         continue;
                     }
-                    let borrow_slot =
-                        field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown);
+                    let borrow_slot = self.shape_can_hold_borrow(&shape);
                     let inner = unwrap_parens(v);
                     let is_borrow = as_addr_of(inner).is_some()
                         || contains_addr_of_in_literal(inner)
@@ -3816,13 +3900,24 @@ impl<'a> Checker<'a> {
                         st.borrow_bindings.insert(root.to_string());
                         if move_operand_ident(v).is_none() {
                             let mut addr_roots = Vec::new();
-                            self.collect_expr_addr_of_roots(st, v, &mut addr_roots);
+                            self.collect_borrowed_roots(st, v, &mut addr_roots);
                             for src in addr_roots {
                                 if src != root {
-                                    if let Some(b) = self.lookup_binding(st, &src) {
-                                        if !b.shape.is_sendable_by_type() {
-                                            st.aliases.entry(root.to_string()).or_insert(src);
-                                            break;
+                                    let matched = self.lookup_binding(st, &src).map(|b| {
+                                        let ok = !b.shape.is_sendable_by_type()
+                                            || b.immutable
+                                            || self.binding_can_be_borrowed(st, &src);
+                                        (ok, b.non_owned_origin.clone())
+                                    });
+                                    if let Some((true, origin)) = matched {
+                                        st.share_edge(root, &src);
+                                        st.aliases.entry(root.to_string()).or_insert(src);
+                                        if let Some(origin) = origin {
+                                            if let Some(nb) = st.env_lookup_mut(root) {
+                                                if nb.non_owned_origin.is_none() {
+                                                    nb.non_owned_origin = Some(origin);
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -5097,6 +5192,12 @@ impl<'a> Checker<'a> {
             && (st.env.contains_key(name)
                 || st.scopes.iter().rev().skip(1).any(|s| s.contains_key(name))
                 || self.consts.contains_key(name));
+        if shadows_outer && st.borrow_bindings.contains(name) {
+            if let Some(outer_borrows) = st.borrow_binding_scopes.last_mut() {
+                outer_borrows.insert(name.to_string());
+            }
+        }
+        st.borrow_bindings.remove(name);
         self.preserve_peers_before_sever(st, name, shadows_outer);
         st.aliases.remove(name);
         st.share_clear(name);
@@ -5191,6 +5292,7 @@ impl<'a> Checker<'a> {
             }
         }
 
+        let subject_carries_borrow = self.expr_carries_borrow(st, subject);
         let self_shadows_const = pre_const_root.as_deref() == Some(name);
         self.define_binding(
             st,
@@ -5201,6 +5303,11 @@ impl<'a> Checker<'a> {
             managed || pre_tainted,
             false,
         );
+        if self.shape_can_hold_borrow(&shape) && subject_carries_borrow {
+            st.borrow_bindings.insert(name.to_string());
+        } else {
+            st.borrow_bindings.remove(name);
+        }
 
         self.record_may_share(st, name, subject);
         self.record_alias(st, name, subject);
@@ -7850,7 +7957,7 @@ impl<'a> Checker<'a> {
     }
 }
 
-fn field_borrow_kind(shape: &TypeShape) -> Option<&'static str> {
+pub(crate) fn field_borrow_kind(shape: &TypeShape) -> Option<&'static str> {
     match shape {
         TypeShape::BorrowHandle(_) => Some("borrow-handle"),
         TypeShape::Pointer(inner) if !matches!(**inner, TypeShape::Atomic) => Some("pointer"),
@@ -8631,4 +8738,3 @@ fn main() {
         );
     }
 }
-
