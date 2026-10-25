@@ -120,16 +120,19 @@ pub(crate) fn is_iterable_handle(name: &str) -> bool {
 
 /// Mode of a package-level call: `serde_json.parse(...)`, `fmt.println(...)`.
 pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
-    match (pkg, method) {
-        ("serde_json", "parse") | ("serde_json", "new_object") | ("flate2", "new_writer") => {
-            CallMode::Produce
-        }
+    let norm = normalize_go_ident_to_snake(method);
+    match (pkg, norm.as_str()) {
+        (
+            "serde_json",
+            "parse" | "new_object" | "new_array",
+        )
+        | ("flate2", "new_writer") => CallMode::Produce,
         ("serde_json", "to_string_pretty")
         | ("serde_json", "array")
         | ("serde_json", "get")
         | ("serde_json", "int")
         | ("serde_json", "string") => CallMode::Borrow,
-        ("serde_json", "set") | ("serde_json", "remove") => CallMode::Mutate,
+        ("serde_json", "set" | "remove" | "push_string") => CallMode::Mutate,
         ("flate2", "write") => CallMode::Mutate,
         ("flate2", "finish") => CallMode::Consume,
         _ => CallMode::Safe,
@@ -140,46 +143,82 @@ pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
 /// `const` root there is a write, `HYB-E3006`). `None` = the descriptor stubs
 /// record no in-place write for this API.
 pub(crate) fn package_mutated_arg(pkg: &str, method: &str) -> Option<usize> {
-    match (pkg, method) {
+    let norm = normalize_go_ident_to_snake(method);
+    match (pkg, norm.as_str()) {
         (
             "sort",
-            "ints" | "strings" | "float64s" | "slice" | "slice_stable" | "sort" | "stable"
-            | "Ints" | "Strings" | "Float64s" | "Slice" | "SliceStable" | "Sort" | "Stable",
+            "ints" | "strings" | "float64s" | "slice" | "slice_stable" | "sort" | "stable",
         ) => Some(0),
+        ("io", "read_full" | "read_at_least") => Some(1),
+        ("io", "copy_buffer") => Some(2),
+        ("hex", "decode") => Some(0),
+        ("json", "unmarshal") => Some(1),
+        ("json", "compact" | "html_escape" | "indent") => Some(0),
+        ("errors", "as") => Some(1),
         (
-            "io",
-            "read_full" | "read_at_least" | "ReadFull" | "ReadAtLeast",
-        ) => Some(1),
-        ("io", "copy_buffer" | "CopyBuffer") => Some(2),
+            "atomic",
+            "store_int32"
+                | "store_int64"
+                | "store_uint32"
+                | "store_uint64"
+                | "store_uintptr"
+                | "store_pointer"
+                | "add_int32"
+                | "add_int64"
+                | "add_uint32"
+                | "add_uint64"
+                | "add_uintptr"
+                | "swap_int32"
+                | "swap_int64"
+                | "swap_uint32"
+                | "swap_uint64"
+                | "swap_uintptr"
+                | "swap_pointer"
+                | "compare_and_swap_int32"
+                | "compare_and_swap_int64"
+                | "compare_and_swap_uint32"
+                | "compare_and_swap_uint64"
+                | "compare_and_swap_uintptr"
+                | "compare_and_swap_pointer",
+        ) => Some(0),
+        ("fmt", "scan" | "scanln") => Some(0),
+        ("fmt", "scanf" | "sscan" | "sscanln" | "fscan" | "fscanln") => Some(1),
+        ("fmt", "sscanf" | "fscanf") => Some(2),
+        ("serde_json", "set" | "remove" | "push_string") | ("flate2", "write") => Some(0),
         _ => None,
     }
 }
 
 /// Result shape of a package-level call (for defines / loop variables).
 pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
-    match (pkg, method) {
-        ("serde_json", "parse") | ("serde_json", "new_object") => {
+    let norm = normalize_go_ident_to_snake(method);
+    match (pkg, norm.as_str()) {
+        ("serde_json", "parse" | "new_object" | "new_array") => {
             TypeShape::OwnHandle("serde_json.value".into())
         }
         ("flate2", "new_writer") => TypeShape::OwnHandle("flate2.writer".into()),
         ("serde_json", "array" | "get") => TypeShape::BorrowHandle("serde_json.view".into()),
-        ("serde_json", "int") | ("flate2", "write") => TypeShape::Primitive,
+        ("serde_json", "int" | "push_string") | ("flate2", "write") => TypeShape::Primitive,
         ("flate2", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
         ("serde_json", "to_string_pretty") | ("serde_json", "string") | ("strings", "join") => {
             TypeShape::Str
         }
-        ("strings", "split") | ("strings", "fields") => TypeShape::Slice(Box::new(TypeShape::Str)),
+        (
+            "strings",
+            "split" | "split_n" | "split_after" | "split_after_n" | "fields" | "fields_func",
+        ) => TypeShape::Slice(Box::new(TypeShape::Str)),
         // `time.after(d)` returns a receive-only channel (the deadline
         // pattern, example 04); the element shape is opaque here — the
         // binding still resolves as a channel so receives on it classify.
         ("time", "after") => TypeShape::Chan(Box::new(TypeShape::Unknown)),
         ("http", "new_serve_mux") => TypeShape::ForeignOpaque("http.serve_mux".into()),
         ("http", "handler") => TypeShape::ForeignOpaque("http.handler".into()),
-        // `atomic.load_pointer` / `atomic.swap_pointer` return an
-        // unsafe.Pointer to arbitrary state — not a primitive (row 11)
-        ("atomic", "load_pointer" | "swap_pointer") => TypeShape::Unknown,
-        ("errors", "new" | "wrap" | "New" | "Wrap") => TypeShape::ForeignOpaque("error".into()),
-        ("errors", "is" | "Is") => TypeShape::Primitive,
+        // `atomic.load_pointer` / `atomic.swap_pointer` and unproven non-scalar
+        // `atomic.pointer` / `atomic.value` return arbitrary state — not a
+        // primitive (GUARANTEES.md row 11).
+        ("atomic", "load_pointer" | "swap_pointer" | "pointer" | "value") => TypeShape::Unknown,
+        ("errors", "new" | "wrap") => TypeShape::ForeignOpaque("error".into()),
+        ("errors", "is" | "as") => TypeShape::Primitive,
         _ if pkg == "atomic" => TypeShape::Primitive,
         _ => TypeShape::Unknown,
     }
@@ -310,12 +349,15 @@ pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {
         // atomics are safe-by-type: no loan implications (class 2)
         return CallMode::Safe;
     }
-    match (recv_type, method) {
+    let norm = normalize_go_ident_to_snake(method);
+    match (recv_type, norm.as_str()) {
         (
             "serde_json.value" | "serde_json.view",
             "array" | "get" | "int" | "string" | "to_string_pretty",
         ) => CallMode::Borrow,
-        ("serde_json.value" | "serde_json.view", "set" | "remove") => CallMode::Mutate,
+        ("serde_json.value" | "serde_json.view", "set" | "remove" | "push_string") => {
+            CallMode::Mutate
+        }
         ("flate2.writer", "write") => CallMode::Mutate,
         ("flate2.writer", "finish") => CallMode::Consume,
         _ => CallMode::Unknown,
@@ -324,12 +366,13 @@ pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {
 
 /// Result shape of a method call on a typed receiver.
 pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
-    match (recv_type, method) {
+    let norm = normalize_go_ident_to_snake(method);
+    match (recv_type, norm.as_str()) {
         ("serde_json.value" | "serde_json.view", "array" | "get") => {
             // element views: iterating the result yields borrow handles
             TypeShape::BorrowHandle("serde_json.view".into())
         }
-        ("serde_json.value" | "serde_json.view", "int") => TypeShape::Primitive,
+        ("serde_json.value" | "serde_json.view", "int" | "push_string") => TypeShape::Primitive,
         ("serde_json.value" | "serde_json.view", "string" | "to_string_pretty") => TypeShape::Str,
         ("flate2.writer", "write") => TypeShape::Primitive,
         ("flate2.writer", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
