@@ -546,6 +546,8 @@ pub struct Emitter {
     /// and user type alias → its target, for zero values that allocate.
     n5_structs: BTreeMap<String, Vec<FieldDecl>>,
     n5_aliases: BTreeMap<String, TypeExpr>,
+    file_consts: BTreeMap<String, Expr>,
+    local_consts: BTreeMap<String, Expr>,
 }
 
 pub(crate) struct ScopeSnapshot {
@@ -554,6 +556,7 @@ pub(crate) struct ScopeSnapshot {
     var_ty: BTreeMap<String, (String, bool)>,
     var_struct: BTreeMap<String, String>,
     pointer_vars: BTreeSet<String>,
+    local_consts: BTreeMap<String, Expr>,
 }
 
 impl Emitter {
@@ -592,6 +595,8 @@ impl Emitter {
             explicit_imports: BTreeMap::new(),
             n5_structs: BTreeMap::new(),
             n5_aliases: BTreeMap::new(),
+            file_consts: BTreeMap::new(),
+            local_consts: BTreeMap::new(),
         }
     }
 
@@ -606,6 +611,7 @@ impl Emitter {
             var_ty: self.var_ty.clone(),
             var_struct: self.var_struct.clone(),
             pointer_vars: self.pointer_vars.clone(),
+            local_consts: self.local_consts.clone(),
         }
     }
 
@@ -615,6 +621,7 @@ impl Emitter {
         self.var_ty = saved.var_ty;
         self.var_struct = saved.var_struct;
         self.pointer_vars = saved.pointer_vars;
+        self.local_consts = saved.local_consts;
     }
 
     pub(crate) fn shadow_local_name(&mut self, name: &str) {
@@ -624,6 +631,7 @@ impl Emitter {
             self.var_ty.remove(name);
             self.var_struct.remove(name);
             self.pointer_vars.remove(name);
+            self.local_consts.remove(name);
         }
     }
 
@@ -740,6 +748,8 @@ impl Emitter {
                 (f.name.clone(), (f.results.len(), err, kind, ptr_params))
             })
             .collect();
+
+        self.file_consts = file.decls.iter().filter_map(|d| match d { Decl::Const(c) => Some((c.name.clone(), c.value.clone())), _ => None }).collect();
 
         // Pass 1: render every declaration into the body buffer, collecting
         // used packages as we go. Top-level decls separate with a blank line
@@ -1205,6 +1215,7 @@ impl Emitter {
         self.var_ty.clear();
         self.pointer_vars.clear();
         self.local_vars.clear();
+        self.local_consts.clear();
         self.temp_n = 0;
         self.try_temps.clear();
         self.loop_labels.clear();
