@@ -540,11 +540,13 @@ pub enum Expr {
         index: Box<Expr>,
         span: Span,
     },
-    /// `words[a:b]`, `payload[i*32 : i*32+32]` (lo/hi optional)
+    /// `words[a:b]`, `payload[i*32 : i*32+32]` (lo/hi optional); `max` is the
+    /// three-index form `a[lo:hi:max]` that also caps the result.
     Slice {
         base: Box<Expr>,
         lo: Option<Box<Expr>>,
         hi: Option<Box<Expr>>,
+        max: Option<Box<Expr>>,
         span: Span,
     },
     /// `stats.processed`, `doc.array`, `fmt.println`, `serde_json.parse`
