@@ -320,7 +320,7 @@ impl<'a> Checker<'a> {
                             self.check_expr_emit_guard(st, chan);
                             if deep {
                                 let elem = match self.shape_of_expr(st, chan) {
-                                    TypeShape::Chan(e) => *e,
+                                    TypeShape::Chan(e) | TypeShape::RecvOnlyChan(e) => *e,
                                     _ => TypeShape::Unknown,
                                 };
                                 for (i, n) in names.iter().enumerate() {
