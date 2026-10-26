@@ -247,7 +247,7 @@ pub(crate) struct FnState {
     /// composite literal that embeds a live binding all leave `b` sharing
     /// storage with `a` too. The freeze rule (O5.2) must cover the whole
     /// connected component, not just the single-parent `aliases` chain.
-    pub may_share: HashMap<String, HashSet<String>>,
+    
     pub loans: Vec<Loan>,
     /// name -> last statement index that references it (Pass A result).
     pub last_use: HashMap<String, usize>,
@@ -272,7 +272,7 @@ pub(crate) struct FnState {
     /// are fresh bindings, not the caller's storage). Recorded at define/
     /// rebind time; consumed at the CALL site so an insert inside the body
     /// counts as an A3 event when the call sits in a live slot-loan window.
-    pub closure_mutates: HashMap<String, HashSet<String>>,
+    
     /// Local closure binding -> `(params, named_results, body)` for
     /// interprocedural return-origin and multi-value return sharing analysis.
     pub closure_fnlits: HashMap<
