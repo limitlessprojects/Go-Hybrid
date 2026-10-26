@@ -311,9 +311,14 @@ pub(crate) fn own_uses_with_results(stmt: &Stmt, named_results: &[String], out: 
             }
         }
         Stmt::Expr { expr, .. } => expr_uses(expr, out),
-        Stmt::Send { chan, value, is_move, .. } => {
+        Stmt::Send {
+            chan,
+            value,
+            is_move,
+            ..
+        } => {
             expr_uses(chan, out);
-            if *is_move { expr_uses(&Expr::Move { operand: Box::new(value.clone()), span: value.span() }, out); } else { expr_uses(value, out); }
+            send_value_uses(value, *is_move, out);
         }
         Stmt::If { cond, .. } => expr_uses(cond, out),
         Stmt::For { kind, .. } => match kind {
@@ -375,9 +380,13 @@ pub(crate) fn own_uses_with_results(stmt: &Stmt, named_results: &[String], out: 
         Stmt::Select { arms, .. } => {
             for arm in arms {
                 match &arm.kind {
-                    SelectArmKind::Send { chan, value, is_move } => {
+                    SelectArmKind::Send {
+                        chan,
+                        value,
+                        is_move,
+                    } => {
                         expr_uses(chan, out);
-                        if *is_move { expr_uses(&Expr::Move { operand: Box::new(value.clone()), span: value.span() }, out); } else { expr_uses(value, out); }
+                        send_value_uses(value, *is_move, out);
                     }
                     SelectArmKind::Recv { chan, .. } => expr_uses(chan, out),
                     SelectArmKind::Default => {}
@@ -385,6 +394,69 @@ pub(crate) fn own_uses_with_results(stmt: &Stmt, named_results: &[String], out: 
             }
         }
     }
+}
+
+fn collect_moved_chain_subexpr_uses(expr: &Expr, out: &mut Vec<Use>) {
+    match crate::model::unwrap_parens(expr) {
+        Expr::Field { base, .. }
+        | Expr::AddrOf { operand: base, .. }
+        | Expr::Unary {
+            op: hy_syntax::UnOp::Addr,
+            operand: base,
+            ..
+        }
+        | Expr::Try { operand: base, .. } => collect_moved_chain_subexpr_uses(base, out),
+        Expr::Index { base, index, .. } => {
+            collect_moved_chain_subexpr_uses(base, out);
+            expr_uses(index, out);
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            collect_moved_chain_subexpr_uses(base, out);
+            if let Some(lo) = lo {
+                expr_uses(lo, out);
+            }
+            if let Some(hi) = hi {
+                expr_uses(hi, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn move_operand_uses(operand: &Expr, move_span: Span, out: &mut Vec<Use>) {
+    let op = crate::model::unwrap_parens(operand);
+    match op {
+        Expr::Ident { name, .. } => out.push(Use {
+            name: name.clone(),
+            span: move_span,
+            is_write: false,
+            via_move: true,
+            via_addr: false,
+        }),
+        Expr::Field { .. } => {
+            if let Some(root) = op.root_ident() {
+                out.push(Use {
+                    name: root.to_string(),
+                    span: move_span,
+                    is_write: false,
+                    via_move: true,
+                    via_addr: false,
+                });
+                collect_moved_chain_subexpr_uses(op, out);
+            } else {
+                expr_uses(operand, out);
+            }
+        }
+        _ => expr_uses(operand, out),
+    }
+}
+
+fn send_value_uses(value: &Expr, is_move: bool, out: &mut Vec<Use>) {
+    if !is_move {
+        expr_uses(value, out);
+        return;
+    }
+    move_operand_uses(value, value.span(), out);
 }
 
 fn place_uses(place: &Place, out: &mut Vec<Use>) {
@@ -442,29 +514,7 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
             _ => expr_uses(operand, out),
         },
         Expr::Unary { operand, .. } => expr_uses(operand, out),
-        Expr::Move { operand, span } => match crate::model::unwrap_parens(operand) {
-            Expr::Ident { name, .. } => out.push(Use {
-                name: name.clone(),
-                span: *span,
-                is_write: false,
-                via_move: true,
-                via_addr: false,
-            }),
-            Expr::Field { .. } => {
-                if let Some(root) = crate::model::unwrap_parens(operand).root_ident() {
-                    out.push(Use {
-                        name: root.to_string(),
-                        span: *span,
-                        is_write: false,
-                        via_move: true,
-                        via_addr: false,
-                    });
-                } else {
-                    expr_uses(operand, out);
-                }
-            }
-            _ => expr_uses(operand, out),
-        },
+        Expr::Move { operand, span } => move_operand_uses(operand, *span, out),
         Expr::Try { operand, .. } => expr_uses(operand, out),
         Expr::Receive { chan, .. } => expr_uses(chan, out),
         Expr::Index { base, index, .. } => {
