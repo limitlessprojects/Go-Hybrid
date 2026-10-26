@@ -2056,7 +2056,12 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        None
+        match e {
+            Expr::Unary { op: UnOp::Neg, operand, .. }
+            | Expr::Binary { op: BinOp::Shl | BinOp::Shr, lhs: operand, .. } => self.fixed_width_int_ty_of(st, operand),
+            Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor, lhs, rhs, .. } => self.fixed_width_int_ty_of(st, lhs).or_else(|| self.fixed_width_int_ty_of(st, rhs)),
+            _ => None,
+        }
     }
 
     /// #725 — the folded result of a TYPED constant expression must stay
