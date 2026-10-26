@@ -25,7 +25,7 @@ use std::collections::HashSet;
 
 use crate::model::{as_addr_of, unwrap_parens, Checker, FnState, TypeShape};
 use hy_diag::Diagnostic;
-use hy_syntax::{Block, Expr, ForKind, MatchPattern, Param, Place, PlaceKind, SelectArmKind, Stmt};
+use hy_syntax::{Block, Expr, Param, Place, PlaceKind, Stmt};
 
 impl<'a> Checker<'a> {
     /// `target` of an assignment (any operator, including `++`/`--`).
@@ -45,30 +45,85 @@ impl<'a> Checker<'a> {
         self.push_unaddressable(msg, &elem, target.span);
     }
 
-    /// `&operand` bound or re-bound as an O8 loan: the emitter stores the
-    /// copy back into `operand` at the loan's last use, so `operand` must
-    /// be assignable in Go.
+    /// `&operand` bound or re-bound as an O8 loan (or embedded inside an
+    /// initializer / assignment RHS): the emitter stores the copy back into
+    /// `operand` or emits `&operand` directly, so `operand` must be assignable
+    /// and addressable in Go.
     pub(crate) fn check_slot_loan_operand_addressable(&mut self, st: &FnState, value: &Expr) {
-        let Some(operand) = as_addr_of(value) else {
-            return;
-        };
-        if !matches!(operand, Expr::Index { .. } | Expr::Field { .. }) {
+        if let Some(operand) = as_addr_of(value) {
+            if matches!(operand, Expr::Index { .. } | Expr::Field { .. })
+                && !expr_root(operand).is_some_and(|r| self.closure_rebinds(r))
+            {
+                if let Some(elem) = self.expr_unassignable_at(st, operand) {
+                    let elem = elem.render();
+                    let msg = format!(
+                        "`&{}` cannot be a loan — the loan is stored back into `{}`, which is part of the map element `{}`, and a Go map element is not addressable (HYB-E2010)",
+                        operand.render(),
+                        operand.render(),
+                        elem
+                    );
+                    self.push_unaddressable(msg, &elem, value.span());
+                }
+            }
+            self.check_subexpr_slot_loans_addressable(st, operand);
             return;
         }
-        if expr_root(operand).is_some_and(|r| self.closure_rebinds(r)) {
-            return;
+        self.check_subexpr_slot_loans_addressable(st, value);
+    }
+
+    fn check_subexpr_slot_loans_addressable(&mut self, st: &FnState, expr: &Expr) {
+        match expr {
+            Expr::Paren { inner: operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Receive { chan: operand, .. }
+            | Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Field { base: operand, .. } => {
+                self.check_slot_loan_operand_addressable(st, operand);
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.check_slot_loan_operand_addressable(st, lhs);
+                self.check_slot_loan_operand_addressable(st, rhs);
+            }
+            Expr::Call { callee, args, .. } => {
+                self.check_slot_loan_operand_addressable(st, callee);
+                for a in args {
+                    self.check_slot_loan_operand_addressable(st, &a.value);
+                }
+            }
+            Expr::Index { base, index, .. } => {
+                self.check_slot_loan_operand_addressable(st, base);
+                self.check_slot_loan_operand_addressable(st, index);
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                self.check_slot_loan_operand_addressable(st, base);
+                if let Some(l) = lo {
+                    self.check_slot_loan_operand_addressable(st, l);
+                }
+                if let Some(h) = hi {
+                    self.check_slot_loan_operand_addressable(st, h);
+                }
+            }
+            Expr::StructLit { fields, .. } => {
+                for f in fields {
+                    self.check_slot_loan_operand_addressable(st, &f.value);
+                }
+            }
+            Expr::SliceLit { items, .. } => {
+                for i in items {
+                    self.check_slot_loan_operand_addressable(st, i);
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    self.check_slot_loan_operand_addressable(st, k);
+                    self.check_slot_loan_operand_addressable(st, v);
+                }
+            }
+            // Closure bodies (`Expr::FnLit`) are walked separately with their inner `cst` in `emit_guard.rs`.
+            _ => {}
         }
-        let Some(elem) = self.expr_unassignable_at(st, operand) else {
-            return;
-        };
-        let elem = elem.render();
-        let msg = format!(
-            "`&{}` cannot be a loan — the loan is stored back into `{}`, which is part of the map element `{}`, and a Go map element is not addressable (HYB-E2010)",
-            operand.render(),
-            operand.render(),
-            elem
-        );
-        self.push_unaddressable(msg, &elem, value.span());
     }
 
     fn push_unaddressable(&mut self, msg: String, elem: &str, span: hy_diag::Span) {
@@ -88,7 +143,10 @@ impl<'a> Checker<'a> {
     /// addressable.
     fn place_unassignable_at<'p>(&self, st: &FnState, p: &'p Place) -> Option<&'p Place> {
         if let PlaceKind::Index { base, .. } = &p.kind {
-            if matches!(self.place_shape(st, base), Some(TypeShape::Map(..))) {
+            if self
+                .addr_place_shape(st, base)
+                .is_some_and(|sh| is_map_or_ptr_to_map(&sh))
+            {
                 return None;
             }
         }
@@ -98,22 +156,23 @@ impl<'a> Checker<'a> {
     /// `Some(map element)` when `p` is provably not addressable in Go.
     fn place_unaddressable_at<'p>(&self, st: &FnState, p: &'p Place) -> Option<&'p Place> {
         match &p.kind {
-            PlaceKind::Index { base, .. } => match self.place_shape(st, base) {
-                Some(TypeShape::Map(..)) => Some(p),
+            PlaceKind::Index { base, .. } => match self.addr_place_shape(st, base) {
+                Some(sh) if is_map_or_ptr_to_map(&sh) => Some(p),
                 Some(TypeShape::Array(_)) => self.place_unaddressable_at(st, base),
                 _ => None,
             },
-            PlaceKind::Field { base, .. } => match self.place_shape(st, base) {
+            PlaceKind::Field { base, .. } => match self.addr_place_shape(st, base) {
                 Some(TypeShape::Struct(_)) => self.place_unaddressable_at(st, base),
                 _ => None,
             },
-            PlaceKind::Ident(_) | PlaceKind::AddrOf { .. } => None,
+            PlaceKind::AddrOf { base } => self.place_unaddressable_at(st, base),
+            PlaceKind::Ident(_) => None,
         }
     }
 
     fn expr_unassignable_at<'e>(&self, st: &FnState, e: &'e Expr) -> Option<&'e Expr> {
         if let Expr::Index { base, .. } = unwrap_parens(e) {
-            if matches!(self.shape_of_expr(st, base), TypeShape::Map(..)) {
+            if is_map_or_ptr_to_map(&self.addr_expr_shape(st, base)) {
                 return None;
             }
         }
@@ -122,16 +181,82 @@ impl<'a> Checker<'a> {
 
     fn expr_unaddressable_at<'e>(&self, st: &FnState, e: &'e Expr) -> Option<&'e Expr> {
         match unwrap_parens(e) {
-            Expr::Index { base, .. } => match self.shape_of_expr(st, base) {
-                TypeShape::Map(..) => Some(e),
+            Expr::Index { base, .. } => match self.addr_expr_shape(st, base) {
+                sh if is_map_or_ptr_to_map(&sh) => Some(e),
                 TypeShape::Array(_) => self.expr_unaddressable_at(st, base),
                 _ => None,
             },
-            Expr::Field { base, .. } => match self.shape_of_expr(st, base) {
+            Expr::Field { base, .. } => match self.addr_expr_shape(st, base) {
                 TypeShape::Struct(_) => self.expr_unaddressable_at(st, base),
                 _ => None,
             },
             _ => None,
+        }
+    }
+
+    fn addr_place_shape(&self, st: &FnState, p: &Place) -> Option<TypeShape> {
+        match &p.kind {
+            PlaceKind::Ident(n) => {
+                let b = self.lookup_binding(st, n)?;
+                if !matches!(b.shape, TypeShape::Unknown) {
+                    return Some(b.shape.clone());
+                }
+                let root = crate::freeze::resolve_alias(st, n);
+                if root != *n {
+                    return self.lookup_binding(st, &root).map(|rb| rb.shape.clone());
+                }
+                Some(TypeShape::Unknown)
+            }
+            PlaceKind::Field { base, name } => {
+                let b = self.addr_place_shape(st, base)?;
+                match self.field_shape(&b, name) {
+                    TypeShape::Unknown => None,
+                    sh => Some(sh),
+                }
+            }
+            PlaceKind::Index { base, .. } => match self.addr_place_shape(st, base)? {
+                TypeShape::Map(_, v) | TypeShape::Slice(v) | TypeShape::Array(v) => Some(*v),
+                TypeShape::Pointer(inner) => match *inner {
+                    TypeShape::Map(_, v) | TypeShape::Slice(v) | TypeShape::Array(v) => Some(*v),
+                    _ => None,
+                },
+                _ => None,
+            },
+            PlaceKind::AddrOf { base } => self
+                .addr_place_shape(st, base)
+                .map(|inner| TypeShape::Pointer(Box::new(inner))),
+        }
+    }
+
+    fn addr_expr_shape(&self, st: &FnState, e: &Expr) -> TypeShape {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                if let Some(b) = self.lookup_binding(st, name) {
+                    if !matches!(b.shape, TypeShape::Unknown) {
+                        return b.shape.clone();
+                    }
+                    let root = crate::freeze::resolve_alias(st, name);
+                    if root != *name {
+                        if let Some(rb) = self.lookup_binding(st, &root) {
+                            return rb.shape.clone();
+                        }
+                    }
+                }
+                self.shape_of_expr(st, e)
+            }
+            Expr::Field { base, name, .. } => {
+                let b = self.addr_expr_shape(st, base);
+                self.field_shape(&b, name)
+            }
+            Expr::Index { base, .. } => match self.addr_expr_shape(st, base) {
+                TypeShape::Map(_, v) | TypeShape::Slice(v) | TypeShape::Array(v) => *v,
+                TypeShape::Pointer(inner) => match *inner {
+                    TypeShape::Map(_, v) | TypeShape::Slice(v) | TypeShape::Array(v) => *v,
+                    _ => TypeShape::Unknown,
+                },
+                _ => TypeShape::Unknown,
+            },
+            _ => self.shape_of_expr(st, e),
         }
     }
 
@@ -140,14 +265,26 @@ impl<'a> Checker<'a> {
     }
 
     /// Entering a closure body in the emit-guard deep walk.
-    pub(crate) fn push_closure_bound(&mut self, params: &[Param], body: &Block) {
-        let mut names: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+    /// `emit_guard.rs` binds parameters, named results, 1-to-1/var locals,
+    /// `if` inits, and `for`/`match`/`select` binders into `cst` in lexical
+    /// scope order; only multi-value single-RHS local declarations that are
+    /// not bound in `cst` need a conservative skip.
+    pub(crate) fn push_closure_bound(&mut self, _params: &[Param], body: &Block) {
+        let mut names = HashSet::new();
         block_binders(body, &mut names);
         self.closure_bound.push(names);
     }
 
     pub(crate) fn pop_closure_bound(&mut self) {
         self.closure_bound.pop();
+    }
+}
+
+fn is_map_or_ptr_to_map(shape: &TypeShape) -> bool {
+    match shape {
+        TypeShape::Map(..) => true,
+        TypeShape::Pointer(inner) => matches!(&**inner, TypeShape::Map(..)),
+        _ => false,
     }
 }
 
@@ -159,8 +296,8 @@ fn expr_root(e: &Expr) -> Option<&str> {
     }
 }
 
-/// Every name a block (and its nested statement blocks) binds. Nested
-/// closures are not entered: their binders shadow only inside themselves.
+/// Multi-value single-RHS local declarations inside `b` (and its nested
+/// statement blocks) whose shapes are not bound in the closure's `FnState`.
 fn block_binders(b: &Block, out: &mut HashSet<String>) {
     for s in &b.stmts {
         stmt_binders(s, out);
@@ -169,7 +306,11 @@ fn block_binders(b: &Block, out: &mut HashSet<String>) {
 
 fn stmt_binders(s: &Stmt, out: &mut HashSet<String>) {
     match s {
-        Stmt::Local(l) => out.extend(l.names.iter().cloned()),
+        Stmt::Local(l) => {
+            if !l.values.is_empty() && l.values.len() != l.names.len() {
+                out.extend(l.names.iter().cloned());
+            }
+        }
         Stmt::If {
             init,
             then,
@@ -184,36 +325,17 @@ fn stmt_binders(s: &Stmt, out: &mut HashSet<String>) {
                 stmt_binders(o, out);
             }
         }
-        Stmt::For { kind, body, .. } => {
-            match kind {
-                ForKind::Range { var, .. } => {
-                    out.insert(var.clone());
-                }
-                ForKind::Iterate { vars, .. } => out.extend(vars.iter().cloned()),
-                ForKind::While { .. } | ForKind::Infinite => {}
-            }
-            block_binders(body, out);
-        }
+        Stmt::For { body, .. } | Stmt::Managed { body, .. } => block_binders(body, out),
         Stmt::Match { arms, .. } => {
             for arm in arms {
-                if let MatchPattern::Path {
-                    binding: Some(n), ..
-                } = &arm.pattern
-                {
-                    out.insert(n.clone());
-                }
                 block_binders(&arm.body, out);
             }
         }
         Stmt::Select { arms, .. } => {
             for arm in arms {
-                if let SelectArmKind::Recv { names, .. } = &arm.kind {
-                    out.extend(names.iter().cloned());
-                }
                 block_binders(&arm.body, out);
             }
         }
-        Stmt::Managed { body, .. } => block_binders(body, out),
         Stmt::Block { block, .. } => block_binders(block, out),
         _ => {}
     }
