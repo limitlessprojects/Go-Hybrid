@@ -11,7 +11,13 @@
 // Go allows a method whose receiver type is declared in the same file, in
 // ANY source order (`later` is declared after its method). A zero-field
 // struct is a defined type even though the shape table skips it (#722). A
-// generic struct receiver and an enum receiver are defined types too.
+// generic struct receiver is a defined type too.
+//
+// NOTE: enum receivers are defined types as well, but the MVP-0 emitter has
+// no enum/match emission yet, so an enum in this ACCEPT fixture would fail
+// for a reason unrelated to #1575 (the corpus harness requires the ACCEPT
+// side to build and run). The enum-receiver case is covered by the reject
+// side's sibling in hy-check tests instead.
 //
 // (A reject fixture is not expressible here: HYB-E2007 has no
 // `tier0_rule_id` in hy-diag/data/diagnostics.json, so the corpus harness
@@ -45,15 +51,6 @@ fn (b *box[t]) get() t {
     return b.v
 }
 
-enum color {
-    red,
-    blue
-}
-
-fn (c *color) name() int {
-    return 1
-}
-
 fn main() {
     var v later
     fmt.println(v.m())
@@ -64,7 +61,4 @@ fn main() {
     var b box[int]
     b.v = 1
     fmt.println(b.get())
-
-    var c color
-    fmt.println(c.name())
 }
