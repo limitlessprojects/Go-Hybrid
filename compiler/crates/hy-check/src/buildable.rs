@@ -1358,7 +1358,14 @@ impl<'a> Collector<'a> {
                 // deeper base (a call result, an index) recurses normally.
                 match unwrap_parens(base) {
                     Expr::Ident { name, .. } => self.read(name),
-                    other => self.expr(other),
+                    other => {
+                        self.expr(other);
+                        self.check_single_value_position(
+                            other,
+                            "a field or method selection",
+                            /*binding_position=*/ false,
+                        );
+                    }
                 }
             }
             Expr::Call {
@@ -1966,8 +1973,8 @@ impl<'a> Collector<'a> {
             ),
             Expr::Call { callee, args, .. } => match self.call_result_kinds(callee, args) {
                 Some(res) if res.is_empty() => OpKind::Void,
-                Some(res) => res[0].clone(),
-                None => OpKind::Unknown,
+                Some(res) if res.len() == 1 => res[0].clone(),
+                Some(_) | None => OpKind::Unknown,
             },
         }
     }
