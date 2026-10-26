@@ -45,9 +45,9 @@
 
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
-    AssignOp, BinOp, Block, CallArg, Decl, Expr, FieldInit, File, FnDecl, ForKind, InterpPart,
-    LitKind, LocalDecl, LocalKind, MatchPattern, Place, PlaceKind, SelectArmKind, Stmt, TypeExpr,
-    UnOp,
+    AssignOp, BinOp, Block, CallArg, Decl, Expr, FieldInit, File, FnDecl, FnResult, ForKind,
+    InterpPart, LitKind, LocalDecl, LocalKind, MatchPattern, Param, Place, PlaceKind, SelectArmKind,
+    Stmt, TypeExpr, UnOp,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -628,9 +628,78 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_signature_bindings(
+        &mut self,
+        receiver: Option<&str>,
+        params: &[Param],
+        results: &[FnResult],
+        span: Span,
+    ) {
+        let mut seen = HashSet::new();
+        let receiver = receiver.map(|name| (name, span)).into_iter();
+        let params = params.iter().map(|p| (p.name.as_str(), p.span));
+        let results = results
+            .iter()
+            .filter_map(|r| r.name.as_deref().map(|name| (name, r.ty.span())));
+        for (name, name_span) in receiver.chain(params).chain(results) {
+            if name != "_" && !seen.insert(name) {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E1002",
+                        self.path.clone(),
+                        name_span,
+                        format!(
+                            "function signature declares `{name}` more than once — Go refuses `{name} redeclared in this block` (HYB-E1002)"
+                        ),
+                    )
+                    .with_notes(vec![
+                        "receiver, parameter, and named-result identifiers share one function scope; rename the repeated declaration or use `_` for an unused parameter"
+                            .to_string(),
+                    ]),
+                );
+            }
+        }
+    }
+
     // -- declarations --------------------------------------------------------
 
     fn fn_decl(&mut self, f: &FnDecl) {
+        if f.receiver.is_none() {
+            if f.name == "main" && (!f.params.is_empty() || !f.type_params.is_empty()) {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E1002",
+                        self.path.clone(),
+                        f.span,
+                        "`fn main` must have no parameters — Go requires `func main` to have no arguments and no return values (HYB-E1002)".to_string(),
+                    )
+                    .with_notes(vec![
+                        "remove parameters from `fn main()`, or read CLI arguments via `os.args()`".to_string(),
+                    ]),
+                );
+            } else if f.name == "init"
+                && (!f.params.is_empty() || !f.results.is_empty() || !f.type_params.is_empty())
+            {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E1002",
+                        self.path.clone(),
+                        f.span,
+                        "`fn init` must have no parameters and no return values — Go requires `func init` to have no arguments and no return values (HYB-E1002)".to_string(),
+                    )
+                    .with_notes(vec![
+                        "declare `fn init() { ... }` without parameters or return types".to_string(),
+                    ]),
+                );
+            }
+        }
+        self.check_signature_bindings(
+            f.receiver.as_ref().map(|r| r.name.as_str()),
+            &f.params,
+            &f.results,
+            f.span,
+        );
+
         if let Some(r) = &f.receiver {
             self.ty(&r.ty);
         }
@@ -1374,8 +1443,9 @@ impl<'a> Collector<'a> {
                 params,
                 results,
                 body,
-                ..
+                span,
             } => {
+                self.check_signature_bindings(None, params, results, *span);
                 for p in params {
                     self.ty(&p.ty);
                 }

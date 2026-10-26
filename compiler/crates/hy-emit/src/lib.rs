@@ -135,6 +135,15 @@ impl EmitError {
         }
     }
 
+    pub fn export_name_collision(name1: &str, name2: &str, go_name: &str) -> Self {
+        EmitError {
+            message: format!(
+                "exported function name collision: `{}` and `{}` both normalize to `{}` in package mode",
+                name1, name2, go_name
+            ),
+        }
+    }
+
     /// The honest unshipped-crate error (the adoption-audit follow-up): the
     /// checker's foreign table knows the crate's type shapes, but the
     /// runtime ships no binding for it — the program cannot build or run.
@@ -164,6 +173,20 @@ pub fn emit_go_package(
     pkg_name: &str,
     binding_prefix: &str,
 ) -> Result<String, EmitError> {
+    // Detect public function export name collisions in package mode (issue #1421)
+    let mut exported_fns: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for decl in &file.decls {
+        if let hy_syntax::Decl::Fn(f) = decl {
+            if f.is_pub && f.receiver.is_none() && !f.name.contains('.') {
+                let go_name = to_go_name(&f.name);
+                if let Some(prev) = exported_fns.get(&go_name) {
+                    return Err(EmitError::export_name_collision(prev, &f.name, &go_name));
+                }
+                exported_fns.insert(go_name, f.name.clone());
+            }
+        }
+    }
+
     let mut em = Emitter::new();
     em.package_name = pkg_name.to_string();
     em.binding_prefix = binding_prefix.to_string();
@@ -1371,15 +1394,8 @@ impl Emitter {
                 }
             }
             2 => {
-                let mut parts: Vec<String> = Vec::new();
-                for r in &f.results {
-                    let ty = self.type_text(&r.ty);
-                    match &r.name {
-                        Some(n) => parts.push(format!("{} {}", n, ty)),
-                        None => parts.push(ty),
-                    }
-                }
-                self.push_raw(&format!(" ({}) {{\n", parts.join(", ")));
+                let results = self.result_list_text(&f.results);
+                self.push_raw(&format!(" ({}) {{\n", results));
             }
             n => {
                 return Err(EmitError::unsupported(format!(
@@ -1398,6 +1414,40 @@ impl Emitter {
         }
         self.push("}");
         Ok(())
+    }
+
+    /// Render a result list without mixing named and unnamed Go parameters.
+    /// Besides rejecting `(code int, string)`, Go parses `(int, text string)`
+    /// as two named string results, so preserving a mixed Hybrid list verbatim
+    /// can change its types. Name every result only when the list is mixed;
+    /// fully named and fully unnamed lists retain their existing emission.
+    fn result_list_text(&mut self, results: &[FnResult]) -> String {
+        let mixed = results.iter().any(|r| r.name.is_some())
+            && results.iter().any(|r| r.name.is_none());
+        let mut used: BTreeSet<String> = results
+            .iter()
+            .filter_map(|r| r.name.clone())
+            .collect();
+        let mut parts = Vec::with_capacity(results.len());
+        for (i, r) in results.iter().enumerate() {
+            let ty = self.type_text(&r.ty);
+            match &r.name {
+                Some(n) => parts.push(format!("{} {}", n, ty)),
+                None if mixed => {
+                    let base = format!("hyR{}", i);
+                    let mut name = base.clone();
+                    let mut suffix = 0;
+                    while used.contains(&name) {
+                        suffix += 1;
+                        name = format!("{}_{}", base, suffix);
+                    }
+                    used.insert(name.clone());
+                    parts.push(format!("{} {}", name, ty));
+                }
+                None => parts.push(ty),
+            }
+        }
+        parts.join(", ")
     }
 
     fn main_ret_vars(&self, f: &FnDecl) -> String {
