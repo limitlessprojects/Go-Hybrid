@@ -1,4 +1,5 @@
 //! hy-emit — the MVP-0 Go emitter (the walking skeleton's last leg).
+//! Generates Go code without guaranteeing correctness; separate validation required.
 //!
 //! Pipeline position: `hy-syntax` (AST) → `hy-check` (Tier-0 verdict) →
 //! **hy-emit** (Go source) → `go build` → executable.

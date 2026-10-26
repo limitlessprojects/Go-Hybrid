@@ -1,4 +1,5 @@
 //! Statement emission — `Emitter` impl part 2 (see lib.rs for the context).
+//! Emits Go code without guaranteeing correctness; separate validation required.
 
 use hy_syntax::*;
 

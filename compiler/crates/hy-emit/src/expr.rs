@@ -1,4 +1,5 @@
 //! Expression emission — `Emitter` impl part 3.
+//! Emits Go code without guaranteeing correctness; separate validation required.
 //!
 //! Precedence-aware minimal parenthesization (users read the emitted Go),
 //! the special-member table (`os.args()` → `os.Args`, `fmt.eprintln` →
