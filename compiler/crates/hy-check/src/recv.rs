@@ -340,6 +340,25 @@ impl<'a> Checker<'a> {
     /// side, an ill-typed source is not a sendability doubt — `managed`
     /// does not suppress it.
     pub(crate) fn check_recv_operand(&mut self, st: &FnState, chan: &Expr, span: Span) -> bool {
+        if self.expr_is_option(st, chan) {
+            let ty_str = self
+                .ty_of_expr(st, chan)
+                .map(|t| t.render())
+                .unwrap_or_else(|| "option".to_string());
+            let msg = format!(
+                "cannot receive from `{}` (`{}`) — a receive source must be a channel, not an `option` wrapper (O4)",
+                chan.render(),
+                ty_str
+            );
+            let notes = vec![
+                "why: `option[chan T]` lowers to a value struct in Go (`hyb_opt`), not a channel; receiving directly from an `option` fails `go build`".to_string(),
+                "fix: unwrap the `option` with `match` (`match opt { some(ch) => <-ch, none => {} }`) before receiving".to_string(),
+            ];
+            self.diags.push(
+                Diagnostic::error("HYB-E2008", self.path.clone(), span, msg).with_notes(notes),
+            );
+            return false;
+        }
         match self.shape_of_expr(st, chan) {
             TypeShape::Chan(_) => {
                 if let Some(ty) = self.recv_chan_type_expr(st, chan) {

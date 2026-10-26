@@ -220,8 +220,9 @@ impl<'a> Checker<'a> {
                         self.check_expr_emit_guard(st, expr);
                         if deep {
                             let shapes = self.iterate_var_shapes(st, expr, vars.len());
-                            for (name, shape) in vars.iter().zip(shapes) {
-                                self.define_binding(st, name, shape, None, false, false, false);
+                            let tys = self.iterate_var_tys(st, expr, vars.len());
+                            for ((name, shape), ty) in vars.iter().zip(shapes).zip(tys) {
+                                self.define_binding(st, name, shape, ty, false, false, false);
                             }
                         }
                     }
@@ -322,13 +323,20 @@ impl<'a> Checker<'a> {
                                     TypeShape::Chan(e) => *e,
                                     _ => TypeShape::Unknown,
                                 };
+                                let elem_ty = self.ty_of_expr(st, chan).and_then(|ct| {
+                                    match self.resolve_type_alias(&ct) {
+                                        TypeExpr::Chan { elem, .. } => Some(*elem),
+                                        _ => None,
+                                    }
+                                });
                                 for (i, n) in names.iter().enumerate() {
                                     let shape = if i == 0 {
                                         elem.clone()
                                     } else {
                                         TypeShape::Primitive
                                     };
-                                    self.define_binding(st, n, shape, None, false, false, false);
+                                    let ty = if i == 0 { elem_ty.clone() } else { None };
+                                    self.define_binding(st, n, shape, ty, false, false, false);
                                 }
                             }
                         }
@@ -366,6 +374,12 @@ impl<'a> Checker<'a> {
                     (_, s) => s,
                 };
                 let ty = l.ty.clone().or_else(|| self.ty_of_expr(st, val));
+                self.define_binding(st, name, shape, ty, immutable, false, is_let);
+            }
+        } else if l.values.len() == 1 && l.names.len() > 1 {
+            let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
+            let tys = self.multi_value_tys(st, &l.values[0], l.names.len());
+            for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
                 self.define_binding(st, name, shape, ty, immutable, false, is_let);
             }
         }

@@ -908,14 +908,21 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                             TypeShape::Chan(e) => *e,
                             _ => TypeShape::Unknown,
                         };
+                        let elem_ty = ck.ty_of_expr(st, chan).and_then(|ct| {
+                            match ck.resolve_type_alias(&ct) {
+                                hy_syntax::TypeExpr::Chan { elem, .. } => Some(*elem),
+                                _ => None,
+                            }
+                        });
                         for (i, n) in names.iter().enumerate() {
                             let shape = if i == 0 {
                                 elem.clone()
                             } else {
                                 TypeShape::Primitive
                             };
+                            let ty = if i == 0 { elem_ty.clone() } else { None };
                             mark_nested_overwritten(st, n, nested);
-                            ck.define_binding(st, n, shape, None, false, managed, false);
+                            ck.define_binding(st, n, shape, ty, false, managed, false);
                         }
                         sync_nested_moves(st, nested);
                     }
@@ -987,11 +994,12 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     collect_expr_direct_fnlits(expr, st, nested);
                     let is_chan = matches!(ck.shape_of_expr(st, expr), TypeShape::Chan(_));
                     let shapes = ck.iterate_var_shapes(st, expr, vars.len());
-                    for (name, shape) in vars.iter().zip(shapes) {
+                    let tys = ck.iterate_var_tys(st, expr, vars.len());
+                    for ((name, shape), ty) in vars.iter().zip(shapes).zip(tys) {
                         let is_ref = shape.is_reference_alias();
                         let may_share = ck.shape_may_share(&shape);
                         mark_nested_overwritten(st, name, nested);
-                        ck.define_binding(st, name, shape, None, false, managed, false);
+                        ck.define_binding(st, name, shape, ty, false, managed, false);
                         if !is_chan {
                             if may_share {
                                 ck.record_may_share(st, name, expr);

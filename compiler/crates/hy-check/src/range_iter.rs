@@ -388,6 +388,25 @@ impl<'a> Checker<'a> {
     /// sides treat an unknown operand. A TYPE contract, not a sendability
     /// doubt — `managed` does not suppress it.
     pub(crate) fn check_range_iterable(&mut self, st: &FnState, expr: &Expr, span: Span) {
+        if self.expr_is_option(st, expr) {
+            let ty_str = self
+                .ty_of_expr(st, expr)
+                .map(|t| t.render())
+                .unwrap_or_else(|| "option".to_string());
+            let msg = format!(
+                "cannot range over `{}` (`{}`) — `for x in e` needs a slice, array, string, map, or channel, not an `option` wrapper (LX13)",
+                expr.render(),
+                ty_str
+            );
+            let notes = vec![
+                "why: `option[T]` lowers to a value struct in Go (`hyb_opt`), which Go cannot range over".to_string(),
+                "fix: unwrap the `option` with `match` (`match opt { some(xs) => for x in xs { ... }, none => {} }`) before ranging".to_string(),
+            ];
+            self.diags.push(
+                Diagnostic::error("HYB-E2009", self.path.clone(), span, msg).with_notes(notes),
+            );
+            return;
+        }
         // Go: "array, pointer to array, slice, string, map, or channel" —
         // only pointer-to-ARRAY is rangeable (`*struct` / `*slice` /
         // `*string` are not), so normalize exactly one Pointer level for
