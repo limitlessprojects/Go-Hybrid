@@ -1898,6 +1898,7 @@ impl<'a> Collector<'a> {
                 | BinOp::BitOr
                 | BinOp::BitXor
                 | BinOp::BitAnd
+                | BinOp::BitAndNot
                 | BinOp::Shl
                 | BinOp::Shr => {
                     let lk = self.kind_of_expr(lhs);
@@ -3005,6 +3006,7 @@ impl<'a> Collector<'a> {
             | BinOp::BitOr
             | BinOp::BitXor
             | BinOp::BitAnd
+            | BinOp::BitAndNot
             | BinOp::Shl
             | BinOp::Shr => {
                 let op_str = match op {
@@ -3012,6 +3014,7 @@ impl<'a> Collector<'a> {
                     BinOp::BitOr => "|",
                     BinOp::BitXor => "^",
                     BinOp::BitAnd => "&",
+                    BinOp::BitAndNot => "&^",
                     BinOp::Shl => "<<",
                     _ => ">>",
                 };
@@ -3212,6 +3215,7 @@ impl<'a> Collector<'a> {
             AssignOp::ModAssign
             | AssignOp::BitOrAssign
             | AssignOp::BitAndAssign
+            | AssignOp::BitAndNotAssign
             | AssignOp::BitXorAssign
             | AssignOp::ShlAssign
             | AssignOp::ShrAssign => {

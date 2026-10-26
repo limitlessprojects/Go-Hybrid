@@ -695,7 +695,8 @@ impl<'a> Lexer<'a> {
         // `<<`, `>>=` before `>>`).
         const MULTI: &[&str] = &[
             "...", "..=", "=>", ":=", "==", "!=", "<=", ">=", "&&", "||", "<-", "<<=", ">>=",
-            "<<", ">>", "++", "--", "+=", "-=", "*=", "/=", "%=", "|=", "&=", "^=", "..",
+            "&^=", "&^", "<<", ">>", "++", "--", "+=", "-=", "*=", "/=", "%=", "|=", "&=", "^=",
+            "..",
         ];
         for m in MULTI {
             if rest.starts_with(m) {
@@ -1355,5 +1356,18 @@ mod tests {
         }
         let t = toks("m := map[string]int{}");
         assert!(t.iter().any(|t| matches!(t, Tok::Ident(s) if s == "map")));
+    }
+
+    #[test]
+    fn bitclear_lexes_as_single_punct_issue_1672() {
+        let t = toks("a &^ b\na &^= b\n");
+        let puncts: Vec<&str> = t
+            .iter()
+            .filter_map(|tk| match tk {
+                Tok::Punct(p) => Some(*p),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(puncts, vec!["&^", "&^="]);
     }
 }

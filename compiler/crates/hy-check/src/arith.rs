@@ -404,6 +404,7 @@ pub(crate) fn const_eval_int(expr: &Expr) -> Option<i128> {
                     }
                 }
                 BinOp::BitAnd => Some(l & r),
+                BinOp::BitAndNot => Some(l & !r),
                 BinOp::BitOr => Some(l | r),
                 BinOp::BitXor => Some(l ^ r),
                 BinOp::Shl => {
