@@ -173,3 +173,54 @@ fn slice_and_array_element_borrows_keep_their_lowering() {
         "array element borrow as argument (addressable, no loan lowering needed)",
     );
 }
+
+#[test]
+fn non_lowered_map_slot_borrow_positions_rejected_issue_1423() {
+    // 1. `var` declaration (`LocalKind::Var`)
+    assert_e3104(
+        "struct acct { bal int }\n\
+         fn main() {\n\
+             m := map[string]acct{\"a\": acct{bal: 1}}\n\
+             var p = &m[\"a\"]\n\
+             fmt.println(p.bal)\n\
+         }\n",
+        "var declaration cannot borrow map slot",
+    );
+
+    // 2. Non-identifier assignment target (`PlaceKind::Index`)
+    assert_e3104(
+        "struct acct { bal int }\n\
+         fn main() {\n\
+             m := map[string]acct{\"a\": acct{bal: 1}}\n\
+             ptrs := make([]*acct, 1)\n\
+             ptrs[0] = &m[\"a\"]\n\
+             fmt.println(ptrs[0].bal)\n\
+         }\n",
+        "index assignment target cannot borrow map slot",
+    );
+
+    // 3. Mixed-target parallel assignment (`PlaceKind::Ident` + `PlaceKind::Index`)
+    assert_e3104(
+        "struct acct { bal int }\n\
+         fn main() {\n\
+             m := map[string]acct{\"a\": acct{bal: 1}}\n\
+             var q acct = acct{bal: 0}\n\
+             arr := []int{0}\n\
+             q, arr[0] = &m[\"a\"], 1\n\
+             fmt.println(q.bal, arr[0])\n\
+         }\n",
+        "mixed-target parallel assignment cannot borrow map slot",
+    );
+
+    // 4. `any`-typed struct-literal field
+    assert_e3104(
+        "struct acct { bal int }\n\
+         struct box { p any }\n\
+         fn main() {\n\
+             m := map[string]acct{\"a\": acct{bal: 1}}\n\
+             b := box{p: &m[\"a\"]}\n\
+             fmt.println(b.p)\n\
+         }\n",
+        "any-typed struct-literal field cannot borrow map slot",
+    );
+}
