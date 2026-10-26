@@ -210,6 +210,20 @@
     },
     {
       "code": "HYB-E2009",
+    {
+      "code": "HYB-E8002",
+      "name": "cancellation-safety-violation",
+      "category": "type",
+      "severity": "error",
+      "title": "cancellation-safety violation",
+      "summary": "A blocking operation is not cancellation-observable.",
+      "fixits": [
+        "ensure all blocking operations are cancellation-observable"
+      ],
+      "example": "select { case <-ch: ... }  // reject: HYB-E8002 — blocking receive without cancellation",
+      "rule": "CANCEL-SAFETY",
+      "tier0_rule_id": "CANCEL-SAFETY"
+    }",
       "tier0_rule_id": "BUILDABLE",
       "name": "non-iterable-range",
       "category": "type",

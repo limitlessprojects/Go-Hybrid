@@ -50,6 +50,7 @@ mod buildable;
 mod const_overflow;
 mod closures;
 mod emit_guard;
+mod cancel;
 mod foreign;
 mod freeze;
 mod loans;
@@ -337,6 +338,8 @@ fn build_tables(ck: &mut Checker<'_>) {
 
 // ---------------------------------------------------------------------------
 // Pass B — the per-function statement driver
+
+        ck.check_cancel_safety();
 // ---------------------------------------------------------------------------
 
 fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
