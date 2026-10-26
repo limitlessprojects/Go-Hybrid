@@ -69,7 +69,16 @@ pub(crate) const SCALAR_ATOMICS: &[&str] = &[
 
 /// Is `name` a scalar atomic (class 2)?
 pub(crate) fn is_scalar_atomic(name: &str) -> bool {
-    SCALAR_ATOMICS.contains(&name)
+    if SCALAR_ATOMICS.contains(&name) {
+        return true;
+    }
+    if let Some(member) = name.strip_prefix("atomic.") {
+        if !member.contains('[') {
+            let norm = format!("atomic.{}", normalize_go_ident_to_snake(member));
+            return SCALAR_ATOMICS.contains(&norm.as_str());
+        }
+    }
+    false
 }
 
 /// Is `name` a `sync/atomic` type OUTSIDE the scalar set — `atomic.pointer[T]`,
@@ -93,7 +102,17 @@ pub(crate) fn foreign_named_type(name: &str) -> Option<TypeShape> {
         // with the row-11 explanation (sendability.rs)
         return Some(TypeShape::Unknown);
     }
-    match name {
+    let norm = match name.split_once('.') {
+        Some((pkg, member)) => {
+            let (base_member, suffix) = match member.find('[') {
+                Some(idx) => (&member[..idx], &member[idx..]),
+                None => (member, ""),
+            };
+            format!("{pkg}.{}{suffix}", normalize_go_ident_to_snake(base_member))
+        }
+        None => name.to_string(),
+    };
+    match norm.as_str() {
         "serde_json.value" => Some(TypeShape::OwnHandle("serde_json.value".into())),
         "serde_json.view" => Some(TypeShape::BorrowHandle("serde_json.view".into())),
         "flate2.writer" => Some(TypeShape::OwnHandle("flate2.writer".into())),
@@ -120,16 +139,15 @@ pub(crate) fn is_iterable_handle(name: &str) -> bool {
 
 /// Mode of a package-level call: `serde_json.parse(...)`, `fmt.println(...)`.
 pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
-    match (pkg, method) {
-        ("serde_json", "parse") | ("serde_json", "new_object" | "new_array") | ("flate2", "new_writer") => {
+    let norm = normalize_go_ident_to_snake(method);
+    match (pkg, norm.as_str()) {
+        ("serde_json", "parse" | "new_object" | "new_array") | ("flate2", "new_writer") => {
             CallMode::Produce
         }
-        ("serde_json", "to_string_pretty")
-        | ("serde_json", "array")
-        | ("serde_json", "get")
-        | ("serde_json", "int")
-        | ("serde_json", "string") => CallMode::Borrow,
-        ("serde_json", "set") | ("serde_json", "remove" | "push_string") => CallMode::Mutate,
+        ("serde_json", "to_string_pretty" | "array" | "get" | "int" | "string") => {
+            CallMode::Borrow
+        }
+        ("serde_json", "set" | "remove" | "push_string") => CallMode::Mutate,
         ("flate2", "write") => CallMode::Mutate,
         ("flate2", "finish") => CallMode::Consume,
         _ => CallMode::Safe,
@@ -140,35 +158,61 @@ pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
 /// `const` root there is a write, `HYB-E3006`). `None` = the descriptor stubs
 /// record no in-place write for this API.
 pub(crate) fn package_mutated_arg(pkg: &str, method: &str) -> Option<usize> {
-    match (pkg, method) {
+    let norm = normalize_go_ident_to_snake(method);
+    match (pkg, norm.as_str()) {
         (
             "sort",
-            "ints" | "strings" | "float64s" | "slice" | "slice_stable" | "sort" | "stable"
-            | "Ints" | "Strings" | "Float64s" | "Slice" | "SliceStable" | "Sort" | "Stable",
+            "ints" | "strings" | "float64s" | "slice" | "slice_stable" | "sort" | "stable",
         ) => Some(0),
+        ("io", "read_full" | "read_at_least") => Some(1),
+        ("io", "copy_buffer") => Some(2),
+        ("json", "unmarshal") => Some(1),
+        ("hex", "encode" | "decode") => Some(0),
+        ("serde_json", "set" | "remove" | "push_string") => Some(0),
+        ("flate2", "write" | "finish") => Some(0),
         (
-            "io",
-            "read_full" | "read_at_least" | "ReadFull" | "ReadAtLeast",
-        ) => Some(1),
-        ("io", "copy_buffer" | "CopyBuffer") => Some(2),
+            "atomic",
+            "add_int32"
+                | "add_int64"
+                | "add_uint32"
+                | "add_uint64"
+                | "add_uintptr"
+                | "compare_and_swap_int32"
+                | "compare_and_swap_int64"
+                | "compare_and_swap_uint32"
+                | "compare_and_swap_uint64"
+                | "compare_and_swap_uintptr"
+                | "compare_and_swap_pointer"
+                | "store_int32"
+                | "store_int64"
+                | "store_uint32"
+                | "store_uint64"
+                | "store_uintptr"
+                | "store_pointer"
+                | "swap_int32"
+                | "swap_int64"
+                | "swap_uint32"
+                | "swap_uint64"
+                | "swap_uintptr"
+                | "swap_pointer",
+        ) => Some(0),
         _ => None,
     }
 }
 
 /// Result shape of a package-level call (for defines / loop variables).
 pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
-    match (pkg, method) {
-        ("serde_json", "parse") | ("serde_json", "new_object" | "new_array") => {
+    let norm = normalize_go_ident_to_snake(method);
+    match (pkg, norm.as_str()) {
+        ("serde_json", "parse" | "new_object" | "new_array") => {
             TypeShape::OwnHandle("serde_json.value".into())
         }
         ("flate2", "new_writer") => TypeShape::OwnHandle("flate2.writer".into()),
         ("serde_json", "array" | "get") => TypeShape::BorrowHandle("serde_json.view".into()),
         ("serde_json", "int") | ("flate2", "write") => TypeShape::Primitive,
         ("flate2", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
-        ("serde_json", "to_string_pretty") | ("serde_json", "string") | ("strings", "join") => {
-            TypeShape::Str
-        }
-        ("strings", "split") | ("strings", "fields") => TypeShape::Slice(Box::new(TypeShape::Str)),
+        ("serde_json", "to_string_pretty" | "string") | ("strings", "join") => TypeShape::Str,
+        ("strings", "split" | "fields") => TypeShape::Slice(Box::new(TypeShape::Str)),
         // `time.after(d)` returns a receive-only channel (the deadline
         // pattern, example 04); the element shape is opaque here — the
         // binding still resolves as a channel so receives on it classify.
@@ -177,9 +221,12 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("http", "handler") => TypeShape::ForeignOpaque("http.handler".into()),
         // `atomic.load_pointer` / `atomic.swap_pointer` return an
         // unsafe.Pointer to arbitrary state — not a primitive (row 11)
-        ("atomic", "load_pointer" | "swap_pointer" | "compare_and_swap_pointer" | "value" | "pointer") => TypeShape::Unknown,
-        ("errors", "new" | "wrap" | "New" | "Wrap") => TypeShape::ForeignOpaque("error".into()),
-        ("errors", "is" | "Is") => TypeShape::Primitive,
+        (
+            "atomic",
+            "load_pointer" | "swap_pointer" | "compare_and_swap_pointer" | "value" | "pointer",
+        ) => TypeShape::Unknown,
+        ("errors", "new" | "wrap") => TypeShape::ForeignOpaque("error".into()),
+        ("errors", "is") => TypeShape::Primitive,
         _ if pkg == "atomic" => TypeShape::Primitive,
         _ => TypeShape::Unknown,
     }
@@ -189,7 +236,8 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
 /// values in Go (`(T, error)`, `(before, after, found)`, etc.) when not
 /// unwrapped with `?` (#380 / T23 `HYB-E2002`).
 pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
-    match (pkg, method) {
+    let norm = normalize_go_ident_to_snake(method);
+    match (pkg, norm.as_str()) {
         (
             "strconv",
             "parse_int"
@@ -198,14 +246,7 @@ pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
                 | "parse_bool"
                 | "parse_complex"
                 | "atoi"
-                | "unquote"
-                | "ParseInt"
-                | "ParseUint"
-                | "ParseFloat"
-                | "ParseBool"
-                | "ParseComplex"
-                | "Atoi"
-                | "Unquote",
+                | "unquote",
         ) => Some(2),
         (
             "os",
@@ -222,21 +263,7 @@ pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
                 | "stat"
                 | "lstat"
                 | "create_temp"
-                | "mkdir_temp"
-                | "Open"
-                | "Create"
-                | "ReadFile"
-                | "ReadDir"
-                | "Getwd"
-                | "UserHomeDir"
-                | "UserCacheDir"
-                | "UserConfigDir"
-                | "Executable"
-                | "LookupEnv"
-                | "Stat"
-                | "Lstat"
-                | "CreateTemp"
-                | "MkdirTemp",
+                | "mkdir_temp",
         ) => Some(2),
         (
             "io",
@@ -246,59 +273,23 @@ pub(crate) fn package_result_count(pkg: &str, method: &str) -> Option<usize> {
                 | "copy"
                 | "copy_n"
                 | "copy_buffer"
-                | "write_string"
-                | "ReadAll"
-                | "ReadFull"
-                | "ReadAtLeast"
-                | "Copy"
-                | "CopyN"
-                | "CopyBuffer"
-                | "WriteString",
+                | "write_string",
         ) => Some(2),
-        (
-            "strings",
-            "cut_prefix" | "cut_suffix" | "CutPrefix" | "CutSuffix",
-        ) => Some(2),
-        ("strings", "cut" | "Cut") => Some(3),
+        ("strings", "cut_prefix" | "cut_suffix") => Some(2),
+        ("strings", "cut") => Some(3),
         (
             "filepath",
-            "abs"
-                | "rel"
-                | "eval_symlinks"
-                | "glob"
-                | "match"
-                | "split"
-                | "Abs"
-                | "Rel"
-                | "EvalSymlinks"
-                | "Glob"
-                | "Match"
-                | "Split",
+            "abs" | "rel" | "eval_symlinks" | "glob" | "match" | "split",
         ) => Some(2),
-        ("path", "match" | "split" | "Match" | "Split") => Some(2),
-        (
-            "time",
-            "parse"
-                | "parse_duration"
-                | "load_location"
-                | "Parse"
-                | "ParseDuration"
-                | "LoadLocation",
-        ) => Some(2),
+        ("path", "match" | "split") => Some(2),
+        ("time", "parse" | "parse_duration" | "load_location") => Some(2),
         (
             "net",
-            "listen"
-                | "dial"
-                | "resolve_tcp_addr"
-                | "lookup_host"
-                | "Listen"
-                | "Dial"
-                | "ResolveTCPAddr"
-                | "LookupHost",
+            "listen" | "dial" | "resolve_tcp_addr" | "lookup_host",
         ) => Some(2),
-        ("net", "split_host_port" | "SplitHostPort") => Some(3),
-        ("hex", "decode_string" | "DecodeString") => Some(2),
-        ("regex", "compile" | "match_string" | "Compile" | "MatchString") => Some(2),
+        ("net", "split_host_port") => Some(3),
+        ("hex", "decode_string") => Some(2),
+        ("regex", "compile" | "match_string") => Some(2),
         _ => None,
     }
 }
@@ -310,7 +301,8 @@ pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {
         // atomics are safe-by-type: no loan implications (class 2)
         return CallMode::Safe;
     }
-    match (recv_type, method) {
+    let norm = normalize_go_ident_to_snake(method);
+    match (recv_type, norm.as_str()) {
         // #2200 / foreign-surface drift: this list must be a SUBSET of
         // hy-emit's SHAPES members for the same key (shapes.rs, "serde_json.value":
         // array, int, string, set, push_string) and of the Go methods the
@@ -405,7 +397,8 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
 
 /// Result shape of a method call on a typed receiver.
 pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
-    match (recv_type, method) {
+    let norm = normalize_go_ident_to_snake(method);
+    match (recv_type, norm.as_str()) {
         ("serde_json.value" | "serde_json.view", "array") => {
             // element views: iterating the result yields borrow handles
             TypeShape::BorrowHandle("serde_json.view".into())
@@ -1358,4 +1351,56 @@ pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
         _ => true,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn descriptor_tables_normalize_go_spellings_consistently() {
+        use super::{
+            foreign_named_type, method_mode, method_result, package_mode, package_mutated_arg,
+            package_result, CallMode,
+        };
+        use crate::model::TypeShape;
+
+        assert_eq!(
+            foreign_named_type("serde_json.View"),
+            Some(TypeShape::BorrowHandle("serde_json.view".into()))
+        );
+        assert_eq!(
+            foreign_named_type("serde_json.Value"),
+            Some(TypeShape::OwnHandle("serde_json.value".into()))
+        );
+        assert_eq!(
+            foreign_named_type("flate2.Writer"),
+            Some(TypeShape::OwnHandle("flate2.writer".into()))
+        );
+        assert_eq!(
+            package_result("atomic", "LoadPointer"),
+            TypeShape::Unknown
+        );
+        assert_eq!(
+            package_result("atomic", "SwapPointer"),
+            TypeShape::Unknown
+        );
+        assert_eq!(
+            package_mode("serde_json", "NewArray"),
+            CallMode::Produce
+        );
+        assert_eq!(
+            package_mode("serde_json", "PushString"),
+            CallMode::Mutate
+        );
+        assert_eq!(
+            method_mode("serde_json.value", "PushString"),
+            CallMode::Mutate
+        );
+        assert_eq!(
+            method_result("flate2.writer", "Finish"),
+            TypeShape::Slice(Box::new(TypeShape::Primitive))
+        );
+        assert_eq!(package_mutated_arg("json", "Unmarshal"), Some(1));
+        assert_eq!(package_mutated_arg("atomic", "StoreInt64"), Some(0));
+    }
+}
+
 
