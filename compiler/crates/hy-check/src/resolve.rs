@@ -770,6 +770,31 @@ impl Checker<'_> {
     /// `check_fn_undefined_names` owns those (per-fn scope).
     pub(crate) fn check_file_undefined_names(&mut self) {
         for d in &self.file.decls {
+            let (name, span) = match d {
+                Decl::Fn(f) => (f.name.as_str(), f.span),
+                Decl::Const(c) => (c.name.as_str(), c.span),
+                Decl::TypeAlias(a) => (a.name.as_str(), a.span),
+                Decl::Struct(st) => (st.name.as_str(), st.span),
+                Decl::Enum(e) => (e.name.as_str(), e.span),
+                Decl::Import { .. } => ("", hy_diag::Span::point(hy_diag::Pos { line: 1, col: 1 })),
+            };
+            const PRELUDE_BUILTINS: &[&str] = &["panic", "len", "make", "delete", "copy", "append", "close", "recover"];
+            if PRELUDE_BUILTINS.contains(&name) {
+                self.diags.push(
+                    hy_diag::Diagnostic::error(
+                        "HYB-E1001",
+                        self.path.to_string(),
+                        span,
+                        format!(
+                            "package-level declaration `{name}` shadows the Go builtin `{name}` used by generated runtime prelude (Go package-level declarations shadow builtins for the whole package) (HYB-E1001)"
+                        ),
+                    )
+                    .with_notes(vec![
+                        "why: Go package-level functions and constants shadow Go builtins package-wide; declaring `panic` or `len` at file level captures prelude calls inside `option.unwrap()` and `set` methods".to_string(),
+                        "fix: rename the top-level declaration to avoid colliding with Go builtins (e.g. `user_panic` instead of `panic`)".to_string(),
+                    ]),
+                );
+            }
             if let Decl::Import { path, span } = d {
                 if !crate::foreign::is_curated_import(path) {
                     self.diags.push(
