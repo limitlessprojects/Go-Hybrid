@@ -312,6 +312,9 @@ fn check_one_closure(
             }
         }
         check_one_closure(ck, &snap, nc.params, nc.results, nc.body);
+if let Some(epoch) = snap.epoch_map.get(&nc.name) {
+snap.epoch = *epoch;
+}
     }
     check_deferred_uses(ck, &cst, body);
     cst.scope_pop();

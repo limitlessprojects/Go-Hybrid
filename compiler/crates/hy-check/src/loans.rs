@@ -276,6 +276,18 @@ impl<'a> Checker<'a> {
                 }
             }
             Resolved::Fn { name } => {
+if name == "close" {
+if let Some(binding) = st.env_lookup(st.last_use.get(&name).unwrap()) {
+if let TypeShape::ChanTx(_) = binding.shape {
+if let Some(epoch) = st.epoch_map.get(name) {
+if *epoch >= st.epoch {
+ck.diags.push(Diagnostic::error("HYB-E3201", ck.path.clone(), cr.span, "cyclic channel wait-for dependency"));
+}
+}
+}
+}
+}
+if name == "copy" {
                 // `copy(dst, src)` (#178): an element-wise slice copy
                 // duplicates the element *references* when the element type
                 // carries mutable GC storage, so the destination and source

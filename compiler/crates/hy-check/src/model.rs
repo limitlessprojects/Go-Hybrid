@@ -31,7 +31,8 @@ pub(crate) enum TypeShape {
     Atomic,
     /// any `chan` direction (class 2); carries the element shape for
     /// loop-variable and receive inference.
-    Chan(Box<TypeShape>),
+    ChanTx(Box<TypeShape>),
+ChanRx(Box<TypeShape>),
     /// `map[K]V` — mutable GC composite (NOT sendable).
     Map(Box<TypeShape>, Box<TypeShape>),
     /// `[]T` — mutable GC composite (NOT sendable).
@@ -248,6 +249,8 @@ pub(crate) struct FnState {
     /// storage with `a` too. The freeze rule (O5.2) must cover the whole
     /// connected component, not just the single-parent `aliases` chain.
     pub may_share: HashMap<String, HashSet<String>>,
+pub epoch: usize,
+pub epoch_map: HashMap<String, usize>,
     pub loans: Vec<Loan>,
     /// name -> last statement index that references it (Pass A result).
     pub last_use: HashMap<String, usize>,
@@ -291,7 +294,9 @@ pub(crate) struct FnState {
     pub result_types: Vec<hy_syntax::TypeExpr>,
     /// Declared named result bindings (`fn f() (out map[string]int)`), in
     /// signature order. A bare `return` reads and returns each named result.
-    pub named_results: Vec<String>,
+    pub named_results: Vec<(String, Option<hy_syntax::TypeExpr>)>,
+pub epoch: usize,
+pub epoch_map: HashMap<String, usize>,Vec<String>,
     /// Bindings currently holding a function-local `&...` borrow (or a
     /// composite literal containing `&...`), for O2 `LOAN-ESCAPE` on
     /// named-result / variable returns (`out = &x; return` / `return out`).

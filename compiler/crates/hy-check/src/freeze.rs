@@ -308,6 +308,10 @@ impl<'a> Checker<'a> {
         // directions) and `may_share` — including multi-hop chains such as a
         // pointer borrow embedded in a composite literal (`p := &h; xs := []*holder{p}`).
         let mut members: Vec<String> = storage_component(st, name).into_iter().collect();
+if st.env_lookup(name).map_or(false, |b| b.shape == TypeShape::ChanTx(Box::new(TypeShape::Unknown))) {
+st.epoch += 1;
+st.epoch_map.insert(name.to_string(), st.epoch);
+}
         members.sort();
         let mut origins = Vec::new();
         for m in &members {

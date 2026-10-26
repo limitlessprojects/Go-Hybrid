@@ -45,7 +45,7 @@ impl<'a> Checker<'a> {
                 Box::new(self.shape_of_type_depth(value, depth + 1)),
             ),
             TypeExpr::Chan { elem, .. } => {
-                TypeShape::Chan(Box::new(self.shape_of_type_depth(elem, depth + 1)))
+                TypeShape::ChanTx(Box::new(self.shape_of_type_depth(elem, depth + 1)))
             }
             // option[T] carries T by value in a struct { v T; ok bool } — its
             // sendability IS the payload's sendability (option[int] crosses,
@@ -267,6 +267,8 @@ impl<'a> Checker<'a> {
             // alias first; predeclared spellings (`make(chan T, n)`,
             // `make([]T, n)`) keep their own shape through `shape_of_type`.
             Expr::StructLit { ty: Some(t), .. } => match self.shape_of_type(t) {
+TypeShape::ChanTx(e) => TypeShape::ChanTx(e),
+TypeShape::ChanRx(e) => TypeShape::ChanRx(e),
                 shape @ TypeShape::Struct(_) => shape,
                 _ => TypeShape::Struct(match t {
                     TypeExpr::Named { name, .. } => Some(name.clone()),
@@ -275,6 +277,26 @@ impl<'a> Checker<'a> {
             },
             Expr::StructLit { ty: None, .. } => TypeShape::Struct(None),
             Expr::MapLit { key, value, .. } => TypeShape::Map(
+Box::new(self.shape_of_type(key)),
+Box::new(self.shape_of_type(value)),
+),
+Expr::StructLit { ty: None, .. } => TypeShape::Struct(None),
+Expr::SliceLit { elem, items, .. } => {
+if let Some((_, inner_elem, _)) = expr.as_array_lit() {
+return TypeShape::Array(Box::new(self.shape_of_type(inner_elem)));
+}
+TypeShape::Slice(Box::new(match elem {
+Some(t) => self.shape_of_type(t),
+None => items
+.first()
+.map(|i| self.shape_of_expr(st, i))
+.unwrap_or(TypeShape::Unknown),
+}))
+},
+Expr::FnLit { .. } => TypeShape::Closure,
+Expr::StructLit { ty: Some(t), .. } => match self.shape_of_type(t) {
+TypeShape::ChanTx(e) => TypeShape::ChanTx(e),
+TypeShape::ChanRx(e) => TypeShape::ChanRx(e),
                 Box::new(self.shape_of_type(key)),
                 Box::new(self.shape_of_type(value)),
             ),
