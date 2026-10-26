@@ -736,6 +736,9 @@ pub(crate) struct Checker<'a> {
     /// An A5 escape site (`HYB-E3013`) inside `managed` is the declared escape
     /// hatch and is permitted, so the check reads this counter.
     pub managed_depth: usize,
+    /// Names bound as locals/params at the statement under the builtin-args
+    /// pass (issue #1851): a callee base in this set is a value, not a crate.
+    pub named_arg_shadow: HashSet<String>,
 }
 
 /// Row 14 (discussion #4): the CLOSED category set — the invariant a
@@ -775,6 +778,7 @@ impl<'a> Checker<'a> {
             managed_audit: Vec::new(),
             closure_bound: Vec::new(),
             managed_depth: 0,
+            named_arg_shadow: HashSet::new(),
         }
     }
 

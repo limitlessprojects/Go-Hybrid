@@ -55,3 +55,36 @@ fn rust_crate_named_args_still_accepted() {
     let r = check(src);
     assert_eq!(e1002_count(&r), 0);
 }
+
+const CALC: &str = "struct calc {\n    k int\n}\n\nfn (c calc) sub(a int, b int) int {\n    return a - b + c.k\n}\n\n";
+
+#[test]
+fn local_named_like_crate_rejects() {
+    let src = format!("{CALC}fn main() {{\n    regex := calc{{k: 0}}\n    fmt.println(regex.sub(b=7, a=10))\n}}\n");
+    let r = check(&src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(e1002_count(&r) >= 1);
+}
+
+#[test]
+fn block_local_shadowing_rust_import_rejects() {
+    let src = format!("import \"rust/sha3\"\n\n{CALC}fn main() {{\n    fmt.println(sha3.digest256(\"x\", seed=1))\n    if true {{\n        sha3 := calc{{k: 0}}\n        fmt.println(sha3.sub(b=7, a=10))\n    }}\n}}\n");
+    let r = check(&src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert_eq!(e1002_count(&r), 1);
+}
+
+#[test]
+fn param_named_like_import_rejects() {
+    let src = format!("import \"rust/sha3\"\n\n{CALC}fn run(sha3 calc) int {{\n    return sha3.sub(b=7, a=10)\n}}\n\nfn main() {{\n    fmt.println(run(calc{{k: 0}}))\n}}\n");
+    let r = check(&src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(e1002_count(&r) >= 1);
+}
+
+#[test]
+fn unimported_crate_name_is_not_special() {
+    let src = "fn main() {\n    fmt.println(regex.digest256(\"x\", seed=1))\n}\n";
+    let r = check(src);
+    assert!(e1002_count(&r) >= 1);
+}
