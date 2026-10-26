@@ -1,3 +1,4 @@
+- PR #1503 follow-up (2026-10-26): remove the extra closing brace before the #730 regression; the semantic range-bound change is unchanged. Verification command: cargo test -p hy-emit --lib range_bound_eval_once_issue_730; execution results are reported in the PR follow-up.
 # Hybrid Language: Development Plan
 
 - Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.

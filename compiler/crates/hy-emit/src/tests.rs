@@ -3032,7 +3032,6 @@ fn main() {}
     assert!(go6.contains("func read_url() int {"));
     assert!(go6.contains("func read_u_r_l() int {"));
 }
-}
 
 #[test]
 fn range_bound_eval_once_issue_730() {
