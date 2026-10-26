@@ -817,7 +817,7 @@ pub(crate) fn expr_path(expr: &Expr) -> Option<String> {
         Expr::Index { base, .. } => expr_path(base),
         Expr::Slice { base, .. } => expr_path(base),
         Expr::Paren { inner, .. } => expr_path(inner),
-        Expr::Try { operand, .. } => expr_path(operand),
+        Expr::Move { operand, .. } | Expr::Try { operand, .. } => expr_path(operand),
         Expr::Call { callee, args, .. }
             if matches!(crate::model::unwrap_parens(callee), Expr::Ident { name, .. } if name == "some")
                 && args.len() == 1 =>
