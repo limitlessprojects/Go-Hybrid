@@ -440,6 +440,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     )> = Vec::new();
     let mut reported_backedge: std::collections::HashSet<String> =
         std::collections::HashSet::new();
+    let mut fn_closures: Vec<closures::NestedClosure<'_>> = Vec::new();
 
     // Pass B: statements in source order.
     for (stmt, idx) in &flat.stmts {
@@ -454,7 +455,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             for ev in evs {
                 match ev {
                     walk::ScopeEvent::Push => st.scope_push(),
-                    walk::ScopeEvent::Pop => st.scope_pop(),
+                    walk::ScopeEvent::Pop => closures::pop_scope_and_sync(&mut st, &mut fn_closures),
                     walk::ScopeEvent::SelectRecv { names, chan } => {
                         let elem = match ck.shape_of_expr(&st, chan) {
                             TypeShape::Chan(e) => *e,
@@ -475,6 +476,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 }
             }
         }
+        closures::collect_stmt_direct_fnlits(stmt, &st, &mut fn_closures);
         if let Stmt::For { body: lbody, .. } = stmt {
             let outer_depth = st.scopes.len().saturating_sub(1);
             let pre_moved = st
@@ -876,6 +878,8 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             _ => {}
         }
 
+        closures::sync_active_moves(&st, &mut fn_closures);
+
         while let Some((_, loop_end, _, _, _)) = active_loops.last() {
             if *loop_end != idx {
                 break;
@@ -894,11 +898,10 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     }
 
     // All remaining block scopes die at the end of the function (issue #14):
-    // the closure pass's capture view is the COMPLETED base env (A5) — a
-    // capture of a block-local now resolves to nothing and fails closed
-    // (HYB-E3005) at the boundary, exactly like any unresolvable name.
+    // sync any block-local snapshots into `fn_closures` before popping so
+    // block-scoped closures still see their enclosing lexical bindings.
     while !st.scopes.is_empty() {
-        st.scope_pop();
+        closures::pop_scope_and_sync(&mut st, &mut fn_closures);
     }
 
     // #123: closure bodies sit outside Pass B (A5), so process_assign and
@@ -909,9 +912,9 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
 
     // Closure-boundary pass (closures.rs): task/send/select-send STATEMENTS
     // inside closure bodies are concurrency boundaries in the emitted Go —
-    // checked here, fail-closed (O4.9), with the completed function env as
-    // the capture view. Captures/loans/freeze stay outside (A5, documented).
-    closures::check_closure_boundaries(ck, &st, body);
+    // checked here, fail-closed (O4.9), with each closure's lexical snapshot
+    // merged over the completed function env.
+    closures::check_closure_boundaries(ck, &st, body, fn_closures);
 }
 
 impl<'a> Checker<'a> {
@@ -4937,6 +4940,132 @@ mod tests {
     }
 
     #[test]
+    fn conditional_and_closure_rebind_laundering_soundness() {
+        // 1a. Conditionally rebinding a parameter `p` inside an untaken branch must
+        // NOT clear `p`'s non_owned_origin after the block exits -> HYB-E3004.
+        let r_cond_rebind_param = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn bad(p map[string]int, done chan<- bool) {\n\
+               if false {\n\
+                 p = map[string]int{\"k\": 2}\n\
+               }\n\
+               task worker(move p, done)\n\
+             }",
+        );
+        assert_eq!(r_cond_rebind_param.verdict, Verdict::Reject);
+        assert!(r_cond_rebind_param
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3004"));
+
+        // 1b. Conditionally rebinding a range variable `v` inside an untaken branch
+        // must NOT clear `v`'s non_owned_origin after the block exits -> HYB-E3004.
+        let r_cond_rebind_range_var = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               items := []map[string]int{map[string]int{\"k\": 1}}\n\
+               done := make(chan bool, 1)\n\
+               for _, v in items {\n\
+                 if false {\n\
+                   v = map[string]int{\"k\": 2}\n\
+                 }\n\
+                 task worker(move v, done)\n\
+               }\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_cond_rebind_range_var.verdict, Verdict::Reject);
+        assert!(r_cond_rebind_range_var
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3004"));
+
+        // 1c. Conditionally rebinding a method receiver `self` inside an untaken
+        // branch must NOT clear `self`'s non_owned_origin after the block exits -> HYB-E3004.
+        let r_cond_rebind_receiver = check(
+            "struct holder { m map[string]int }\n\
+             fn worker(h holder, done chan<- bool) {\n\
+               h.m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn (self holder) bad(done chan<- bool) {\n\
+               if false {\n\
+                 self = holder{m: map[string]int{\"k\": 2}}\n\
+               }\n\
+               task worker(move self, done)\n\
+             }",
+        );
+        assert_eq!(r_cond_rebind_receiver.verdict, Verdict::Reject);
+        assert!(r_cond_rebind_receiver
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3004"));
+
+        // 1d. Rebinding a captured outer variable inside a closure (`cap = fresh`)
+        // mutates the shared capture cell in Go and must NOT allow moving `cap`
+        // across a concurrency boundary inside the closure -> HYB-E3004.
+        let r_closure_rebind_capture_move = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               cap := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 1)\n\
+               f := fn() {\n\
+                 cap = map[string]int{\"k\": 2}\n\
+                 task worker(move cap, done)\n\
+               }\n\
+               f()\n\
+               cap[\"k\"] = 99\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_closure_rebind_capture_move.verdict, Verdict::Reject);
+        assert!(r_closure_rebind_capture_move
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3004"));
+
+        // Positive control: rebinding parameter `p` inside a block and moving `p`
+        // WITHIN that same block (where `p` definitely holds the fresh map) stays
+        // Accepted, and shadowing a moved outer `m` with a fresh block-local `m`
+        // used by a block-local closure also stays Accepted.
+        let r_in_block_rebind_ok = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn ok(p map[string]int, done chan<- bool) {\n\
+               if true {\n\
+                 p = map[string]int{\"k\": 2}\n\
+                 task worker(move p, done)\n\
+               }\n\
+               m := map[string]int{\"k\": 0}\n\
+               task worker(move m, done)\n\
+               if true {\n\
+                 m := map[string]int{\"k\": 2}\n\
+                 m[\"k\"] = 3\n\
+                 f := fn() { m[\"k\"] = 4 }\n\
+                 f()\n\
+               }\n\
+             }",
+        );
+        assert_eq!(
+            r_in_block_rebind_ok.verdict,
+            Verdict::Accept,
+            "{:?}",
+            r_in_block_rebind_ok.diagnostics
+        );
+    }
+
+    #[test]
     fn move_of_map_during_live_slot_loan_preserves_a3_e3102() {
         let define = check(
             "import \"fmt\"\n\
@@ -5183,6 +5312,186 @@ mod tests {
             .filter(|d| d.code == "HYB-E3006")
             .count();
         assert_eq!(e3006_count, 2, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn outermost_closure_lexical_scope_and_rebind_soundness() {
+        // 2a. Outermost closure capturing a block-local `m` that was moved before
+        // the closure must be rejected with HYB-E3003 even though `m`'s block scope
+        // pops before `check_fn` finishes.
+        let r_block_local_moved_before_closure = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               done := make(chan bool, 1)\n\
+               if true {\n\
+                 m := map[string]int{\"k\": 0}\n\
+                 task worker(move m, done)\n\
+                 f := fn() { m[\"k\"] = 99 }\n\
+                 f()\n\
+               }\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_block_local_moved_before_closure.verdict, Verdict::Reject);
+        assert!(r_block_local_moved_before_closure
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3003"));
+
+        // 2b. Deferred outermost closure inside a block reading a block-local `m`
+        // that is moved later in the same block must be rejected with HYB-E3003.
+        let r_block_local_defer_closure_move = check(
+            "import \"fmt\"\n\
+             fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               done := make(chan bool, 1)\n\
+               if true {\n\
+                 m := map[string]int{\"k\": 0}\n\
+                 defer (fn() { fmt.println(m[\"k\"]) })()\n\
+                 task worker(move m, done)\n\
+               }\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_block_local_defer_closure_move.verdict, Verdict::Reject);
+        assert!(r_block_local_defer_closure_move
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3003"));
+
+        // 2c. Block-local `m` (map) shadowing an outer sendable `m := 1` (int)
+        // must NOT resolve to the outer `int` inside a closure declared in the block
+        // -> HYB-E3001.
+        let r_block_shadow_unsendable_in_closure = check(
+            "fn worker(x any) {}\n\
+             fn main() {\n\
+               m := 1\n\
+               _ = m\n\
+               if true {\n\
+                 m := map[string]int{\"k\": 0}\n\
+                 f := fn() { task worker(m) }\n\
+                 f()\n\
+               }\n\
+             }",
+        );
+        assert_eq!(
+            r_block_shadow_unsendable_in_closure.verdict,
+            Verdict::Reject
+        );
+        assert!(r_block_shadow_unsendable_in_closure
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3001"));
+
+        // 2d. Moving `m`, accessing `m` inside an outermost closure, and then
+        // redeclaring `m, x := fresh, 1` in the same scope must still reject the
+        // closure's use-after-move -> HYB-E3003.
+        let r_closure_use_after_move_then_rebind = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 1)\n\
+               task worker(move m, done)\n\
+               (fn() { m[\"k\"] = 99 })()\n\
+               m, x := map[string]int{\"k\": 2}, 1\n\
+               _ = m[\"k\"]\n\
+               _ = x\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(
+            r_closure_use_after_move_then_rebind.verdict,
+            Verdict::Reject
+        );
+        assert!(r_closure_use_after_move_then_rebind
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3003"));
+    }
+
+    #[test]
+    fn loop_continue_before_trailing_break_and_defer_move_soundness() {
+        // 3a. A loop body ending in `break` or `return` that has a reachable
+        // `continue` after `move m` CAN iterate again, so `check_loop_backedge`
+        // must reject the loop-carried use-after-move -> HYB-E3003.
+        let r_continue_before_trailing_break = check(
+            "fn worker(m map[string]int, done chan<- bool) {\n\
+               m[\"k\"] = 1\n\
+               done <- true\n\
+             }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               done := make(chan bool, 2)\n\
+               for i in 0..2 {\n\
+                 if i == 0 {\n\
+                   task worker(move m, done)\n\
+                   continue\n\
+                 }\n\
+                 m[\"k\"] = 99\n\
+                 break\n\
+               }\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r_continue_before_trailing_break.verdict, Verdict::Reject);
+        assert!(r_continue_before_trailing_break
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3003"));
+
+        // 3b. `defer report(m)` followed by `select { ch <- move m => {} }` and then
+        // `m = fresh` must still detect the move before the rebind and reject with
+        // HYB-E3003 (not misclassify as ReboundBeforeMove).
+        let r_defer_select_send_move_then_rebind = check(
+            "fn report(m map[string]int) { _ = m[\"k\"] }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               ch := make(chan map[string]int, 1)\n\
+               defer report(m)\n\
+               select {\n\
+                 ch <- move m => {}\n\
+               }\n\
+               m = map[string]int{\"k\": 2}\n\
+               _ = m[\"k\"]\n\
+               <-ch\n\
+             }",
+        );
+        assert_eq!(
+            r_defer_select_send_move_then_rebind.verdict,
+            Verdict::Reject
+        );
+        assert!(r_defer_select_send_move_then_rebind
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3003"));
+
+        // 3c. `defer report(m)` followed by `consume(move m)` (Stmt::Expr) and then
+        // `m = fresh` must also reject with HYB-E3003.
+        let r_defer_expr_move_then_rebind = check(
+            "fn report(m map[string]int) { _ = m[\"k\"] }\n\
+             fn consume(m map[string]int) { _ = m[\"k\"] }\n\
+             fn main() {\n\
+               m := map[string]int{\"k\": 0}\n\
+               defer report(m)\n\
+               consume(move m)\n\
+               m = map[string]int{\"k\": 2}\n\
+               _ = m[\"k\"]\n\
+             }",
+        );
+        assert_eq!(r_defer_expr_move_then_rebind.verdict, Verdict::Reject);
+        assert!(r_defer_expr_move_then_rebind
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HYB-E3003"));
     }
 }
 

@@ -32,42 +32,66 @@ use hy_syntax::{Block, Expr, LocalKind, SelectArmKind, Stmt};
 
 /// Check the boundary statements of every closure body reachable from
 /// `body` (one env per closure, captures included). Called once per
-/// function, after the flat Pass B loop — the enclosing env is complete.
-pub(crate) fn check_closure_boundaries(ck: &mut Checker<'_>, st: &FnState, body: &Block) {
+/// function, after the flat Pass B loop — each closure checks against its
+/// lexical snapshot with active scope moves synced.
+pub(crate) fn check_closure_boundaries<'a>(
+    ck: &mut Checker<'_>,
+    st: &FnState,
+    body: &'a Block,
+    mut fn_closures: Vec<NestedClosure<'a>>,
+) {
     check_deferred_uses(ck, st, body);
-    for (params, results, body, pos) in collect_fnlits(body) {
-        let mut scoped_st;
-        let st_ref = if let Some((s_env, s_aliases, s_share)) = st.closure_scoped_envs.get(&pos) {
-            scoped_st = st.clone();
-            for (k, v) in s_env {
-                scoped_st.env.insert(k.clone(), v.clone());
-            }
-            for (k, v) in s_aliases {
-                scoped_st.aliases.insert(k.clone(), v.clone());
-            }
-            for (k, vs) in s_share {
-                scoped_st
-                    .may_share
-                    .entry(k.clone())
-                    .or_default()
-                    .extend(vs.iter().cloned());
-            }
-            &scoped_st
-        } else {
-            st
-        };
-        check_one_closure(ck, st_ref, params, results, body);
+    sync_active_moves(st, &mut fn_closures);
+    if fn_closures.is_empty() {
+        for (params, results, cbody, pos) in collect_fnlits(body) {
+            let mut scoped_st;
+            let st_ref = if let Some((s_env, s_aliases, s_share)) = st.closure_scoped_envs.get(&pos)
+            {
+                scoped_st = st.clone();
+                for (k, v) in s_env {
+                    scoped_st.env.insert(k.clone(), v.clone());
+                }
+                for (k, v) in s_aliases {
+                    scoped_st.aliases.insert(k.clone(), v.clone());
+                }
+                for (k, vs) in s_share {
+                    scoped_st
+                        .may_share
+                        .entry(k.clone())
+                        .or_default()
+                        .extend(vs.iter().cloned());
+                }
+                &scoped_st
+            } else {
+                st
+            };
+            check_one_closure(ck, st_ref, params, results, cbody);
+        }
+        return;
+    }
+    for nc in fn_closures {
+        let snap = restore_closure_snapshot(
+            st,
+            nc.saved_scopes,
+            nc.saved_aliases,
+            nc.saved_share,
+            nc.saved_env,
+        );
+        check_one_closure(ck, &snap, nc.params, nc.results, nc.body);
     }
 }
 
-struct NestedClosure<'a> {
+pub(crate) struct NestedClosure<'a> {
     params: &'a [hy_syntax::Param],
     results: &'a [hy_syntax::FnResult],
     body: &'a Block,
     saved_scopes: Vec<std::collections::HashMap<String, Binding>>,
     saved_aliases: std::collections::HashMap<String, String>,
     saved_share: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    saved_env: std::collections::HashMap<String, Binding>,
     overwritten: std::collections::HashSet<(usize, String)>,
+    open_depth: usize,
+    min_new_move_pos: (u32, u32),
 }
 
 fn push_nested_closure<'a>(
@@ -77,6 +101,20 @@ fn push_nested_closure<'a>(
     body: &'a Block,
     nested: &mut Vec<NestedClosure<'a>>,
 ) {
+    let open_depth = st.scopes.len();
+    let min_new_move_pos = st
+        .env
+        .values()
+        .chain(st.scopes.iter().flat_map(|s| s.values()))
+        .filter_map(|b| b.moved.as_ref().map(|m| (m.span.end.line, m.span.end.col)))
+        .chain(
+            st.outer_state_scopes
+                .iter()
+                .flat_map(|s| s.values())
+                .filter_map(|(m, _)| m.as_ref().map(|mv| (mv.span.end.line, mv.span.end.col))),
+        )
+        .max()
+        .unwrap_or((0, 0));
     nested.push(NestedClosure {
         params,
         results,
@@ -84,7 +122,10 @@ fn push_nested_closure<'a>(
         saved_scopes: st.scopes.clone(),
         saved_aliases: st.aliases.clone(),
         saved_share: st.may_share.clone(),
+        saved_env: st.env.clone(),
         overwritten: std::collections::HashSet::new(),
+        open_depth,
+        min_new_move_pos,
     });
 }
 
@@ -101,97 +142,81 @@ fn mark_nested_overwritten(st: &FnState, name: &str, nested: &mut [NestedClosure
     }
 }
 
-fn is_overwritten_in_nc(st: &FnState, nc: &NestedClosure<'_>, name: &str) -> bool {
-    match st.lookup_depth(name) {
-        Some(0) | None => false,
-        Some(d) => nc.overwritten.contains(&(d - 1, name.to_string())),
-    }
-}
-
 fn sync_nested_moves(st: &FnState, nested: &mut [NestedClosure<'_>]) {
-    for nc in nested.iter_mut() {
-        for (depth, scope) in st.scopes.iter().enumerate() {
-            if depth < nc.saved_scopes.len() {
-                for (k, b) in scope {
-                    if !nc.overwritten.contains(&(depth, k.clone())) {
-                        if let Some(sb) = nc.saved_scopes[depth].get_mut(k) {
-                            if sb.moved.is_none() && b.moved.is_some() {
-                                sb.moved = b.moved.clone();
-                            }
-                        }
-                    }
-                }
+    sync_active_moves(st, nested);
+}
+
+fn restore_closure_snapshot(
+    base: &FnState,
+    saved_scopes: Vec<std::collections::HashMap<String, Binding>>,
+    saved_aliases: std::collections::HashMap<String, String>,
+    saved_share: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    saved_env: std::collections::HashMap<String, Binding>,
+) -> FnState {
+    let mut snap = base.clone();
+    snap.scopes = saved_scopes;
+    // Lexical capture env (#449): the closure's captured state is what
+    // existed at ITS define point — later defines in the enclosing body
+    // (shadows, rebinds) must not leak into what it captured.
+    snap.env = saved_env;
+    // A nested closure checks against ITS OWN named results: reset the
+    // enclosing closure's seeded state, check_one_closure re-seeds from
+    // nresults (a bare return inside the nested closure must not record
+    // uses for the enclosing closure's result names).
+    snap.named_results = Vec::new();
+    snap.result_shapes = Vec::new();
+    for (k, v) in saved_aliases {
+        snap.aliases.entry(k).or_insert(v);
+    }
+    for (k, vs) in saved_share {
+        snap.may_share.entry(k).or_default().extend(vs);
+    }
+    // Propagate any moves across snap's aliases and may-share peers (#449):
+    // a move recorded on one binding must freeze every alias resolving to
+    // the same root and every may-share clique member.
+    let mut moved_info: Vec<(String, crate::model::MoveInfo)> = Vec::new();
+    for (k, b) in &snap.env {
+        if let Some(mv) = &b.moved {
+            if !snap.scopes.iter().any(|s| s.contains_key(k)) {
+                moved_info.push((k.clone(), mv.clone()));
             }
         }
-        for (k, v) in &st.aliases {
-            if !is_overwritten_in_nc(st, nc, k) && !is_overwritten_in_nc(st, nc, v) {
-                nc.saved_aliases.entry(k.clone()).or_insert_with(|| v.clone());
-            }
-        }
-        for (k, vs) in &st.may_share {
-            if !is_overwritten_in_nc(st, nc, k) {
-                for v in vs {
-                    if !is_overwritten_in_nc(st, nc, v) {
-                        nc.saved_share.entry(k.clone()).or_default().insert(v.clone());
-                        nc.saved_share.entry(v.clone()).or_default().insert(k.clone());
-                    }
-                }
-            }
-        }
-        let mut active_moves: Vec<(String, crate::model::MoveInfo)> = Vec::new();
-        for (k, b) in &st.env {
+    }
+    for (depth, scope) in snap.scopes.iter().enumerate() {
+        for (k, b) in scope {
             if let Some(mv) = &b.moved {
-                active_moves.push((k.clone(), mv.clone()));
-            }
-        }
-        for (depth, scope) in st.scopes.iter().enumerate() {
-            for (k, b) in scope {
-                if !nc.overwritten.contains(&(depth, k.clone())) {
-                    if let Some(mv) = &b.moved {
-                        active_moves.push((k.clone(), mv.clone()));
-                    }
+                if !snap.scopes[(depth + 1)..].iter().any(|s| s.contains_key(k)) {
+                    moved_info.push((k.clone(), mv.clone()));
                 }
             }
         }
-        for (moved_name, mv) in active_moves {
-            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-            let mut stack = vec![moved_name];
-            while let Some(cur) = stack.pop() {
-                if !seen.insert(cur.clone()) {
-                    continue;
-                }
-                if let Some(parent) = nc.saved_aliases.get(&cur) {
-                    stack.push(parent.clone());
-                }
-                for (child, parent) in &nc.saved_aliases {
-                    if parent == &cur {
-                        stack.push(child.clone());
-                    }
-                }
-                if let Some(peers) = nc.saved_share.get(&cur) {
-                    for p in peers {
-                        stack.push(p.clone());
-                    }
-                }
+    }
+    for (name, mv) in moved_info {
+        let root = crate::freeze::resolve_alias(&snap, &name);
+        let mut members: Vec<String> = vec![name.clone(), root.clone()];
+        for a in snap.aliases.keys() {
+            if crate::freeze::resolve_alias(&snap, a) == root {
+                members.push(a.clone());
             }
-            for member in seen {
-                for scope in nc.saved_scopes.iter_mut().rev() {
-                    if let Some(sb) = scope.get_mut(&member) {
-                        if sb.moved.is_none() {
-                            sb.moved = Some(mv.clone());
-                        }
-                        break;
+        }
+        let seeded = members.clone();
+        for m in seeded {
+            members.extend(snap.share_group(&m));
+        }
+        members.sort();
+        members.dedup();
+        for m in members {
+            if let Some(b) = snap.env_lookup_mut(&m) {
+                if b.moved.is_none() {
+                    b.moved = Some(mv.clone());
+                    if b.non_owned_origin.is_none() {
+                        b.non_owned_origin = Some(format!("a may-share peer of {}", name));
                     }
                 }
             }
         }
     }
-}
-
-fn pop_scope_and_sync(st: &mut FnState, nested: &mut [NestedClosure<'_>]) {
-    sync_nested_moves(st, nested);
-    st.scope_pop();
-    sync_nested_moves(st, nested);
+    snap
 }
 
 fn check_one_closure(
@@ -269,52 +294,150 @@ fn check_one_closure(
     cst.scope_push();
     check_closure_slot_loans(ck, &mut cst, body);
     check_body_boundaries(ck, &mut cst, body, false, &mut nested);
-    sync_nested_moves(&cst, &mut nested);
+    sync_active_moves(&cst, &mut nested);
     for nc in nested {
-        let mut snap = cst.clone();
-        snap.scopes = nc.saved_scopes;
-        // A nested closure checks against ITS OWN named results: reset the
-        // enclosing closure's seeded state, check_one_closure re-seeds from
-        // nresults (a bare return inside the nested closure must not record
-        // uses for the enclosing closure's result names).
-        snap.named_results = Vec::new();
-        snap.result_shapes = Vec::new();
-        for (k, v) in nc.saved_aliases {
-            snap.aliases.insert(k, v);
-        }
-        for (k, vs) in nc.saved_share {
-            snap.may_share.entry(k).or_default().extend(vs);
-        }
-        let moved_entries: Vec<(String, crate::model::MoveInfo)> = snap
-            .env
-            .iter()
-            .chain(snap.scopes.iter().flat_map(|s| s.iter()))
-            .filter_map(|(k, b)| b.moved.as_ref().map(|mv| (k.clone(), mv.clone())))
-            .collect();
-        for (moved_name, mv) in moved_entries {
-            let root = crate::freeze::resolve_alias(&snap, &moved_name);
-            let mut members = vec![moved_name, root.clone()];
-            for a in snap.aliases.keys() {
-                if crate::freeze::resolve_alias(&snap, a) == root {
-                    members.push(a.clone());
-                }
-            }
-            let seeded = members.clone();
-            for m in seeded {
-                members.extend(snap.share_group(&m));
-            }
-            for m in members {
-                if let Some(b) = snap.env_lookup_mut(&m) {
-                    if b.moved.is_none() {
-                        b.moved = Some(mv.clone());
-                    }
-                }
-            }
-        }
+        let snap = restore_closure_snapshot(
+            &cst,
+            nc.saved_scopes,
+            nc.saved_aliases,
+            nc.saved_share,
+            nc.saved_env,
+        );
         check_one_closure(ck, &snap, nc.params, nc.results, nc.body);
     }
     check_deferred_uses(ck, &cst, body);
     cst.scope_pop();
+}
+
+fn is_overwritten_in_nc(st: &FnState, nc: &NestedClosure<'_>, name: &str) -> bool {
+    match st.lookup_depth(name) {
+        Some(0) | None => false,
+        Some(d) => nc.overwritten.contains(&(d - 1, name.to_string())),
+    }
+}
+
+/// Propagate any newly recorded moves in the currently open scopes of `st`
+/// into the saved snapshots of already-collected closures in those scopes.
+pub(crate) fn sync_active_moves(st: &FnState, nested: &mut [NestedClosure<'_>]) {
+    for nc in nested.iter_mut() {
+        for (k, b) in &st.env {
+            if let Some(mv) = &b.moved {
+                if (mv.span.start.line, mv.span.start.col) >= nc.min_new_move_pos {
+                    if let Some(sb) = nc.saved_env.get_mut(k) {
+                        if sb.moved.is_none() {
+                            sb.moved = Some(mv.clone());
+                        }
+                    }
+                }
+            }
+        }
+        let limit = nc.open_depth.min(st.scopes.len()).min(nc.saved_scopes.len());
+        for depth in 0..limit {
+            for (k, b) in &st.scopes[depth] {
+                if !nc.overwritten.contains(&(depth, k.clone())) {
+                    if let Some(mv) = &b.moved {
+                        if (mv.span.start.line, mv.span.start.col) >= nc.min_new_move_pos {
+                            if let Some(sb) = nc.saved_scopes[depth].get_mut(k) {
+                                if sb.moved.is_none() {
+                                    sb.moved = Some(mv.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (k, v) in &st.aliases {
+            if !is_overwritten_in_nc(st, nc, k) && !is_overwritten_in_nc(st, nc, v) {
+                nc.saved_aliases.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        for (k, vs) in &st.may_share {
+            if !is_overwritten_in_nc(st, nc, k) {
+                for v in vs {
+                    if !is_overwritten_in_nc(st, nc, v) {
+                        nc.saved_share.entry(k.clone()).or_default().insert(v.clone());
+                        nc.saved_share.entry(v.clone()).or_default().insert(k.clone());
+                    }
+                }
+            }
+        }
+        let mut active_moves: Vec<(String, crate::model::MoveInfo)> = Vec::new();
+        for (k, b) in &st.env {
+            if let Some(mv) = &b.moved {
+                if (mv.span.start.line, mv.span.start.col) >= nc.min_new_move_pos {
+                    active_moves.push((k.clone(), mv.clone()));
+                }
+            }
+        }
+        for depth in 0..limit {
+            for (k, b) in &st.scopes[depth] {
+                if !nc.overwritten.contains(&(depth, k.clone())) {
+                    if let Some(mv) = &b.moved {
+                        if (mv.span.start.line, mv.span.start.col) >= nc.min_new_move_pos {
+                            active_moves.push((k.clone(), mv.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        for (moved_name, mv) in active_moves {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut stack = vec![moved_name];
+            while let Some(cur) = stack.pop() {
+                if !seen.insert(cur.clone()) {
+                    continue;
+                }
+                if let Some(parent) = nc.saved_aliases.get(&cur) {
+                    stack.push(parent.clone());
+                }
+                for (child, parent) in &nc.saved_aliases {
+                    if parent == &cur {
+                        stack.push(child.clone());
+                    }
+                }
+                if let Some(peers) = nc.saved_share.get(&cur) {
+                    for p in peers {
+                        stack.push(p.clone());
+                    }
+                }
+            }
+            for member in seen {
+                let mut found_in_scope = false;
+                for scope in nc.saved_scopes.iter_mut().rev() {
+                    if let Some(sb) = scope.get_mut(&member) {
+                        if sb.moved.is_none() {
+                            sb.moved = Some(mv.clone());
+                        }
+                        found_in_scope = true;
+                        break;
+                    }
+                }
+                if !found_in_scope {
+                    if let Some(sb) = nc.saved_env.get_mut(&member) {
+                        if sb.moved.is_none() {
+                            sb.moved = Some(mv.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Pop the innermost scope and sync any moved bindings back into the saved
+/// scopes of not-yet-checked closures (#449): a move that happens in a
+/// block must stay visible when the closure's snapshot is restored,
+/// including at the exact scope depth the move occurred at.
+pub(crate) fn pop_scope_and_sync(st: &mut FnState, nested: &mut [NestedClosure<'_>]) {
+    sync_active_moves(st, nested);
+    let depth = st.scopes.len().saturating_sub(1);
+    for nc in nested.iter_mut() {
+        if depth < nc.open_depth {
+            nc.open_depth = depth;
+        }
+    }
+    st.scope_pop();
 }
 
 /// Walk one closure body recursively, checking boundary statements only.
@@ -330,6 +453,7 @@ fn check_body_boundaries<'a>(
 ) {
     for stmt in &block.stmts {
         check_stmt_boundaries(ck, st, stmt, managed, nested);
+        sync_active_moves(st, nested);
     }
 }
 
@@ -353,7 +477,7 @@ fn collect_expr_direct_fnlits<'a>(
     }
 }
 
-fn collect_stmt_direct_fnlits<'a>(
+pub(crate) fn collect_stmt_direct_fnlits<'a>(
     stmt: &'a Stmt,
     st: &FnState,
     nested: &mut Vec<NestedClosure<'a>>,
@@ -364,6 +488,9 @@ fn collect_stmt_direct_fnlits<'a>(
         for t in targets {
             collect_place_direct_fnlits(t, &mut flits);
         }
+    }
+    if flits.is_empty() {
+        return;
     }
     for flit in flits {
         if let Expr::FnLit {
@@ -1933,13 +2060,92 @@ fn stmt_moves_watched_binding(
         }
         Stmt::Select { arms, .. } => {
             for arm in arms {
-                if let SelectArmKind::Send { chan, value, .. } = &arm.kind {
+                if let SelectArmKind::Send {
+                    chan,
+                    value,
+                    is_move,
+                } = &arm.kind
+                {
+                    let span = chan.span().to(value.span());
                     let desc = format!(
                         "the select move-send `{} <- {}`",
                         chan.render(),
-                        value.render()
+                        if *is_move && !matches!(value, Expr::Move { .. }) {
+                            format!("move {}", value.render())
+                        } else {
+                            value.render()
+                        }
                     );
+                    if *is_move {
+                        if let Expr::Ident { name, .. } = crate::model::unwrap_parens(value) {
+                            if watch.contains(name) {
+                                return Some(crate::model::MoveInfo {
+                                    span,
+                                    kind: crate::model::MoveKind::Moved,
+                                    desc,
+                                    moved_name: name.to_string(),
+                                });
+                            }
+                        }
+                    }
                     if let Some(mv) = check_expr(value, desc) {
+                        return Some(mv);
+                    }
+                }
+            }
+        }
+        Stmt::Expr { expr, .. } => {
+            let desc = format!("the expression `{}`", expr.render());
+            if let Some(mv) = check_expr(expr, desc) {
+                return Some(mv);
+            }
+        }
+        Stmt::Defer { call, .. } => {
+            let desc = format!("the deferred call `defer {}`", call.render());
+            if let Some(mv) = check_expr(call, desc) {
+                return Some(mv);
+            }
+        }
+        Stmt::If { cond, .. } => {
+            let desc = format!("the condition `{}`", cond.render());
+            if let Some(mv) = check_expr(cond, desc) {
+                return Some(mv);
+            }
+        }
+        Stmt::For { kind, .. } => match kind {
+            While { cond } => {
+                let desc = format!("the loop condition `{}`", cond.render());
+                if let Some(mv) = check_expr(cond, desc) {
+                    return Some(mv);
+                }
+            }
+            Range { lo, hi, .. } => {
+                let desc_lo = format!("the range bound `{}`", lo.render());
+                if let Some(mv) = check_expr(lo, desc_lo) {
+                    return Some(mv);
+                }
+                let desc_hi = format!("the range bound `{}`", hi.render());
+                if let Some(mv) = check_expr(hi, desc_hi) {
+                    return Some(mv);
+                }
+            }
+            Iterate { expr, .. } => {
+                let desc = format!("the loop header `{}`", expr.render());
+                if let Some(mv) = check_expr(expr, desc) {
+                    return Some(mv);
+                }
+            }
+            Infinite => {}
+        },
+        Stmt::Match { subject, arms, .. } => {
+            let desc = format!("the match subject `{}`", subject.render());
+            if let Some(mv) = check_expr(subject, desc) {
+                return Some(mv);
+            }
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    let gdesc = format!("the match guard `{}`", g.render());
+                    if let Some(mv) = check_expr(g, gdesc) {
                         return Some(mv);
                     }
                 }

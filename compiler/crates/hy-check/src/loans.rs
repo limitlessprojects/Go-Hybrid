@@ -5564,7 +5564,13 @@ impl<'a> Checker<'a> {
                             b.ty = info.ty;
                         }
                         b.moved = None; // a fresh value re-owns the binding
-                        b.non_owned_origin = info.non_owned;
+                        let keep_capture_origin = b
+                            .non_owned_origin
+                            .as_deref()
+                            .is_some_and(|o| o.starts_with("captured outer binding "));
+                        if !keep_capture_origin || info.non_owned.is_some() {
+                            b.non_owned_origin = info.non_owned;
+                        }
                     }
                     // a rebind re-owns the binding: drop the old alias and
                     // may-share edges, then re-record from the new value (#27)
@@ -5681,11 +5687,15 @@ impl<'a> Checker<'a> {
                             b.ty = ty;
                         }
                         b.moved = None;
-                        b.non_owned_origin = if may_share {
-                            moved_non_owned.clone()
-                        } else {
-                            None
-                        };
+                        let keep_capture_origin = b
+                            .non_owned_origin
+                            .as_deref()
+                            .is_some_and(|o| o.starts_with("captured outer binding "));
+                        if may_share && moved_non_owned.is_some() {
+                            b.non_owned_origin = moved_non_owned.clone();
+                        } else if !keep_capture_origin {
+                            b.non_owned_origin = None;
+                        }
                     }
                     st.aliases.remove(name);
                     st.share_clear(name);
