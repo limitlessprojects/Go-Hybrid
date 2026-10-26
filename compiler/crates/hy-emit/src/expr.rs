@@ -396,14 +396,7 @@ impl Emitter {
                 // Block): emitted verbatim so `fn() int {…}` lowers to
                 // `func() int {…}`.
                 if !results.is_empty() {
-                    let rs = results
-                        .iter()
-                        .map(|r| match &r.name {
-                            Some(n) => format!("{} {}", n, self.type_text(&r.ty)),
-                            None => self.type_text(&r.ty),
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                    let rs = self.result_list_text(results);
                     out.push_str(&format!("({}) ", rs));
                 }
                 out.push_str("{\n");
@@ -939,7 +932,7 @@ impl Emitter {
                 elem: Some(t),
                 items,
                 ..
-            } if items.is_empty() && first.value.as_array_lit().is_none() => {
+            } if items.is_empty() && first_val.as_array_lit().is_none() => {
                 format!("[]{}", self.type_text(t))
             }
             Expr::MapLit {
@@ -980,7 +973,13 @@ impl Emitter {
                 elem: Some(t),
                 items,
                 ..
-            } if items.is_empty() => format!("[]{}", self.type_text(t)),
+            } if items.is_empty() => {
+                if val.as_array_lit().is_some() {
+                    self.type_text(t)
+                } else {
+                    format!("[]{}", self.type_text(t))
+                }
+            }
             Expr::MapLit {
                 key,
                 value,

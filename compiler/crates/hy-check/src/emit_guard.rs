@@ -153,6 +153,7 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
+                    self.check_slot_loan_rebind(st, stmt);
                     self.mark_slot_loans_assign(st, targets, *op, values);
                 }
             }
