@@ -214,3 +214,19 @@ fn controls_untouched() {
         "struct pair { n int } fn main() { p := pair{ n: 1 } x := int8(p.n) _ = x }",
     );
 }
+
+#[test]
+fn complex_targets_reject_non_numeric_and_overflow_constants_issue_1770() {
+    rejects_with_e6006("fn main() { x := complex64(\"invalid\") _ = x }");
+    rejects_with_e6006("fn main() { x := complex128(\"invalid\") _ = x }");
+    rejects_with_e6006("fn main() { x := complex64(true) _ = x }");
+    rejects_with_e6006("fn main() { x := complex128(false) _ = x }");
+    rejects_with_e6006("fn main() { x := complex64(nil) _ = x }");
+    rejects_with_e6006("fn main() { x := complex128(nil) _ = x }");
+    rejects_with_e6006("fn main() { x := complex64(1e40) _ = x }");
+
+    accepts_without_e6006("fn main() { x := complex64(1) _ = x }");
+    accepts_without_e6006("fn main() { x := complex128(2.5) _ = x }");
+    accepts_without_e6006("fn main() { x := complex128(1e40) _ = x }");
+    accepts_without_e6006("fn main() { x := complex64('A') _ = x }");
+}
