@@ -194,3 +194,45 @@ fn single_value_calls_stay_accepted() {
         "fn one() int {\n    return 1\n}\n\nfn g(a int) {\n    fmt.println(\"{a}\")\n}\n\nfn main() {\n    g(one())\n}\n",
     );
 }
+
+#[test]
+fn void_and_multivalue_calls_in_composite_literals_and_unary_ops_reject() {
+    // Issue #1016: void calls, 0-value builtins, and multi-value calls inside
+    // struct, slice/array, and map literals or unary operands must reject with HYB-E1002.
+    assert_code(
+        "struct box { x int }\n\nfn noop() {}\n\nfn main() {\n    b := box{x: noop()}\n    _ = b\n}\n",
+        "HYB-E1002",
+    );
+    assert_code(
+        "fn noop() {}\n\nfn main() {\n    xs := []int{noop()}\n    _ = xs\n}\n",
+        "HYB-E1002",
+    );
+    assert_code(
+        "fn main() {\n    ch := make(chan int, 1)\n    xs := []int{close(ch)}\n    _ = xs\n}\n",
+        "HYB-E1002",
+    );
+    assert_code(
+        "fn noop() {}\n\nfn main() {\n    m := map[string]int{\"k\": noop()}\n    _ = m\n}\n",
+        "HYB-E1002",
+    );
+    assert_code(
+        "fn noop() {}\n\nfn main() {\n    m := map[int]int{noop(): 1}\n    _ = m\n}\n",
+        "HYB-E1002",
+    );
+    assert_code(
+        "fn main() {\n    m0 := map[string]int{\"a\": 1}\n    m := map[string]int{\"k\": delete(m0, \"a\")}\n    _ = m\n}\n",
+        "HYB-E1002",
+    );
+    assert_operand_rejected(
+        &format!("{TWO}fn main() {{\n    v := -two()\n    _ = v\n}}\n"),
+        "HYB-E1002",
+    );
+    assert_operand_rejected(
+        &format!("{TWO}fn main() {{\n    xs := []int{{two()}}\n    _ = xs\n}}\n"),
+        "HYB-E1002",
+    );
+    // Single-value calls in composite literals stay accepted.
+    assert_ok(
+        "import \"fmt\"\n\nstruct box { x int }\n\nfn one() int {\n    return 1\n}\n\nfn main() {\n    b := box{x: one()}\n    xs := []int{one()}\n    m := map[int]int{one(): one()}\n    fmt.println(\"{b.x} {len(xs)} {len(m)}\")\n}\n",
+    );
+}
