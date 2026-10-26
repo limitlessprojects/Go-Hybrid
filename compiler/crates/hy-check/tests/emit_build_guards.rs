@@ -568,3 +568,21 @@ fn method_with_own_type_parameters_is_rejected_issue_881() {
 fn method_using_struct_type_parameters_stays_accepted_issue_881() {
     accepts_without(METHOD_USING_STRUCT_TYPE_PARAM_OK, "HYB-E1002");
 }
+
+#[test]
+fn non_integer_or_nil_shift_counts_are_rejected_issue_1777() {
+    for src in [
+        "fn main() {\n    _ = 1 << 1.5\n}\n",
+        "fn main() {\n    _ = 1 >> 2.5\n}\n",
+        "fn main() {\n    _ = 1 << \"invalid\"\n}\n",
+        "fn main() {\n    _ = 1 << true\n}\n",
+        "fn main() {\n    _ = 1 << nil\n}\n",
+        "fn main() {\n    _ = 1 >> nil\n}\n",
+        "fn main() {\n    var x int = 8\n    x <<= 2.5\n}\n",
+        "fn main() {\n    var x int = 8\n    x <<= nil\n}\n",
+        "fn main() {\n    var x int = 8\n    x >>= \"bad\"\n}\n",
+        "fn main() {\n    var x int = 8\n    x >>= false\n}\n",
+    ] {
+        rejects_with(src, "HYB-E6005");
+    }
+}
