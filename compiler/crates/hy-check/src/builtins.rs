@@ -13,7 +13,8 @@ use crate::const_overflow::{const_int_fold_with, ConstFold};
 use crate::model::{unwrap_parens, Checker, FnState};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
-    CallArg, ChanDir, Decl, Expr, ForKind, LitKind, Place, PlaceKind, SelectArmKind, Stmt, UnOp,
+    CallArg, ChanDir, Decl, Expr, ForKind, LitKind, MatchPattern, Place, PlaceKind, SelectArmKind,
+    Stmt, UnOp,
 };
 use std::collections::HashMap;
 
@@ -107,6 +108,17 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::For { kind, body, .. } => {
+                if deep {
+                    match kind {
+                        ForKind::Iterate { vars, .. } => {
+                            self.named_arg_shadow.extend(vars.iter().cloned());
+                        }
+                        ForKind::Range { var, .. } => {
+                            self.named_arg_shadow.insert(var.clone());
+                        }
+                        _ => {}
+                    }
+                }
                 match kind {
                     ForKind::While { cond } => self.check_expr_builtin_args(st, cond),
                     ForKind::Range { lo, hi, .. } => {
@@ -152,6 +164,12 @@ impl<'a> Checker<'a> {
                         self.check_expr_builtin_args(st, g);
                     }
                     if deep {
+                        if let MatchPattern::Path {
+                            binding: Some(b), ..
+                        } = &arm.pattern
+                        {
+                            self.named_arg_shadow.insert(b.clone());
+                        }
                         for s in &arm.body.stmts {
                             self.check_stmt_builtin_args_inner(st, s, true);
                         }
@@ -178,6 +196,9 @@ impl<'a> Checker<'a> {
                         SelectArmKind::Default => {}
                     }
                     if deep {
+                        if let SelectArmKind::Recv { names, .. } = &arm.kind {
+                            self.named_arg_shadow.extend(names.iter().cloned());
+                        }
                         for s in &arm.body.stmts {
                             self.check_stmt_builtin_args_inner(st, s, true);
                         }

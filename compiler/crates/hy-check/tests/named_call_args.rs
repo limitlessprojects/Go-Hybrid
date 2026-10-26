@@ -88,3 +88,34 @@ fn unimported_crate_name_is_not_special() {
     let r = check(src);
     assert!(e1002_count(&r) >= 1);
 }
+
+#[test]
+fn closure_for_var_shadowing_rust_import_rejects() {
+    let src = format!("import \"rust/sha3\"\n\n{CALC}fn main() {{\n    fmt.println(sha3.digest256(\"x\", seed=1))\n    f := fn() {{\n        for sha3 in []calc{{calc{{k: 0}}}} {{\n            fmt.println(sha3.sub(b=7, a=10))\n        }}\n    }}\n    f()\n}}\n");
+    let r = check(&src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert_eq!(e1002_count(&r), 1);
+}
+
+#[test]
+fn closure_match_binding_shadowing_rust_import_rejects() {
+    let src = format!("import \"rust/sha3\"\n\n{CALC}fn pick() option[calc] {{\n    return some(calc{{k: 0}})\n}}\n\nfn main() {{\n    fmt.println(sha3.digest256(\"x\", seed=1))\n    f := fn() {{\n        match pick() {{\n            some(sha3): fmt.println(sha3.sub(b=7, a=10))\n            none: fmt.println(\"none\")\n        }}\n    }}\n    f()\n}}\n");
+    let r = check(&src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert_eq!(e1002_count(&r), 1);
+}
+
+#[test]
+fn closure_select_recv_shadowing_rust_import_rejects() {
+    let src = format!("import \"rust/sha3\"\n\n{CALC}fn main() {{\n    fmt.println(sha3.digest256(\"x\", seed=1))\n    ch := make(chan calc, 1)\n    ch <- calc{{k: 0}}\n    f := fn() {{\n        select {{\n            sha3 := <-ch:\n                fmt.println(sha3.sub(b=7, a=10))\n        }}\n    }}\n    f()\n}}\n");
+    let r = check(&src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert_eq!(e1002_count(&r), 1);
+}
+
+#[test]
+fn closure_unshadowed_rust_import_still_accepted() {
+    let src = "import \"rust/sha3\"\n\nfn main() {\n    f := fn() {\n        for i in 0..2 {\n            fmt.println(sha3.stream_checksum(1000, seed=i))\n        }\n    }\n    f()\n}\n";
+    let r = check(src);
+    assert_eq!(e1002_count(&r), 0);
+}
