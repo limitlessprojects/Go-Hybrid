@@ -3032,7 +3032,6 @@ fn main() {}
     assert!(go6.contains("func read_url() int {"));
     assert!(go6.contains("func read_u_r_l() int {"));
 }
-}
 
 #[test]
 fn try_bare_error_call_lowering_issue_726() {
