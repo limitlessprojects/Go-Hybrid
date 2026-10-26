@@ -1202,29 +1202,79 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
     }
 }
 
-/// Check A3 (`HYB-E3102`) for map-slot loans opened inside a closure body.
+/// Check A2 (`HYB-E3101`), A3/O8 (`HYB-E3102`), and A7 (`HYB-E3105`) for loans
+/// and handle consumes inside a closure body.
 fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block) {
-    use crate::model::{Loan, LoanTarget};
+    use crate::model::{Loan, LoanTarget, TypeShape};
     use crate::walk;
+    use hy_syntax::ForKind;
     let flat = walk::flatten(body);
     let saved_last_use = std::mem::replace(&mut st.last_use, flat.last_use.clone());
     let saved_loop_end = std::mem::replace(&mut st.loop_end, flat.loop_end.clone());
     let saved_loans = std::mem::take(&mut st.loans);
     for (stmt, idx) in &flat.stmts {
         let idx = *idx;
-        let mut calls = Vec::new();
-        walk::own_calls(stmt, &mut calls);
-        for cr in calls {
-            let mut dummy_consumes = Vec::new();
-            ck.process_call(st, &cr, idx, None, &mut dummy_consumes);
+        let mut uses = Vec::new();
+        walk::own_uses(stmt, &mut uses);
+        let mut stmt_consumes = Vec::new();
+        if let Stmt::For {
+            kind: ForKind::Iterate { expr, .. },
+            ..
+        } = stmt
+        {
+            let loop_end = flat.loop_end_of(idx);
+            let mut calls = Vec::new();
+            walk::expr_calls(expr, &mut calls);
+            for cr in calls {
+                ck.process_call(st, &cr, idx, Some(loop_end), &mut stmt_consumes);
+            }
+        } else {
+            let mut calls = Vec::new();
+            walk::own_calls(stmt, &mut calls);
+            for cr in calls {
+                ck.process_call(st, &cr, idx, None, &mut stmt_consumes);
+            }
+        }
+        if !stmt_consumes.is_empty() {
+            ck.check_same_stmt_consumes(st, &uses, &stmt_consumes);
         }
         match stmt {
             Stmt::Local(l) => {
-                if l.names.len() == l.values.len() {
+                let immutable = matches!(l.kind, hy_syntax::LocalKind::Const);
+                let is_let = matches!(l.kind, hy_syntax::LocalKind::Let);
+                if l.values.is_empty() {
+                    let shape = l
+                        .ty
+                        .as_ref()
+                        .map(|t| ck.shape_of_type(t))
+                        .unwrap_or(TypeShape::Unknown);
+                    for name in &l.names {
+                        if !st.scopes.last().is_some_and(|s| s.contains_key(name)) {
+                            ck.define_binding(st, name, shape.clone(), l.ty.clone(), immutable, false, is_let);
+                        }
+                    }
+                } else if l.names.len() == l.values.len() {
                     for (name, val) in l.names.iter().zip(l.values.iter()) {
+                        let inferred = ck.shape_of_expr(st, val);
+                        let (shape, ty) = match (&l.ty, inferred) {
+                            (Some(t), TypeShape::Unknown) => (ck.shape_of_type(t), Some(t.clone())),
+                            (_, s) => (s, ck.ty_of_expr(st, val).or_else(|| l.ty.clone())),
+                        };
+                        if !st.scopes.last().is_some_and(|s| s.contains_key(name)) {
+                            ck.define_binding(st, name, shape.clone(), ty, immutable, false, is_let);
+                        }
                         if let Some(path) = walk::addr_of_index_base_path(val) {
                             let binding = name.clone();
                             let key = walk::addr_of_index_slot_key(val);
+                            ck.emit_o8_alias_if_live_pub(
+                                st,
+                                &path,
+                                key.as_deref(),
+                                Some(&binding),
+                                val.span(),
+                                idx,
+                                "a second slot loan",
+                            );
                             let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
                             st.loans.push(Loan {
                                 target: LoanTarget::MapSlot {
@@ -1239,6 +1289,20 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                             });
                         } else {
                             ck.extend_map_slot_loan_to_alias(st, name, val, idx);
+                        }
+                        if matches!(shape, TypeShape::BorrowHandle(_)) {
+                            ck.extend_call_loans_to_view(st, val, name, idx);
+                        }
+                    }
+                } else if l.values.len() == 1 && l.names.len() > 1 {
+                    let shapes = ck.multi_value_shapes(st, &l.values[0], l.names.len());
+                    let tys = ck.multi_value_tys(st, &l.values[0], l.names.len());
+                    for ((name, shape), ty) in l.names.iter().zip(shapes).zip(tys) {
+                        if !st.scopes.last().is_some_and(|s| s.contains_key(name)) {
+                            ck.define_binding(st, name, shape.clone(), ty, immutable, false, is_let);
+                        }
+                        if matches!(shape, TypeShape::BorrowHandle(_)) {
+                            ck.extend_call_loans_to_view(st, &l.values[0], name, idx);
                         }
                     }
                 }
@@ -1255,6 +1319,15 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                             if let Some(path) = walk::addr_of_index_base_path(v) {
                                 let binding = name.clone();
                                 let key = walk::addr_of_index_slot_key(v);
+                                ck.emit_o8_alias_if_live_pub(
+                                    st,
+                                    &path,
+                                    key.as_deref(),
+                                    Some(&binding),
+                                    v.span(),
+                                    idx,
+                                    "a second slot loan",
+                                );
                                 let last =
                                     st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
                                 st.loans.push(Loan {
@@ -1271,6 +1344,21 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                             } else {
                                 ck.extend_map_slot_loan_to_alias(st, name, v, idx);
                             }
+                            if matches!(ck.shape_of_expr(st, v), TypeShape::BorrowHandle(_)) {
+                                ck.extend_call_loans_to_view(st, v, name, idx);
+                            }
+                        }
+                    }
+                } else if *op == hy_syntax::AssignOp::Assign
+                    && values.len() == 1
+                    && targets.len() > 1
+                {
+                    let shapes = ck.multi_value_shapes(st, &values[0], targets.len());
+                    for (t, shape) in targets.iter().zip(shapes) {
+                        if let hy_syntax::PlaceKind::Ident(name) = &t.kind {
+                            if matches!(shape, TypeShape::BorrowHandle(_)) {
+                                ck.extend_call_loans_to_view(st, &values[0], name, idx);
+                            }
                         }
                     }
                 }
@@ -1280,6 +1368,17 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                             ck.emit_a3_if_live_pub(st, &path, t.span, idx, "insert");
                         }
                     }
+                    if let Some((path, key)) = walk::place_field_store_slot(t) {
+                        ck.emit_o8_alias_if_live_pub(
+                            st,
+                            &path,
+                            key.as_deref(),
+                            None,
+                            t.span,
+                            idx,
+                            "a field store",
+                        );
+                    }
                 }
             }
             _ => {}
@@ -1288,6 +1387,9 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
     st.loans = saved_loans;
     st.loop_end = saved_loop_end;
     st.last_use = saved_last_use;
+    if let Some(top) = st.scopes.last_mut() {
+        top.clear();
+    }
 }
 
 /// The outermost FnLits reachable from `block`. Closures nested inside other

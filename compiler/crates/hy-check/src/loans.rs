@@ -440,7 +440,8 @@ impl<'a> Checker<'a> {
     }
 
     /// Extend any live `LoanTarget::MapSlot` window when a slot-loan binding
-    /// (or an existing alias of one) is copied into `alias_name` (`p := s` or `p = s`).
+    /// (or an existing alias of one) is copied or moved into `alias_name`
+    /// (`p := s`, `p = s`, `p := move s`, `p = move s`, or wrapped forms).
     pub(crate) fn extend_map_slot_loan_to_alias(
         &self,
         st: &mut FnState,
@@ -448,15 +449,28 @@ impl<'a> Checker<'a> {
         val: &Expr,
         idx: usize,
     ) {
-        let Expr::Ident { name: src, .. } = unwrap_parens(val) else {
+        let mut src_roots = Vec::new();
+        match unwrap_parens(val) {
+            Expr::Ident { name, .. } => src_roots.push(name.clone()),
+            _ => {
+                collect_ref_roots(val, &mut src_roots);
+                collect_move_ident_sources(val, &mut src_roots);
+            }
+        }
+        if src_roots.is_empty() {
             return;
-        };
+        }
         let alias_last = st.last_use.get(alias_name).copied().unwrap_or(idx).max(idx);
-        let resolved_src = crate::freeze::resolve_alias(st, src);
-        for loan in &mut st.loans {
-            if let LoanTarget::MapSlot { binding, .. } = &loan.target {
-                if (binding == src || *binding == resolved_src) && loan.created <= idx {
-                    loan.last = loan.last.max(alias_last);
+        for src in src_roots {
+            if src == alias_name {
+                continue;
+            }
+            let resolved_src = crate::freeze::resolve_alias(st, &src);
+            for loan in &mut st.loans {
+                if let LoanTarget::MapSlot { binding, .. } = &loan.target {
+                    if (binding == &src || *binding == resolved_src) && loan.created <= idx {
+                        loan.last = loan.last.max(alias_last);
+                    }
                 }
             }
         }
@@ -516,6 +530,20 @@ impl<'a> Checker<'a> {
     /// overwritten by, or overwrites, the loan's store-back. `owner` is the
     /// binding being (re)loaned, whose own earlier loan does not conflict.
     #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_o8_alias_if_live_pub(
+        &mut self,
+        st: &FnState,
+        path: &str,
+        key: Option<&str>,
+        owner: Option<&str>,
+        span: Span,
+        idx: usize,
+        what: &str,
+    ) {
+        self.emit_o8_alias_if_live(st, path, key, owner, span, idx, what);
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn emit_o8_alias_if_live(
         &mut self,
         st: &FnState,
@@ -527,12 +555,13 @@ impl<'a> Checker<'a> {
         what: &str,
     ) {
         let Some(loan) = st.loans.iter().find(|l| {
+            let eff_last = self.effective_loan_last(st, l);
             matches!(&l.target, LoanTarget::MapSlot { binding, path: p, key: k }
                 if owner != Some(binding.as_str())
                     && a3_paths_conflict(st, p, path)
                     && !matches!((k.as_deref(), key), (Some(a), Some(b)) if a != b))
                 && l.created <= idx
-                && idx <= l.last
+                && idx <= eff_last
         }) else {
             return;
         };
@@ -1707,11 +1736,15 @@ impl<'a> Checker<'a> {
                 if move_operand_ident(value).is_some()
                     || matches!(unwrap_parens(value), Expr::Move { .. })
                 {
+                    let is_view = matches!(shape, TypeShape::BorrowHandle(_));
                     self.define_binding(st, name, shape, ty, immutable, managed, is_let);
                     if let Some(origin) = moved_non_owned {
                         if let Some(b) = st.env_lookup_mut(name) {
                             b.non_owned_origin = Some(origin);
                         }
+                    }
+                    if is_view {
+                        self.extend_call_loans_to_view(st, value, name, idx);
                     }
                     self.record_move_const_and_a3_loans(st, name, value, idx);
                     continue;
@@ -3837,7 +3870,7 @@ impl<'a> Checker<'a> {
     /// Extend call-scoped borrow loans opened by the calls inside `value`
     /// to the last use of the view binding `name` (the A2 non-lexical
     /// window for define-stored element views).
-    fn extend_call_loans_to_view(&self, st: &mut FnState, value: &Expr, name: &str, idx: usize) {
+    pub(crate) fn extend_call_loans_to_view(&self, st: &mut FnState, value: &Expr, name: &str, idx: usize) {
         let view_last = st.last_use.get(name).copied().unwrap_or(idx).max(idx);
         let mut calls = Vec::new();
         walk::expr_calls(value, &mut calls);
@@ -3881,6 +3914,7 @@ impl<'a> Checker<'a> {
         }
         let mut ref_roots = Vec::new();
         collect_ref_roots(value, &mut ref_roots);
+        collect_move_ident_sources(value, &mut ref_roots);
         for src in ref_roots {
             if src == name {
                 continue;
@@ -5757,6 +5791,19 @@ impl<'a> Checker<'a> {
                 })
                 .collect();
             self.link_multi_value_return_aliases(st, &values[0], &bound);
+            for (i, t) in targets.iter().enumerate() {
+                if is_const_write.get(i).copied().unwrap_or(false) {
+                    continue;
+                }
+                if let PlaceKind::Ident(name) = &t.kind {
+                    if matches!(
+                        self.lookup_binding(st, name).map(|b| &b.shape),
+                        Some(TypeShape::BorrowHandle(_))
+                    ) {
+                        self.extend_call_loans_to_view(st, &values[0], name, idx);
+                    }
+                }
+            }
         }
     }
 
