@@ -8,6 +8,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -288,6 +289,26 @@ class RunnerOutputTests(unittest.TestCase):
         self.assertEqual(summary['steps'][0]['exit'], 124)
         self.assertIn('compiler-context', summary['steps'][0]['out_tail'])
         self.assertIn('<<TIMEOUT', summary['steps'][0]['out_tail'])
+
+    def test_timeout_terminates_spawned_descendants(self):
+        with tempfile.TemporaryDirectory() as td:
+            ready, done = pathlib.Path(td) / 'ready', pathlib.Path(td) / 'done'
+            child = (
+                "from pathlib import Path; import time; "
+                f"Path({str(ready)!r}).write_text('ready'); time.sleep(2); "
+                f"Path({str(done)!r}).write_text('finished')"
+            )
+            parent = (
+                "import subprocess, sys, time; "
+                f"subprocess.Popen([sys.executable, '-c', {child!r}], "
+                "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+                "time.sleep(4)"
+            )
+            code, _, output = runner.run_cmd([sys.executable, '-c', parent], 1)
+            self.assertEqual(code, 124)
+            self.assertIn('<<TIMEOUT', output)
+            time.sleep(2.5)
+            self.assertFalse(done.exists(), 'Spawned descendant should have been terminated on timeout')
 
 
 class WorktreeShaTests(unittest.TestCase):
