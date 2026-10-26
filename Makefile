@@ -23,7 +23,7 @@ help:
 	@echo "make test-quick       — sandbox unit tests (grows with the compiler)"
 	@echo "make ci               — what CI runs on push"
 	@echo "make examples         — the ten target programs, byte-exact acceptance"
-	@echo "make corpus           — Tier-0 corpus verdicts (126/122)"
+	@echo "make corpus           — Tier-0 corpus verdicts (127/122)"
 	@echo "make census           — every stated corpus count matches the corpus"
 	@echo "make differential     — the differential corpus loop (accept + reject)"
 	@echo "make bench            — G2 call-overhead bench on the live bridge (hyb bench-overhead)"
