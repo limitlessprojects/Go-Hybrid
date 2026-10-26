@@ -1607,13 +1607,29 @@ fn inspect_later_defer_fate(
     defer_idx: usize,
     name: &str,
 ) -> LaterDeferFate {
+    let mut local_shapes: std::collections::HashMap<String, TypeShape> = st
+        .env
+        .iter()
+        .chain(st.scopes.iter().flat_map(|s| s.iter()))
+        .map(|(k, b)| (k.clone(), b.shape.clone()))
+        .collect();
     let mut pre_peers: std::collections::HashMap<String, std::collections::HashSet<String>> =
         std::collections::HashMap::new();
     for (stmt, idx) in &flat.stmts {
         if *idx >= defer_idx {
             break;
         }
-        update_pre_defer_peers(ck, st, stmt, &mut pre_peers);
+        if let Some(evs) = flat.events.get(idx) {
+            for ev in evs {
+                update_pre_defer_event(ck, st, ev, &mut pre_peers, &mut local_shapes);
+            }
+        }
+        update_pre_defer_peers(ck, st, stmt, &mut pre_peers, &mut local_shapes);
+    }
+    if let Some(evs) = flat.events.get(&defer_idx) {
+        for ev in evs {
+            update_pre_defer_event(ck, st, ev, &mut pre_peers, &mut local_shapes);
+        }
     }
 
     let root = crate::freeze::resolve_alias(st, name);
@@ -1641,10 +1657,31 @@ fn inspect_later_defer_fate(
         if *idx <= defer_idx || flat.in_managed(*idx) {
             continue;
         }
-        if let Some(mv) = stmt_moves_watched_binding(stmt, &watch) {
+        if let Some(evs) = flat.events.get(idx) {
+            for ev in evs {
+                update_post_defer_event(
+                    ck,
+                    st,
+                    ev,
+                    name,
+                    &mut watch,
+                    &mut rebound_self,
+                    &mut local_shapes,
+                );
+            }
+        }
+        if let Some(mv) = stmt_moves_watched_binding(ck, st, stmt, &watch, &local_shapes) {
             return LaterDeferFate::Moved(mv);
         }
-        update_post_defer_watch(ck, st, stmt, name, &mut watch, &mut rebound_self);
+        update_post_defer_watch(
+            ck,
+            st,
+            stmt,
+            name,
+            &mut watch,
+            &mut rebound_self,
+            &mut local_shapes,
+        );
     }
     if rebound_self {
         LaterDeferFate::ReboundBeforeMove
@@ -1701,14 +1738,140 @@ fn expr_referenced_bindings(e: &Expr, out: &mut Vec<String>) {
     }
 }
 
+fn shape_with_locals(
+    ck: &Checker<'_>,
+    st: &FnState,
+    local_shapes: &std::collections::HashMap<String, TypeShape>,
+    expr: &Expr,
+) -> TypeShape {
+    let mut tmp = st.clone();
+    for (k, sh) in local_shapes {
+        tmp.env
+            .entry(k.clone())
+            .and_modify(|b| b.shape = sh.clone())
+            .or_insert_with(|| Binding {
+                shape: sh.clone(),
+                ty: None,
+                immutable: false,
+                is_let: false,
+                managed_taint: false,
+                moved: None,
+                non_owned_origin: None,
+                slot_loan: false,
+            });
+    }
+    ck.shape_of_expr(&tmp, expr)
+}
+
+fn reads_storage_with_locals(
+    ck: &Checker<'_>,
+    st: &FnState,
+    local_shapes: &std::collections::HashMap<String, TypeShape>,
+    val: &Expr,
+    target: &str,
+) -> bool {
+    let mut tmp = st.clone();
+    for (k, sh) in local_shapes {
+        tmp.env
+            .entry(k.clone())
+            .and_modify(|b| b.shape = sh.clone())
+            .or_insert_with(|| Binding {
+                shape: sh.clone(),
+                ty: None,
+                immutable: false,
+                is_let: false,
+                managed_taint: false,
+                moved: None,
+                non_owned_origin: None,
+                slot_loan: false,
+            });
+    }
+    ck.value_reads_storage_of(&tmp, val, target)
+}
+
+fn binding_may_share_or_handle(
+    ck: &Checker<'_>,
+    st: &FnState,
+    local_shapes: &std::collections::HashMap<String, TypeShape>,
+    name: &str,
+) -> bool {
+    local_shapes
+        .get(name)
+        .map(|sh| ck.shape_may_share(sh) || sh.is_handle() || matches!(sh, TypeShape::Unknown))
+        .or_else(|| {
+            ck.lookup_binding(st, name).map(|b| {
+                ck.shape_may_share(&b.shape)
+                    || b.shape.is_handle()
+                    || matches!(b.shape, TypeShape::Unknown)
+            })
+        })
+        .unwrap_or(true)
+}
+
+fn update_pre_defer_event(
+    ck: &Checker<'_>,
+    st: &FnState,
+    ev: &crate::walk::ScopeEvent,
+    peers: &mut std::collections::HashMap<String, std::collections::HashSet<String>>,
+    local_shapes: &mut std::collections::HashMap<String, TypeShape>,
+) {
+    match ev {
+        crate::walk::ScopeEvent::MatchBind { name, subject } => {
+            if *name == "_" {
+                return;
+            }
+            let sh = shape_with_locals(ck, st, local_shapes, subject);
+            let self_read = reads_storage_with_locals(ck, st, local_shapes, subject, name);
+            if !self_read {
+                sever_peer_node(peers, name);
+            }
+            let mut refs = Vec::new();
+            expr_referenced_bindings(subject, &mut refs);
+            for r in refs {
+                if binding_may_share_or_handle(ck, st, local_shapes, &r) {
+                    link_peer_nodes(peers, name, &r);
+                }
+            }
+            local_shapes.insert(name.to_string(), sh);
+        }
+        crate::walk::ScopeEvent::SelectRecv { names, chan } => {
+            let elem = match shape_with_locals(ck, st, local_shapes, chan) {
+                TypeShape::Chan(e) => *e,
+                _ => TypeShape::Unknown,
+            };
+            for (i, n) in names.iter().enumerate() {
+                if n == "_" {
+                    continue;
+                }
+                sever_peer_node(peers, n);
+                local_shapes.insert(
+                    n.clone(),
+                    if i == 0 {
+                        elem.clone()
+                    } else {
+                        TypeShape::Primitive
+                    },
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
 fn update_pre_defer_peers(
     ck: &Checker<'_>,
     st: &FnState,
     stmt: &Stmt,
     peers: &mut std::collections::HashMap<String, std::collections::HashSet<String>>,
+    local_shapes: &mut std::collections::HashMap<String, TypeShape>,
 ) {
     match stmt {
         Stmt::Local(l) => {
+            let multi_shapes = if l.values.len() == 1 && l.names.len() > 1 {
+                Some(ck.multi_value_shapes(st, &l.values[0], l.names.len()))
+            } else {
+                None
+            };
             for (i, target) in l.names.iter().enumerate() {
                 if target == "_" {
                     continue;
@@ -1718,19 +1881,26 @@ fn update_pre_defer_peers(
                 if let Some(v) = val {
                     expr_referenced_bindings(v, &mut refs);
                 }
-                let self_read = val.is_some_and(|v| ck.value_reads_storage_of(st, v, target));
+                let self_read =
+                    val.is_some_and(|v| reads_storage_with_locals(ck, st, local_shapes, v, target));
                 if !self_read {
                     sever_peer_node(peers, target);
                 }
                 for r in refs {
-                    let may_share = ck
-                        .lookup_binding(st, &r)
-                        .map(|b| ck.shape_may_share(&b.shape))
-                        .unwrap_or(true);
-                    if may_share {
+                    if binding_may_share_or_handle(ck, st, local_shapes, &r) {
                         link_peer_nodes(peers, target, &r);
                     }
                 }
+                let inferred = multi_shapes
+                    .as_ref()
+                    .and_then(|v| v.get(i).cloned())
+                    .or_else(|| val.map(|v| shape_with_locals(ck, st, local_shapes, v)))
+                    .unwrap_or(TypeShape::Unknown);
+                let shape = match (&l.ty, inferred) {
+                    (Some(t), TypeShape::Unknown) => ck.shape_of_type(t),
+                    (_, inf) => inf,
+                };
+                local_shapes.insert(target.clone(), shape);
             }
             if l.values.len() == 1 && l.names.len() > 1 {
                 for (i, j) in ck.callee_shared_return_pairs(st, &l.values[0]) {
@@ -1746,6 +1916,11 @@ fn update_pre_defer_peers(
             values,
             ..
         } => {
+            let multi_shapes = if values.len() == 1 && targets.len() > 1 {
+                Some(ck.multi_value_shapes(st, &values[0], targets.len()))
+            } else {
+                None
+            };
             for (i, t) in targets.iter().enumerate() {
                 if let hy_syntax::PlaceKind::Ident(target) = &t.kind {
                     if target == "_" {
@@ -1756,18 +1931,23 @@ fn update_pre_defer_peers(
                     if let Some(v) = val {
                         expr_referenced_bindings(v, &mut refs);
                     }
-                    let self_read = val.is_some_and(|v| ck.value_reads_storage_of(st, v, target));
+                    let self_read = val
+                        .is_some_and(|v| reads_storage_with_locals(ck, st, local_shapes, v, target));
                     if !self_read {
                         sever_peer_node(peers, target);
                     }
                     for r in refs {
-                        let may_share = ck
-                            .lookup_binding(st, &r)
-                            .map(|b| ck.shape_may_share(&b.shape))
-                            .unwrap_or(true);
-                        if may_share {
+                        if binding_may_share_or_handle(ck, st, local_shapes, &r) {
                             link_peer_nodes(peers, target, &r);
                         }
+                    }
+                    let shape = multi_shapes
+                        .as_ref()
+                        .and_then(|v| v.get(i).cloned())
+                        .or_else(|| val.map(|v| shape_with_locals(ck, st, local_shapes, v)))
+                        .unwrap_or(TypeShape::Unknown);
+                    if !matches!(shape, TypeShape::Unknown) {
+                        local_shapes.insert(target.clone(), shape);
                     }
                 }
             }
@@ -1785,6 +1965,89 @@ fn update_pre_defer_peers(
                 }
             }
         }
+        Stmt::For {
+            kind: Iterate { vars, expr },
+            ..
+        } => {
+            let expr_shape = shape_with_locals(ck, st, local_shapes, expr);
+            let is_chan = matches!(expr_shape, TypeShape::Chan(_));
+            let shapes = ck.iterate_var_shapes(st, expr, vars.len());
+            let mut refs = Vec::new();
+            expr_referenced_bindings(expr, &mut refs);
+            for (target, shape) in vars.iter().zip(shapes) {
+                if target == "_" {
+                    continue;
+                }
+                let self_read =
+                    !is_chan && reads_storage_with_locals(ck, st, local_shapes, expr, target);
+                if !self_read {
+                    sever_peer_node(peers, target);
+                }
+                if !is_chan {
+                    for r in &refs {
+                        if binding_may_share_or_handle(ck, st, local_shapes, r) {
+                            link_peer_nodes(peers, target, r);
+                        }
+                    }
+                }
+                local_shapes.insert(target.clone(), shape);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn update_post_defer_event(
+    ck: &Checker<'_>,
+    st: &FnState,
+    ev: &crate::walk::ScopeEvent,
+    deferred_name: &str,
+    watch: &mut std::collections::HashSet<String>,
+    rebound_self: &mut bool,
+    local_shapes: &mut std::collections::HashMap<String, TypeShape>,
+) {
+    match ev {
+        crate::walk::ScopeEvent::MatchBind { name, subject } => {
+            if *name == "_" {
+                return;
+            }
+            let reads_watched = watch
+                .iter()
+                .any(|w| reads_storage_with_locals(ck, st, local_shapes, subject, w));
+            if reads_watched {
+                watch.insert(name.to_string());
+            } else {
+                watch.remove(*name);
+                if *name == deferred_name {
+                    *rebound_self = true;
+                }
+            }
+            let sh = shape_with_locals(ck, st, local_shapes, subject);
+            local_shapes.insert(name.to_string(), sh);
+        }
+        crate::walk::ScopeEvent::SelectRecv { names, chan } => {
+            let elem = match shape_with_locals(ck, st, local_shapes, chan) {
+                TypeShape::Chan(e) => *e,
+                _ => TypeShape::Unknown,
+            };
+            for (i, n) in names.iter().enumerate() {
+                if n == "_" {
+                    continue;
+                }
+                watch.remove(n);
+                if n == deferred_name {
+                    *rebound_self = true;
+                }
+                local_shapes.insert(
+                    n.clone(),
+                    if i == 0 {
+                        elem.clone()
+                    } else {
+                        TypeShape::Primitive
+                    },
+                );
+            }
+        }
         _ => {}
     }
 }
@@ -1796,32 +2059,60 @@ fn update_post_defer_watch(
     deferred_name: &str,
     watch: &mut std::collections::HashSet<String>,
     rebound_self: &mut bool,
+    local_shapes: &mut std::collections::HashMap<String, TypeShape>,
 ) {
-    let mut handle_bind = |target: &str, val: Option<&Expr>| {
-        if target == "_" {
-            return;
-        }
-        let Some(v) = val else {
-            return;
-        };
-        let reads_watched = watch
-            .iter()
-            .any(|w| ck.value_reads_storage_of(st, v, w));
-        if reads_watched {
-            watch.insert(target.to_string());
-        } else {
-            watch.remove(target);
-            if target == deferred_name {
-                *rebound_self = true;
+    let handle_bind =
+        |target: &str,
+         val: Option<&Expr>,
+         local_shapes: &std::collections::HashMap<String, TypeShape>,
+         watch: &mut std::collections::HashSet<String>,
+         rebound_self: &mut bool| {
+            if target == "_" {
+                return;
             }
-        }
-    };
+            let Some(v) = val else {
+                return;
+            };
+            let reads_watched = watch.iter().any(|w| {
+                reads_storage_with_locals(ck, st, local_shapes, v, w)
+                    || matches!(
+                        crate::model::unwrap_parens(v),
+                        Expr::Ident { name: src, .. } if src == w
+                    )
+            });
+            if reads_watched {
+                watch.insert(target.to_string());
+            } else {
+                watch.remove(target);
+                if target == deferred_name {
+                    *rebound_self = true;
+                }
+            }
+        };
 
     match stmt {
         Stmt::Local(l) => {
+            let multi_shapes = if l.values.len() == 1 && l.names.len() > 1 {
+                Some(ck.multi_value_shapes(st, &l.values[0], l.names.len()))
+            } else {
+                None
+            };
+            let snap_shapes = local_shapes.clone();
             for (i, target) in l.names.iter().enumerate() {
                 let val = l.values.get(i).or_else(|| l.values.first());
-                handle_bind(target, val);
+                handle_bind(target, val, &snap_shapes, watch, rebound_self);
+                if target != "_" {
+                    let inferred = multi_shapes
+                        .as_ref()
+                        .and_then(|v| v.get(i).cloned())
+                        .or_else(|| val.map(|v| shape_with_locals(ck, st, &snap_shapes, v)))
+                        .unwrap_or(TypeShape::Unknown);
+                    let shape = match (&l.ty, inferred) {
+                        (Some(t), TypeShape::Unknown) => ck.shape_of_type(t),
+                        (_, inf) => inf,
+                    };
+                    local_shapes.insert(target.clone(), shape);
+                }
             }
         }
         Stmt::Assign {
@@ -1830,10 +2121,50 @@ fn update_post_defer_watch(
             values,
             ..
         } => {
+            let multi_shapes = if values.len() == 1 && targets.len() > 1 {
+                Some(ck.multi_value_shapes(st, &values[0], targets.len()))
+            } else {
+                None
+            };
+            let snap_shapes = local_shapes.clone();
             for (i, t) in targets.iter().enumerate() {
                 if let hy_syntax::PlaceKind::Ident(target) = &t.kind {
                     let val = values.get(i).or_else(|| values.first());
-                    handle_bind(target, val);
+                    handle_bind(target, val, &snap_shapes, watch, rebound_self);
+                    if target != "_" {
+                        let shape = multi_shapes
+                            .as_ref()
+                            .and_then(|v| v.get(i).cloned())
+                            .or_else(|| val.map(|v| shape_with_locals(ck, st, &snap_shapes, v)))
+                            .unwrap_or(TypeShape::Unknown);
+                        if !matches!(shape, TypeShape::Unknown) {
+                            local_shapes.insert(target.clone(), shape);
+                        }
+                    }
+                }
+            }
+        }
+        Stmt::For {
+            kind: Iterate { vars, expr },
+            ..
+        } => {
+            let expr_shape = shape_with_locals(ck, st, local_shapes, expr);
+            let is_chan = matches!(expr_shape, TypeShape::Chan(_));
+            let shapes = ck.iterate_var_shapes(st, expr, vars.len());
+            let snap_shapes = local_shapes.clone();
+            for (target, shape) in vars.iter().zip(shapes) {
+                if is_chan {
+                    if target != "_" {
+                        watch.remove(target);
+                        if target == deferred_name {
+                            *rebound_self = true;
+                        }
+                    }
+                } else {
+                    handle_bind(target, Some(expr), &snap_shapes, watch, rebound_self);
+                }
+                if target != "_" {
+                    local_shapes.insert(target.clone(), shape);
                 }
             }
         }
@@ -1842,8 +2173,11 @@ fn update_post_defer_watch(
 }
 
 fn stmt_moves_watched_binding(
+    ck: &Checker<'_>,
+    st: &FnState,
     stmt: &Stmt,
     watch: &std::collections::HashSet<String>,
+    local_shapes: &std::collections::HashMap<String, TypeShape>,
 ) -> Option<crate::model::MoveInfo> {
     let check_expr = |e: &Expr, desc: String| -> Option<crate::model::MoveInfo> {
         let mut ops = Vec::new();
@@ -1868,8 +2202,90 @@ fn stmt_moves_watched_binding(
         None
     };
 
+    let mut calls = Vec::new();
+    if let Stmt::For {
+        kind: Iterate { expr, .. },
+        ..
+    } = stmt
+    {
+        crate::walk::expr_calls(expr, &mut calls);
+    } else {
+        crate::walk::own_calls(stmt, &mut calls);
+    }
+    for cr in calls {
+        if let Expr::Field {
+            base,
+            name: method,
+            ..
+        } = crate::model::unwrap_parens(cr.callee)
+        {
+            if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens(base) {
+                if !watch.contains(pkg.as_str())
+                    && !local_shapes.contains_key(pkg.as_str())
+                    && ck.lookup_binding(st, pkg).is_none()
+                    && ck.known_package(pkg)
+                {
+                    if crate::foreign::package_mode(pkg, method)
+                        == crate::foreign::CallMode::Consume
+                    {
+                        for a in cr.args {
+                            if let Some(root) = a.value.root_ident() {
+                                if watch.contains(root) {
+                                    return Some(crate::model::MoveInfo {
+                                        span: cr.span,
+                                        kind: crate::model::MoveKind::Consumed,
+                                        desc: format!(
+                                            "the consuming call `{}`",
+                                            cr.callee.render()
+                                        ),
+                                        moved_name: root.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+            if let Some(root) = base.root_ident() {
+                if watch.contains(root) {
+                    let recv_shape = local_shapes
+                        .get(root)
+                        .cloned()
+                        .or_else(|| ck.lookup_binding(st, root).map(|b| b.shape.clone()))
+                        .unwrap_or_else(|| shape_with_locals(ck, st, local_shapes, base));
+                    let is_consume = match crate::shape::receiver_type_name(&recv_shape) {
+                        Some(tname) => {
+                            crate::foreign::method_mode(&tname, method)
+                                == crate::foreign::CallMode::Consume
+                        }
+                        None => {
+                            crate::foreign::method_mode("flate2.writer", method)
+                                == crate::foreign::CallMode::Consume
+                                && !ck.method_decls.iter().any(|((_, m), _)| m == method)
+                        }
+                    };
+                    if is_consume {
+                        return Some(crate::model::MoveInfo {
+                            span: cr.span,
+                            kind: crate::model::MoveKind::Consumed,
+                            desc: format!("the consuming call `{}`", cr.callee.render()),
+                            moved_name: root.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     match stmt {
-        Stmt::Task { args, .. } => {
+        Stmt::Task { callee, args, .. } => {
+            if let Some(mv) = check_expr(
+                callee,
+                format!("the spawn callee `{}`", callee.render()),
+            ) {
+                return Some(mv);
+            }
             for a in args {
                 let desc = format!("the spawn argument `{}`", a.value.render());
                 if let Some(mv) = check_expr(&a.value, desc) {
@@ -1893,7 +2309,12 @@ fn stmt_moves_watched_binding(
                 }
             );
             if *is_move {
-                if let Expr::Ident { name, .. } = crate::model::unwrap_parens(value) {
+                let moved_name = match crate::model::unwrap_parens(value) {
+                    Expr::Ident { name, .. } => Some(name.as_str()),
+                    Expr::Field { .. } => crate::model::unwrap_parens(value).root_ident(),
+                    _ => None,
+                };
+                if let Some(name) = moved_name {
                     if watch.contains(name) {
                         return Some(crate::model::MoveInfo {
                             span: *span,
@@ -1903,6 +2324,9 @@ fn stmt_moves_watched_binding(
                         });
                     }
                 }
+            }
+            if let Some(mv) = check_expr(chan, format!("the send target `{}`", chan.render())) {
+                return Some(mv);
             }
             if let Some(mv) = check_expr(value, desc) {
                 return Some(mv);
@@ -1916,7 +2340,28 @@ fn stmt_moves_watched_binding(
                 }
             }
         }
-        Stmt::Assign { values, .. } => {
+        Stmt::Assign {
+            targets, values, ..
+        } => {
+            for t in targets {
+                let mut walker = t;
+                loop {
+                    match &walker.kind {
+                        hy_syntax::PlaceKind::Index { base, index } => {
+                            let desc = format!("the assignment target `{}`", t.render());
+                            if let Some(mv) = check_expr(index, desc) {
+                                return Some(mv);
+                            }
+                            walker = base;
+                        }
+                        hy_syntax::PlaceKind::Field { base, .. }
+                        | hy_syntax::PlaceKind::AddrOf { base } => {
+                            walker = base;
+                        }
+                        hy_syntax::PlaceKind::Ident(_) => break,
+                    }
+                }
+            }
             for v in values {
                 let desc = format!("the move-assignment `{}`", v.render());
                 if let Some(mv) = check_expr(v, desc) {
@@ -1934,16 +2379,113 @@ fn stmt_moves_watched_binding(
         }
         Stmt::Select { arms, .. } => {
             for arm in arms {
-                if let SelectArmKind::Send { chan, value, .. } = &arm.kind {
-                    let desc = format!(
-                        "the select move-send `{} <- {}`",
-                        chan.render(),
-                        value.render()
-                    );
-                    if let Some(mv) = check_expr(value, desc) {
+                match &arm.kind {
+                    SelectArmKind::Send {
+                        chan,
+                        value,
+                        is_move,
+                    } => {
+                        let desc = format!(
+                            "the select move-send `{} <- {}`",
+                            chan.render(),
+                            if *is_move && !matches!(value, Expr::Move { .. }) {
+                                format!("move {}", value.render())
+                            } else {
+                                value.render()
+                            }
+                        );
+                        if *is_move {
+                            let moved_name = match crate::model::unwrap_parens(value) {
+                                Expr::Ident { name, .. } => Some(name.as_str()),
+                                Expr::Field { .. } => {
+                                    crate::model::unwrap_parens(value).root_ident()
+                                }
+                                _ => None,
+                            };
+                            if let Some(name) = moved_name {
+                                if watch.contains(name) {
+                                    return Some(crate::model::MoveInfo {
+                                        span: chan.span().to(value.span()),
+                                        kind: crate::model::MoveKind::Moved,
+                                        desc,
+                                        moved_name: name.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        if let Some(mv) = check_expr(
+                            chan,
+                            format!("the select-send target `{}`", chan.render()),
+                        ) {
+                            return Some(mv);
+                        }
+                        if let Some(mv) = check_expr(value, desc) {
+                            return Some(mv);
+                        }
+                    }
+                    SelectArmKind::Recv { chan, .. } => {
+                        let desc = format!("the select-recv `{}`", chan.render());
+                        if let Some(mv) = check_expr(chan, desc) {
+                            return Some(mv);
+                        }
+                    }
+                    SelectArmKind::Default => {}
+                }
+            }
+        }
+        Stmt::Expr { expr, .. } => {
+            let desc = format!("the expression `{}`", expr.render());
+            if let Some(mv) = check_expr(expr, desc) {
+                return Some(mv);
+            }
+        }
+        Stmt::If { cond, .. } => {
+            let desc = format!("the condition `{}`", cond.render());
+            if let Some(mv) = check_expr(cond, desc) {
+                return Some(mv);
+            }
+        }
+        Stmt::For { kind, .. } => match kind {
+            Iterate { expr, .. } => {
+                let desc = format!("the loop header `{}`", expr.render());
+                if let Some(mv) = check_expr(expr, desc) {
+                    return Some(mv);
+                }
+            }
+            Range { lo, hi, .. } => {
+                if let Some(mv) = check_expr(lo, format!("the range bound `{}`", lo.render())) {
+                    return Some(mv);
+                }
+                if let Some(mv) = check_expr(hi, format!("the range bound `{}`", hi.render())) {
+                    return Some(mv);
+                }
+            }
+            While { cond } => {
+                if let Some(mv) = check_expr(cond, format!("the loop condition `{}`", cond.render()))
+                {
+                    return Some(mv);
+                }
+            }
+            Infinite => {}
+        },
+        Stmt::Match { subject, arms, .. } => {
+            let desc = format!("the match subject `{}`", subject.render());
+            if let Some(mv) = check_expr(subject, desc) {
+                return Some(mv);
+            }
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    let gdesc = format!("the match guard `{}`", g.render());
+                    if let Some(mv) = check_expr(g, gdesc) {
                         return Some(mv);
                     }
                 }
+            }
+        }
+        Stmt::Defer { call, .. } => {
+            let desc = format!("the deferred call `defer {}`", call.render());
+            if let Some(mv) = check_expr(call, desc) {
+                return Some(mv);
             }
         }
         _ => {}
