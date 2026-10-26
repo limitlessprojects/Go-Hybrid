@@ -352,7 +352,7 @@ impl Emitter {
 
         // `x := f()?` — the try desugar. Values.len() == 1, a Try node.
         if l.values.len() == 1 {
-            if let Expr::Try { operand, .. } = &l.values[0] {
+            if let Expr::Try { operand, .. } = Self::peel_parens(&l.values[0]) {
                 return self.emit_try_define(l, operand);
             }
         }
@@ -581,7 +581,7 @@ impl Emitter {
     fn hoist_tries_call(&mut self, callee: &Expr, args: &[CallArg]) -> Result<(), EmitError> {
         let any_arg_has_try = args.iter().any(|a| Self::expr_has_hoistable_try(&a.value));
         if any_arg_has_try {
-            match callee {
+            match Self::peel_parens(callee) {
                 Expr::Field { base, .. } => self.hoist_order_before_try(base)?,
                 Expr::Call { .. } => self.hoist_order_before_try(callee)?,
                 _ => self.hoist_tries_expr(callee)?,
@@ -890,16 +890,20 @@ impl Emitter {
             callee,
             args,
             span: _,
-        } = call
+        } = Self::peel_parens(call)
         {
             if let Expr::Field {
                 base,
                 name,
                 span: _,
-            } = callee.as_ref()
+            } = Self::peel_parens(callee.as_ref())
             {
-                if let Expr::Ident { name: pkg, .. } = base.as_ref() {
-                    if *pkg == "httptest" && (*name == "get" || *name == "post") {
+                if let Expr::Ident { name: pkg, .. } = Self::peel_parens(base.as_ref()) {
+                    if *pkg == "httptest"
+                        && self.is_unshadowed_pkg_root(pkg)
+                        && (*name == "get" || *name == "post")
+                    {
+                        self.hoist_tries_call(callee, args)?;
                         return self.emit_httptest_get(l, args, name);
                     }
                 }
@@ -914,7 +918,7 @@ impl Emitter {
         if let Some(w) = self.handler_writer.clone() {
             self.hoist_tries_expr(call)?;
             let temp = self.next_temp("hyErr");
-            let call_text = self.emit_expr(call, 0)?;
+            let call_text = self.emit_expr(Self::peel_parens(call), 0)?;
             let mut names = l.names.clone();
             names.push(temp.clone());
             self.push(&format!("{} := {}", names.join(", "), call_text));
@@ -939,7 +943,7 @@ impl Emitter {
         }
         self.hoist_tries_expr(call)?;
         let temp = self.next_temp("hyErr");
-        let call_text = self.emit_expr(call, 0)?;
+        let call_text = self.emit_expr(Self::peel_parens(call), 0)?;
         let mut names = l.names.clone();
         names.push(temp.clone());
         self.push(&format!("{} := {}", names.join(", "), call_text));

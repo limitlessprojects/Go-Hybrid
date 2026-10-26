@@ -809,11 +809,13 @@ impl<'a> Collector<'a> {
         for v in &l.values {
             self.expr(v);
         }
-        // #682 U8: `a := v()` where `v` produces no value. Only the
-        // single-name/single-value shape is checked; `a, b := f()` is a legal
-        // multi-value binding and is handled by `infer_local_kinds`.
-        if l.names.len() == 1 && l.values.len() == 1 {
-            self.check_single_value_position(&l.values[0], "a binding", /*binding_position=*/ true);
+        // #682 U8: `a := v()` where `v` produces no value. Single-value
+        // bindings and parallel bindings must not use void calls. Multi-value
+        // unpacks (`a, b := f()`) are checked by `infer_local_kinds`.
+        if l.values.len() > 1 || l.names.len() == 1 {
+            for v in &l.values {
+                self.check_single_value_position(v, "a binding", /*binding_position=*/ true);
+            }
         }
         // Binding-count guards: a declaration whose value count cannot
         // match its names fails go build with `assignment mismatch`.
@@ -988,12 +990,13 @@ impl<'a> Collector<'a> {
                 for v in values {
                     self.expr(v);
                 }
-                // #682 U8: `a = v()` where `v` produces no value. The
-                // multi-name form (`a, b = f()`) is a legal multi-value
-                // assignment, so only the single-target/single-value shape is
-                // checked here.
-                if targets.len() == 1 && values.len() == 1 {
-                    self.check_single_value_position(&values[0], "an assignment", /*binding_position=*/ true);
+                // #682 U8: `a = v()` where `v` produces no value. Single-value
+                // assignments and parallel assignments must not use void calls.
+                // Multi-value unpacks (`a, b = f()`) are checked by tuple rules.
+                if values.len() > 1 || targets.len() == 1 {
+                    for v in values {
+                        self.check_single_value_position(v, "an assignment", /*binding_position=*/ true);
+                    }
                 }
                 self.check_assign_operands(targets, *op, values, *span);
             }

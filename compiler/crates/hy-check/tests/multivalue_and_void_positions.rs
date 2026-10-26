@@ -194,3 +194,79 @@ fn single_value_calls_stay_accepted() {
         "fn one() int {\n    return 1\n}\n\nfn g(a int) {\n    fmt.println(\"{a}\")\n}\n\nfn main() {\n    g(one())\n}\n",
     );
 }
+
+#[test]
+fn parallel_binding_with_void_call_is_rejected() {
+    assert_code(
+        r#"
+package main
+import "fmt"
+fn void_fn() {}
+fn main() {
+    x, y := 1, void_fn()
+    fmt.println(x, y)
+}
+"#,
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn parallel_assignment_with_void_call_is_rejected() {
+    assert_code(
+        r#"
+package main
+import "fmt"
+fn void_fn() {}
+fn main() {
+    var x int = 0
+    var y int = 0
+    x, y = 1, void_fn()
+    fmt.println(x, y)
+}
+"#,
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn parallel_binding_with_multi_value_call_is_rejected() {
+    assert_code(
+        r#"
+package main
+import "fmt"
+fn two() (int, int) {
+    return 1, 2
+}
+fn main() {
+    x, y := 1, two()
+    fmt.println(x, y)
+}
+"#,
+        "HYB-E2002",
+    );
+}
+
+#[test]
+fn parallel_assignment_with_multi_value_call_is_rejected() {
+    assert_code(
+        r#"
+package main
+import "fmt"
+fn two() (int, int) {
+    return 1, 2
+}
+fn main() {
+    var x int = 0
+    var y int = 0
+    x, y = 1, two()
+    fmt.println(x, y)
+}
+"#,
+        "HYB-E2002",
+    );
+}
+
+
+
+
