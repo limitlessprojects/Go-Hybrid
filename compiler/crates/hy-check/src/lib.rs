@@ -101,6 +101,10 @@ impl Verdict {
 /// into source order before returning: the corpus harness reads the FIRST
 /// error's `tier0_rule` as the join key against VERDICTS.md.
 pub fn check_file(file: &File) -> CheckResult {
+    // WASM modülü çağrısı yapılacak
+    // Örnek: wazero::run_wasm(file);
+    // Geçici çözüm için mevcut işlev çağrısı korunuyor
+
     let mut ck = Checker::new(file);
 
     build_tables(&mut ck);

@@ -85,6 +85,10 @@ pub(crate) fn is_unproven_atomic(name: &str) -> bool {
 /// Classify a dotted foreign type name; `None` = not a known foreign type
 /// (the caller falls back to local struct decls / `Unknown`).
 pub(crate) fn foreign_named_type(name: &str) -> Option<TypeShape> {
+    // WASM modülü aracılığıyla gerçek tip bilgisi alınacak
+    // Örnek: wazero::get_foreign_type(name);
+    // Geçici çözüm için mevcut işlev çağrısı korunuyor
+
     if is_scalar_atomic(name) {
         return Some(TypeShape::Atomic);
     }
