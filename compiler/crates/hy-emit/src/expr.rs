@@ -161,7 +161,7 @@ impl Emitter {
 
             // The move marker is ownership bookkeeping (O5) — the checker
             // verified it; Go receives the plain value.
-            Expr::Move { operand, .. } => self.emit_expr_inner(operand),
+            Expr::Move { operand, .. } => format!("__hy_detach_{}(__hy_take(&{}))", self.type_text(&operand.ty), self.emit_expr_inner(operand)?),
 
             // E3: a hoisted try substitutes its temp (the expression-form
             // desugar); a try the hoister never saw is a clean error.

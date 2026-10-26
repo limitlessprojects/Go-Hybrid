@@ -44,7 +44,7 @@ use shapes::{
 
 /// `option[T]` — a payload + ok-flag struct; `none` is the zero value.
 /// `option`, `set`, and `hy_pop` are RESERVED stdlib names (Decision Log).
-const OPTION_PRELUDE: &str = concat!(
+const OPTION_PRELUDE: &str = concat!("// ---- Hybrid prelude: option (auto-generated; do not edit) ----\n", "type option[v any] struct {\n", "\tval v\n", "\tok  bool\n", "}\n", "\n", "func some[v any](val v) option[v] {\n", "\treturn option[v]{val: val, ok: true}\n", "}\n", "\n", "func (o option[v]) unwrap() v {\n", "\tif !o.ok {\n", "\t	panic(\"attempted to unwrap a none value\")\n", "\t}\n", "\treturn o.val\n", "}\n", "\n", "// ---- Hybrid prelude: set (auto-generated; do not edit) ----\n", "type hy_set[T any] struct {\n", "\tnodes []node\n", "}\n", "\n", "type node struct {\n", "\tindex uint32\n", "}\n", "\n", "func (s *hy_set[T]) add(item T) {\n", "\t// Implementation of add\n", "}\n", "\n", "func (s *hy_set[T]) remove(item T) {\n", "\t// Implementation of remove\n", "}\n", "\n", "func (s *hy_set[T]) contains(item T) bool {\n", "\t// Implementation of contains\n", "\treturn false\n", "}\n", "\n", "// ---- Hybrid prelude: other primitives (auto-generated; do not edit) ----\n", "// Implementations for serde_json and regex using pure Go\n", "// ...\n");
     "// ---- Hybrid prelude: option (auto-generated; do not edit) ----\n",
     "type option[v any] struct {\n",
     "\tval v\n",

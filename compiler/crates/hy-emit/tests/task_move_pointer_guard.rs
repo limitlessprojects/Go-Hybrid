@@ -24,7 +24,7 @@ fn main() {
 "#,
     );
 
-    assert!(go.contains("go worker(p)"), "moved pointer must stay a *T:\n{}", go);
+    assert!(go.contains("go worker(__hy_detach_env(__hy_take(&p)))"), "moved pointer must be taken and detached:\n{}", go);
     assert!(
         !go.contains("go worker(&p)"),
         "task lowering must not turn *T into **T:\n{}",
