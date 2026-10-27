@@ -25,17 +25,20 @@ use hy_syntax::{
     Stmt,
 };
 
-fn is_slot_loan_expr(e: &Expr) -> bool {
-    if walk::addr_of_index_base_path(e).is_some() {
-        return true;
-    }
-    let Some(inner) = as_addr_of(unwrap_parens(e)) else {
-        return false;
-    };
-    matches!(unwrap_parens(inner), Expr::Index { .. })
-}
-
 impl<'a> Checker<'a> {
+    fn is_slot_loan_expr(&self, st: &FnState, e: &Expr) -> bool {
+        let Some(inner) = as_addr_of(unwrap_parens(e)) else {
+            return false;
+        };
+        match unwrap_parens(inner) {
+            Expr::Index { base, .. } => {
+                let shape = self.shape_of_expr(st, base);
+                !matches!(shape, TypeShape::Slice(_) | TypeShape::Array(..))
+            }
+            _ => false,
+        }
+    }
+
     /// After `process_local`: flag every name bound to `&m[k]` (including
     /// parenthesized `(&m[k])` and `&(m[k])`). Only runs for define/let bindings
     /// without explicit type ascriptions where hy-emit actually lowers the loan.
@@ -47,7 +50,7 @@ impl<'a> Checker<'a> {
             return;
         }
         for (name, val) in l.names.iter().zip(l.values.iter()) {
-            if is_slot_loan_expr(val) {
+            if self.is_slot_loan_expr(st, val) {
                 if let Some(b) = st.env_lookup_mut(name) {
                     b.slot_loan = true;
                 }
@@ -75,7 +78,7 @@ impl<'a> Checker<'a> {
         }
         for (t, v) in targets.iter().zip(values.iter()) {
             if let PlaceKind::Ident(name) = &t.kind {
-                let is_loan = is_slot_loan_expr(v);
+                let is_loan = self.is_slot_loan_expr(st, v);
                 if let Some(b) = st.env_lookup_mut(name) {
                     b.slot_loan |= is_loan;
                 }
@@ -165,7 +168,7 @@ impl<'a> Checker<'a> {
         matches!(self.shape_of_expr(st, v), TypeShape::Pointer(_))
     }
 
-    /// T24: `&x` where `x` is a live slot-loan binding.
+    /// T24: `&x` or `move x` where `x` is a live slot-loan binding.
     pub(crate) fn check_addr_of_loan(&mut self, st: &FnState, uses: &[Use]) {
         for u in uses.iter().filter(|u| u.via_addr) {
             let Some(b) = self.lookup_binding(st, &u.name) else {
@@ -175,6 +178,15 @@ impl<'a> Checker<'a> {
                 continue;
             }
             self.emit_addr_of_loan_diag(&u.name, u.span);
+        }
+        for u in uses.iter().filter(|u| u.via_move) {
+            let Some(b) = self.lookup_binding(st, &u.name) else {
+                continue;
+            };
+            if !b.slot_loan {
+                continue;
+            }
+            self.emit_move_of_loan_diag(&u.name, u.span);
         }
     }
 
@@ -218,9 +230,26 @@ impl<'a> Checker<'a> {
             Stmt::Expr { expr, .. } => {
                 self.check_expr_addr_of_loan_projections(st, expr, include_direct_ident);
             }
-            Stmt::Send { chan, value, .. } => {
+            Stmt::Send {
+                chan,
+                value,
+                is_move,
+                span,
+            } => {
                 self.check_expr_addr_of_loan_projections(st, chan, include_direct_ident);
                 self.check_expr_addr_of_loan_projections(st, value, include_direct_ident);
+                if *is_move && include_direct_ident {
+                    let unwrapped = unwrap_parens(value);
+                    if let Expr::Ident { name, span: id_span } = unwrapped {
+                        if self.lookup_binding(st, name).is_some_and(|b| b.slot_loan) {
+                            self.emit_move_of_loan_diag(name, *id_span);
+                        }
+                    } else if let Some(root) = unwrapped.root_ident() {
+                        if self.lookup_binding(st, root).is_some_and(|b| b.slot_loan) {
+                            self.emit_move_of_loan_diag(root, *span);
+                        }
+                    }
+                }
             }
             Stmt::If { cond, .. } => {
                 self.check_expr_addr_of_loan_projections(st, cond, include_direct_ident);
@@ -276,7 +305,11 @@ impl<'a> Checker<'a> {
             Stmt::Select { arms, .. } => {
                 for arm in arms {
                     match &arm.kind {
-                        SelectArmKind::Send { chan, value, .. } => {
+                        SelectArmKind::Send {
+                            chan,
+                            value,
+                            is_move,
+                        } => {
                             self.check_expr_addr_of_loan_projections(
                                 st,
                                 chan,
@@ -287,6 +320,18 @@ impl<'a> Checker<'a> {
                                 value,
                                 include_direct_ident,
                             );
+                            if *is_move && include_direct_ident {
+                                let unwrapped = unwrap_parens(value);
+                                if let Expr::Ident { name, span: id_span } = unwrapped {
+                                    if self.lookup_binding(st, name).is_some_and(|b| b.slot_loan) {
+                                        self.emit_move_of_loan_diag(name, *id_span);
+                                    }
+                                } else if let Some(root) = unwrapped.root_ident() {
+                                    if self.lookup_binding(st, root).is_some_and(|b| b.slot_loan) {
+                                        self.emit_move_of_loan_diag(root, value.span());
+                                    }
+                                }
+                            }
                         }
                         SelectArmKind::Recv { chan, .. } => {
                             self.check_expr_addr_of_loan_projections(
@@ -381,6 +426,23 @@ impl<'a> Checker<'a> {
                 _ => {}
             }
         }
+        if let Expr::Move { operand, span } = expr {
+            match unwrap_parens(operand) {
+                Expr::Ident { name, span: id_span } if include_direct_ident => {
+                    if self.lookup_binding(st, name).is_some_and(|b| b.slot_loan) {
+                        self.emit_move_of_loan_diag(name, *id_span);
+                    }
+                }
+                Expr::Field { .. } => {
+                    if let Some(root) = operand.root_ident() {
+                        if self.lookup_binding(st, root).is_some_and(|b| b.slot_loan) {
+                            self.emit_move_of_loan_diag(root, *span);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         match expr {
             Expr::Binary { lhs, rhs, .. } => {
                 self.check_expr_addr_of_loan_projections(st, lhs, include_direct_ident);
@@ -465,6 +527,35 @@ impl<'a> Checker<'a> {
         d.fixits = vec![FixIt {
             description: format!(
                 "use `{}` directly, or take a fresh loan of the slot (`&m[k]`) where it is needed",
+                name
+            ),
+            replacement: None,
+        }];
+        self.diags.push(d);
+    }
+
+    fn emit_move_of_loan_diag(&mut self, name: &str, span: Span) {
+        if self
+            .diags
+            .iter()
+            .any(|d| d.code == "HYB-E3104" && d.span == span)
+        {
+            return;
+        }
+        let msg = format!(
+            "`move {}` moves an active map-slot loan: a loan is a function-local borrow (O8 / T24) and cannot be moved or escaped",
+            name
+        );
+        let mut d = Diagnostic::error("HYB-E3104", self.path.clone(), span, msg).with_notes(vec![
+            format!(
+                "`{}` is an active O8 map-slot loan that lowers to a copy of the slot plus a store-back; moving it escapes the loan or races with the store-back",
+                name
+            ),
+            "Tier 0 keeps every loan function-local (O2): loans cannot be moved across concurrency boundaries or escaped".to_string(),
+        ]);
+        d.fixits = vec![FixIt {
+            description: format!(
+                "use `{}` directly without moving, or take a fresh loan of the slot (`&m[k]`) where it is needed",
                 name
             ),
             replacement: None,

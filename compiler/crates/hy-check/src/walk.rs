@@ -311,9 +311,41 @@ pub(crate) fn own_uses_with_results(stmt: &Stmt, named_results: &[String], out: 
             }
         }
         Stmt::Expr { expr, .. } => expr_uses(expr, out),
-        Stmt::Send { chan, value, .. } => {
+        Stmt::Send {
+            chan,
+            value,
+            is_move,
+            ..
+        } => {
             expr_uses(chan, out);
-            expr_uses(value, out);
+            if *is_move {
+                let unwrapped = crate::model::unwrap_parens(value);
+                match unwrapped {
+                    Expr::Ident { name, .. } => out.push(Use {
+                        name: name.clone(),
+                        span: value.span(),
+                        is_write: false,
+                        via_move: true,
+                        via_addr: false,
+                    }),
+                    Expr::Field { .. } => {
+                        if let Some(root) = unwrapped.root_ident() {
+                            out.push(Use {
+                                name: root.to_string(),
+                                span: value.span(),
+                                is_write: false,
+                                via_move: true,
+                                via_addr: false,
+                            });
+                        } else {
+                            expr_uses(value, out);
+                        }
+                    }
+                    _ => expr_uses(value, out),
+                }
+            } else {
+                expr_uses(value, out);
+            }
         }
         Stmt::If { cond, .. } => expr_uses(cond, out),
         Stmt::For { kind, .. } => match kind {
@@ -375,9 +407,40 @@ pub(crate) fn own_uses_with_results(stmt: &Stmt, named_results: &[String], out: 
         Stmt::Select { arms, .. } => {
             for arm in arms {
                 match &arm.kind {
-                    SelectArmKind::Send { chan, value, .. } => {
+                    SelectArmKind::Send {
+                        chan,
+                        value,
+                        is_move,
+                    } => {
                         expr_uses(chan, out);
-                        expr_uses(value, out);
+                        if *is_move {
+                            let unwrapped = crate::model::unwrap_parens(value);
+                            match unwrapped {
+                                Expr::Ident { name, .. } => out.push(Use {
+                                    name: name.clone(),
+                                    span: value.span(),
+                                    is_write: false,
+                                    via_move: true,
+                                    via_addr: false,
+                                }),
+                                Expr::Field { .. } => {
+                                    if let Some(root) = unwrapped.root_ident() {
+                                        out.push(Use {
+                                            name: root.to_string(),
+                                            span: value.span(),
+                                            is_write: false,
+                                            via_move: true,
+                                            via_addr: false,
+                                        });
+                                    } else {
+                                        expr_uses(value, out);
+                                    }
+                                }
+                                _ => expr_uses(value, out),
+                            }
+                        } else {
+                            expr_uses(value, out);
+                        }
                     }
                     SelectArmKind::Recv { chan, .. } => expr_uses(chan, out),
                     SelectArmKind::Default => {}
