@@ -2004,7 +2004,10 @@ impl<'a> Checker<'a> {
 
     /// A tuple call can carry a borrow in any result, not just the first.
     fn expr_has_borrow_shape(&self, st: &FnState, e: &Expr) -> bool {
-        let inner = unwrap_parens(e);
+        let mut inner = unwrap_parens(e);
+        while let Expr::Try { operand, .. } = inner {
+            inner = unwrap_parens(operand);
+        }
         if let Expr::Call { callee, .. } = inner {
             if let Some(results) = self.call_result_tys(st, callee) {
                 return results.iter().any(|ty| {
@@ -2015,6 +2018,17 @@ impl<'a> Checker<'a> {
         }
         let shape = self.shape_of_expr(st, inner);
         field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown)
+    }
+
+    /// A multi-return call can return shared GC storage in any result, even
+    /// when result 0 is primitive.
+    fn call_any_result_may_share(&self, st: &FnState, callee: &Expr) -> bool {
+        self.call_result_tys(st, callee).is_some_and(|results| {
+            results.iter().any(|ty| {
+                let shape = self.shape_of_type(ty);
+                self.shape_may_share(&shape) || matches!(shape, TypeShape::Unknown)
+            })
+        })
     }
 
     pub(crate) fn expr_carries_borrow(&self, st: &FnState, e: &Expr) -> bool {
@@ -2232,7 +2246,10 @@ impl<'a> Checker<'a> {
             }
             Expr::Call { callee, args, .. } => {
                 let call_res = self.shape_of_expr(st, inner);
-                if self.shape_may_share(&call_res) || self.expr_has_borrow_shape(st, inner) {
+                if self.shape_may_share(&call_res)
+                    || self.expr_has_borrow_shape(st, inner)
+                    || self.call_any_result_may_share(st, callee)
+                {
                     for (idx, a) in args.iter().enumerate() {
                         if !matches!(unwrap_parens(&a.value), Expr::Move { .. }) {
                             let arg_shape = self.shape_of_expr(st, &a.value);
@@ -3923,60 +3940,6 @@ impl<'a> Checker<'a> {
             return;
         }
         self.record_multi_value_may_share(st, name, shape, value);
-        let mut roots = Vec::new();
-        collect_ref_roots(value, &mut roots);
-        self.collect_callee_const_return_roots(st, value, &mut roots, 0);
-        if shape.is_reference_alias() || matches!(shape, TypeShape::OwnHandle(_)) {
-            for src in &roots {
-                if src == name {
-                    let outer_b = if !st.scopes.is_empty() {
-                        st.scopes
-                            .iter()
-                            .take(st.scopes.len().saturating_sub(1))
-                            .rev()
-                            .find_map(|s| s.get(name))
-                            .or_else(|| st.env.get(name))
-                            .cloned()
-                    } else {
-                        None
-                    };
-                    if let Some(ob) = outer_b {
-                        let ok = if matches!(shape, TypeShape::OwnHandle(_)) {
-                            self.shape_carries_handle(&ob.shape)
-                        } else {
-                            self.shape_may_share(&ob.shape)
-                        };
-                        if ok {
-                            st.aliases.insert(name.to_string(), src.clone());
-                            if let Some(origin) = ob.non_owned_origin {
-                                if let Some(nb) = st.env_lookup_mut(name) {
-                                    nb.non_owned_origin = Some(origin);
-                                }
-                            }
-                            break;
-                        }
-                    }
-                    continue;
-                }
-                let matched = self.lookup_binding(st, src).map(|b| {
-                    let ok = if matches!(shape, TypeShape::OwnHandle(_)) {
-                        self.shape_carries_handle(&b.shape)
-                    } else {
-                        b.shape.is_reference_alias()
-                    };
-                    (ok, b.non_owned_origin.clone())
-                });
-                if let Some((true, origin)) = matched {
-                    st.aliases.insert(name.to_string(), src.clone());
-                    if let Some(origin) = origin {
-                        if let Some(nb) = st.env_lookup_mut(name) {
-                            nb.non_owned_origin = Some(origin);
-                        }
-                    }
-                    break;
-                }
-            }
-        }
     }
 
     pub(crate) fn record_multi_value_may_share(
@@ -8630,5 +8593,171 @@ fn main() {
             "expected HYB-E3103 for parenthesized &(x) stored in struct field"
         );
     }
+
+    #[test]
+    fn multi_return_auto_addr_pointer_receiver_and_param_share_storage() {
+        let src_recv_define = "\
+struct buf {
+    data [2]int
 }
 
+fn (b *buf) slice_pair() (int, []int) {
+    return 0, b.data[:]
+}
+
+fn worker(s []int, done chan bool) {
+    s[0] = 99
+    done <- true
+}
+
+fn main() {
+    b := buf{data: [2]int{1, 2}}
+    _, s := b.slice_pair()
+    done := make(chan bool, 1)
+    task worker(move s, done)
+    b.data[0] = 42
+    <-done
+}
+";
+        assert!(
+            check_codes(src_recv_define).iter().any(|c| c == "HYB-E3003"),
+            "expected HYB-E3003 for write to b after moving slice from multi-return *T receiver call"
+        );
+
+        let src_param_define = "\
+struct buf {
+    data [2]int
+}
+
+fn take_slice_pair(b *buf) (int, []int) {
+    return 0, b.data[:]
+}
+
+fn worker(s []int, done chan bool) {
+    s[0] = 99
+    done <- true
+}
+
+fn main() {
+    b := buf{data: [2]int{1, 2}}
+    _, s := take_slice_pair(b)
+    done := make(chan bool, 1)
+    task worker(move s, done)
+    b.data[0] = 42
+    <-done
+}
+";
+        assert!(
+            check_codes(src_param_define).iter().any(|c| c == "HYB-E3003"),
+            "expected HYB-E3003 for write to b after moving slice from multi-return *T param call"
+        );
+
+        let src_holder_assign = "\
+struct buf {
+    data [2]int
+}
+
+struct holder {
+    s []int
+}
+
+fn (b *buf) holder_pair() (int, holder) {
+    return 0, holder{s: b.data[:]}
+}
+
+fn worker(h holder, done chan bool) {
+    h.s[0] = 99
+    done <- true
+}
+
+fn main() {
+    b := buf{data: [2]int{1, 2}}
+    var code int
+    var h holder
+    code, h = b.holder_pair()
+    _ = code
+    done := make(chan bool, 1)
+    task worker(move h, done)
+    b.data[0] = 42
+    <-done
+}
+";
+        assert!(
+            check_codes(src_holder_assign).iter().any(|c| c == "HYB-E3003"),
+            "expected HYB-E3003 for multi-value assign from *T receiver call returning struct with slice"
+        );
+
+        let src_param_launder = "\
+struct buf {
+    data [2]int
+}
+
+fn (b *buf) slice_pair() (int, []int) {
+    return 0, b.data[:]
+}
+
+fn worker(s []int, done chan bool) {
+    s[0] = 99
+    done <- true
+}
+
+fn launder(b buf, done chan bool) {
+    _, s := b.slice_pair()
+    task worker(move s, done)
+}
+";
+        assert!(
+            check_codes(src_param_launder).iter().any(|c| c == "HYB-E3004"),
+            "expected HYB-E3004 for laundering non-owned parameter b via multi-return *T receiver call"
+        );
+
+        let src_const_write = "\
+struct buf {
+    data [2]int
+}
+
+fn (b *buf) slice_pair() (int, []int) {
+    return 0, b.data[:]
+}
+
+fn main() {
+    const cb = buf{data: [2]int{10, 20}}
+    _, s := cb.slice_pair()
+    s[0] = 77
+}
+";
+        assert!(
+            check_codes(src_const_write).iter().any(|c| c == "HYB-E3006"),
+            "expected HYB-E3006 for mutating const composite via multi-return *T receiver call"
+        );
+
+        let src_try_ptr_pair = "\
+struct cell {
+    v int
+}
+
+fn (c *cell) ptr_pair_try() (int, *cell, error) {
+    return 0, c, nil
+}
+
+fn worker(p *cell, done chan bool) {
+    p.v = 99
+    done <- true
+}
+
+fn run() error {
+    c := cell{v: 1}
+    _, p := c.ptr_pair_try()?
+    done := make(chan bool, 1)
+    task worker(move p, done)
+    c.v = 42
+    <-done
+    return nil
+}
+";
+        assert!(
+            check_codes(src_try_ptr_pair).iter().any(|c| c == "HYB-E3003"),
+            "expected HYB-E3003 for write to c after moving pointer from ?-unwrapped multi-return *T receiver call"
+        );
+    }
+}
