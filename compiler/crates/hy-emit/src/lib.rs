@@ -30,6 +30,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use hy_syntax::*;
 
+mod auto_schedule;
 mod constconv;
 mod rangebind;
 mod shapes;

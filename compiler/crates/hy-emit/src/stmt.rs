@@ -108,13 +108,57 @@ impl Emitter {
             // schedules them in parallel layers where data accesses are provably
             // disjoint. Conflicting tasks are serialized.
             Stmt::Auto { body, .. } => {
-                // MVP: emit as a plain block. Task blocks inside are already
-                // handled by their own arm above (as immediate goroutines).
-                // TODO: collect task blocks, run effect analysis + DAG scheduling,
-                // then emit layered parallel execution with sync.WaitGroup.
+                use super::auto_schedule::schedule_block;
+
+                let result = schedule_block(body);
+                let n_tasks = result.tasks.len();
+
+                // Ensure sync is imported for WaitGroup
+                if n_tasks > 0 {
+                    self.use_package("sync");
+                }
+
                 self.push("{ // auto: automatic fork-join scheduling");
                 self.indent += 1;
-                self.emit_block_body(&body.stmts)?;
+
+                // Emit non-task statements first (declarations, etc.)
+                // then emit scheduled task layers.
+                for stmt in &body.stmts {
+                    if !matches!(stmt, Stmt::TaskBlock { .. }) {
+                        self.emit_stmt(stmt)?;
+                    }
+                }
+
+                if n_tasks > 0 {
+                    // Emit each layer: parallel goroutines + WaitGroup, layers serialized.
+                    for (layer_idx, layer) in result.layers.iter().enumerate() {
+                        if layer.len() == 1 {
+                            // Single task in layer: run directly (no goroutine needed)
+                            let task_idx = layer[0];
+                            let task_body = result.tasks[task_idx];
+                            self.emit_block_body(&task_body.stmts)?;
+                        } else {
+                            // Multiple tasks in layer: run in parallel with WaitGroup
+                            self.push(&format!("{{ // layer {} ({} parallel tasks)", layer_idx, layer.len()));
+                            self.indent += 1;
+                            self.push("var wg sync.WaitGroup");
+                            for &task_idx in layer {
+                                let task_body = result.tasks[task_idx];
+                                self.push("wg.Add(1)");
+                                self.push("go func() {");
+                                self.indent += 1;
+                                self.push("defer wg.Done()");
+                                self.emit_block_body(&task_body.stmts)?;
+                                self.indent -= 1;
+                                self.push("}()");
+                            }
+                            self.push("wg.Wait()");
+                            self.indent -= 1;
+                            self.push("}");
+                        }
+                    }
+                }
+
                 self.indent -= 1;
                 self.push("}");
                 Ok(())
