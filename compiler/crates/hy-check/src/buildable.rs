@@ -1310,6 +1310,10 @@ impl<'a> Collector<'a> {
             } => {
                 self.expr(base);
                 self.expr(index);
+                // The indexed value is one slot: `two_slices()[0]` is Go's
+                // multi-value-in-single-value context, and `kind_of_expr`
+                // would otherwise read only the first result (#1854).
+                self.check_single_value_position(base, "an index base", /*binding_position=*/ false);
                 let bk = self.kind_of_expr(base);
                 let ik = self.kind_of_expr(index);
                 self.check_index_kind(&base.render(), Some(base.as_ref()), &bk, index, &ik, *span);
@@ -1324,6 +1328,8 @@ impl<'a> Collector<'a> {
                 if let Some(x) = hi {
                     self.expr(x);
                 }
+                // Same for the sliced value (#1854).
+                self.check_single_value_position(base, "a slice base", /*binding_position=*/ false);
                 let bk = self.kind_of_expr(base);
                 self.check_slice_kind(base, &bk, lo.as_deref(), hi.as_deref(), *span);
             }
