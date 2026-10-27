@@ -91,3 +91,41 @@ Not transliterated: the body is `os/exec` + `bytes.Buffer` + `time.After` + a se
 | moby/18412 | closure | not transliterable (exec / bytes / time) | **porting gap** |
 
 Of the seven: **1 lifts for free, 2 are correctly rejected on the buggy form, 2 are rejected for being method spawns regardless of bug or fix, 2 cannot be expressed at all without foreign subsystems.** Even before the fixed-form run, the method-spawn cost alone is 2/7 = 28.6%, above the O18 trigger.
+
+## 7. Fixed-form verdicts (the number O18 actually asks for)
+
+I fetched the upstream patches from the links in each kernel's README.
+
+### moby/22941 — fix is "pass the capture as an argument"
+
+The patch is four lines:
+
+```diff
+-		go func() {
+-			srv.Write(pair[0])
+-		}()
++		go func(x []byte) {
++			srv.Write(x)
++		}(pair[0])
+```
+
+This is precisely Hybrid's `move` idiom, written in Go by hand. **Fixed-form verdict: the capture is now a move; the remaining share is `srv` (the `*pipe`), which is mutex-guarded in the original.** Under A1 that share still triggers `E3001` — the mutex is invisible to the checker — so the fixed kernel needs `managed("guarded by wrMu","mutex")`. **Cost: one `managed` site on code that is correct.**
+
+### kubernetes/80284 — fix adds a mutex around the shared struct
+
+The patch adds `a.mu.Lock(); defer a.mu.Unlock()` around the mutation and changes `onRotate func()` to `onRotateList []func()`. The share is a `*Authenticator` across two tasks, now correctly guarded.
+
+**Fixed-form verdict: `E3001` again** — "mutable struct shared as a live borrow". The guard is a runtime property; the spawn-callee proof sees only that two tasks hold the same pointer. So the fixed kernel needs `managed("guarded by a.mu","mutex")`. **Cost: one `managed` site on code that is correct.**
+
+### What this establishes
+
+For the two shared-borrow kernels, the *fixed* form is rejected exactly like the buggy one — the checker cannot see the mutex that makes the fix a fix. That is the O18 cost, and it is not a transliteration artifact: it follows from `managed` being the only channel for "guarded share", which is a design choice, not an oversight.
+
+| Fixed-form outcome | Kernels |
+|---|---|
+| free after mechanical lift (`move`) | moby/27037, moby/22941's capture |
+| rejected, needs `managed("…","mutex")` | moby/22941's `*pipe`, kubernetes/80284 |
+| rejected for method spawn, fix-independent | serving/5865, kubernetes/82550 |
+| not expressible | kubernetes/70892, moby/18412 |
+
+So on the sample where a fixed form exists: **0 of 2 fixed kernels pass without the hatch**, and the two method-spawn kernels would fail regardless of the fix. The strict ruling's cost is not confined to buggy code — it lands on correct code that uses the two idioms Go programs use most: guarded shared state and method spawns.
