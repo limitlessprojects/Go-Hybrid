@@ -3032,3 +3032,23 @@ fn main() {}
     assert!(go6.contains("func read_url() int {"));
     assert!(go6.contains("func read_u_r_l() int {"));
 }
+
+#[test]
+fn main_error_result_wrapper_shape_issue_2048() {
+    let go = emit("fn main() error {\n    return nil\n}\n");
+    assert!(
+        go.contains("hyErr := func() (hyErr error) {"),
+        "single-error main closure signature:\n{}",
+        go
+    );
+    assert!(
+        go.contains("return nil"),
+        "explicit return nil inside single-error main:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("os.Exit(hyR0)") && !go.contains("os.Exit(hyErr)"),
+        "must not pass error result to os.Exit:\n{}",
+        go
+    );
+}

@@ -191,3 +191,104 @@ fn main() {
         "independent nested function scopes",
     );
 }
+
+#[test]
+fn type_parameter_and_value_parameter_collision_rejects_issue_2048() {
+    rejects_with_e1002(
+        r#"fn id[t any](t int) int {
+    return t
+}
+fn main() {
+    fmt.println("{id[string](1)}")
+}
+"#,
+        "type parameter / value parameter collision",
+    );
+}
+
+#[test]
+fn type_parameter_and_named_result_collision_rejects_issue_2048() {
+    rejects_with_e1002(
+        r#"fn make_zero[t any]() (t int) {
+    t = 0
+    return
+}
+fn main() {
+    fmt.println("{make_zero[string]()}")
+}
+"#,
+        "type parameter / named result collision",
+    );
+}
+
+#[test]
+fn receiver_name_and_receiver_type_arg_collision_rejects_issue_2048() {
+    rejects_with_e1002(
+        r#"struct box[t any] {
+    v t
+}
+fn (t box[t]) get() int {
+    return 0
+}
+fn main() {
+    b := box[int]{v: 1}
+    fmt.println("{b.get()}")
+}
+"#,
+        "receiver name / receiver type parameter collision",
+    );
+}
+
+#[test]
+fn duplicate_receiver_type_parameters_reject_issue_2048() {
+    rejects_with_e1002(
+        r#"struct pair[a any, b any] {
+    x a
+    y b
+}
+fn (p *pair[t, t]) reset() {}
+fn main() {
+    p := pair[int, int]{x: 1, y: 2}
+    p.reset()
+}
+"#,
+        "duplicate receiver type parameters",
+    );
+}
+
+#[test]
+fn receiver_type_param_and_value_param_collision_rejects_issue_2048() {
+    rejects_with_e1002(
+        r#"struct box[t any] {
+    v t
+}
+fn (b box[t]) add(t int) int {
+    return t
+}
+fn main() {
+    b := box[int]{v: 1}
+    fmt.println("{b.add(2)}")
+}
+"#,
+        "receiver type parameter / value parameter collision",
+    );
+}
+
+#[test]
+fn receiver_type_param_and_named_result_collision_rejects_issue_2048() {
+    rejects_with_e1002(
+        r#"struct box[t any] {
+    v t
+}
+fn (b box[t]) out() (t int) {
+    t = 1
+    return
+}
+fn main() {
+    b := box[int]{v: 1}
+    fmt.println("{b.out()}")
+}
+"#,
+        "receiver type parameter / named result collision",
+    );
+}

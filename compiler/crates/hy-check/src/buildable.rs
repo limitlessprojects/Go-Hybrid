@@ -46,8 +46,8 @@
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
     AssignOp, BinOp, Block, CallArg, Decl, Expr, FieldInit, File, FnDecl, FnResult, ForKind,
-    InterpPart, LitKind, LocalDecl, LocalKind, MatchPattern, Param, Place, PlaceKind, SelectArmKind,
-    Stmt, TypeExpr, UnOp,
+    InterpPart, LitKind, LocalDecl, LocalKind, MatchPattern, Param, Place, PlaceKind, Receiver,
+    SelectArmKind, Stmt, TypeExpr, TypeParam, UnOp,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -628,20 +628,56 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn receiver_type_param_bindings<'b>(ty: &'b TypeExpr) -> Vec<(&'b str, Span)> {
+        match ty {
+            TypeExpr::Named { name, span } => {
+                let mut out = Vec::new();
+                if let Some((_, rest)) = name.split_once('[') {
+                    if let Some((inside, _)) = rest.rsplit_once(']') {
+                        for part in inside.split(',') {
+                            if let Some(tp) = part.split_whitespace().next() {
+                                if !tp.is_empty() {
+                                    out.push((tp, *span));
+                                }
+                            }
+                        }
+                    }
+                }
+                out
+            }
+            TypeExpr::Pointer { to, .. } => Self::receiver_type_param_bindings(to),
+            _ => Vec::new(),
+        }
+    }
+
+    fn is_valid_main_result_type(&self, ty: &TypeExpr) -> bool {
+        matches!(ty, TypeExpr::Named { name, .. } if name == "int" || name == "error")
+    }
+
     fn check_signature_bindings(
         &mut self,
-        receiver: Option<&str>,
+        receiver: Option<&Receiver>,
+        type_params: &[TypeParam],
         params: &[Param],
         results: &[FnResult],
         span: Span,
     ) {
         let mut seen = HashSet::new();
-        let receiver = receiver.map(|name| (name, span)).into_iter();
+        let recv_name = receiver.map(|r| (r.name.as_str(), span)).into_iter();
+        let recv_tparams = receiver
+            .into_iter()
+            .flat_map(|r| Self::receiver_type_param_bindings(&r.ty));
+        let fn_tparams = type_params.iter().map(|tp| (tp.name.as_str(), span));
         let params = params.iter().map(|p| (p.name.as_str(), p.span));
         let results = results
             .iter()
             .filter_map(|r| r.name.as_deref().map(|name| (name, r.ty.span())));
-        for (name, name_span) in receiver.chain(params).chain(results) {
+        for (name, name_span) in recv_name
+            .chain(recv_tparams)
+            .chain(fn_tparams)
+            .chain(params)
+            .chain(results)
+        {
             if name != "_" && !seen.insert(name) {
                 self.diags.push(
                     Diagnostic::error(
@@ -653,7 +689,7 @@ impl<'a> Collector<'a> {
                         ),
                     )
                     .with_notes(vec![
-                        "receiver, parameter, and named-result identifiers share one function scope; rename the repeated declaration or use `_` for an unused parameter"
+                        "receiver, type-parameter, value-parameter, and named-result identifiers share one function scope; rename the repeated declaration or use `_` for an unused parameter"
                             .to_string(),
                     ]),
                 );
@@ -677,6 +713,24 @@ impl<'a> Collector<'a> {
                         "remove parameters from `fn main()`, or read CLI arguments via `os.args()`".to_string(),
                     ]),
                 );
+            }
+            if f.name == "main"
+                && (f.results.len() > 1
+                    || f.results
+                        .first()
+                        .is_some_and(|r| !self.is_valid_main_result_type(&r.ty)))
+            {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E1002",
+                        self.path.clone(),
+                        f.span,
+                        "`fn main` may only return nothing, `int` (exit code), or `error` — Go `os.Exit` requires an `int` status code (HYB-E1002)".to_string(),
+                    )
+                    .with_notes(vec![
+                        "declare `fn main() { ... }`, `fn main() (code int) { ... }`, or `fn main() error { ... }`".to_string(),
+                    ]),
+                );
             } else if f.name == "init"
                 && (!f.params.is_empty() || !f.results.is_empty() || !f.type_params.is_empty())
             {
@@ -694,7 +748,8 @@ impl<'a> Collector<'a> {
             }
         }
         self.check_signature_bindings(
-            f.receiver.as_ref().map(|r| r.name.as_str()),
+            f.receiver.as_ref(),
+            &f.type_params,
             &f.params,
             &f.results,
             f.span,
@@ -1445,7 +1500,7 @@ impl<'a> Collector<'a> {
                 body,
                 span,
             } => {
-                self.check_signature_bindings(None, params, results, *span);
+                self.check_signature_bindings(None, &[], params, results, *span);
                 for p in params {
                     self.ty(&p.ty);
                 }

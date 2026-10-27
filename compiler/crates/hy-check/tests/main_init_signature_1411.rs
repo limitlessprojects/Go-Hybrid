@@ -68,3 +68,21 @@ fn accepts_valid_main_init_and_methods_issue_1411() {
         r_methods.diagnostics
     );
 }
+
+#[test]
+fn rejects_main_with_invalid_return_types_issue_2048() {
+    for src in [
+        "fn main() string {\n    return \"hello\"\n}\n",
+        "fn main() (int, int) {\n    return 0, 0\n}\n",
+        "fn main() (int, error) {\n    return 0, nil\n}\n",
+        "fn main() bool {\n    return true\n}\n",
+    ] {
+        let r = check(src);
+        assert_eq!(r.verdict, Verdict::Reject, "expected Reject for {src}, got {:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E1002"),
+            "expected HYB-E1002 for {src}, got: {:?}",
+            r.diagnostics
+        );
+    }
+}
