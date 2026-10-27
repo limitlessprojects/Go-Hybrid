@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-\"\"\"W-002 (#279) Executable Spike: Type-Carried Ownership Capabilities with Local Inference.\"\"\"
+"""W-002 (#279) Executable Spike: Type-Carried Ownership Capabilities with Local Inference."""
 
 from __future__ import annotations
 from dataclasses import dataclass, field
