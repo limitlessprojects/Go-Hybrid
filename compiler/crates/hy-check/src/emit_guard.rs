@@ -313,7 +313,7 @@ impl<'a> Checker<'a> {
                     match &arm.kind {
                         SelectArmKind::Send { chan, value, .. } => {
 if let TypeShape::ChanTx(_) = ck.shape_of_expr(st, chan) {
-if let Some(epoch) = st.epoch_map.get(chan.root_ident().unwrap()) {
+if let Some(epoch) = st.epoch_map.get(&chan.root_ident().unwrap()) {
 if *epoch >= st.epoch {
 ck.diags.push(Diagnostic::error("HYB-E3201", ck.path.clone(), chan.span, "cyclic channel wait-for dependency"));
 }

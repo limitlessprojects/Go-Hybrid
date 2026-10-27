@@ -277,9 +277,9 @@ impl<'a> Checker<'a> {
             }
             Resolved::Fn { name } => {
 if name == "close" {
-if let Some(binding) = st.env_lookup(st.last_use.get(&name).unwrap()) {
+if let Some(binding) = st.env_lookup(&name) {
 if let TypeShape::ChanTx(_) = binding.shape {
-if let Some(epoch) = st.epoch_map.get(name) {
+if let Some(epoch) = st.epoch_map.get(&name) {
 if *epoch >= st.epoch {
 ck.diags.push(Diagnostic::error("HYB-E3201", ck.path.clone(), cr.span, "cyclic channel wait-for dependency"));
 }

@@ -280,7 +280,6 @@ TypeShape::ChanRx(e) => TypeShape::ChanRx(e),
 Box::new(self.shape_of_type(key)),
 Box::new(self.shape_of_type(value)),
 ),
-Expr::StructLit { ty: None, .. } => TypeShape::Struct(None),
 Expr::SliceLit { elem, items, .. } => {
 if let Some((_, inner_elem, _)) = expr.as_array_lit() {
 return TypeShape::Array(Box::new(self.shape_of_type(inner_elem)));
@@ -294,7 +293,6 @@ None => items
 }))
 },
 Expr::FnLit { .. } => TypeShape::Closure,
-Expr::StructLit { ty: Some(t), .. } => match self.shape_of_type(t) {
 TypeShape::ChanTx(e) => TypeShape::ChanTx(e),
 TypeShape::ChanRx(e) => TypeShape::ChanRx(e),
                 Box::new(self.shape_of_type(key)),
