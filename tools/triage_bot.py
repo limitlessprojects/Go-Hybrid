@@ -556,15 +556,28 @@ def cmd_board(args):
     _, srch = gh.req("GET", "/search/issues?q=%s" % quote(
         'repo:%s is:issue is:open "%s" in:body' % (cfg["repo"], BOARD_MARKER)))
     hits = (srch or {}).get("items", [])
-    if hits:
-        n = hits[0]["number"]
-        gh.patch("/repos/%s/issues/%d" % (cfg["repo"], n), {"body": md})
-        log("board updated on #%d (%d calls, %s remaining)" % (n, gh.calls, gh.remaining))
-    else:
-        iss = gh.post("/repos/%s/issues" % cfg["repo"],
-                      {"title": "Triage Board (auto-updated daily — pin me)",
-                       "body": md})
-        log("board created: %s (%d calls)" % (iss.get("html_url"), gh.calls))
+    try:
+        if hits:
+            n = hits[0]["number"]
+            gh.patch("/repos/%s/issues/%d" % (cfg["repo"], n), {"body": md})
+            log("board updated on #%d (%d calls, %s remaining)" % (n, gh.calls, gh.remaining))
+        else:
+            iss = gh.post("/repos/%s/issues" % cfg["repo"],
+                          {"title": "Triage Board (auto-updated daily — pin me)",
+                           "body": md})
+            log("board created: %s (%d calls)" % (iss.get("html_url"), gh.calls))
+    except RuntimeError as _e:
+        # A `pull_request` event from a fork is handed a read-only GITHUB_TOKEN, so the
+        # board write answers 403 "Resource not accessible by integration" no matter what
+        # `permissions:` the workflow asks for. The board is a *view* of label state, never
+        # the record (see shepherd-board.yml), so failing to repaint it must not turn the
+        # `board` check red: a red check blocks the "CI must pass on our side" merge gate in
+        # BOUNTY.md for a PR whose own tests are green. Print it and succeed instead; the
+        # nightly `schedule` run holds a write token and repaints the real board.
+        if " 403 " not in str(_e):
+            raise
+        log("board NOT updated (read-only token): %s" % _e)
+        print(md)
 
 
 # ---------------------------------------------------------------- main
