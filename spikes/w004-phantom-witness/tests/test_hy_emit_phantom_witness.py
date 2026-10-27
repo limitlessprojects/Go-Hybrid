@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Unit tests for W-004 (#174): CPS-Scoped Phantom Witness Emitter."""
 
+import sys
+from pathlib import Path
 import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from tools import hy_emit_phantom_witness as witness_emit
 
 
