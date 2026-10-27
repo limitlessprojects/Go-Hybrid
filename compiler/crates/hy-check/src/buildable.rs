@@ -2142,6 +2142,15 @@ impl<'a> Collector<'a> {
                     "a struct literal may only name fields the struct declares",
                 ),
                 Some((_, fty)) => {
+                    // Each named field value is one slot: `s{v: two_ints()}`
+                    // is Go's multi-value-in-single-value context, and the
+                    // kind comparison below would read only the first result
+                    // (#1853).
+                    self.check_single_value_position(
+                        &f.value,
+                        "a struct literal field",
+                        /*binding_position=*/ false,
+                    );
                     let want = self.kind_of_ty_with_subst(fty, &subst, 0);
                     let got = self.kind_of_expr(&f.value);
                     if kinds_conflict(&want, &got) {
