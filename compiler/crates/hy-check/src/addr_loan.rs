@@ -167,7 +167,7 @@ impl<'a> Checker<'a> {
 
     /// T24: `&x` where `x` is a live slot-loan binding.
     pub(crate) fn check_addr_of_loan(&mut self, st: &FnState, uses: &[Use]) {
-        for u in uses.iter().filter(|u| u.via_addr) {
+        for u in uses.iter().filter(|u| u.via_addr || u.via_move) {
             let Some(b) = self.lookup_binding(st, &u.name) else {
                 continue;
             };
@@ -218,7 +218,7 @@ impl<'a> Checker<'a> {
             Stmt::Expr { expr, .. } => {
                 self.check_expr_addr_of_loan_projections(st, expr, include_direct_ident);
             }
-            Stmt::Send { chan, value, .. } => {
+            Stmt::Send { chan, value, is_move, span } => { if *is_move { self.check_addr_of_loan(st, &[Use { name: value.root_ident().unwrap_or("").into(), span: *span, is_write: false, via_move: true, via_addr: false }]); }
                 self.check_expr_addr_of_loan_projections(st, chan, include_direct_ident);
                 self.check_expr_addr_of_loan_projections(st, value, include_direct_ident);
             }
