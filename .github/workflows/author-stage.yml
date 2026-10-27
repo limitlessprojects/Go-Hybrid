@@ -45,7 +45,7 @@ defaults:
 jobs:
   author:
     if: ${{ vars.AUTHOR_ENABLED == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 150
     env:
       AUTHOR_API_BASE: ${{ secrets.AUTHOR_API_BASE }}
