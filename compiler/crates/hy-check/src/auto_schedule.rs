@@ -200,12 +200,6 @@ fn analyze_expr(expr: &Expr, effect: &mut TaskEffect) {
     }
 }
 
-/// A scheduled task layer: tasks that can run in parallel.
-pub(crate) struct ScheduledTask<'a> {
-    pub body: &'a Block,
-    pub effect: TaskEffect,
-}
-
 /// Greedy graph-coloring scheduler: assign tasks to layers.
 /// Each layer contains tasks that do not conflict with each other.
 /// Layers run sequentially, within a layer tasks run in parallel.
