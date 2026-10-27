@@ -33,12 +33,11 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import corpus_harness
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CORPUS_REL = Path("tests") / "checker-corpus"
-
-VERDICT_RE = re.compile(
-    r"^//\s*EXPECTED-VERDICT:\s*(ACCEPT-MANAGED|ACCEPT|REJECT)\b", re.M
-)
 
 # (path, regex with one capture group holding the claimed total, what it is)
 TOTAL_SURFACES: list[tuple[str, str, str]] = [
@@ -83,15 +82,26 @@ README_BREAKDOWN = (
 )
 
 
-def census(corpus_dir: Path) -> tuple[int, Counter]:
-    """The truth: derived from the corpus files, never from another claim."""
+def _census(corpus_dir: Path) -> tuple[int, Counter, list[str]]:
+    """Derive verdict counts and file-specific metadata errors from the corpus."""
     files = sorted(corpus_dir.glob("*.hy"))
     counts: Counter = Counter()
+    problems: list[str] = []
     for path in files:
-        text = path.read_text(encoding="utf-8")
-        match = VERDICT_RE.search(text)
-        counts[match.group(1) if match else "NO-VERDICT"] += 1
-    return len(files), counts
+        try:
+            expected = corpus_harness.read_expected(path)
+        except ValueError as error:
+            counts["INVALID"] += 1
+            problems.append(f"{path.name}: {error}")
+            continue
+        counts[expected[0] if expected else "NO-VERDICT"] += 1
+    return len(files), counts, problems
+
+
+def census(corpus_dir: Path) -> tuple[int, Counter]:
+    """The truth: derived from the corpus files, never from another claim."""
+    total, counts, _ = _census(corpus_dir)
+    return total, counts
 
 
 def check_total_surfaces(root: Path, total: int) -> list[str]:
@@ -149,11 +159,15 @@ def collect_problems(root: Path) -> tuple[list[str], int, Counter]:
     if not corpus_dir.is_dir():
         return [f"no corpus directory at {corpus_dir}"], 0, Counter()
 
-    total, counts = census(corpus_dir)
+    total, counts, verdict_problems = _census(corpus_dir)
     if total == 0:
         return ["the corpus is empty; refusing to certify a count"], 0, counts
 
-    problems = check_total_surfaces(root, total) + check_breakdown(root, total, counts)
+    problems = (
+        verdict_problems
+        + check_total_surfaces(root, total)
+        + check_breakdown(root, total, counts)
+    )
     no_verdict = counts.get("NO-VERDICT", 0)
     if no_verdict:
         problems.append(
