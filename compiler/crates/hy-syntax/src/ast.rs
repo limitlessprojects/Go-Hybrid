@@ -45,6 +45,8 @@ impl File {
 
 #[derive(Debug, Clone)]
 pub enum Decl {
+    /// `region R { ... }`
+    Region(RegionDecl),
     /// `import "sync"` / `import "rust/serde_json"`
     Import {
         path: String,
@@ -107,6 +109,12 @@ pub struct EnumVariant {
 }
 
 #[derive(Debug, Clone)]
+pub struct RegionDecl {
+    pub name: String,
+    pub block: Block,
+    pub span: Span,
+}
+
 pub struct FnDecl {
     /// `pub fn` — exported at package emission (example 09's adoption
     /// surface: M4's export mapping ValidateEmail). Contract extension
