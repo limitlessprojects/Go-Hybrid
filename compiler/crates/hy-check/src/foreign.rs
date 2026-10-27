@@ -22,7 +22,6 @@ use crate::model::TypeShape;
 pub(crate) const BUILTIN_PACKAGES: &[&str] = &[
     "serde_json",
     "flate2",
-    "atomic",
     "sync/atomic",
     "strings",
     "fmt",
@@ -36,11 +35,7 @@ pub(crate) const BUILTIN_PACKAGES: &[&str] = &[
     "sort",
     "strconv",
     "errors",
-];
-    "serde_json",
-    "flate2",
-    "atomic",
-    "strings",
+];    "strings",
     "fmt",
     "http",
     "httptest",

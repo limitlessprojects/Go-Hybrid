@@ -41,14 +41,14 @@ defaults:
 
 jobs:
   autoland:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 90
     env:
       SHEPHERD_MODE: ${{ vars.SHEPHERD_MODE || 'dry-run' }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout main (pinned v4, full history)
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
