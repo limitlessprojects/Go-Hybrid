@@ -289,6 +289,38 @@ fn build_tables(ck: &mut Checker<'_>) {
         }
     }
 
+    // Issue #1119: Go rejects a type whose field and method share a name
+    // (`field and method with the same name`). Structs are collected above, so
+    // the clash is only provable here — after every declaration is known,
+    // regardless of source order.
+    let clashes: Vec<(String, String, hy_diag::Span)> = ck
+        .method_decls
+        .iter()
+        .filter_map(|((base, mname), f)| {
+            let fields = ck.structs.get(base)?;
+            fields
+                .iter()
+                .any(|(n, _)| n == mname)
+                .then(|| (base.clone(), mname.clone(), f.span))
+        })
+        .collect();
+    for (base, mname, span) in clashes {
+        ck.diags.push(
+            Diagnostic::error(
+                "HYB-E1002",
+                ck.path.clone(),
+                span,
+                format!(
+                    "method `{mname}` on `{base}` has the same name as field `{base}.{mname}` — Go refuses `field and method with the same name` (HYB-E1002)"
+                ),
+            )
+            .with_notes(vec![
+                "why: Go's spec forbids a field and a method with the same identifier on one type, so the emitted file cannot build".to_string(),
+                format!("fix: rename the method or the `{mname}` field"),
+            ]),
+        );
+    }
+
     // Issue #201-E pass 2: array-length validity over every DECLARED type,
     // after all file-level consts, type aliases, and fns are known.
     for d in &file.decls {
