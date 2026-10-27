@@ -14,11 +14,11 @@ permissions:
 
 jobs:
   quick:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
       - name: Checkout (pinned v4)
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@v4
       - name: Python syntax + self-tests
         run: |
           set -e
