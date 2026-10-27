@@ -889,13 +889,15 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 let scheduled = auto_schedule::schedule_block(body);
                 let _ = scheduled;
 
-                // Safety checks: blocking calls, dynamic spawn, etc.
+                // Safety checks: blocking calls, dynamic spawn, escaped references.
                 let violations = auto_schedule::check_auto_safety(body);
                 for v in violations {
                     let code = match v.kind {
                         auto_schedule::SafetyViolationKind::BlockingReceive => "HYB-E3011",
                         auto_schedule::SafetyViolationKind::BlockingSelect => "HYB-E3012",
                         auto_schedule::SafetyViolationKind::DynamicSpawn => "HYB-E3013",
+                        auto_schedule::SafetyViolationKind::EscapedTaskCall => "HYB-E3014",
+                        auto_schedule::SafetyViolationKind::EscapedReference => "HYB-E3015",
                     };
                     ck.diags.push(
                         Diagnostic::error(
@@ -905,8 +907,8 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                             &v.message,
                         )
                         .with_notes(vec![
-                            "auto scope requires statically-known tasks with no blocking calls".to_string(),
-                            "move blocking operations outside the auto block, or use regular `task` spawns".to_string(),
+                            "auto scope is closed: all tasks must be inline blocks, no blocking calls, no dynamic spawn".to_string(),
+                            "move external calls or blocking operations outside the auto block".to_string(),
                         ]),
                     );
                 }

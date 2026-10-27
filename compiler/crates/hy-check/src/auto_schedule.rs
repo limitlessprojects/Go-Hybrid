@@ -274,6 +274,10 @@ pub(crate) enum SafetyViolationKind {
     BlockingSelect,
     /// Task block inside a loop (dynamic spawn)
     DynamicSpawn,
+    /// Plain `task fn(...)` call inside auto scope (only inline `task { ... }` allowed)
+    EscapedTaskCall,
+    /// Internal variable assigned to an outer-scope variable (escape)
+    EscapedReference,
 }
 
 /// Check an auto block for safety violations (issue #1962 constraints).
@@ -306,6 +310,18 @@ fn check_stmt_safety(stmt: &Stmt, violations: &mut Vec<SafetyViolation>, loop_de
                 });
             }
             check_block_safety(body, violations, loop_depth);
+        }
+        // Plain `task fn(...)` call inside auto scope is not allowed:
+        // we can't analyze the callee's effects, so it might escape state
+        // to the outer goroutine. Only inline `task { ... }` blocks are allowed.
+        Stmt::Task { callee, .. } => {
+            violations.push(SafetyViolation {
+                kind: SafetyViolationKind::EscapedTaskCall,
+                message: format!(
+                    "plain `task {}` inside auto scope — only inline `task {{ ... }}` blocks are allowed (external call could escape state)",
+                    callee.render()
+                ),
+            });
         }
         Stmt::For { body, .. } => {
             check_block_safety(body, violations, loop_depth + 1);
