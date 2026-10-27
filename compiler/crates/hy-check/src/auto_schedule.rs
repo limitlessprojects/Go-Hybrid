@@ -16,7 +16,7 @@
 
 use std::collections::HashSet;
 
-use hy_syntax::{Block, Expr, Place, PlaceKind, Stmt};
+use hy_syntax::{Block, Expr, Place, Stmt};
 
 /// The read/write effect summary of a single task.
 #[derive(Debug, Clone, Default)]
