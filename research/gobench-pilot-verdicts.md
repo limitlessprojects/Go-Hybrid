@@ -53,3 +53,41 @@ These are the "restructure" costs the tripwire is meant to price, and they are r
 ## 4. Next
 
 Finish the remaining four single-spawn kernels, then fetch the upstream patch for each and transliterate the **fixed** form — the only form whose rejection counts as cost. Publish per-kernel: site shape, lifted?, fixed-form verdict, `managed` required (yes/no), parser gap hit.
+## 5. Remaining four single-spawn kernels (5 of 7 now have verdicts)
+
+### kubernetes/80284 — two closures capturing the same `*authenticator`
+
+Func-typed fields (`onRotate func()`) have no Hybrid spelling, so the field collapses to an `int`; the share, not the field type, is the question.
+
+**Verdict: `HYB-E3001`** — "`&a` (*authenticator) is not sendable across tasks … mutable struct shared as a live borrow". For the buggy kernel this is a **true positive**: two tasks write `a.onRotate` concurrently.
+
+### kubernetes/82550 — `go provider.LazyProvide()` x10 (method spawn)
+
+Two restrictions fire, in order:
+
+1. **`HYB-E3103`** — `struct field lazy_provider.actual has pointer type *caching_provider — fields never hold borrows`. The kernel's lazy-init pattern (`if p.actualProvider == nil { p.actualProvider = &CachingDockerConfigProvider{} }`) is unrepresentable as written.
+2. With the field changed to a value, the method spawn itself: **`HYB-E3005`** — `p.lazy_provide` is a method value; O4.0 cannot prove it.
+
+This kernel needs **two** restructures before it can even be scored.
+
+### kubernetes/70892 — `go func(){ for piece := range toProcess { select { case <-stop: return; default: doWorkPiece(piece) } } }()`
+
+Not transliterated: the closure captures `context.Context`, a `sync.WaitGroup`, a `<-chan struct{}`, and a **function-typed value** `DoWorkPieceFunc`. Hybrid has no `context`, no `WaitGroup`, and the parser has no function-type fields/params; three foreign subsystems would have to be modelled before the spawn site could be judged. Recorded as a **porting gap**, not a verdict.
+
+### moby/18412 — `go func(){ exitErr := cmd.Wait(); done <- exitErr }()`
+
+Not transliterated: the body is `os/exec` + `bytes.Buffer` + `time.After` + a select on a timer. All four are foreign subsystems with no Hybrid equivalent in the parser today. Recorded as a **porting gap**.
+
+## 6. Scoreboard so far (7 single-spawn kernels)
+
+| Kernel | Shape | Verdict | Counts as |
+|---|---|---|---|
+| moby/27037 | closure | OK after mechanical lift (`move` per-iteration) | **free** |
+| moby/22941 | closure | E3001 shared mutable borrow | true positive (buggy) |
+| serving/5865 | method | E3005 unprovable callee | **cost** |
+| kubernetes/80284 | closure | E3001 shared mutable borrow | true positive (buggy) |
+| kubernetes/82550 | method | E3103 pointer field + E3005 callee | **cost** (plus restructure) |
+| kubernetes/70892 | closure | not transliterable (context / WaitGroup / func value) | **porting gap** |
+| moby/18412 | closure | not transliterable (exec / bytes / time) | **porting gap** |
+
+Of the seven: **1 lifts for free, 2 are correctly rejected on the buggy form, 2 are rejected for being method spawns regardless of bug or fix, 2 cannot be expressed at all without foreign subsystems.** Even before the fixed-form run, the method-spawn cost alone is 2/7 = 28.6%, above the O18 trigger.
