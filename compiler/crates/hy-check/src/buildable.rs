@@ -3542,6 +3542,9 @@ impl<'a> Collector<'a> {
         for item in items {
             let bare = unwrap_parens(item);
             if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
+                // Slice/array element nils are owned by N1 in sendability.rs
+                // (`check_composite_nils`); only the map-key slot was missing
+                // (#2036).
                 continue;
             }
             if let Expr::SliceLit {
@@ -3603,6 +3606,9 @@ impl<'a> Collector<'a> {
         for item in items {
             let bare = unwrap_parens(item);
             if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
+                // Slice/array element nils are owned by N1 in sendability.rs
+                // (`check_composite_nils`); only the map-key slot was missing
+                // (#2036).
                 continue;
             }
             if let Expr::SliceLit {
@@ -3669,7 +3675,21 @@ impl<'a> Collector<'a> {
         let resolved_val = self.ck.resolve_type_alias(val_ty);
         let exp_val = self.kind_of_ty(&resolved_val, 0);
         for (k, v) in entries {
-            if exp_key != OpKind::Unknown {
+            if exp_key != OpKind::Unknown && matches!(unwrap_parens(k), Expr::Lit { kind: LitKind::Nil, .. }) {
+                // A nil literal is only a valid key when the key type is
+                // nilable (#2036).
+                if !kind_accepts_nil(&exp_key) {
+                    self.emit_e1002(
+                        k.span(),
+                        format!(
+                            "cannot use nil as `{}` value in map key (HYB-E1002)",
+                            exp_key.label()
+                        ),
+                        "the key type is not nilable; write a zero value of the key type instead",
+                    );
+                }
+            }
+            if exp_key != OpKind::Unknown && !matches!(unwrap_parens(k), Expr::Lit { kind: LitKind::Nil, .. }) {
                 let kk = self.kind_of_expr(k);
                 if kk != OpKind::Unknown
                     && kk != exp_key
@@ -3693,6 +3713,9 @@ impl<'a> Collector<'a> {
             if exp_val != OpKind::Unknown {
                 let bare_v = unwrap_parens(v);
                 if matches!(bare_v, Expr::Lit { kind: LitKind::Nil, .. }) {
+                    // Map-value nils are owned by N1 in sendability.rs
+                    // (`check_composite_nils`); only the key slot was missing
+                    // (#2036).
                     continue;
                 }
                 let vk = self.kind_of_expr(v);
@@ -4853,4 +4876,19 @@ fn main() {
             r.diagnostics
         );
     }
+}
+
+/// #2036 — whether a `nil` literal can be assigned to a slot of this kind.
+/// `Unknown` stays fail-open; every other non-nilable kind rejects.
+fn kind_accepts_nil(kind: &OpKind) -> bool {
+    matches!(
+        kind,
+        OpKind::Unknown
+            | OpKind::Interface
+            | OpKind::Slice(_)
+            | OpKind::Map(_, _)
+            | OpKind::Chan(_)
+            | OpKind::Pointer(_)
+            | OpKind::Fn(..)
+    )
 }
