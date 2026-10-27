@@ -512,6 +512,32 @@ impl<'a> Lexer<'a> {
                     ),
                 );
             }
+            // `0x1.8` used to split into `0x1` and `.8`, and the parser then
+            // accepted the stray `.8` as a second statement — the emitted Go
+            // could never build. Hybrid has no hex-float form, so a fractional
+            // part after a prefixed base is a malformed literal (#1168).
+            if self.at(0) == Some('.')
+                && self
+                    .at(1)
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(false)
+            {
+                self.escape_diag(
+                    start,
+                    false,
+                    format!(
+                        "malformed 0{base} literal: a fractional part is not allowed after `0{base}` (Hybrid has no hex-float form; write a decimal float)"
+                    ),
+                );
+                self.bump();
+                while let Some(c) = self.at(0) {
+                    if c == '_' || c.is_ascii_digit() {
+                        self.bump();
+                    } else {
+                        break;
+                    }
+                }
+            }
             return self.tok(start, Tok::Int(s));
         }
 
