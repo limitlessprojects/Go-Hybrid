@@ -23,6 +23,10 @@
 // 04's deadline pattern). ----
 
 // EXPECTED-VERDICT: REJECT A1c
+<<<<<<< HEAD
+=======
+// (the send-target classification — #77; the pinned HYB code is E3007)
+>>>>>>> af5a4d7 (fix(checker): resolve file-level const references in B4 negative-shift guard)
 
 fn main() {
     deadline := time.after(time.seconds(5))

@@ -144,7 +144,7 @@ impl<'a> Checker<'a> {
                 }
                 // `x <<= -1` — the compound form of HYB-E6005.
                 if matches!(op, AssignOp::ShlAssign | AssignOp::ShrAssign) && values.len() == 1 {
-                    self.check_negative_shift(&values[0], *span);
+                    self.check_negative_shift(st, &values[0], *span);
                 }
                 if deep {
                     for (t, v) in targets.iter().zip(values.iter()) {
@@ -417,7 +417,7 @@ impl<'a> Checker<'a> {
                 self.check_expr_emit_guard(st, rhs);
                 match op {
                     BinOp::Eq | BinOp::Ne => self.check_equality(st, lhs, rhs, *span),
-                    BinOp::Shl | BinOp::Shr => self.check_negative_shift(rhs, *span),
+                    BinOp::Shl | BinOp::Shr => self.check_negative_shift(st, rhs, *span),
                     _ => {}
                 }
                 self.check_binary_const_overflow(st, *op, lhs, rhs);
@@ -840,8 +840,9 @@ impl<'a> Checker<'a> {
     // B4 — constant negative shift counts (HYB-E6005)
     // ------------------------------------------------------------------
 
-    fn check_negative_shift(&mut self, rhs: &Expr, span: Span) {
-        let Some(v) = const_int_value(rhs) else {
+    fn check_negative_shift(&mut self, st: &FnState, rhs: &Expr, span: Span) {
+        let v = const_int_value(rhs).or_else(|| self.const_ref_int_value(st, rhs, 0));
+        let Some(v) = v else {
             return;
         };
         if v >= 0 {
@@ -860,6 +861,30 @@ impl<'a> Checker<'a> {
                 "fix: shift by a non-negative constant (shift the other operand instead: `1 << n` with `n >= 0`)".to_string(),
             ]),
         );
+    }
+
+    /// Fold a shift-count expression that references a file-level `const`.
+    /// Go treats a named constant exactly like its value (`x << neg` with
+    /// `const neg = -2` is the same compile-time `negative shift count`
+    /// error as `x << -1`), so the B4 guard must resolve const references
+    /// too — a plain `const_int_value` only folds literal expressions and
+    /// silently accepted programs Go refuses to compile. A LOCAL binding
+    /// shadowing the name is skipped (its value is not a constant here);
+    /// depth caps `const`-to-`const` chains.
+    fn const_ref_int_value(&self, st: &FnState, e: &Expr, depth: u8) -> Option<i128> {
+        if depth >= 4 {
+            return None;
+        }
+        let e = unwrap_parens(e);
+        let Expr::Ident { name, .. } = e else {
+            return None;
+        };
+        // a visible local/parameter shadows the file-level const
+        if st.env_lookup(name).is_some() {
+            return None;
+        }
+        let value = self.const_values.get(name.as_str())?;
+        const_int_value(value).or_else(|| self.const_ref_int_value(st, value, depth + 1))
     }
 
     // ------------------------------------------------------------------

@@ -2943,6 +2943,71 @@ mod tests {
     }
 
     #[test]
+    fn const_ref_negative_shift_rejects_e6005() {
+        // A file-level `const` IS a Go constant: `x << neg` with
+        // `const neg = -2` is the same compile-time `negative shift count`
+        // error as `x << -1`. B4 only folded literal expressions, so the
+        // const-reference form passed `hyb check` with 0 diagnostics while
+        // the emitted Go failed to build.
+        let r = check(
+            "const neg = -2
+             fn main() {
+               x := 1
+               fmt.println(x << neg)
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E6005");
+    }
+
+    #[test]
+    fn const_chain_negative_shift_rejects_e6005() {
+        // const→const chains resolve through the file const map.
+        let r = check(
+            "const a = -1 - 1
+             const b = a
+             fn main() {
+               x := 1
+               fmt.println(x << b)
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E6005");
+    }
+
+    #[test]
+    fn const_ref_positive_shift_accepts() {
+        // A non-negative const shift count stays legal.
+        let r = check(
+            "const neg = 2
+             fn main() {
+               x := 1
+               fmt.println(x << neg)
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn local_shadowing_const_skips_shift_guard() {
+        // A local binding shadowing the const name is a VARIABLE shift
+        // (run-time panic per X2, defined behavior) — the const-reference
+        // resolution must skip it, and the local `fmt.println(m["k"])`
+        // companion below keeps the body non-trivial.
+        let r = check(
+            "const neg = -2
+             fn main() {
+               neg := 3
+               x := 1
+               fmt.println(x << neg)
+             }",
+        );
+        // the shadowed form compiles in Go (variable shift) and must NOT
+        // trip the const-reference guard
+        assert_ne!(r.diagnostics.first().map(|d| d.code.as_str()), Some("HYB-E6005"));
+    }
+
+    #[test]
     fn new_builtin_send_pointer_rejects() {
         let r = check(
             "fn main() {\n\
