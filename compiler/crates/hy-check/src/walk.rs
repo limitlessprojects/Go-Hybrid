@@ -348,6 +348,16 @@ pub(crate) fn own_uses_with_results(stmt: &Stmt, named_results: &[String], out: 
                 expr_uses(&a.value, out);
             }
         }
+        Stmt::TaskBlock { body, .. } => {
+            for s in &body.stmts {
+                own_uses_with_results(s, named_results, out);
+            }
+        }
+        Stmt::Auto { body, .. } => {
+            for s in &body.stmts {
+                own_uses_with_results(s, named_results, out);
+            }
+        }
         Stmt::Managed { .. } => {}
         Stmt::Match { subject, arms, .. } => {
             expr_uses(subject, out);
@@ -569,6 +579,16 @@ pub(crate) fn own_calls<'a>(stmt: &'a Stmt, out: &mut Vec<CallRef<'a>>) {
             expr_calls(callee, out);
             for a in args {
                 expr_calls(&a.value, out);
+            }
+        }
+        Stmt::TaskBlock { body, .. } => {
+            for s in &body.stmts {
+                own_calls(s, out);
+            }
+        }
+        Stmt::Auto { body, .. } => {
+            for s in &body.stmts {
+                own_calls(s, out);
             }
         }
         Stmt::Managed { .. } => {}

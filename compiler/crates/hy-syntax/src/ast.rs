@@ -895,6 +895,8 @@ impl Stmt {
             | Stmt::For { span, .. }
             | Stmt::Return { span, .. }
             | Stmt::Task { span, .. }
+            | Stmt::TaskBlock { span, .. }
+            | Stmt::Auto { span, .. }
             | Stmt::Managed { span, .. }
             | Stmt::Match { span, .. }
             | Stmt::Defer { span, .. }
