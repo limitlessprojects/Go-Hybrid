@@ -3595,6 +3595,12 @@ impl<'a> Collector<'a> {
     }
 
     fn check_slice_lit_items(&mut self, elem_ty: &TypeExpr, items: &[Expr]) {
+        // Every element is one slot, even when the element type is unresolved:
+        // `[]int{two_ints()}` is Go's multi-value-in-single-value context
+        // (#1849).
+        for item in items {
+            self.check_single_value_position(item, "a slice literal element", /*binding_position=*/ false);
+        }
         let resolved_ty = self.ck.resolve_type_alias(elem_ty);
         let expected = self.kind_of_ty(&resolved_ty, 0);
         if expected == OpKind::Unknown {
@@ -3668,6 +3674,12 @@ impl<'a> Collector<'a> {
         let exp_key = self.kind_of_ty(&resolved_key, 0);
         let resolved_val = self.ck.resolve_type_alias(val_ty);
         let exp_val = self.kind_of_ty(&resolved_val, 0);
+        // Each key and value is one slot; a multi-value call in either
+        // position is Go's single-value-context error (#1849).
+        for (k, v) in entries {
+            self.check_single_value_position(k, "a map literal key", /*binding_position=*/ false);
+            self.check_single_value_position(v, "a map literal value", /*binding_position=*/ false);
+        }
         for (k, v) in entries {
             if exp_key != OpKind::Unknown {
                 let kk = self.kind_of_expr(k);
