@@ -393,6 +393,11 @@ fn check_expr_safety(expr: &Expr, violations: &mut Vec<SafetyViolation>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hy_diag::{Pos, Span};
+
+    fn dummy_span() -> Span {
+        Span::new(Pos::new(1, 1), Pos::new(1, 1))
+    }
 
     #[test]
     fn test_conflict_detection() {
@@ -420,9 +425,9 @@ mod tests {
         // Expected layers:
         //   layer 0: [0, 1] — 0 writes x, 1 writes y, no conflict
         //   layer 1: [2]    — 2 reads x, conflicts with 0
-        let block0 = Block { stmts: vec![], span: hy_diag::Span::new_dummy() };
-        let block1 = Block { stmts: vec![], span: hy_diag::Span::new_dummy() };
-        let block2 = Block { stmts: vec![], span: hy_diag::Span::new_dummy() };
+        let block0 = Block { stmts: vec![], span: dummy_span() };
+        let block1 = Block { stmts: vec![], span: dummy_span() };
+        let block2 = Block { stmts: vec![], span: dummy_span() };
 
         // We can't easily build real blocks in tests, so test the scheduler
         // with manually constructed effects.
