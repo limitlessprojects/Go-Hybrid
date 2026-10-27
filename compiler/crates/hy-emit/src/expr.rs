@@ -155,7 +155,10 @@ impl Emitter {
             }
 
             Expr::AddrOf { operand, .. } => {
-                let o = self.emit_expr(operand, ATOM)?;
+                // `&(pt)` is legal Hybrid (the checker peels the parens) but
+                // illegal Go ("cannot take the address of (pt)") — peel before
+                // emitting the operand (#1993 cause 3).
+                let o = self.emit_expr(Self::unwrap_parens(operand), ATOM)?;
                 Ok(format!("&{}", o))
             }
 
@@ -266,7 +269,9 @@ impl Emitter {
                 let head = format!("map[{}]{}", self.type_text(key), self.type_text(value));
                 let mut parts = Vec::new();
                 for (k, v) in entries {
-                    let kt = self.emit_expr(k, 0)?;
+                    // Elided struct KEYS inherit the map's key type too:
+                    // `map[point]int{{x: 2}: 9}` (#1993 cause 4).
+                    let kt = self.emit_expr_exp(k, 0, Some(key))?;
                     // Elided struct values inherit the map's VALUE type
                     // (Batch I, corpus 09: `map[string]service{"k": {…}}`).
                     let vt = self.emit_expr_exp(v, 0, Some(value))?;
