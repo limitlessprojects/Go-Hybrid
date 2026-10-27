@@ -233,16 +233,9 @@ pub(crate) fn schedule_tasks(tasks: &[&Block]) -> Vec<Vec<usize>> {
     layers
 }
 
-/// Result of scheduling an auto block.
-pub(crate) struct ScheduleResult {
-    /// The collected task blocks (in source order).
-    pub tasks: Vec<*const Block>,
-    /// Layers of task indices (each layer runs in parallel).
-    pub layers: Vec<Vec<usize>>,
-}
-
 /// Collect all inline task blocks from an auto block and schedule them.
-pub(crate) fn schedule_block(block: &Block) -> ScheduleResult {
+/// Returns the layers of task indices (each layer runs in parallel).
+pub(crate) fn schedule_block_layers(block: &Block) -> Vec<Vec<usize>> {
     let mut task_blocks: Vec<&Block> = Vec::new();
 
     for stmt in &block.stmts {
@@ -251,12 +244,7 @@ pub(crate) fn schedule_block(block: &Block) -> ScheduleResult {
         }
     }
 
-    let layers = schedule_tasks(&task_blocks);
-
-    ScheduleResult {
-        tasks: task_blocks.into_iter().map(|b| b as *const Block).collect(),
-        layers,
-    }
+    schedule_tasks(&task_blocks)
 }
 
 /// A safety violation found in an auto block.

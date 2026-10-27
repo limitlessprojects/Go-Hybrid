@@ -886,8 +886,8 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             // Collects all inline task blocks inside, analyzes their effects,
             // and schedules them in parallel layers where possible.
             Stmt::Auto { body, span } => {
-                let scheduled = auto_schedule::schedule_block(body);
-                let _ = scheduled;
+                let layers = auto_schedule::schedule_block_layers(body);
+                let _ = layers;
 
                 // Safety checks: blocking calls, dynamic spawn, escaped references.
                 let violations = auto_schedule::check_auto_safety(body);
