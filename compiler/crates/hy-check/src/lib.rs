@@ -887,9 +887,29 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             // and schedules them in parallel layers where possible.
             Stmt::Auto { body, span } => {
                 let scheduled = auto_schedule::schedule_block(body);
-                // TODO: emit scheduling diagnostics, check escape/blocking rules
                 let _ = scheduled;
-                let _ = span;
+
+                // Safety checks: blocking calls, dynamic spawn, etc.
+                let violations = auto_schedule::check_auto_safety(body);
+                for v in violations {
+                    let code = match v.kind {
+                        auto_schedule::SafetyViolationKind::BlockingReceive => "HYB-E3011",
+                        auto_schedule::SafetyViolationKind::BlockingSelect => "HYB-E3012",
+                        auto_schedule::SafetyViolationKind::DynamicSpawn => "HYB-E3013",
+                    };
+                    ck.diags.push(
+                        Diagnostic::error(
+                            code,
+                            ck.path.clone(),
+                            *span,
+                            &v.message,
+                        )
+                        .with_notes(vec![
+                            "auto scope requires statically-known tasks with no blocking calls".to_string(),
+                            "move blocking operations outside the auto block, or use regular `task` spawns".to_string(),
+                        ]),
+                    );
+                }
             }
 
             // If-init Locals and blocks: already covered by the flat walk

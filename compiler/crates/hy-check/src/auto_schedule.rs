@@ -259,6 +259,121 @@ pub(crate) fn schedule_block(block: &Block) -> ScheduleResult {
     }
 }
 
+/// A safety violation found in an auto block.
+#[derive(Debug, Clone)]
+pub(crate) struct SafetyViolation {
+    pub kind: SafetyViolationKind,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SafetyViolationKind {
+    /// Blocking receive (`<-ch`) inside auto scope
+    BlockingReceive,
+    /// `select` statement inside auto scope
+    BlockingSelect,
+    /// Task block inside a loop (dynamic spawn)
+    DynamicSpawn,
+}
+
+/// Check an auto block for safety violations (issue #1962 constraints).
+///
+/// Constraints (from the proposal):
+///   * No blocking calls (channel receive, select) — the scheduler needs
+///     to know all tasks upfront; a blocking call would deadlock the layer.
+///   * No dynamic spawn (task inside loops) — the task set must be statically
+///     known at compile time.
+pub(crate) fn check_auto_safety(block: &Block) -> Vec<SafetyViolation> {
+    let mut violations = Vec::new();
+    check_block_safety(block, &mut violations, 0);
+    violations
+}
+
+fn check_block_safety(block: &Block, violations: &mut Vec<SafetyViolation>, loop_depth: u32) {
+    for stmt in &block.stmts {
+        check_stmt_safety(stmt, violations, loop_depth);
+    }
+}
+
+fn check_stmt_safety(stmt: &Stmt, violations: &mut Vec<SafetyViolation>, loop_depth: u32) {
+    match stmt {
+        Stmt::TaskBlock { body, .. } => {
+            // Dynamic spawn: task inside a loop
+            if loop_depth > 0 {
+                violations.push(SafetyViolation {
+                    kind: SafetyViolationKind::DynamicSpawn,
+                    message: "task block inside a loop — dynamic spawn is not allowed in auto scope".to_string(),
+                });
+            }
+            check_block_safety(body, violations, loop_depth);
+        }
+        Stmt::For { body, .. } => {
+            check_block_safety(body, violations, loop_depth + 1);
+        }
+        Stmt::Block { block, .. } => {
+            check_block_safety(block, violations, loop_depth);
+        }
+        Stmt::If { then, otherwise, .. } => {
+            check_block_safety(then, violations, loop_depth);
+            if let Some(otherwise) = otherwise {
+                check_stmt_safety(otherwise, violations, loop_depth);
+            }
+        }
+        Stmt::Select { .. } => {
+            violations.push(SafetyViolation {
+                kind: SafetyViolationKind::BlockingSelect,
+                message: "select statement inside auto scope — blocking calls are not allowed".to_string(),
+            });
+        }
+        Stmt::Expr { expr, .. } => {
+            check_expr_safety(expr, violations);
+        }
+        Stmt::Send { chan, value, .. } => {
+            check_expr_safety(chan, violations);
+            check_expr_safety(value, violations);
+        }
+        _ => {}
+    }
+}
+
+fn check_expr_safety(expr: &Expr, violations: &mut Vec<SafetyViolation>) {
+    match expr {
+        Expr::Receive { chan, .. } => {
+            violations.push(SafetyViolation {
+                kind: SafetyViolationKind::BlockingReceive,
+                message: format!("channel receive `<-{}` inside auto scope — blocking calls are not allowed", chan.render()),
+            });
+        }
+        Expr::Call { callee, args, .. } => {
+            check_expr_safety(callee, violations);
+            for arg in args {
+                check_expr_safety(&arg.value, violations);
+            }
+        }
+        Expr::Unary { operand, .. } => {
+            check_expr_safety(operand, violations);
+        }
+        Expr::Binary { left, right, .. } => {
+            check_expr_safety(left, violations);
+            check_expr_safety(right, violations);
+        }
+        Expr::Index { base, index, .. } => {
+            check_expr_safety(base, violations);
+            check_expr_safety(index, violations);
+        }
+        Expr::Field { base, .. } => {
+            check_expr_safety(base, violations);
+        }
+        Expr::Try(expr, _) => {
+            check_expr_safety(expr, violations);
+        }
+        Expr::Move(expr, _) => {
+            check_expr_safety(expr, violations);
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
