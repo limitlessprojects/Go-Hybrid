@@ -90,6 +90,35 @@ impl Emitter {
                 self.push("}");
                 Ok(())
             }
+            // `task { ... }` — inline task block (issue #1962).
+            // In a normal scope: emits as an immediate goroutine closure.
+            // Inside an `auto` block: collected and scheduled by the auto
+            // scheduler (handled in the Auto arm below).
+            Stmt::TaskBlock { body, .. } => {
+                // Emit as a goroutine closure: go func() { ... }()
+                self.push("go func() {");
+                self.indent += 1;
+                self.emit_block_body(&body.stmts)?;
+                self.indent -= 1;
+                self.push("}()");
+                Ok(())
+            }
+            // `auto { ... }` — automatic fork-join scheduling (issue #1962).
+            // Collects all inline task blocks, analyzes their effects, and
+            // schedules them in parallel layers where data accesses are provably
+            // disjoint. Conflicting tasks are serialized.
+            Stmt::Auto { body, .. } => {
+                // MVP: emit as a plain block. Task blocks inside are already
+                // handled by their own arm above (as immediate goroutines).
+                // TODO: collect task blocks, run effect analysis + DAG scheduling,
+                // then emit layered parallel execution with sync.WaitGroup.
+                self.push("{ // auto: automatic fork-join scheduling");
+                self.indent += 1;
+                self.emit_block_body(&body.stmts)?;
+                self.indent -= 1;
+                self.push("}");
+                Ok(())
+            }
             Stmt::Defer { call, .. } => {
                 // P1 (§7): a deferred CALL's arguments are evaluated at defer
                 // time, so a `?` inside them hoists to a binding BEFORE this

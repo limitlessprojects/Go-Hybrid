@@ -46,6 +46,7 @@
 mod addr_loan;
 mod addressable;
 mod arith;
+mod auto_schedule;
 mod buildable;
 mod const_overflow;
 mod closures;
@@ -869,6 +870,26 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     call,
                     format!("the deferred call `defer {}`", call.render()),
                 );
+            }
+
+            // `task { ... }` — inline task block (issue #1962).
+            // Only valid inside an `auto { ... }` scope; checked by the
+            // auto-scheduler pass which collects and schedules all tasks.
+            Stmt::TaskBlock { body, span } => {
+                // For now: record that we saw a task block. The full
+                // scheduling pass runs after the flat walk completes.
+                // TODO: check that we are inside an auto block (HYB-E3011)
+                let _ = (body, span);
+            }
+
+            // `auto { ... }` — automatic fork-join scheduling (issue #1962).
+            // Collects all inline task blocks inside, analyzes their effects,
+            // and schedules them in parallel layers where possible.
+            Stmt::Auto { body, span } => {
+                let scheduled = auto_schedule::schedule_block(body);
+                // TODO: emit scheduling diagnostics, check escape/blocking rules
+                let _ = scheduled;
+                let _ = span;
             }
 
             // If-init Locals and blocks: already covered by the flat walk

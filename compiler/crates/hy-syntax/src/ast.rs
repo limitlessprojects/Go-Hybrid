@@ -314,6 +314,14 @@ pub enum Stmt {
         args: Vec<CallArg>,
         span: Span,
     },
+    /// `task { ... }` — inline task block (used inside `auto` scopes for
+    /// effect analysis and automatic scheduling, issue #1962). The body is
+    /// a closure-like block whose captured variables are analyzed for
+    /// read/write effects to determine parallelism.
+    TaskBlock {
+        body: Block,
+        span: Span,
+    },
     /// `managed("reason", "category", tickets...) { ... }` — the escape
     /// hatch (O6, hardened by row 14 / discussion #4). The payload is
     /// REQUIRED and fail-closed: a bare block is HYB-E0003, an unknown
@@ -324,6 +332,16 @@ pub enum Stmt {
         reason: String,
         category: String,
         tickets: Vec<String>,
+        body: Block,
+        span: Span,
+    },
+    /// `auto { ... }` — opt-in automatic fork-join scheduling (issue #1962).
+    /// Inside this block, `task` statements are collected and scheduled
+    /// automatically: tasks with provably disjoint data accesses run in
+    /// parallel, ambiguous or conflicting tasks are serialized. Unknown =
+    /// slower, not unsafe. The block is closed: mutable state cannot escape
+    /// to the outer scope; blocking calls and dynamic spawn are rejected.
+    Auto {
         body: Block,
         span: Span,
     },

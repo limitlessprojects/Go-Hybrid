@@ -93,6 +93,7 @@ const KEYWORDS: &[&str] = &[
     "pub",
     "return",
     "select",
+    "auto",
     "struct",
     "task",
     "true",
