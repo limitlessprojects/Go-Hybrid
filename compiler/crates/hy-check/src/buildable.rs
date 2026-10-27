@@ -2223,6 +2223,29 @@ impl<'a> Collector<'a> {
     /// `None` means "one value, or unknown" — the caller must stay permissive.
     /// This is the single place the multi-value shape is derived, so the
     /// distinction is not re-guessed at each call site.
+    /// Kinds of the type arguments a call spells explicitly
+    /// (`identity[int]` → `[Int]`). `None` when the call does not name them —
+    /// inference is left fail-open.
+    fn type_arg_kinds(name: &str) -> Option<Vec<OpKind>> {
+        let open = name.find('[')?;
+        let close = name.rfind(']')?;
+        if close <= open + 1 {
+            return None;
+        }
+        Some(
+            name[open + 1..close]
+                .split(',')
+                .map(|s| match s.trim() {
+                    "int" | "byte" | "u8" | "int64" => OpKind::Int,
+                    "string" => OpKind::Str,
+                    "bool" => OpKind::Bool,
+                    "float" | "float64" => OpKind::Float,
+                    _ => OpKind::Unknown,
+                })
+                .collect(),
+        )
+    }
+
     fn non_single_value_count(&self, e: &Expr) -> Option<usize> {
         match unwrap_parens(e) {
             Expr::Call { callee, args, .. } => {
@@ -2334,10 +2357,9 @@ impl<'a> Collector<'a> {
             return;
         };
         // Generic instantiations (`id[int](x)`) carry type arguments the
-        // parameter list does not describe; leave them to the type checker.
-        if !f.type_params.is_empty() {
-            return;
-        }
+        // parameter list does not describe — but ARITY is independent of the
+        // instantiation, so the guard that used to skip this check entirely
+        // let `identity[int](1, 2, 3)` through (#1961).
         // A lone multi-value call IS the whole argument list and expands to one
         // argument per result: `g(two())` for a 2-param `g` is one written
         // argument but two effective ones, and it builds. #682 U7's
@@ -2437,9 +2459,10 @@ impl<'a> Collector<'a> {
         let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
             return;
         };
-        if !f.type_params.is_empty() {
-            return;
-        }
+        // Substituted type-argument kinds, when the call spells them
+        // (`identity[int]`). A type parameter that the call does not pin stays
+        // Unknown, which `kinds_conflict` treats fail-open (#1961).
+        let targs = Self::type_arg_kinds(name);
         if self.multi_value_arg_count(args).is_some() {
             return;
         }
@@ -2447,7 +2470,15 @@ impl<'a> Collector<'a> {
             return;
         }
         for (p, a) in f.params.iter().zip(args.iter()) {
-            let want = self.kind_of_ty(&p.ty, 0);
+            let want = if let TypeExpr::Named { name: tn, .. } = &p.ty {
+                f.type_params
+                    .iter()
+                    .position(|tp| tp.name == *tn)
+                    .and_then(|pos| targs.as_ref().and_then(|t| t.get(pos)).cloned())
+                    .unwrap_or_else(|| self.kind_of_ty(&p.ty, 0))
+            } else {
+                self.kind_of_ty(&p.ty, 0)
+            };
             let got = self.kind_of_expr(&a.value);
             if let OpKind::Pointer(inner) = &want {
                 if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
