@@ -1200,6 +1200,36 @@ ten programs spawns a closure]
 here). The bridge's blocking-pool and thread-budget machinery (Spike 4) is
 runtime-owned and invisible to `task` semantics.
 
+### 8.1.1 Auto scheduling (issue #1962)
+
+**C2a — `auto { ... }` is an opt-in automatic fork-join scope.**
+Inside an auto block, inline `task { ... }` blocks are collected and scheduled
+automatically: tasks with provably disjoint data accesses run in parallel,
+conflicting or ambiguous tasks are serialized. Unknown = slower, not unsafe.
+
+```hy
+auto {
+    task { a = 10 }   // writes a
+    task { b = 20 }   // writes b — disjoint → parallel
+    task { c++ }      // writes c — conflicts → next layer
+    task { c++ }      // writes c — conflicts → serialized with above
+}
+```
+
+The scheduler uses greedy graph-coloring layering: each layer contains tasks
+that do not conflict with each other. Layers run sequentially; tasks within a
+layer run in parallel (emitted as goroutines + `sync.WaitGroup`).
+
+**Constraints (closed scope):**
+- Only inline `task { ... }` blocks are allowed — plain `task fn(...)` calls
+  are rejected (external callee effects can't be analyzed, state might escape).
+- No blocking calls (channel receive, `select`) — would deadlock the layer.
+- No dynamic spawn (task inside loops) — task set must be statically known.
+- No escaped references — mutable state cannot leak to the outer goroutine.
+
+**Emission:** each layer becomes a `var wg sync.WaitGroup` block; single-task
+layers run inline (no goroutine overhead).
+
 ### 8.2 Channels
 
 **C3 — Channels are Go's.** `make(chan T)`, `make(chan T, n)` (buffered —
