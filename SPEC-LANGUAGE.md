@@ -688,6 +688,14 @@ types** (`struct node { … }`) are nominal. `[TBD]`: Go's `type name T`
 derived-type form (methods on a named primitive) — deferred until the
 differential corpus ports code needing it. [decided: corpus silence]
 
+Type names are not values: assignment operands, call arguments, and return
+values naming a type reject with `HYB-E1002` (`BUILDABLE`). This includes
+`any`, `error`, empty/generic structs, and known types in curated imported
+packages (`http.client`, `sync.mutex`, `time.duration`, `json.decoder`).
+Type positions, conversion callees, and method-expression qualifiers remain
+legal; a value binding shadows a type or package name. [#2041; regression pin:
+`compiler/crates/hy-check/tests/type_values_issue_2041.rs`]
+
 ### 2.11 `result[T, E]` — considered, deferred
 
 **T26 — No first-class `result` type in MVP.** The error model is Go-shaped

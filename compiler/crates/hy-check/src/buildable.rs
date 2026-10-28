@@ -576,12 +576,18 @@ impl<'a> Collector<'a> {
         // enum, a type alias, or a built-in conversion target. Anything else
         // stays fail-open.
         let is_declared_type = self.ck.structs.contains_key(name)
+            || self.ck.struct_type_params.contains_key(head)
             || self.ck.enums.contains_key(name)
             || self.ck.type_aliases.contains_key(name)
-            || crate::const_init::is_conversion_type_name(name);
+            || crate::const_init::is_conversion_type_name(name)
+            || matches!(name, "any" | "error" | "interface{}");
         if !is_declared_type {
             return;
         }
+        self.emit_type_name_as_value(name, span);
+    }
+
+    fn emit_type_name_as_value(&mut self, name: &str, span: Span) {
         self.emit_e1002(
             span,
             format!(
@@ -1270,6 +1276,49 @@ impl<'a> Collector<'a> {
 
     // -- expressions and types ----------------------------------------------
 
+    /// A callee or selector base may name a type.
+    /// Still visit computed bases and mark package roots/local values as read.
+    fn qualifier_expr(&mut self, e: &Expr) {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.read(name),
+            Expr::Field { base, name, span } => self.field_expr(base, name, *span),
+            other => self.expr(other),
+        }
+    }
+
+    /// Type arguments can be parsed as index/unary expressions (`box[int]`,
+    /// `*T`). Record their names without treating their components as values.
+    fn type_arg_expr(&mut self, e: &Expr) {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.read(name),
+            Expr::Field { base, .. } => self.type_arg_expr(base),
+            Expr::Index { base, index, .. } => {
+                self.type_arg_expr(base);
+                self.type_arg_expr(index);
+            }
+            Expr::Unary { operand, .. } => self.type_arg_expr(operand),
+            _ => {}
+        }
+    }
+
+    fn field_expr(&mut self, base: &Expr, name: &str, span: Span) {
+        self.check_pointer_method_receiver(base, name, span);
+        if matches!(self.kind_of_expr(base), OpKind::Interface) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot select field `{}` on a value of type `any` — Go refuses `{}.{} undefined (type any has no field or method {})` (HYB-E1002)",
+                    name,
+                    base.render(),
+                    name,
+                    name
+                ),
+                "an `any` value must be asserted to a concrete type before its fields can be read",
+            );
+        }
+        self.qualifier_expr(base);
+    }
+
     fn expr(&mut self, e: &Expr) {
         match e {
             Expr::Ident { name, span } => {
@@ -1332,33 +1381,15 @@ impl<'a> Collector<'a> {
             // The struct-field lookup below cannot catch it, because an
             // interface is not a struct — so reject the base explicitly.
             Expr::Field { base, name, span } => {
-                self.check_pointer_method_receiver(base, name, *span);
-                if matches!(self.kind_of_expr(base), OpKind::Interface) {
-                    self.emit_e1002(
-                        *span,
-                        format!(
-                            "cannot select field `{}` on a value of type `any` — Go refuses `{}.{} undefined (type any has no field or method {})` (HYB-E1002)",
-                            name,
-                            base.render(),
-                            name,
-                            name
-                        ),
-                        "an `any` value must be asserted to a concrete type before its fields can be read",
-                    );
-                }
-                // #778: a Field BASE is a QUALIFIER position, not a value
-                // position, so the type-name check must not fire on it. Two
-                // legal spellings put a type name there:
-                //   * `color.red`      — an enum variant
-                //   * `greeting.build` — a method call on the type
-                // (and `fmt.println` is a package root, which is not a type
-                // and never reached this check anyway). A bare `x := colour`
-                // IS a value position and still rejects, pinned in the
-                // fixture. An identifier base is read for used-marking; a
-                // deeper base (a call result, an index) recurses normally.
-                match unwrap_parens(base) {
-                    Expr::Ident { name, .. } => self.read(name),
-                    other => self.expr(other),
+                self.field_expr(base, name, *span);
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    // A local, parameter or file value shadows the package.
+                    if self.lookup_kind(pkg).is_none()
+                        && self.is_imported_pkg_root(pkg)
+                        && crate::foreign::is_curated_package_type(pkg, name)
+                    {
+                        self.emit_type_name_as_value(&format!("{}.{}", pkg, name), *span);
+                    }
                 }
             }
             Expr::Call {
@@ -1369,10 +1400,7 @@ impl<'a> Collector<'a> {
                 // `int(3.7)` is a legal built-in one, so the type-name check
                 // must not fire there. `read` still runs, because an unused
                 // local closure called as `f()` has been read.
-                match unwrap_parens(callee) {
-                    Expr::Ident { name, .. } => self.read(name),
-                    other => self.expr(other),
-                }
+                self.qualifier_expr(callee);
                 // `new(T)` and `make(T, len, cap)` take a TYPE as their FIRST
                 // argument, so that position is a type position and the
                 // #778 value-position check must not fire there — `new(bag)`
@@ -1384,6 +1412,7 @@ impl<'a> Collector<'a> {
                 );
                 for (i, a) in args.iter().enumerate() {
                     if type_first_arg && i == 0 {
+                        self.type_arg_expr(&a.value);
                         continue;
                     }
                     self.expr(&a.value);

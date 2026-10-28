@@ -479,6 +479,196 @@ fn normalize_go_ident_to_snake(name: &str) -> String {
     out
 }
 
+/// Type members of the curated Go packages, as distinct from exported values.
+/// Keep this narrower than `foreign_named_type`: that shape fallback also
+/// accepts unknown members and therefore cannot prove that a name is a type.
+/// M4 snake_case and Go spellings share the member-resolution normalizer.
+pub(crate) fn is_curated_package_type(pkg: &str, member: &str) -> bool {
+    let norm = normalize_go_ident_to_snake(crate::model::Checker::base_named_type_str(member));
+    match pkg {
+        "fmt" => matches!(
+            norm.as_str(),
+            "stringer" | "go_stringer" | "state" | "formatter" | "scanner" | "scan_state"
+        ),
+        "os" => matches!(
+            norm.as_str(),
+            "file"
+                | "file_info"
+                | "file_mode"
+                | "dir_entry"
+                | "path_error"
+                | "link_error"
+                | "syscall_error"
+                | "process"
+                | "process_state"
+                | "proc_attr"
+                | "signal"
+                | "root"
+        ),
+        "io" => matches!(
+            norm.as_str(),
+            "reader"
+                | "writer"
+                | "closer"
+                | "read_writer"
+                | "read_closer"
+                | "write_closer"
+                | "read_write_closer"
+                | "read_seeker"
+                | "read_seek_closer"
+                | "write_seeker"
+                | "read_write_seeker"
+                | "reader_from"
+                | "writer_to"
+                | "reader_at"
+                | "writer_at"
+                | "byte_reader"
+                | "byte_scanner"
+                | "byte_writer"
+                | "rune_reader"
+                | "rune_scanner"
+                | "string_writer"
+                | "limited_reader"
+                | "section_reader"
+                | "offset_writer"
+                | "pipe_reader"
+                | "pipe_writer"
+                | "seeker"
+        ),
+        "time" => matches!(
+            norm.as_str(),
+            "time"
+                | "duration"
+                | "timer"
+                | "ticker"
+                | "location"
+                | "month"
+                | "weekday"
+                | "parse_error"
+        ),
+        "sort" => matches!(
+            norm.as_str(),
+            "interface" | "int_slice" | "float64_slice" | "string_slice"
+        ),
+        "strings" => matches!(norm.as_str(), "builder" | "reader" | "replacer"),
+        "strconv" => norm == "num_error",
+        "sync" => matches!(
+            norm.as_str(),
+            "mutex"
+                | "rw_mutex"
+                | "rwmutex"
+                | "wait_group"
+                | "once"
+                | "cond"
+                | "map"
+                | "pool"
+                | "locker"
+        ),
+        "atomic" => matches!(
+            norm.as_str(),
+            "bool" | "int32" | "int64" | "uint32" | "uint64" | "uintptr" | "pointer" | "value"
+        ),
+        "bufio" => matches!(
+            norm.as_str(),
+            "reader" | "writer" | "read_writer" | "scanner" | "split_func"
+        ),
+        "http" => matches!(
+            norm.as_str(),
+            "handler"
+                | "handler_func"
+                | "request"
+                | "response"
+                | "response_writer"
+                | "header"
+                | "serve_mux"
+                | "server"
+                | "client"
+                | "transport"
+                | "cookie"
+                | "cookie_jar"
+                | "round_tripper"
+                | "flusher"
+                | "hijacker"
+                | "close_notifier"
+                | "pusher"
+                | "conn_state"
+                | "dir"
+                | "file"
+                | "file_system"
+                | "http2_config"
+                | "max_bytes_error"
+                | "protocol_error"
+                | "protocols"
+                | "response_controller"
+                | "same_site"
+        ),
+        "httptest" => matches!(norm.as_str(), "response_recorder" | "server"),
+        "net" => matches!(
+            norm.as_str(),
+            "conn"
+                | "listener"
+                | "packet_conn"
+                | "addr"
+                | "dialer"
+                | "listen_config"
+                | "resolver"
+                | "ip"
+                | "ip_mask"
+                | "ip_net"
+                | "ip_addr"
+                | "ip_conn"
+                | "tcp_addr"
+                | "tcp_conn"
+                | "tcp_listener"
+                | "udp_addr"
+                | "udp_conn"
+                | "unix_addr"
+                | "unix_conn"
+                | "unix_listener"
+                | "interface"
+                | "hardware_addr"
+                | "buffers"
+                | "error"
+                | "addr_error"
+                | "dns_config_error"
+                | "dns_error"
+                | "invalid_addr_error"
+                | "op_error"
+                | "parse_error"
+                | "unknown_network_error"
+                | "flags"
+                | "mx"
+                | "ns"
+                | "srv"
+        ),
+        "url" => matches!(
+            norm.as_str(),
+            "url" | "userinfo" | "values" | "error" | "escape_error" | "invalid_host_error"
+        ),
+        "json" => matches!(
+            norm.as_str(),
+            "decoder"
+                | "encoder"
+                | "raw_message"
+                | "number"
+                | "delim"
+                | "token"
+                | "marshaler"
+                | "unmarshaler"
+                | "invalid_unmarshal_error"
+                | "marshaler_error"
+                | "syntax_error"
+                | "unmarshal_field_error"
+                | "unmarshal_type_error"
+                | "unsupported_type_error"
+                | "unsupported_value_error"
+        ),
+        "hex" => norm == "invalid_byte_error",
+        "filepath" => norm == "walk_func",
+        _ => false,
+    }
+}
+
 /// Does curated package `pkg` export `member` (under M4 snake_case or Go spelling, #658)?
 pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
     let norm = normalize_go_ident_to_snake(member);

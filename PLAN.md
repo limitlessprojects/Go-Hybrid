@@ -1,5 +1,7 @@
 # Hybrid Language: Development Plan
 
+- Contributor amendment (#2041): reject builtin, empty/generic struct and curated imported type names in value positions with HYB-E1002; preserve type/callee/qualifier positions and shadowing. Regression suite 9/9, workspace 1809/1809, corpus 127/127 and differential 41/41 build+run + 86/86 rejects pass on native ARM64 with pinned Rust 1.99.0 / Go 1.26.9. Sandbox TMPDIR was placed inside the real clone for Go VCS discovery; upstream CI/maintainer review remain pending.
+
 - Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15
