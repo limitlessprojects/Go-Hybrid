@@ -2318,10 +2318,24 @@ impl<'a> Collector<'a> {
                 // must not fire on it either.
                 match unwrap_parens(callee) {
                     Expr::Ident { name, .. } => self.read(name),
-                    Expr::Field { base, .. } => {
-                        match unwrap_parens(base) {
-                            Expr::Ident { name: bname, .. } => self.read(bname),
-                            other => self.expr(other),
+                    Expr::Field { base, name, .. } => {
+                        let is_foreign_conv = match unwrap_parens(base) {
+                            Expr::Ident { name: pkg, .. } => {
+                                let is_pkg_root = self.is_imported_pkg_root(pkg)
+                                    || crate::foreign::BUILTIN_PACKAGES.contains(&pkg.as_str());
+                                let is_shadowed = self.scopes.iter().rev().any(|l| l.contains_key(pkg))
+                                    || self.lookup_kind(pkg).is_some();
+                                if is_pkg_root && !is_shadowed && crate::foreign::is_foreign_type(pkg, name) {
+                                    self.read(pkg);
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => false,
+                        };
+                        if !is_foreign_conv {
+                            self.expr(callee);
                         }
                     }
                     other => self.expr(other),
