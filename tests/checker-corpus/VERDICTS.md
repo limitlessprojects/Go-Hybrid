@@ -1075,3 +1075,11 @@ ACCEPT-MANAGED 2 · REJECT 86** — main's 125 plus this one.
 by the autonomous pipeline (bundles author-758 / author-827, landings
 0107658 / d0a2db5). Sibling-take credit: sonson0910's stale-base
 companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.
+-------------------------------------------------------------------------------
+
+### slot-loan-return-operand-flush - ACCEPT (issue #1398 regression pin)
+
+Slot loans (O8/OQ) written back BETWEEN operand evaluation and the `return` itself, and before every `?` propagate-error exit - the emission-order contract the pre-fix emitter violated (flush only at the top of `emit_return`, never on the error paths). `EXPECTED-OUTPUT: bump: 11 11 try: 42` pins the runtime result; Tier-0, `--deny-managed` clean.
+
+With this registration the corpus is **127 programs: ACCEPT 39 -
+ACCEPT-MANAGED 2 - REJECT 86** - main's 126 plus this one.

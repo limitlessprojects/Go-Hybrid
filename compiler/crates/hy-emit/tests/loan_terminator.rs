@@ -91,3 +91,72 @@ fn main() {
         go
     );
 }
+
+#[test]
+fn slot_loan_flushes_between_operand_eval_and_return_issue_1398() {
+    let src = "\
+struct counter {
+    n int
+}
+fn (c *counter) next() int {
+    c.n = c.n + 1
+    return c.n
+}
+fn bump(m map[string]counter) int {
+    c := &m[\"k\"]
+    return c.next()
+}
+fn main() {
+    m := map[string]counter{\"k\": counter{n: 10}}
+    _ = bump(m)
+}
+";
+    let ast = parse_file("loan_return_operand.hy", src).expect("parses");
+    let go = emit_go(&ast).expect("emits");
+    let eval_pos = go
+        .find("hyRet0 := c.next()")
+        .expect("operand evaluated into a temp before the store-back");
+    let store_pos = go.find("m[\"k\"] = c").expect("has store-back");
+    let ret_pos = go.find("return hyRet0").expect("returns the temp");
+    assert!(
+        eval_pos < store_pos && store_pos < ret_pos,
+        "expected eval < store-back < return, got:\n{}",
+        go
+    );
+}
+
+#[test]
+fn slot_loan_store_back_emits_before_propagate_error_return_issue_1398() {
+    let src = "\
+struct counter {
+    n int
+}
+fn fail_step() (int, error) {
+    return 0, errors.new(\"boom\")
+}
+fn update_then_try(m map[string]counter) (int, error) {
+    c := &m[\"k\"]
+    c.n = 42
+    x := fail_step()?
+    c.n = c.n + x
+    return c.n, nil
+}
+fn main() {
+    m := map[string]counter{\"k\": counter{n: 10}}
+    _, _ = update_then_try(m)
+}
+";
+    let ast = parse_file("loan_return_propagate.hy", src).expect("parses");
+    let go = emit_go(&ast).expect("emits");
+    let store_pos = go
+        .find("m[\"k\"] = c")
+        .expect("store-back emitted on the propagate-error path");
+    let ret_pos = go
+        .find("return 0, hyErr0")
+        .expect("has propagate-error early return");
+    assert!(
+        store_pos < ret_pos,
+        "expected store-back before the propagate-error return, got:\n{}",
+        go
+    );
+}

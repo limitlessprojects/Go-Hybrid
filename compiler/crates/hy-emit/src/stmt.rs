@@ -856,6 +856,10 @@ impl Emitter {
     /// contract, the E6 main-closure return, an error-result fn's
     /// zero-results return (package mode), or a clean error.
     fn propagate_error(&mut self, err_temp: &str) -> Result<(), EmitError> {
+        // Every branch below emits an early `return` (issue #1398): a live
+        // O8/OQ slot loan must be written back first, or all mutations
+        // performed before the failing `?` are silently dropped.
+        self.flush_loans_for_return();
         if let Some(w) = self.handler_writer.clone() {
             self.use_package("http");
             self.push(&format!(
@@ -925,6 +929,9 @@ impl Emitter {
                 "http.Error({}, {}.Error(), http.StatusBadRequest)",
                 w, temp
             ));
+            // E11's early return is a return too (issue #1398): flush the
+            // live slot loans before it or pre-`?` mutations vanish.
+            self.flush_loans_for_return();
             self.push("return");
             self.indent -= 1;
             self.push("}");
@@ -1629,6 +1636,18 @@ impl Emitter {
         }
     }
 
+    /// True when any non-sentinel frame still carries a live slot loan.
+    /// Mirrors `flush_loans_for_return`'s sentinel skip exactly.
+    fn has_live_loans(&self) -> bool {
+        self.loan_frames.iter().any(|frame| {
+            let sentinel = frame
+                .first()
+                .map(|(n, _)| n.is_empty())
+                .unwrap_or(false);
+            !sentinel && !frame.is_empty()
+        })
+    }
+
     fn flush_loans_for_return(&mut self) {
         let mut stores: Vec<(String, String)> = Vec::new();
         for frame in self.loan_frames.iter().rev() {
@@ -1958,7 +1977,6 @@ impl Emitter {
     // -----------------------------------------------------------------------
 
     fn emit_return(&mut self, values: &[Expr]) -> Result<(), EmitError> {
-        self.flush_loans_for_return();
         for (idx, v) in values.iter().enumerate() {
             let later_has_try = values[idx + 1..].iter().any(Self::expr_has_hoistable_try);
             if later_has_try {
@@ -1967,6 +1985,41 @@ impl Emitter {
                 self.hoist_tries_expr(v)?;
             }
         }
+        // O8/OQ slot loans (issue #1398): the write-back must land BETWEEN
+        // operand evaluation and the `return` itself. A top-of-function
+        // flush wrote `m["k"] = slot` before evaluating `return slot.next()`
+        // and the post-call map kept the stale pre-call value. Materialize
+        // every non-trivial operand into a temp (that is the evaluation),
+        // flush the live loans (that is the write-back), then return the
+        // temps. Ident/FnLit operands cannot mutate a loan and pass
+        // through untouched, so loans-inactive emission is byte-identical.
+        let materialized: Option<Vec<Expr>> = if self.has_live_loans() {
+            let mut temps = Vec::with_capacity(values.len());
+            for v in values {
+                match v {
+                    // Ident (incl. `none`, `_`), FnLit and Lit (incl. `nil`
+                    // — `hyRet := nil` would not even build) cannot mutate
+                    // a loan: they pass through untouched.
+                    Expr::Ident { .. } | Expr::FnLit { .. } | Expr::Lit { .. } => {
+                        temps.push(v.clone())
+                    }
+                    other => {
+                        let text = self.emit_expr(other, 0)?;
+                        let tmp = self.next_temp("hyRet");
+                        self.push(&format!("{} := {}", tmp, text));
+                        temps.push(Expr::Ident {
+                            name: tmp,
+                            span: other.span(),
+                        });
+                    }
+                }
+            }
+            self.flush_loans_for_return();
+            Some(temps)
+        } else {
+            None
+        };
+        let values: &[Expr] = materialized.as_deref().unwrap_or(values);
         // Inside a function literal the closure owns the return — plain.
         if self.fnlit_depth > 0 {
             let vs = values

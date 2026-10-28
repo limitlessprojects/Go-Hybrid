@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 127 programs — ACCEPT 39 · ACCEPT-MANAGED 2 · REJECT 86 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
-**Current registered corpus: 127 programs — ACCEPT 39 · ACCEPT-MANAGED 2 · REJECT 86 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 128 programs — ACCEPT 40 · ACCEPT-MANAGED 2 · REJECT 86 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 128 programs — ACCEPT 40 · ACCEPT-MANAGED 2 · REJECT 86 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -301,3 +301,35 @@ in `hy-check/tests/type_name_in_value_position.rs` (13 tests).
 
 With this registration the corpus is **120 programs: ACCEPT 38 ·
 ACCEPT-MANAGED 2 · REJECT 80** — main's 118 plus these two.
+
+## Bounty-track registration - 2026-10-24: slot-loan write-back between operand eval and return (issue #1398)
+
+`hy-emit` flushed O8/OQ slot loans at the TOP of `emit_return` (before
+the operands were evaluated) and skipped the `?` error-propagation exits
+entirely. `return c.next()` therefore wrote `m["k"] = c` back with the
+PRE-call value (the map kept the stale slot; `bump` printed `11 10`
+instead of `11 11`), and every mutation performed before a failing `?`
+was dropped on the floor (printed `10` instead of `42`). The flush now
+runs BETWEEN operand evaluation (materialised into temps: Ident, FnLit
+and Lit pass through untouched) and the `return` itself, and
+`propagate_error` / the E11 handler flush before their early returns.
+With no live loans the emission is byte-identical, so no golden output
+moved.
+
+| program | verdict | rule | diagnostic | rationale |
+|---|---|---|---|---|
+| slot-loan-return-operand-flush | ACCEPT | - | - | `return c.next()` mutates through the loan while its operands are evaluated; `update_then_try` pins the same store-back on the `?` propagate exit. `EXPECTED-OUTPUT: bump: 11 11 try: 42` locks both runtime results; Tier-0 (map/struct/ctrl/error propagation), `--deny-managed` clean |
+
+The fix lives in `compiler/crates/hy-emit/src/stmt.rs` (`emit_return`
+materialisation + `has_live_loans`, `propagate_error`, the E11 handler
+return), pinned by `hy-emit/tests/loan_terminator.rs` (2 tests: eval <
+store-back < return, and store-back < propagate-error return) and by
+this fixture.
+
+Reproduction (branch tree, rustc 1.99.0 / go1.26.9 + mingw-w64 gcc):
+`python3 tools/corpus_harness.py` reports **127/127 verdict agreement,
+tripwire not fired**; `python3 tools/differential_loop.py` reports
+**accept-side 41/41 (build+run, stdout matched), reject-side 86/86**.
+
+With this registration the corpus is **128 programs: ACCEPT 40 -
+ACCEPT-MANAGED 2 - REJECT 86** - main's 126 plus this one.
