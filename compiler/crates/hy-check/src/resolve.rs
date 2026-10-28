@@ -265,6 +265,7 @@ impl<'a> Scan<'a> {
             Stmt::Defer { call, .. } => self.run_expr(call),
             Stmt::Break { .. } | Stmt::Continue { .. } => {}
             Stmt::Block { block, .. } => self.run_block(block),
+            Stmt::TaskBlock { body, .. } | Stmt::Auto { body, .. } => self.run_block(body),
             Stmt::Select { arms, .. } => {
                 for arm in arms {
                     match &arm.kind {

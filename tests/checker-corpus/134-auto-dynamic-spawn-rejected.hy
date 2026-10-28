@@ -5,8 +5,9 @@
 // be rejected. The task set must be statically known at compile time.
 //
 // ---- Expected verdict ----
-// EXPECTED-VERDICT: REJECT
-//   Error: HYB-E3013 — task block inside a loop.
+// EXPECTED-VERDICT: REJECT AUTO-SPAWN
+// EXPECTED-DIAGNOSTIC: HYB-E3203
+//   Error: HYB-E3203 — task block inside a loop.
 // ============================================================================
 
 fn main() {

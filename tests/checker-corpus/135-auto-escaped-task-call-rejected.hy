@@ -7,8 +7,9 @@
 // allowed inside auto scope.
 //
 // ---- Expected verdict ----
-// EXPECTED-VERDICT: REJECT
-//   Error: HYB-E3014 — plain task call inside auto scope.
+// EXPECTED-VERDICT: REJECT AUTO-TASK
+// EXPECTED-DIAGNOSTIC: HYB-E3204
+//   Error: HYB-E3204 — plain task call inside auto scope.
 // ============================================================================
 
 fn helper(x int) int {

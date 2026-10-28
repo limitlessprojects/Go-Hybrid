@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "updated": "2026-10-18",
+  "updated": "2026-10-29",
   "format": "HYB-Exxxx registry (SPEC-LANGUAGE.md §9.6; append-only, never renumbered, never reused)",
   "categories": {
     "E0": "parse / lexical",
     "E1": "resolve (names, imports, visibility)",
     "E2": "type errors",
-    "E3": "ownership & sendability (E30xx send/move/freeze, E31xx loans)",
+    "E3": "ownership & sendability (E30xx send/move/freeze, E31xx loans, E32xx auto scheduling)",
     "E4": "nil / zero-value safety",
     "E5": "exhaustiveness & patterns",
     "E6": "integer overflow / bounds",
@@ -488,6 +488,83 @@
       "example": "return &reg.counters[i]   // reject: HYB-E3104 — loans never escape functions",
       "rule": "O2",
       "tier0_rule_id": "LOAN-ESCAPE"
+    },
+    {
+      "code": "HYB-E3201",
+      "name": "auto-blocking-receive",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "blocking receive inside an auto scope",
+      "summary": "An `auto { ... }` scope is a closed fork-join region: every task must be an inline block whose effects the scheduler can see statically. A channel receive (`<-ch`) can block indefinitely, so a layer that contains one may never reach its join — the scheduler cannot prove progress.",
+      "fixits": [
+        "move the receive outside the `auto` block",
+        "have the task send on a buffered channel and receive after the auto block joined",
+        "if the blocking call is required, use plain `task` spawns instead of `auto`"
+      ],
+      "example": "auto { task { result = <-ch } }   // reject: HYB-E3201 — blocking receive in auto scope",
+      "rule": "C2a",
+      "tier0_rule_id": "AUTO-RECV"
+    },
+    {
+      "code": "HYB-E3202",
+      "name": "auto-blocking-select",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "select statement inside an auto scope",
+      "summary": "A `select` with no ready clause blocks just like a bare receive. The auto scheduler needs every task to finish so the layer can join; an unresolved `select` can deadlock the region.",
+      "fixits": [
+        "move the `select` outside the `auto` block",
+        "give the `select` a `default` clause and run it outside the auto scope"
+      ],
+      "example": "auto { task { select { case v := <-ch: use(v) } } }   // reject: HYB-E3202",
+      "rule": "C2a",
+      "tier0_rule_id": "AUTO-SELECT"
+    },
+    {
+      "code": "HYB-E3203",
+      "name": "auto-dynamic-spawn",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "task block inside a loop within an auto scope",
+      "summary": "The auto scheduler collects a fixed set of inline task blocks at compile time and schedulers them into layers. A task block inside a loop spawns a number of tasks known only at runtime, so no static layer schedule exists.",
+      "fixits": [
+        "unroll the loop into explicit inline `task { ... }` blocks",
+        "keep the loop outside the `auto` block and use plain `task` spawns"
+      ],
+      "example": "auto { for i in 0..4 { task { work(i) } } }   // reject: HYB-E3203 — dynamic spawn",
+      "rule": "C2a",
+      "tier0_rule_id": "AUTO-SPAWN"
+    },
+    {
+      "code": "HYB-E3204",
+      "name": "auto-escaping-task-call",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "plain task call inside an auto scope",
+      "summary": "Only inline `task { ... }` blocks may appear in an `auto` scope. A plain `task fn(...)` call invokes a callee whose read/write effects the scheduler cannot analyze, so the task might touch state that another task in the same layer also mutates.",
+      "fixits": [
+        "inline the callee body as a `task { ... }` block",
+        "call the function sequentially outside the `auto` block",
+        "use a plain `task` spawn (outside `auto`) when concurrency is manual"
+      ],
+      "example": "auto { task helper() }   // reject: HYB-E3204 — only inline task blocks are analyzable",
+      "rule": "C2a",
+      "tier0_rule_id": "AUTO-TASK"
+    },
+    {
+      "code": "HYB-E3205",
+      "name": "auto-escaped-reference",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "auto task state escapes the auto scope",
+      "summary": "An `auto` scope must keep every task’s effects inside the region: writing a variable that outlives the region (or handing a task-local reference to the enclosing goroutine) breaks the layered schedule, because the escape can be observed before the layer joins.",
+      "fixits": [
+        "write the value to a variable declared inside the `auto` block and copy it out after the join",
+        "pass data between tasks through channels instead of shared mutable state"
+      ],
+      "example": "x = compute()   // inside task: reject: HYB-E3205 — state escapes the auto scope",
+      "rule": "C2a",
+      "tier0_rule_id": "AUTO-ESCAPE"
     },
     {
       "code": "HYB-E4001",

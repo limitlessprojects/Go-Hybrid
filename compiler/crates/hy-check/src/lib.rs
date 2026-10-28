@@ -878,7 +878,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
             Stmt::TaskBlock { body, span } => {
                 // For now: record that we saw a task block. The full
                 // scheduling pass runs after the flat walk completes.
-                // TODO: check that we are inside an auto block (HYB-E3011)
+                // TODO: check that we are inside an auto block (HYB-E3204)
                 let _ = (body, span);
             }
 
@@ -893,11 +893,11 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 let violations = auto_schedule::check_auto_safety(body);
                 for v in violations {
                     let code = match v.kind {
-                        auto_schedule::SafetyViolationKind::BlockingReceive => "HYB-E3011",
-                        auto_schedule::SafetyViolationKind::BlockingSelect => "HYB-E3012",
-                        auto_schedule::SafetyViolationKind::DynamicSpawn => "HYB-E3013",
-                        auto_schedule::SafetyViolationKind::EscapedTaskCall => "HYB-E3014",
-                        auto_schedule::SafetyViolationKind::EscapedReference => "HYB-E3015",
+                        auto_schedule::SafetyViolationKind::BlockingReceive => "HYB-E3201",
+                        auto_schedule::SafetyViolationKind::BlockingSelect => "HYB-E3202",
+                        auto_schedule::SafetyViolationKind::DynamicSpawn => "HYB-E3203",
+                        auto_schedule::SafetyViolationKind::EscapedTaskCall => "HYB-E3204",
+                        auto_schedule::SafetyViolationKind::EscapedReference => "HYB-E3205",
                     };
                     ck.diags.push(
                         Diagnostic::error(

@@ -16,7 +16,7 @@
 
 use std::collections::HashSet;
 
-use hy_syntax::{Block, Expr, Place, Stmt};
+use hy_syntax::{Block, Expr, InterpPart, Stmt};
 
 /// The read/write effect summary of a single task.
 #[derive(Debug, Clone, Default)]
@@ -114,25 +114,28 @@ fn analyze_stmt(stmt: &Stmt, effect: &mut TaskEffect) {
                 analyze_stmt(init, effect);
             }
             analyze_expr(cond, effect);
-            analyze_block(then, effect);
+            merge_block(then, effect);
             if let Some(otherwise) = otherwise {
                 analyze_stmt(otherwise, effect);
             }
         }
         Stmt::For { body, .. } => {
             // Conservative: loops read and write everything inside
-            analyze_block(body, effect);
+            merge_block(body, effect);
         }
         Stmt::Block { block, .. } => {
-            analyze_block(block, effect);
+            merge_block(block, effect);
         }
         Stmt::TaskBlock { body, .. } => {
             // Nested task blocks: their effects are nested, not collected here
             // (auto scheduling is one level deep; nested tasks are their own scope)
-            analyze_block(body, effect);
+            merge_block(body, effect);
+        }
+        Stmt::Auto { body, .. } => {
+            merge_block(body, effect);
         }
         Stmt::Managed { body, .. } => {
-            analyze_block(body, effect);
+            merge_block(body, effect);
         }
         // Other statements (break, continue, defer, match, select, ...)
         // are conservative: we don't deeply analyze them.
@@ -141,7 +144,7 @@ fn analyze_stmt(stmt: &Stmt, effect: &mut TaskEffect) {
 }
 
 /// Merge a block's effects into an existing effect (for nested blocks).
-fn analyze_block(block: &Block, effect: &mut TaskEffect) {
+fn merge_block(block: &Block, effect: &mut TaskEffect) {
     for stmt in &block.stmts {
         analyze_stmt(stmt, effect);
     }
@@ -150,12 +153,8 @@ fn analyze_block(block: &Block, effect: &mut TaskEffect) {
 /// Analyze an expression, updating the effect sets.
 fn analyze_expr(expr: &Expr, effect: &mut TaskEffect) {
     match expr {
-        Expr::Ident(name, _) => {
+        Expr::Ident { name, .. } => {
             effect.read(name);
-        }
-        Expr::Place(place, _) => {
-            let root = place.root();
-            effect.read(root);
         }
         Expr::Call { callee, args, .. } => {
             analyze_expr(callee, effect);
@@ -166,34 +165,47 @@ fn analyze_expr(expr: &Expr, effect: &mut TaskEffect) {
         Expr::Unary { op: _, operand, .. } => {
             analyze_expr(operand, effect);
         }
-        Expr::Binary { left, right, .. } => {
-            analyze_expr(left, effect);
-            analyze_expr(right, effect);
+        Expr::Binary { lhs, rhs, .. } => {
+            analyze_expr(lhs, effect);
+            analyze_expr(rhs, effect);
         }
-        Expr::Lit(_, _) => {
+        Expr::Lit { .. } => {
             // literals have no variable effects
         }
         Expr::Interp { parts, .. } => {
             for part in parts {
-                analyze_expr(part, effect);
+                if let InterpPart::Expr(inner) = part {
+                    analyze_expr(inner, effect);
+                }
             }
         }
         Expr::Index { base, index, .. } => {
             analyze_expr(base, effect);
             analyze_expr(index, effect);
         }
+        Expr::Slice { base, lo, hi, .. } => {
+            analyze_expr(base, effect);
+            if let Some(lo) = lo {
+                analyze_expr(lo, effect);
+            }
+            if let Some(hi) = hi {
+                analyze_expr(hi, effect);
+            }
+        }
         Expr::Field { base, name: _, .. } => {
             analyze_expr(base, effect);
         }
-        Expr::AddrOf(place, _) => {
-            let root = place.root();
-            effect.read(root);
+        Expr::AddrOf { operand, .. } => {
+            analyze_expr(operand, effect);
         }
-        Expr::Try(expr, _) => {
-            analyze_expr(expr, effect);
+        Expr::Try { operand, .. } => {
+            analyze_expr(operand, effect);
         }
-        Expr::Move(expr, _) => {
-            analyze_expr(expr, effect);
+        Expr::Move { operand, .. } => {
+            analyze_expr(operand, effect);
+        }
+        Expr::Paren { inner, .. } => {
+            analyze_expr(inner, effect);
         }
         // Other expressions: conservative, no effect recorded.
         _ => {}
@@ -311,11 +323,45 @@ fn check_stmt_safety(stmt: &Stmt, violations: &mut Vec<SafetyViolation>, loop_de
         Stmt::Block { block, .. } => {
             check_block_safety(block, violations, loop_depth);
         }
-        Stmt::If { then, otherwise, .. } => {
+        Stmt::If { init, cond, then, otherwise, .. } => {
+            if let Some(init) = init {
+                check_stmt_safety(init, violations, loop_depth);
+            }
+            check_expr_safety(cond, violations);
             check_block_safety(then, violations, loop_depth);
             if let Some(otherwise) = otherwise {
                 check_stmt_safety(otherwise, violations, loop_depth);
             }
+        }
+        Stmt::Local(local) => {
+            for value in &local.values {
+                check_expr_safety(value, violations);
+            }
+        }
+        Stmt::Assign { values, .. } => {
+            for value in values {
+                check_expr_safety(value, violations);
+            }
+        }
+        Stmt::Return { values, .. } => {
+            for value in values {
+                check_expr_safety(value, violations);
+            }
+        }
+        Stmt::Managed { body, .. } | Stmt::Auto { body, .. } => {
+            check_block_safety(body, violations, loop_depth);
+        }
+        Stmt::Match { subject, arms, .. } => {
+            check_expr_safety(subject, violations);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    check_expr_safety(guard, violations);
+                }
+                check_block_safety(&arm.body, violations, loop_depth);
+            }
+        }
+        Stmt::Defer { call, .. } => {
+            check_expr_safety(call, violations);
         }
         Stmt::Select { .. } => {
             violations.push(SafetyViolation {
@@ -351,9 +397,9 @@ fn check_expr_safety(expr: &Expr, violations: &mut Vec<SafetyViolation>) {
         Expr::Unary { operand, .. } => {
             check_expr_safety(operand, violations);
         }
-        Expr::Binary { left, right, .. } => {
-            check_expr_safety(left, violations);
-            check_expr_safety(right, violations);
+        Expr::Binary { lhs, rhs, .. } => {
+            check_expr_safety(lhs, violations);
+            check_expr_safety(rhs, violations);
         }
         Expr::Index { base, index, .. } => {
             check_expr_safety(base, violations);
@@ -362,11 +408,30 @@ fn check_expr_safety(expr: &Expr, violations: &mut Vec<SafetyViolation>) {
         Expr::Field { base, .. } => {
             check_expr_safety(base, violations);
         }
-        Expr::Try(expr, _) => {
-            check_expr_safety(expr, violations);
+        Expr::Try { operand, .. } => {
+            check_expr_safety(operand, violations);
         }
-        Expr::Move(expr, _) => {
-            check_expr_safety(expr, violations);
+        Expr::Move { operand, .. } => {
+            check_expr_safety(operand, violations);
+        }
+        Expr::Paren { inner, .. } => {
+            check_expr_safety(inner, violations);
+        }
+        Expr::Interp { parts, .. } => {
+            for part in parts {
+                if let InterpPart::Expr(inner) = part {
+                    check_expr_safety(inner, violations);
+                }
+            }
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            check_expr_safety(base, violations);
+            if let Some(lo) = lo {
+                check_expr_safety(lo, violations);
+            }
+            if let Some(hi) = hi {
+                check_expr_safety(hi, violations);
+            }
         }
         _ => {}
     }

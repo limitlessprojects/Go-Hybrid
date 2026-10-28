@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 
-use hy_syntax::{Block, Expr, Place, Stmt};
+use hy_syntax::{Block, Expr, InterpPart, Stmt};
 
 /// The read/write effect summary of a single task.
 #[derive(Debug, Clone, Default)]
@@ -97,6 +97,9 @@ fn analyze_stmt(stmt: &Stmt, effect: &mut TaskEffect) {
         Stmt::TaskBlock { body, .. } => {
             analyze_block_stmts(&body.stmts, effect);
         }
+        Stmt::Auto { body, .. } => {
+            analyze_block_stmts(&body.stmts, effect);
+        }
         Stmt::Managed { body, .. } => {
             analyze_block_stmts(&body.stmts, effect);
         }
@@ -112,11 +115,8 @@ fn analyze_block_stmts(stmts: &[Stmt], effect: &mut TaskEffect) {
 
 fn analyze_expr(expr: &Expr, effect: &mut TaskEffect) {
     match expr {
-        Expr::Ident(name, _) => {
+        Expr::Ident { name, .. } => {
             effect.read(name);
-        }
-        Expr::Place(place, _) => {
-            effect.read(place.root());
         }
         Expr::Call { callee, args, .. } => {
             analyze_expr(callee, effect);
@@ -127,25 +127,44 @@ fn analyze_expr(expr: &Expr, effect: &mut TaskEffect) {
         Expr::Unary { operand, .. } => {
             analyze_expr(operand, effect);
         }
-        Expr::Binary { left, right, .. } => {
-            analyze_expr(left, effect);
-            analyze_expr(right, effect);
+        Expr::Binary { lhs, rhs, .. } => {
+            analyze_expr(lhs, effect);
+            analyze_expr(rhs, effect);
+        }
+        Expr::Interp { parts, .. } => {
+            for part in parts {
+                if let InterpPart::Expr(inner) = part {
+                    analyze_expr(inner, effect);
+                }
+            }
         }
         Expr::Index { base, index, .. } => {
             analyze_expr(base, effect);
             analyze_expr(index, effect);
         }
+        Expr::Slice { base, lo, hi, .. } => {
+            analyze_expr(base, effect);
+            if let Some(lo) = lo {
+                analyze_expr(lo, effect);
+            }
+            if let Some(hi) = hi {
+                analyze_expr(hi, effect);
+            }
+        }
         Expr::Field { base, .. } => {
             analyze_expr(base, effect);
         }
-        Expr::AddrOf(place, _) => {
-            effect.read(place.root());
+        Expr::AddrOf { operand, .. } => {
+            analyze_expr(operand, effect);
         }
-        Expr::Try(expr, _) => {
-            analyze_expr(expr, effect);
+        Expr::Try { operand, .. } => {
+            analyze_expr(operand, effect);
         }
-        Expr::Move(expr, _) => {
-            analyze_expr(expr, effect);
+        Expr::Move { operand, .. } => {
+            analyze_expr(operand, effect);
+        }
+        Expr::Paren { inner, .. } => {
+            analyze_expr(inner, effect);
         }
         _ => {}
     }

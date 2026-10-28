@@ -218,6 +218,7 @@ fn stmt_reads(s: &Stmt, target: &str) -> bool {
             expr_reads(callee, target) || args.iter().any(|a| expr_reads(&a.value, target))
         }
         Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => block_reads(body, target),
+        Stmt::TaskBlock { body, .. } | Stmt::Auto { body, .. } => block_reads(body, target),
         Stmt::Match { subject, arms, .. } => {
             if expr_reads(subject, target) {
                 return true;

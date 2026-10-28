@@ -113,8 +113,9 @@ impl Emitter {
                 let result = schedule_block(body);
                 let n_tasks = result.tasks.len();
 
-                // Ensure sync is imported for WaitGroup
-                if n_tasks > 0 {
+                // WaitGroup is only emitted when a layer actually runs more than
+                // one task in parallel; importing sync otherwise is a Go build error.
+                if result.layers.iter().any(|layer| layer.len() > 1) {
                     self.use_package("sync");
                 }
 
@@ -3026,6 +3027,9 @@ impl Emitter {
                         .any(|a| Self::expr_mentions_ident(&a.value, target))
             }
             Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+                Self::block_mentions_ident(body, target)
+            }
+            Stmt::TaskBlock { body, .. } | Stmt::Auto { body, .. } => {
                 Self::block_mentions_ident(body, target)
             }
             Stmt::Break { .. } | Stmt::Continue { .. } => false,

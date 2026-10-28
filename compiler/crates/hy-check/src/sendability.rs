@@ -1694,7 +1694,10 @@ impl<'a> Checker<'a> {
                     self.walk_expr_chan_dir(&a.value, env);
                 }
             }
-            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+            Stmt::Managed { body, .. }
+            | Stmt::Block { block: body, .. }
+            | Stmt::TaskBlock { body, .. }
+            | Stmt::Auto { body, .. } => {
                 env.push();
                 for s in &body.stmts {
                     self.walk_stmt_chan_dir(s, env);

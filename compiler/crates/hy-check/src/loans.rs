@@ -7616,6 +7616,9 @@ fn collect_capture_idents_stmt(
             }
         }
         hy_syntax::Stmt::Managed { body, .. } => collect_capture_idents_block(body, bound, out),
+        hy_syntax::Stmt::TaskBlock { body, .. } | hy_syntax::Stmt::Auto { body, .. } => {
+            collect_capture_idents_block(body, bound, out)
+        }
         hy_syntax::Stmt::Match { subject, arms, .. } => {
             collect_capture_idents_expr(subject, bound, out);
             for arm in arms {

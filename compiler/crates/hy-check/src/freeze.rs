@@ -843,6 +843,8 @@ impl<'a> Checker<'a> {
                 flow.select_break_reach.unwrap_or(flow.loop_break_reach)
             }
             hy_syntax::Stmt::Block { block, .. }
+            | hy_syntax::Stmt::TaskBlock { body: block, .. }
+            | hy_syntax::Stmt::Auto { body: block, .. }
             | hy_syntax::Stmt::Managed { body: block, .. } => {
                 Self::block_can_reach_backedge(block, after_reach, flow)
             }
@@ -933,6 +935,8 @@ impl<'a> Checker<'a> {
                 Some(flow.select_break_reach.unwrap_or(flow.loop_break_reach))
             }
             hy_syntax::Stmt::Block { block, .. }
+            | hy_syntax::Stmt::TaskBlock { body: block, .. }
+            | hy_syntax::Stmt::Auto { body: block, .. }
             | hy_syntax::Stmt::Managed { body: block, .. } => {
                 Self::block_move_can_reach_backedge(block, move_span, after_reach, flow)
             }

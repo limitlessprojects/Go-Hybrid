@@ -10,6 +10,9 @@
 //   Task 3: reads c, writes d ─ layer 2 (conflicts with task 2)
 //
 // Expected layers: [0, 1] → [2] → [3]
+//
+// ---- Expected verdict ----
+// EXPECTED-VERDICT: ACCEPT
 // ============================================================================
 
 fn main() {

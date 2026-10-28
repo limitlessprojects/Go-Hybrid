@@ -1076,6 +1076,9 @@ impl Emitter {
             Stmt::Block { block, .. } | Stmt::Managed { body: block, .. } => {
                 Self::collect_comparable_in_block(block, param_names, out);
             }
+            Stmt::TaskBlock { body, .. } | Stmt::Auto { body, .. } => {
+                Self::collect_comparable_in_block(body, param_names, out);
+            }
             Stmt::Task { callee, args, .. } => {
                 Self::collect_comparable_in_expr(callee, param_names, out);
                 for a in args {
@@ -1652,6 +1655,7 @@ impl Emitter {
             Stmt::Defer { call, .. } => self.expr_has_try(call),
             Stmt::Block { block, .. } => self.block_has_try(block),
             Stmt::Managed { body, .. } => self.block_has_try(body),
+            Stmt::TaskBlock { body, .. } | Stmt::Auto { body, .. } => self.block_has_try(body),
             Stmt::Task { callee, args, .. } => {
                 self.expr_has_try(callee) || args.iter().any(|a| self.expr_has_try(&a.value))
             }

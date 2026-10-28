@@ -302,6 +302,8 @@ impl<'a> Checker<'a> {
             Stmt::Break { .. }
             | Stmt::Continue { .. }
             | Stmt::Block { .. }
+            | Stmt::TaskBlock { .. }
+            | Stmt::Auto { .. }
             | Stmt::Managed { .. } => {}
         }
     }

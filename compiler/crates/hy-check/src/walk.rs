@@ -670,6 +670,7 @@ pub(crate) fn own_fnlits<'a>(stmt: &'a Stmt, out: &mut Vec<&'a Expr>) {
         }
         Stmt::Defer { call, .. } => expr_fnlits(call, out),
         Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Block { .. } => {}
+        Stmt::TaskBlock { .. } | Stmt::Auto { .. } => {}
         Stmt::Select { arms, .. } => {
             for arm in arms {
                 match &arm.kind {

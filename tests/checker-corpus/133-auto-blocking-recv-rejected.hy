@@ -6,8 +6,9 @@
 // would deadlock the parallel layer.
 //
 // ---- Expected verdict ----
-// EXPECTED-VERDICT: REJECT
-//   Error: HYB-E3011 — channel receive inside auto scope.
+// EXPECTED-VERDICT: REJECT AUTO-RECV
+// EXPECTED-DIAGNOSTIC: HYB-E3201
+//   Error: HYB-E3201 — channel receive inside auto scope.
 // ============================================================================
 
 fn main() {

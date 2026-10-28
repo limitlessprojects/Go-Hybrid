@@ -1392,6 +1392,7 @@ fn collect_stmt<'a>(
         Stmt::Defer { call, .. } => collect_expr(call, out),
         Stmt::Break { .. } | Stmt::Continue { .. } => {}
         Stmt::Block { block, .. } => collect_block(block, out),
+        Stmt::TaskBlock { body, .. } | Stmt::Auto { body, .. } => collect_block(body, out),
         Stmt::Select { arms, .. } => {
             for arm in arms {
                 match &arm.kind {
