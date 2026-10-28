@@ -86,14 +86,15 @@ fn main() {
 fn match_guard_some_binding_via_type_alias_subject_rejected() {
     assert_single_e2002(
         r#"
-type PairFn = fn() (int, int)
-type OptPairFn = ?PairFn
+type pair_fn = fn() int int
+type opt_pair_fn = option[pair_fn]
 fn pair() (int, int) { return 1, 2 }
-fn make_opt() OptPairFn { return some(pair) }
+fn make_opt() opt_pair_fn { return some(pair) }
 fn main() {
     opt := make_opt()
     match opt {
         some(f) if f() == 1: {}
+        some(_): {}
         none: {}
     }
 }
@@ -143,9 +144,11 @@ fn main() {
 fn closure_if_init_multi_binding_shadows_single_value_fn_rejected() {
     assert_single_e2002(
         r#"
+type single_fn = fn() int
+type pair_fn = fn() int int
 fn single() int { return 1 }
 fn pair() (int, int) { return 1, 2 }
-fn both_fns() (fn() int, fn() (int, int)) { return single, pair }
+fn both_fns() (single_fn, pair_fn) { return single, pair }
 fn main() {
     f := single
     cb := fn() {
@@ -195,6 +198,7 @@ fn main() {
     opt := some(single)
     match opt {
         some(f) if f() == 1: {}
+        some(_): {}
         none: {}
     }
     cb := fn() {
