@@ -256,5 +256,77 @@ class CliTests(unittest.TestCase):
             self.assertIn("conflict marker", res.stderr.lower())
 
 
+class NonUtf8EvidenceTests(unittest.TestCase):
+    """An unrelated undecodable byte must not hide ASCII structural evidence."""
+
+    def _bytes_tree(self, relative, content):
+        tmp = tempfile.TemporaryDirectory(prefix="marker-bytes-")
+        root = Path(tmp.name)
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        self.addCleanup(tmp.cleanup)
+        return root
+
+    def test_invalid_byte_before_conflict_block_still_reports_it(self):
+        root = self._bytes_tree(
+            "fixture.go",
+            b"// unrelated bad byte: \xff\n"
+            b"<<<<<<< HEAD\nleft\n=======\nright\n>>>>>>> other\n",
+        )
+        hits = list(MOD.scan(str(root)))
+        self.assertEqual(len(hits), 1)
+        self.assertEqual((hits[0][0], hits[0][1], hits[0][3]), ("fixture.go", 2, "marker"))
+
+    def test_invalid_byte_after_conflict_block_still_reports_it(self):
+        # Decoding aborts at the bad byte; a block already streamed before it
+        # must not be discarded with the file.
+        root = self._bytes_tree(
+            "fixture.go",
+            b"<<<<<<< HEAD\nleft\n=======\nright\n>>>>>>> other\n"
+            b"// unrelated bad byte: \xff\n",
+        )
+        hits = list(MOD.scan(str(root)))
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0][1], 1)
+
+    def test_invalid_byte_before_spilled_workflow_line_still_reports_it(self):
+        root = self._bytes_tree(
+            ".github/workflows/ci.yml",
+            b"name: ci\non: push\njobs:\n  quick:\n    steps:\n"
+            b"      - run: |\n          set -e\n"
+            b"# unrelated bad byte: \xff\n"
+            b"python3 -m py_compile tools/job.py\n",
+        )
+        hits = [h for h in MOD.scan(str(root)) if h[3] == "workflow"]
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0][1], 9)
+
+    def test_invalid_byte_alone_is_not_reported(self):
+        # Scope control: this stays a structural scan, not a UTF-8 validator.
+        root = self._bytes_tree("notes.md", b"plain prose with a stray byte \xff\n")
+        self.assertEqual(list(MOD.scan(str(root))), [])
+
+    def test_invalid_byte_keeps_unknown_extension_skipped(self):
+        root = self._bytes_tree(
+            "blob.xyz",
+            b"\xff\n<<<<<<< HEAD\nleft\n=======\nright\n>>>>>>> other\n",
+        )
+        self.assertEqual(list(MOD.scan(str(root))), [])
+
+    def test_cli_names_the_block_despite_invalid_byte(self):
+        root = self._bytes_tree(
+            "fixture.go",
+            b"// unrelated bad byte: \xff\n"
+            b"<<<<<<< HEAD\nleft\n=======\nright\n>>>>>>> other\n",
+        )
+        res = subprocess.run(
+            [sys.executable, str(SCRIPT), "--root", str(root)],
+            capture_output=True, text=True, timeout=20,
+        )
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertIn("fixture.go:2", res.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
