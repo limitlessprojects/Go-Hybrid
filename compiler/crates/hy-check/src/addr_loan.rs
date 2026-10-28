@@ -25,17 +25,23 @@ use hy_syntax::{
     Stmt,
 };
 
-fn is_slot_loan_expr(e: &Expr) -> bool {
-    if walk::addr_of_index_base_path(e).is_some() {
-        return true;
-    }
-    let Some(inner) = as_addr_of(unwrap_parens(e)) else {
-        return false;
-    };
-    matches!(unwrap_parens(inner), Expr::Index { .. })
-}
-
 impl<'a> Checker<'a> {
+    fn is_map_slot_loan_expr(&self, st: &FnState, e: &Expr) -> bool {
+        let Some(inner) = as_addr_of(unwrap_parens(e)) else {
+            return false;
+        };
+        match unwrap_parens(inner) {
+            Expr::Index { base, .. } => {
+                let shape = self.shape_of_expr(st, base);
+                if matches!(shape, TypeShape::Slice(..) | TypeShape::Array(..)) {
+                    return false;
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// After `process_local`: flag every name bound to `&m[k]` (including
     /// parenthesized `(&m[k])` and `&(m[k])`). Only runs for define/let bindings
     /// without explicit type ascriptions where hy-emit actually lowers the loan.
@@ -47,7 +53,7 @@ impl<'a> Checker<'a> {
             return;
         }
         for (name, val) in l.names.iter().zip(l.values.iter()) {
-            if is_slot_loan_expr(val) {
+            if self.is_map_slot_loan_expr(st, val) {
                 if let Some(b) = st.env_lookup_mut(name) {
                     b.slot_loan = true;
                 }
@@ -75,7 +81,7 @@ impl<'a> Checker<'a> {
         }
         for (t, v) in targets.iter().zip(values.iter()) {
             if let PlaceKind::Ident(name) = &t.kind {
-                let is_loan = is_slot_loan_expr(v);
+                let is_loan = self.is_map_slot_loan_expr(st, v);
                 if let Some(b) = st.env_lookup_mut(name) {
                     b.slot_loan |= is_loan;
                 }
@@ -176,6 +182,42 @@ impl<'a> Checker<'a> {
             }
             self.emit_addr_of_loan_diag(&u.name, u.span);
         }
+    }
+
+    /// T24 / O8: moving an active map-slot loan (`move slot`, `task worker(move slot)`, `ch <- move slot`)
+    /// escapes the function-local borrow or races with store-back (HYB-E3104).
+    pub(crate) fn check_move_of_loan(&mut self, st: &FnState, uses: &[Use]) {
+        for u in uses.iter().filter(|u| u.via_move) {
+            let Some(b) = self.lookup_binding(st, &u.name) else {
+                continue;
+            };
+            if !b.slot_loan {
+                continue;
+            }
+            self.emit_move_of_loan_diag(&u.name, u.span);
+        }
+    }
+
+    fn emit_move_of_loan_diag(&mut self, name: &str, span: Span) {
+        let msg = format!(
+            "`move {}` moves a map-slot loan: a loan is a function-local borrow (O2, O8, T24) and cannot be moved",
+            name
+        );
+        let mut d = Diagnostic::error("HYB-E3104", self.path.clone(), span, msg).with_notes(vec![
+            format!(
+                "`{}` is an active map-slot loan that must be stored back into its map slot in this function",
+                name
+            ),
+            "moving it transfers the local copy to another owner or concurrent task while the parent executes the store-back, causing a data race".to_string(),
+        ]);
+        d.fixits = vec![FixIt {
+            description: format!(
+                "pass or send a value copy instead of moving `{}`",
+                name
+            ),
+            replacement: None,
+        }];
+        self.diags.push(d);
     }
 
     /// T24 extension: reject address-of on field/index projections rooted at a

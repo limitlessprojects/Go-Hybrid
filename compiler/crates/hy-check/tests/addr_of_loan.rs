@@ -96,3 +96,94 @@ fn addr_of_plain_local_is_not_affected() {
         r.diagnostics
     );
 }
+
+#[test]
+fn issue_2066_move_slot_loan_in_task_arg_is_rejected_e3104() {
+    let src = r#"
+struct item {
+    n int
+}
+
+fn worker(p *item, done chan int) {
+    p.n = 10
+    done <- 1
+}
+
+fn main() {
+    m := map[string]item{"a": item{n: 1}}
+    done := make(chan int, 1)
+    var slot *item
+    slot = &m["a"]
+    task worker(move slot, done)
+    <-done
+}
+"#;
+    let r = check(src);
+    assert_eq!(codes(&r), vec!["HYB-E3104".to_string()]);
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn issue_2066_move_slot_loan_in_channel_send_is_rejected_e3104() {
+    let src = r#"
+struct item {
+    n int
+}
+
+fn main() {
+    m := map[string]item{"a": item{n: 1}}
+    ch := make(chan *item, 1)
+    slot := &m["a"]
+    ch <- move slot
+}
+"#;
+    let r = check(src);
+    assert_eq!(codes(&r), vec!["HYB-E3104".to_string()]);
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn issue_2066_move_slot_loan_in_select_send_is_rejected_e3104() {
+    let src = r#"
+struct item {
+    n int
+}
+
+fn main() {
+    m := map[string]item{"a": item{n: 1}}
+    ch := make(chan *item, 1)
+    slot := &m["a"]
+    select {
+    ch <- move slot:
+        fmt.println("sent")
+    default:
+        fmt.println("full")
+    }
+}
+"#;
+    let r = check(src);
+    assert_eq!(codes(&r), vec!["HYB-E3104".to_string()]);
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn issue_2066_move_slot_loan_in_function_call_is_rejected_e3104() {
+    let src = r#"
+struct item {
+    n int
+}
+
+fn consume(p *item) {
+    p.n = 20
+}
+
+fn main() {
+    m := map[string]item{"a": item{n: 1}}
+    slot := &m["a"]
+    consume(move slot)
+}
+"#;
+    let r = check(src);
+    assert_eq!(codes(&r), vec!["HYB-E3104".to_string()]);
+    assert_eq!(r.verdict, Verdict::Reject);
+}

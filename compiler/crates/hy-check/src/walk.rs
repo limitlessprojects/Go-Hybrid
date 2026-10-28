@@ -311,9 +311,14 @@ pub(crate) fn own_uses_with_results(stmt: &Stmt, named_results: &[String], out: 
             }
         }
         Stmt::Expr { expr, .. } => expr_uses(expr, out),
-        Stmt::Send { chan, value, .. } => {
+        Stmt::Send {
+            chan,
+            value,
+            is_move,
+            ..
+        } => {
             expr_uses(chan, out);
-            expr_uses(value, out);
+            add_send_value_uses(value, *is_move, out);
         }
         Stmt::If { cond, .. } => expr_uses(cond, out),
         Stmt::For { kind, .. } => match kind {
@@ -375,9 +380,14 @@ pub(crate) fn own_uses_with_results(stmt: &Stmt, named_results: &[String], out: 
         Stmt::Select { arms, .. } => {
             for arm in arms {
                 match &arm.kind {
-                    SelectArmKind::Send { chan, value, .. } => {
+                    SelectArmKind::Send {
+                        chan,
+                        value,
+                        is_move,
+                        ..
+                    } => {
                         expr_uses(chan, out);
-                        expr_uses(value, out);
+                        add_send_value_uses(value, *is_move, out);
                     }
                     SelectArmKind::Recv { chan, .. } => expr_uses(chan, out),
                     SelectArmKind::Default => {}
@@ -402,6 +412,36 @@ fn place_uses(place: &Place, out: &mut Vec<Use>) {
         }
         PlaceKind::Field { base, .. } => place_uses(base, out),
         PlaceKind::AddrOf { base } => place_uses(base, out),
+    }
+}
+
+fn add_send_value_uses(value: &Expr, is_move: bool, out: &mut Vec<Use>) {
+    if is_move {
+        match crate::model::unwrap_parens(value) {
+            Expr::Ident { name, span } => out.push(Use {
+                name: name.clone(),
+                span: *span,
+                is_write: false,
+                via_move: true,
+                via_addr: false,
+            }),
+            Expr::Field { .. } => {
+                if let Some(root) = crate::model::unwrap_parens(value).root_ident() {
+                    out.push(Use {
+                        name: root.to_string(),
+                        span: value.span(),
+                        is_write: false,
+                        via_move: true,
+                        via_addr: false,
+                    });
+                } else {
+                    expr_uses(value, out);
+                }
+            }
+            _ => expr_uses(value, out),
+        }
+    } else {
+        expr_uses(value, out);
     }
 }
 

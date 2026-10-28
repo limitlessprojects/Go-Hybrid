@@ -529,6 +529,8 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         ck.check_uses(&st, &uses);
         // T24: no address-of on a map-slot loan (HYB-E3104).
         ck.check_addr_of_loan(&st, &uses);
+        // T24 / O8: no move of an active map-slot loan (HYB-E3104).
+        ck.check_move_of_loan(&st, &uses);
         // T24 + O8: a live slot loan cannot be re-bound to a general
         // pointer — the loan lowers to a copy + store-back (HYB-E3104).
         ck.check_slot_loan_rebind(&st, stmt);
