@@ -1712,10 +1712,20 @@ impl Emitter {
                 let c = self.emit_expr(cond, ATOM)?;
                 self.push(&format!("if !{} {{", c));
                 self.indent += 1;
+                if let Some(inherited) = self.branch_inherit.clone() {
+                    for (_, store) in inherited {
+                        self.push(&store);
+                    }
+                }
                 self.push("break");
                 self.indent -= 1;
                 self.push("}");
+                self.for_depth += 1;
+                let sentinel = label.clone().unwrap_or_default();
+                self.loan_frames.push(vec![(String::new(), sentinel)]);
                 self.emit_arm_stmts_with_loans(&body.stmts)?;
+                self.loan_frames.pop();
+                self.for_depth -= 1;
                 self.indent -= 1;
                 self.push("}");
                 if label.is_some() {

@@ -18,6 +18,10 @@ fn worker(m map[string]item, done chan bool) {
     }
     done <- true
 }
+
+fn ok() (bool, error) {
+    return true, nil
+}
 ";
 
 fn emit(main_body: &str) -> String {
@@ -252,5 +256,30 @@ fn if_without_a_boundary_keeps_the_single_store_back_after_it() {
     assert!(
         between(&go, "n.x = 1", "fmt.Println(len(m))").contains("}\n\tm[\"a\"] = n"),
         "the store-back stays after the `if`:\n{go}"
+    );
+}
+
+#[test]
+fn for_try_loop_sentinel_preserves_outer_loans_issue_2100() {
+    let go = emit(
+        "    m := map[string]item{\"a\": item{x: 0}}
+    done := make(chan bool, 1)
+    n := &m[\"a\"]
+    for ok()? {
+        break
+    }
+    n.x = 7
+    done <- true
+",
+    );
+    // Outer loan should only flush after n.x = 7, not inside the `for ok()?` loop before break
+    let loop_body = between(&go, "for {", "n.x = 7");
+    assert!(
+        !loop_body.contains("m[\"a\"] = n"),
+        "loop break in for cond()? must not prematurely flush outer loan:\n{go}"
+    );
+    assert!(
+        between(&go, "n.x = 7", "done <- true").contains("m[\"a\"] = n"),
+        "outer loan flushes after its last use:\n{go}"
     );
 }
