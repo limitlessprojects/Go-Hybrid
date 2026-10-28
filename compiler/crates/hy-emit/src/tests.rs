@@ -3032,3 +3032,57 @@ fn main() {}
     assert!(go6.contains("func read_url() int {"));
     assert!(go6.contains("func read_u_r_l() int {"));
 }
+
+#[test]
+fn foreign_struct_lit_fields_and_composite_const_shapes_issue_2096() {
+    let src = r#"
+struct holder {
+  hdr http.header
+}
+
+const global_srv = http.server{addr: ":8080"}
+const global_holder = holder{}
+
+fn main() {
+  const local_srv = http.server{addr: ":9090"}
+  const local_holder = holder{}
+  p := &holder{}
+  srvs := []*http.server{{addr: ":7070"}}
+
+  println(global_srv.addr)
+  println(local_srv.addr)
+  println(global_holder.hdr.get("Accept"))
+  println(local_holder.hdr.get("Accept"))
+  println(p.hdr.get("Accept"))
+  println(len(srvs))
+}
+"#;
+    let go = emit(src);
+    assert!(
+        go.contains(r#"var global_srv = http.Server{Addr: ":8080"}"#),
+        "expected exported Go field Addr in global_srv literal, got:\n{}",
+        go
+    );
+    assert!(
+        go.contains(r#"var local_srv = http.Server{Addr: ":9090"}"#),
+        "expected exported Go field Addr in local_srv literal, got:\n{}",
+        go
+    );
+    assert!(
+        go.contains(r#"srvs := []*http.Server{&http.Server{Addr: ":7070"}}"#),
+        "expected &http.Server{{Addr: \":7070\"}} in []*http.server elided literal, got:\n{}",
+        go
+    );
+    assert!(
+        go.contains("println(global_srv.Addr)") && go.contains("println(local_srv.Addr)"),
+        "expected global_srv.Addr and local_srv.Addr field resolution, got:\n{}",
+        go
+    );
+    assert!(
+        go.contains(r#"println(global_holder.hdr.Get("Accept"))"#)
+            && go.contains(r#"println(local_holder.hdr.Get("Accept"))"#)
+            && go.contains(r#"println(p.hdr.Get("Accept"))"#),
+        "expected Get(\"Accept\") method resolution on global_holder, local_holder, and p, got:\n{}",
+        go
+    );
+}

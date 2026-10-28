@@ -130,7 +130,7 @@ impl Emitter {
 
     /// Follow user type aliases (`type counts = map[string]int`) to the
     /// type they name; anything else is returned as written.
-    fn n5_resolve_alias(&self, ty: &TypeExpr) -> TypeExpr {
+    pub(crate) fn n5_resolve_alias(&self, ty: &TypeExpr) -> TypeExpr {
         let mut cur = ty.clone();
         for _ in 0..MAX_DEPTH {
             let next = match &cur {

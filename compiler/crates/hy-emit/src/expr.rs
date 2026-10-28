@@ -76,8 +76,14 @@ impl Emitter {
                 Expr::StructLit {
                     ty: None, fields, ..
                 } => {
-                    let head = self.type_text(exp);
-                    let body = self.struct_lit_body(exp, fields)?;
+                    let resolved = self.n5_resolve_alias(exp);
+                    let (head, body_ty) = match &resolved {
+                        TypeExpr::Pointer { to, .. } => {
+                            (format!("&{}", self.type_text(to)), to.as_ref())
+                        }
+                        _ => (self.type_text(exp), &resolved),
+                    };
+                    let body = self.struct_lit_body(body_ty, fields)?;
                     return Ok(format!("{}{{{}}}", head, body)); // atomic head
                 }
                 Expr::SliceLit {
@@ -495,7 +501,7 @@ impl Emitter {
         ty: &TypeExpr,
         fields: &[FieldInit],
     ) -> Result<String, EmitError> {
-        let body = self.field_inits(fields)?;
+        let body = self.field_inits(ty, fields)?;
         let extra = self.n5_missing_fields(ty, fields);
         if extra.is_empty() {
             return Ok(body);
@@ -508,11 +514,28 @@ impl Emitter {
         Ok(parts.join(", "))
     }
 
-    fn field_inits(&mut self, fields: &[FieldInit]) -> Result<String, EmitError> {
+    fn field_inits(&mut self, ty: &TypeExpr, fields: &[FieldInit]) -> Result<String, EmitError> {
+        let resolved = self.n5_resolve_alias(ty);
+        let base_name = crate::base_ty_name(&resolved);
+        let foreign_ty = base_name.as_deref().filter(|n| n.contains('.'));
+        let user_struct = base_name
+            .as_deref()
+            .filter(|n| !n.contains('.'))
+            .map(|n| n.split('[').next().unwrap_or(n));
         let mut parts = Vec::new();
         for f in fields {
-            let v = self.emit_expr(&f.value, 0)?;
-            parts.push(format!("{}: {}", f.name, v));
+            let field_ty = user_struct
+                .and_then(|s| self.n5_structs.get(s))
+                .and_then(|decls| decls.iter().find(|d| d.name == f.name).map(|d| d.ty.clone()));
+            let v = self.emit_expr_exp(&f.value, 0, field_ty.as_ref())?;
+            let field_name = match foreign_ty {
+                Some(ty_key) => match lookup_member(ty_key, &f.name) {
+                    Some(m) if m.kind == MemberKind::Field => m.go.to_string(),
+                    _ => to_go_name(&f.name),
+                },
+                None => f.name.clone(),
+            };
+            parts.push(format!("{}: {}", field_name, v));
         }
         Ok(parts.join(", "))
     }
