@@ -34,6 +34,8 @@ import subprocess
 import sys
 import tempfile
 
+from corpus_harness import agree_diagnostic, read_expected_diagnostic
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CORPUS = os.path.join(REPO_ROOT, "tests", "checker-corpus")
 DEFAULT_BIN = os.path.join(
@@ -95,8 +97,8 @@ def read_expected_output(path, expected):
     return match.group(1).strip()
 
 
-def checker_rejects(bin_path, hy_path, expected_rule):
-    """Require the first error to match the pre-registered rejection rule.
+def checker_rejects(bin_path, hy_path, expected_rule, expected_code=None):
+    """Require the first error to match its rule and optional exact code.
 
     False also covers harness faults — an unexecutable checker, a decode
     failure, or undecodable output — not only checker disagreement: the
@@ -162,11 +164,13 @@ def checker_rejects(bin_path, hy_path, expected_rule):
         )
     errors = [d for d in diags if d.get("severity") == "error"]
     first_rule = errors[0].get("tier0_rule") if errors else None
+    code_ok, code_detail = agree_diagnostic(expected_code, diags)
     return (
         summary.get("verdict") == "reject"
-        and first_rule is not None and first_rule == expected_rule,
+        and first_rule is not None and first_rule == expected_rule and code_ok,
         f"verdict={summary.get('verdict')} errors={len(errors)} "
-        f"first_rule={first_rule} expected_rule={expected_rule}",
+        f"first_rule={first_rule} expected_rule={expected_rule}"
+        + (f"; {code_detail}" if expected_code is not None else ""),
     )
 
 
@@ -276,13 +280,18 @@ def main():
     for path in files:
         expected = read_expected(path)
         expected_output = read_expected_output(path, expected)
+        try:
+            expected_code = read_expected_diagnostic(path, expected)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
         if expected is None:
             continue
         name = os.path.basename(path)
         verdict, rule, hazards = expected
         if verdict == "REJECT":
             reject_total += 1
-            ok, detail = checker_rejects(bin_path, path, rule)
+            ok, detail = checker_rejects(bin_path, path, rule, expected_code)
             if ok:
                 reject_pass += 1
                 print(f"PASS  {name} (reject {rule})")
