@@ -3032,3 +3032,49 @@ fn main() {}
     assert!(go6.contains("func read_url() int {"));
     assert!(go6.contains("func read_u_r_l() int {"));
 }
+
+#[test]
+fn for_while_try_pushes_loan_sentinel_and_flushes_branch_inherit_issue_2100() {
+    let go = emit(
+        "fn ok() (bool, error) {
+    return true, nil
+}
+
+fn main() {
+    m := map[string]int{\"a\": 0}
+    n := &m[\"a\"]
+    for ok()? {
+        break
+    }
+    n = 7
+}
+",
+    );
+    let stores = go.matches("m[\"a\"] = n").count();
+    assert_eq!(
+        stores, 1,
+        "expected exactly 1 store-back after loop (not inside `for ok()?` break), got {stores} in:\n{go}"
+    );
+
+    let go_handoff = emit(
+        "fn ok() (bool, error) {
+    return false, nil
+}
+
+fn main() {
+    m := map[string]int{\"a\": 0}
+    n := &m[\"a\"]
+    n = 7
+    for ok()? {
+        n = 8
+        delete(m, \"a\")
+        break
+    }
+}
+",
+    );
+    assert!(
+        go_handoff.contains("if !hyT0 {\n\t\t\t\tm[\"a\"] = n\n\t\t\t\tbreak\n\t\t\t}"),
+        "expected 0-trip `if !hyT0` branch to flush inherited `m[\"a\"] = n` before break, got:\n{go_handoff}"
+    );
+}
