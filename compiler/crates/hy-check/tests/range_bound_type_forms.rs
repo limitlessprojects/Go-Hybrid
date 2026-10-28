@@ -124,3 +124,62 @@ fn valid_integer_ranges_stay_legal() {
         "fn main() {\n    var n int = 5\n    for i in 0..n { _ = i }\n}\n",
     );
 }
+
+// Issue #1165: compare integer identities, rather than their source spellings.
+#[test]
+fn equivalent_integer_spellings_accept_in_both_range_forms() {
+    let groups: &[&[&str]] = &[
+        &["u8", "uint8", "byte"],
+        &["i8", "int8"],
+        &["u16", "uint16"],
+        &["i16", "int16"],
+        &["u32", "uint32"],
+        &["i32", "int32", "rune"],
+        &["u64", "uint64"],
+        &["i64", "int64"],
+    ];
+    for group in groups {
+        for lo in *group {
+            for hi in *group {
+                for range in ["..", "..="] {
+                    assert_ok(&format!(
+                        "fn main() {{\n    var lo {lo} = 0\n    var hi {hi} = 5\n    for i in lo{range}hi {{ _ = i }}\n}}\n"
+                    ));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn equivalent_integer_conversion_and_typed_const_bounds_accept() {
+    for range in ["..", "..="] {
+        assert_ok(&format!(
+            "const hi uint8 = 5\nfn main() {{\n    for i in byte(0){range}hi {{ _ = i }}\n}}\n"
+        ));
+        assert_ok(&format!(
+            "const lo rune = 0\nfn main() {{\n    for i in lo{range}int32(5) {{ _ = i }}\n}}\n"
+        ));
+    }
+}
+
+#[test]
+fn equal_integer_ranges_do_not_make_distinct_types_compatible() {
+    for (a, b) in [
+        ("u8", "uint16"),
+        ("int", "i64"),
+        ("uint", "uintptr"),
+        ("uint", "u64"),
+    ] {
+        for (lo, hi) in [(a, b), (b, a)] {
+            for range in ["..", "..="] {
+                assert_code(
+                    &format!(
+                        "fn main() {{\n    var lo {lo} = 0\n    var hi {hi} = 5\n    for i in lo{range}hi {{ _ = i }}\n}}\n"
+                    ),
+                    "HYB-E2009",
+                );
+            }
+        }
+    }
+}

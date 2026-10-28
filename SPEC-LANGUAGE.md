@@ -316,6 +316,13 @@ index/element for slices/arrays/strings, key/value for maps; `for v in ch`
 yields received values. Two-variable channel receive is the comma-ok
 clause inside `select` (`v, ok := <-sq:`).
 
+Integer range bounds are compared using their emitted Go integer type, so
+equivalent spellings (`u8`/`uint8`/`byte`, `i32`/`int32`/`rune`, and the other
+fixed-width SPEC/Go pairs) are compatible. Equal representable ranges do not
+make distinct Go types compatible: `int`/`int64` and `uint`/`uintptr` remain
+distinct. This clarifies LX13 for issue #1165; untyped-bound defaulting and
+constant-overflow checks are unchanged.
+
 **LX13a — the iterable is TYPE-checked (HYB-E2009/E3005).** LX13's iterable
 set is a closed contract: since issue #411, the checker rejects `for x in e`
 when `e` resolves to a concrete non-iterable shape (an int, bool, struct, a

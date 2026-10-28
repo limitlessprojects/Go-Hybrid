@@ -27,6 +27,22 @@ use crate::model::{unwrap_parens, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{Expr, ForKind, LitKind, Stmt, TypeExpr};
 
+/// Integer identity in emitted Go, not width/range equivalence. In particular,
+/// `int`, `uint` and `uintptr` remain distinct from fixed-width integers.
+fn go_integer_type_name(name: &str) -> &str {
+    match name {
+        "u8" | "byte" => "uint8",
+        "i8" => "int8",
+        "u16" => "uint16",
+        "i16" => "int16",
+        "u32" => "uint32",
+        "i32" | "rune" => "int32",
+        "u64" => "uint64",
+        "i64" => "int64",
+        _ => name,
+    }
+}
+
 impl<'a> Checker<'a> {
     /// Statement entry: classify the iterable of every `for x in e` and the
     /// integer bounds of every `for i in lo..hi` in this statement's own
@@ -271,7 +287,7 @@ impl<'a> Checker<'a> {
         let tl = self.typed_int_bound(st, lo);
         let th = self.typed_int_bound(st, hi);
         let mismatch = match (&tl, &th) {
-            (Some(a), Some(b)) => a != b,
+            (Some(a), Some(b)) => go_integer_type_name(a) != go_integer_type_name(b),
             (None, Some(b)) => b != "int",
             (Some(a), None) => inclusive && a != "int",
             (None, None) => false,
