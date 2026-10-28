@@ -146,6 +146,7 @@ fn closure_if_init_multi_binding_shadows_single_value_fn_rejected() {
         r#"
 type single_fn = fn() int
 type pair_fn = fn() int int
+const _anchor = 0
 fn single() int { return 1 }
 fn pair() (int, int) { return 1, 2 }
 fn both_fns() (single_fn, pair_fn) { return single, pair }
