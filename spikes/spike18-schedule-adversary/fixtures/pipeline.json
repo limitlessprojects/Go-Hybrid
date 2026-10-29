@@ -1,0 +1,61 @@
+{
+  "graph": {
+    "actors": [
+      {
+        "name": "source",
+        "op": "source",
+        "factor": 0
+      },
+      {
+        "name": "triple",
+        "op": "scale",
+        "factor": 3
+      },
+      {
+        "name": "sink",
+        "op": "sink",
+        "factor": 0
+      }
+    ],
+    "edges": [
+      {
+        "name": "raw",
+        "from": 0,
+        "to": 1,
+        "produce": 1,
+        "consume": 1,
+        "initial": []
+      },
+      {
+        "name": "scaled",
+        "from": 1,
+        "to": 2,
+        "produce": 1,
+        "consume": 1,
+        "initial": []
+      }
+    ]
+  },
+  "certificate": {
+    "graph_sha256": "ce42750bdb8803c2b135338c88125d0bc817fa5aba02b6748f3d921a23f05d43",
+    "schedule": [
+      0,
+      1,
+      2
+    ],
+    "repetitions": [
+      1,
+      1,
+      1
+    ],
+    "capacities": [
+      1,
+      1
+    ],
+    "high_water": [
+      1,
+      1
+    ],
+    "payload_bytes": 16
+  }
+}

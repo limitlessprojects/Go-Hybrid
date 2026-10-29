@@ -1,0 +1,65 @@
+{
+  "graph": {
+    "actors": [
+      {
+        "name": "source",
+        "op": "source",
+        "factor": 0
+      },
+      {
+        "name": "sum",
+        "op": "sum",
+        "factor": 0
+      },
+      {
+        "name": "sink",
+        "op": "sink",
+        "factor": 0
+      }
+    ],
+    "edges": [
+      {
+        "name": "pairs_to_triples",
+        "from": 0,
+        "to": 1,
+        "produce": 2,
+        "consume": 3,
+        "initial": []
+      },
+      {
+        "name": "totals",
+        "from": 1,
+        "to": 2,
+        "produce": 1,
+        "consume": 1,
+        "initial": []
+      }
+    ]
+  },
+  "certificate": {
+    "graph_sha256": "2e02169c37db0e07adae2d6d1a54c3411bf997bc7cf4596b1a3a972b0bfc6250",
+    "schedule": [
+      0,
+      0,
+      1,
+      0,
+      1,
+      2,
+      2
+    ],
+    "repetitions": [
+      3,
+      2,
+      2
+    ],
+    "capacities": [
+      4,
+      2
+    ],
+    "high_water": [
+      4,
+      2
+    ],
+    "payload_bytes": 48
+  }
+}

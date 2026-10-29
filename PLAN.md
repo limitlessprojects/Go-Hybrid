@@ -1,5 +1,7 @@
 # Hybrid Language: Development Plan
 
+- Contributor research (W-018, #378): [independent schedule adversary](spikes/spike18-schedule-adversary/RESULTS.md) adds guarded uint64 Go emission, 25,152 witness cross-checks and finite marking/mask exploration; four generated kernels match FIFO/golden oracles and measure 0 allocations/Step. Local workspace/corpus/differential checks pass (1,800 / 127 / 41+86); hosted CI and wildcard review remain pending. No compiler lowering or ledger/milestone status change.
+
 - Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15

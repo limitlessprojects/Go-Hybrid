@@ -1,0 +1,78 @@
+{
+  "graph": {
+    "actors": [
+      {
+        "name": "left",
+        "op": "source",
+        "factor": 0
+      },
+      {
+        "name": "right",
+        "op": "source",
+        "factor": 0
+      },
+      {
+        "name": "join",
+        "op": "sum",
+        "factor": 0
+      },
+      {
+        "name": "sink",
+        "op": "sink",
+        "factor": 0
+      }
+    ],
+    "edges": [
+      {
+        "name": "left_input",
+        "from": 0,
+        "to": 2,
+        "produce": 1,
+        "consume": 1,
+        "initial": []
+      },
+      {
+        "name": "right_input",
+        "from": 1,
+        "to": 2,
+        "produce": 1,
+        "consume": 1,
+        "initial": []
+      },
+      {
+        "name": "joined",
+        "from": 2,
+        "to": 3,
+        "produce": 1,
+        "consume": 1,
+        "initial": []
+      }
+    ]
+  },
+  "certificate": {
+    "graph_sha256": "055d6fd512e12788d7072bf69376ff70379cdb52f94c063637029c31c4a5b8e1",
+    "schedule": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "repetitions": [
+      1,
+      1,
+      1,
+      1
+    ],
+    "capacities": [
+      1,
+      1,
+      1
+    ],
+    "high_water": [
+      1,
+      1,
+      1
+    ],
+    "payload_bytes": 24
+  }
+}
