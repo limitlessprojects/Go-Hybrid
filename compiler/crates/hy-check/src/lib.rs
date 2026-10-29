@@ -727,29 +727,17 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     );
                     let is_chan = matches!(ck.shape_of_expr(&st, expr), TypeShape::Chan(_));
                     let shapes = ck.iterate_var_shapes(&st, expr, vars.len());
+                    // #797 / #811: capture the collection's sharing and
+                    // `const` facts BEFORE any loop variable exists. Once
+                    // `for a, b in a` binds `a`, the header expression
+                    // resolves to that new loop variable, not to the
+                    // collection, so re-reading it per variable loses the
+                    // edge entirely.
+                    let pre = ck.iterate_roots(&st, expr);
                     for (name, shape) in vars.iter().zip(shapes) {
-                        let is_ref = shape.is_reference_alias();
-                        let may_share = ck.shape_may_share(&shape);
-                        ck.define_binding(&mut st, name, shape, None, false, managed, false);
-                        if !is_chan {
-                            if may_share {
-                                ck.record_may_share(&mut st, name, expr);
-                            }
-                            if is_ref {
-                                if let Some(root) = expr.root_ident() {
-                                    if ck.lookup_binding(&st, root).is_some() {
-                                        st.aliases.insert(name.clone(), root.to_string());
-                                    }
-                                }
-                            }
-                            if let Some(b) = st.env_lookup_mut(name) {
-                                b.non_owned_origin = Some(format!(
-                                    "range variable `{}` iterating `{}` (the collection still holds the element)",
-                                    name,
-                                    expr.render()
-                                ));
-                            }
-                        }
+                        ck.bind_iterate_var(
+                            &mut st, name, shape, expr, &pre, vars, is_chan, managed,
+                        );
                     }
                 }
                 ForKind::Range { var, lo, hi, .. } => {

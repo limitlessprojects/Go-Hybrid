@@ -440,6 +440,49 @@ impl FnState {
                 }
             }
         }
+        // Issues #797 / #811: a block-established sharing edge whose OTHER
+        // endpoint was shadowed inside this block never reaches `may_share`:
+        // `preserve_peers_before_sever` severs the shadowed outer binding from
+        // the sharing graph and records the surviving holder as
+        // `shadow_links[holder] += (shadowed_outer, depth)` instead. Letting
+        // `shadow_links` be discarded on pop (the old behaviour) lost that
+        // edge, so after the block the checker believed the two surviving
+        // OUTER bindings were independent: `task worker(move a)` no longer
+        // froze the peer and a write through it passed with 0 diagnostics
+        // while the emitted Go raced at runtime.
+        //
+        // The shadow dies with this scope, so the edge must be restored as a
+        // real outer-to-outer `may_share` edge — which is exactly what it was
+        // before the shadow severed it.
+        let scope_depth = self.scopes.len();
+        // Does the binding this link names at `depth` survive this pop? The
+        // shadowed binding is deliberately ABSENT from the innermost layer for
+        // its name, so `to_outer_name` cannot resolve it — the recorded depth
+        // is what identifies it. A link into the layer being popped dies with
+        // it; anything shallower survives at the same depth (scopes are popped
+        // from the end, so surviving indices are unchanged).
+        let survives_at_depth = |name: &str, depth: usize, env: &HashMap<String, Binding>,
+                                 scopes: &[HashMap<String, Binding>]|
+         -> bool {
+            if depth >= scope_depth {
+                return false;
+            }
+            if depth == 0 {
+                env.contains_key(name)
+            } else {
+                scopes.get(depth - 1).is_some_and(|s| s.contains_key(name))
+            }
+        };
+        for (holder, links) in &self.shadow_links {
+            let Some(oh) = to_outer_name(holder, &self.aliases, &self.env, &self.scopes) else {
+                continue;
+            };
+            for (shadowed, depth) in links {
+                if survives_at_depth(shadowed, *depth, &self.env, &self.scopes) {
+                    inner_outer_shares.push((oh.clone(), shadowed.clone()));
+                }
+            }
+        }
         self.scopes.pop();
         if let Some(outer_shadows) = self.shadow_link_scopes.pop() {
             self.shadow_links = outer_shadows;
