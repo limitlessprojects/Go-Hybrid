@@ -318,4 +318,57 @@ fn identity_full_reslice_accepts() {
         "the identity re-slice keeps the same header",
     );
 }
+// ---------------------------------------------------------------------------
+// Fixed arrays: caught by the same rule, and MEASURED to be a real divergence.
+//
+// The rule does not test Array-vs-Slice — it is a whole-value path-prefix
+// compare, so a fixed array is caught incidentally rather than by design.
+// That is correct, not a side effect to be tolerated: the O8 lowering copies
+// the element out at the binding and reads that COPY through the loan, so it
+// diverges from true pointer semantics as soon as anything zeroes the array.
+//
+// Measured on 1f0ff97 (emitted Go vs a real-Go `s := &a[0]` oracle):
+//
+//   var a [2]svc; a[0] = svc{replicas: 1}; s := &a[0]; a = [2]svc{}
+//   read through loan -> hyb emitted: 1      real Go: 0
+//   a[0]             -> hyb emitted: 1      real Go: 0
+//
+// A write-only variant (`s.replicas = 5` then read `a[0]`) happens to agree
+// (5 and 5) because the store-back lands in the same zeroed storage — which is
+// exactly the trap that makes a naive oracle call this legal. The read-through
+// case is the discriminating one, so it is pinned here.
+// ---------------------------------------------------------------------------
+
+/// Fixed array, READ through the loan after the re-bind: the loan keeps
+/// serving the pre-rebind copy (1) where a real Go pointer sees the zeroed
+/// array (0). Diverges — reject.
+#[test]
+fn fixed_array_read_through_loan_after_rebind_rejects() {
+    assert_rejects_rebind(
+        "    var a [2]svc\n    a[0] = svc{replicas: 1}\n    s := &a[0]\n    a = [2]svc{}\n    fmt.println(\"read through loan={s.replicas}\")\n    fmt.println(\"a0={a[0].replicas}\")",
+        "a fixed array re-bound while its element loan is still read",
+    );
+}
+
+/// The same shape where the loan is only WRITTEN after the re-bind. This one
+/// agrees with real Go (both print 5), but the loan is still read-carrying:
+/// the hidden copy is live across the re-bind, so the program is only
+/// accidentally right. Kept as an explicit reject so the boundary is the
+/// re-bind, not the observation order.
+#[test]
+fn fixed_array_write_only_after_rebind_rejects() {
+    assert_rejects_rebind(
+        "    var a [2]svc\n    a[0] = svc{replicas: 1}\n    s := &a[0]\n    a = [2]svc{}\n    s.replicas = 5\n    fmt.println(\"a0={a[0].replicas}\")",
+        "a fixed array re-bound while its element loan is still live",
+    );
+}
+
+/// A fixed array whose loan is fully finished before the re-bind is legal.
+#[test]
+fn fixed_array_rebind_after_loan_last_use_accepts() {
+    assert_accepts(
+        "struct svc {\n    replicas int\n}\n\nfn main() {\n    var a [2]svc\n    a[0] = svc{replicas: 1}\n    s := &a[0]\n    s.replicas = 5\n    a = [2]svc{}\n    fmt.println(a[0].replicas)\n}\n",
+        "the array is re-bound only after the loan last use",
+    );
+}
 
