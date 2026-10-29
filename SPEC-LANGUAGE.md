@@ -326,6 +326,14 @@ distinct — `int`/`int64` and `uint`/`uintptr` never collapse, and the
 `usize`/`isize` names are undefined by SPEC-LANGUAGE (§402) and are left
 untouched. Untyped-bound defaulting and the constant-overflow checks are
 unchanged. (Issue #1165.)
+An inclusive range `lo..=hi` runs the body once for every integer from `lo`
+through `hi`. The range variable is re-bound from that sequence on each
+iteration, so a write to it inside the body cannot change how many times the
+loop runs: `for i in 0..=n` with an `i += 1` in the body is the skip-next
+idiom (the next iteration still gets `i + 1`), not a way to end the loop
+early, and the sequence can never run past `hi` or wrap at the type maximum.
+The half-open form `lo..hi` keeps its C-style lowering, where the body sees
+and may steer the same variable the loop tests. (Issues #322, #2153.)
 
 **LX13a — the iterable is TYPE-checked (HYB-E2009/E3005).** LX13's iterable
 set is a closed contract: since issue #411, the checker rejects `for x in e`
