@@ -23,11 +23,13 @@ Env:
 """
 import argparse, json, os, sys, time, urllib.request, urllib.error
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 REPO = os.environ.get("GITHUB_REPOSITORY", "limitlessprojects/Go-Hybrid")
 TOK = os.environ.get("GITHUB_TOKEN", "")
 MIN_AGE = int(os.environ.get("SWEEPER_MIN_AGE_DAYS", "5"))
 PROTECTED_LABELS = {"triage:wildcard-hold", "triage:pareto", "triage:keep"}
+CONFIG_PATH = Path(__file__).resolve().with_name("triage_config.json")
 
 COMMENT = """Queue sweeper: this PR has been open past the review window ({age} days)
 without a protected label, so it is being closed as **not planned** to keep
@@ -69,14 +71,24 @@ def api(path, method="GET", body=None):
     return 0, None
 
 def config_protected_numbers():
-    nums = set()
+    """Read the complete protection set, or stop rather than sweep unprotected."""
     try:
-        with open("tools/triage_config.json") as f:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
             cfg = json.load(f)
-        nums |= set(cfg.get("wildcard_holds", []))
-        nums |= set(cfg.get("drafts_parked", []))
-    except Exception as e:
-        print(f"  (triage_config.json unreadable: {e} — label protection only)")
+    except (OSError, UnicodeError, ValueError) as e:
+        raise ValueError(f"protection config {CONFIG_PATH} unreadable: {e}") from e
+    if not isinstance(cfg, dict):
+        raise ValueError(f"protection config {CONFIG_PATH} must be an object")
+    nums = set()
+    for key in ("wildcard_holds", "drafts_parked"):
+        values = cfg.get(key)
+        if not isinstance(values, list) or any(
+            type(number) is not int or number <= 0 for number in values
+        ):
+            raise ValueError(
+                f"protection config {CONFIG_PATH}: {key} must be a list of positive PR numbers"
+            )
+        nums.update(values)
     return nums
 
 def main():
@@ -89,7 +101,11 @@ def main():
         print("GITHUB_TOKEN not set"); sys.exit(1)
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=args.min_age)).isoformat()
-    protected_nums = config_protected_numbers()
+    try:
+        protected_nums = config_protected_numbers()
+    except ValueError as e:
+        print(f"error: {e}; sweep aborted", file=sys.stderr)
+        sys.exit(1)
     print(f"repo={REPO} min_age={args.min_age}d cutoff={cutoff[:10]} "
           f"config_protected={len(protected_nums)} dry={args.dry}")
 
