@@ -34,6 +34,11 @@ import subprocess
 import sys
 import tempfile
 
+# The EXPECTED-DIAGNOSTIC grammar and its comparator live in the corpus
+# harness; the loop reuses them instead of growing a second parser (#2161).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import corpus_harness  # noqa: E402
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CORPUS = os.path.join(REPO_ROOT, "tests", "checker-corpus")
 DEFAULT_BIN = os.path.join(
@@ -95,8 +100,13 @@ def read_expected_output(path, expected):
     return match.group(1).strip()
 
 
-def checker_rejects(bin_path, hy_path, expected_rule):
+def checker_rejects(bin_path, hy_path, expected_rule, expected_code=None):
     """Require the first error to match the pre-registered rejection rule.
+
+    When the fixture also pins `EXPECTED-DIAGNOSTIC`, the first error's code
+    must match it too: the corpus harness already reads and enforces that pin,
+    and a fixture whose code drifted while its rule stayed the same used to
+    report FULL AGREEMENT here (#2161).
 
     False also covers harness faults — an unexecutable checker, a decode
     failure, or undecodable output — not only checker disagreement: the
@@ -162,11 +172,16 @@ def checker_rejects(bin_path, hy_path, expected_rule):
         )
     errors = [d for d in diags if d.get("severity") == "error"]
     first_rule = errors[0].get("tier0_rule") if errors else None
+    first_code = errors[0].get("code") if errors else None
+    code_ok, code_why = corpus_harness.agree_diagnostic(expected_code, diags)
     return (
         summary.get("verdict") == "reject"
-        and first_rule is not None and first_rule == expected_rule,
+        and first_rule is not None and first_rule == expected_rule
+        and code_ok,
         f"verdict={summary.get('verdict')} errors={len(errors)} "
-        f"first_rule={first_rule} expected_rule={expected_rule}",
+        f"first_rule={first_rule} expected_rule={expected_rule} "
+        f"first_code={first_code} expected_code={expected_code}"
+        + (f" ({code_why})" if not code_ok else ""),
     )
 
 
@@ -273,22 +288,39 @@ def main():
     reject_pass = reject_total = 0
     failures = []
 
+    # Read every fixture's contract before running anything. The optional
+    # exact first-error pin is part of a reject fixture's contract (the corpus
+    # harness enforces it), and a malformed or misplaced pin is a corpus
+    # error: it must not depend on how far the loop got first (#2161).
+    contracts = {}
     for path in files:
         expected = read_expected(path)
         expected_output = read_expected_output(path, expected)
         if expected is None:
             continue
+        try:
+            expected_code = corpus_harness.read_expected_diagnostic(path, expected)
+        except ValueError as exc:
+            print(f"corpus error: {exc}", file=sys.stderr)
+            return 2
+        contracts[path] = (expected, expected_output, expected_code)
+
+    for path in files:
+        if path not in contracts:
+            continue
+        expected, expected_output, expected_code = contracts[path]
         name = os.path.basename(path)
         verdict, rule, hazards = expected
         if verdict == "REJECT":
             reject_total += 1
-            ok, detail = checker_rejects(bin_path, path, rule)
+            pinned = f" {expected_code}" if expected_code else ""
+            ok, detail = checker_rejects(bin_path, path, rule, expected_code)
             if ok:
                 reject_pass += 1
-                print(f"PASS  {name} (reject {rule})")
+                print(f"PASS  {name} (reject {rule}{pinned})")
             else:
                 failures.append(name)
-                print(f"FAIL  {name} (expected reject {rule}; {detail})")
+                print(f"FAIL  {name} (expected reject {rule}{pinned}; {detail})")
         else:
             accept_total += 1
             workdir = tempfile.mkdtemp(prefix="hydiff-")
