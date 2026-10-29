@@ -73,6 +73,29 @@ def run_cmd(cmd, timeout, cwd=None, env=None):
     return code, round(time.monotonic() - start, 2), out_tail
 
 
+def stat_snapshot(path):
+    """(mtime_ns, size) of an existing regular file, else None.
+
+    Used to tell an artifact this run wrote from one that was already sitting
+    in the results directory when the run started (issue #2191).
+    """
+    if not os.path.isfile(path):
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def resolve_expected(results_dir, expected):
+    """Map a job's `results/...` spelling onto the worker's output root."""
+    if expected.startswith("results/"):
+        return os.path.join(results_dir, expected[len("results/"):])
+    return expected
+
+
+
 def env_report():
     """Hardware + toolchain report; the same on every tier."""
     rep = {
@@ -233,6 +256,21 @@ def main():
         )
 
     hard_setup_failed = False
+    # Snapshot every declared output that is already on disk, before any job
+    # step runs. `os.path.isfile` on its own let a file left behind by an
+    # earlier invocation certify a run that produced nothing (issue #2191).
+    pre_run_results = {}
+    declared_results = job.get("expected_results", [])
+    if isinstance(declared_results, list):
+        for expected in declared_results:
+            if not isinstance(expected, str) or not expected:
+                continue
+            target = resolve_expected(results_dir, expected)
+            if os.path.abspath(target) == os.path.abspath(os.path.join(results_dir, "summary.json")):
+                continue
+            snapshot = stat_snapshot(target)
+            if snapshot is not None:
+                pre_run_results[expected] = snapshot
     if not sha_ok:
         print(
             "[{}] check sha-check: failed ({}), skipping setup and commands".format(
@@ -291,14 +329,19 @@ def main():
                    "expected result must be a non-empty file path")
             continue
         # Job specs use results/... independent of the worker's output root.
-        target = (os.path.join(results_dir, expected[len("results/"):])
-                  if expected.startswith("results/") else expected)
+        target = resolve_expected(results_dir, expected)
         # This file is generated below, after the final verdict is known.
         if os.path.abspath(target) == os.path.abspath(path):
             continue
         if not os.path.isfile(target):
             record("expected-result", "check", 1, 0.0,
                    "missing expected result file: {}".format(expected))
+        elif pre_run_results.get(expected) is not None and stat_snapshot(target) == pre_run_results[expected]:
+            # Byte-for-byte the file that was already there when the run
+            # started: a leftover artifact, not this run's evidence (#2191).
+            record("expected-result", "check", 1, 0.0,
+                   "expected result file was not produced by this run "
+                   "(unchanged since before it started): {}".format(expected))
 
     write_summary_and_exit()
 
