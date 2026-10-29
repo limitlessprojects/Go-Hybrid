@@ -214,3 +214,33 @@ fn controls_untouched() {
         "struct pair { n int } fn main() { p := pair{ n: 1 } x := int8(p.n) _ = x }",
     );
 }
+
+
+#[test]
+fn string_conversion_2_512_radix_overflow_rejects() {
+    // Issue #2229: Hex, binary, and octal literals >= 2^512 must be rejected with HYB-E6006
+    let hex_2_512 = format!("0x1{}", "0".repeat(128));
+    rejects_with_e6006(&format!("fn main() {{ s := string({}) _ = s }}", hex_2_512));
+
+    let bin_2_512 = format!("0b1{}", "0".repeat(512));
+    rejects_with_e6006(&format!("fn main() {{ s := string({}) _ = s }}", bin_2_512));
+
+    let oct_2_512 = format!("0o4{}", "0".repeat(170));
+    rejects_with_e6006(&format!("fn main() {{ s := string({}) _ = s }}", oct_2_512));
+}
+
+#[test]
+fn string_conversion_2_512_radix_below_boundary_accepts() {
+    // Issue #2229: Binary literals < 2^512 with length > 155 characters (e.g. 2^155) must NOT be rejected
+    let bin_155 = format!("0b1{}", "0".repeat(155));
+    accepts_without_e6006(&format!("fn main() {{ s := string({}) _ = s }}", bin_155));
+
+    let hex_below = format!("0x{}", "f".repeat(128));
+    accepts_without_e6006(&format!("fn main() {{ s := string({}) _ = s }}", hex_below));
+
+    let bin_below = format!("0b{}", "1".repeat(512));
+    accepts_without_e6006(&format!("fn main() {{ s := string({}) _ = s }}", bin_below));
+
+    let oct_below = format!("0o3{}", "7".repeat(170));
+    accepts_without_e6006(&format!("fn main() {{ s := string({}) _ = s }}", oct_below));
+}

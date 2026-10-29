@@ -996,14 +996,49 @@ fn conv_const(e: &Expr) -> Option<ConvConst> {
 const TWO_POW_512: &str = "13407807929942597099574024998205846127479365820592393377723561443721764030073546976801874298166903427690031858186486050853753882811946569946433649006084096";
 
 fn lit_below_2_512(s: &str) -> bool {
-    let t = s.replace('_', "");
-    let t = t.trim_start_matches('0');
-    let t = if t.is_empty() { "0" } else { t };
-    let t = t.strip_prefix('-').unwrap_or(t);
-    match t.len().cmp(&TWO_POW_512.len()) {
-        std::cmp::Ordering::Less => true,
-        std::cmp::Ordering::Greater => false,
-        std::cmp::Ordering::Equal => t < TWO_POW_512,
+    let clean: String = s.chars().filter(|c| *c != '_').collect();
+    let mut t = clean.as_str();
+    if let Some(rest) = t.strip_prefix('+').or_else(|| t.strip_prefix('-')) {
+        t = rest;
+    }
+    let (radix, digits) = if let Some(rest) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        (16, rest)
+    } else if let Some(rest) = t.strip_prefix("0b").or_else(|| t.strip_prefix("0B")) {
+        (2, rest)
+    } else if let Some(rest) = t.strip_prefix("0o").or_else(|| t.strip_prefix("0O")) {
+        (8, rest)
+    } else if t.len() > 1 && t.starts_with('0') && !t.chars().any(|c| c == '8' || c == '9') {
+        (8, t)
+    } else {
+        (10, t)
+    };
+
+    let sig = digits.trim_start_matches('0');
+    if sig.is_empty() {
+        return true;
+    }
+
+    match radix {
+        // Hexadecimal: 2^512 = 16^128 ('1' followed by 128 zeros, 129 digits).
+        // Any 129-digit hex value is >= 16^128 = 2^512.
+        16 => sig.len() < 129,
+
+        // Binary: 2^512 = '1' followed by 512 zeros (513 digits).
+        // Any 513-digit binary value is >= 2^512.
+        2 => sig.len() < 513,
+
+        // Octal: 2^512 = 4 * 8^170 ('4' followed by 170 zeros, 171 digits).
+        // < 171 digits: strictly < 2^512.
+        // == 171 digits: < 2^512 iff leading digit < '4' ('1', '2', or '3').
+        // > 171 digits: >= 2^512.
+        8 => sig.len() < 171 || (sig.len() == 171 && sig.as_bytes()[0] < b'4'),
+
+        // Decimal: compare against TWO_POW_512 (155 digits).
+        _ => match sig.len().cmp(&TWO_POW_512.len()) {
+            std::cmp::Ordering::Less => true,
+            std::cmp::Ordering::Greater => false,
+            std::cmp::Ordering::Equal => sig < TWO_POW_512,
+        },
     }
 }
 
@@ -1546,5 +1581,26 @@ mod unit {
         );
         assert_eq!(target_int_range(), (i64::MIN as i128, i64::MAX as i128));
         assert_eq!(target_uint_range(), (0, u64::MAX as i128));
+    }
+
+    #[test]
+    fn string_conversion_2_512_boundary_radix() {
+        // Hexadecimal: 2^512 = 16^128 (1 followed by 128 zeros)
+        let hex_2_512 = format!("0x1{}", "0".repeat(128));
+        let hex_below = format!("0x{}", "f".repeat(128)); // 16^128 - 1 = 2^512 - 1
+        assert!(!lit_below_2_512(&hex_2_512), "hex 2^512 must not be below 2^512");
+        assert!(lit_below_2_512(&hex_below), "hex 2^512 - 1 must be below 2^512");
+
+        // Binary: 2^512 = 1 followed by 512 zeros
+        let bin_2_512 = format!("0b1{}", "0".repeat(512));
+        let bin_155 = format!("0b1{}", "0".repeat(155)); // 2^155 < 2^512
+        assert!(!lit_below_2_512(&bin_2_512), "bin 2^512 must not be below 2^512");
+        assert!(lit_below_2_512(&bin_155), "bin 2^155 must be below 2^512");
+
+        // Octal: 2^512 = 4 * 8^170 (4 followed by 170 zeros)
+        let oct_2_512 = format!("0o4{}", "0".repeat(170));
+        let oct_below = format!("0o3{}", "7".repeat(170)); // 4 * 8^170 - 1 = 2^512 - 1
+        assert!(!lit_below_2_512(&oct_2_512), "oct 2^512 must not be below 2^512");
+        assert!(lit_below_2_512(&oct_below), "oct 2^512 - 1 must be below 2^512");
     }
 }
