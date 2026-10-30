@@ -124,8 +124,7 @@ fn legal_map_slot_loan_bindings_stay_accepted() {
         "n := &g.nodes[1] (the binding initializer is the slot-loan position)",
     );
     accept(
-        "type int_ptr = *int\n\
-         fn main() (out int_ptr) {\n\
+        "fn main() (out int) {\n\
              m := map[int]int{1: 10}\n\
              out = &m[1]\n\
              fmt.println(\"o {out}\")\n\

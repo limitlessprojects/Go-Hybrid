@@ -450,6 +450,8 @@ pub struct Emitter {
     temp_n: usize,
     /// Inside a main-wrapper closure? (bare `return` legality, `?` shape)
     in_main_closure: bool,
+    /// True when `fn main` declares a single `error` result (`fn main() error`).
+    in_main_error_closure: bool,
     /// Inside a function literal (closure) — `?` binds to ITS results.
     fnlit_depth: usize,
     /// Enclosing `for`/`loop` depth in the CURRENT function/closure frame.
@@ -565,6 +567,7 @@ impl Emitter {
             bindings: BTreeMap::new(),
             temp_n: 0,
             in_main_closure: false,
+            in_main_error_closure: false,
             fnlit_depth: 0,
             for_depth: 0,
             assoc_fns: BTreeSet::new(),
@@ -1334,12 +1337,16 @@ impl Emitter {
             // func main() { <ret> := func(<results…>, hyErr error) { … }() … }
             self.push_raw(" {\n");
             self.indent += 1;
+            let main_is_error_result = f.results.len() == 1
+                && matches!(&f.results[0].ty, TypeExpr::Named { name, .. } if name == "error");
             let ret_vars = self.main_ret_vars(f);
             let closure_sig = self.main_closure_sig(f);
             self.push(&format!("{} := func() {} {{", ret_vars, closure_sig));
             self.indent += 1;
             let saved = self.in_main_closure;
+            let saved_err = self.in_main_error_closure;
             self.in_main_closure = true;
+            self.in_main_error_closure = main_is_error_result;
             self.emit_hints_from_params(&f.params);
             if let Some(body) = &f.body {
                 // The closure-body level is already pushed above;
@@ -1356,6 +1363,7 @@ impl Emitter {
             // returns hyErr == nil, exactly the E6 contract's ok path.
             self.push("return");
             self.in_main_closure = saved;
+            self.in_main_error_closure = saved_err;
             self.indent -= 1;
             self.push("}()");
             self.push("if hyErr != nil {");
@@ -1365,7 +1373,7 @@ impl Emitter {
             self.push("os.Exit(1)");
             self.indent -= 1;
             self.push("}");
-            if !f.results.is_empty() {
+            if !f.results.is_empty() && !main_is_error_result {
                 // The declared non-error result IS the exit code on the
                 // explicit `return N` path (example 02's `return 1`). The
                 // receiver var mirrors the declared result's name.
@@ -1451,7 +1459,9 @@ impl Emitter {
     }
 
     fn main_ret_vars(&self, f: &FnDecl) -> String {
-        if f.results.is_empty() {
+        let is_err = f.results.len() == 1
+            && matches!(&f.results[0].ty, TypeExpr::Named { name, .. } if name == "error");
+        if f.results.is_empty() || is_err {
             "hyErr".to_string()
         } else {
             // `code` is example-02's named result; unnamed results get a
@@ -1469,6 +1479,16 @@ impl Emitter {
     /// The wrapper closure's signature: the declared results (named) plus
     /// the hidden `hyErr error` the `?` desugaring returns through.
     fn main_closure_sig(&mut self, f: &FnDecl) -> String {
+        let is_err = f.results.len() == 1
+            && matches!(&f.results[0].ty, TypeExpr::Named { name, .. } if name == "error");
+        if is_err {
+            let n = f.results[0]
+                .name
+                .as_deref()
+                .filter(|name| *name != "_")
+                .unwrap_or("hyErr");
+            return format!("({} error)", n);
+        }
         let mut parts: Vec<String> = Vec::new();
         for (i, r) in f.results.iter().enumerate() {
             let n = r.name.clone().unwrap_or_else(|| format!("hyR{}", i));

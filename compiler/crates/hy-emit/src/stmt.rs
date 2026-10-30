@@ -868,8 +868,12 @@ impl Emitter {
             return Ok(());
         }
         if self.in_main_closure {
-            self.push(&format!("hyErr = {}", err_temp));
-            self.push("return");
+            if self.in_main_error_closure {
+                self.push(&format!("return {}", err_temp));
+            } else {
+                self.push(&format!("hyErr = {}", err_temp));
+                self.push("return");
+            }
             return Ok(());
         }
         if let Some(mut rets) = self.cur_fn_error_returns.clone() {
@@ -1992,7 +1996,11 @@ impl Emitter {
                 .iter()
                 .map(|v| self.emit_expr(v, 0))
                 .collect::<Result<Vec<_>, _>>()?;
-            self.push(&format!("return {}, nil", vs.join(", ")));
+            if self.in_main_error_closure {
+                self.push(&format!("return {}", vs.join(", ")));
+            } else {
+                self.push(&format!("return {}, nil", vs.join(", ")));
+            }
             return Ok(());
         }
         // `return fn(…)` where the fn's result is a conversion target
