@@ -75,6 +75,7 @@ pub(crate) enum OpKind {
     /// any value), and assigning *from* one stays fail-open because type
     /// assertions are not modelled.
     Interface,
+    Error,
     Int,
     Float,
     Bool,
@@ -102,6 +103,7 @@ impl OpKind {
         match self {
             OpKind::Unknown => "unknown".to_string(),
             OpKind::Interface => "any".to_string(),
+            OpKind::Error => "error".to_string(),
             OpKind::Int => "int".to_string(),
             OpKind::Float => "float64".to_string(),
             OpKind::Bool => "bool".to_string(),
@@ -147,6 +149,10 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         // arm below, so every assignment to an `any` target would be rejected.
         // The accept-side corpus controls caught exactly that.
         (Interface, _) | (_, Interface) => false,
+        // Error target accepts custom error structs (Struct(_)) or another Error.
+        // Assigning an Error value to a concrete target stays fail-open.
+        (Error, Struct(_)) => false,
+        (_, Error) => false,
         // No value is involved; a count check owns that case.
         (Void, _) | (_, Void) => false,
         // An untyped int constant is assignable to a float target
@@ -283,7 +289,7 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         // kind model (it may hold anything), so a member lookup on it cannot
         // claim absence — same fail-open as `kinds_conflict`'s Interface arm.
         OpKind::Interface => false,
-        OpKind::Int | OpKind::Float | OpKind::Bool | OpKind::Str => true,
+        OpKind::Int | OpKind::Float | OpKind::Bool | OpKind::Str | OpKind::Error => true,
         OpKind::Void => false,
         // A struct whose NAME did not resolve cannot have its members looked up.
         OpKind::Struct(None) => false,
@@ -1665,6 +1671,7 @@ impl<'a> Collector<'a> {
             // #682 U9-U12: `any` is a resolved interface type, not an
             // unresolved one, so it must not fall through to `Unknown`.
             "any" | "interface{}" => OpKind::Interface,
+            "error" => OpKind::Error,
             "bool" => OpKind::Bool,
             "string" => OpKind::Str,
             "float32" | "float64" | "f32" | "f64" => OpKind::Float,
@@ -3077,7 +3084,11 @@ impl<'a> Collector<'a> {
                     let is_loan_shape = as_addr_of(&values[0])
                         .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }));
                     let vk = self.kind_of_expr(&values[0]);
-                    if !is_loan_shape && kinds_conflict(&tk, &vk) {
+                    let mut assign_conflict = kinds_conflict(&tk, &vk);
+                    if tk == OpKind::Float && vk == OpKind::Int && !is_untyped_literal(&values[0]) {
+                        assign_conflict = true;
+                    }
+                    if !is_loan_shape && assign_conflict {
                         self.emit_e1002(
                             span,
                             format!(
@@ -3161,40 +3172,48 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
-            AssignOp::AddAssign => {
-                let Some(val) = values.first() else { return };
-                let vk = self.kind_of_expr(val);
-                let t_ok = matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
-                let v_ok = matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
-                let mismatch = tk != OpKind::Unknown
-                    && vk != OpKind::Unknown
-                    && tk.is_numeric() != vk.is_numeric();
-                if !t_ok || !v_ok || mismatch || kinds_conflict(&tk, &vk) {
-                    self.emit_e1002(
-                        span,
-                        format!(
-                            "invalid operation `{} += {}` (mismatched or non-addable types `{}` and `{}`) (HYB-E1002)",
-                            target.render(),
-                            val.render(),
-                            tk.label(),
-                            vk.label()
-                        ),
-                        "`+=` requires two numeric values or two strings of matching types",
-                    );
-                }
-            }
-            AssignOp::SubAssign | AssignOp::MulAssign | AssignOp::DivAssign => {
-                let Some(val) = values.first() else { return };
-                let vk = self.kind_of_expr(val);
-                let op_sym = match op {
-                    AssignOp::SubAssign => "-=",
-                    AssignOp::MulAssign => "*=",
-                    _ => "/=",
-                };
-                if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float)
-                    || !matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float)
-                    || kinds_conflict(&tk, &vk)
-                {
+             AssignOp::AddAssign => {
+                 let Some(val) = values.first() else { return };
+                 let vk = self.kind_of_expr(val);
+                 let t_ok = matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
+                 let v_ok = matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
+                 let mismatch = tk != OpKind::Unknown
+                     && vk != OpKind::Unknown
+                     && tk.is_numeric() != vk.is_numeric();
+                 let mut add_conflict = kinds_conflict(&tk, &vk);
+                 if tk == OpKind::Float && vk == OpKind::Int && !is_untyped_literal(val) {
+                     add_conflict = true;
+                 }
+                 if !t_ok || !v_ok || mismatch || add_conflict {
+                     self.emit_e1002(
+                         span,
+                         format!(
+                             "invalid operation `{} += {}` (mismatched or non-addable types `{}` and `{}`) (HYB-E1002)",
+                             target.render(),
+                             val.render(),
+                             tk.label(),
+                             vk.label()
+                         ),
+                         "`+=` requires two numeric values or two strings of matching types",
+                     );
+                 }
+             }
+             AssignOp::SubAssign | AssignOp::MulAssign | AssignOp::DivAssign => {
+                 let Some(val) = values.first() else { return };
+                 let vk = self.kind_of_expr(val);
+                 let op_sym = match op {
+                     AssignOp::SubAssign => "-=",
+                     AssignOp::MulAssign => "*=",
+                     _ => "/=",
+                 };
+                 let mut sub_conflict = kinds_conflict(&tk, &vk);
+                 if tk == OpKind::Float && vk == OpKind::Int && !is_untyped_literal(val) {
+                     sub_conflict = true;
+                 }
+                 if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float)
+                     || !matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float)
+                     || sub_conflict
+                 {
                     self.emit_e1002(
                         span,
                         format!(
@@ -4406,6 +4425,18 @@ impl<'a> Collector<'a> {
                 );
             }
         }
+    }
+}
+
+fn is_untyped_literal(e: &Expr) -> bool {
+    match unwrap_parens(e) {
+        Expr::Lit { .. } => true,
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => matches!(unwrap_parens(operand), Expr::Lit { .. }),
+        _ => false,
     }
 }
 

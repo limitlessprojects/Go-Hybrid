@@ -694,6 +694,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         targets.as_deref(),
                     );
                     ck.check_chan_send_const_overflow(&st, chan, value);
+                    ck.check_chan_send_named_mismatch(&st, chan, value, *span);
                 }
             }
 
@@ -810,6 +811,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                                     targets.as_deref(),
                                 );
                                 ck.check_chan_send_const_overflow(&st, chan, value);
+                                ck.check_chan_send_named_mismatch(&st, chan, value, span);
                             }
                         }
                         SelectArmKind::Recv { chan, .. } => {

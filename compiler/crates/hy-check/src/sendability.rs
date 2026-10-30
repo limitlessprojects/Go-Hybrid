@@ -688,12 +688,10 @@ impl<'a> Checker<'a> {
             (ForeignOpaque(_), _) | (_, ForeignOpaque(_)) => true,
             (Primitive, Primitive) | (Str, Str) | (Atomic, Atomic) => true,
             (Struct(Some(a)), Struct(Some(b))) => a == b,
-            (Map(_, _), Map(_, _)) => true,
-            (Slice(_), Slice(_)) | (Array(_), Array(_)) => true,
-            // Go converts between slice and array of the same element class
-            // only in limited cases; keep coarse-class permissive here.
-            (Slice(_), Array(_)) | (Array(_), Slice(_)) => true,
-            (Pointer(_), Pointer(_)) => true,
+            (Map(k1, v1), Map(k2, v2)) => Self::shape_may_be_elem(k1, k2) && Self::shape_may_be_elem(v1, v2),
+            (Slice(a), Slice(b)) | (Array(a), Array(b)) => Self::shape_may_be_elem(a, b),
+            (Slice(a), Array(b)) | (Array(a), Slice(b)) => Self::shape_may_be_elem(a, b),
+            (Pointer(a), Pointer(b)) => Self::shape_may_be_elem(a, b),
             (Chan(a), Chan(b)) => Self::shape_may_be_elem(a, b),
             (Closure, Closure) => true,
             (OwnHandle(a), OwnHandle(b)) | (BorrowHandle(a), BorrowHandle(b)) => a == b,
@@ -816,6 +814,101 @@ impl<'a> Checker<'a> {
         if let Some(elem_ty) = self.chan_elem_ty(st, chan) {
             let desc = format!("channel `{}`", chan.render());
             self.check_const_overflow_init(&desc, &elem_ty, value, Some(st));
+        }
+    }
+
+
+    /// Check that a sent value's concrete Named type matches the channel's
+    /// element Named type at the primitive-scalar level (issue #1044).
+    /// Go rejects `ch <- true` when `ch` is `chan int` even though both
+    /// map to `TypeShape::Primitive`; this check uses TypeExpr to catch
+    /// bool/int/float64 mismatches that shape_may_be_elem cannot see.
+    /// Helper for #1044: recursively compare concrete TypeExpr types for channel
+    /// sends to catch primitive scalar mismatches (bool vs int vs float64), map
+    /// key/value mismatches, slice/array element mismatches, and slice-vs-array
+    /// cross-sends.
+    fn type_exprs_may_be_elem(got: &hy_syntax::TypeExpr, want: &hy_syntax::TypeExpr) -> bool {
+        use hy_syntax::TypeExpr::*;
+        match (got, want) {
+            (Named { name: g, .. }, Named { name: w, .. }) => {
+                if g == w {
+                    return true;
+                }
+                const PRIMITIVES: &[&str] = &[
+                    "int", "int8", "int16", "int32", "int64",
+                    "uint", "uint8", "uint16", "uint32", "uint64",
+                    "float32", "float64", "bool", "string", "byte", "rune",
+                ];
+                !(PRIMITIVES.contains(&g.as_str()) && PRIMITIVES.contains(&w.as_str()))
+            }
+            (Slice { elem: g, .. }, Slice { elem: w, .. }) => {
+                Self::type_exprs_may_be_elem(g, w)
+            }
+            (Array { elem: g, .. }, Array { elem: w, .. }) => {
+                Self::type_exprs_may_be_elem(g, w)
+            }
+            (Slice { .. }, Array { .. }) | (Array { .. }, Slice { .. }) => false,
+            (Map { key: gk, value: gv, .. }, Map { key: wk, value: wv, .. }) => {
+                Self::type_exprs_may_be_elem(gk, wk) && Self::type_exprs_may_be_elem(gv, wv)
+            }
+            (Pointer { to: g, .. }, Pointer { to: w, .. }) => {
+                Self::type_exprs_may_be_elem(g, w)
+            }
+            _ => true,
+        }
+    }
+
+    /// Helper for #1044: check if an untyped literal matches a target primitive type name.
+    fn lit_kind_matches_type_name(kind: &hy_syntax::LitKind, name: &str) -> bool {
+        use hy_syntax::LitKind::*;
+        match kind {
+            Bool(_) => name == "bool",
+            Int(_) => matches!(
+                name,
+                "int" | "int8" | "int16" | "int32" | "int64"
+                    | "uint" | "uint8" | "uint16" | "uint32" | "uint64"
+                    | "byte" | "rune"
+            ),
+            Float(_) => matches!(name, "float32" | "float64"),
+            Str(_) | RawStr(_) => name == "string",
+            Char(_) => matches!(name, "rune" | "byte" | "int" | "int32" | "int8" | "uint8"),
+            Nil => true,
+        }
+    }
+
+    /// Check that a sent value's concrete type matches the channel's
+    /// element type (issue #1044).
+    pub(crate) fn check_chan_send_named_mismatch(
+        &mut self,
+        st: &FnState,
+        chan: &Expr,
+        value: &Expr,
+        span: Span,
+    ) {
+        let Some(elem_ty) = self.chan_elem_ty(st, chan) else { return };
+        let resolved_elem = self.resolve_type_alias(&elem_ty);
+
+        if let Expr::Lit { kind, .. } = value {
+            if let hy_syntax::TypeExpr::Named { name: en, .. } = &resolved_elem {
+                if !Self::lit_kind_matches_type_name(kind, en) {
+                    let msg = format!(
+                        "`{}` has incompatible literal type but the channel element type is {} (HYB-E3011)",
+                        value.render(), resolved_elem.render()
+                    );
+                    self.push_chan_elem_mismatch(span, msg);
+                }
+            }
+            return;
+        }
+
+        let Some(val_ty) = self.ty_of_expr(st, value) else { return };
+        let resolved_val = self.resolve_type_alias(&val_ty);
+        if !Self::type_exprs_may_be_elem(&resolved_val, &resolved_elem) {
+            let msg = format!(
+                "`{}` has type {} but the channel element type is {} (HYB-E3011)",
+                value.render(), resolved_val.render(), resolved_elem.render()
+            );
+            self.push_chan_elem_mismatch(span, msg);
         }
     }
 
@@ -1301,6 +1394,16 @@ impl<'a> Checker<'a> {
                     }
                 }
                 Outcome::Managed { desc, risky } => {
+                    // Issue #1044: element type mismatch is a TYPE contract
+                    // that applies even when sendability is managed.
+                    if let Some((got, want)) = send_elem_mismatch {
+                        self.emit_chan_elem_mismatch_send(
+                            &got,
+                            &want,
+                            v.span(),
+                            &format!("`{}`", v.render()),
+                        );
+                    }
                     // only values not safe-by-type are the trust surface
                     if risky {
                         managed_descs.push(desc);
