@@ -417,6 +417,42 @@ impl<'a> Scan<'a> {
                                     ),
                                 ]),
                             );
+                        } else if !self.allowed.contains(root)
+                            && !self.file_decls.contains(root)
+                            && !self.packages.contains(root)
+                            && !crate::foreign::BUILTIN_PACKAGES.contains(&root.as_str())
+                            && !crate::foreign::is_curated_package_root(root)
+                        {
+                            // Issue #1131: a bare dotted access whose root is
+                            // neither declared, imported, nor a curated
+                            // package root (`widgets.count` with no import)
+                            // passed the checker and then failed `go build`
+                            // with `undefined: widgets` (BUILDABLE row 13).
+                            // The arms above cover explicit uncurated
+                            // imports, bare uncurated stdlib roots, and
+                            // unknown members of curated roots; this arm
+                            // closes the remaining shape: a root that is
+                            // none of those. Fail-open for every name the
+                            // checker cannot see (an unresolved local, a
+                            // file-level decl, an imported package, a
+                            // builtin package, a curated package).
+                            self.diags.push(
+                                hy_diag::Diagnostic::error(
+                                    "HYB-E1001",
+                                    self.path.to_string(),
+                                    *span,
+                                    format!(
+                                        "`{}.{}` cannot be resolved — `{}` is not an imported package, a declared name, or a curated package root (Go refuses `undefined: {}`) (HYB-E1001)",
+                                        root, name, root, root
+                                    ),
+                                )
+                                .with_notes(vec![
+                                    format!(
+                                        "declare `{}` in the file or scope, or `import` the package that provides it — imports (plus the builtin package table) are the only package-qualified roots",
+                                        root
+                                    ),
+                                ]),
+                            );
                         }
                     }
                 } else {
@@ -734,6 +770,31 @@ impl Checker<'_> {
     /// `check_fn_undefined_names` owns those (per-fn scope).
     pub(crate) fn check_file_undefined_names(&mut self) {
         for d in &self.file.decls {
+            let (name, span) = match d {
+                Decl::Fn(f) => (f.name.as_str(), f.span),
+                Decl::Const(c) => (c.name.as_str(), c.span),
+                Decl::TypeAlias(a) => (a.name.as_str(), a.span),
+                Decl::Struct(st) => (st.name.as_str(), st.span),
+                Decl::Enum(e) => (e.name.as_str(), e.span),
+                Decl::Import { .. } => ("", hy_diag::Span::point(hy_diag::Pos { line: 1, col: 1 })),
+            };
+            const PRELUDE_BUILTINS: &[&str] = &["panic", "len", "make", "delete", "copy", "append", "close", "recover"];
+            if PRELUDE_BUILTINS.contains(&name) {
+                self.diags.push(
+                    hy_diag::Diagnostic::error(
+                        "HYB-E1001",
+                        self.path.to_string(),
+                        span,
+                        format!(
+                            "package-level declaration `{name}` shadows the Go builtin `{name}` used by generated runtime prelude (Go package-level declarations shadow builtins for the whole package) (HYB-E1001)"
+                        ),
+                    )
+                    .with_notes(vec![
+                        "why: Go package-level functions and constants shadow Go builtins package-wide; declaring `panic` or `len` at file level captures prelude calls inside `option.unwrap()` and `set` methods".to_string(),
+                        "fix: rename the top-level declaration to avoid colliding with Go builtins (e.g. `user_panic` instead of `panic`)".to_string(),
+                    ]),
+                );
+            }
             if let Decl::Import { path, span } = d {
                 if !crate::foreign::is_curated_import(path) {
                     self.diags.push(
