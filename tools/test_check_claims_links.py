@@ -102,5 +102,30 @@ class CheckClaimsLinksTest(unittest.TestCase):
         self.assertEqual(report["issues"][0]["kind"], "missing-claims-file")
 
 
+    def test_empty_claims_table_is_reported(self):
+        (self.root / "GUARANTEES.md").write_text(
+            "# GUARANTEES\n\n## The claims table\n\nNo evidence rows.\n",
+            encoding="utf-8",
+        )
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 1)
+        report = json.loads(result.stdout)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["rows"], 0)
+        self.assertEqual([i["kind"] for i in report["issues"]], ["empty-claims-table"])
+
+    def test_missing_table_heading_is_reported_as_empty(self):
+        (self.root / "GUARANTEES.md").write_text(
+            "# GUARANTEES\n\nUnrelated content without claims section.\n",
+            encoding="utf-8",
+        )
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 1)
+        report = json.loads(result.stdout)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["rows"], 0)
+        self.assertEqual([i["kind"] for i in report["issues"]], ["empty-claims-table"])
+
+
 if __name__ == "__main__":
     unittest.main()
