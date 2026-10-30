@@ -640,8 +640,16 @@ impl Parser {
             self.bump();
             let mut results = Vec::new();
             while !self.at_punct(")") && !self.at_eof() {
-                let named =
-                    matches!(self.cur(), Tok::Ident(_)) && matches!(self.nth(1), Tok::Ident(_));
+                let named = matches!(self.cur(), Tok::Ident(_))
+                    && match self.nth(1) {
+                        Tok::Punct("*")
+                        | Tok::Punct("[")
+                        | Tok::Kw("chan")
+                        | Tok::Kw("fn")
+                        | Tok::Ident(_) => true,
+                        Tok::Punct("<-") => matches!(self.nth(2), Tok::Kw("chan")),
+                        _ => false,
+                    };
                 if named {
                     let name = self.expect_ident()?;
                     let ty = self.parse_type()?;
