@@ -516,7 +516,7 @@ impl<'a> Checker<'a> {
     /// overwritten by, or overwrites, the loan's store-back. `owner` is the
     /// binding being (re)loaned, whose own earlier loan does not conflict.
     #[allow(clippy::too_many_arguments)]
-    fn emit_o8_alias_if_live(
+    pub(crate) fn emit_o8_alias_if_live(
         &mut self,
         st: &FnState,
         path: &str,

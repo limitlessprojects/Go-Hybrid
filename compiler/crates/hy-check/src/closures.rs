@@ -1203,6 +1203,21 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
     }
 }
 
+/// #1403: record a closure-local alias declaration (`alias := m` / `alias = m`)
+/// in `st.aliases` so A3 root resolution (`a3_paths_conflict`) sees that the
+/// alias shares storage with its source while a slot loan on that source is
+/// live. `check_body_boundaries` records these later, but
+/// `check_closure_slot_loans` runs first and needs them for its own A3/O8
+/// window checks.
+fn record_closure_local_alias(st: &mut FnState, name: &str, val: &Expr) {
+    if let Expr::Ident { name: src, .. } = crate::model::unwrap_parens(val) {
+        let root = crate::freeze::resolve_alias(st, src);
+        if root != name {
+            st.aliases.insert(name.to_string(), root);
+        }
+    }
+}
+
 /// Check A3 (`HYB-E3102`) for map-slot loans opened inside a closure body.
 fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block) {
     use crate::model::{Loan, LoanTarget};
@@ -1226,6 +1241,19 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                         if let Some(path) = walk::addr_of_index_base_path(val) {
                             let binding = name.clone();
                             let key = walk::addr_of_index_slot_key(val);
+                            // #1403: O8 uniqueness — a second slot loan on the
+                            // same live slot is a store-back clobber. Mirror
+                            // `loans.rs::process_local` (which the flat walk
+                            // above bypasses for closure bodies).
+                            ck.emit_o8_alias_if_live(
+                                st,
+                                &path,
+                                key.as_deref(),
+                                Some(&binding),
+                                val.span(),
+                                idx,
+                                "a second slot loan",
+                            );
                             let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
                             st.loans.push(Loan {
                                 target: LoanTarget::MapSlot {
@@ -1240,6 +1268,9 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                             });
                         } else {
                             ck.extend_map_slot_loan_to_alias(st, name, val, idx);
+                            // #1403: `alias := m` must be visible to A3 root
+                            // resolution during this same flat walk.
+                            record_closure_local_alias(st, name, val);
                         }
                     }
                 }
@@ -1256,6 +1287,17 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                             if let Some(path) = walk::addr_of_index_base_path(v) {
                                 let binding = name.clone();
                                 let key = walk::addr_of_index_slot_key(v);
+                                // #1403: O8 uniqueness, mirroring
+                                // `loans.rs::process_assign`.
+                                ck.emit_o8_alias_if_live(
+                                    st,
+                                    &path,
+                                    key.as_deref(),
+                                    Some(&binding),
+                                    v.span(),
+                                    idx,
+                                    "a second slot loan",
+                                );
                                 let last =
                                     st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
                                 st.loans.push(Loan {
@@ -1271,6 +1313,8 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                                 });
                             } else {
                                 ck.extend_map_slot_loan_to_alias(st, name, v, idx);
+                                // #1403: `alias = m` must be visible to A3.
+                                record_closure_local_alias(st, name, v);
                             }
                         }
                     }
@@ -1280,6 +1324,20 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                         if let Some(path) = walk::place_path(t) {
                             ck.emit_a3_if_live_pub(st, &path, t.span, idx, "insert");
                         }
+                    }
+                    // #1403: a field store through the loaned slot's base
+                    // (`ns[0].bal = 50` while `s := &ns[0]` is live) is an O8
+                    // uniqueness violation, same as `loans.rs::process_assign`.
+                    if let Some((path, key)) = walk::place_field_store_slot(t) {
+                        ck.emit_o8_alias_if_live(
+                            st,
+                            &path,
+                            key.as_deref(),
+                            None,
+                            t.span,
+                            idx,
+                            "a field store",
+                        );
                     }
                 }
             }
