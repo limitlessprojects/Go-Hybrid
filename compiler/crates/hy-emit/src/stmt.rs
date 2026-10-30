@@ -286,7 +286,12 @@ impl Emitter {
                     },
                     (Some(t), Some(v)) => {
                         self.hoist_tries_expr(v)?;
-                        let e = self.emit_expr(v, 0)?;
+                        // The declared type is an expected type: a `none`
+                        // initializer lowers to `option[T]{}` (issue #1297).
+                        let e = match l.ty.as_ref() {
+                            Some(ty) => self.emit_expr_exp(v, 0, Some(ty))?,
+                            None => self.emit_expr(v, 0)?,
+                        };
                         self.push(&format!("var {} {} = {}", l.names.join(", "), t, e));
                     }
                     (None, Some(v)) => {
@@ -298,6 +303,17 @@ impl Emitter {
                         return Err(EmitError::unsupported(
                             "`var x` without a type or initializer",
                         ));
+                    }
+                }
+                // A declared `option[T]` local is the evidence a later
+                // `o = none` lowers against (#1297) — with or without an
+                // initializer.
+                if let Some(t) = &ty {
+                    if l.names.len() == 1
+                        && l.names[0] != "_"
+                        && super::expr::option_zero_text(t).is_some()
+                    {
+                        self.local_option_ty.insert(l.names[0].clone(), t.clone());
                     }
                 }
                 self.hint_from_values(&l.names, &l.values);
@@ -506,6 +522,15 @@ impl Emitter {
             Stmt::Expr { expr, .. } => Self::expr_has_hoistable_try(expr),
             _ => false,
         }
+    }
+
+    /// A bare `none` (parens transparent) — the prelude option's zero value.
+    pub(crate) fn is_bare_none(e: &Expr) -> bool {
+        let mut lit = e;
+        while let Expr::Paren { inner, .. } = lit {
+            lit = inner;
+        }
+        matches!(lit, Expr::Ident { name, .. } if name == "none")
     }
 
     pub(crate) fn place_has_hoistable_try(p: &Place) -> bool {
@@ -1320,10 +1345,20 @@ impl Emitter {
             .iter()
             .map(|t| self.emit_place(t))
             .collect::<Result<Vec<_>, _>>()?;
-        let vs = values
-            .iter()
-            .map(|v| self.emit_expr(v, 0))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut vs = Vec::with_capacity(values.len());
+        for (i, v) in values.iter().enumerate() {
+            // `o = none` on a var DECLARED as `option[T]`: the binding's
+            // declared type is the only evidence, and it is registered at
+            // the declaration (#1297).
+            let declared = targets.get(i).and_then(|t| match &t.kind {
+                PlaceKind::Ident(n) => self.local_option_ty.get(n).cloned(),
+                _ => None,
+            });
+            match declared.as_deref().and_then(super::expr::option_zero_text) {
+                Some(zero) if Self::is_bare_none(v) => vs.push(zero),
+                _ => vs.push(self.emit_expr(v, 0)?),
+            }
+        }
         self.push(&format!("{} {} {}", ts.join(", "), op_text, vs.join(", ")));
         Ok(())
     }
