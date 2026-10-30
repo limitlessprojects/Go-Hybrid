@@ -5184,5 +5184,91 @@ mod tests {
             .count();
         assert_eq!(e3006_count, 2, "{:?}", r.diagnostics);
     }
+
+    #[test]
+    fn mixed_named_and_unnamed_results_preserve_bare_return_slot_indices() {
+        // 1. Inline FnLit with leading unnamed slot + two named slots + trailing `error`:
+        //    `1ad3f4d` normalizes `(int, a dict, b dict, error)` to
+        //    `(hyR0 int, a dict, b dict, hyR3 error)`, making bare `return` buildable Go.
+        //    Previously `resolve_call_expr_decl_or_fnlit` dropped unnamed slots and
+        //    shifted return-slot pair `(1, 2)` onto `(0, 1)`.
+        let inline_fnlit = check(
+            "type dict = map[string]int\n\
+             fn worker(m dict) { m[\"k\"] = 2 }\n\
+             fn main() {\n\
+               _, x, y, _ := (fn() (int, a dict, b dict, error) {\n\
+                 m := map[string]int{\"k\": 1}\n\
+                 a = m\n\
+                 b = m\n\
+                 return\n\
+               })()\n\
+               task worker(move x)\n\
+               y[\"k\"] = 3\n\
+             }",
+        );
+        assert_eq!(inline_fnlit.verdict, Verdict::Reject, "{:?}", inline_fnlit.diagnostics);
+        assert!(
+            inline_fnlit.diagnostics.iter().any(|d| d.code == "HYB-E3003"),
+            "{:?}",
+            inline_fnlit.diagnostics
+        );
+
+        // 2. `?` try-unwrapped mixed-result call (`_, x, y := dup()?`), top-level fn, and method.
+        let try_fn_and_method = check(
+            "type dict = map[string]int\n\
+             struct helper { tag int }\n\
+             fn dup_fn() (int, a dict, b dict, error) {\n\
+               m := map[string]int{\"k\": 1}\n\
+               a = m\n\
+               b = m\n\
+               return\n\
+             }\n\
+             fn (h helper) dup_method() (int, a dict, b dict, error) {\n\
+               m := map[string]int{\"k\": h.tag}\n\
+               a = m\n\
+               b = m\n\
+               return\n\
+             }\n\
+             fn worker(m dict) { m[\"k\"] = 2 }\n\
+             fn run() error {\n\
+               _, fx, fy := dup_fn()?\n\
+               task worker(move fx)\n\
+               fy[\"k\"] = 3\n\
+               h := helper{tag: 1}\n\
+               _, mx, my := h.dup_method()?\n\
+               task worker(move mx)\n\
+               my[\"k\"] = 4\n\
+               return nil\n\
+             }",
+        );
+        assert_eq!(
+            try_fn_and_method.verdict,
+            Verdict::Reject,
+            "{:?}",
+            try_fn_and_method.diagnostics
+        );
+        let e3003_count = try_fn_and_method
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "HYB-E3003")
+            .count();
+        assert_eq!(e3003_count, 2, "{:?}", try_fn_and_method.diagnostics);
+
+        // 3. Positive control: distinct maps assigned to named slots `(1, 2)` do not false-positive.
+        let clean = check(
+            "type dict = map[string]int\n\
+             fn worker(m dict) { m[\"k\"] = 2 }\n\
+             fn main() {\n\
+               _, x, y, _ := (fn() (int, a dict, b dict, error) {\n\
+                 a = map[string]int{\"k\": 1}\n\
+                 b = map[string]int{\"k\": 2}\n\
+                 return\n\
+               })()\n\
+               task worker(move x)\n\
+               y[\"k\"] = 3\n\
+             }",
+        );
+        assert_eq!(clean.verdict, Verdict::Accept, "{:?}", clean.diagnostics);
+    }
 }
 

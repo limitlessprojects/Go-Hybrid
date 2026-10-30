@@ -273,8 +273,9 @@ pub(crate) struct FnState {
     /// rebind time; consumed at the CALL site so an insert inside the body
     /// counts as an A3 event when the call sits in a live slot-loan window.
     pub closure_mutates: HashMap<String, HashSet<String>>,
-    /// Local closure binding -> `(params, named_results, body)` for
+    /// Local closure binding -> `(params, results_by_slot, body)` for
     /// interprocedural return-origin and multi-value return sharing analysis.
+    /// Unnamed result slots use `"_"` so positional return indices stay aligned.
     pub closure_fnlits: HashMap<
         String,
         (

@@ -1038,7 +1038,12 @@ impl<'a> Checker<'a> {
                     .collect();
                 let typed_results: Vec<(String, Option<hy_syntax::TypeExpr>)> = results
                     .iter()
-                    .filter_map(|r| r.name.as_ref().map(|n| (n.clone(), Some(r.ty.clone()))))
+                    .map(|r| {
+                        (
+                            r.name.clone().unwrap_or_else(|| "_".to_string()),
+                            Some(r.ty.clone()),
+                        )
+                    })
                     .collect();
                 st.closure_fnlits.insert(
                     name.to_string(),
@@ -4179,7 +4184,12 @@ impl<'a> Checker<'a> {
                 let results = decl
                     .results
                     .iter()
-                    .filter_map(|r| r.name.as_ref().map(|n| (n.clone(), Some(r.ty.clone()))))
+                    .map(|r| {
+                        (
+                            r.name.clone().unwrap_or_else(|| "_".to_string()),
+                            Some(r.ty.clone()),
+                        )
+                    })
                     .collect();
                 Some((params, results, body))
             }
@@ -4238,7 +4248,12 @@ impl<'a> Checker<'a> {
                 let results = decl
                     .results
                     .iter()
-                    .filter_map(|r| r.name.as_ref().map(|n| (n.clone(), Some(r.ty.clone()))))
+                    .map(|r| {
+                        (
+                            r.name.clone().unwrap_or_else(|| "_".to_string()),
+                            Some(r.ty.clone()),
+                        )
+                    })
                     .collect();
                 Some((params, results, body))
             }
@@ -4254,7 +4269,12 @@ impl<'a> Checker<'a> {
                     .collect();
                 let r = results
                     .iter()
-                    .filter_map(|r| r.name.as_ref().map(|n| (n.clone(), Some(r.ty.clone()))))
+                    .map(|r| {
+                        (
+                            r.name.clone().unwrap_or_else(|| "_".to_string()),
+                            Some(r.ty.clone()),
+                        )
+                    })
                     .collect();
                 Some((p, r, body))
             }
@@ -4318,7 +4338,12 @@ impl<'a> Checker<'a> {
                 };
                 let mut shadowed: HashSet<String> =
                     typed_params.iter().map(|(n, _)| n.clone()).collect();
-                shadowed.extend(typed_results.iter().map(|(n, _)| n.clone()));
+                shadowed.extend(
+                    typed_results
+                        .iter()
+                        .filter(|(n, _)| n != "_")
+                        .map(|(n, _)| n.clone()),
+                );
                 let mut aliases: HashMap<String, HashSet<String>> = HashMap::new();
                 for (cname, cb) in &self.consts {
                     if self.shape_may_share(&cb.shape) && !shadowed.contains(cname) {
@@ -4444,6 +4469,9 @@ impl<'a> Checker<'a> {
                         Stmt::Return { values, .. } => {
                             if values.is_empty() {
                                 for (nr, _) in &typed_results {
+                                    if nr == "_" {
+                                        continue;
+                                    }
                                     if let Some(cs) = aliases.get(nr) {
                                         for c in cs {
                                             if !out.contains(c) {
@@ -4859,12 +4887,20 @@ impl<'a> Checker<'a> {
                 }
                 Stmt::Return { values, .. } => {
                     let sets: Vec<HashSet<String>> = if values.is_empty() {
-                        if typed_results.len() < 2 {
+                        if typed_results.len() < 2
+                            || !typed_results.iter().any(|(n, _)| n != "_")
+                        {
                             continue;
                         }
                         typed_results
                             .iter()
-                            .map(|(nr, _)| origins.get(nr).cloned().unwrap_or_default())
+                            .map(|(nr, _)| {
+                                if nr == "_" {
+                                    HashSet::new()
+                                } else {
+                                    origins.get(nr).cloned().unwrap_or_default()
+                                }
+                            })
                             .collect()
                     } else {
                         if values.len() < 2 {
