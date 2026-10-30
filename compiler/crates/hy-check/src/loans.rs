@@ -3177,6 +3177,9 @@ impl<'a> Checker<'a> {
                     for ((name, v), (shape, ty, origins)) in
                         l.names.iter().zip(l.values.iter()).zip(rhs_info)
                     {
+                        let is_slot_loan = l.ty.is_none()
+                            && matches!(l.kind, LocalKind::Define | LocalKind::Let)
+                            && walk::addr_of_index_base_path(v).is_some();
                         cst.env_define(
                             name,
                             Binding {
@@ -3187,7 +3190,7 @@ impl<'a> Checker<'a> {
                                 managed_taint: false,
                                 moved: None,
                                 non_owned_origin: None,
-                                slot_loan: false,
+                                slot_loan: is_slot_loan,
                             },
                         );
                         cst.closure_defs.remove(name);
@@ -3245,17 +3248,41 @@ impl<'a> Checker<'a> {
                     {
                         match &t.kind {
                             PlaceKind::Ident(name) => {
+                                let is_new_slot_loan = walk::addr_of_index_base_path(v).is_some();
+                                let mut active_slot_loan = false;
                                 if let Some(b) = cst.env_lookup_mut(name) {
                                     if !matches!(v_shape, TypeShape::Unknown) || b.ty.is_none() {
-                                        b.shape = v_shape;
+                                        b.shape = v_shape.clone();
                                     }
                                     if v_ty.is_some() || b.ty.is_none() {
                                         b.ty = v_ty;
                                     }
+                                    b.slot_loan |= is_new_slot_loan;
+                                    active_slot_loan = b.slot_loan && !is_new_slot_loan;
                                 }
                                 cst.closure_defs.remove(name);
                                 self.record_closure_mutations(cst, name, v);
-                                if src_slots.is_empty() {
+                                if active_slot_loan {
+                                    let tgt_shares = self.shape_may_share(&v_shape)
+                                        || matches!(v_shape, TypeShape::Unknown);
+                                    let dst_slots = aliases.get(name).cloned().unwrap_or_default();
+                                    if tgt_shares && !src_slots.is_empty() {
+                                        for d in &dst_slots {
+                                            for s in &src_slots {
+                                                if d != s {
+                                                    out.insert((*d, *s));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    let mut merged = dst_slots;
+                                    merged.extend(src_slots);
+                                    if merged.is_empty() {
+                                        aliases.remove(name);
+                                    } else {
+                                        aliases.insert(name.clone(), merged);
+                                    }
+                                } else if src_slots.is_empty() {
                                     aliases.remove(name);
                                 } else {
                                     aliases.insert(name.clone(), src_slots);
@@ -3297,7 +3324,27 @@ impl<'a> Checker<'a> {
                         let src_slots = if carries { raw.clone() } else { HashSet::new() };
                         match &t.kind {
                             PlaceKind::Ident(name) => {
-                                if src_slots.is_empty() {
+                                let active_slot_loan =
+                                    cst.env_lookup(name).is_some_and(|b| b.slot_loan);
+                                if active_slot_loan {
+                                    let dst_slots = aliases.get(name).cloned().unwrap_or_default();
+                                    if carries && !src_slots.is_empty() {
+                                        for d in &dst_slots {
+                                            for s in &src_slots {
+                                                if d != s {
+                                                    out.insert((*d, *s));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    let mut merged = dst_slots;
+                                    merged.extend(src_slots);
+                                    if merged.is_empty() {
+                                        aliases.remove(name);
+                                    } else {
+                                        aliases.insert(name.clone(), merged);
+                                    }
+                                } else if src_slots.is_empty() {
                                     aliases.remove(name);
                                 } else {
                                     aliases.insert(name.clone(), src_slots);
@@ -4363,6 +4410,7 @@ impl<'a> Checker<'a> {
                         set
                     };
                 let flat = walk::flatten(body);
+                let mut slot_loans: HashMap<String, String> = HashMap::new();
                 for (stmt, _) in &flat.stmts {
                     match stmt {
                         Stmt::Local(l) => {
@@ -4370,10 +4418,12 @@ impl<'a> Checker<'a> {
                                 for n in &l.names {
                                     aliases.remove(n);
                                     shadowed.insert(n.clone());
+                                    slot_loans.remove(n);
                                 }
                             } else if l.values.len() == 1 && l.names.len() > 1 {
                                 let cs = expr_const_origins(&l.values[0], &aliases, &shadowed);
                                 for n in &l.names {
+                                    slot_loans.remove(n);
                                     if cs.is_empty() {
                                         aliases.remove(n);
                                         shadowed.insert(n.clone());
@@ -4384,6 +4434,17 @@ impl<'a> Checker<'a> {
                                 }
                             } else {
                                 for (n, v) in l.names.iter().zip(l.values.iter()) {
+                                    if l.ty.is_none()
+                                        && matches!(l.kind, LocalKind::Define | LocalKind::Let)
+                                    {
+                                        if let Some(path) = walk::addr_of_index_base_path(v) {
+                                            slot_loans.insert(n.clone(), path_root(&path).to_string());
+                                        } else {
+                                            slot_loans.remove(n);
+                                        }
+                                    } else {
+                                        slot_loans.remove(n);
+                                    }
                                     let cs = expr_const_origins(v, &aliases, &shadowed);
                                     if cs.is_empty() {
                                         aliases.remove(n);
@@ -4403,9 +4464,20 @@ impl<'a> Checker<'a> {
                                     .iter()
                                     .map(|v| expr_const_origins(v, &aliases, &shadowed))
                                     .collect();
-                                for (t, cs) in targets.iter().zip(rhs_cs) {
+                                for ((t, v), cs) in targets.iter().zip(values.iter()).zip(rhs_cs) {
                                     match &t.kind {
                                         PlaceKind::Ident(n) => {
+                                            if let Some(path) = walk::addr_of_index_base_path(v) {
+                                                slot_loans.insert(n.clone(), path_root(&path).to_string());
+                                            } else if let Some(lr) = slot_loans.get(n).cloned() {
+                                                if !lr.is_empty() && !cs.is_empty() {
+                                                    shadowed.remove(&lr);
+                                                    aliases
+                                                        .entry(lr)
+                                                        .or_default()
+                                                        .extend(cs.iter().cloned());
+                                                }
+                                            }
                                             if cs.is_empty() {
                                                 aliases.remove(n);
                                                 shadowed.insert(n.clone());
@@ -4430,6 +4502,15 @@ impl<'a> Checker<'a> {
                                 let cs = expr_const_origins(&values[0], &aliases, &shadowed);
                                 for t in targets {
                                     if let PlaceKind::Ident(n) = &t.kind {
+                                        if let Some(lr) = slot_loans.get(n).cloned() {
+                                            if !lr.is_empty() && !cs.is_empty() {
+                                                shadowed.remove(&lr);
+                                                aliases
+                                                    .entry(lr)
+                                                    .or_default()
+                                                    .extend(cs.iter().cloned());
+                                            }
+                                        }
                                         if cs.is_empty() {
                                             aliases.remove(n);
                                             shadowed.insert(n.clone());
@@ -5441,6 +5522,147 @@ impl<'a> Checker<'a> {
         self.record_assign_borrow_aliases(st, targets, op, values);
     }
 
+    /// Active O8 map-slot / field-loan target root bindings for `name` when
+    /// `name` is an active slot loan (`b.slot_loan`). In `hy-emit`, a whole-value
+    /// or multi-return assignment to a live slot-loan variable (`q = fresh`,
+    /// `q, ok = pair(fresh)`) does not flush the loan; it updates `q` and emits
+    /// the deferred store-back `m[k] = q` at `q`'s last use (or scope exit), so
+    /// the new value stored into `q` is written into the loaned map/struct `m`.
+    fn active_slot_loan_roots(&self, st: &FnState, name: &str, idx: usize) -> Vec<String> {
+        if !self.lookup_binding(st, name).is_some_and(|b| b.slot_loan) {
+            return Vec::new();
+        }
+        let mut roots: Vec<String> = Vec::new();
+        let live_max_created = st
+            .loans
+            .iter()
+            .filter_map(|l| match &l.target {
+                LoanTarget::MapSlot { binding, .. }
+                    if binding == name
+                        && (idx == 0
+                            || (l.created <= idx && idx <= self.effective_loan_last(st, l))) =>
+                {
+                    Some(l.created)
+                }
+                _ => None,
+            })
+            .max()
+            .or_else(|| {
+                st.loans
+                    .iter()
+                    .filter_map(|l| match &l.target {
+                        LoanTarget::MapSlot { binding, .. } if binding == name => Some(l.created),
+                        _ => None,
+                    })
+                    .max()
+            });
+        if let Some(target_created) = live_max_created {
+            for l in &st.loans {
+                if let LoanTarget::MapSlot { binding, path, .. } = &l.target {
+                    if binding == name && l.created == target_created {
+                        let r = path_root(path);
+                        if !r.is_empty() && r != name && !roots.iter().any(|x| x == r) {
+                            roots.push(r.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        if roots.is_empty() {
+            if let Some(parent) = st.aliases.get(name) {
+                if parent != name && !roots.contains(parent) {
+                    roots.push(parent.clone());
+                }
+            }
+            if let Some(peers) = st.may_share.get(name) {
+                for p in peers {
+                    if p != name && !roots.contains(p) {
+                        roots.push(p.clone());
+                    }
+                }
+            }
+        }
+        roots
+    }
+
+    fn propagate_slot_loan_whole_value_update(
+        &self,
+        st: &mut FnState,
+        name: &str,
+        loan_roots: &[String],
+        span: Span,
+    ) {
+        if loan_roots.is_empty() || name == "_" {
+            return;
+        }
+        let mut q_peers: Vec<String> = st
+            .share_group(name)
+            .into_iter()
+            .filter(|p| {
+                p != name
+                    && self.lookup_binding(st, p).is_some_and(|b| {
+                        b.moved.is_none() && (self.shape_may_share(&b.shape) || b.immutable)
+                    })
+            })
+            .collect();
+        if let Some(alias_parent) = st.aliases.get(name).cloned() {
+            if alias_parent != name
+                && !q_peers.contains(&alias_parent)
+                && self.lookup_binding(st, &alias_parent).is_some_and(|b| {
+                    b.moved.is_none() && (self.shape_may_share(&b.shape) || b.immutable)
+                })
+            {
+                q_peers.push(alias_parent);
+            }
+        }
+        for lr in loan_roots {
+            if lr != name && self.binding_may_share(st, lr) {
+                st.share_edge(name, lr);
+                for peer in &q_peers {
+                    if peer != lr {
+                        st.share_edge(peer, lr);
+                    }
+                }
+            }
+        }
+        if self.binding_may_share(st, name) {
+            let const_root = self.const_write_root(
+                st,
+                &Place {
+                    kind: PlaceKind::Ident(name.to_string()),
+                    span,
+                },
+            );
+            if let Some(cr) = const_root {
+                for lr in loan_roots {
+                    if lr != &cr {
+                        st.share_edge(lr, &cr);
+                    }
+                }
+            }
+            if let Some((orig, _)) = self.non_owned_origin_of(st, name) {
+                let peer_origin = if orig.starts_with("a may-share peer of ") {
+                    orig
+                } else {
+                    format!("a may-share peer of {}", orig)
+                };
+                for lr in loan_roots {
+                    let mut lr_group = vec![lr.clone()];
+                    lr_group.extend(st.share_group(lr));
+                    for target in lr_group {
+                        if target != name && self.binding_may_share(st, &target) {
+                            if let Some(tb) = st.env_lookup_mut(&target) {
+                                if tb.non_owned_origin.is_none() {
+                                    tb.non_owned_origin = Some(peer_origin.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn rebind_assign_targets(
         &mut self,
         st: &mut FnState,
@@ -5546,6 +5768,11 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                     overwritten.push(name.clone());
+                    let slot_loan_roots = if walk::addr_of_index_base_path(v).is_none() {
+                        self.active_slot_loan_roots(&pre_st, name, idx)
+                    } else {
+                        Vec::new()
+                    };
                     if !info.reads_self {
                         self.preserve_peers_before_sever(st, name, false);
                     }
@@ -5598,6 +5825,7 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
+                    self.propagate_slot_loan_whole_value_update(st, name, &slot_loan_roots, t.span);
                     // #111: a closure rebind replaces the old body's
                     // mutation set (or clears it for non-closure values)
                     st.closure_mutates.remove(name);
@@ -5670,6 +5898,7 @@ impl<'a> Checker<'a> {
                     } else {
                         None
                     };
+                    let slot_loan_roots = self.active_slot_loan_roots(st, name, idx);
                     if !reads_self {
                         self.preserve_peers_before_sever(st, name, false);
                     }
@@ -5741,6 +5970,7 @@ impl<'a> Checker<'a> {
                     if may_share {
                         self.record_move_const_and_a3_loans(st, name, &values[0], idx);
                     }
+                    self.propagate_slot_loan_whole_value_update(st, name, &slot_loan_roots, t.span);
                 } else {
                     let root = t.root();
                     if !root.is_empty() && self.binding_may_share(st, root) {
@@ -6038,8 +6268,28 @@ impl<'a> Checker<'a> {
                             self.check_addr_of_const_loan(&cst, v);
                         }
                     }
+                    if l.names.len() == l.values.len() {
+                        for (name, val) in l.names.iter().zip(l.values.iter()) {
+                            if let Some(path) = walk::addr_of_index_base_path(val) {
+                                let key = walk::addr_of_index_slot_key(val);
+                                let last = cst.last_use.get(name).copied().unwrap_or(idx).max(idx);
+                                cst.loans.push(Loan {
+                                    target: LoanTarget::MapSlot {
+                                        binding: name.clone(),
+                                        path,
+                                        key,
+                                    },
+                                    created: idx,
+                                    last,
+                                    span: val.span(),
+                                    desc: format!("`{} := {}`", name, val.render()),
+                                });
+                            }
+                        }
+                    }
                     self.process_closure_const_local(&mut cst, l);
                     self.record_local_borrow_aliases(&mut cst, l);
+                    self.mark_slot_loans_local(&mut cst, l);
                 }
                 Stmt::Assign {
                     targets,
@@ -6050,6 +6300,28 @@ impl<'a> Checker<'a> {
                     if check_writes {
                         for v in values {
                             self.check_addr_of_const_loan(&cst, v);
+                        }
+                    }
+                    if *op == AssignOp::Assign && targets.len() == values.len() {
+                        for (t, v) in targets.iter().zip(values.iter()) {
+                            if let PlaceKind::Ident(name) = &t.kind {
+                                if let Some(path) = walk::addr_of_index_base_path(v) {
+                                    let key = walk::addr_of_index_slot_key(v);
+                                    let last =
+                                        cst.last_use.get(name).copied().unwrap_or(idx).max(idx);
+                                    cst.loans.push(Loan {
+                                        target: LoanTarget::MapSlot {
+                                            binding: name.clone(),
+                                            path,
+                                            key,
+                                        },
+                                        created: idx,
+                                        last,
+                                        span: v.span(),
+                                        desc: format!("`{} = {}`", name, v.render()),
+                                    });
+                                }
+                            }
                         }
                     }
                     let is_const_write: Vec<bool> = targets
@@ -6095,6 +6367,12 @@ impl<'a> Checker<'a> {
                                 if name == "_" {
                                     continue;
                                 }
+                                let slot_loan_roots = if walk::addr_of_index_base_path(v).is_none()
+                                {
+                                    self.active_slot_loan_roots(&cst, name, idx)
+                                } else {
+                                    Vec::new()
+                                };
                                 if !self.value_reads_storage_of(&cst, v, name) {
                                     self.preserve_peers_before_sever(&mut cst, name, false);
                                 }
@@ -6111,6 +6389,12 @@ impl<'a> Checker<'a> {
                                 self.record_may_share(&mut cst, name, v);
                                 self.record_move_const_and_a3_loans(&mut cst, name, v, 0);
                                 self.record_alias(&mut cst, name, v);
+                                self.propagate_slot_loan_whole_value_update(
+                                    &mut cst,
+                                    name,
+                                    &slot_loan_roots,
+                                    t.span,
+                                );
                                 cst.closure_mutates.remove(name);
                                 cst.closure_defs.remove(name);
                                 cst.closure_fnlits.remove(name);
@@ -6123,6 +6407,7 @@ impl<'a> Checker<'a> {
                             }
                         }
                         self.record_assign_borrow_aliases(&mut cst, targets, *op, values);
+                        self.mark_slot_loans_assign(&mut cst, targets, *op, values);
                     } else if *op == AssignOp::Assign && values.len() == 1 && targets.len() > 1 {
                         let shapes = self.multi_value_shapes(&cst, &values[0], targets.len());
                         let tys = self.multi_value_tys(&cst, &values[0], targets.len());
@@ -6133,6 +6418,7 @@ impl<'a> Checker<'a> {
                                 continue;
                             }
                             if let PlaceKind::Ident(name) = &t.kind {
+                                let slot_loan_roots = self.active_slot_loan_roots(&cst, name, idx);
                                 if let Some(b) = cst.env_lookup_mut(name) {
                                     if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
                                         b.shape = shape.clone();
@@ -6148,6 +6434,12 @@ impl<'a> Checker<'a> {
                                     name,
                                     &shape,
                                     &values[0],
+                                );
+                                self.propagate_slot_loan_whole_value_update(
+                                    &mut cst,
+                                    name,
+                                    &slot_loan_roots,
+                                    t.span,
                                 );
                             } else {
                                 let root = t.root();
@@ -6170,6 +6462,7 @@ impl<'a> Checker<'a> {
                             .collect();
                         self.link_multi_value_return_aliases(&mut cst, &values[0], &bound);
                         self.record_assign_borrow_aliases(&mut cst, targets, *op, values);
+                        self.mark_slot_loans_assign(&mut cst, targets, *op, values);
                     }
                 }
                 Stmt::For { kind, .. } => match kind {
@@ -6276,6 +6569,18 @@ impl<'a> Checker<'a> {
         let pre_st = st.clone();
         let mut overwritten = Vec::new();
         let is_let = l.kind == LocalKind::Let;
+        if l.values.is_empty() {
+            let shape = l
+                .ty
+                .as_ref()
+                .map(|t| self.shape_of_type(t))
+                .unwrap_or(TypeShape::Unknown);
+            let ty = l.ty.clone();
+            for name in &l.names {
+                self.define_binding(st, name, shape.clone(), ty.clone(), immutable, false, is_let);
+            }
+            return;
+        }
         if l.values.len() == 1 && l.names.len() > 1 {
             let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
             let tys = self.multi_value_tys(st, &l.values[0], l.names.len());
