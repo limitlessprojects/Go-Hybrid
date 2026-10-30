@@ -237,5 +237,42 @@ class CliTests(unittest.TestCase):
             self.assertIn("conflict marker", res.stderr.lower())
 
 
+class NonUtf8MarkerTests(unittest.TestCase):
+    """An unrelated invalid byte must not hide ASCII structural evidence."""
+
+    def run_guard(self, relative, content):
+        with tempfile.TemporaryDirectory(prefix="marker-bytes-") as directory:
+            path = Path(directory, relative)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+            return subprocess.run(
+                [sys.executable, str(SCRIPT), "--root", directory],
+                capture_output=True, text=True, encoding="utf-8")
+
+    def test_invalid_byte_before_complete_conflict_block(self):
+        result = self.run_guard("fixture.go", b"// bad byte: \xff\n<<<<<<< HEAD\nleft\n=======\nright\n>>>>>>> other\n")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("fixture.go:2:", result.stderr)
+
+    def test_invalid_byte_after_complete_conflict_block(self):
+        result = self.run_guard("fixture.rs", b"<<<<<<< HEAD\nleft\n=======\nright\n>>>>>>> other\n// bad byte: \xff\n")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("fixture.rs:1:", result.stderr)
+
+    def test_workflow_bad_byte_does_not_hide_column_zero_shell_line(self):
+        result = self.run_guard(".github/workflows/ci.yaml", b"# bad byte: \xff\nname: ci\npython3 tools/job.py\n")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("workflow structure:", result.stderr)
+        self.assertIn("ci.yaml:3:", result.stderr)
+
+    def test_bad_byte_alone_is_not_a_conflict_or_full_yaml_validation(self):
+        result = self.run_guard("fixture.go", b"// unrelated byte: \xff\n")
+        self.assertEqual(result.returncode, 0)
+
+    def test_unknown_binary_extension_remains_outside_scan(self):
+        result = self.run_guard("fixture.bin", b"\xff\n<<<<<<< HEAD\n=======\n>>>>>>> other\n")
+        self.assertEqual(result.returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
