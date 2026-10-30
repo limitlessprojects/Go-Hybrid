@@ -193,17 +193,14 @@ fn stmt_reads(s: &Stmt, target: &str) -> bool {
                         return true;
                     }
                 }
-                ForKind::Range {
-                    var,
-                    lo,
-                    hi,
-                    inclusive,
-                } => {
+                ForKind::Range { var, lo, hi, .. } => {
                     if expr_reads(lo, target) {
                         return true;
                     }
                     if var == target {
-                        return *inclusive && expr_reads(hi, target);
+                        // Both bounds are evaluated before the range variable
+                        // shadows an outer binding of the same name (#730).
+                        return expr_reads(hi, target);
                     }
                     if expr_reads(hi, target) {
                         return true;

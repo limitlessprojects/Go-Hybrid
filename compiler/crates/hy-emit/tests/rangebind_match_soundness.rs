@@ -114,8 +114,8 @@ fn main() {
     let file_ex = parse_file("test.hy", src_exclusive).expect("parse exclusive succeeds");
     let go_ex = emit_go(&file_ex).expect("emit exclusive succeeds");
     assert!(
-        go_ex.contains("for i, _ := range xs {"),
-        "exclusive `for v in 0..v` lowers to `for v := 0; v < v; v++` where `v` in `v < v` is the inner `v`, so outer `v` must be blanked:\n{go_ex}"
+        go_ex.contains("for i, v := range xs {"),
+        "exclusive `for v in 0..v` captures the outer `v` before the inner range binding shadows it, so the outer binding must be retained:\n{go_ex}"
     );
 
     let src_inclusive = r#"package main
