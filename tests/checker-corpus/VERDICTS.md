@@ -1075,3 +1075,11 @@ ACCEPT-MANAGED 2 · REJECT 86** — main's 125 plus this one.
 by the autonomous pipeline (bundles author-758 / author-827, landings
 0107658 / d0a2db5). Sibling-take credit: sonson0910's stale-base
 companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.
+-------------------------------------------------------------------------------
+
+### atomic-value-copy-reject - REJECT A1c (issue #1399)
+
+Scalar sync/atomic values (`atomic.bool`/`int32`/`int64`/`uint32`/`uint64`/`uintptr`) are copy-locked (sync/atomic embeds noCopy): every by-value copy - decl copy, whole-value assignment, compound RMW, by-value spawn/send/move - rejects fail-closed (HYB-E2011 statement-level; HYB-E3001/E3002 at boundaries). The `&hits` pointer route (OQ6) and atomic methods stay legal.
+
+With this registration the corpus is **127 programs: ACCEPT 38 -
+ACCEPT-MANAGED 2 - REJECT 87** - main's 126 plus this one.

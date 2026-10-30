@@ -105,6 +105,8 @@ impl<'a> Checker<'a> {
                     self.check_expr_emit_guard(st, v);
                     // `n := &m[k].f` — the O8 store-back place must build.
                     self.check_slot_loan_operand_addressable(st, v);
+                    // `other := hits` — a copy-locked atomic by value (#1399).
+                    self.check_atomic_value_copy(st, v);
                 }
                 if deep {
                     if matches!(l.kind, hy_syntax::LocalKind::Const) {
@@ -140,10 +142,20 @@ impl<'a> Checker<'a> {
                 for v in values {
                     self.check_expr_emit_guard(st, v);
                     self.check_slot_loan_operand_addressable(st, v);
+                    // `hits = z` / `hits += 1` — copy-locked atomic by value (#1399).
+                    self.check_atomic_value_copy(st, v);
                 }
                 // `x <<= -1` — the compound form of HYB-E6005.
                 if matches!(op, AssignOp::ShlAssign | AssignOp::ShrAssign) && values.len() == 1 {
                     self.check_negative_shift(&values[0], *span);
+                }
+                // `hits += 1` / `hits++` — in-place RMW on a copy-locked
+                // atomic target (#1399); plain `=` copies are caught on the
+                // value side above.
+                if !matches!(op, AssignOp::Assign) {
+                    for t in targets {
+                        self.check_atomic_value_copy_target(st, t);
+                    }
                 }
                 if deep {
                     for (t, v) in targets.iter().zip(values.iter()) {
@@ -716,6 +728,55 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+    }
+
+    /// HYB-E2011 (#1399): a proven atomic-typed binding is copy-locked —
+    /// Go's `copylocks` vet rule rejects every by-value copy of a
+    /// sync/atomic scalar (they embed `sync/atomic.noCopy`), and a copy
+    /// taken while another task mutates through `&x` is a data race
+    /// (issue #1399). Only a bare-ident value whose binding shape IS
+    /// `Atomic` rejects; method receivers (`x.add(1)`), `&x`, pointer
+    /// copies, and unresolved shapes stay legal.
+    fn check_atomic_value_copy(&mut self, st: &FnState, v: &Expr) {
+        let Expr::Ident { name, span } = unwrap_parens(v) else {
+            return;
+        };
+        self.check_atomic_value_copy_ident(st, name, *span);
+    }
+
+    /// The target-side twin: `hits += 1` / `hits++` read and write the
+    /// copy-locked value in place — a non-atomic read-modify-write (#1399).
+    fn check_atomic_value_copy_target(&mut self, st: &FnState, t: &Place) {
+        let PlaceKind::Ident(name) = &t.kind else {
+            return;
+        };
+        self.check_atomic_value_copy_ident(st, name, t.span);
+    }
+
+    fn check_atomic_value_copy_ident(&mut self, st: &FnState, name: &str, span: Span) {
+        let Some(b) = self.lookup_binding(st, name) else {
+            return;
+        };
+        if !matches!(b.shape, TypeShape::Atomic) {
+            return;
+        }
+        let msg = format!(
+            "`{}` is an atomic value — it cannot be copied by value (HYB-E2011)",
+            name
+        );
+        let notes = vec![
+            "Go's copylocks rule (`go vet`) rejects every by-value copy of a sync/atomic scalar: the type embeds `sync/atomic.noCopy`".to_string(),
+            format!(
+                "a copy taken while another task mutates through `&{}` is a data race (issue #1399)",
+                name
+            ),
+            format!(
+                "share it as `&{}` and mutate through atomic ops only (OQ6); reads via `{}.load()`",
+                name, name
+            ),
+        ];
+        self.diags
+            .push(Diagnostic::error("HYB-E2011", self.path.clone(), span, msg).with_notes(notes));
     }
 
     // ------------------------------------------------------------------

@@ -9,7 +9,8 @@
 //! Outcome per value (task brief, VERDICTS.md sketches):
 //!   * OK classes: primitives; string/const/immutable; chan-typed values;
 //!     `move x`; fresh literals whose reference-typed parts are all sendable
-//!     (O4.6 deep sendability); atomic values and `&atomic_binding`;
+//!     (O4.6 deep sendability); `&atomic_binding` (atomic VALUES are
+//!     copy-locked — never by-value sendable, #1399);
 //!     managed-tainted values (class 6).
 //!   * REJECT: a named mutable GC binding (map/slice/struct/pointer-to-
 //!     mutable), `&mutable_struct_binding`, borrow-handles, closures.
@@ -123,6 +124,14 @@ impl<'a> Checker<'a> {
                     self.binding_ty_str(b)
                 )],
             }),
+            TypeShape::Atomic => Outcome::Rejected(RejectInfo {
+                value: name.to_string(),
+                ty: self.binding_ty_str(b),
+                notes: vec![format!(
+                    "`{}` is an atomic value — Go's copylocks rule forbids copying a sync/atomic scalar by value (it embeds noCopy); share it as `&{}` and mutate through atomic ops only (OQ6)",
+                    name, name
+                )],
+            }),
             shape if self.shape_holds_closure(shape, &mut Vec::new()) => {
                 Outcome::Rejected(RejectInfo {
                     value: name.to_string(),
@@ -139,7 +148,7 @@ impl<'a> Checker<'a> {
                     value: name.to_string(),
                     ty: self.binding_ty_str(b),
                     notes: vec![format!(
-                        "`{}` is a {} that holds a borrow handle or foreign opaque value; moving the container cannot transfer non-movable interior state across tasks (O4/O7/A5)",
+                        "`{}` is a {} that holds a borrow handle, foreign opaque value, or copy-locked atomic value; moving the container copies that non-movable interior state by value, so it cannot cross tasks (O4/O7/A5)",
                         name,
                         shape.noun()
                     )],
@@ -187,7 +196,9 @@ impl<'a> Checker<'a> {
         seen: &mut Vec<String>,
     ) -> bool {
         match shape {
-            TypeShape::BorrowHandle(_) | TypeShape::ForeignOpaque(_) => true,
+            // `Atomic` is an unmovable leaf too (#1399): moving a container
+            // that holds one copies the copy-locked value by value.
+            TypeShape::BorrowHandle(_) | TypeShape::ForeignOpaque(_) | TypeShape::Atomic => true,
             TypeShape::Slice(e) | TypeShape::Array(e) | TypeShape::Pointer(e) => {
                 self.shape_holds_unmovable_leaf(e, seen)
             }
@@ -220,7 +231,9 @@ impl<'a> Checker<'a> {
         seen: &mut Vec<String>,
     ) -> bool {
         match shape {
-            TypeShape::Primitive | TypeShape::Str | TypeShape::Atomic | TypeShape::Chan(_) => true,
+            // `Atomic` is absent (#1399): a scalar sync/atomic value is
+            // copy-locked (noCopy) — never a pure value-copy.
+            TypeShape::Primitive | TypeShape::Str | TypeShape::Chan(_) => true,
             TypeShape::Array(elem) => self.shape_is_const_sendable(elem, seen),
             TypeShape::Struct(Some(sname)) => {
                 if seen.iter().any(|s| s == sname) {

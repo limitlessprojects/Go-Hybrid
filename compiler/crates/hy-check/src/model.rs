@@ -57,14 +57,17 @@ pub(crate) enum TypeShape {
 }
 
 impl TypeShape {
-    /// Class 1/2/4-by-type: primitives, strings, atomics, and channels (a
-    /// channel is safe to share BY TYPE regardless of its element type — the
-    /// value crossing the site is the channel itself). `Unknown` is
-    /// deliberately ABSENT: an unproven shape must not pass as safe (the
-    /// O4.9 fail-closed boundary — HYB-E3005).
+    /// Class 1/2/4-by-type: primitives, strings, and channels (a channel
+    /// is safe to share BY TYPE regardless of its element type — the value
+    /// crossing the site is the channel itself). `Atomic` is deliberately
+    /// NOT here (#1399): a scalar sync/atomic value is copy-locked
+    /// (sync/atomic embeds noCopy) — only pointer access (`&x`, OQ6) is
+    /// the mediated share route. `Unknown` is deliberately ABSENT: an
+    /// unproven shape must not pass as safe (the O4.9 fail-closed
+    /// boundary — HYB-E3005).
     pub(crate) fn is_sendable_by_type(&self) -> bool {
         match self {
-            TypeShape::Primitive | TypeShape::Str | TypeShape::Atomic | TypeShape::Chan(_) => true,
+            TypeShape::Primitive | TypeShape::Str | TypeShape::Chan(_) => true,
             // `&atomic_binding` is the mediated share route (OQ6); a pointer
             // to anything else is a mutable pointee — strict reject.
             TypeShape::Pointer(inner) => matches!(**inner, TypeShape::Atomic),

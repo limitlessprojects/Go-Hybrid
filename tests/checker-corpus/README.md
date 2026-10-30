@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 127 programs — ACCEPT 39 · ACCEPT-MANAGED 2 · REJECT 86 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
-**Current registered corpus: 127 programs — ACCEPT 39 · ACCEPT-MANAGED 2 · REJECT 86 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 128 programs — ACCEPT 39 · ACCEPT-MANAGED 2 · REJECT 87 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 128 programs — ACCEPT 39 · ACCEPT-MANAGED 2 · REJECT 87 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -301,3 +301,45 @@ in `hy-check/tests/type_name_in_value_position.rs` (13 tests).
 
 With this registration the corpus is **120 programs: ACCEPT 38 ·
 ACCEPT-MANAGED 2 · REJECT 80** — main's 118 plus these two.
+
+## Bounty-track registration - 2026-10-24: atomic values are copy-locked (issue #1399)
+
+`TypeShape::Atomic` (the Tier-0 scalar set: `atomic.bool`, `atomic.int32`,
+`atomic.int64`, `atomic.uint32`, `atomic.uint64`, `atomic.uintptr`) was
+marked sendable-by-type in `model.rs` and const-copyable in
+`sendability.rs`, so EVERY by-value copy passed `hyb check
+--deny-managed` with 0 diagnostics - decl copies (`other := hits`),
+whole-value assignments (`hits = z`), compound read-modify-writes
+(`hits += 1` / `hits++`), by-value task/spawn/send operands, and `move`
+of a container holding one. On the Go side these types embed
+`sync/atomic.noCopy`: `go vet` (copylocks) rejects every one of them,
+and a copy taken while another task mutates through `&hits` is an
+unsynchronized data race (`go run -race`, issue #1399).
+
+The rule is now narrow and one-directional: an atomic VALUE never copies
+by value; the pointer route (`&hits`, OQ6) and atomic methods
+(`hits.add(1)`, `hits.load()`) stay legal. Boundary copies reject
+through the sendability family (task -> HYB-E3001, `ch <- hits` ->
+HYB-E3002, `move` -> HYB-E3001); statement-level copies reject as the
+new **HYB-E2011** (registered in diagnostics.json).
+
+| program | verdict | rule | diagnostic | rationale |
+|---|---|---|---|---|
+| atomic-value-copy-reject | REJECT | A1c | `HYB-E2011` | `other := hits` and `hits = other` on a scalar sync/atomic binding - the copy-locked value is never a pure value-copy; first diagnostic carries tier0 A1c |
+
+The rule lives in `model.rs::is_sendable_by_type` (Atomic removed;
+`Pointer(Atomic)` kept), `sendability.rs` (`shape_is_const_sendable`,
+`classify_move_ident`, `shape_holds_unmovable_leaf`) and the new
+`emit_guard.rs::check_atomic_value_copy` guard, pinned by
+`hy-check/tests/atomic_value_copy.rs` (9 tests: the three statement
+forms, the three boundary forms, and the three legal-route controls).
+The pre-fix tree accepted the issue's reproducer with 0 diagnostics;
+corpus #17 (the `&hits` positive control) and all ACCEPT fixtures stay
+ACCEPT.
+
+Reproduction (branch tree, rustc 1.99.0 / go1.26.9 + mingw-w64 gcc):
+`python3 tools/corpus_harness.py` reports **127/127 verdict agreement,
+tripwire not fired**.
+
+With this registration the corpus is **128 programs: ACCEPT 39 ·
+ACCEPT-MANAGED 2 · REJECT 87** — main's 127 plus this one.

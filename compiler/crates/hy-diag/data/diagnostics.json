@@ -240,6 +240,21 @@
       "tier0_rule_id": "BUILDABLE"
     },
     {
+      "code": "HYB-E2011",
+      "name": "atomic-value-copy",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "atomic value copied by value",
+      "summary": "A scalar sync/atomic value (`atomic.bool`, `atomic.int32`, `atomic.int64`, `atomic.uint32`, `atomic.uint64`, `atomic.uintptr`) is copy-locked: the Go type embeds `sync/atomic.noCopy`, so `go vet` (copylocks) rejects every by-value copy — a decl copy (`other := hits`), a whole-value assignment (`hits = z`), a compound read-modify-write (`hits += 1`), a by-value task/spawn/send operand, or a `move`. A copy taken while another task mutates through `&hits` is also an unsynchronized data race (`go run -race`). Only a proven Atomic-shaped binding rejects: method receivers (`hits.load()`, `hits.add(1)`), `&hits` (the OQ6 pointer route), and pointer copies stay legal.",
+      "fixits": [
+        "share the atomic as a pointer: `task worker(&hits, ...)` and mutate through atomic ops (`hits.add(1)`, `hits.load()`)",
+        "read it once on the owner task and pass the plain value (int64/bool) instead of the atomic itself"
+      ],
+      "example": "other := hits   // reject: HYB-E2011 — `hits` is an atomic value (copy-locked)",
+      "rule": "O4",
+      "tier0_rule_id": "A1c"
+    },
+    {
       "code": "HYB-E3001",
       "name": "not-sendable-spawn",
       "category": "ownership-sendability",
