@@ -194,3 +194,76 @@ fn single_value_calls_stay_accepted() {
         "fn one() int {\n    return 1\n}\n\nfn g(a int) {\n    fmt.println(\"{a}\")\n}\n\nfn main() {\n    g(one())\n}\n",
     );
 }
+
+
+#[test]
+fn try_void_in_single_value_positions_is_rejected() {
+    let run_fn = "fn run() error {\n    return nil\n}\n\n";
+    assert_code(
+        &format!("{run_fn}fn main() error {{\n    x := -run()?\n    _ = x\n    return nil\n}}\n"),
+        "HYB-E1002",
+    );
+    assert_code(
+        &format!("{run_fn}fn main() error {{\n    s := []int{{1, 2, 3}}\n    sub := s[run()?:2]\n    _ = sub\n    return nil\n}}\n"),
+        "HYB-E1002",
+    );
+    assert_code(
+        &format!("{run_fn}fn main() error {{\n    v := run()? + 1\n    _ = v\n    return nil\n}}\n"),
+        "HYB-E1002",
+    );
+    assert_code(
+        &format!("{run_fn}fn take(n int) {{}}\n\nfn main() error {{\n    take(run()?)\n    return nil\n}}\n"),
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn try_multi_value_in_single_value_positions_is_rejected() {
+    let multi_fn = "fn multi() (int, int, error) {\n    return 1, 2, nil\n}\n\n";
+    assert_operand_rejected(
+        &format!("{multi_fn}fn main() error {{\n    s := []int{{1, 2, 3}}\n    idx := s[multi()?]\n    _ = idx\n    return nil\n}}\n"),
+        "HYB-E1002",
+    );
+    assert_operand_rejected(
+        &format!("{multi_fn}fn main() error {{\n    s := []int{{1, 2, 3}}\n    sub := s[0:multi()?]\n    _ = sub\n    return nil\n}}\n"),
+        "HYB-E1002",
+    );
+    assert_operand_rejected(
+        &format!("{multi_fn}fn main() error {{\n    v := multi()? + 1\n    _ = v\n    return nil\n}}\n"),
+        "HYB-E1002",
+    );
+    assert_code(
+        &format!("{multi_fn}fn take(n int) {{}}\n\nfn main() error {{\n    take(multi()?)\n    return nil\n}}\n"),
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn try_single_value_stays_accepted() {
+    let single_fn = "fn single() (int, error) {\n    return 42, nil\n}\n\n";
+    assert_ok(
+        &format!("{single_fn}fn main() error {{\n    x := single()?\n    v := single()? + 1\n    s := []int{{1, 2, 3}}\n    sub := s[0:single()?]\n    _ = x\n    _ = v\n    _ = sub\n    return nil\n}}\n"),
+    );
+}
+
+#[test]
+fn issue_1960_repro_example() {
+    let src = "fn run() error {\n\
+                 return nil\n\
+               }\n\
+               fn multi() (int, int, error) {\n\
+                 return 1, 2, nil\n\
+               }\n\
+               fn main() error {\n\
+                 x := -run()?\n\
+                 s := []int{1, 2, 3}\n\
+                 sub := s[run()?:2]\n\
+                 idx := s[multi()?]\n\
+                 _ = x\n\
+                 _ = sub\n\
+                 _ = idx\n\
+                 return nil\n\
+               }\n";
+    let cs = codes(src);
+    assert_eq!(cs.iter().filter(|c| *c == "HYB-E1002").count(), 3, "expected 3 HYB-E1002 diagnostics for the 3 defects in issue 1960, got {cs:?}");
+}

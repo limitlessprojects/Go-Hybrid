@@ -1845,8 +1845,26 @@ impl<'a> Collector<'a> {
             },
             Expr::Interp { .. } => OpKind::Str,
             Expr::Paren { inner, .. }
-            | Expr::Move { operand: inner, .. }
-            | Expr::Try { operand: inner, .. } => self.kind_of_expr(inner),
+            | Expr::Move { operand: inner, .. } => self.kind_of_expr(inner),
+            Expr::Try { operand: inner, .. } => {
+                let bare = unwrap_parens(inner);
+                if let Expr::Call { callee, args, .. } = bare {
+                    if let Some(res) = self.call_result_kinds(callee, args) {
+                        let has_err = self.call_has_trailing_error(callee);
+                        let effective = if has_err {
+                            res.len().saturating_sub(1)
+                        } else {
+                            res.len()
+                        };
+                        if effective == 0 {
+                            return OpKind::Void;
+                        } else if effective >= 1 {
+                            return res[0].clone();
+                        }
+                    }
+                }
+                self.kind_of_expr(inner)
+            }
             Expr::AddrOf { operand, .. } => OpKind::Pointer(Box::new(self.kind_of_expr(operand))),
             Expr::Unary { op, operand, .. } => match op {
                 UnOp::Addr => OpKind::Pointer(Box::new(self.kind_of_expr(operand))),
@@ -2052,6 +2070,41 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn call_has_trailing_error(&self, callee: &Expr) -> bool {
+        let bare = unwrap_parens(callee);
+        match bare {
+            Expr::FnLit { results, .. } => matches!(
+                results.last().map(|r| &r.ty),
+                Some(TypeExpr::Named { name, .. }) if name == "error"
+            ),
+            Expr::Ident { name, .. } => {
+                let head = Checker::base_named_type_str(name);
+                if let Some(f) = self.ck.fns.get(name.as_str()).or_else(|| self.ck.fns.get(head)) {
+                    matches!(
+                        f.results.last().map(|r| &r.ty),
+                        Some(TypeExpr::Named { name, .. }) if name == "error"
+                    )
+                } else {
+                    false
+                }
+            }
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let head = Checker::base_named_type_str(name);
+                if let Some(sname) = self.struct_base_name(&bk) {
+                    if let Some(m) = self.ck.method_decls.get(&(sname, head.to_string())) {
+                        return matches!(
+                            m.results.last().map(|r| &r.ty),
+                            Some(TypeExpr::Named { name, .. }) if name == "error"
+                        );
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     fn make_kind(&self, args: &[CallArg]) -> OpKind {
         let Some(first) = args.first() else {
             return OpKind::Unknown;
@@ -2231,6 +2284,25 @@ impl<'a> Collector<'a> {
                     None
                 } else {
                     Some(res.len())
+                }
+            }
+            Expr::Try { operand, .. } => {
+                let inner = unwrap_parens(operand);
+                if let Expr::Call { callee, args, .. } = inner {
+                    let res = self.call_result_kinds(callee, args)?;
+                    let has_err = self.call_has_trailing_error(callee);
+                    let effective = if has_err {
+                        res.len().saturating_sub(1)
+                    } else {
+                        res.len()
+                    };
+                    if effective == 1 {
+                        None
+                    } else {
+                        Some(effective)
+                    }
+                } else {
+                    None
                 }
             }
             _ => None,
@@ -2758,6 +2830,10 @@ impl<'a> Collector<'a> {
 
     /// Family B1/B2 (#425): unary `!` requires `bool`, unary `-` requires a numeric operand.
     fn check_unary_operand(&mut self, op: UnOp, operand: &Expr, span: Span) {
+        self.check_single_value_position(operand, "a unary operation", /*binding_position=*/ false);
+        if self.non_single_value_count(operand).is_some() {
+            return;
+        }
         let k = self.kind_of_expr(operand);
         match op {
             UnOp::Not => {
