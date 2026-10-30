@@ -22,7 +22,7 @@ use crate::foreign;
 use crate::model::{unwrap_parens, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
-    AssignOp, Expr, ForKind, InterpPart, Place, PlaceKind, SelectArmKind, Stmt, TypeExpr,
+    AssignOp, Expr, ForKind, InterpPart, MatchPattern, Place, PlaceKind, SelectArmKind, Stmt, TypeExpr,
 };
 
 /// Statically known value count of a non-call binding source (T23).
@@ -83,8 +83,71 @@ impl<'a> Checker<'a> {
                 self.check_expr_single_value(st, chan, chan.span());
                 self.check_expr_single_value(st, value, *span);
             }
-            Stmt::If { cond, .. } => {
-                self.check_expr_single_value(st, cond, cond.span());
+            Stmt::If { init, cond, .. } => {
+                if let Some(i) = init {
+                    self.check_stmt_multi_value(st, i);
+                }
+                if let Some(hy_syntax::Stmt::Local(l)) = init.as_deref() {
+                    let mut tmp = st.clone();
+                    tmp.scope_push();
+                    let immutable = l.kind == hy_syntax::LocalKind::Const;
+                    let is_let = l.kind == hy_syntax::LocalKind::Let;
+                    if l.values.is_empty() {
+                        let shape = l
+                            .ty
+                            .as_ref()
+                            .map(|t| self.shape_of_type(t))
+                            .unwrap_or(TypeShape::Unknown);
+                        for name in &l.names {
+                            self.define_binding(
+                                &mut tmp,
+                                name,
+                                shape.clone(),
+                                l.ty.clone(),
+                                immutable,
+                                false,
+                                is_let,
+                            );
+                        }
+                    } else if l.names.len() == l.values.len() {
+                        let bindings: Vec<_> = l
+                            .names
+                            .iter()
+                            .zip(l.values.iter())
+                            .map(|(name, val)| {
+                                let inferred = self.shape_of_expr(st, val);
+                                let shape = match (&l.ty, inferred) {
+                                    (Some(t), TypeShape::Unknown) => self.shape_of_type(t),
+                                    (_, s) => s,
+                                };
+                                let ty = l.ty.clone().or_else(|| self.ty_of_expr(st, val));
+                                (name, shape, ty)
+                            })
+                            .collect();
+                        for (name, shape, ty) in bindings {
+                            self.define_binding(&mut tmp, name, shape, ty, immutable, false, is_let);
+                        }
+                    } else if l.values.len() == 1 && l.names.len() > 1 {
+                        let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
+                        let tys = self.multi_value_tys(st, &l.values[0], l.names.len());
+                        for ((name, shape), ty) in
+                            l.names.iter().zip(shapes.into_iter()).zip(tys.into_iter())
+                        {
+                            self.define_binding(
+                                &mut tmp,
+                                name,
+                                shape,
+                                l.ty.clone().or(ty),
+                                immutable,
+                                false,
+                                is_let,
+                            );
+                        }
+                    }
+                    self.check_expr_single_value(&tmp, cond, cond.span());
+                } else {
+                    self.check_expr_single_value(st, cond, cond.span());
+                }
             }
             Stmt::For { kind, .. } => match kind {
                 ForKind::Infinite => {}
@@ -122,7 +185,27 @@ impl<'a> Checker<'a> {
                 self.check_expr_single_value(st, subject, subject.span());
                 for arm in arms {
                     if let Some(g) = &arm.guard {
-                        self.check_expr_single_value(st, g, g.span());
+                        let mut arm_st = st.clone();
+                        arm_st.scope_push();
+                        if let MatchPattern::Path {
+                            segments,
+                            binding: Some(b),
+                        } = &arm.pattern
+                        {
+                            if segments == &["some"] {
+                                self.bind_match_arm(&mut arm_st, b, subject, false);
+                                if let Some(ty) = self.ty_of_expr(st, subject) {
+                                    if let TypeExpr::Option { elem, .. } =
+                                        self.resolve_type_alias(&ty)
+                                    {
+                                        if let Some(binding) = arm_st.env_lookup_mut(b) {
+                                            binding.ty = Some(*elem);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        self.check_expr_single_value(&arm_st, g, g.span());
                     }
                 }
             }
