@@ -163,6 +163,39 @@ fn range_over_fn_returning_send_only_rejects_e3009() {
 }
 
 #[test]
+fn close_multi_return_through_fn_typed_field_rejects_e3009_issue_1358() {
+    let r = check(
+        "struct holder {\n\
+           f fn() int <-chan int\n\
+         }\n\
+         fn main() {\n\
+           ch := make(chan int, 1)\n\
+           h := holder{f: fn() (int, <-chan int) { return 1, ch }}\n\
+           _, rx := h.f()\n\
+           close(rx)\n\
+         }",
+    );
+    assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+    assert_eq!(first_code(&r).as_deref(), Some("HYB-E3009"));
+}
+
+#[test]
+fn close_multi_return_through_bidir_fn_typed_field_ok() {
+    let r = check(
+        "struct holder {\n\
+           f fn() int chan int\n\
+         }\n\
+         fn main() {\n\
+           ch := make(chan int, 1)\n\
+           h := holder{f: fn() (int, chan int) { return 1, ch }}\n\
+           _, rx := h.f()\n\
+           close(rx)\n\
+         }",
+    );
+    assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+}
+
+#[test]
 fn close_unresolvable_name_no_false_positive() {
     let r = check(
         "fn main() {\n\

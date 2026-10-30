@@ -1157,9 +1157,18 @@ impl<'a> Checker<'a> {
                         },
                         _ => None,
                     })?;
-                self.method_decls
-                    .get(&(recv_base, head.to_string()))
-                    .map(|f| f.results.iter().map(|r| r.ty.clone()).collect())
+                if let Some(f) = self.method_decls.get(&(recv_base, head.to_string())) {
+                    return Some(f.results.iter().map(|r| r.ty.clone()).collect());
+                }
+                // `base.name` may be a struct field with an `fn` type instead of a
+                // method. Fall back to the field so multi-return calls through a
+                // function-typed field resolve their result vector.
+                if let Some(ty) = self.ty_of_expr(st, callee) {
+                    if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&ty) {
+                        return Some(results);
+                    }
+                }
+                None
             }
             _ => None,
         }
