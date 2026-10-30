@@ -454,17 +454,29 @@ impl<'a> Checker<'a> {
             } if items.is_empty() && unwrapped.as_array_lit().is_none() => MakeTargetKind::Slice,
             Expr::MapLit { entries, .. } if entries.is_empty() => MakeTargetKind::Map,
             Expr::StructLit {
-                ty: Some(hy_syntax::TypeExpr::Chan { .. }),
+                ty: Some(hy_syntax::TypeExpr::Chan { dir, .. }),
                 fields,
                 ..
-            } if fields.is_empty() => MakeTargetKind::Chan,
+            } if fields.is_empty() => {
+                if *dir != hy_syntax::ChanDir::Both {
+                    MakeTargetKind::DirectionalChan
+                } else {
+                    MakeTargetKind::Chan
+                }
+            }
             Expr::Ident { name, .. } => {
                 let base = Self::base_named_type_str(name);
                 if let Some(ty) = self.type_aliases.get(base) {
                     match self.resolve_type_alias(ty) {
                         hy_syntax::TypeExpr::Slice { .. } => MakeTargetKind::Slice,
                         hy_syntax::TypeExpr::Map { .. } => MakeTargetKind::Map,
-                        hy_syntax::TypeExpr::Chan { .. } => MakeTargetKind::Chan,
+                        hy_syntax::TypeExpr::Chan { dir, .. } => {
+                            if dir != hy_syntax::ChanDir::Both {
+                                MakeTargetKind::DirectionalChan
+                            } else {
+                                MakeTargetKind::Chan
+                            }
+                        }
                         _ => MakeTargetKind::Invalid,
                     }
                 } else {
@@ -486,6 +498,16 @@ impl<'a> Checker<'a> {
         }
         let target = self.classify_make_target(&args[0].value);
         match target {
+            MakeTargetKind::DirectionalChan => {
+                self.emit_builtin(
+                    span,
+                    format!(
+                        "`make` requires a bidirectional channel type — cannot make send-only or receive-only channel `{}` (HYB-E2005)",
+                        args[0].value.render()
+                    ),
+                );
+                return;
+            }
             MakeTargetKind::Invalid => {
                 self.emit_builtin(
                     span,
@@ -605,6 +627,7 @@ enum MakeTargetKind {
     Slice,
     Map,
     Chan,
+    DirectionalChan,
     Invalid,
 }
 
