@@ -121,7 +121,7 @@ pub(crate) fn is_iterable_handle(name: &str) -> bool {
 /// Mode of a package-level call: `serde_json.parse(...)`, `fmt.println(...)`.
 pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
     match (pkg, method) {
-        ("serde_json", "parse") | ("serde_json", "new_object") | ("flate2", "new_writer") => {
+        ("serde_json", "parse") | ("serde_json", "new_object" | "new_array") | ("flate2", "new_writer") => {
             CallMode::Produce
         }
         ("serde_json", "to_string_pretty")
@@ -129,7 +129,7 @@ pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
         | ("serde_json", "get")
         | ("serde_json", "int")
         | ("serde_json", "string") => CallMode::Borrow,
-        ("serde_json", "set") | ("serde_json", "remove") => CallMode::Mutate,
+        ("serde_json", "set") | ("serde_json", "remove" | "push_string") => CallMode::Mutate,
         ("flate2", "write") => CallMode::Mutate,
         ("flate2", "finish") => CallMode::Consume,
         _ => CallMode::Safe,
@@ -158,7 +158,7 @@ pub(crate) fn package_mutated_arg(pkg: &str, method: &str) -> Option<usize> {
 /// Result shape of a package-level call (for defines / loop variables).
 pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
     match (pkg, method) {
-        ("serde_json", "parse") | ("serde_json", "new_object") => {
+        ("serde_json", "parse") | ("serde_json", "new_object" | "new_array") => {
             TypeShape::OwnHandle("serde_json.value".into())
         }
         ("flate2", "new_writer") => TypeShape::OwnHandle("flate2.writer".into()),
@@ -177,7 +177,7 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("http", "handler") => TypeShape::ForeignOpaque("http.handler".into()),
         // `atomic.load_pointer` / `atomic.swap_pointer` return an
         // unsafe.Pointer to arbitrary state — not a primitive (row 11)
-        ("atomic", "load_pointer" | "swap_pointer") => TypeShape::Unknown,
+        ("atomic", "load_pointer" | "swap_pointer" | "compare_and_swap_pointer" | "value" | "pointer") => TypeShape::Unknown,
         ("errors", "new" | "wrap" | "New" | "Wrap") => TypeShape::ForeignOpaque("error".into()),
         ("errors", "is" | "Is") => TypeShape::Primitive,
         _ if pkg == "atomic" => TypeShape::Primitive,
@@ -315,7 +315,7 @@ pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {
             "serde_json.value" | "serde_json.view",
             "array" | "get" | "int" | "string" | "to_string_pretty",
         ) => CallMode::Borrow,
-        ("serde_json.value" | "serde_json.view", "set" | "remove") => CallMode::Mutate,
+        ("serde_json.value" | "serde_json.view", "set" | "remove" | "push_string") => CallMode::Mutate,
         ("flate2.writer", "write") => CallMode::Mutate,
         ("flate2.writer", "finish") => CallMode::Consume,
         _ => CallMode::Unknown,

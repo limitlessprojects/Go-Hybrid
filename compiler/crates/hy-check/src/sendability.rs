@@ -3018,6 +3018,7 @@ impl<'a> Checker<'a> {
                             return Some(*elem);
                         }
                     }
+                    if (head == "unwrap" && args.is_empty()) || (head == "or" && args.len() == 1) { if let TypeExpr::Option { elem, .. } = resolved_base { return Some(*elem); } }
                     let recv_base = Self::base_named_type(&resolved_base)
                         .or_else(|| Self::base_named_type(&base_ty))?;
                     if let Some(m) = self

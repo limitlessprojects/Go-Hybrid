@@ -997,9 +997,14 @@ const TWO_POW_512: &str = "13407807929942597099574024998205846127479365820592393
 
 fn lit_below_2_512(s: &str) -> bool {
     let t = s.replace('_', "");
+    let t = t.strip_prefix('-').unwrap_or(&t);
+    for (p, max, hi) in [("0x", 129, b'1'), ("0X", 129, b'1'), ("0b", 513, b'1'), ("0B", 513, b'1'), ("0o", 171, b'4'), ("0O", 171, b'4')] {
+        if let Some(d) = t.strip_prefix(p).map(|d| d.trim_start_matches('0')) {
+            return (d.len(), d.as_bytes().first().copied().unwrap_or(0)) < (max, hi);
+        }
+    }
     let t = t.trim_start_matches('0');
     let t = if t.is_empty() { "0" } else { t };
-    let t = t.strip_prefix('-').unwrap_or(t);
     match t.len().cmp(&TWO_POW_512.len()) {
         std::cmp::Ordering::Less => true,
         std::cmp::Ordering::Greater => false,

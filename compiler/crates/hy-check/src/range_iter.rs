@@ -48,7 +48,7 @@ impl<'a> Checker<'a> {
                         shape,
                         TypeShape::Struct(Some(ref n)) if n.starts_with("set[") || n == "set"
                     );
-                    if vars.len() > 1 && (is_chan || is_set) {
+                    if vars.len() > 1 && (is_chan || is_set || shape.is_handle()) {
                         let kind_str = if is_chan { "channel" } else { "set" };
                         let why_note = if is_chan {
                             "why: Go permits only a single iteration variable when ranging over a channel (`range over … permits only one iteration variable`), so an accepted Hybrid program would emit unbuildable Go (LX13)".to_string()
@@ -392,10 +392,10 @@ impl<'a> Checker<'a> {
         // only pointer-to-ARRAY is rangeable (`*struct` / `*slice` /
         // `*string` are not), so normalize exactly one Pointer level for
         // arrays and leave every other shape as classified.
-        let shape = match self.shape_of_expr(st, expr) {
+        let shape = if matches!(self.ty_of_expr(st, expr).map(|t| self.resolve_type_alias(&t)), Some(TypeExpr::Option { .. })) { TypeShape::Struct(None) } else { match self.shape_of_expr(st, expr) {
             TypeShape::Pointer(inner) if matches!(*inner, TypeShape::Array(_)) => *inner,
             other => other,
-        };
+        } };
         match shape {
             TypeShape::Slice(_)
             | TypeShape::Array(_)

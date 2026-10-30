@@ -32,7 +32,7 @@ impl<'a> Checker<'a> {
         if st.is_none() {
             visiting.push(name.to_string());
         }
-        if self.expr_is_constant_inner(value, st, &mut visiting, 0) {
+        if !st.is_none().then(|| self.file_const_decl(name)?.ty.as_ref()).flatten().is_some_and(|ty| matches!(self.resolve_type_alias(ty), hy_syntax::TypeExpr::Option { .. }) || !matches!(self.shape_of_type(ty), TypeShape::Primitive | TypeShape::Str)) && self.expr_is_constant_inner(value, st, &mut visiting, 0) {
             return;
         }
         let span = value.span();
@@ -88,7 +88,7 @@ impl<'a> Checker<'a> {
                 if st.is_some_and(|s| s.env_lookup(ty_name).is_some()) {
                     return false;
                 }
-                if self.fns.contains_key(ty_name) || self.structs.contains_key(ty_name) {
+                if self.fns.contains_key(ty_name) || self.structs.contains_key(ty_name) || self.consts.contains_key(ty_name) {
                     return false;
                 }
                 if args.len() != 1 || args[0].spread {
@@ -211,7 +211,7 @@ impl<'a> Checker<'a> {
             if let Some(b) = st.env_lookup(name) {
                 // Only scalar/string `const` bindings are Go compile-time
                 // constants; composite `const`s lower to Go `var`.
-                return b.immutable && matches!(b.shape, TypeShape::Primitive | TypeShape::Str);
+                return b.immutable && matches!(b.shape, TypeShape::Primitive | TypeShape::Str) && !matches!(b.ty.as_ref().map(|t| self.resolve_type_alias(t)), Some(hy_syntax::TypeExpr::Option { .. }));
             }
         }
         if visiting.iter().any(|v| v == name) {

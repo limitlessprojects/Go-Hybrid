@@ -459,3 +459,66 @@ fn main() {
         "HYB-E3104",
     );
 }
+
+#[test]
+fn rejects_live_loan_rebound_via_multi_return_and_closure_and_after_value_update() {
+    // 1. Multi-return call re-binding a live slot loan to `*acct` must reject with HYB-E3104.
+    rejects_with(
+        r#"struct acct {
+    bal int
+}
+
+fn next_acct() (*acct, bool) {
+    a := acct{bal: 5}
+    return &a, true
+}
+
+fn main() {
+    m := map[string]acct{"a": acct{bal: 1}}
+    q := &m["a"]
+    var ok bool
+    q, ok = next_acct()
+    fmt.println("{q.bal} {ok}")
+}
+"#,
+        "HYB-E3104",
+    );
+
+    // 2. Closure body re-binding a live slot loan to a general pointer must reject with HYB-E3104.
+    rejects_with(
+        r#"struct acct {
+    bal int
+}
+
+fn main() {
+    f := fn() {
+        m := map[string]acct{"a": acct{bal: 1}}
+        q := &m["a"]
+        q = &acct{bal: 5}
+        fmt.println("{q.bal}")
+    }
+    f()
+}
+"#,
+        "HYB-E3104",
+    );
+
+    // 3. Whole-value update (`q = acct{bal: 2}`) on an active O8 slot-loan variable
+    // preserves `slot_loan`, so taking `&q` or `&q.bal` afterward still rejects with HYB-E3104.
+    rejects_with(
+        r#"struct acct {
+    bal int
+}
+
+fn main() {
+    m := map[string]acct{"a": acct{bal: 1}}
+    var q acct
+    q = &m["a"]
+    q = acct{bal: 2}
+    p := &q
+    fmt.println("{p}")
+}
+"#,
+        "HYB-E3104",
+    );
+}
