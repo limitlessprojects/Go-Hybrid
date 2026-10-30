@@ -640,7 +640,11 @@ impl Parser {
             self.bump();
             let mut results = Vec::new();
             while !self.at_punct(")") && !self.at_eof() {
-                let named = matches!(self.cur(), Tok::Ident(_))
+                let is_ident_name = match self.cur() {
+                    Tok::Ident(name) => name != "map",
+                    _ => false,
+                };
+                let named = is_ident_name
                     && match self.nth(1) {
                         Tok::Punct("*")
                         | Tok::Punct("[")
