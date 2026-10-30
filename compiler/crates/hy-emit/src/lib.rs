@@ -117,6 +117,15 @@ const POP_PRELUDE: &str = concat!(
     "}\n",
 );
 
+// Clip an already evaluated two-index view, preserving its slice type and
+// backing storage. Go can inline this; no bound or base is evaluated twice.
+const CLIP_PRELUDE: &str = concat!(
+    "// ---- Hybrid prelude: capacity clipping (auto-generated) ----\n",
+    "func hy_clip[s ~[]e, e any](view s) s {\n",
+    "\treturn view[:len(view):len(view)]\n",
+    "}\n",
+);
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -160,7 +169,14 @@ impl EmitError {
 
 /// Emit one parsed Hybrid file as compilable Go source (`package main`).
 pub fn emit_go(file: &File) -> Result<String, EmitError> {
+    emit_go_with_plan(file, &hy_check::ClipPlan::default())
+}
+
+/// Emit using the lowering facts returned by `hy_check::check_file` for this
+/// exact AST. The unplanned API makes no type-based clipping decisions.
+pub fn emit_go_with_plan(file: &File, clip_plan: &hy_check::ClipPlan) -> Result<String, EmitError> {
     let mut em = Emitter::new();
+    em.clip_plan = clip_plan.clone();
     em.emit_file(file)
 }
 
@@ -172,6 +188,16 @@ pub fn emit_go_package(
     file: &File,
     pkg_name: &str,
     binding_prefix: &str,
+) -> Result<String, EmitError> {
+    emit_go_package_with_plan(file, pkg_name, binding_prefix, &hy_check::ClipPlan::default())
+}
+
+/// Package-mode counterpart of `emit_go_with_plan`.
+pub fn emit_go_package_with_plan(
+    file: &File,
+    pkg_name: &str,
+    binding_prefix: &str,
+    clip_plan: &hy_check::ClipPlan,
 ) -> Result<String, EmitError> {
     // Detect public function export name collisions in package mode (issue #1421)
     let mut exported_fns: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -188,6 +214,7 @@ pub fn emit_go_package(
     }
 
     let mut em = Emitter::new();
+    em.clip_plan = clip_plan.clone();
     em.package_name = pkg_name.to_string();
     em.binding_prefix = binding_prefix.to_string();
     em.export_pub = true;
@@ -436,6 +463,8 @@ pub(crate) enum MemberSpecial {
 type FnShape = (usize, bool, Option<BindingKind>, Vec<Option<String>>);
 
 pub struct Emitter {
+    clip_plan: hy_check::ClipPlan,
+    needs_clip: bool,
     /// Function/decl body under assembly (header assembled last — bug #1).
     body: String,
     indent: usize,
@@ -559,6 +588,8 @@ pub(crate) struct ScopeSnapshot {
 impl Emitter {
     pub fn new() -> Self {
         Emitter {
+            clip_plan: hy_check::ClipPlan::default(),
+            needs_clip: false,
             body: String::new(),
             indent: 0,
             imports: BTreeSet::new(),
@@ -848,7 +879,7 @@ impl Emitter {
             || body.contains(".contains(")
             || body.contains(".insert(");
         let needs_pop = body.contains("hy_pop(");
-        if needs_option || needs_set || needs_pop {
+        if needs_option || needs_set || needs_pop || self.needs_clip {
             out.push('\n');
             if needs_option {
                 out.push_str(OPTION_PRELUDE);
@@ -860,6 +891,10 @@ impl Emitter {
             }
             if needs_pop {
                 out.push_str(POP_PRELUDE);
+                out.push('\n');
+            }
+            if self.needs_clip {
+                out.push_str(&CLIP_PRELUDE.replace("hy_clip", self.clip_plan.helper_name()));
                 out.push('\n');
             }
         }
@@ -1158,13 +1193,16 @@ impl Emitter {
                 Self::collect_comparable_in_expr(base, param_names, out);
                 Self::collect_comparable_in_expr(index, param_names, out);
             }
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 Self::collect_comparable_in_expr(base, param_names, out);
                 if let Some(l) = lo {
                     Self::collect_comparable_in_expr(l, param_names, out);
                 }
                 if let Some(h) = hi {
                     Self::collect_comparable_in_expr(h, param_names, out);
+                }
+                if let Some(max) = max {
+                    Self::collect_comparable_in_expr(max, param_names, out);
                 }
             }
             Expr::Field { base, .. } => {
@@ -1678,10 +1716,11 @@ impl Emitter {
             | Expr::Move { operand, .. } => self.expr_has_try(operand),
             Expr::Receive { chan, .. } => self.expr_has_try(chan),
             Expr::Index { base, index, .. } => self.expr_has_try(base) || self.expr_has_try(index),
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 self.expr_has_try(base)
                     || lo.as_ref().map(|x| self.expr_has_try(x)).unwrap_or(false)
                     || hi.as_ref().map(|x| self.expr_has_try(x)).unwrap_or(false)
+                    || max.as_ref().map(|x| self.expr_has_try(x)).unwrap_or(false)
             }
             Expr::Field { base, .. } => self.expr_has_try(base),
             Expr::Call { callee, args, .. } => {

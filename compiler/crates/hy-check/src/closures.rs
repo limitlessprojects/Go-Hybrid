@@ -1489,13 +1489,16 @@ fn collect_expr<'a>(
             collect_expr(base, out);
             collect_expr(index, out);
         }
-        Expr::Slice { base, lo, hi, .. } => {
+        Expr::Slice { base, lo, hi, max, .. } => {
             collect_expr(base, out);
             if let Some(lo) = lo {
                 collect_expr(lo, out);
             }
             if let Some(hi) = hi {
                 collect_expr(hi, out);
+            }
+            if let Some(max) = max {
+                collect_expr(max, out);
             }
         }
         Expr::Field { base, .. } => collect_expr(base, out),

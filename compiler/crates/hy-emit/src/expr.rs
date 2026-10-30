@@ -187,7 +187,7 @@ impl Emitter {
                 Ok(format!("{}[{}]", b, i))
             }
 
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, span } => {
                 let b = self.emit_expr(base, ATOM)?;
                 let lo_t = match lo {
                     Some(x) => self.emit_expr(x, 0)?,
@@ -197,7 +197,18 @@ impl Emitter {
                     Some(x) => self.emit_expr(x, 0)?,
                     None => String::new(),
                 };
-                Ok(format!("{}[{}:{}]", b, lo_t, hi_t))
+                if let Some(max) = max {
+                    let max_t = self.emit_expr(max, 0)?;
+                    Ok(format!("{}[{}:{}:{}]", b, lo_t, hi_t, max_t))
+                } else {
+                    let view = format!("{}[{}:{}]", b, lo_t, hi_t);
+                    if self.clip_plan.clips(*span) {
+                        self.needs_clip = true;
+                        Ok(format!("{}({})", self.clip_plan.helper_name(), view))
+                    } else {
+                        Ok(view)
+                    }
+                }
             }
 
             Expr::Field { base, name, .. } => {

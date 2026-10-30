@@ -226,13 +226,16 @@ impl<'a> Checker<'a> {
                 self.check_expr_const_zero_divisor(st, base);
                 self.check_expr_const_zero_divisor(st, index);
             }
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 self.check_expr_const_zero_divisor(st, base);
                 if let Some(lo) = lo {
                     self.check_expr_const_zero_divisor(st, lo);
                 }
                 if let Some(hi) = hi {
                     self.check_expr_const_zero_divisor(st, hi);
+                }
+                if let Some(max) = max {
+                    self.check_expr_const_zero_divisor(st, max);
                 }
             }
             Expr::Call { callee, args, .. } => {
@@ -492,13 +495,16 @@ fn expr_defined_names(expr: &Expr, out: &mut std::collections::HashSet<String>) 
             expr_defined_names(base, out);
             expr_defined_names(index, out);
         }
-        Expr::Slice { base, lo, hi, .. } => {
+        Expr::Slice { base, lo, hi, max, .. } => {
             expr_defined_names(base, out);
             if let Some(lo) = lo {
                 expr_defined_names(lo, out);
             }
             if let Some(hi) = hi {
                 expr_defined_names(hi, out);
+            }
+            if let Some(max) = max {
+                expr_defined_names(max, out);
             }
         }
         Expr::Call { callee, args, .. } => {

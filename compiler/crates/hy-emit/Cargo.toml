@@ -6,4 +6,5 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+hy-check = { path = "../hy-check" }
 hy-syntax = { path = "../hy-syntax" }

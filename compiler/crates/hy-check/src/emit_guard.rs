@@ -433,13 +433,16 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 self.check_expr_emit_guard(st, base);
                 if let Some(lo) = lo {
                     self.check_expr_emit_guard(st, lo);
                 }
                 if let Some(hi) = hi {
                     self.check_expr_emit_guard(st, hi);
+                }
+                if let Some(max) = max {
+                    self.check_expr_emit_guard(st, max);
                 }
             }
             Expr::Call { callee, args, .. } => {
@@ -1933,13 +1936,16 @@ impl<'a> Checker<'a> {
             | Expr::Receive { chan: operand, .. } => {
                 Self::scan_expr_for_local_const(operand, name, use_pos, found);
             }
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 Self::scan_expr_for_local_const(base, name, use_pos, found);
                 if let Some(lo) = lo {
                     Self::scan_expr_for_local_const(lo, name, use_pos, found);
                 }
                 if let Some(hi) = hi {
                     Self::scan_expr_for_local_const(hi, name, use_pos, found);
+                }
+                if let Some(max) = max {
+                    Self::scan_expr_for_local_const(max, name, use_pos, found);
                 }
             }
             Expr::Call { callee, args, .. } => {

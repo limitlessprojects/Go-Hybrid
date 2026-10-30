@@ -405,13 +405,16 @@ impl<'a> Checker<'a> {
                 self.check_expr_addr_of_loan_projections(st, base, include_direct_ident);
                 self.check_expr_addr_of_loan_projections(st, index, include_direct_ident);
             }
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 self.check_expr_addr_of_loan_projections(st, base, include_direct_ident);
                 if let Some(lo) = lo {
                     self.check_expr_addr_of_loan_projections(st, lo, include_direct_ident);
                 }
                 if let Some(hi) = hi {
                     self.check_expr_addr_of_loan_projections(st, hi, include_direct_ident);
+                }
+                if let Some(max) = max {
+                    self.check_expr_addr_of_loan_projections(st, max, include_direct_ident);
                 }
             }
             Expr::Call { callee, args, .. } => {

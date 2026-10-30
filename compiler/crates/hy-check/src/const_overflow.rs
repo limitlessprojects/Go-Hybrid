@@ -559,13 +559,16 @@ impl<'a> Checker<'a> {
                 self.check_expr_type_conversions(base);
                 self.check_expr_type_conversions(index);
             }
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 self.check_expr_type_conversions(base);
                 if let Some(lo) = lo {
                     self.check_expr_type_conversions(lo);
                 }
                 if let Some(hi) = hi {
                     self.check_expr_type_conversions(hi);
+                }
+                if let Some(max) = max {
+                    self.check_expr_type_conversions(max);
                 }
             }
             Expr::Call {

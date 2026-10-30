@@ -69,6 +69,41 @@ use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
 use hy_syntax::{Decl, Expr, File, FnDecl, ForKind, SelectArmKind, Stmt};
 use model::{Binding, Checker, FnState, MANAGED_CATEGORIES, TypeShape};
 
+/// Checker-owned lowering facts for one parsed file. Full spans distinguish
+/// nested slices that start at the same position. Use only with that file's AST.
+#[derive(Debug, Clone, Default)]
+pub struct ClipPlan {
+    clipped_slices: std::collections::BTreeSet<(u32, u32, u32, u32)>,
+    array_slices: std::collections::BTreeSet<(u32, u32, u32, u32)>,
+    helper_name: String,
+}
+
+impl ClipPlan {
+    pub(crate) fn insert(&mut self, span: hy_diag::Span) {
+        self.clipped_slices.insert(Self::key(span));
+    }
+
+    pub fn clips(&self, span: hy_diag::Span) -> bool {
+        self.clipped_slices.contains(&Self::key(span))
+    }
+
+    /// Array-valued bases must be captured by address when a later `?`
+    /// hoists their evaluation; capturing by value would copy the array.
+    pub fn has_array_base(&self, span: hy_diag::Span) -> bool {
+        self.array_slices.contains(&Self::key(span))
+    }
+
+    /// A file-local prelude symbol chosen to avoid source bindings and other
+    /// generated files in the same directory/package.
+    pub fn helper_name(&self) -> &str {
+        &self.helper_name
+    }
+
+    fn key(span: hy_diag::Span) -> (u32, u32, u32, u32) {
+        (span.start.line, span.start.col, span.end.line, span.end.col)
+    }
+}
+
 /// The result of checking one file.
 #[derive(Debug, Default)]
 pub struct CheckResult {
@@ -76,6 +111,7 @@ pub struct CheckResult {
     /// `accept` when no errors remain (warnings allowed), else `reject`.
     pub verdict: Verdict,
     pub managed: ManagedReport,
+    pub clip_plan: ClipPlan,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -122,7 +158,7 @@ pub fn check_file(file: &File) -> CheckResult {
     // Issue #134: an accepted program must emit buildable Go — unused `:=`
     // bindings (incl. `_ := 5`), unused imports, and repeated names on the
     // left of one `:=` are rejected fail-closed as HYB-E1002.
-    buildable::check_buildable(&mut ck);
+    let clip_plan = buildable::check_buildable(&mut ck);
 
     let mut diags = ck.diags;
     diags.sort_by(|a, b| {
@@ -147,6 +183,7 @@ pub fn check_file(file: &File) -> CheckResult {
     CheckResult {
         diagnostics: diags,
         verdict,
+        clip_plan,
         managed: ManagedReport {
             managed_blocks: ck.managed_blocks,
             sites_via_managed: ck.sites_via_managed,
@@ -5186,4 +5223,3 @@ mod tests {
         assert_eq!(e3006_count, 2, "{:?}", r.diagnostics);
     }
 }
-

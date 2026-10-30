@@ -472,13 +472,17 @@ impl Emitter {
             Expr::Index { base, index, .. } => {
                 Self::expr_has_hoistable_try(base) || Self::expr_has_hoistable_try(index)
             }
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 Self::expr_has_hoistable_try(base)
                     || lo
                         .as_deref()
                         .map(Self::expr_has_hoistable_try)
                         .unwrap_or(false)
                     || hi
+                        .as_deref()
+                        .map(Self::expr_has_hoistable_try)
+                        .unwrap_or(false)
+                    || max
                         .as_deref()
                         .map(Self::expr_has_hoistable_try)
                         .unwrap_or(false)
@@ -538,13 +542,17 @@ impl Emitter {
             Expr::Index { base, index, .. } => {
                 Self::expr_has_call_or_recv(base) || Self::expr_has_call_or_recv(index)
             }
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 Self::expr_has_call_or_recv(base)
                     || lo
                         .as_deref()
                         .map(Self::expr_has_call_or_recv)
                         .unwrap_or(false)
                     || hi
+                        .as_deref()
+                        .map(Self::expr_has_call_or_recv)
+                        .unwrap_or(false)
+                    || max
                         .as_deref()
                         .map(Self::expr_has_call_or_recv)
                         .unwrap_or(false)
@@ -688,29 +696,32 @@ impl Emitter {
                 }
                 self.hoist_tries_expr(index)?;
             }
-            Expr::Slice { base, lo, hi, .. } => {
-                let lo_try = lo
-                    .as_deref()
-                    .map(Self::expr_has_hoistable_try)
-                    .unwrap_or(false);
-                let hi_try = hi
-                    .as_deref()
-                    .map(Self::expr_has_hoistable_try)
-                    .unwrap_or(false);
-                if lo_try || hi_try {
-                    self.hoist_order_before_try(base)?;
+            Expr::Slice { base, lo, hi, max, span } => {
+                let bounds = [lo.as_deref(), hi.as_deref(), max.as_deref()];
+                if bounds.iter().flatten().any(|x| Self::expr_has_hoistable_try(x)) {
+                    if self.clip_plan.has_array_base(*span) {
+                        self.hoist_tries_expr(base)?;
+                        if Self::expr_has_call_or_recv(base) {
+                            let text = self.emit_expr(base, 0)?;
+                            let temp = self.next_temp("hyT");
+                            self.push(&format!("{} := &({})", temp, text));
+                            self.expr_temps.insert(Self::expr_key(base), format!("(*{})", temp));
+                        }
+                    } else {
+                        self.hoist_order_before_try(base)?;
+                    }
                 } else {
                     self.hoist_tries_expr(base)?;
                 }
-                if let Some(l) = lo {
-                    if hi_try {
-                        self.hoist_order_before_try(l)?;
+                for (idx, bound) in bounds.iter().enumerate() {
+                    let Some(bound) = bound else { continue };
+                    let later_try = bounds[idx + 1..].iter().flatten()
+                        .any(|x| Self::expr_has_hoistable_try(x));
+                    if later_try {
+                        self.hoist_order_before_try(bound)?;
                     } else {
-                        self.hoist_tries_expr(l)?;
+                        self.hoist_tries_expr(bound)?;
                     }
-                }
-                if let Some(h) = hi {
-                    self.hoist_tries_expr(h)?;
                 }
             }
             Expr::Receive { chan, .. } => self.hoist_tries_expr(chan)?,
@@ -2765,12 +2776,15 @@ impl Emitter {
                 Self::expr_has_boundary_using(base, root)
                     || Self::expr_has_boundary_using(index, root)
             }
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 Self::expr_has_boundary_using(base, root)
                     || lo
                         .as_deref()
                         .is_some_and(|x| Self::expr_has_boundary_using(x, root))
                     || hi
+                        .as_deref()
+                        .is_some_and(|x| Self::expr_has_boundary_using(x, root))
+                    || max
                         .as_deref()
                         .is_some_and(|x| Self::expr_has_boundary_using(x, root))
             }
@@ -3033,12 +3047,15 @@ impl Emitter {
                 Self::expr_mentions_ident(base, target)
                     || Self::expr_mentions_ident(index, target)
             }
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 Self::expr_mentions_ident(base, target)
                     || lo
                         .as_ref()
                         .is_some_and(|x| Self::expr_mentions_ident(x, target))
                     || hi
+                        .as_ref()
+                        .is_some_and(|x| Self::expr_mentions_ident(x, target))
+                    || max
                         .as_ref()
                         .is_some_and(|x| Self::expr_mentions_ident(x, target))
             }

@@ -1866,13 +1866,16 @@ impl<'a> Checker<'a> {
                 self.walk_expr_chan_dir(base, env);
                 self.walk_expr_chan_dir(index, env);
             }
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 self.walk_expr_chan_dir(base, env);
                 if let Some(lo) = lo {
                     self.walk_expr_chan_dir(lo, env);
                 }
                 if let Some(hi) = hi {
                     self.walk_expr_chan_dir(hi, env);
+                }
+                if let Some(max) = max {
+                    self.walk_expr_chan_dir(max, env);
                 }
             }
             Expr::StructLit { ty, fields, .. } => {

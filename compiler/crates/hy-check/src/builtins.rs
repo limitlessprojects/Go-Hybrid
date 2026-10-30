@@ -214,13 +214,16 @@ impl<'a> Checker<'a> {
                 self.check_expr_builtin_args(base);
                 self.check_expr_builtin_args(index);
             }
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 self.check_expr_builtin_args(base);
                 if let Some(lo) = lo {
                     self.check_expr_builtin_args(lo);
                 }
                 if let Some(hi) = hi {
                     self.check_expr_builtin_args(hi);
+                }
+                if let Some(max) = max {
+                    self.check_expr_builtin_args(max);
                 }
             }
             Expr::Field { base, .. } => self.check_expr_builtin_args(base),

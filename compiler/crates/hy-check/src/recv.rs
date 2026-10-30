@@ -276,13 +276,16 @@ impl<'a> Checker<'a> {
                 self.check_expr_recv_operands(st, base);
                 self.check_expr_recv_operands(st, index);
             }
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 self.check_expr_recv_operands(st, base);
                 if let Some(lo) = lo {
                     self.check_expr_recv_operands(st, lo);
                 }
                 if let Some(hi) = hi {
                     self.check_expr_recv_operands(st, hi);
+                }
+                if let Some(max) = max {
+                    self.check_expr_recv_operands(st, max);
                 }
             }
             Expr::Field { base, .. } => self.check_expr_recv_operands(st, base),

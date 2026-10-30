@@ -970,13 +970,16 @@ pub(crate) fn collect_move_operands<'e>(e: &'e Expr, out: &mut Vec<(&'e Expr, Sp
             collect_move_operands(base, out);
             collect_move_operands(index, out);
         }
-        Expr::Slice { base, lo, hi, .. } => {
+        Expr::Slice { base, lo, hi, max, .. } => {
             collect_move_operands(base, out);
             if let Some(l) = lo {
                 collect_move_operands(l, out);
             }
             if let Some(h) = hi {
                 collect_move_operands(h, out);
+            }
+            if let Some(max) = max {
+                collect_move_operands(max, out);
             }
         }
         Expr::Call { callee, args, .. } => {

@@ -2489,7 +2489,7 @@ impl<'a> Checker<'a> {
     /// not match even though `collect_ref_roots` still sees `a`.
     fn expr_slices_addressable_array(&self, st: &FnState, value: &Expr, root: &str) -> bool {
         match value {
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 if self.addressable_array_root(st, base) == Some(root) {
                     return true;
                 }
@@ -2503,6 +2503,11 @@ impl<'a> Checker<'a> {
                 }
                 if let Some(hi) = hi {
                     if self.expr_slices_addressable_array(st, hi, root) {
+                        return true;
+                    }
+                }
+                if let Some(max) = max {
+                    if self.expr_slices_addressable_array(st, max, root) {
                         return true;
                     }
                 }
@@ -7488,13 +7493,16 @@ fn collect_move_ident_sources(expr: &Expr, out: &mut Vec<String>) {
                 collect_move_ident_sources(&a.value, out);
             }
         }
-        Expr::Slice { base, lo, hi, .. } => {
+        Expr::Slice { base, lo, hi, max, .. } => {
             collect_move_ident_sources(base, out);
             if let Some(lo) = lo {
                 collect_move_ident_sources(lo, out);
             }
             if let Some(hi) = hi {
                 collect_move_ident_sources(hi, out);
+            }
+            if let Some(max) = max {
+                collect_move_ident_sources(max, out);
             }
         }
         Expr::Field { base, .. }
@@ -7699,13 +7707,16 @@ fn collect_capture_idents_expr(
             collect_capture_idents_expr(base, bound, out);
             collect_capture_idents_expr(index, bound, out);
         }
-        Expr::Slice { base, lo, hi, .. } => {
+        Expr::Slice { base, lo, hi, max, .. } => {
             collect_capture_idents_expr(base, bound, out);
             if let Some(lo) = lo {
                 collect_capture_idents_expr(lo, bound, out);
             }
             if let Some(hi) = hi {
                 collect_capture_idents_expr(hi, bound, out);
+            }
+            if let Some(max) = max {
+                collect_capture_idents_expr(max, bound, out);
             }
         }
         Expr::Field { base, .. } => collect_capture_idents_expr(base, bound, out),

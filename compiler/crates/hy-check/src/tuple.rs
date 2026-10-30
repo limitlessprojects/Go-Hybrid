@@ -198,13 +198,16 @@ impl<'a> Checker<'a> {
                 self.check_expr_single_value(st, base, base.span());
                 self.check_expr_single_value(st, index, index.span());
             }
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 self.check_expr_single_value(st, base, base.span());
                 if let Some(l) = lo {
                     self.check_expr_single_value(st, l, l.span());
                 }
                 if let Some(h) = hi {
                     self.check_expr_single_value(st, h, h.span());
+                }
+                if let Some(max) = max {
+                    self.check_expr_single_value(st, max, max.span());
                 }
             }
             Expr::Field { base, .. } => {

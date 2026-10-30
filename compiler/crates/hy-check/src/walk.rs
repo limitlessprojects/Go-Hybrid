@@ -471,13 +471,16 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
             expr_uses(base, out);
             expr_uses(index, out);
         }
-        Expr::Slice { base, lo, hi, .. } => {
+        Expr::Slice { base, lo, hi, max, .. } => {
             expr_uses(base, out);
             if let Some(lo) = lo {
                 expr_uses(lo, out);
             }
             if let Some(hi) = hi {
                 expr_uses(hi, out);
+            }
+            if let Some(max) = max {
+                expr_uses(max, out);
             }
         }
         Expr::Field { base, .. } => expr_uses(base, out),
@@ -692,13 +695,16 @@ pub(crate) fn expr_fnlits<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
             expr_fnlits(base, out);
             expr_fnlits(index, out);
         }
-        Expr::Slice { base, lo, hi, .. } => {
+        Expr::Slice { base, lo, hi, max, .. } => {
             expr_fnlits(base, out);
             if let Some(lo) = lo {
                 expr_fnlits(lo, out);
             }
             if let Some(hi) = hi {
                 expr_fnlits(hi, out);
+            }
+            if let Some(max) = max {
+                expr_fnlits(max, out);
             }
         }
         Expr::Field { base, .. } => expr_fnlits(base, out),
@@ -762,13 +768,16 @@ pub(crate) fn expr_calls<'e>(expr: &'e Expr, out: &mut Vec<CallRef<'e>>) {
             expr_calls(base, out);
             expr_calls(index, out);
         }
-        Expr::Slice { base, lo, hi, .. } => {
+        Expr::Slice { base, lo, hi, max, .. } => {
             expr_calls(base, out);
             if let Some(lo) = lo {
                 expr_calls(lo, out);
             }
             if let Some(hi) = hi {
                 expr_calls(hi, out);
+            }
+            if let Some(max) = max {
+                expr_calls(max, out);
             }
         }
         Expr::Field { base, .. } => expr_calls(base, out),

@@ -351,6 +351,8 @@ struct Define {
 
 struct Collector<'a> {
     ck: &'a Checker<'a>,
+    clip_plan: crate::ClipPlan,
+    lowering_names: HashSet<String>,
     /// One layer per open block/closure. `Some(id)` = a checked define
     /// (`:=`/`let`/`var`/`const`, or a written elidable `for`/`select`
     /// binding); `None` = a name that shadows (params, receivers, named
@@ -387,11 +389,13 @@ struct Collector<'a> {
 
 /// Entry point: `check_file` calls this once per file (after the per-fn
 /// passes; diagnostics are sorted into source order by the caller).
-pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
+pub(crate) fn check_buildable(ck: &mut Checker<'_>) -> crate::ClipPlan {
     let file: &File = ck.file;
-    let diags = {
+    let (diags, clip_plan) = {
         let mut c = Collector {
             ck,
+            clip_plan: crate::ClipPlan::default(),
+            lowering_names: ck.pkg_names.keys().cloned().collect(),
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
             file_consts: HashMap::new(),
@@ -440,9 +444,23 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
         }
         c.check_imports(file);
         c.finish();
-        c.diags
+        // The filename is stable under relative/absolute CLI spelling and
+        // distinct for sibling .hy files. Hex encoding is injective.
+        let filename = std::path::Path::new(&file.path).file_name().unwrap_or_default();
+        let suffix: String = filename.to_string_lossy().as_bytes().iter()
+            .map(|b| format!("{b:02x}")).collect();
+        let prefix = format!("hy_clip_{suffix}");
+        let mut helper = prefix.clone();
+        let mut n = 0;
+        while c.lowering_names.contains(&helper) || c.roots.contains(&helper) {
+            n += 1;
+            helper = format!("{prefix}_{n}");
+        }
+        c.clip_plan.helper_name = helper;
+        (c.diags, c.clip_plan)
     };
     ck.diags.extend(diags);
+    clip_plan
 }
 
 impl<'a> Collector<'a> {
@@ -460,6 +478,7 @@ impl<'a> Collector<'a> {
 
     /// A name that shadows checked defines but is not itself checked.
     fn exempt(&mut self, name: &str) {
+        self.lowering_names.insert(name.to_string());
         if name != "_" {
             if let Some(top) = self.scopes.last_mut() {
                 top.insert(name.to_string(), None);
@@ -468,6 +487,7 @@ impl<'a> Collector<'a> {
     }
 
     fn bind_kind(&mut self, name: &str, kind: OpKind) {
+        self.lowering_names.insert(name.to_string());
         if name != "_" {
             if let Some(top) = self.kind_scopes.last_mut() {
                 top.insert(name.to_string(), kind);
@@ -664,6 +684,7 @@ impl<'a> Collector<'a> {
     // -- declarations --------------------------------------------------------
 
     fn fn_decl(&mut self, f: &FnDecl) {
+        self.lowering_names.extend(f.type_params.iter().map(|p| p.name.clone()));
         if f.receiver.is_none() {
             if f.name == "main" && (!f.params.is_empty() || !f.type_params.is_empty()) {
                 self.diags.push(
@@ -1315,7 +1336,7 @@ impl<'a> Collector<'a> {
                 self.check_index_kind(&base.render(), Some(base.as_ref()), &bk, index, &ik, *span);
             }
             Expr::Slice {
-                base, lo, hi, span, ..
+                base, lo, hi, max, span,
             } => {
                 self.expr(base);
                 if let Some(x) = lo {
@@ -1324,8 +1345,20 @@ impl<'a> Collector<'a> {
                 if let Some(x) = hi {
                     self.expr(x);
                 }
+                if let Some(x) = max {
+                    self.expr(x);
+                }
                 let bk = self.kind_of_expr(base);
-                self.check_slice_kind(base, &bk, lo.as_deref(), hi.as_deref(), *span);
+                if matches!(bk, OpKind::Array(_)) {
+                    self.clip_plan.array_slices.insert(crate::ClipPlan::key(*span));
+                }
+                if max.is_none()
+                    && (matches!(bk, OpKind::Slice(_) | OpKind::Array(_))
+                        || matches!(&bk, OpKind::Pointer(inner) if matches!(**inner, OpKind::Array(_))))
+                {
+                    self.clip_plan.insert(*span);
+                }
+                self.check_slice_kind(base, &bk, lo.as_deref(), hi.as_deref(), max.as_deref(), *span);
             }
             // #682 U10: Go refuses `a.nope` where `a` is `any`
             // (`a.nope undefined (type any has no field or method nope)`).
@@ -3368,6 +3401,7 @@ impl<'a> Collector<'a> {
         bk: &OpKind,
         lo: Option<&Expr>,
         hi: Option<&Expr>,
+        max: Option<&Expr>,
         span: Span,
     ) {
         let sliceable = matches!(
@@ -3389,6 +3423,13 @@ impl<'a> Collector<'a> {
             );
             return;
         }
+        if max.is_some() && matches!(bk, OpKind::Str) {
+            self.emit_e1002(
+                span,
+                "a string cannot use a full slice expression (HYB-E1002)".to_string(),
+                "strings support only two-index slicing; omit the maximum bound",
+            );
+        }
         let const_str_len = if matches!(bk, OpKind::Str) {
             self.eval_const_string_len_at(base, span.start)
         } else {
@@ -3403,7 +3444,8 @@ impl<'a> Collector<'a> {
         };
         let mut lo_const: Option<i128> = None;
         let mut hi_const: Option<i128> = None;
-        for (idx, bound_opt) in [lo, hi].into_iter().enumerate() {
+        let mut max_const: Option<i128> = None;
+        for (idx, bound_opt) in [lo, hi, max].into_iter().enumerate() {
             let Some(bound) = bound_opt else { continue };
             self.check_single_value_position(bound, "a slice bound", /*binding_position=*/ false);
             let k = self.kind_of_expr(bound);
@@ -3458,10 +3500,40 @@ impl<'a> Collector<'a> {
                     }
                     if idx == 0 {
                         lo_const = Some(v);
-                    } else {
+                    } else if idx == 1 {
                         hi_const = Some(v);
+                    } else {
+                        max_const = Some(v);
                     }
                 }
+            }
+        }
+        if let (Some(hi_expr), Some(max_expr), Some(hi_v), Some(max_v)) =
+            (hi, max, hi_const, max_const)
+        {
+            if hi_v > max_v {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "invalid full slice indices: `{}` > `{}` (`{} > {}`) (HYB-E1002)",
+                        hi_expr.render(), max_expr.render(), hi_v, max_v
+                    ),
+                    "the high bound must not exceed the maximum bound in `s[lo:hi:max]`",
+                );
+            }
+        }
+        if let (Some(lo_expr), Some(max_expr), Some(lo_v), Some(max_v)) =
+            (lo, max, lo_const, max_const)
+        {
+            if lo_v > max_v {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "invalid full slice indices: `{}` > `{}` (`{} > {}`) (HYB-E1002)",
+                        lo_expr.render(), max_expr.render(), lo_v, max_v
+                    ),
+                    "the low bound must not exceed the maximum bound in `s[lo:hi:max]`",
+                );
             }
         }
         if let (Some(lo_expr), Some(hi_expr), Some(lo_v), Some(hi_v)) =

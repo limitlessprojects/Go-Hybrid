@@ -365,13 +365,16 @@ impl<'a> Scan<'a> {
                 self.run_expr(base);
                 self.run_expr(index);
             }
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice { base, lo, hi, max, .. } => {
                 self.run_expr(base);
                 if let Some(l) = lo {
                     self.run_expr(l);
                 }
                 if let Some(h) = hi {
                     self.run_expr(h);
+                }
+                if let Some(max) = max {
+                    self.run_expr(max);
                 }
             }
             Expr::Field { base, name, span } => {

@@ -366,7 +366,8 @@ MulOp        = "*" | "/" | "%" | "<<" | ">>" | "&" .
 UnaryExpr    = [ "!" | "-" | "^" | "move" ] UnaryExpr | PrimaryExpr .
 PrimaryExpr  = Operand { Postfix } .
 Postfix      = "." Identifier | "(" [ ArgList ] ")" | "[" Expression "]"
-             | "[" [ Expression ] ":" [ Expression ] "]" .
+             | "[" [ Expression ] ":" [ Expression ] "]"
+             | "[" [ Expression ] ":" Expression ":" Expression "]" .
 Operand      = Literal | Identifier | "(" Expression ")" | FuncLit | "nil" .
 FuncLit      = "fn" [ Signature ] Block .
 ArgList      = Expression { "," Expression } [ "," ] | Expression "=" Expression { "," … } .
@@ -383,8 +384,12 @@ Legal in spawn arguments, channel sends, assignments, and returns. Applying
 `move` to a literal, primitive, or other unaliased fresh value is legal but
 redundant (no-op semantically, linted).
 
-**LX19 — Slicing.** `s[a:b]` (T7); three-index `s[a:b:c]` is `[TBD]`.
+**LX19 — Slicing.** `s[a:b]` (T7); full slices use `s[a:b:max]`.
 `buf[..n]` omits the low bound (0); `c.order[1:]` omits the high (`len`).
+In a full slice only the low bound may be omitted: both high and maximum
+are required. Full slices apply to slices, addressable arrays and pointers
+to arrays, never strings; bounds satisfy `0 <= a <= b <= max <= cap(base)`.
+Constant violations are rejected; dynamic violations panic as in Go.
 
 ### 1.5 Skeleton holes — deliberately open
 
@@ -474,6 +479,17 @@ the last element; panics on empty — example 08). Zero value is the
 `append` works, `for` iterates zero times); the nil/empty distinction is not
 observable in Hybrid (N4). Slices are GC values; reads of elements are
 copies (O9); a slice passed to a call is a call-scoped view (O3).
+
+For a two-index slice whose base the checker resolves to a slice, array or
+pointer to an array, the result's capacity equals its length (#1927).
+The checker hands this decision to the emitter; a generic prelude helper
+clips the already evaluated view without copying its backing array.
+Base and supplied bounds are evaluated once, in Go evaluation order.
+Appending past the view's length therefore allocates rather than exposing
+the original tail. Explicit `s[a:b:max]` instead preserves Go's requested
+capacity `max - a`. String slicing and unresolved base kinds retain their
+existing two-index lowering; unresolved bases carry no clipping guarantee.
+This does not establish element disjointness or replace ownership checks.
 
 **T8 — Maps `map[K]V`.** GC hash maps, Go semantics for iteration order
 (unspecified), `delete`, comma-ok read (`v, ok := m[k]`), `len`. Zero value
