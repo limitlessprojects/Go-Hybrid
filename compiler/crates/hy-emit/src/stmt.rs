@@ -1349,10 +1349,63 @@ impl Emitter {
         }
     }
 
+    pub fn type_of_place(&self, p: &Place) -> Option<&'static str> {
+        match &p.kind {
+            PlaceKind::Ident(name) => {
+                if let Some(BindingKind::ForeignTy(t)) = self.bindings.get(name) {
+                    return Some(t);
+                }
+                if let Some((ty, _)) = self.var_ty.get(name) {
+                    if let Some((k, _)) = super::shapes::SHAPES.iter().find(|(k, _)| *k == ty) {
+                        return Some(k);
+                    }
+                }
+                None
+            }
+            PlaceKind::Field { base, name } => {
+                if let Some(bt) = self.type_of_place(base) {
+                    if let Some(m) = super::shapes::lookup_member(bt, name) {
+                        return m.result;
+                    }
+                }
+                if let PlaceKind::Ident(vn) = &base.kind {
+                    if let Some(sn) = self.var_struct.get(vn) {
+                        if let Some(fields) = self.struct_fields.get(sn) {
+                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
+                                if let Some((k, _)) =
+                                    super::shapes::SHAPES.iter().find(|(k, _)| *k == fty)
+                                {
+                                    return Some(k);
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            PlaceKind::AddrOf { base } => self.type_of_place(base),
+            PlaceKind::Index { .. } => None,
+        }
+    }
+
     /// Member-name normalization for a PLACE (assignment target). Same rule
-    /// as the expression side: foreign package roots and Foreign bindings
-    /// normalize; our own members stay verbatim.
+    /// as the expression side: shape-table members (including MethodZero
+    /// `w.header[k] = v` -> `w.Header()[k] = v` and foreign fields nested
+    /// inside user structs `ctx.req.host = ...` -> `ctx.req.Host = ...`)
+    /// resolve first; foreign package roots and Foreign bindings normalize;
+    /// our own struct members stay verbatim.
     pub fn place_member_name(&self, base: &Place, name: &str) -> String {
+        if let Some(t) = self.type_of_place(base) {
+            if let Some(m) = super::shapes::lookup_member(t, name) {
+                return match m.kind {
+                    super::shapes::MemberKind::Field | super::shapes::MemberKind::Method => {
+                        m.go.to_string()
+                    }
+                    super::shapes::MemberKind::MethodZero => format!("{}()", m.go),
+                };
+            }
+            return super::to_go_name(name);
+        }
         let root = base.root();
         if self.is_unshadowed_pkg_root(root)
             || matches!(
