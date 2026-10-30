@@ -300,6 +300,161 @@ pub(crate) struct FnState {
     /// time so call sites can analyze parameter/capture stores (`record_callee_param_stores`).
     pub closure_defs:
         HashMap<String, (Vec<hy_syntax::Param>, Vec<hy_syntax::FnResult>, hy_syntax::Block)>,
+    pub closure_mutate_scopes: Vec<HashMap<String, HashSet<String>>>,
+    pub closure_fnlit_scopes: Vec<
+        HashMap<
+            String,
+            (
+                Vec<(String, Option<hy_syntax::TypeExpr>)>,
+                Vec<(String, Option<hy_syntax::TypeExpr>)>,
+                hy_syntax::Block,
+            ),
+        >,
+    >,
+    pub closure_def_scopes: Vec<
+        HashMap<String, (Vec<hy_syntax::Param>, Vec<hy_syntax::FnResult>, hy_syntax::Block)>,
+    >,
+    pub block_closure_mutates: HashMap<String, HashSet<String>>,
+    pub block_closure_fnlits: HashMap<
+        String,
+        (
+            Vec<(String, Option<hy_syntax::TypeExpr>)>,
+            Vec<(String, Option<hy_syntax::TypeExpr>)>,
+            hy_syntax::Block,
+        ),
+    >,
+    pub block_closure_defs:
+        HashMap<String, (Vec<hy_syntax::Param>, Vec<hy_syntax::FnResult>, hy_syntax::Block)>,
+}
+
+pub(crate) type ClosureDefEntry = (
+    Vec<hy_syntax::Param>,
+    Vec<hy_syntax::FnResult>,
+    hy_syntax::Block,
+);
+pub(crate) type ClosureDef = ClosureDefEntry;
+
+pub(crate) type ClosureFnLitEntry = (
+    Vec<(String, Option<hy_syntax::TypeExpr>)>,
+    Vec<(String, Option<hy_syntax::TypeExpr>)>,
+    hy_syntax::Block,
+);
+pub(crate) type ClosureFnLit = ClosureFnLitEntry;
+
+pub(crate) fn merge_closure_def(
+    existing: &ClosureDefEntry,
+    incoming: &ClosureDefEntry,
+) -> ClosureDefEntry {
+    let (params1, results1, body1) = existing;
+    let (params2, results2, body2) = incoming;
+    if body1.span == body2.span && body1.stmts.len() == body2.stmts.len() {
+        return existing.clone();
+    }
+    let params = if params1.len() >= params2.len() {
+        params1.clone()
+    } else {
+        params2.clone()
+    };
+    let mut results = results1.clone();
+    for r2 in results2 {
+        if let Some(n2) = &r2.name {
+            if !results.iter().any(|r1| r1.name.as_ref() == Some(n2)) {
+                results.push(r2.clone());
+            }
+        } else if results.is_empty() {
+            results.push(r2.clone());
+        }
+    }
+    let mut stmts2 = Vec::new();
+    for (p1, p2) in params.iter().zip(params2.iter()) {
+        if p1.name != p2.name && p1.name != "_" && p2.name != "_" {
+            stmts2.push(hy_syntax::Stmt::Local(hy_syntax::LocalDecl {
+                kind: hy_syntax::LocalKind::Define,
+                names: vec![p2.name.clone()],
+                ty: Some(p2.ty.clone()),
+                values: vec![hy_syntax::Expr::Ident {
+                    name: p1.name.clone(),
+                    span: body2.span,
+                }],
+                span: body2.span,
+            }));
+        }
+    }
+    stmts2.extend(body2.stmts.iter().cloned());
+    let block2 = hy_syntax::Block {
+        stmts: stmts2,
+        span: body2.span,
+    };
+    let merged_body = hy_syntax::Block {
+        stmts: vec![
+            hy_syntax::Stmt::Block {
+                block: body1.clone(),
+                span: body1.span,
+            },
+            hy_syntax::Stmt::Block {
+                block: block2,
+                span: body2.span,
+            },
+        ],
+        span: body1.span,
+    };
+    (params, results, merged_body)
+}
+
+pub(crate) fn merge_closure_fnlit(
+    existing: &ClosureFnLitEntry,
+    incoming: &ClosureFnLitEntry,
+) -> ClosureFnLitEntry {
+    let (params1, results1, body1) = existing;
+    let (params2, results2, body2) = incoming;
+    if body1.span == body2.span && body1.stmts.len() == body2.stmts.len() {
+        return existing.clone();
+    }
+    let params = if params1.len() >= params2.len() {
+        params1.clone()
+    } else {
+        params2.clone()
+    };
+    let mut results = results1.clone();
+    for (n2, ty2) in results2 {
+        if !results.iter().any(|(n1, _)| n1 == n2) {
+            results.push((n2.clone(), ty2.clone()));
+        }
+    }
+    let mut stmts2 = Vec::new();
+    for ((p1, _), (p2, ty2)) in params.iter().zip(params2.iter()) {
+        if p1 != p2 && p1 != "_" && p2 != "_" {
+            stmts2.push(hy_syntax::Stmt::Local(hy_syntax::LocalDecl {
+                kind: hy_syntax::LocalKind::Define,
+                names: vec![p2.clone()],
+                ty: ty2.clone(),
+                values: vec![hy_syntax::Expr::Ident {
+                    name: p1.clone(),
+                    span: body2.span,
+                }],
+                span: body2.span,
+            }));
+        }
+    }
+    stmts2.extend(body2.stmts.iter().cloned());
+    let block2 = hy_syntax::Block {
+        stmts: stmts2,
+        span: body2.span,
+    };
+    let merged_body = hy_syntax::Block {
+        stmts: vec![
+            hy_syntax::Stmt::Block {
+                block: body1.clone(),
+                span: body1.span,
+            },
+            hy_syntax::Stmt::Block {
+                block: block2,
+                span: body2.span,
+            },
+        ],
+        span: body1.span,
+    };
+    (params, results, merged_body)
 }
 
 impl FnState {
@@ -309,6 +464,9 @@ impl FnState {
         self.alias_scopes.push(self.aliases.clone());
         self.share_scopes.push(self.may_share.clone());
         self.shadow_link_scopes.push(self.shadow_links.clone());
+        self.closure_mutate_scopes.push(self.closure_mutates.clone());
+        self.closure_fnlit_scopes.push(self.closure_fnlits.clone());
+        self.closure_def_scopes.push(self.closure_defs.clone());
         self.fnlit_scopes.push(Vec::new());
     }
 
@@ -519,6 +677,102 @@ impl FnState {
                             if bp.moved.is_none() {
                                 bp.moved = Some(mv.clone());
                             }
+                        }
+                    }
+                }
+            }
+        }
+        let key_in_popped = |k: &str| -> bool {
+            let root = k.split('.').next().unwrap_or(k).trim_end_matches("[]");
+            popped_scope.contains_key(k) || popped_scope.contains_key(root)
+        };
+        if let Some(outer_mutates) = self.closure_mutate_scopes.pop() {
+            let popped_keys: Vec<String> = self
+                .closure_mutates
+                .keys()
+                .filter(|k| key_in_popped(k))
+                .cloned()
+                .collect();
+            for k in popped_keys {
+                if let Some(curr) = self.closure_mutates.remove(&k) {
+                    self.block_closure_mutates
+                        .entry(k)
+                        .or_default()
+                        .extend(curr);
+                }
+            }
+            for k in popped_scope.keys() {
+                if let Some(prev) = outer_mutates.get(k) {
+                    self.closure_mutates.insert(k.clone(), prev.clone());
+                }
+            }
+            for (k, prev) in outer_mutates {
+                if key_in_popped(&k) {
+                    self.closure_mutates.insert(k, prev);
+                } else {
+                    self.closure_mutates.entry(k).or_default().extend(prev);
+                }
+            }
+        }
+        if let Some(outer_fnlits) = self.closure_fnlit_scopes.pop() {
+            let popped_keys: Vec<String> = self
+                .closure_fnlits
+                .keys()
+                .filter(|k| key_in_popped(k))
+                .cloned()
+                .collect();
+            for k in popped_keys {
+                if let Some(curr) = self.closure_fnlits.remove(&k) {
+                    let merged = match self.block_closure_fnlits.get(&k) {
+                        Some(prev) => merge_closure_fnlit(prev, &curr),
+                        None => curr,
+                    };
+                    self.block_closure_fnlits.insert(k, merged);
+                }
+            }
+            for (k, prev) in outer_fnlits {
+                if key_in_popped(&k) {
+                    self.closure_fnlits.insert(k, prev);
+                } else {
+                    match self.closure_fnlits.get(&k) {
+                        Some(curr) => {
+                            let merged = merge_closure_fnlit(&prev, curr);
+                            self.closure_fnlits.insert(k, merged);
+                        }
+                        None => {
+                            self.closure_fnlits.insert(k, prev);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(outer_defs) = self.closure_def_scopes.pop() {
+            let popped_keys: Vec<String> = self
+                .closure_defs
+                .keys()
+                .filter(|k| key_in_popped(k))
+                .cloned()
+                .collect();
+            for k in popped_keys {
+                if let Some(curr) = self.closure_defs.remove(&k) {
+                    let merged = match self.block_closure_defs.get(&k) {
+                        Some(prev) => merge_closure_def(prev, &curr),
+                        None => curr,
+                    };
+                    self.block_closure_defs.insert(k, merged);
+                }
+            }
+            for (k, prev) in outer_defs {
+                if key_in_popped(&k) {
+                    self.closure_defs.insert(k, prev);
+                } else {
+                    match self.closure_defs.get(&k) {
+                        Some(curr) => {
+                            let merged = merge_closure_def(&prev, curr);
+                            self.closure_defs.insert(k, merged);
+                        }
+                        None => {
+                            self.closure_defs.insert(k, prev);
                         }
                     }
                 }
