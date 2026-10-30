@@ -738,6 +738,15 @@ m = nil                        // reject: HYB-E4001 — map has no nil; zero val
 var s []int = nil              // reject: HYB-E4001 — slice has no nil; use []int{} or option[[]int]
 ```
 
+N1 also applies to each map literal key, using the literal's declared key
+type: `map[int]int{nil: 1}` (including parenthesized `nil`) is rejected with
+`HYB-E4001`. This type check applies in function arguments, returns, nested
+literals, and `managed` blocks. An invalid value must not suppress checking
+the key. Predeclared `error` (including aliases) retains its N1 nil home,
+while a Hybrid declaration shadowing `error` does not. Foreign Go types
+retain the N2 perimeter; this is not Go's general
+nilability rule for Hybrid pointers or containers.
+
 **Why:** this is the entire feature — a nil-check the compiler can "tell you
 reliably" exists only where nil can actually appear. **Reversal:** none;
 adding nullable-by-default back would delete the wishlist #2 feature.

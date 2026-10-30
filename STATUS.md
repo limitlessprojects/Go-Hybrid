@@ -30,3 +30,25 @@
 - LANDED (session-34, author-stage round 2): **T-EBIND binding-shape family — #929 (98fe6c2) + #905 (3f671b3) via autoland bundles, #903 closed subsumed-with-credit** — #929: T23 source-count rules cover non-call sources (receive/map-index <=2, slice/array/string index =1, select-recv 3-name, 1-result call to 2+ names); #905: parallel decl/assign count guards + typed-decl initializer compat + positional parallel-assign kinds (O8 loan fail-open preserved; Try excluded as provably-single — corpus 10-a5 pinned the two-value `f()?` shape) — both READY round 1, $0, 0 over-reach, P1 seeds committed BEFORE authoring (round-1 miss repaired); corpus 124->126 (38/2/86), census 8/8; credits magomedta (#930/#906) + rickymulya (#904)
 - AUTOLAND-TRANSPORT (session-34 finding): the workflow's live push has NEVER worked — GH006 (GITHUB_TOKEN non-admin + required checks strict); round-1's 'autoland landed' was session-side autoland.py with the same gates (commit-evidence: committer Z User) — this session landed both bundles the same way; the baseline gate also caught #905's never-clean verbatim fence honestly (AUTOLAND-STALE-PREMISE -> sanitized session-side). NEXT-session infra: bundle -> branch -> PR -> required checks -> auto-merge (keeps protection meaningful, makes the loop unattended)
 - OLD-NEXT (round 7): author-stage round 2 — the template/LLM boundary: try the closure/loan families (16 issues) with a BLOCK-expectation, seed Ghost-Fork P1 predictions BEFORE authoring (round-1 miss, recorded); Ornith-1.0/1.5-9B Kaggle arms on the residual (AUTHOR-STAGE.md §5); landing queue #801 #930 #985 #984 (bounty (T,error)-tail) #935 #904 #906 #815 #774 #991 #800 #923 #751 #931 #937 #972 #780 #818 #766 #824 #828; wildcard verdicts post 2026-11-01 to #365 (22 slots ready); W4 Phase-B ~2026-10-27 (do NOT hand-flip labels)
+
+
+## 2026-10-28 — N1 map-key validation amendment (#2036)
+
+Latest main `1f0ff978f4deff78c77bca96db0e3e46f32de71b` accepted
+`map[int]int{nil: 1}` with zero diagnostics. The existing composite-nil
+sweep checked value slots, and a binding-only repair would still miss
+ordinary call arguments. Validate keys in the existing recursive typed
+expression walk instead; reuse the N1 shape predicate and HYB-E4001
+emitter without changing the foreign-Go perimeter. Key and value checks
+remain independent, including nested keys when an outer value is invalid.
+
+Regression pin: `map_literal_nil_keys.rs` (eight tests): Hybrid key shapes,
+parentheses, simultaneous key/value errors, nested keys, argument/return/
+managed contexts, and valid-key/existing nil-value controls. Six tests
+fail on unmodified main; all eight pass with the repair. Error/alias and
+foreign nil homes remain accepted; a Hybrid struct shadowing `error` does not
+inherit that exception. The 127 registered
+corpus verdicts are unchanged. SPEC-LANGUAGE N1 now spells out map keys.
+Validation: 1808 workspace tests pass; checker corpus 127/127; differential
+41 accepted / 86 rejected cases pass; all ten examples pass. Upstream CI
+remains required before final review.

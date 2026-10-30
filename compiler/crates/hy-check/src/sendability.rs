@@ -1909,7 +1909,29 @@ impl<'a> Checker<'a> {
                 entries,
                 ..
             } => {
+                let key_shape = self.shape_of_type(key);
+                let key_text = key.render();
+                // `error` is N1's other nil home, but its lightweight shape
+                // is Unknown. Resolve aliases without granting the exception
+                // to a Hybrid declaration that shadows the predeclared name.
+                let error_key = matches!(
+                    self.resolve_type_alias(key),
+                    TypeExpr::Named { name, .. } if name == "error"
+                ) && !self.structs.contains_key("error")
+                    && !self.enums.contains_key("error")
+                    && !self.type_aliases.contains_key("error");
                 for (k, v) in entries {
+                    // N1 is a type contract in every expression context, not
+                    // only at a binding or task boundary. Check independently
+                    // of the value so its own error cannot hide a nil key.
+                    if Self::is_nil_literal(k) && !error_key && !Self::is_nilable_shape(&key_shape) {
+                        self.emit_nil_type_error_text(
+                            &key_shape,
+                            key_text.clone(),
+                            k.span(),
+                            &format!("the map key slot `{}`", key_text),
+                        );
+                    }
                     self.check_expr_against_ty(k, key, env);
                     self.check_expr_against_ty(v, value, env);
                     self.walk_expr_chan_dir(k, env);

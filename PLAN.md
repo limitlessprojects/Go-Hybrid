@@ -265,3 +265,25 @@ All SPEC §3 rows verified — see research/claims.md. Headlines: rustygo 127/14
 ## Contributor validation: submit revision lookup (2026-10-16)
 - Base 00610f7: resolve_head ignores failed git rev-parse, allowing an invalid revision/error message into a Kaggle upload and submitted.json. Abort before touching worker files or invoking Kaggle when HEAD lookup fails.
 - Three new offline tests: original two failures/one pass; patched all 11 job-test methods pass. Real temporary Git repositories cover unborn and committed HEAD; a mocked upload boundary verifies no push, payload mutation or submission record after lookup failure. git diff --check passes. No real Kaggle submission or compiler/Rust/Go suite run; maintainer CI remains required, including repair of existing workflow conflict markers (#339).
+
+
+## 2026-10-28 — N1 map-key validation amendment (#2036)
+
+Latest main `1f0ff978f4deff78c77bca96db0e3e46f32de71b` accepted
+`map[int]int{nil: 1}` with zero diagnostics. The existing composite-nil
+sweep checked value slots, and a binding-only repair would still miss
+ordinary call arguments. Validate keys in the existing recursive typed
+expression walk instead; reuse the N1 shape predicate and HYB-E4001
+emitter without changing the foreign-Go perimeter. Key and value checks
+remain independent, including nested keys when an outer value is invalid.
+
+Regression pin: `map_literal_nil_keys.rs` (eight tests): Hybrid key shapes,
+parentheses, simultaneous key/value errors, nested keys, argument/return/
+managed contexts, and valid-key/existing nil-value controls. Six tests
+fail on unmodified main; all eight pass with the repair. Error/alias and
+foreign nil homes remain accepted; a Hybrid struct shadowing `error` does not
+inherit that exception. The 127 registered
+corpus verdicts are unchanged. SPEC-LANGUAGE N1 now spells out map keys.
+Validation: 1808 workspace tests pass; checker corpus 127/127; differential
+41 accepted / 86 rejected cases pass; all ten examples pass. Upstream CI
+remains required before final review.
