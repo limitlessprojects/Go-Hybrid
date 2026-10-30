@@ -91,6 +91,7 @@ pub(crate) enum OpKind {
     /// closure/method-value arity bypass (#577 C9).
     Fn(Vec<OpKind>, Option<usize>),
     Void,
+    TypeParam(String),
 }
 
 impl OpKind {
@@ -115,6 +116,7 @@ impl OpKind {
             OpKind::Pointer(inner) => format!("*{}", inner.label()),
             OpKind::Fn(..) => "fn".to_string(),
             OpKind::Void => "void".to_string(),
+            OpKind::TypeParam(n) => n.clone(),
         }
     }
 }
@@ -261,6 +263,10 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         // Chan target: cannot convert from Int, Float, Bool, Str, Slice, Map, Struct.
         (Chan(_), Int | Float | Bool | Str | Slice(_) | Map(_, _) | Struct(_)) => true,
 
+        // TypeParam cannot convert to/from other types (unless identical)
+        (TypeParam(_), other) if !matches!(other, Unknown | TypeParam(_)) => true,
+        (other, TypeParam(_)) if !matches!(other, Unknown | TypeParam(_) | Interface) => true,
+
         _ => false,
     }
 }
@@ -295,6 +301,7 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         // A fn kind only carries results here, so it is not evidence about
         // members either way.
         OpKind::Fn(..) => false,
+        OpKind::TypeParam(_) => true,
     }
 }
 
@@ -378,6 +385,7 @@ struct Collector<'a> {
     /// Lexical nesting depth within `select` statements.
     select_depth: usize,
     defines: Vec<Define>,
+    active_type_params: HashSet<String>,
     /// Every identifier mentioned in the file plus every dotted type root —
     /// the import-usage set (the emitter's declared-import header needs it).
     roots: HashSet<String>,
@@ -401,6 +409,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             loop_depth: 0,
             select_depth: 0,
             defines: Vec::new(),
+            active_type_params: HashSet::new(),
             roots: HashSet::new(),
             diags: Vec::new(),
             path: ck.path.clone(),
@@ -443,6 +452,40 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
         c.diags
     };
     ck.diags.extend(diags);
+}
+
+fn extract_type_params_from_receiver(
+    r_ty: &TypeExpr,
+    struct_tparams: &HashMap<String, Vec<hy_syntax::TypeParam>>,
+    out: &mut HashSet<String>,
+) {
+    let raw_name = match r_ty {
+        TypeExpr::Named { name, .. } => Some(name.as_str()),
+        TypeExpr::Pointer { to, .. } => match &**to {
+            TypeExpr::Named { name, .. } => Some(name.as_str()),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(rn) = raw_name {
+        if let Some(open) = rn.find('[') {
+            if rn.ends_with(']') {
+                let inner = &rn[open + 1..rn.len() - 1];
+                for arg in split_top_level_type_args(inner) {
+                    let trimmed = arg.trim();
+                    if !trimmed.is_empty() {
+                        out.insert(trimmed.to_string());
+                    }
+                }
+            }
+        }
+        let base = Checker::base_named_type_str(rn);
+        if let Some(tps) = struct_tparams.get(base) {
+            for tp in tps {
+                out.insert(tp.name.clone());
+            }
+        }
+    }
 }
 
 impl<'a> Collector<'a> {
@@ -700,6 +743,18 @@ impl<'a> Collector<'a> {
             f.span,
         );
 
+        let mut current_type_params = self.active_type_params.clone();
+        for tp in &f.type_params {
+            current_type_params.insert(tp.name.clone());
+        }
+        if let Some(r) = &f.receiver {
+            extract_type_params_from_receiver(
+                &r.ty,
+                &self.ck.struct_type_params,
+                &mut current_type_params,
+            );
+        }
+        let outer_type_params = std::mem::replace(&mut self.active_type_params, current_type_params);
         if let Some(r) = &f.receiver {
             self.ty(&r.ty);
         }
@@ -719,7 +774,10 @@ impl<'a> Collector<'a> {
             f.results.last().map(|r| &r.ty),
             Some(TypeExpr::Named { name, .. }) if name == "error"
         );
-        let Some(body) = &f.body else { return };
+        let Some(body) = &f.body else {
+            self.active_type_params = outer_type_params;
+            return;
+        };
         self.push_scope();
         if let Some(r) = &f.receiver {
             self.exempt(&r.name);
@@ -760,6 +818,7 @@ impl<'a> Collector<'a> {
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
         self.pop_scope();
+        self.active_type_params = outer_type_params;
     }
 
     fn local(&mut self, l: &LocalDecl) {
@@ -1654,6 +1713,9 @@ impl<'a> Collector<'a> {
             return OpKind::Unknown;
         }
         let name = name.trim();
+        if self.active_type_params.contains(name) {
+            return OpKind::TypeParam(name.to_string());
+        }
         let base = Checker::base_named_type_str(name);
         if self.ck.structs.contains_key(base) || self.ck.struct_type_params.contains_key(base) {
             return OpKind::Struct(Some(name.to_string()));
@@ -3062,33 +3124,36 @@ impl<'a> Collector<'a> {
             // positionally; a multi-value right-hand side (`a, b = f()`) is
             // left to the call-shape rules.
             AssignOp::Assign => {
-                if targets.len() == 1 && values.len() == 1 {
-                    // O8 slot-loan (adapted during integration): `q = &m["a"]`
-                    // on a value-typed `q` does NOT emit `q = &m["a"]` — the
-                    // emitter lowers the loan to `q = m["a"]` plus a store-back
-                    // into the slot, so a `Struct` target receiving a
-                    // `Pointer` value here is legal Hybrid, not a mismatch
-                    // (map_element_addressable's
-                    // accepts_slot_loan_into_value_var pins the shape).
-                    // Fail open for exactly that shape: an addr-of whose
-                    // operand is an index or field place. Loans are validated
-                    // for addressability by addressable.rs (HYB-E2010), so
-                    // the non-addressable ones still reject.
-                    let is_loan_shape = as_addr_of(&values[0])
-                        .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }));
-                    let vk = self.kind_of_expr(&values[0]);
-                    if !is_loan_shape && kinds_conflict(&tk, &vk) {
-                        self.emit_e1002(
-                            span,
-                            format!(
-                                "cannot assign a value of type `{}` to `{}` (type `{}`) — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
-                                vk.label(),
-                                target.render(),
-                                tk.label(),
-                                tk.label()
-                            ),
-                            "the target's declared type is fixed; write an explicit conversion when a conversion is intended",
-                        );
+                if targets.len() == values.len() {
+                    for (target, value) in targets.iter().zip(values.iter()) {
+                        // O8 slot-loan (adapted during integration): `q = &m["a"]`
+                        // on a value-typed `q` does NOT emit `q = &m["a"]` — the
+                        // emitter lowers the loan to `q = m["a"]` plus a store-back
+                        // into the slot, so a `Struct` target receiving a
+                        // `Pointer` value here is legal Hybrid, not a mismatch
+                        // (map_element_addressable's
+                        // accepts_slot_loan_into_value_var pins the shape).
+                        // Fail open for exactly that shape: an addr-of whose
+                        // operand is an index or field place. Loans are validated
+                        // for addressability by addressable.rs (HYB-E2010), so
+                        // the non-addressable ones still reject.
+                        let is_loan_shape = as_addr_of(value)
+                            .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }));
+                        let cur_tk = self.kind_of_place(target);
+                        let vk = self.kind_of_expr(value);
+                        if !is_loan_shape && kinds_conflict(&cur_tk, &vk) {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot assign a value of type `{}` to `{}` (type `{}`) — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
+                                    vk.label(),
+                                    target.render(),
+                                    cur_tk.label(),
+                                    cur_tk.label()
+                                ),
+                                "the target's declared type is fixed; write an explicit conversion when a conversion is intended",
+                            );
+                        }
                     }
                 } else if values.len() > 1 && values.len() != targets.len() {
                     // Binding-count guards: a parallel assignment is
