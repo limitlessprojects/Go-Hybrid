@@ -332,9 +332,16 @@ impl FnState {
                 let snap_aliases = self.aliases.clone();
                 let snap_share = self.may_share.clone();
                 for pos in fnlits {
-                    self.closure_scoped_envs.entry(pos).or_insert_with(|| {
-                        (snap_env.clone(), snap_aliases.clone(), snap_share.clone())
-                    });
+                    if let Some((_, s_aliases, s_share)) = self.closure_scoped_envs.get_mut(&pos) {
+                        for (k, v) in &snap_aliases {
+                            s_aliases.insert(k.clone(), v.clone());
+                        }
+                        for (k, vs) in &snap_share {
+                            s_share.entry(k.clone()).or_default().extend(vs.iter().cloned());
+                        }
+                    } else {
+                        self.closure_scoped_envs.insert(pos, (snap_env.clone(), snap_aliases.clone(), snap_share.clone()));
+                    }
                 }
             }
         }
