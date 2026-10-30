@@ -101,6 +101,51 @@ class CheckClaimsLinksTest(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertEqual(report["issues"][0]["kind"], "missing-claims-file")
 
+    def test_missing_corpus_directory_is_reported_for_numeric_reference(self):
+        corpus = self.root / "tests" / "checker-corpus"
+        for path in corpus.iterdir():
+            path.unlink()
+        corpus.rmdir()
+        (self.root / "GUARANTEES.md").write_text(
+            "## The claims table\n| 1 | spawn | checker | claim | corpus 16 |\n",
+            encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["issues"], [
+            {"row": 1, "kind": "missing-corpus-number", "target": "16"}])
+
+    def test_non_directory_corpus_is_reported_for_numeric_reference(self):
+        corpus = self.root / "tests" / "checker-corpus"
+        for path in corpus.iterdir():
+            path.unlink()
+        corpus.rmdir()
+        corpus.write_text("not a directory", encoding="utf-8")
+        (self.root / "GUARANTEES.md").write_text(
+            "## The claims table\n| 1 | spawn | checker | claim | corpus 16 |\n",
+            encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["issues"][0]["kind"],
+                         "missing-corpus-number")
+
+    def test_accept_marker_rejects_unknown_accept_prefixed_verdicts(self):
+        for verdict in ("ACCEPTED", "ACCEPT-NONSENSE"):
+            with self.subTest(verdict=verdict):
+                (self.root / "tests/checker-corpus/15-good.hy").write_text(
+                    "// EXPECTED-VERDICT: " + verdict + "\n", encoding="utf-8")
+                result = self.run_tool()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                issues = json.loads(result.stdout)["issues"]
+                self.assertEqual(len(issues), 1)
+                self.assertEqual(issues[0]["kind"], "verdict-mismatch")
+                self.assertEqual(issues[0]["found"], verdict)
+
+    def test_accept_marker_still_accepts_managed_verdict(self):
+        (self.root / "tests/checker-corpus/15-good.hy").write_text(
+            "// EXPECTED-VERDICT: ACCEPT-MANAGED\n", encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
