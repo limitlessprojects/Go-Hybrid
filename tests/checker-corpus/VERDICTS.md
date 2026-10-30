@@ -1075,3 +1075,35 @@ ACCEPT-MANAGED 2 · REJECT 86** — main's 125 plus this one.
 by the autonomous pipeline (bundles author-758 / author-827, landings
 0107658 / d0a2db5). Sibling-take credit: sonson0910's stale-base
 companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.
+
+-------------------------------------------------------------------------------
+
+### block-alias-spawn-write-reject (issue #399) — REJECT
+
+`alias = shared` inside an `if` block used to restore the pre-block `may_share` wholesale on scope_pop, erasing the edge the block created; the flat-function twin always rejected. Pinned on current main (rejects HYB-E3003); PRs #400/#401 closed before a landing, the gap closed incidentally.
+
+With this registration the corpus is **127 programs: ACCEPT 38 · ACCEPT-MANAGED 2 · REJECT 87** — main's 126 plus this one.
+
+-------------------------------------------------------------------------------
+
+### closure-reassign-captured-move-reject (issue #301) — REJECT
+
+Closure-local `alias := fresh` reassigned to the captured outer map (`alias = m`) used to leave no origin trail, so `task worker(move alias, ...)` read as an owned move; landed #206 (process_closure_assign) closed it and #302/#311/#479 were closed as same-fix. This pins the repro (rejects HYB-E3004 on current main).
+
+With this registration the corpus is **128 programs: ACCEPT 38 · ACCEPT-MANAGED 2 · REJECT 88** — main's 127 plus this one.
+
+-------------------------------------------------------------------------------
+
+### for-cond-nonbool-reject (issue #1032) — REJECT
+
+Go-style condition loops (`for cond {}`, ForKind::While) must type their condition as bool (GUARANTEES row 13, BUILDABLE). `for i {}` with int `i` rejects HYB-E1002 on current main (buildable.rs check_bool_condition); this pins the BUILDABLE seam. Companion void-call coverage lives in open PR #1038.
+
+With this registration the corpus is **129 programs: ACCEPT 38 · ACCEPT-MANAGED 2 · REJECT 89** — main's 128 plus this one.
+
+-------------------------------------------------------------------------------
+
+### loop-fresh-copy-move-reject (issue #372) — REJECT
+
+A fresh-copy call binding (`chunk := chunk_of(words)`) inside a loop used to clear the moved-state of the outer root on the back-edge, so the second iteration moved `words` into a second live task (`WARNING: DATA RACE` under go run -race); companion PRs #373/#421/#702 closed before a landing. Rejects HYB-E3003 on current main; pinned here.
+
+With this registration the corpus is **130 programs: ACCEPT 38 · ACCEPT-MANAGED 2 · REJECT 90** — main's 129 plus this one.
