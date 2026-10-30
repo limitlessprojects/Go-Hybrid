@@ -576,9 +576,13 @@ impl<'a> Collector<'a> {
         // enum, a type alias, or a built-in conversion target. Anything else
         // stays fail-open.
         let is_declared_type = self.ck.structs.contains_key(name)
+            || self.ck.structs.contains_key(head)
+            || self.ck.struct_type_params.contains_key(name)
+            || self.ck.struct_type_params.contains_key(head)
             || self.ck.enums.contains_key(name)
             || self.ck.type_aliases.contains_key(name)
-            || crate::const_init::is_conversion_type_name(name);
+            || crate::const_init::is_conversion_type_name(name)
+            || matches!(name, "any" | "error" | "interface{}");
         if !is_declared_type {
             return;
         }
@@ -1346,6 +1350,23 @@ impl<'a> Collector<'a> {
                         "an `any` value must be asserted to a concrete type before its fields can be read",
                     );
                 }
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if (self.is_imported_pkg_root(pkg)
+                        || crate::foreign::is_curated_package_root(pkg)
+                        || crate::foreign::BUILTIN_PACKAGES.contains(&pkg.as_str()))
+                        && !self.scopes.iter().rev().any(|layer| layer.contains_key(pkg))
+                        && Self::is_foreign_type_name(pkg, name)
+                    {
+                        self.emit_e1002(
+                            *span,
+                            format!(
+                                "`{}.{}` is a type, not a value — Go refuses `{}.{} (type) is not an expression` (HYB-E1002)",
+                                pkg, name, pkg, name
+                            ),
+                            "a type name can only be used in a type position or as a conversion callee (`T(x)`)",
+                        );
+                    }
+                }
                 // #778: a Field BASE is a QUALIFIER position, not a value
                 // position, so the type-name check must not fire on it. Two
                 // legal spellings put a type name there:
@@ -1371,6 +1392,12 @@ impl<'a> Collector<'a> {
                 // local closure called as `f()` has been read.
                 match unwrap_parens(callee) {
                     Expr::Ident { name, .. } => self.read(name),
+                    Expr::Field { base, .. } => {
+                        match unwrap_parens(base) {
+                            Expr::Ident { name, .. } => self.read(name),
+                            other => self.expr(other),
+                        }
+                    }
                     other => self.expr(other),
                 }
                 // `new(T)` and `make(T, len, cap)` take a TYPE as their FIRST
@@ -2803,6 +2830,125 @@ impl<'a> Collector<'a> {
                 ),
                 "the operand of `&` must be addressable (a variable, pointer indirection, field, slice/array element, or composite literal)",
             );
+        }
+    }
+
+    fn is_foreign_type_name(pkg: &str, member: &str) -> bool {
+        let norm = member.to_ascii_lowercase().replace('_', "");
+        match pkg {
+            "http" | "net/http" => matches!(
+                norm.as_str(),
+                "client"
+                    | "request"
+                    | "response"
+                    | "header"
+                    | "server"
+                    | "servemux"
+                    | "transport"
+                    | "cookie"
+                    | "cookiejar"
+                    | "roundtripper"
+                    | "responsewriter"
+                    | "handler"
+                    | "handlerfunc"
+                    | "filesystem"
+                    | "file"
+                    | "dir"
+            ),
+            "httptest" | "net/http/httptest" => matches!(
+                norm.as_str(),
+                "server" | "responserecorder"
+            ),
+            "sync" => matches!(
+                norm.as_str(),
+                "mutex" | "rwmutex" | "waitgroup" | "pool" | "once" | "cond" | "map" | "locker"
+            ),
+            "atomic" | "sync/atomic" => matches!(
+                norm.as_str(),
+                "value" | "pointer" | "int32" | "int64" | "uint32" | "uint64" | "uintptr" | "bool"
+            ),
+            "time" => matches!(
+                norm.as_str(),
+                "duration" | "time" | "ticker" | "timer" | "location" | "month" | "weekday"
+            ),
+            "io" => matches!(
+                norm.as_str(),
+                "reader"
+                    | "writer"
+                    | "closer"
+                    | "readcloser"
+                    | "writecloser"
+                    | "readwriter"
+                    | "readwritecloser"
+                    | "seeker"
+                    | "readseeker"
+                    | "writerto"
+                    | "readerfrom"
+                    | "bytereader"
+                    | "bytescanner"
+                    | "runereader"
+                    | "runescanner"
+                    | "stringwriter"
+                    | "sectionreader"
+                    | "limitedreader"
+                    | "pipereader"
+                    | "pipewriter"
+                    | "offsetwriter"
+            ),
+            "os" => matches!(
+                norm.as_str(),
+                "file"
+                    | "fileinfo"
+                    | "filemode"
+                    | "direntry"
+                    | "process"
+                    | "processstate"
+                    | "procattr"
+                    | "signal"
+                    | "patherror"
+                    | "linkerror"
+                    | "syscallerror"
+            ),
+            "json" | "encoding/json" => matches!(
+                norm.as_str(),
+                "decoder" | "encoder" | "rawmessage" | "token" | "delim" | "syntaxerror" | "unmarshaltypeerror"
+            ),
+            "net" => matches!(
+                norm.as_str(),
+                "conn"
+                    | "listener"
+                    | "packetconn"
+                    | "ip"
+                    | "ipnet"
+                    | "ipmask"
+                    | "hardwareaddr"
+                    | "addr"
+                    | "tcpaddr"
+                    | "udpaddr"
+                    | "unixaddr"
+                    | "ipaddr"
+                    | "tcpconn"
+                    | "udpconn"
+                    | "unixconn"
+                    | "ipconn"
+                    | "tcplistener"
+                    | "udplistener"
+                    | "unixlistener"
+                    | "dialer"
+                    | "resolver"
+                    | "buffers"
+            ),
+            "bufio" => matches!(
+                norm.as_str(),
+                "reader" | "writer" | "readwriter" | "scanner" | "splitfunc"
+            ),
+            "url" | "net/url" => matches!(
+                norm.as_str(),
+                "url" | "values" | "userinfo" | "error" | "escapeerror" | "invalidhosterror"
+            ),
+            "strings" => matches!(norm.as_str(), "reader" | "builder" | "replacer"),
+            "bytes" => matches!(norm.as_str(), "buffer" | "reader"),
+            _ => false,
         }
     }
 
@@ -4852,5 +4998,40 @@ fn main() {
             "unexpected diagnostics: {:?}",
             r.diagnostics
         );
+    }
+
+    #[test]
+    fn rejects_type_name_in_value_position_2041() {
+        for src in [
+            "fn main() {\n    x := any\n    fmt.println(x)\n}\n",
+            "fn main() {\n    x := error\n    fmt.println(x)\n}\n",
+            "struct box[t] {\n    v t\n}\nfn main() {\n    b := box\n    fmt.println(b)\n}\n",
+            "import \"net/http\"\nfn main() {\n    c := http.client\n    fmt.println(c)\n}\n",
+            "import \"sync\"\nfn main() {\n    m := sync.mutex\n    fmt.println(m)\n}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                error_codes(&r).contains(&"HYB-E1002".to_string()),
+                "expected HYB-E1002, got {:?} for:\n{src}",
+                error_codes(&r)
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_valid_type_and_package_positions_2041() {
+        for src in [
+            "import \"time\"\nfn main() {\n    d := time.duration(5)\n    fmt.println(d)\n}\n",
+            "import \"net/http\"\nfn main() {\n    c := http.client{}\n    fmt.println(c)\n}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(
+                r.verdict,
+                Verdict::Accept,
+                "unexpected diagnostics for:\n{src}\n{:?}",
+                r.diagnostics
+            );
+        }
     }
 }
