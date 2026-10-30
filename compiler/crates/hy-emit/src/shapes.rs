@@ -180,11 +180,37 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
         "serde_json.value",
         TypeShape {
             members: &[
-                ("array", method("Array", None)),
+                ("array", method("Array", Some("serde_json.view"))),
+                ("get", method("Get", Some("serde_json.view"))),
                 ("int", method("Int", None)),
                 ("string", method("String", None)),
                 ("set", method("Set", None)),
+                ("set_int", method("SetInt", None)),
+                ("set_bool", method("SetBool", None)),
+                ("remove", method("Remove", None)),
                 ("push_string", method("PushString", None)),
+                ("to_string_pretty", method("ToStringPretty", None)),
+                ("release", method("Release", None)),
+            ],
+        },
+    ),
+    (
+        // Borrowed element/sub-tree handle returned by `array` / `get`:
+        // lowers to `jsonbinding.Value` and exposes the same method surface.
+        "serde_json.view",
+        TypeShape {
+            members: &[
+                ("array", method("Array", Some("serde_json.view"))),
+                ("get", method("Get", Some("serde_json.view"))),
+                ("int", method("Int", None)),
+                ("string", method("String", None)),
+                ("set", method("Set", None)),
+                ("set_int", method("SetInt", None)),
+                ("set_bool", method("SetBool", None)),
+                ("remove", method("Remove", None)),
+                ("push_string", method("PushString", None)),
+                ("to_string_pretty", method("ToStringPretty", None)),
+                ("release", method("Release", None)),
             ],
         },
     ),
@@ -209,9 +235,44 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
                 ("unlock", method("Unlock", None)),
                 ("try_lock", method("TryLock", None)),
                 ("rlock", method("RLock", None)),
+                ("r_lock", method("RLock", None)),
                 ("runlock", method("RUnlock", None)),
+                ("r_unlock", method("RUnlock", None)),
                 ("try_rlock", method("TryRLock", None)),
+                ("try_r_lock", method("TryRLock", None)),
             ],
+        },
+    ),
+    (
+        "sync.rw_mutex",
+        TypeShape {
+            members: &[
+                ("lock", method("Lock", None)),
+                ("unlock", method("Unlock", None)),
+                ("try_lock", method("TryLock", None)),
+                ("rlock", method("RLock", None)),
+                ("r_lock", method("RLock", None)),
+                ("runlock", method("RUnlock", None)),
+                ("r_unlock", method("RUnlock", None)),
+                ("try_rlock", method("TryRLock", None)),
+                ("try_r_lock", method("TryRLock", None)),
+            ],
+        },
+    ),
+    (
+        "sync.wait_group",
+        TypeShape {
+            members: &[
+                ("add", method("Add", None)),
+                ("done", method("Done", None)),
+                ("wait", method("Wait", None)),
+            ],
+        },
+    ),
+    (
+        "sync.once",
+        TypeShape {
+            members: &[("do", method("Do", None))],
         },
     ),
     (
@@ -300,10 +361,27 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
 /// not listed default to (1, true) — the rust-call convention.
 pub static METHOD_RESULTS: &[(&str, &str, (u8, bool))] = &[
     ("serde_json.value", "array", (1, true)),
+    ("serde_json.value", "get", (1, true)),
     ("serde_json.value", "int", (1, true)),
     ("serde_json.value", "string", (1, true)),
+    ("serde_json.value", "to_string_pretty", (1, true)),
     ("serde_json.value", "set", (0, true)),
+    ("serde_json.value", "set_int", (0, true)),
+    ("serde_json.value", "set_bool", (0, true)),
+    ("serde_json.value", "remove", (0, true)),
     ("serde_json.value", "push_string", (0, true)),
+    ("serde_json.value", "release", (0, false)),
+    ("serde_json.view", "array", (1, true)),
+    ("serde_json.view", "get", (1, true)),
+    ("serde_json.view", "int", (1, true)),
+    ("serde_json.view", "string", (1, true)),
+    ("serde_json.view", "to_string_pretty", (1, true)),
+    ("serde_json.view", "set", (0, true)),
+    ("serde_json.view", "set_int", (0, true)),
+    ("serde_json.view", "set_bool", (0, true)),
+    ("serde_json.view", "remove", (0, true)),
+    ("serde_json.view", "push_string", (0, true)),
+    ("serde_json.view", "release", (0, false)),
 ];
 
 pub fn lookup_method_results(ty: &str, name: &str) -> Option<(u8, bool)> {
@@ -500,6 +578,7 @@ pub static RUST_CRATES: &[RustCrateDesc] = &[
 pub static RUST_TYPES: &[(&str, &str, &str)] = &[
     // (hy type, binding root, Go type)
     ("serde_json.value", "jsonbinding", "Value"),
+    ("serde_json.view", "jsonbinding", "Value"),
 ];
 
 pub fn lookup_rust_type(hy_ty: &str) -> Option<(&'static str, &'static str)> {

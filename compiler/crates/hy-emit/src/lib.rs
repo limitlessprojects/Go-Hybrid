@@ -367,6 +367,8 @@ fn go_initialism(seg: &str) -> Option<&'static str> {
         "rfc3339" => "RFC3339",
         "rhs" => "RHS",
         "rpc" => "RPC",
+        "rw" => "RW",
+        "rwmutex" => "RWMutex",
         "sha1" => "SHA1",
         "sha256" => "SHA256",
         "sha384" => "SHA384",

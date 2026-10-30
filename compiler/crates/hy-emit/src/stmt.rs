@@ -794,9 +794,14 @@ impl Emitter {
         // (a for-loop var over this temp) binds the ELEMENT handle type.
         if let Expr::Call { callee, .. } = operand {
             if let Expr::Field { base, name, .. } = callee.as_ref() {
-                if name == "array" && self.type_of_expr(base) == Some("serde_json.value") {
+                if matches!(name.as_str(), "array" | "get")
+                    && matches!(
+                        self.type_of_expr(base),
+                        Some("serde_json.value" | "serde_json.view")
+                    )
+                {
                     self.bindings
-                        .insert(temp.clone(), BindingKind::ForeignTy("serde_json.value"));
+                        .insert(temp.clone(), BindingKind::ForeignTy("serde_json.view"));
                 }
             }
         }
@@ -1068,11 +1073,14 @@ impl Emitter {
                     if pkg == "io" && name == "read_all" {
                         return BindingKind::Bytes;
                     }
-                    // Rust-handle constructors: a serde_json value handle.
+                    // Rust-handle constructors: a serde_json value/view handle.
                     if pkg == "serde_json"
                         && matches!(name.as_str(), "parse" | "new_object" | "new_array")
                     {
                         return BindingKind::ForeignTy("serde_json.value");
+                    }
+                    if pkg == "serde_json" && matches!(name.as_str(), "array" | "get") {
+                        return BindingKind::ForeignTy("serde_json.view");
                     }
                     // time.since/now return a KNOWN type — duration members
                     // resolve property-style through the shape table (10:
@@ -1084,6 +1092,13 @@ impl Emitter {
                         return BindingKind::ForeignTy("time.time");
                     }
                     return BindingKind::Foreign;
+                }
+            }
+            if let Some(bt) = self.type_of_expr(base) {
+                if let Some(m) = super::shapes::lookup_member(bt, name) {
+                    if let Some(res_ty) = m.result {
+                        return BindingKind::ForeignTy(res_ty);
+                    }
                 }
             }
         }
