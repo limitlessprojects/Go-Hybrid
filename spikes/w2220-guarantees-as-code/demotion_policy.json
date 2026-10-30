@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "owner_default": "@gamethao92",
+  "rows": {
+    "1": {
+      "status": "executable",
+      "verifier": { "kind": "corpus_pair" },
+      "owner": "@gamethao92",
+      "review_by": "2027-01-31"
+    },
+    "8": {
+      "status": "executable",
+      "verifier": {
+        "kind": "run_gate",
+        "gate": "managed_gate",
+        "baseline": "gates/managed-baseline.json"
+      },
+      "owner": "@gamethao92",
+      "review_by": "2027-01-31"
+    },
+    "16": {
+      "status": "executable",
+      "verifier": {
+        "kind": "runtime_pin",
+        "language": "go",
+        "runtime": "go run -race",
+        "expect": "panic: send on closed channel"
+      },
+      "owner": "@gamethao92",
+      "review_by": "2027-01-31"
+    },
+    "9": {
+      "status": "prose-only",
+      "verifier": { "kind": "argument" },
+      "owner": "@gamethao92",
+      "expires": "2026-12-31",
+      "debt": "W2220-DEBT-009"
+    }
+  }
+}
