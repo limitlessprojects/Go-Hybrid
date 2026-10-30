@@ -1032,10 +1032,21 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expr::MapLit { value: vty, entries, .. } => {
+            Expr::MapLit { key: kty, value: vty, entries, .. } => {
+                let kshape = self.shape_of_type(kty);
+                let kty_text = kty.render();
                 let vshape = self.shape_of_type(vty);
                 let vty_text = vty.render();
                 for (k, v) in entries {
+                    if Checker::is_nil_literal(k) && !Checker::is_nilable_shape(&kshape) {
+                        self.emit_nil_type_error_text(
+                            &kshape,
+                            kty_text.clone(),
+                            k.span(),
+                            &format!("the map key slot `{}`", kty_text),
+                        );
+                        continue;
+                    }
                     if Checker::is_nil_literal(v) && !Checker::is_nilable_shape(&vshape) {
                         self.emit_nil_type_error_text(
                             &vshape,

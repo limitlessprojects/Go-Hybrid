@@ -2756,8 +2756,9 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// Family B1/B2 (#425): unary `!` requires `bool`, unary `-` requires a numeric operand.
+    /// Family B1/B2 (#425, #1850): unary `!` requires `bool`, unary `-` requires a numeric operand.
     fn check_unary_operand(&mut self, op: UnOp, operand: &Expr, span: Span) {
+        self.check_single_value_position(operand, "a unary operation", /*binding_position=*/ false);
         let k = self.kind_of_expr(operand);
         match op {
             UnOp::Not => {
@@ -3601,6 +3602,7 @@ impl<'a> Collector<'a> {
             return;
         }
         for item in items {
+            self.check_single_value_position(item, "a slice literal element", /*binding_position=*/ false);
             let bare = unwrap_parens(item);
             if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
                 continue;
@@ -3669,7 +3671,26 @@ impl<'a> Collector<'a> {
         let resolved_val = self.ck.resolve_type_alias(val_ty);
         let exp_val = self.kind_of_ty(&resolved_val, 0);
         for (k, v) in entries {
+            self.check_single_value_position(k, "a map literal key", /*binding_position=*/ false);
+            self.check_single_value_position(v, "a map literal value", /*binding_position=*/ false);
             if exp_key != OpKind::Unknown {
+                let bare_k = unwrap_parens(k);
+                if matches!(bare_k, Expr::Lit { kind: LitKind::Nil, .. }) {
+                    if matches!(
+                        exp_key,
+                        OpKind::Int | OpKind::Float | OpKind::String | OpKind::Bool | OpKind::Array(_) | OpKind::Struct(_)
+                    ) {
+                        self.emit_e1002(
+                            k.span(),
+                            format!(
+                                "cannot use `nil` as `{}` value in map key (HYB-E1002)",
+                                key_ty.render()
+                            ),
+                            "every key of a map composite literal `map[K]V{...}` must be assignable to the key type `K`",
+                        );
+                        continue;
+                    }
+                }
                 let kk = self.kind_of_expr(k);
                 if kk != OpKind::Unknown
                     && kk != exp_key
