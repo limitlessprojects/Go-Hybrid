@@ -417,6 +417,28 @@ impl<'a> Scan<'a> {
                                     ),
                                 ]),
                             );
+                        } else if !crate::foreign::is_curated_package_root(root) {
+                            // Unknown root: not a local, not a curated package,
+                            // not a known Go stdlib name. Nothing collects an
+                            // import for it, so `go build` says
+                            // `undefined: <root>` (issue #1131).
+                            self.diags.push(
+                                hy_diag::Diagnostic::error(
+                                    "HYB-E1001",
+                                    self.path.to_string(),
+                                    *span,
+                                    format!(
+                                        "`{}.{}` cannot be resolved — `{}` is not a declared name and not a package on the M5 curated allowlist (allowlist: {}) (HYB-E1001)",
+                                        root,
+                                        name,
+                                        root,
+                                        crate::foreign::CURATED_ALLOWLIST_DISPLAY
+                                    ),
+                                )
+                                .with_notes(vec![
+                                    "SPEC M5: a dotted root must be a declared local/const/type or a curated package whose bindings are normalized; an unknown root is never imported".to_string(),
+                                ]),
+                            );
                         }
                     }
                 } else {

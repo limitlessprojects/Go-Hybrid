@@ -186,16 +186,15 @@ fn imported_package_prefix_allowed() {
 }
 
 #[test]
-fn dotted_first_segment_is_package_open_world() {
-    // The emitter's contract: "unknown roots still work — they emit verbatim
-    // and get an import" (hy-emit is_package_root). Spike-10's `hex.encode`
-    // is a root the checker's foreign table never listed but that builds, so
-    // a direct ident base under `.` is exempt from E1001 on purpose — the
-    // checker cannot tell a real std/binding root from a typo'd one, and the
-    // go toolchain reports the difference exactly (`undefined: foo` vs a
-    // working import). Everything BARE stays checked.
-    accepts_without_e1001("fn main() {\n    x := foo.bar(1)\n    _ = x\n}\n");
-    accepts_without_e1001("fn main() {\n    _ = undefined_obj.field\n}\n");
+fn dotted_first_segment_is_a_declared_name_or_curated_root_issue_1131() {
+    // A dotted root nothing declares and no import covers used to be exempt
+    // from E1001 and then failed `go build` with `undefined: <root>`. The
+    // emitter collects no import for an unknown root, so the exemption was a
+    // BUILDABLE hole (issue #1131): check now rejects it, naming the curated
+    // allowlist. BARE idents were already checked; so were curated members,
+    // uncurated stdlib roots, and explicit imports.
+    rejects_with_e1001("fn main() {\n    x := foo.bar(1)\n    _ = x\n}\n");
+    rejects_with_e1001("fn main() {\n    _ = undefined_obj.field\n}\n");
 }
 
 #[test]

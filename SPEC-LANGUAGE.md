@@ -1980,6 +1980,14 @@ concurrency flags for the A5 lint, API contract extraction) is per-package
 work; promising "any Go package" and delivering broken bindings would be
 the dishonest version. The list grows by Decision Log entries.
 
+**M5b — A dotted root must be declared or curated (`HYB-E1001`).** A bare
+`root.member` whose root is not a declared local/const/type and not a
+package on the allowlist rejects at check time naming the allowlist, instead
+of passing and then failing `go build` with `undefined: root`. The emitter
+collects no import for an unknown root, so the exemption was a BUILDABLE
+hole (#1131). Curated roots stay importless-workable (`hex.encode`), and a
+declared root keeps its chain (`x.b.d`).
+
 **M6 — Rust crate imports and pinning.** `import "rust/serde_json"`
 resolves the crate through the module manifest (`hybrid.mod`), which pins
 **exact versions** (`serde_json = "1.0.140"` — no ranges; reproducibility
