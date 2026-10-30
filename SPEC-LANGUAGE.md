@@ -642,6 +642,12 @@ uses both styles deliberately). Function results that can be absent. Struct
 fields that may hold nothing (the nil-field killer). Option is a value
 wrapper: `option[T]` is sendable iff `T` is (O4).
 
+**T21a — `none` needs a target.** `none` is the option zero value
+(`ok: false`), so it lowers wherever the target type is already declared: a
+typed `var`, an assignment to a declared binding, a struct-literal field, a
+slice/map element, and `return`. With no declared target (`x := none`, a bare
+`take(none)` argument) it stays a clean error rather than a guessed type.
+
 ### 2.7 Immutability — the fourth wishlist item, scoped honestly
 
 **T22 — MVP immutability is binding-level.** `let x = e` creates an

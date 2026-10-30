@@ -286,7 +286,7 @@ impl Emitter {
                     },
                     (Some(t), Some(v)) => {
                         self.hoist_tries_expr(v)?;
-                        let e = self.emit_expr(v, 0)?;
+                        let e = self.emit_expr_exp(v, 0, l.ty.as_ref())?;
                         self.push(&format!("var {} {} = {}", l.names.join(", "), t, e));
                     }
                     (None, Some(v)) => {
@@ -320,6 +320,11 @@ impl Emitter {
                     }
                     if l.names.len() == 1 && l.names[0] != "_" {
                         self.register_var_ty(&l.names[0], t);
+                    }
+                    for n in &l.names {
+                        if n != "_" {
+                            self.decl_ty.insert(n.clone(), t.clone());
+                        }
                     }
                 }
                 return Ok(());
@@ -1185,6 +1190,19 @@ impl Emitter {
         }
     }
 
+    /// `none` against a target binding whose DECLARED type is `option[T]`:
+    /// the declared type is the only source of the zero value. `None` when
+    /// the value is not `none` or the target is not a declared option.
+    fn none_zero_for_target(&mut self, name: &str, v: &Expr) -> Option<String> {
+        if !matches!(v, Expr::Ident { name, .. } if name == "none") {
+            return None;
+        }
+        match self.decl_ty.get(name).cloned() {
+            Some(ty @ TypeExpr::Option { .. }) => Some(self.zero_value(&ty)),
+            _ => None,
+        }
+    }
+
     fn emit_assign(
         &mut self,
         targets: &[Place],
@@ -1255,7 +1273,10 @@ impl Emitter {
                         }
                     }
                 } else {
-                    rhs_texts.push(self.emit_expr(v, 0)?);
+                    match self.none_zero_for_target(name, v) {
+                        Some(z) => rhs_texts.push(z),
+                        None => rhs_texts.push(self.emit_expr(v, 0)?),
+                    }
                 }
             }
             self.push(&format!("{} = {}", names.join(", "), rhs_texts.join(", ")));
@@ -1320,10 +1341,18 @@ impl Emitter {
             .iter()
             .map(|t| self.emit_place(t))
             .collect::<Result<Vec<_>, _>>()?;
-        let vs = values
-            .iter()
-            .map(|v| self.emit_expr(v, 0))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut vs: Vec<String> = Vec::with_capacity(values.len());
+        for (idx, v) in values.iter().enumerate() {
+            // `o = none` against a target declared `option[T]`.
+            let zero = match targets.get(idx).map(|t| &t.kind) {
+                Some(PlaceKind::Ident(n)) => self.none_zero_for_target(n, v),
+                _ => None,
+            };
+            match zero {
+                Some(z) => vs.push(z),
+                None => vs.push(self.emit_expr(v, 0)?),
+            }
+        }
         self.push(&format!("{} {} {}", ts.join(", "), op_text, vs.join(", ")));
         Ok(())
     }
@@ -1562,6 +1591,11 @@ impl Emitter {
                     }
                     if l.names.len() == 1 && l.names[0] != "_" {
                         self.register_var_ty(&l.names[0], t);
+                    }
+                    for n in &l.names {
+                        if n != "_" {
+                            self.decl_ty.insert(n.clone(), t.clone());
+                        }
                     }
                 }
                 let names = l.names.join(", ");
