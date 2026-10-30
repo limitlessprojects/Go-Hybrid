@@ -1600,7 +1600,32 @@ impl<'a> Collector<'a> {
                 self.check_named_type_instantiation(arg, span);
             }
         }
-        if head == "set" || head == "option" || head == "map" {
+        if head == "map" {
+            return;
+        }
+        if head == "set" || head == "option" {
+            if let Some(inner) = inner_opt {
+                let got = split_top_level_type_args(inner).len();
+                if got != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "wrong number of type arguments for prelude generic type `{}` in `{}`: expected 1, found {} (HYB-E1002)",
+                            head, name, got
+                        ),
+                        "prelude types `set[T]` and `option[T]` accept exactly one type argument",
+                    );
+                }
+            } else {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "cannot use generic type `{}` without type arguments (expected 1) (HYB-E1002)",
+                        head
+                    ),
+                    "supply an explicit type argument, e.g. `set[int]` or `option[string]`",
+                );
+            }
             return;
         }
         let Some(tparams) = self.ck.struct_type_params.get(head) else {
