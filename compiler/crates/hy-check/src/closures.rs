@@ -1050,14 +1050,14 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 let mut loop_stmts: Vec<(&Stmt, usize)> =
                     Vec::with_capacity(flat_body.stmts.len() + 1);
                 loop_stmts.push((stmt, 0));
-                for (s, idx) in flat_body.stmts {
-                    loop_stmts.push((s, idx + 1));
+                for (s, idx) in &flat_body.stmts {
+                    loop_stmts.push((*s, *idx + 1));
                 }
                 let loop_events: std::collections::HashMap<usize, Vec<crate::walk::ScopeEvent>> =
                     flat_body
                         .events
-                        .into_iter()
-                        .map(|(k, v)| (k + 1, v))
+                        .iter()
+                        .map(|(k, v)| (k + 1, v.clone()))
                         .collect();
                 let mut reported_backedge = std::collections::HashSet::new();
                 ck.check_loop_backedge(
@@ -1068,6 +1068,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     body,
                     &pre_moved,
                     &mut reported_backedge,
+                    &|idx| idx > 0 && flat_body.in_managed(idx - 1),
                 );
             }
             pop_scope_and_sync(st, nested);

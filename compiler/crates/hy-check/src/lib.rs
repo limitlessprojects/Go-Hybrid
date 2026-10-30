@@ -889,6 +889,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 lbody,
                 &pre_moved,
                 &mut reported_backedge,
+                &|idx| flat.in_managed(idx),
             );
         }
     }

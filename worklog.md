@@ -757,3 +757,28 @@ Stage Summary:
 - Next queue: NEEDS-INTEGRATION const stack #291 -> #297 -> #300 -> #232 (recipes in agent D's log; #232 needs the 5-line ConstInt adaptation after #297; #300 leaves the struct-field-store gap as a follow-up issue), #242 as scenario-port (11/15 live failures = goalposts); tools batch #364 -> #333(bump 675->708... recount at merge) -> #387 -> #383 -> #316 -> #388 -> #403 -> #325 -> #299 -> #423; then #288 (defer '?' hoist, validated 717/0). Closes pending: none left from the old list (#409/#411/#415/#438/#205/#228-A/#346 done or in tools batch).
 - Wildcard M1: every slot now has an attached artifact or a named gap; W-002/3/4/6/8/10/11/13/16 remain outreach targets; #365 verdicts 2026-11-01.
 - CI note: zero-job PR-run failures recurred 17:33-18:04Z (3 runs, jobs total_count=0) while all main push runs stay green — content-independent infra signature, monitoring per session-11 precedent; local batteries are primary evidence.
+
+---
+
+Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queue, 2hrly):
+- Env restore from recycled sandbox: rustup 1.99.0 pin reinstalled, go1.26.9 restored to /home/z/tools/go (hyb toolchain-enforcement caught a stray 1.27.3 on PATH — pin works as designed). Baseline on clean main 1f0ff97: cargo green, corpus tripwire not fired, differential FULL 41+86 AGREEMENT.
+- LANDED (15 merges, each: diff read -> verify_pr.sh battery [merge gate + cargo test --workspace + corpus + differential FULL] -> credit merge -> push -> ls-remote assert -> written PR reply):
+  #2142 (Slangelange, fixes #1072) chan-dir through option unwrap/or — 66d2fa6. Repro-discipline check added to the protocol: `close(some(rc).unwrap())` accepted pre-fix, rejects E3009 post-fix.
+  #2145 (Slangelange, fixes #1083) E6003 non-const ascriptions + shadowed const conversions — 8cb61a7.
+  #2065 (tomaslizak, fixes #2064) place_root paren strip, O8 store-back ordering — b0092c2.
+  #2061 (tomaslizak, fixes #1140) addressable-array slice share-edges through copy/callee stores — eed3af4.
+  #2101 (jpereyra243-byte, fixes #2100) while-try loop sentinel + branch_inherit flush — 5f903b6.
+  #2140 (Slangelange, fixes #1069) via_move uses on Send/select send arms — 189e825.
+  #2143 (Slangelange, fixes #1105) 2-var handle + option-wrapped range iterables E2009 — 5076009.
+  #2146 (Slangelange, fixes #1115) serde_json new_array/push_string + atomic call modes — 0a29255.
+  #2301 (ocakciomursel-pixel, fixes #840) relative BIN_DIR vs PWD — d5c41fb.
+  #1903 (phubinhbusiness-art, fixes #1902) select-arm-header ? hoist — 6358af1 + fe25d5a fixture fixup. PROCEDURE FAULT self-caught: the in-merge fixture fixup was claimed in the merge message but left in the verify worktree — main was red 6358af1..fe25d5a; fixup committed and red window disclosed on the PR thread. Lesson: the fixup commit goes INSIDE the merge (see #1910, done right: merge of a branch that already contains the fixup commit).
+  #1910 (phubinhbusiness-art, fixes #1913) httptest.get/post ? defines + parens — fec9b16 (+ f67ca64 inside the merge).
+  #2054 (huhuli083-creator, fixes #845) const-param slot/field loans in interprocedural calls — 5af171a.
+  #2228 (gttps, fixes #2226) O8 lit_index_key radix canonicalization — d1616cf.
+  #2230 (gttps, fixes #2229) lit_below_2_512 radix decode — 73755a9 (strongest take; dup-cluster courtesy posted on #2245).
+  #2328 (Dimank92, fixes #2317) loop-carried tail-alias freeze on back-edge moves — b62d1a2, same-day on the fresh soundness issue.
+- BLOCKED with evidence (not landed, written replies): #2067 (tomaslizak) — over-broad via_move rejection breaks pinned-legal `p := &clone_arr(a)[:][0]; task worker(move p)` (detached-copy backing has no store-back); discriminator must be map-backed aliasing, not slot_loan alone. Re-run battery same-day on a narrowed rebase.
+- CI: 80 action_required runs approved (2x40); ~312 remain for the cron ticks. Sweeper healthy (daily success, #787 protected per policy — queue is the live 5-day window at ~65 arrivals/day).
+- Suite growth this session: 136 -> 149 suites, all green; differential FULL agreement on every landing; final main b62d1a2 verified (ls-remote == HEAD).
+- Cron: arena watcher (478193) retired per owner instruction; new "Go-Hybrid PR queue drain — verify & land (2hrly)" (486809) fires 2026-10-30 14:20 +03, same doctrine encoded in the prompt.

@@ -2655,7 +2655,7 @@ impl<'a> Checker<'a> {
         collect_ref_roots(&src.value, &mut src_roots);
         for d in &dst_roots {
             for s in &src_roots {
-                if d != s && self.binding_may_share(st, d) && self.binding_may_share(st, s) {
+                if d != s && self.binding_may_share(st, d) && (self.binding_may_share(st, s) || self.expr_slices_addressable_array(st, &src.value, s)) {
                     st.share_edge(d, s);
                 }
             }
@@ -2754,7 +2754,7 @@ impl<'a> Checker<'a> {
                 for s in &src_roots {
                     if d != s
                         && (self.binding_may_share(st, s)
-                            || self.lookup_binding(st, s).is_some_and(|b| b.immutable))
+                            || self.lookup_binding(st, s).is_some_and(|b| b.immutable) || matches!(src_src, CalleeSlotSource::Arg(e) if self.expr_slices_addressable_array(st, e, s)))
                     {
                         st.share_edge(d, s);
                     }
@@ -7135,7 +7135,9 @@ impl<'a> Checker<'a> {
             | Expr::Try { operand: inner, .. }
             | Expr::Unary { operand: inner, .. }
             | Expr::AddrOf { operand: inner, .. } => {
-                self.expr_fnlit_mutates_const_param(inner, aliases, depth)
+                (matches!(as_addr_of(e).map(unwrap_parens), Some(Expr::Index { .. } | Expr::Field { .. }))
+                    && Self::expr_reaches_const_aliases(e, aliases))
+                    || self.expr_fnlit_mutates_const_param(inner, aliases, depth)
             }
             Expr::Call { callee, args, .. } => {
                 self.expr_fnlit_mutates_const_param(callee, aliases, depth)

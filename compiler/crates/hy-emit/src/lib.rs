@@ -1664,7 +1664,7 @@ impl Emitter {
                             || self.block_has_try(&a.body)
                     })
             }
-            Stmt::Select { arms, .. } => arms.iter().any(|a| self.block_has_try(&a.body)),
+            Stmt::Select { arms, .. } => arms.iter().any(|a| match &a.kind { SelectArmKind::Recv { chan, .. } => self.expr_has_try(chan), SelectArmKind::Send { chan, value, .. } => self.expr_has_try(chan) || self.expr_has_try(value), SelectArmKind::Default => false } || self.block_has_try(&a.body)),
             Stmt::Break { .. } | Stmt::Continue { .. } => false,
         }
     }

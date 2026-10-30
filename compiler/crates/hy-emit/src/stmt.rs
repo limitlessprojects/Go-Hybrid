@@ -180,6 +180,8 @@ impl Emitter {
                 // Go select, 1:1 — Hybrid's arm spelling
                 // (`v, ok := <-sq:` / `<-deadline:` / `ch <- v:`) lowers to
                 // Go's case clauses.
+                let hdrs: Vec<&Expr> = arms.iter().flat_map(|a| match &a.kind { SelectArmKind::Recv { chan, .. } => vec![chan], SelectArmKind::Send { chan, value, .. } => vec![chan, value], SelectArmKind::Default => vec![] }).collect();
+                for (i, e) in hdrs.iter().enumerate() { if hdrs[i + 1..].iter().any(|r| Self::expr_has_hoistable_try(r)) { self.hoist_order_before_try(e)?; } else { self.hoist_tries_expr(e)?; } }
                 self.push("select {");
                 self.indent += 1;
                 for arm in arms {
@@ -352,7 +354,7 @@ impl Emitter {
 
         // `x := f()?` — the try desugar. Values.len() == 1, a Try node.
         if l.values.len() == 1 {
-            if let Expr::Try { operand, .. } = &l.values[0] {
+            if let Expr::Try { operand, .. } = Self::peel_parens(&l.values[0]) {
                 return self.emit_try_define(l, operand);
             }
         }
@@ -890,17 +892,17 @@ impl Emitter {
             callee,
             args,
             span: _,
-        } = call
+        } = Self::peel_parens(call)
         {
             if let Expr::Field {
                 base,
                 name,
                 span: _,
-            } = callee.as_ref()
+            } = Self::peel_parens(callee)
             {
-                if let Expr::Ident { name: pkg, .. } = base.as_ref() {
-                    if *pkg == "httptest" && (*name == "get" || *name == "post") {
-                        return self.emit_httptest_get(l, args, name);
+                if let Expr::Ident { name: pkg, .. } = Self::peel_parens(base) {
+                    if self.is_unshadowed_pkg_root(pkg) && *pkg == "httptest" && (*name == "get" || *name == "post") {
+                        self.hoist_tries_call(callee, args)?; return self.emit_httptest_get(l, args, name);
                     }
                 }
             }
@@ -1712,10 +1714,12 @@ impl Emitter {
                 let c = self.emit_expr(cond, ATOM)?;
                 self.push(&format!("if !{} {{", c));
                 self.indent += 1;
+                for (_, s) in self.branch_inherit.clone().unwrap_or_default() { self.push(&s); }
                 self.push("break");
                 self.indent -= 1;
                 self.push("}");
-                self.emit_arm_stmts_with_loans(&body.stmts)?;
+                self.loan_frames.push(vec![(String::new(), label.clone().unwrap_or_default())]);
+                let r = self.emit_arm_stmts_with_loans(&body.stmts); self.loan_frames.pop(); r?;
                 self.indent -= 1;
                 self.push("}");
                 if label.is_some() {
@@ -2613,6 +2617,7 @@ impl Emitter {
 
     /// Leading identifier of a rendered loan place (`m["a"]` -> `m`, `h.m[k]` -> `h`).
     fn place_root(place: &str) -> &str {
+        let place = place.trim_start_matches('(');
         let end = place
             .find(|c: char| !(c.is_alphanumeric() || c == '_'))
             .unwrap_or(place.len());
