@@ -254,3 +254,28 @@ fn if_without_a_boundary_keeps_the_single_store_back_after_it() {
         "the store-back stays after the `if`:\n{go}"
     );
 }
+
+#[test]
+fn parenthesized_loan_base_flushes_before_spawn_issue_2064() {
+    let go = emit(
+        "    m := map[string]item{\"a\": item{x: 0}}
+    done := make(chan bool, 1)
+    p := &(m)[\"a\"]
+    if true {
+        p.x = 7
+        task worker(move m, done)
+    }
+    <-done
+",
+    );
+    assert!(
+        between(&go, "p.x = 7", "go worker(m, done)").contains("[\"a\"] = p"),
+        "parenthesized loan base must store back before spawn:\n{go}"
+    );
+    let after_if_idx = go.rfind("}\n\t<-done").expect("has end marker");
+    let after_if = &go[after_if_idx..];
+    assert!(
+        !after_if.contains("[\"a\"] = p"),
+        "parenthesized loan base must not store back after if construct:\n{go}"
+    );
+}
