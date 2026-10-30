@@ -214,7 +214,7 @@ fn is_definitely_single_value(e: &Expr) -> bool {
 /// pointer vs scalar), Go never permits comparison.
 fn equality_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
     if a.is_numeric() && b.is_numeric() {
-        return false;
+        return a != b;
     }
     kinds_conflict(a, b) && kinds_conflict(b, a)
 }
@@ -2967,9 +2967,22 @@ impl<'a> Collector<'a> {
             // are rejected here under HYB-E1002 (rule `BUILDABLE`).
             BinOp::Eq | BinOp::Ne => {
                 let op_str = if matches!(op, BinOp::Eq) { "==" } else { "!=" };
+                let conflict = if lk.is_numeric() && rk.is_numeric() {
+                    if lk == rk {
+                        false
+                    } else if lk == OpKind::Float && rk == OpKind::Int {
+                        !self.is_untyped_int_const(rhs, span.start)
+                    } else if lk == OpKind::Int && rk == OpKind::Float {
+                        !self.is_untyped_int_const(lhs, span.start)
+                    } else {
+                        true
+                    }
+                } else {
+                    equality_kinds_conflict(&lk, &rk)
+                };
                 if !Checker::is_nil_literal(lhs)
                     && !Checker::is_nil_literal(rhs)
-                    && equality_kinds_conflict(&lk, &rk)
+                    && conflict
                 {
                     self.emit_e1002(
                         span,
@@ -3015,7 +3028,9 @@ impl<'a> Collector<'a> {
                 let r_ok = matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
                 let mismatch = lk != OpKind::Unknown
                     && rk != OpKind::Unknown
-                    && lk.is_numeric() != rk.is_numeric();
+                    && (lk.is_numeric() != rk.is_numeric()
+                        || (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs, span.start))
+                        || (lk == OpKind::Int && rk == OpKind::Float && !self.is_untyped_int_const(lhs, span.start)));
                 if !l_ok || !r_ok || mismatch {
                     self.emit_e1002(
                         span,
@@ -3036,7 +3051,9 @@ impl<'a> Collector<'a> {
                 let r_ok = matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
                 let mismatch = lk != OpKind::Unknown
                     && rk != OpKind::Unknown
-                    && lk.is_numeric() != rk.is_numeric();
+                    && (lk.is_numeric() != rk.is_numeric()
+                        || (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs, span.start))
+                        || (lk == OpKind::Int && rk == OpKind::Float && !self.is_untyped_int_const(lhs, span.start)));
                 if !l_ok || !r_ok || mismatch {
                     self.emit_e1002(
                         span,
@@ -3057,8 +3074,11 @@ impl<'a> Collector<'a> {
                     BinOp::Mul => "*",
                     _ => "/",
                 };
+                let mismatch = (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs, span.start))
+                    || (lk == OpKind::Int && rk == OpKind::Float && !self.is_untyped_int_const(lhs, span.start));
                 if !matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float)
+                    || mismatch
                 {
                     self.emit_e1002(
                         span,
@@ -3241,7 +3261,9 @@ impl<'a> Collector<'a> {
                 let v_ok = matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
                 let mismatch = tk != OpKind::Unknown
                     && vk != OpKind::Unknown
-                    && tk.is_numeric() != vk.is_numeric();
+                    && (tk.is_numeric() != vk.is_numeric()
+                        || (tk == OpKind::Float && vk == OpKind::Int && !self.is_untyped_int_const(val, span.start))
+                        || (tk == OpKind::Int && vk == OpKind::Float));
                 if !t_ok || !v_ok || mismatch || kinds_conflict(&tk, &vk) {
                     self.emit_e1002(
                         span,
@@ -3264,8 +3286,11 @@ impl<'a> Collector<'a> {
                     AssignOp::MulAssign => "*=",
                     _ => "/=",
                 };
+                let mismatch = (tk == OpKind::Float && vk == OpKind::Int && !self.is_untyped_int_const(val, span.start))
+                    || (tk == OpKind::Int && vk == OpKind::Float);
                 if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float)
+                    || mismatch
                     || kinds_conflict(&tk, &vk)
                 {
                     self.emit_e1002(
@@ -3588,6 +3613,23 @@ impl<'a> Collector<'a> {
             return None;
         }
         self.ck.const_int_value_at(e, use_pos, 0)
+    }
+
+    fn is_untyped_int_const(&self, e: &Expr, pos: hy_diag::Pos) -> bool {
+        if crate::const_overflow::const_int_value(e).is_some() {
+            return true;
+        }
+        if let Expr::Lit {
+            kind: LitKind::Int(_) | LitKind::Char(_),
+            ..
+        } = unwrap_parens(e)
+        {
+            return true;
+        }
+        if !self.expr_has_non_const_local(e) && self.eval_const_int_at(e, pos).is_some() {
+            return true;
+        }
+        false
     }
 
     fn eval_const_string_len_at(&self, e: &Expr, use_pos: hy_diag::Pos) -> Option<i128> {
