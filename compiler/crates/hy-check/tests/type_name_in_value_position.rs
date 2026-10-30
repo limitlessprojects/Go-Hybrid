@@ -172,3 +172,69 @@ fn a_field_named_like_a_type_is_fine() {
         "{HOLDER}fn main() {{\n    h := holder{{n: 1}}\n    x := h.n\n    fmt.println(\"{{x}}\")\n}}\n"
     ));
 }
+
+// ---------------------------------------------------------------------------
+// Issue #2041: built-in `any`/`error`, generic structs, and qualified types
+// (`pkg.type_name`) in value positions.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn builtin_any_and_error_in_value_position_rejected_2041() {
+    assert_code(
+        "fn main() {\n    x := any\n    fmt.println(\"{x}\")\n}\n",
+        "HYB-E1002",
+    );
+    assert_code(
+        "fn main() {\n    x := error\n    fmt.println(\"{x}\")\n}\n",
+        "HYB-E1002",
+    );
+    assert_code(
+        "fn take(val any) {}\n\nfn main() {\n    take(any)\n}\n",
+        "HYB-E1002",
+    );
+    assert_code(
+        "fn take(val error) {}\n\nfn main() {\n    take(error)\n}\n",
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn generic_struct_name_in_value_position_rejected_2041() {
+    assert_code(
+        "struct box[t] {\n    val t\n}\n\nfn main() {\n    x := box\n    fmt.println(\"{x}\")\n}\n",
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn qualified_types_in_value_position_rejected_2041() {
+    assert_code(
+        "import \"net/http\"\n\nfn main() {\n    c := http.client\n    fmt.println(\"{c}\")\n}\n",
+        "HYB-E1002",
+    );
+    assert_code(
+        "import \"sync\"\n\nfn main() {\n    m := sync.mutex\n    fmt.println(\"{m}\")\n}\n",
+        "HYB-E1002",
+    );
+    assert_code(
+        "import \"time\"\n\nfn main() {\n    d := time.duration\n    fmt.println(\"{d}\")\n}\n",
+        "HYB-E1002",
+    );
+    assert_code(
+        "import \"encoding/json\"\n\nfn main() {\n    d := json.decoder\n    fmt.println(\"{d}\")\n}\n",
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn qualified_types_as_conversions_and_literals_stay_accepted_2041() {
+    assert_ok(
+        "import \"time\"\n\nfn main() {\n    d := time.duration(100)\n    fmt.println(\"{d}\")\n}\n",
+    );
+    assert_ok(
+        "import \"net/http\"\n\nfn main() {\n    c := http.client{}\n    fmt.println(\"{c}\")\n}\n",
+    );
+    assert_ok(
+        "import \"sync\"\n\nfn main() {\n    m := new(sync.mutex)\n    fmt.println(\"{m}\")\n}\n",
+    );
+}

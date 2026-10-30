@@ -576,9 +576,12 @@ impl<'a> Collector<'a> {
         // enum, a type alias, or a built-in conversion target. Anything else
         // stays fail-open.
         let is_declared_type = self.ck.structs.contains_key(name)
+            || self.ck.struct_type_params.contains_key(name)
+            || self.ck.struct_type_params.contains_key(head)
             || self.ck.enums.contains_key(name)
             || self.ck.type_aliases.contains_key(name)
-            || crate::const_init::is_conversion_type_name(name);
+            || crate::const_init::is_conversion_type_name(name)
+            || matches!(name, "any" | "error" | "interface{}");
         if !is_declared_type {
             return;
         }
@@ -1346,6 +1349,25 @@ impl<'a> Collector<'a> {
                         "an `any` value must be asserted to a concrete type before its fields can be read",
                     );
                 }
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    let is_pkg_root = self.is_imported_pkg_root(pkg)
+                        || crate::foreign::BUILTIN_PACKAGES.contains(&pkg.as_str());
+                    let is_shadowed = self.scopes.iter().rev().any(|l| l.contains_key(pkg))
+                        || self.lookup_kind(pkg).is_some();
+                    if is_pkg_root && !is_shadowed && crate::foreign::is_foreign_type(pkg, name) {
+                        self.read(pkg);
+                        let qual = format!("{}.{}", pkg, name);
+                        self.emit_e1002(
+                            *span,
+                            format!(
+                                "`{}` is a type, not a value — Go refuses `{} (type) is not an expression` (HYB-E1002)",
+                                qual, qual
+                            ),
+                            "a type name can only be used in a type position or as a conversion callee (`T(x)`)",
+                        );
+                        return;
+                    }
+                }
                 // #778: a Field BASE is a QUALIFIER position, not a value
                 // position, so the type-name check must not fire on it. Two
                 // legal spellings put a type name there:
@@ -1369,8 +1391,32 @@ impl<'a> Collector<'a> {
                 // `int(3.7)` is a legal built-in one, so the type-name check
                 // must not fire there. `read` still runs, because an unused
                 // local closure called as `f()` has been read.
+                //
+                // Similarly, a Field callee (`time.Duration(x)`, `http.Get(url)`)
+                // is in call/conversion position, so the value-position type check
+                // must not fire on it either.
                 match unwrap_parens(callee) {
                     Expr::Ident { name, .. } => self.read(name),
+                    Expr::Field { base, name, .. } => {
+                        let is_foreign_conv = match unwrap_parens(base) {
+                            Expr::Ident { name: pkg, .. } => {
+                                let is_pkg_root = self.is_imported_pkg_root(pkg)
+                                    || crate::foreign::BUILTIN_PACKAGES.contains(&pkg.as_str());
+                                let is_shadowed = self.scopes.iter().rev().any(|l| l.contains_key(pkg))
+                                    || self.lookup_kind(pkg).is_some();
+                                if is_pkg_root && !is_shadowed && crate::foreign::is_foreign_type(pkg, name) {
+                                    self.read(pkg);
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            _ => false,
+                        };
+                        if !is_foreign_conv {
+                            self.expr(callee);
+                        }
+                    }
                     other => self.expr(other),
                 }
                 // `new(T)` and `make(T, len, cap)` take a TYPE as their FIRST
@@ -1384,6 +1430,16 @@ impl<'a> Collector<'a> {
                 );
                 for (i, a) in args.iter().enumerate() {
                     if type_first_arg && i == 0 {
+                        match unwrap_parens(&a.value) {
+                            Expr::Ident { name, .. } => self.read(name),
+                            Expr::Field { base, .. } => {
+                                match unwrap_parens(base) {
+                                    Expr::Ident { name: bname, .. } => self.read(bname),
+                                    other => self.expr(other),
+                                }
+                            }
+                            _ => {}
+                        }
                         continue;
                     }
                     self.expr(&a.value);

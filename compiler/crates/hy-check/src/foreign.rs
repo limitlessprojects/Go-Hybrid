@@ -479,6 +479,193 @@ fn normalize_go_ident_to_snake(name: &str) -> String {
     out
 }
 
+/// Does `member` in package `pkg` name a foreign type (rather than a function, var, or const)?
+pub(crate) fn is_foreign_type(pkg: &str, member: &str) -> bool {
+    let norm = normalize_go_ident_to_snake(member);
+    let m = norm.as_str();
+    match pkg {
+        "fmt" => matches!(
+            m,
+            "stringer" | "go_stringer" | "state" | "formatter" | "scanner" | "scan_state"
+        ),
+        "os" => matches!(
+            m,
+            "file"
+                | "file_info"
+                | "file_mode"
+                | "dir_entry"
+                | "path_error"
+                | "link_error"
+                | "syscall_error"
+                | "process"
+                | "process_state"
+                | "proc_attr"
+                | "signal"
+        ),
+        "io" => matches!(
+            m,
+            "reader"
+                | "writer"
+                | "closer"
+                | "read_writer"
+                | "read_closer"
+                | "write_closer"
+                | "read_write_closer"
+                | "read_seeker"
+                | "read_seek_closer"
+                | "write_seeker"
+                | "read_write_seeker"
+                | "reader_from"
+                | "writer_to"
+                | "reader_at"
+                | "writer_at"
+                | "byte_reader"
+                | "byte_scanner"
+                | "byte_writer"
+                | "rune_reader"
+                | "rune_scanner"
+                | "string_writer"
+                | "limited_reader"
+                | "section_reader"
+                | "offset_writer"
+                | "pipe_reader"
+                | "pipe_writer"
+                | "seeker"
+        ),
+        "time" => matches!(
+            m,
+            "time"
+                | "duration"
+                | "timer"
+                | "ticker"
+                | "location"
+                | "month"
+                | "weekday"
+                | "parse_error"
+        ),
+        "sort" => matches!(
+            m,
+            "interface" | "int_slice" | "float64_slice" | "string_slice"
+        ),
+        "strings" => matches!(m, "builder" | "reader" | "replacer"),
+        "strconv" => matches!(m, "num_error"),
+        "sync" => matches!(
+            m,
+            "mutex"
+                | "rw_mutex"
+                | "rwmutex"
+                | "wait_group"
+                | "once"
+                | "cond"
+                | "map"
+                | "pool"
+                | "locker"
+        ),
+        "atomic" => matches!(
+            m,
+            "bool"
+                | "int32"
+                | "int64"
+                | "uint32"
+                | "uint64"
+                | "uintptr"
+                | "pointer"
+                | "value"
+        ),
+        "bufio" => matches!(
+            m,
+            "reader" | "writer" | "read_writer" | "scanner" | "split_func"
+        ),
+        "http" => matches!(
+            m,
+            "request"
+                | "response"
+                | "response_writer"
+                | "header"
+                | "serve_mux"
+                | "server"
+                | "client"
+                | "transport"
+                | "cookie"
+                | "cookie_jar"
+                | "round_tripper"
+                | "flusher"
+                | "hijacker"
+                | "close_notifier"
+                | "pusher"
+                | "conn_state"
+                | "dir"
+                | "file"
+                | "file_system"
+                | "http2_config"
+                | "max_bytes_error"
+                | "protocol_error"
+                | "protocols"
+                | "response_controller"
+                | "same_site"
+        ),
+        "httptest" => matches!(m, "response_recorder" | "server"),
+        "net" => matches!(
+            m,
+            "conn"
+                | "listener"
+                | "packet_conn"
+                | "addr"
+                | "dialer"
+                | "listen_config"
+                | "resolver"
+                | "ip"
+                | "ip_mask"
+                | "ip_net"
+                | "ip_addr"
+                | "ip_conn"
+                | "tcp_addr"
+                | "tcp_conn"
+                | "tcp_listener"
+                | "udp_addr"
+                | "udp_conn"
+                | "unix_addr"
+                | "unix_conn"
+                | "unix_listener"
+                | "interface"
+                | "hardware_addr"
+                | "buffers"
+                | "error"
+                | "addr_error"
+                | "dns_config_error"
+                | "dns_error"
+                | "invalid_addr_error"
+                | "op_error"
+                | "parse_error"
+                | "unknown_network_error"
+        ),
+        "url" => matches!(
+            m,
+            "url" | "values" | "userinfo" | "error" | "escape_error" | "invalid_host_error"
+        ),
+        "json" => matches!(
+            m,
+            "decoder"
+                | "encoder"
+                | "raw_message"
+                | "delim"
+                | "number"
+                | "marshaler"
+                | "unmarshaler"
+                | "syntax_error"
+                | "unmarshal_type_error"
+                | "unsupported_type_error"
+                | "unsupported_value_error"
+                | "marshaler_error"
+        ),
+        "hex" => matches!(m, "dumper" | "invalid_byte_error"),
+        "filepath" => matches!(m, "walk_func"),
+        "serde_json" => matches!(m, "value" | "view"),
+        "flate2" => matches!(m, "writer"),
+        _ => false,
+    }
+}
+
 /// Does curated package `pkg` export `member` (under M4 snake_case or Go spelling, #658)?
 pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
     let norm = normalize_go_ident_to_snake(member);
