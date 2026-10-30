@@ -1845,8 +1845,25 @@ impl<'a> Collector<'a> {
             },
             Expr::Interp { .. } => OpKind::Str,
             Expr::Paren { inner, .. }
-            | Expr::Move { operand: inner, .. }
-            | Expr::Try { operand: inner, .. } => self.kind_of_expr(inner),
+            | Expr::Move { operand: inner, .. } => self.kind_of_expr(inner),
+            Expr::Try { operand: inner, .. } => {
+                if let Expr::Call { callee, args, .. } = unwrap_parens(inner) {
+                    if let Some(res) = self.call_result_kinds(callee, args) {
+                        let has_err = self.call_has_error_tail(callee);
+                        let eff = if has_err {
+                            res.len().saturating_sub(1)
+                        } else {
+                            res.len()
+                        };
+                        if eff == 0 {
+                            return OpKind::Void;
+                        } else if eff == 1 {
+                            return res[0].clone();
+                        }
+                    }
+                }
+                self.kind_of_expr(inner)
+            }
             Expr::AddrOf { operand, .. } => OpKind::Pointer(Box::new(self.kind_of_expr(operand))),
             Expr::Unary { op, operand, .. } => match op {
                 UnOp::Addr => OpKind::Pointer(Box::new(self.kind_of_expr(operand))),
@@ -2223,6 +2240,41 @@ impl<'a> Collector<'a> {
     /// `None` means "one value, or unknown" — the caller must stay permissive.
     /// This is the single place the multi-value shape is derived, so the
     /// distinction is not re-guessed at each call site.
+    fn call_has_error_tail(&self, callee: &Expr) -> bool {
+        let bare = unwrap_parens(callee);
+        match bare {
+            Expr::FnLit { results, .. } => matches!(
+                results.last().map(|r| &r.ty),
+                Some(TypeExpr::Named { name, .. }) if name == "error"
+            ),
+            Expr::Ident { name, .. } => {
+                let head = Checker::base_named_type_str(name);
+                if let Some(f) = self.ck.fns.get(name.as_str()).or_else(|| self.ck.fns.get(head)) {
+                    matches!(
+                        f.results.last().map(|r| &r.ty),
+                        Some(TypeExpr::Named { name, .. }) if name == "error"
+                    )
+                } else {
+                    false
+                }
+            }
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let head = Checker::base_named_type_str(name);
+                if let Some(sname) = self.struct_base_name(&bk) {
+                    if let Some(m) = self.ck.method_decls.get(&(sname, head.to_string())) {
+                        return matches!(
+                            m.results.last().map(|r| &r.ty),
+                            Some(TypeExpr::Named { name, .. }) if name == "error"
+                        );
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     fn non_single_value_count(&self, e: &Expr) -> Option<usize> {
         match unwrap_parens(e) {
             Expr::Call { callee, args, .. } => {
@@ -2231,6 +2283,24 @@ impl<'a> Collector<'a> {
                     None
                 } else {
                     Some(res.len())
+                }
+            }
+            Expr::Try { operand, .. } => {
+                if let Expr::Call { callee, args, .. } = unwrap_parens(operand) {
+                    let res = self.call_result_kinds(callee, args)?;
+                    let has_err = self.call_has_error_tail(callee);
+                    let effective_count = if has_err {
+                        res.len().saturating_sub(1)
+                    } else {
+                        res.len()
+                    };
+                    if effective_count == 1 {
+                        None
+                    } else {
+                        Some(effective_count)
+                    }
+                } else {
+                    None
                 }
             }
             _ => None,
@@ -2758,6 +2828,10 @@ impl<'a> Collector<'a> {
 
     /// Family B1/B2 (#425): unary `!` requires `bool`, unary `-` requires a numeric operand.
     fn check_unary_operand(&mut self, op: UnOp, operand: &Expr, span: Span) {
+        if self.non_single_value_count(operand).is_some() {
+            self.check_single_value_position(operand, "a unary operand", /*binding_position=*/ false);
+            return;
+        }
         let k = self.kind_of_expr(operand);
         match op {
             UnOp::Not => {
@@ -4821,6 +4895,48 @@ fn main() {
                 error_codes(&r)
             );
         }
+    }
+
+    #[test]
+    fn rejects_void_and_multi_value_try_in_single_value_positions_1960() {
+        let src = "\
+fn run() error {
+    return nil
+}
+
+fn multi() (int, int, error) {
+    return 1, 2, nil
+}
+
+fn main() error {
+    x := -run()?
+    s := []int{1, 2, 3}
+    sub := s[run()?:2]
+    idx := s[multi()?]
+    _ = x
+    _ = sub
+    _ = idx
+    return nil
+}
+";
+        let r = check(src);
+        assert_eq!(
+            r.verdict,
+            Verdict::Reject,
+            "expected reject for void and multi-value try in single-value positions"
+        );
+        let codes = error_codes(&r);
+        assert!(
+            codes.contains(&"HYB-E1002".to_string()),
+            "expected HYB-E1002, got {:?}",
+            codes
+        );
+        assert_eq!(
+            codes.iter().filter(|c| *c == "HYB-E1002").count(),
+            3,
+            "expected 3 HYB-E1002 diagnostics (unary, slice bound, index), got {:?}",
+            r.diagnostics
+        );
     }
 
     #[test]
