@@ -542,6 +542,10 @@ pub struct Emitter {
     local_vars: BTreeSet<String>,
     /// Functions whose first result is a pointer type.
     ptr_returning_fns: BTreeSet<String>,
+    /// User method result shapes: (receiver struct name, method name) → (n_value_results, ends_in_error)
+    method_shapes: BTreeMap<(String, String), (usize, bool)>,
+    /// Fallback user method result shapes: method name → (n_value_results, ends_in_error)
+    methods_by_name: BTreeMap<String, (usize, bool)>,
     /// N5 (zeroinit.rs): non-generic user struct → its declared fields,
     /// and user type alias → its target, for zero values that allocate.
     n5_structs: BTreeMap<String, Vec<FieldDecl>>,
@@ -589,6 +593,8 @@ impl Emitter {
             pointer_vars: BTreeSet::new(),
             local_vars: BTreeSet::new(),
             ptr_returning_fns: BTreeSet::new(),
+            method_shapes: BTreeMap::new(),
+            methods_by_name: BTreeMap::new(),
             explicit_imports: BTreeMap::new(),
             n5_structs: BTreeMap::new(),
             n5_aliases: BTreeMap::new(),
@@ -737,9 +743,37 @@ impl Emitter {
                         _ => None,
                     })
                     .collect::<Vec<_>>();
-                (f.name.clone(), (f.results.len(), err, kind, ptr_params))
+                let val_count = if err {
+                    f.results.len().saturating_sub(1)
+                } else {
+                    f.results.len()
+                };
+                (f.name.clone(), (val_count, err, kind, ptr_params))
             })
             .collect();
+
+        self.method_shapes.clear();
+        self.methods_by_name.clear();
+        for f in file.fns() {
+            if let Some(ref r) = f.receiver {
+                let err = matches!(
+                    f.results.last(),
+                    Some(FnResult {
+                        ty: TypeExpr::Named { name, .. },
+                        ..
+                    }) if name == "error"
+                );
+                let val_count = if err {
+                    f.results.len().saturating_sub(1)
+                } else {
+                    f.results.len()
+                };
+                if let Some(sn) = base_ty_name(&r.ty) {
+                    self.method_shapes.insert((sn.to_string(), f.name.clone()), (val_count, err));
+                }
+                self.methods_by_name.insert(f.name.clone(), (val_count, err));
+            }
+        }
 
         // Pass 1: render every declaration into the body buffer, collecting
         // used packages as we go. Top-level decls separate with a blank line
