@@ -117,5 +117,17 @@ class ProbeParser(unittest.TestCase):
         self.assertFalse(any("removed line" in ln for ln in added))
 
 
+class PreflightWorkflowContract(unittest.TestCase):
+    """Preflight checks must never fail unconditionally on repositories lacking root go.mod (fixes #2168)."""
+
+    def test_preflight_guards_root_go_build(self):
+        workflow_path = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "shepherd-preflight.yml"
+        self.assertTrue(workflow_path.is_file(), f"Workflow not found: {workflow_path}")
+        content = workflow_path.read_text(encoding="utf-8")
+        # Ensure go build ./... is guarded with [ -f go.mod ] and module fallback
+        self.assertIn("if [ -f go.mod ]; then", content)
+        self.assertIn("examples/gomod-integration", content)
+
+
 if __name__ == "__main__":
     unittest.main()

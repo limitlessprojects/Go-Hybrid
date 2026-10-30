@@ -68,17 +68,28 @@ jobs:
             echo "Pinned toolchains: Go $(go version | awk '{print $3}'), $(rustc --version | awk '{print $2}')"
             echo
           } > /tmp/preflight.md
-          if go build ./... ; then
-            echo "- go build: **pass**" >> /tmp/preflight.md
+          if [ -f go.mod ]; then
+            if go build ./... ; then
+              echo "- go build: **pass**" >> /tmp/preflight.md
+            else
+              echo "- go build: **FAIL**" >> /tmp/preflight.md
+              exit 1
+            fi
+            if go vet ./... ; then
+              echo "- go vet: **pass**" >> /tmp/preflight.md
+            else
+              echo "- go vet: **FAIL**" >> /tmp/preflight.md
+              exit 1
+            fi
+          elif [ -f examples/gomod-integration/go.mod ]; then
+            if (cd examples/gomod-integration && go build ./... && go vet ./...) ; then
+              echo "- go build/vet (examples/gomod-integration): **pass**" >> /tmp/preflight.md
+            else
+              echo "- go build/vet (examples/gomod-integration): **FAIL**" >> /tmp/preflight.md
+              exit 1
+            fi
           else
-            echo "- go build: **FAIL**" >> /tmp/preflight.md
-            exit 1
-          fi
-          if go vet ./... ; then
-            echo "- go vet: **pass**" >> /tmp/preflight.md
-          else
-            echo "- go vet: **FAIL**" >> /tmp/preflight.md
-            exit 1
+            echo "- go build/vet: **skipped** (no root go.mod; Go fixtures live under examples/gomod-integration)" >> /tmp/preflight.md
           fi
           if cargo build -p hyb --quiet ; then
             echo "- classifier build (hyb): **pass**" >> /tmp/preflight.md
