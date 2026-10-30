@@ -193,4 +193,36 @@ fn single_value_calls_stay_accepted() {
     assert_ok(
         "fn one() int {\n    return 1\n}\n\nfn g(a int) {\n    fmt.println(\"{a}\")\n}\n\nfn main() {\n    g(one())\n}\n",
     );
+    assert_ok("fn one_bool() bool {\n    return true\n}\n\nfn main() {\n    b := !one_bool()\n    fmt.println(\"{b}\")\n}\n");
+    assert_ok("fn one() int {\n    return 1\n}\n\nfn main() {\n    n := -one()\n    fmt.println(\"{n}\")\n}\n");
 }
+
+#[test]
+fn multi_value_call_as_unary_operand_is_rejected() {
+    let two_bools = "fn two_bools() (bool, bool) {\n    return true, false\n}\n\n";
+    assert_operand_rejected(
+        &format!("{two_bools}fn main() {{\n    v := !two_bools()\n    fmt.println(\"{{v}}\")\n}}\n"),
+        "HYB-E1002",
+    );
+    assert_operand_rejected(
+        &format!("{two_bools}fn main() {{\n    if !two_bools() {{\n        fmt.println(\"t\")\n    }}\n}}\n"),
+        "HYB-E1002",
+    );
+    assert_operand_rejected(
+        &format!("{TWO}fn main() {{\n    v := -two()\n    fmt.println(\"{{v}}\")\n}}\n"),
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn no_result_call_as_unary_operand_is_rejected() {
+    assert_code(
+        "fn v() {\n    fmt.println(\"x\")\n}\n\nfn main() {\n    a := !v()\n    fmt.println(\"{a}\")\n}\n",
+        "HYB-E1002",
+    );
+    assert_code(
+        "fn v() {\n    fmt.println(\"x\")\n}\n\nfn main() {\n    a := -v()\n    fmt.println(\"{a}\")\n}\n",
+        "HYB-E1002",
+    );
+}
+

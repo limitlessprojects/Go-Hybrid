@@ -2758,6 +2758,7 @@ impl<'a> Collector<'a> {
 
     /// Family B1/B2 (#425): unary `!` requires `bool`, unary `-` requires a numeric operand.
     fn check_unary_operand(&mut self, op: UnOp, operand: &Expr, span: Span) {
+        self.check_single_value_position(operand, "a unary operation", /*binding_position=*/ false);
         let k = self.kind_of_expr(operand);
         match op {
             UnOp::Not => {
