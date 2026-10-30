@@ -434,6 +434,16 @@ impl<'a> Checker<'a> {
                 }),
             });
         }
+        if self.expr_is_option(st, operand) {
+            return Outcome::Rejected(RejectInfo {
+                value: expr.render(),
+                ty: format!("*{}", self.binding_ty_str(b)),
+                notes: vec![format!(
+                    "`&{}` lends a mutable `option` wrapper — a live borrow of mutable shared state, which is not one of the sendable classes (O4)",
+                    root
+                )],
+            });
+        }
         match &b.shape {
             // `&hits` where hits is atomic-typed — the mediated route (OQ6)
             TypeShape::Atomic => Outcome::Ok,
@@ -832,6 +842,25 @@ impl<'a> Checker<'a> {
     /// usual); false emits the diagnostic and the caller skips the value
     /// check (the site is ill-typed — no cascade).
     pub(crate) fn check_send_target(&mut self, st: &FnState, chan: &Expr, span: Span) -> bool {
+        if self.expr_is_option(st, chan) {
+            let ty_str = self
+                .ty_of_expr(st, chan)
+                .map(|t| t.render())
+                .unwrap_or_else(|| "option".to_string());
+            let msg = format!(
+                "cannot send to `{}` (`{}`) — a send target must be a channel, not an `option` wrapper (O4)",
+                chan.render(),
+                ty_str
+            );
+            let notes = vec![
+                "why: `option[chan T]` lowers to a value struct in Go (`hyb_opt`), not a channel; sending directly to an `option` fails `go build`".to_string(),
+                "fix: unwrap the `option` with `match` (`match opt { some(ch) => ch <- v, none => {} }`) before sending".to_string(),
+            ];
+            self.diags.push(
+                Diagnostic::error("HYB-E3007", self.path.clone(), span, msg).with_notes(notes),
+            );
+            return false;
+        }
         match self.shape_of_expr(st, chan) {
             TypeShape::Chan(_) => {
                 if let Some(ty) = self.ty_of_expr(st, chan) {

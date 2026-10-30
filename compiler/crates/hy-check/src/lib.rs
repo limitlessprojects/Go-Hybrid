@@ -460,13 +460,20 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                             TypeShape::Chan(e) => *e,
                             _ => TypeShape::Unknown,
                         };
+                        let elem_ty = ck.ty_of_expr(&st, chan).and_then(|ct| {
+                            match ck.resolve_type_alias(&ct) {
+                                hy_syntax::TypeExpr::Chan { elem, .. } => Some(*elem),
+                                _ => None,
+                            }
+                        });
                         for (i, n) in names.iter().enumerate() {
                             let shape = if i == 0 {
                                 elem.clone()
                             } else {
                                 TypeShape::Primitive
                             };
-                            ck.define_binding(&mut st, n, shape, None, false, managed, false);
+                            let ty = if i == 0 { elem_ty.clone() } else { None };
+                            ck.define_binding(&mut st, n, shape, ty, false, managed, false);
                         }
                     }
                     walk::ScopeEvent::MatchBind { name, subject } => {
@@ -707,10 +714,11 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     );
                     let is_chan = matches!(ck.shape_of_expr(&st, expr), TypeShape::Chan(_));
                     let shapes = ck.iterate_var_shapes(&st, expr, vars.len());
-                    for (name, shape) in vars.iter().zip(shapes) {
+                    let tys = ck.iterate_var_tys(&st, expr, vars.len());
+                    for ((name, shape), ty) in vars.iter().zip(shapes).zip(tys) {
                         let is_ref = shape.is_reference_alias();
                         let may_share = ck.shape_may_share(&shape);
-                        ck.define_binding(&mut st, name, shape, None, false, managed, false);
+                        ck.define_binding(&mut st, name, shape, ty, false, managed, false);
                         if !is_chan {
                             if may_share {
                                 ck.record_may_share(&mut st, name, expr);
