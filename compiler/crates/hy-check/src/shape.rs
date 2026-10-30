@@ -86,6 +86,15 @@ impl<'a> Checker<'a> {
         if let Some(target) = self.type_aliases.get(base) {
             return self.shape_of_type_depth(target, depth + 1);
         }
+        // User enums: unit-only enums are primitive scalar values (iota-backed int);
+        // data-carrying enums are tagged composites.
+        if self.enums.contains_key(base) {
+            if self.enum_has_payload.get(base) == Some(&true) {
+                return TypeShape::Struct(Some(base.to_string()));
+            } else {
+                return TypeShape::Primitive;
+            }
+        }
         match name {
             "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
             | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "usize"

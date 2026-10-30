@@ -323,6 +323,11 @@ impl<'a> Checker<'a> {
 
     fn classify_ident(&self, st: &FnState, name: &str) -> Outcome {
         let Some(b) = self.lookup_binding(st, name) else {
+            // Unit-only enum variants are Class-4 immutable values (SPEC-LANGUAGE §2.5 / §7.2)
+            // and are safe to send across channel and task boundaries.
+            if self.unit_variants.contains_key(name) {
+                return Outcome::Ok;
+            }
             // FAIL-CLOSED (O4.9): a name that does not resolve cannot be
             // proven safe — it used to pass silently; now it is HYB-E3005
             // unless the site is `managed`.

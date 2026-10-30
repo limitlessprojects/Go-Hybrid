@@ -653,9 +653,33 @@ fn rust_crate_import_errors_cleanly() {
 }
 
 #[test]
-fn enum_decl_errors_cleanly() {
-    let msg = emit_err("enum shape { circle square } fn main() { }");
-    assert!(msg.contains("enum"), "{}", msg);
+fn enum_decl_emits_go() {
+    let go = emit("enum color { red green }\nfn show(c color) { }\nfn main() { show(red) }");
+    assert!(go.contains("type color int"), "{}", go);
+    assert!(go.contains("red color = iota"), "{}", go);
+    assert!(go.contains("green"), "{}", go);
+}
+
+#[test]
+fn enum_decl_payload_emits_go() {
+    let go = emit("enum shape { circle(int) square }\nfn main() { }");
+    assert!(go.contains("type shapeKind int"), "{}", go);
+    assert!(go.contains("type shape struct"), "{}", go);
+    assert!(go.contains("func circle(val int) shape"), "{}", go);
+}
+
+#[test]
+fn enum_buildable_issue_1649_repros() {
+    let go1 = emit("enum color { red, green }\nfn show(c color) { fmt.println(\"c\") }\nfn main() { show(red) }");
+    assert!(go1.contains("type color int"), "{}", go1);
+    assert!(go1.contains("red color = iota"), "{}", go1);
+    assert!(go1.contains("show(red)"), "{}", go1);
+
+    let go2 = emit("enum color { red, green }\nfn main() {\n    ch := make(chan color, 1)\n    ch <- red\n    c := <-ch\n    if c == red { fmt.println(\"r\") }\n}");
+    assert!(go2.contains("type color int"), "{}", go2);
+    assert!(go2.contains("ch := make(chan color, 1)"), "{}", go2);
+    assert!(go2.contains("ch <- red"), "{}", go2);
+    assert!(go2.contains("c := <-ch"), "{}", go2);
 }
 
 #[test]

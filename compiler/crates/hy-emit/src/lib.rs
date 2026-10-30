@@ -788,12 +788,7 @@ impl Emitter {
                 }
                 Decl::Const(c) => self.emit_file_const(c)?,
                 Decl::Struct(s) => self.emit_struct(s)?,
-                Decl::Enum(e) => {
-                    return Err(EmitError::unsupported(format!(
-                        "enum `{}` (match/enum emission lands with the match surface)",
-                        e.name
-                    )));
-                }
+                Decl::Enum(e) => self.emit_enum(e)?,
                 Decl::TypeAlias(t) => {
                     let ty = self.type_text(&t.ty);
                     self.push(&format!("type {} = {}", t.name, ty));
@@ -919,6 +914,73 @@ impl Emitter {
         }
         self.indent -= 1;
         self.push("}");
+        Ok(())
+    }
+
+    fn emit_enum(&mut self, e: &EnumDecl) -> Result<(), EmitError> {
+        if e.variants.iter().all(|v| v.payload.is_none()) {
+            self.push(&format!("type {} int", e.name));
+            if !e.variants.is_empty() {
+                self.push("");
+                self.push("const (");
+                self.indent += 1;
+                for (i, v) in e.variants.iter().enumerate() {
+                    if i == 0 {
+                        self.push(&format!("{} {} = iota", v.name, e.name));
+                    } else {
+                        self.push(&v.name);
+                    }
+                }
+                self.indent -= 1;
+                self.push(")");
+            }
+        } else {
+            let kind_type = format!("{}Kind", e.name);
+            self.push(&format!("type {} int", kind_type));
+            self.push("");
+            self.push("const (");
+            self.indent += 1;
+            for (i, v) in e.variants.iter().enumerate() {
+                if i == 0 {
+                    self.push(&format!("_{}_{} {} = iota", e.name, v.name, kind_type));
+                } else {
+                    self.push(&format!("_{}_{}", e.name, v.name));
+                }
+            }
+            self.indent -= 1;
+            self.push(")");
+            self.push("");
+            self.push(&format!("type {} struct {{", e.name));
+            self.indent += 1;
+            self.push(&format!("kind {}", kind_type));
+            for v in &e.variants {
+                if let Some(p) = &v.payload {
+                    let ty_str = self.type_text(p);
+                    self.push(&format!("{} {}", v.name, ty_str));
+                }
+            }
+            self.indent -= 1;
+            self.push("}");
+            for v in &e.variants {
+                self.push("");
+                if let Some(p) = &v.payload {
+                    let ty_str = self.type_text(p);
+                    self.push(&format!("func {}(val {}) {} {{", v.name, ty_str, e.name));
+                    self.indent += 1;
+                    self.push(&format!(
+                        "return {}{{kind: _{}_{}, {}: val}}",
+                        e.name, e.name, v.name, v.name
+                    ));
+                    self.indent -= 1;
+                    self.push("}");
+                } else {
+                    self.push(&format!(
+                        "var {} = {}{{kind: _{}_{}}}",
+                        v.name, e.name, e.name, v.name
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 

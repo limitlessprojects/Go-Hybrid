@@ -272,6 +272,8 @@ fn build_tables(ck: &mut Checker<'_>) {
                 }
             }
             Decl::Enum(e) => {
+                let has_payload = e.variants.iter().any(|v| v.payload.is_some());
+                ck.enum_has_payload.insert(e.name.clone(), has_payload);
                 ck.enum_has_zero_value.insert(
                     e.name.clone(),
                     e.variants.first().is_some_and(|v| v.payload.is_none()),
@@ -280,6 +282,11 @@ fn build_tables(ck: &mut Checker<'_>) {
                     e.name.clone(),
                     e.variants.iter().map(|v| v.name.clone()).collect(),
                 );
+                for v in &e.variants {
+                    if v.payload.is_none() {
+                        ck.unit_variants.insert(v.name.clone(), e.name.clone());
+                    }
+                }
                 ck.declare_pkg_name(&e.name, "enum", e.span);
             }
             Decl::TypeAlias(ta) => {
@@ -5184,6 +5191,20 @@ mod tests {
             .filter(|d| d.code == "HYB-E3006")
             .count();
         assert_eq!(e3006_count, 2, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn enum_variant_send_and_channel_accept_issue_1649() {
+        let r = check(
+            "enum color { red, green }\n\
+             fn main() {\n\
+                 ch := make(chan color, 1)\n\
+                 ch <- red\n\
+                 c := <-ch\n\
+                 if c == red { fmt.println(\"r\") }\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
     }
 }
 
