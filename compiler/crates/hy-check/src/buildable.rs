@@ -1409,6 +1409,11 @@ impl<'a> Collector<'a> {
                 }
                 for f in fields {
                     self.expr(&f.value);
+                    self.check_single_value_position(
+                        &f.value,
+                        "a struct literal field",
+                        /*binding_position=*/ false,
+                    );
                 }
                 self.check_struct_literal(ty.as_ref(), fields, *span);
             }
@@ -1418,6 +1423,11 @@ impl<'a> Collector<'a> {
                 }
                 for i in items {
                     self.expr(i);
+                    self.check_single_value_position(
+                        i,
+                        "a slice or array literal element",
+                        /*binding_position=*/ false,
+                    );
                 }
                 if let Some((_, inner_elem, _)) = e.as_array_lit() {
                     self.check_array_lit_items(inner_elem, items);
@@ -1435,7 +1445,17 @@ impl<'a> Collector<'a> {
                 self.ty(value);
                 for (k, v) in entries {
                     self.expr(k);
+                    self.check_single_value_position(
+                        k,
+                        "a map key",
+                        /*binding_position=*/ false,
+                    );
                     self.expr(v);
+                    self.check_single_value_position(
+                        v,
+                        "a map value",
+                        /*binding_position=*/ false,
+                    );
                 }
                 self.check_map_lit_entries(key, value, entries);
             }
@@ -1966,8 +1986,8 @@ impl<'a> Collector<'a> {
             ),
             Expr::Call { callee, args, .. } => match self.call_result_kinds(callee, args) {
                 Some(res) if res.is_empty() => OpKind::Void,
-                Some(res) => res[0].clone(),
-                None => OpKind::Unknown,
+                Some(res) if res.len() == 1 => res[0].clone(),
+                Some(_) | None => OpKind::Unknown,
             },
         }
     }
@@ -2758,10 +2778,15 @@ impl<'a> Collector<'a> {
 
     /// Family B1/B2 (#425): unary `!` requires `bool`, unary `-` requires a numeric operand.
     fn check_unary_operand(&mut self, op: UnOp, operand: &Expr, span: Span) {
+        self.check_single_value_position(
+            operand,
+            "a unary operation",
+            /*binding_position=*/ false,
+        );
         let k = self.kind_of_expr(operand);
         match op {
             UnOp::Not => {
-                if !matches!(k, OpKind::Unknown | OpKind::Bool) {
+                if !matches!(k, OpKind::Unknown | OpKind::Bool | OpKind::Void) {
                     self.emit_e1002(
                         span,
                         format!(
@@ -2774,7 +2799,7 @@ impl<'a> Collector<'a> {
                 }
             }
             UnOp::Neg => {
-                if !matches!(k, OpKind::Unknown | OpKind::Int | OpKind::Float) {
+                if !matches!(k, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Void) {
                     self.emit_e1002(
                         span,
                         format!(
@@ -3572,7 +3597,7 @@ impl<'a> Collector<'a> {
                 }
             }
             let ik = self.kind_of_expr(item);
-            if ik == OpKind::Unknown || ik == expected {
+            if matches!(ik, OpKind::Unknown | OpKind::Void) || ik == expected {
                 continue;
             }
             if expected == OpKind::Float
@@ -3633,7 +3658,7 @@ impl<'a> Collector<'a> {
                 }
             }
             let ik = self.kind_of_expr(item);
-            if ik == OpKind::Unknown || ik == expected {
+            if matches!(ik, OpKind::Unknown | OpKind::Void) || ik == expected {
                 continue;
             }
             if expected == OpKind::Float
