@@ -342,6 +342,47 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
     }
 }
 
+/// The observable method surface of a foreign handle type, or `None` when
+/// `recv_type` is not a handle this module models.
+pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'static str]> {
+    match recv_type {
+        "serde_json.value" | "serde_json.view" => {
+            Some(&["array", "int", "push_string", "set", "string"])
+        }
+        "sync.mutex" => Some(&["lock", "try_lock", "unlock"]),
+        "sync.rwmutex" => {
+            Some(&["lock", "rlock", "runlock", "try_lock", "try_rlock", "unlock"])
+        }
+        "flate2.writer" => Some(&["finish", "write"]),
+        "atomic.bool" => Some(&["compare_and_swap", "load", "store", "swap"]),
+        "atomic.int"
+        | "atomic.int32"
+        | "atomic.int64"
+        | "atomic.uint32"
+        | "atomic.uint64"
+        | "atomic.uintptr" => Some(&["add", "compare_and_swap", "load", "store", "swap"]),
+        _ => None,
+    }
+}
+
+/// The observable field surface of a foreign handle type, or `None` when
+/// `recv_type` is not a handle this module models.
+pub(crate) fn foreign_field_surface(recv_type: &str) -> Option<&'static [&'static str]> {
+    match recv_type {
+        "sync.mutex" => Some(&[]),
+        "sync.rwmutex" => Some(&[]),
+        "serde_json.value" | "serde_json.view" => Some(&[]),
+        "flate2.writer" => Some(&[]),
+        _ if recv_type == "atomic.int" || is_scalar_atomic(recv_type) => Some(&[]),
+        _ => None,
+    }
+}
+
+/// Is `recv_type` a recognized foreign handle with modeled surface?
+pub(crate) fn is_foreign_handle(recv_type: &str) -> bool {
+    foreign_method_surface(recv_type).is_some() || foreign_field_surface(recv_type).is_some()
+}
+
 /// Human-readable M5 curated package allowlist string for HYB-E1001 diagnostics (#658).
 pub(crate) const CURATED_ALLOWLIST_DISPLAY: &str = "fmt, os, io, time, sort, strings, strconv, errors, sync, sync/atomic, bufio, net, net/http, net/http/httptest, net/url, encoding/json, encoding/hex, path, path/filepath, rust/serde_json, rust/sha3, rust/regex";
 

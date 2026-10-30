@@ -51,6 +51,7 @@ use hy_syntax::{
 };
 use std::collections::{HashMap, HashSet};
 
+use crate::foreign;
 use crate::model::{as_addr_of, unwrap_parens, Checker};
 
 /// Lightweight operand-kind classification for issue #425: distinguishes
@@ -91,6 +92,7 @@ pub(crate) enum OpKind {
     /// closure/method-value arity bypass (#577 C9).
     Fn(Vec<OpKind>, Option<usize>),
     Void,
+    ForeignHandle(String),
 }
 
 impl OpKind {
@@ -115,6 +117,7 @@ impl OpKind {
             OpKind::Pointer(inner) => format!("*{}", inner.label()),
             OpKind::Fn(..) => "fn".to_string(),
             OpKind::Void => "void".to_string(),
+            OpKind::ForeignHandle(name) => name.clone(),
         }
     }
 }
@@ -285,6 +288,7 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         OpKind::Interface => false,
         OpKind::Int | OpKind::Float | OpKind::Bool | OpKind::Str => true,
         OpKind::Void => false,
+        OpKind::ForeignHandle(..) => false,
         // A struct whose NAME did not resolve cannot have its members looked up.
         OpKind::Struct(None) => false,
         OpKind::Struct(Some(_)) => true,
@@ -378,6 +382,7 @@ struct Collector<'a> {
     /// Lexical nesting depth within `select` statements.
     select_depth: usize,
     defines: Vec<Define>,
+    in_callee: bool,
     /// Every identifier mentioned in the file plus every dotted type root —
     /// the import-usage set (the emitter's declared-import header needs it).
     roots: HashSet<String>,
@@ -401,6 +406,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             loop_depth: 0,
             select_depth: 0,
             defines: Vec::new(),
+            in_callee: false,
             roots: HashSet::new(),
             diags: Vec::new(),
             path: ck.path.clone(),
@@ -1222,7 +1228,11 @@ impl<'a> Collector<'a> {
                 }
                 self.place_read(p);
             }
-            PlaceKind::Field { .. } | PlaceKind::AddrOf { .. } => {
+            PlaceKind::Field { base, name } => {
+                self.check_foreign_field_place(base, name, p.span);
+                self.place_read(p);
+            }
+            PlaceKind::AddrOf { .. } => {
                 self.place_read(p);
             }
         }
@@ -1263,7 +1273,10 @@ impl<'a> Collector<'a> {
                 let base_expr = place_as_expr(base);
                 self.check_index_kind(&base.render(), base_expr.as_ref(), &bk, index, &ik, p.span);
             }
-            PlaceKind::Field { base, .. } => self.place_read(base),
+            PlaceKind::Field { base, name } => {
+                self.check_foreign_field_place(base, name, p.span);
+                self.place_read(base);
+            }
             PlaceKind::AddrOf { base } => self.place_read(base),
         }
     }
@@ -1332,6 +1345,8 @@ impl<'a> Collector<'a> {
             // The struct-field lookup below cannot catch it, because an
             // interface is not a struct — so reject the base explicitly.
             Expr::Field { base, name, span } => {
+                let is_callee = self.in_callee;
+                self.in_callee = false;
                 self.check_pointer_method_receiver(base, name, *span);
                 if matches!(self.kind_of_expr(base), OpKind::Interface) {
                     self.emit_e1002(
@@ -1345,6 +1360,9 @@ impl<'a> Collector<'a> {
                         ),
                         "an `any` value must be asserted to a concrete type before its fields can be read",
                     );
+                }
+                if !is_callee {
+                    self.check_foreign_field_expr(base, name, *span);
                 }
                 // #778: a Field BASE is a QUALIFIER position, not a value
                 // position, so the type-name check must not fire on it. Two
@@ -1369,10 +1387,13 @@ impl<'a> Collector<'a> {
                 // `int(3.7)` is a legal built-in one, so the type-name check
                 // must not fire there. `read` still runs, because an unused
                 // local closure called as `f()` has been read.
+                let prev_in_callee = self.in_callee;
+                self.in_callee = true;
                 match unwrap_parens(callee) {
                     Expr::Ident { name, .. } => self.read(name),
                     other => self.expr(other),
                 }
+                self.in_callee = prev_in_callee;
                 // `new(T)` and `make(T, len, cap)` take a TYPE as their FIRST
                 // argument, so that position is a type position and the
                 // #778 value-position check must not fire there — `new(bag)`
@@ -1660,6 +1681,9 @@ impl<'a> Collector<'a> {
         }
         if let Some(target) = self.ck.type_aliases.get(base) {
             return self.kind_of_ty(target, depth + 1);
+        }
+        if foreign::is_foreign_handle(name) || foreign::is_foreign_handle(base) {
+            return OpKind::ForeignHandle(name.to_string());
         }
         match name {
             // #682 U9-U12: `any` is a resolved interface type, not an
@@ -2027,6 +2051,40 @@ impl<'a> Collector<'a> {
             }
             Expr::Field { base, name, .. } => {
                 let bk = self.kind_of_expr(base);
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none() && foreign::BUILTIN_PACKAGES.contains(&pkg.as_str()) {
+                        let res_shape = foreign::package_result(pkg, name);
+                        if let Some(tname) = crate::shape::receiver_type_name(&res_shape) {
+                            if foreign::is_foreign_handle(&tname) {
+                                return Some(vec![OpKind::ForeignHandle(tname)]);
+                            }
+                        }
+                        if res_shape == crate::model::TypeShape::Str {
+                            return Some(vec![OpKind::Str]);
+                        }
+                    }
+                }
+                let mut recv_k = &bk;
+                while let OpKind::Pointer(inner) = recv_k {
+                    recv_k = inner;
+                }
+                if let OpKind::ForeignHandle(ref tname) = recv_k {
+                    if (tname == "serde_json.value" || tname == "serde_json.view") && name == "array" {
+                        return Some(vec![OpKind::Slice(Box::new(OpKind::ForeignHandle("serde_json.value".into())))]);
+                    }
+                    let res_shape = foreign::method_result(tname, name);
+                    if let Some(tname_res) = crate::shape::receiver_type_name(&res_shape) {
+                        if foreign::is_foreign_handle(&tname_res) {
+                            return Some(vec![OpKind::ForeignHandle(tname_res)]);
+                        }
+                    }
+                    if res_shape == crate::model::TypeShape::Primitive {
+                        return Some(vec![OpKind::Int]);
+                    }
+                    if res_shape == crate::model::TypeShape::Str {
+                        return Some(vec![OpKind::Str]);
+                    }
+                }
                 if name == "pop" && args.is_empty() {
                     if let OpKind::Slice(elem) = bk {
                         return Some(vec![*elem]);
@@ -3866,6 +3924,46 @@ impl<'a> Collector<'a> {
                     }
                 }
                 let bk = self.kind_of_expr(base);
+                let mut recv_k = &bk;
+                while let OpKind::Pointer(inner) = recv_k {
+                    recv_k = inner;
+                }
+                if let OpKind::ForeignHandle(ref tname) = recv_k {
+                    let has_foreign_method = foreign::foreign_method_surface(tname)
+                        .map(|methods| methods.contains(&name.as_str()))
+                        .unwrap_or(false);
+                    if !has_foreign_method {
+                        let note = match foreign::foreign_method_surface(tname) {
+                            Some(methods) if methods.is_empty() => {
+                                format!("`{}` is a foreign handle with no methods", tname)
+                            }
+                            Some(methods) => {
+                                let m_list = methods
+                                    .iter()
+                                    .map(|m| format!("`{}`", m))
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                format!("`{}` is a foreign handle; its methods are {}", tname, m_list)
+                            }
+                            None => {
+                                format!("foreign receiver `{}` has no known methods on this surface", tname)
+                            }
+                        };
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`{}` has no field or method `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                                base.render(),
+                                name,
+                                tname,
+                                base.render(),
+                                name
+                            ),
+                            &note,
+                        );
+                    }
+                    return;
+                }
                 // A method has no field entry, so resolve it before the field
                 // lookup: `x.bump()` must reach the arity check even though
                 // `bump` is not a struct field (#577 C9).
@@ -4011,6 +4109,70 @@ impl<'a> Collector<'a> {
 
     /// Check method selection too: task callees and bound method values do
     /// not pass through the ordinary call-arity checker (#656).
+    fn check_foreign_field_expr(&mut self, base: &Expr, field: &str, span: Span) {
+        let mut bk = self.kind_of_expr(base);
+        while let OpKind::Pointer(inner) = bk {
+            bk = *inner;
+        }
+        if let OpKind::ForeignHandle(ref tname) = bk {
+            if let Some(surface) = foreign::foreign_field_surface(tname) {
+                if !surface.contains(&field) {
+                    let note = if surface.is_empty() {
+                        format!("`{}` is a foreign handle with no exported fields", tname)
+                    } else {
+                        let f_list = surface.iter().map(|f| format!("`{}`", f)).collect::<Vec<_>>().join(", ");
+                        format!("`{}` is a foreign handle; its fields are {}", tname, f_list)
+                    };
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`{}` has no field `{}` — Go refuses `{}.{} undefined (type {} has no field or method {})` (HYB-E1002)",
+                            tname,
+                            field,
+                            base.render(),
+                            field,
+                            tname,
+                            field
+                        ),
+                        &note,
+                    );
+                }
+            }
+        }
+    }
+
+    fn check_foreign_field_place(&mut self, base: &Place, field: &str, span: Span) {
+        let mut bk = self.kind_of_place(base);
+        while let OpKind::Pointer(inner) = bk {
+            bk = *inner;
+        }
+        if let OpKind::ForeignHandle(ref tname) = bk {
+            if let Some(surface) = foreign::foreign_field_surface(tname) {
+                if !surface.contains(&field) {
+                    let note = if surface.is_empty() {
+                        format!("`{}` is a foreign handle with no exported fields", tname)
+                    } else {
+                        let f_list = surface.iter().map(|f| format!("`{}`", f)).collect::<Vec<_>>().join(", ");
+                        format!("`{}` is a foreign handle; its fields are {}", tname, f_list)
+                    };
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`{}` has no field `{}` — Go refuses `{}.{} undefined (type {} has no field or method {})` (HYB-E1002)",
+                            tname,
+                            field,
+                            base.render(),
+                            field,
+                            tname,
+                            field
+                        ),
+                        &note,
+                    );
+                }
+            }
+        }
+    }
+
     fn check_pointer_method_receiver(&mut self, base: &Expr, name: &str, span: Span) {
         let bk = self.kind_of_expr(base);
         let head = Checker::base_named_type_str(name);
