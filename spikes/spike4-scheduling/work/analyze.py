@@ -144,7 +144,7 @@ def main():
     for d in (1, 100):
         c = find(cells, "M3", 1000, 1, d)
         if c and not c.get("capped"):
-            lat99 = (c.get("p99_us", 0) / 1000.0) - d / 1000.0
+            lat99 = (c.get("p99_us", 0) / 1000.0) - d
             print(f"  (1k,1%,{d}ms) p99 latency overhead: {lat99:.2f} ms (<=5ms) -> {'PASS' if lat99 <= 5.0 else 'FAIL'}")
     # zero ticket loss at full drain on any uncapped M3 cell
     lost = [c for c in cells if c["mech"] == "M3" and not c.get("capped")
