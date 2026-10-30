@@ -1818,6 +1818,42 @@ impl<'a> Collector<'a> {
         );
     }
 
+    /// A bare package root is a qualifier, not a value: Go refuses
+    /// `use of package fmt not in selector`. Bindings and package-scope
+    /// declarations of the same name shadow the package and stay values.
+    fn check_package_name_in_value_position(&mut self, name: &str, span: Span) {
+        if self
+            .scopes
+            .iter()
+            .rev()
+            .any(|layer| layer.contains_key(name))
+        {
+            return;
+        }
+        if self.ck.consts.contains_key(name)
+            || self.ck.fns.contains_key(name)
+            || self.ck.structs.contains_key(name)
+            || self.ck.enums.contains_key(name)
+            || self.ck.type_aliases.contains_key(name)
+        {
+            return;
+        }
+        let is_package = self.ck.packages.contains(name)
+            || crate::foreign::BUILTIN_PACKAGES.contains(&name)
+            || crate::foreign::is_curated_package_root(name);
+        if !is_package {
+            return;
+        }
+        self.emit_e1002(
+            span,
+            format!(
+                "`{}` is a package, not a value — Go refuses `use of package {} not in selector` (HYB-E1002)",
+                name, name
+            ),
+            "a package name can only qualify a member (`pkg.member`); bind or pass an actual value",
+        );
+    }
+
     fn write(&mut self, name: &str) {
         for layer in self.scopes.iter().rev() {
             if let Some(entry) = layer.get(name) {
@@ -2987,6 +3023,7 @@ impl<'a> Collector<'a> {
                 self.read(name);
                 // #778: a value position, so a type name here cannot build.
                 self.check_type_name_in_value_position(name, *span);
+                self.check_package_name_in_value_position(name, *span);
             }
             Expr::Lit { .. } => {}
             Expr::Interp { parts, span, .. } => {
@@ -4951,6 +4988,12 @@ impl<'a> Collector<'a> {
     }
 
     fn check_conversion_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
+        // A package-scope `fn`/`const` of the same name shadows the curated
+        // package root (#2358): `fn path()` makes `path()` a call, not a
+        // conversion, so the arity rule must not fire.
+        if self.ck.fns.contains_key(name) || self.ck.consts.contains_key(name) {
+            return;
+        }
         let k = self.kind_of_named(name, 0);
         if matches!(k, OpKind::Unknown) {
             return;
