@@ -459,8 +459,24 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
                         via_move: true,
                         via_addr: false,
                     });
+                    expr_chain_index_uses(operand, out);
                 } else {
-                    expr_uses(operand, out);
+                    let mut roots = Vec::new();
+                    crate::model::collect_ref_roots(operand, &mut roots);
+                    if roots.is_empty() {
+                        expr_uses(operand, out);
+                    } else {
+                        for r in roots {
+                            out.push(Use {
+                                name: r,
+                                span: *span,
+                                is_write: false,
+                                via_move: true,
+                                via_addr: false,
+                            });
+                        }
+                        expr_chain_index_uses(operand, out);
+                    }
                 }
             }
             _ => expr_uses(operand, out),
@@ -898,5 +914,28 @@ pub(crate) fn addr_of_index_base_path(value: &Expr) -> Option<String> {
     match operand {
         Expr::Index { base, .. } => expr_path(base),
         _ => None,
+    }
+}
+
+fn expr_chain_index_uses(expr: &Expr, out: &mut Vec<Use>) {
+    match crate::model::unwrap_parens(expr) {
+        Expr::Field { base, .. }
+        | Expr::Try { operand: base, .. }
+        | Expr::AddrOf { operand: base, .. }
+        | Expr::Unary { operand: base, .. } => expr_chain_index_uses(base, out),
+        Expr::Index { base, index, .. } => {
+            expr_chain_index_uses(base, out);
+            expr_uses(index, out);
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            expr_chain_index_uses(base, out);
+            if let Some(l) = lo {
+                expr_uses(l, out);
+            }
+            if let Some(h) = hi {
+                expr_uses(h, out);
+            }
+        }
+        _ => {}
     }
 }

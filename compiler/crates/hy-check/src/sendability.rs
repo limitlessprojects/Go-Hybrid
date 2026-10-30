@@ -1195,13 +1195,24 @@ impl<'a> Checker<'a> {
                 } else if matches!(op, Expr::Field { .. })
                     && matches!(self.shape_of_expr(st, op), TypeShape::OwnHandle(_))
                 {
+                    let mut roots: Vec<String> = Vec::new();
                     if let Some(root) = op.root_ident() {
+                        roots.push(root.to_string());
+                    } else {
+                        crate::model::collect_ref_roots(op, &mut roots);
+                    }
+                    let mut any_bound = false;
+                    for root in &roots {
                         if self.lookup_binding(st, root).is_some() {
+                            any_bound = true;
                             if !managed {
                                 self.check_non_owned_move(st, root, v.span());
                             }
-                            moves.push((root.to_string(), v.span()));
+                            moves.push((root.clone(), v.span()));
                         }
+                    }
+                    if !any_bound && !managed {
+                        self.check_o54_non_ident_move(st, op, v.span());
                     }
                 } else if !managed {
                     self.check_o54_non_ident_move(st, op, v.span());
@@ -1239,13 +1250,24 @@ impl<'a> Checker<'a> {
                 } else if matches!(op, Expr::Field { .. })
                     && matches!(self.shape_of_expr(st, op), TypeShape::OwnHandle(_))
                 {
+                    let mut roots: Vec<String> = Vec::new();
                     if let Some(root) = op.root_ident() {
+                        roots.push(root.to_string());
+                    } else {
+                        crate::model::collect_ref_roots(op, &mut roots);
+                    }
+                    let mut any_bound = false;
+                    for root in &roots {
                         if self.lookup_binding(st, root).is_some() {
+                            any_bound = true;
                             if !managed {
                                 self.check_non_owned_move(st, root, mspan);
                             }
-                            moves.push((root.to_string(), mspan));
+                            moves.push((root.clone(), mspan));
                         }
+                    }
+                    if !any_bound && !managed {
+                        self.check_o54_non_ident_move(st, op, mspan);
                     }
                 } else if !managed {
                     self.check_o54_non_ident_move(st, op, mspan);

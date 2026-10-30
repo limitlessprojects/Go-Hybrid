@@ -407,6 +407,16 @@ impl<'a> Checker<'a> {
             {
                 if let Some(root) = op.root_ident() {
                     self.mark_move(st, root, mspan, desc.clone(), MoveKind::Moved);
+                } else {
+                    let mut roots = Vec::new();
+                    crate::model::collect_ref_roots(op, &mut roots);
+                    if roots.is_empty() {
+                        self.check_o54_non_ident_move(st, op, mspan);
+                    } else {
+                        for r in roots {
+                            self.mark_move(st, &r, mspan, desc.clone(), MoveKind::Moved);
+                        }
+                    }
                 }
             } else {
                 self.check_o54_non_ident_move(st, op, mspan);
@@ -424,12 +434,19 @@ impl<'a> Checker<'a> {
         let mut ops = Vec::new();
         crate::model::collect_move_operands(value, &mut ops);
         for (op, _) in ops {
-            let root = match op {
-                Expr::Ident { name, .. } => Some(name.as_str()),
-                Expr::Field { .. } => op.root_ident(),
-                _ => None,
-            };
-            if let Some(src) = root {
+            let mut roots: Vec<String> = Vec::new();
+            match op {
+                Expr::Ident { name, .. } => roots.push(name.clone()),
+                Expr::Field { .. } => {
+                    if let Some(r) = op.root_ident() {
+                        roots.push(r.to_string());
+                    } else {
+                        crate::model::collect_ref_roots(op, &mut roots);
+                    }
+                }
+                _ => {}
+            }
+            for src in &roots {
                 if let Some((o, via_share)) = self.non_owned_origin_of(st, src) {
                     return Some(if via_share {
                         format!("a may-share peer of {}", o)

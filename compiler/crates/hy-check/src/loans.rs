@@ -7679,8 +7679,11 @@ impl<'a> Checker<'a> {
 fn collect_move_ident_sources(expr: &Expr, out: &mut Vec<String>) {
     match unwrap_parens(expr) {
         Expr::Move { operand, .. } => {
-            if let Some(root) = unwrap_parens(operand).root_ident() {
+            let inner = unwrap_parens(operand);
+            if let Some(root) = inner.root_ident() {
                 out.push(root.to_string());
+            } else if matches!(inner, Expr::Field { .. }) {
+                crate::model::collect_ref_roots(inner, out);
             }
             collect_move_ident_sources(operand, out);
         }

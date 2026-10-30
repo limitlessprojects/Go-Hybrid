@@ -1849,18 +1849,25 @@ fn stmt_moves_watched_binding(
         let mut ops = Vec::new();
         crate::model::collect_move_operands(e, &mut ops);
         for (op, mspan) in ops {
-            let moved_name = match op {
-                Expr::Ident { name, .. } => Some(name.as_str()),
-                Expr::Field { .. } => op.root_ident(),
-                _ => None,
-            };
-            if let Some(n) = moved_name {
-                if watch.contains(n) {
+            let mut moved_names: Vec<String> = Vec::new();
+            match op {
+                Expr::Ident { name, .. } => moved_names.push(name.clone()),
+                Expr::Field { .. } => {
+                    if let Some(r) = op.root_ident() {
+                        moved_names.push(r.to_string());
+                    } else {
+                        crate::model::collect_ref_roots(op, &mut moved_names);
+                    }
+                }
+                _ => {}
+            }
+            for n in moved_names {
+                if watch.contains(n.as_str()) {
                     return Some(crate::model::MoveInfo {
                         span: mspan,
                         kind: crate::model::MoveKind::Moved,
                         desc,
-                        moved_name: n.to_string(),
+                        moved_name: n,
                     });
                 }
             }
