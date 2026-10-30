@@ -1,7 +1,7 @@
 //! The Hybrid AST — the cross-component contract between `hy-syntax`
 //! (produces), `hy-check` (consumes), and the MVP-0 emitter (consumes).
 //!
-//! Scope: the surface exercised by tests/checker-corpus/*.hy (127 programs),
+//! Scope: the surface exercised by tests/checker-corpus/*.hy (134 programs),
 //! examples/ (ten target programs), and spikes/spike6-ownership/work/*.hy
 //! (ten programs). Anything outside that surface is allowed to be
 //! unimplemented by the parser — it must produce a clean `unsupported`
@@ -314,6 +314,14 @@ pub enum Stmt {
         args: Vec<CallArg>,
         span: Span,
     },
+    /// `task { ... }` — inline task block (used inside `auto` scopes for
+    /// effect analysis and automatic scheduling, issue #1962). The body is
+    /// a closure-like block whose captured variables are analyzed for
+    /// read/write effects to determine parallelism.
+    TaskBlock {
+        body: Block,
+        span: Span,
+    },
     /// `managed("reason", "category", tickets...) { ... }` — the escape
     /// hatch (O6, hardened by row 14 / discussion #4). The payload is
     /// REQUIRED and fail-closed: a bare block is HYB-E0003, an unknown
@@ -324,6 +332,16 @@ pub enum Stmt {
         reason: String,
         category: String,
         tickets: Vec<String>,
+        body: Block,
+        span: Span,
+    },
+    /// `auto { ... }` — opt-in automatic fork-join scheduling (issue #1962).
+    /// Inside this block, `task` statements are collected and scheduled
+    /// automatically: tasks with provably disjoint data accesses run in
+    /// parallel, ambiguous or conflicting tasks are serialized. Unknown =
+    /// slower, not unsafe. The block is closed: mutable state cannot escape
+    /// to the outer scope; blocking calls and dynamic spawn are rejected.
+    Auto {
         body: Block,
         span: Span,
     },
@@ -877,6 +895,8 @@ impl Stmt {
             | Stmt::For { span, .. }
             | Stmt::Return { span, .. }
             | Stmt::Task { span, .. }
+            | Stmt::TaskBlock { span, .. }
+            | Stmt::Auto { span, .. }
             | Stmt::Managed { span, .. }
             | Stmt::Match { span, .. }
             | Stmt::Defer { span, .. }

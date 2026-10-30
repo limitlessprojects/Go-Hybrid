@@ -52,7 +52,7 @@ run_example() {
     fi
 
     case "$name" in
-    01-hello|03-worker-pool|04-pipeline-backpressure|05-json-transform|06-http-server|07-lru-generics|08-graph-ownership)
+    01-hello|03-worker-pool|04-pipeline-backpressure|05-json-transform|06-http-server|07-lru-generics|08-graph-ownership|11-auto-scheduling)
         # Runtime failure is diagnosed as such (run exit N + captured output),
         # not mislabeled as an output diff; diffing only makes sense at exit 0.
         local rc
@@ -176,7 +176,7 @@ run_example() {
 }
 
 if [ $# -eq 0 ]; then
-    set -- 01-hello 02-cli-cat 03-worker-pool 04-pipeline-backpressure 05-json-transform 06-http-server 07-lru-generics 08-graph-ownership 09-go-imports-hybrid 10-rust-crate-import
+    set -- 01-hello 02-cli-cat 03-worker-pool 04-pipeline-backpressure 05-json-transform 06-http-server 07-lru-generics 08-graph-ownership 09-go-imports-hybrid 10-rust-crate-import 11-auto-scheduling
 fi
 
 for name in "$@"; do

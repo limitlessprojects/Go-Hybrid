@@ -90,6 +90,80 @@ impl Emitter {
                 self.push("}");
                 Ok(())
             }
+            // `task { ... }` — inline task block (issue #1962).
+            // In a normal scope: emits as an immediate goroutine closure.
+            // Inside an `auto` block: collected and scheduled by the auto
+            // scheduler (handled in the Auto arm below).
+            Stmt::TaskBlock { body, .. } => {
+                // Emit as a goroutine closure: go func() { ... }()
+                self.push("go func() {");
+                self.indent += 1;
+                self.emit_block_body(&body.stmts)?;
+                self.indent -= 1;
+                self.push("}()");
+                Ok(())
+            }
+            // `auto { ... }` — automatic fork-join scheduling (issue #1962).
+            // Collects all inline task blocks, analyzes their effects, and
+            // schedules them in parallel layers where data accesses are provably
+            // disjoint. Conflicting tasks are serialized.
+            Stmt::Auto { body, .. } => {
+                use super::auto_schedule::schedule_block;
+
+                let result = schedule_block(body);
+                let n_tasks = result.tasks.len();
+
+                // WaitGroup is only emitted when a layer actually runs more than
+                // one task in parallel; importing sync otherwise is a Go build error.
+                if result.layers.iter().any(|layer| layer.len() > 1) {
+                    self.use_package("sync");
+                }
+
+                self.push("{ // auto: automatic fork-join scheduling");
+                self.indent += 1;
+
+                // Emit non-task statements first (declarations, etc.)
+                // then emit scheduled task layers.
+                for stmt in &body.stmts {
+                    if !matches!(stmt, Stmt::TaskBlock { .. }) {
+                        self.emit_stmt(stmt)?;
+                    }
+                }
+
+                if n_tasks > 0 {
+                    // Emit each layer: parallel goroutines + WaitGroup, layers serialized.
+                    for (layer_idx, layer) in result.layers.iter().enumerate() {
+                        if layer.len() == 1 {
+                            // Single task in layer: run directly (no goroutine needed)
+                            let task_idx = layer[0];
+                            let task_body = result.tasks[task_idx];
+                            self.emit_block_body(&task_body.stmts)?;
+                        } else {
+                            // Multiple tasks in layer: run in parallel with WaitGroup
+                            self.push(&format!("{{ // layer {} ({} parallel tasks)", layer_idx, layer.len()));
+                            self.indent += 1;
+                            self.push("var wg sync.WaitGroup");
+                            for &task_idx in layer {
+                                let task_body = result.tasks[task_idx];
+                                self.push("wg.Add(1)");
+                                self.push("go func() {");
+                                self.indent += 1;
+                                self.push("defer wg.Done()");
+                                self.emit_block_body(&task_body.stmts)?;
+                                self.indent -= 1;
+                                self.push("}()");
+                            }
+                            self.push("wg.Wait()");
+                            self.indent -= 1;
+                            self.push("}");
+                        }
+                    }
+                }
+
+                self.indent -= 1;
+                self.push("}");
+                Ok(())
+            }
             Stmt::Defer { call, .. } => {
                 // P1 (§7): a deferred CALL's arguments are evaluated at defer
                 // time, so a `?` inside them hoists to a binding BEFORE this
@@ -2958,6 +3032,9 @@ impl Emitter {
                         .any(|a| Self::expr_mentions_ident(&a.value, target))
             }
             Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+                Self::block_mentions_ident(body, target)
+            }
+            Stmt::TaskBlock { body, .. } | Stmt::Auto { body, .. } => {
                 Self::block_mentions_ident(body, target)
             }
             Stmt::Break { .. } | Stmt::Continue { .. } => false,

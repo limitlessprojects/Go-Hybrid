@@ -152,6 +152,13 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            Stmt::TaskBlock { body, .. } | Stmt::Auto { body, .. } => {
+                if deep {
+                    for s in &body.stmts {
+                        self.check_stmt_const_zero_divisor_inner(st, s, true);
+                    }
+                }
+            }
             Stmt::Select { arms, .. } => {
                 for arm in arms {
                     match &arm.kind {
@@ -601,6 +608,11 @@ fn stmt_defined_names(stmt: &Stmt, out: &mut std::collections::HashSet<String>) 
         }
         Stmt::Block { block, .. } => {
             for s in &block.stmts {
+                stmt_defined_names(s, out);
+            }
+        }
+        Stmt::TaskBlock { body, .. } | Stmt::Auto { body, .. } => {
+            for s in &body.stmts {
                 stmt_defined_names(s, out);
             }
         }

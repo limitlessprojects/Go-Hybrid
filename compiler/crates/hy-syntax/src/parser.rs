@@ -885,6 +885,7 @@ impl Parser {
                 | Tok::Kw("select")
                 | Tok::Kw("return")
                 | Tok::Kw("task")
+                | Tok::Kw("auto")
                 | Tok::Kw("managed")
                 | Tok::Kw("defer")
                 | Tok::Kw("break")
@@ -925,6 +926,15 @@ impl Parser {
             }
             Tok::Kw("task") => {
                 self.bump();
+                // `task { ... }` — inline task block (auto-scope effect analysis)
+                if matches!(self.cur(), Tok::Punct("{")) {
+                    let body = self.parse_block()?;
+                    return Ok(Stmt::TaskBlock {
+                        body,
+                        span: self.span_from(start),
+                    });
+                }
+                // `task fn_name(args...)` — classic spawn form
                 let e = self.parse_expr(true)?;
                 match e {
                     Expr::Call { callee, args, .. } => Ok(Stmt::Task {
@@ -978,6 +988,17 @@ impl Parser {
                     reason: reason.clone(),
                     category: category.clone(),
                     tickets: payload[2.min(payload.len())..].to_vec(),
+                    body,
+                    span: self.span_from(start),
+                })
+            }
+            Tok::Kw("auto") => {
+                self.bump();
+                // `auto { ... }` — automatic fork-join scheduling (issue #1962).
+                // The parser only recognizes the block shape; the checker
+                // performs effect analysis and scheduling classification.
+                let body = self.parse_block()?;
+                Ok(Stmt::Auto {
                     body,
                     span: self.span_from(start),
                 })

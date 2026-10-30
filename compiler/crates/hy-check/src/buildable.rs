@@ -1150,6 +1150,7 @@ impl<'a> Collector<'a> {
                 }
             }
             Stmt::Block { block, .. } => self.block_scoped(block),
+            Stmt::TaskBlock { body, .. } | Stmt::Auto { body, .. } => self.block_scoped(body),
             Stmt::Select { arms, .. } => {
                 self.select_depth += 1;
                 for arm in arms {

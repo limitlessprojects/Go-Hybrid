@@ -46,6 +46,7 @@
 mod addr_loan;
 mod addressable;
 mod arith;
+mod auto_schedule;
 mod buildable;
 mod const_overflow;
 mod closures;
@@ -869,6 +870,48 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     call,
                     format!("the deferred call `defer {}`", call.render()),
                 );
+            }
+
+            // `task { ... }` — inline task block (issue #1962).
+            // Only valid inside an `auto { ... }` scope; checked by the
+            // auto-scheduler pass which collects and schedules all tasks.
+            Stmt::TaskBlock { body, span } => {
+                // For now: record that we saw a task block. The full
+                // scheduling pass runs after the flat walk completes.
+                // TODO: check that we are inside an auto block (HYB-E3204)
+                let _ = (body, span);
+            }
+
+            // `auto { ... }` — automatic fork-join scheduling (issue #1962).
+            // Collects all inline task blocks inside, analyzes their effects,
+            // and schedules them in parallel layers where possible.
+            Stmt::Auto { body, span } => {
+                let layers = auto_schedule::schedule_block_layers(body);
+                let _ = layers;
+
+                // Safety checks: blocking calls, dynamic spawn, escaped references.
+                let violations = auto_schedule::check_auto_safety(body);
+                for v in violations {
+                    let code = match v.kind {
+                        auto_schedule::SafetyViolationKind::BlockingReceive => "HYB-E3201",
+                        auto_schedule::SafetyViolationKind::BlockingSelect => "HYB-E3202",
+                        auto_schedule::SafetyViolationKind::DynamicSpawn => "HYB-E3203",
+                        auto_schedule::SafetyViolationKind::EscapedTaskCall => "HYB-E3204",
+                        auto_schedule::SafetyViolationKind::EscapedReference => "HYB-E3205",
+                    };
+                    ck.diags.push(
+                        Diagnostic::error(
+                            code,
+                            ck.path.clone(),
+                            *span,
+                            &v.message,
+                        )
+                        .with_notes(vec![
+                            "auto scope is closed: all tasks must be inline blocks, no blocking calls, no dynamic spawn".to_string(),
+                            "move external calls or blocking operations outside the auto block".to_string(),
+                        ]),
+                    );
+                }
             }
 
             // If-init Locals and blocks: already covered by the flat walk
