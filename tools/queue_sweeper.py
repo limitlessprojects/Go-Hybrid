@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 REPO = os.environ.get("GITHUB_REPOSITORY", "limitlessprojects/Go-Hybrid")
 TOK = os.environ.get("GITHUB_TOKEN", "")
 MIN_AGE = int(os.environ.get("SWEEPER_MIN_AGE_DAYS", "5"))
-PROTECTED_LABELS = {"triage:wildcard-hold", "triage:pareto", "triage:keep"}
+PROTECTED_LABELS = {"triage:wildcard-hold", "triage:pareto", "triage:keep", "bot:land-candidate"}
 
 COMMENT = """Queue sweeper: this PR has been open past the review window ({age} days)
 without a protected label, so it is being closed as **not planned** to keep
@@ -79,6 +79,14 @@ def config_protected_numbers():
         print(f"  (triage_config.json unreadable: {e} — label protection only)")
     return nums
 
+def is_protected(p, protected_nums=None):
+    labels = {l["name"] for l in p.get("labels", [])}
+    if labels & PROTECTED_LABELS:
+        return True
+    if protected_nums and p.get("number") in protected_nums:
+        return True
+    return False
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry", action="store_true")
@@ -104,10 +112,7 @@ def main():
 
     due = []
     for p in prs:
-        labels = {l["name"] for l in p.get("labels", [])}
-        if labels & PROTECTED_LABELS:
-            continue
-        if p["number"] in protected_nums:
+        if is_protected(p, protected_nums):
             continue
         if (p.get("created_at") or "") >= cutoff:
             continue  # fresh arrival — still inside its review window

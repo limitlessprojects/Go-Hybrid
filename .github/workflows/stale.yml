@@ -26,7 +26,7 @@ jobs:
           days-before-pr-close: -1
           days-before-issue-stale: 60
           days-before-issue-close: -1
-          exempt-pr-labels: triage:wildcard-hold,triage:pareto,triage:keep
+          exempt-pr-labels: triage:wildcard-hold,triage:pareto,triage:keep,bot:land-candidate
           exempt-issue-labels: soundness,M1,triage:keep
           stale-pr-label: triage:stale
           stale-issue-label: triage:stale

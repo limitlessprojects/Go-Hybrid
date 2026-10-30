@@ -3,7 +3,7 @@ name: queue-sweeper
 # Doctrine change 2026-10-24 (AUTOMATION.md rule 2): the queue drains itself.
 # Closes unprotected PRs older than SWEEPER_MIN_AGE_DAYS (default 5) as
 # not-planned, each with a written reopen-path reply. Protected labels:
-# triage:wildcard-hold / triage:pareto / triage:keep (+ config-listed numbers).
+# triage:wildcard-hold / triage:pareto / triage:keep / bot:land-candidate (+ config-listed numbers).
 # Runs after the daily triage board (04:30 UTC) so fresh land-candidates get
 # their protection label before the sweep.
 

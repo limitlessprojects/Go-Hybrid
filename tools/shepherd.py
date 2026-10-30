@@ -121,9 +121,29 @@ def cmd_gate(args):
 
 # ------------------------------------------------------------------ labels
 
+SYNC_MAPPING = {
+    "LAND-CANDIDATE": ["bot:land-candidate", "triage:pareto"],
+    "CONFLICTS": ["bot:conflict"],
+    "STALE-BASE": ["bot:stale-base"],
+}
+
+
+def labels_for_item(it):
+    """Compute the labels to sync for a given triage item."""
+    if it.get("wildcard_hold") or it.get("draft_parked"):
+        return []
+    bucket = it.get("bucket")
+    want = SYNC_MAPPING.get(bucket)
+    if not want:
+        return []
+    return list(want) if isinstance(want, list) else [want]
+
+
 def ensure_palette(gh, cfg, extra=None):
     """Create any missing bot:* labels (422 = already exists, fine)."""
     labels = dict(cfg["bot_labels"])
+    labels.setdefault("triage:pareto", {"color": "5319e7",
+                                        "description": "Top-ranked land candidate for the next session"})
     for name in (extra or []):
         labels.setdefault(name, {"color": "cccccc",
                                  "description": "Shepherd W4: superseded by cluster survivor"})
@@ -151,21 +171,18 @@ def cmd_sync_labels(args):
     gh = tb.Gh(cfg["repo"], tb.load_token(args))
     ensure_palette(gh, cfg)
     items = json.loads(Path(args.from_scan).read_text())["items"]
-    mapping = {"LAND-CANDIDATE": "bot:land-candidate",
-               "CONFLICTS": "bot:conflict",
-               "STALE-BASE": "bot:stale-base"}
     n = 0
     for it in items:
-        want = mapping.get(it["bucket"])
-        if not want or it.get("wildcard_hold") or it.get("draft_parked"):
+        want_labels = labels_for_item(it)
+        if not want_labels:
             continue
         n += 1
         if args.dry:
-            tb.log("  #%d -> %s" % (it["number"], want))
+            tb.log("  #%d -> %s" % (it["number"], ",".join(want_labels)))
             continue
         try:
             gh.post("/repos/%s/issues/%d/labels" % (gh.repo, it["number"]),
-                    {"labels": [want]})
+                    {"labels": want_labels})
         except (RuntimeError, tb.RateGuard) as e:
             tb.log("  FAIL #%d: %s" % (it["number"], e))
             if isinstance(e, tb.RateGuard):

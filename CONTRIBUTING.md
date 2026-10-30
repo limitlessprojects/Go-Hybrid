@@ -43,7 +43,7 @@ the repo runs.
    test pin. Verdict changes go through a logged amendment.
 4. Every PR gets a written reply, merged or not. No silent closes.
 5. The queue self-drains: a PR older than 5 days without a protected label
-   (`triage:pareto`, `triage:wildcard-hold`, `triage:keep`) is closed as
+   (`triage:pareto`, `bot:land-candidate`, `triage:wildcard-hold`, `triage:keep`) is closed as
    not-planned by the [queue sweeper](AUTOMATION.md) — with the written
    reply from rule 4 explaining the reopen path. Rebased reopens re-enter
    triage as fresh arrivals, and the daily board promotes land-candidates
