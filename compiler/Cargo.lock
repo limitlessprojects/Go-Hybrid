@@ -33,6 +33,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hy-wasm"
+version = "0.0.1"
+dependencies = [
+ "hy-check",
+ "hy-diag",
+ "hy-syntax",
+]
+
+[[package]]
 name = "hyb"
 version = "0.0.1"
 dependencies = [

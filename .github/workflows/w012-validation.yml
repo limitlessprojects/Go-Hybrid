@@ -1,0 +1,182 @@
+# W012's embedding boundary is outside the generic compiler CI suite.
+name: w012-validation
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/w012-validation.yml'
+      - 'compiler/**'
+      - 'spikes/w012-analyzer/**'
+      - 'tests/checker-corpus/**'
+      - 'test_wasm_parity.js'
+      - 'tools/env.sh'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/w012-validation.yml'
+      - 'compiler/**'
+      - 'spikes/w012-analyzer/**'
+      - 'tests/checker-corpus/**'
+      - 'test_wasm_parity.js'
+      - 'tools/env.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  analyzer-parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TARGET_DIR: ${{ github.workspace }}/compiler/target
+      GOFLAGS: '-p=2'
+      HYBRID_WASM_PATH: ${{ github.workspace }}/compiler/target/wasm32-unknown-unknown/release/hy_wasm.wasm
+      HYBRID_NATIVE_PATH: ${{ github.workspace }}/compiler/target/release/hyb
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Pinned Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26.9'
+          cache: false
+      - name: Node for full-envelope parity
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.19.0'
+      - name: Pinned Rust and WASM target
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.99.0 --profile minimal --target wasm32-unknown-unknown
+          rustup default 1.99.0
+          rustc --version
+          go version
+          node --version
+      - name: Build both checker artifacts from this checkout
+        working-directory: compiler
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p hyb
+          cargo build --locked --release -p hy-wasm --target wasm32-unknown-unknown
+      - name: Upload prebuilt WASM for independent Go-only consumer
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: w012-prebuilt-wasm
+          path: compiler/target/wasm32-unknown-unknown/release/hy_wasm.wasm
+          if-no-files-found: error
+          retention-days: 7
+      - name: Complete native and WASM envelope parity
+        run: node test_wasm_parity.js
+      - name: Go wrapper parity, warning preservation, and failure boundaries
+        working-directory: spikes/w012-analyzer
+        run: |
+          set -euo pipefail
+          go test -race -count=1 ./...
+          go vet ./...
+      - name: Enforce gofmt for the W-012 analyzer module
+        working-directory: spikes/w012-analyzer
+        run: |
+          set -euo pipefail
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            printf 'Unformatted Go files:\n%s\n' "$unformatted"
+            exit 1
+          fi
+      - name: Reproduce 25-file 100-edit request-path comparison
+        working-directory: spikes/w012-analyzer
+        run: |
+          set -euo pipefail
+          go run ./cmd/editbench -root ../.. -files 25 -edits 100 -warmup 10 \
+            -output "$RUNNER_TEMP/w012-edit-benchmark.json"
+      - name: Measure opt-in WASM cache in two separate Go processes
+        working-directory: spikes/w012-analyzer
+        env:
+          HYBRID_W012_CACHE_DIR: ${{ runner.temp }}/w012-wazero-compilation-cache
+        run: |
+          set -euo pipefail
+          mkdir -p "$HYBRID_W012_CACHE_DIR"
+          go build -o "$RUNNER_TEMP/w012-editbench" ./cmd/editbench
+          "$RUNNER_TEMP/w012-editbench" -root ../.. -files 2 -edits 2 -warmup 1 \
+            -output "$RUNNER_TEMP/w012-cold-cache-first.json"
+          "$RUNNER_TEMP/w012-editbench" -root ../.. -files 2 -edits 2 -warmup 1 \
+            -output "$RUNNER_TEMP/w012-cold-cache-second.json"
+          python3 - <<'PY'
+          import json, os
+          root = os.environ["RUNNER_TEMP"]
+          with open(os.path.join(root, "w012-cold-cache-first.json")) as f: first = json.load(f)
+          with open(os.path.join(root, "w012-cold-cache-second.json")) as f: second = json.load(f)
+          assert first["WASMSHA256"] == second["WASMSHA256"]
+          assert first["NativeSHA256"] == second["NativeSHA256"]
+          print("CROSS-PROCESS WASM FILESYSTEM CACHE, experimental only")
+          print("first cold Engine.GetEngine:", first["ColdWASMInitMS"], "ms")
+          print("second cold Engine.GetEngine:", second["ColdWASMInitMS"], "ms")
+          print("No speed threshold asserted; compare host-specific raw samples.")
+          PY
+      - name: Publish cross-process cache timings
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: w012-cross-process-cache-timings
+          path: ${{ runner.temp }}/w012-cold-cache-*.json
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Publish raw request latency samples
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: w012-request-latency-raw
+          path: ${{ runner.temp }}/w012-edit-benchmark.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  go-only-consumer:
+    needs: analyzer-parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout source without build artifacts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Pinned Go toolchain (no Rust installation step)
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version: '1.26.9'
+          cache: false
+      - name: Retrieve WASM built by separate Rust-capable job
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: w012-prebuilt-wasm
+          path: compiler/target/wasm32-unknown-unknown/release
+      - name: Execute Hybrid analyzer using Go and precompiled WASM
+        working-directory: spikes/w012-analyzer
+        env:
+          HYBRID_WASM_PATH: ${{ github.workspace }}/compiler/target/wasm32-unknown-unknown/release/hy_wasm.wasm
+          GOFLAGS: '-p=2'
+        run: |
+          set -euo pipefail
+          # Poison Rust commands: any attempt to invoke cargo/rustc by name
+          # breaks this test. This does not mean the hosted VM lacks Rust.
+          mkdir -p "$RUNNER_TEMP/forbid-rust"
+          printf '#!/bin/sh\necho RUST_TOOLCHAIN_INVOKED >&2\nexit 87\n' > "$RUNNER_TEMP/forbid-rust/cargo"
+          cp "$RUNNER_TEMP/forbid-rust/cargo" "$RUNNER_TEMP/forbid-rust/rustc"
+          chmod +x "$RUNNER_TEMP/forbid-rust/cargo" "$RUNNER_TEMP/forbid-rust/rustc"
+          export PATH="$RUNNER_TEMP/forbid-rust:$PATH"
+          test -s "$HYBRID_WASM_PATH"
+          go build -o "$RUNNER_TEMP/hybvet" ./cmd/hybvet
+          set +e
+          "$RUNNER_TEMP/hybvet" vet ./testpkg > "$RUNNER_TEMP/w012-negative.log" 2>&1
+          result=$?
+          set -e
+          if [ "$result" -eq 0 ] || ! grep -q 'HYB-E3003' "$RUNNER_TEMP/w012-negative.log"; then
+            echo "Expected invalid Hybrid source to produce HYB-E3003 without Rust" >&2
+            cat "$RUNNER_TEMP/w012-negative.log" >&2
+            exit 1
+          fi
+          # Editing only .hy must be visible on the next vet pass.
+          cp ../../tests/checker-corpus/09-a3-map-slot-valid.hy ./testpkg/sibling.hy
+          "$RUNNER_TEMP/hybvet" vet ./testpkg
+          echo "Go+prebuilt WASM check PASS; cargo/rustc not invoked."

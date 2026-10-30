@@ -1,0 +1,12 @@
+[package]
+name = "hy-wasm"
+version = "0.0.1"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+hy-syntax = { path = "../hy-syntax" }
+hy-check = { path = "../hy-check" }
+hy-diag = { path = "../hy-diag" }

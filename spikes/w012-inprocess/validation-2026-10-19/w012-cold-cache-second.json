@@ -1,0 +1,71 @@
+{
+  "Kind": "single-file-after-write request proxy, NOT gopls/LSP",
+  "TimestampUTC": "2026-10-19T03:34:20Z",
+  "OS": "linux",
+  "Arch": "amd64",
+  "Go": "go1.26.9",
+  "CPUs": 4,
+  "GOMAXPROCS": 4,
+  "Files": 2,
+  "Edits": 2,
+  "Warmup": 1,
+  "FixtureSHA256": "972c48b086eb3182a721d7a73f8fc9604d1d292ff84148fcf9f04198f29da8ed",
+  "WASMSHA256": "62c3e2eea177b4356b37a75d9c3441e3b5920a9bc4fa1018210fa7efb689b978",
+  "NativeSHA256": "a7f1f9db61754cbcb77509adb3883d771b8d6a37816f5e62f257a0d3b93370d7",
+  "WASMBytes": 1662985,
+  "NativeBytes": 3990272,
+  "ColdWASMInitMS": 12.21737,
+  "ColdReusedInitMS": 363.861369,
+  "Native": {
+    "Min": 1.147383,
+    "P50": 1.147383,
+    "P90": 1.464782,
+    "P95": 1.464782,
+    "P99": 1.464782,
+    "Mean": 1.3060825
+  },
+  "InProcess": {
+    "Min": 2.239082,
+    "P50": 2.239082,
+    "P90": 2.33654,
+    "P95": 2.33654,
+    "P99": 2.33654,
+    "Mean": 2.2878109999999996
+  },
+  "ReusedGuest": {
+    "Min": 1.342928,
+    "P50": 1.342928,
+    "P90": 1.425403,
+    "P95": 1.425403,
+    "P99": 1.425403,
+    "Mean": 1.3841655
+  },
+  "NativeOverInProcessP50": 0.5124345602349535,
+  "NativeOverReusedP50": 0.854389066279056,
+  "Samples": [
+    {
+      "Edit": 1,
+      "File": "file-000.hy",
+      "First": "native",
+      "NativeMS": 1.147383,
+      "InProcessMS": 2.239082,
+      "ExperimentalReusedMS": 1.425403
+    },
+    {
+      "Edit": 2,
+      "File": "file-001.hy",
+      "First": "embedded",
+      "NativeMS": 1.464782,
+      "InProcessMS": 2.33654,
+      "ExperimentalReusedMS": 1.342928
+    }
+  ],
+  "Limitations": [
+    "Not stock gopls, not unsaved buffers, not editor keystroke-to-diagnostic latency.",
+    "Each request checks the edited file only, not all 25 workspace files.",
+    "Durations begin after the write; native includes subprocess, file read and envelope decode; embedded receives in-memory source bytes.",
+    "Cold WASM initialization is separate from warm Engine.Check timings.",
+    "The experimental reused guest is strictly sequential and not a production instance pool; cancellation, concurrency and lifetime safety remain unproven.",
+    "One fixture and one CI machine are insufficient for population-level performance or memory claims."
+  ]
+}
