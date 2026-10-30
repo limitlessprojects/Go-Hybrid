@@ -219,6 +219,19 @@ fn equality_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
     kinds_conflict(a, b) && kinds_conflict(b, a)
 }
 
+fn is_nilable_kind(k: &OpKind) -> bool {
+    matches!(
+        k,
+        OpKind::Pointer(_)
+            | OpKind::Slice(_)
+            | OpKind::Map(_, _)
+            | OpKind::Chan(_)
+            | OpKind::Interface
+            | OpKind::Fn(..)
+            | OpKind::Unknown
+    )
+}
+
 /// Does a type conversion `target(arg)` fail because the two types are incompatible in Go?
 ///
 /// In Go, type conversions `T(x)` require compatible types:
@@ -576,9 +589,12 @@ impl<'a> Collector<'a> {
         // enum, a type alias, or a built-in conversion target. Anything else
         // stays fail-open.
         let is_declared_type = self.ck.structs.contains_key(name)
+            || self.ck.struct_type_params.contains_key(name)
+            || self.ck.struct_type_params.contains_key(head)
             || self.ck.enums.contains_key(name)
             || self.ck.type_aliases.contains_key(name)
-            || crate::const_init::is_conversion_type_name(name);
+            || crate::const_init::is_conversion_type_name(name)
+            || matches!(name, "any" | "error" | "interface{}");
         if !is_declared_type {
             return;
         }
@@ -590,6 +606,19 @@ impl<'a> Collector<'a> {
             ),
             "a type name can only be used in a type position or as a conversion callee (`T(x)`)",
         );
+    }
+
+    fn check_qualified_type_name_in_value_position(&mut self, pkg: &str, member: &str, span: Span) {
+        if crate::foreign::is_curated_package_type(pkg, member) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "`{}.{}` is a type, not a value — Go refuses `{}.{} (type) is not an expression` (HYB-E1002)",
+                    pkg, member, pkg, member
+                ),
+                "a type name can only be used in a type position or as a conversion callee (`T(x)`)",
+            );
+        }
     }
 
     fn write(&mut self, name: &str) {
@@ -1357,7 +1386,12 @@ impl<'a> Collector<'a> {
                 // fixture. An identifier base is read for used-marking; a
                 // deeper base (a call result, an index) recurses normally.
                 match unwrap_parens(base) {
-                    Expr::Ident { name, .. } => self.read(name),
+                    Expr::Ident { name: base_name, .. } => {
+                        self.read(base_name);
+                        if self.is_imported_pkg_root(base_name) {
+                            self.check_qualified_type_name_in_value_position(base_name, name, *span);
+                        }
+                    }
                     other => self.expr(other),
                 }
             }
@@ -1371,6 +1405,12 @@ impl<'a> Collector<'a> {
                 // local closure called as `f()` has been read.
                 match unwrap_parens(callee) {
                     Expr::Ident { name, .. } => self.read(name),
+                    Expr::Field { base, .. } => {
+                        match unwrap_parens(base) {
+                            Expr::Ident { name: b, .. } => self.read(b),
+                            other => self.expr(other),
+                        }
+                    }
                     other => self.expr(other),
                 }
                 // `new(T)` and `make(T, len, cap)` take a TYPE as their FIRST
@@ -3542,6 +3582,16 @@ impl<'a> Collector<'a> {
         for item in items {
             let bare = unwrap_parens(item);
             if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
+                if !is_nilable_kind(&expected) {
+                    self.emit_e1002(
+                        item.span(),
+                        format!(
+                            "cannot use `nil` as `{}` value in array literal (HYB-E1002)",
+                            elem_ty.render()
+                        ),
+                        "only pointers, slices, maps, channels, interfaces, and function types may be initialized with `nil`",
+                    );
+                }
                 continue;
             }
             if let Expr::SliceLit {
@@ -3603,6 +3653,16 @@ impl<'a> Collector<'a> {
         for item in items {
             let bare = unwrap_parens(item);
             if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
+                if !is_nilable_kind(&expected) {
+                    self.emit_e1002(
+                        item.span(),
+                        format!(
+                            "cannot use `nil` as `{}` value in slice literal (HYB-E1002)",
+                            elem_ty.render()
+                        ),
+                        "only pointers, slices, maps, channels, interfaces, and function types may be initialized with `nil`",
+                    );
+                }
                 continue;
             }
             if let Expr::SliceLit {
@@ -3693,6 +3753,16 @@ impl<'a> Collector<'a> {
             if exp_val != OpKind::Unknown {
                 let bare_v = unwrap_parens(v);
                 if matches!(bare_v, Expr::Lit { kind: LitKind::Nil, .. }) {
+                    if !is_nilable_kind(&exp_val) {
+                        self.emit_e1002(
+                            v.span(),
+                            format!(
+                                "cannot use `nil` as `{}` value in map literal (HYB-E1002)",
+                                val_ty.render()
+                            ),
+                            "only pointers, slices, maps, channels, interfaces, and function types may be initialized with `nil`",
+                        );
+                    }
                     continue;
                 }
                 let vk = self.kind_of_expr(v);

@@ -479,6 +479,98 @@ fn normalize_go_ident_to_snake(name: &str) -> String {
     out
 }
 
+/// Does `pkg` export `member` as a type (rather than a function or variable)?
+pub(crate) fn is_curated_package_type(pkg: &str, member: &str) -> bool {
+    let norm = normalize_go_ident_to_snake(member);
+    let m = norm.as_str();
+    match pkg {
+        "http" => matches!(
+            m,
+            "client"
+                | "server"
+                | "header"
+                | "request"
+                | "response"
+                | "response_writer"
+                | "serve_mux"
+                | "transport"
+                | "cookie"
+                | "cookie_jar"
+                | "round_tripper"
+                | "flusher"
+                | "hijacker"
+                | "close_notifier"
+                | "pusher"
+                | "conn_state"
+                | "dir"
+                | "file"
+                | "file_system"
+                | "http2_config"
+                | "max_bytes_error"
+                | "protocol_error"
+                | "protocols"
+                | "response_controller"
+                | "same_site"
+        ),
+        "sync" => matches!(
+            m,
+            "mutex"
+                | "rw_mutex"
+                | "rwmutex"
+                | "wait_group"
+                | "once"
+                | "cond"
+                | "map"
+                | "pool"
+                | "locker"
+        ),
+        "atomic" => matches!(
+            m,
+            "bool" | "int32" | "int64" | "uint32" | "uint64" | "uintptr" | "pointer" | "value"
+        ),
+        "time" => matches!(
+            m,
+            "duration" | "time" | "ticker" | "timer" | "location" | "month" | "weekday"
+        ),
+        "json" => matches!(
+            m,
+            "decoder" | "encoder" | "raw_message" | "token" | "delim"
+        ),
+        "url" => matches!(m, "url" | "values" | "userinfo"),
+        "os" => matches!(
+            m,
+            "file" | "file_info" | "file_mode" | "dir_entry" | "process" | "process_state" | "signal"
+        ),
+        "io" => matches!(
+            m,
+            "reader"
+                | "writer"
+                | "closer"
+                | "seeker"
+                | "read_closer"
+                | "write_closer"
+                | "read_seeker"
+                | "write_seeker"
+                | "read_writer"
+                | "read_write_closer"
+                | "read_write_seeker"
+                | "byte_reader"
+                | "byte_writer"
+                | "byte_scanner"
+                | "rune_reader"
+                | "rune_scanner"
+                | "string_writer"
+                | "limited_reader"
+                | "section_reader"
+                | "offset_writer"
+                | "pipe_reader"
+                | "pipe_writer"
+        ),
+        "bufio" => matches!(m, "reader" | "writer" | "read_writer" | "scanner" | "split_func"),
+        _ => false,
+    }
+}
+
 /// Does curated package `pkg` export `member` (under M4 snake_case or Go spelling, #658)?
 pub(crate) fn is_curated_package_member(pkg: &str, member: &str) -> bool {
     let norm = normalize_go_ident_to_snake(member);
