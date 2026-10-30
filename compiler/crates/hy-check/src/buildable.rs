@@ -161,12 +161,17 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         // A struct whose name did not resolve is not evidence of a mismatch.
         (Struct(None), _) | (_, Struct(None)) => false,
         (a, b) if a == b => false,
-        // Same container shape: recurse into the element kinds.
+        // Same container shape: Go composite/reference types ([]T, [N]T, chan T,
+        // map[K]V, *T) are strictly invariant in their element/pointee types —
+        // the top-level scalar (Float, Int) exemption for untyped int literals
+        // never applies inside type constructors.
         (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) => {
-            kinds_conflict(a, b)
+            invariant_kinds_conflict(a, b)
         }
-        (Map(k1, v1), Map(k2, v2)) => kinds_conflict(k1, k2) || kinds_conflict(v1, v2),
-        (Pointer(a), Pointer(b)) => kinds_conflict(a, b),
+        (Map(k1, v1), Map(k2, v2)) => {
+            invariant_kinds_conflict(k1, k2) || invariant_kinds_conflict(v1, v2)
+        }
+        (Pointer(a), Pointer(b)) => invariant_kinds_conflict(a, b),
         // Fn kinds only carry results here, so a result match is not proof of
         // a signature match; stay permissive.
         (Fn(..), Fn(..)) => false,
@@ -182,6 +187,12 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
 /// any context. Calls, receives, and index expressions are excluded —
 /// their counts are owned by the source-count rules (tuple.rs T23 and the
 /// #926 void-position rule) — and an unresolved shape fails open.
+/// Bidirectional conflict check for invariant type positions (slice/array/chan/map/pointer
+/// elements and `copy(dst, src)` slice elements), where Go never adapts `int` to `float64`.
+fn invariant_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
+    kinds_conflict(a, b) || kinds_conflict(b, a)
+}
+
 fn is_definitely_single_value(e: &Expr) -> bool {
     match unwrap_parens(e) {
         Expr::Lit { .. }
@@ -2517,7 +2528,7 @@ impl<'a> Collector<'a> {
             let want = self.kind_of_ty(&p.ty, 0);
             let got = self.kind_of_expr(&a.value);
             if let OpKind::Pointer(inner) = &want {
-                if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
+                if !invariant_kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
                     continue;
                 }
             }
@@ -2557,7 +2568,7 @@ impl<'a> Collector<'a> {
             let want = self.kind_of_ty(&p.ty, 0);
             let got = self.kind_of_expr(&a.value);
             if let OpKind::Pointer(inner) = &want {
-                if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
+                if !invariant_kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
                     continue;
                 }
             }
@@ -4386,7 +4397,7 @@ impl<'a> Collector<'a> {
 
                 match (&dk, &sk) {
                     (OpKind::Slice(dst_elem), OpKind::Slice(src_elem)) => {
-                        if kinds_conflict(dst_elem, src_elem) {
+                        if invariant_kinds_conflict(dst_elem, src_elem) {
                             self.emit_e1002(
                                 span,
                                 format!(
@@ -4940,5 +4951,36 @@ fn main() {
             "unexpected diagnostics: {:?}",
             r.diagnostics
         );
+    }
+
+    #[test]
+    fn rejects_invariant_container_and_copy_float_int_mismatches() {
+        let cases = [
+            // 1. []int assigned to []float64
+            "fn main() {\n    xs := []int{1, 2}\n    var fs []float64 = xs\n    fmt.println(fs)\n}\n",
+            // 2. [2]int assigned to [2]float64
+            "fn main() {\n    a := [2]int{1, 2}\n    var b [2]float64 = a\n    fmt.println(b)\n}\n",
+            // 3. chan int assigned to chan float64
+            "fn main() {\n    ch := make(chan int, 1)\n    var fch chan float64 = ch\n    fmt.println(fch)\n}\n",
+            // 4. map[string]int assigned to map[string]float64
+            "fn main() {\n    m := map[string]int{\"a\": 1}\n    var fm map[string]float64 = m\n    fmt.println(fm)\n}\n",
+            // 5. *int assigned to *float64
+            "fn take_ptr(p *float64) { fmt.println(p) }\nfn main() {\n    i := 1\n    take_ptr(&i)\n}\n",
+            // 6. addressable int auto-addressed into *float64 parameter
+            "fn take_ptr(p *float64) { fmt.println(p) }\nfn main() {\n    i := 1\n    take_ptr(i)\n}\n",
+            // 7. copy([]float64, []int)
+            "fn main() {\n    dst := []float64{1.0}\n    src := []int{1}\n    n := copy(dst, src)\n    fmt.println(n)\n}\n",
+        ];
+        for (idx, src_code) in cases.iter().enumerate() {
+            let r = check(src_code);
+            let codes = error_codes(&r);
+            assert!(
+                codes.iter().any(|c| c == "HYB-E1002"),
+                "case {} should reject with HYB-E1002, got {:?} for:\n{}",
+                idx + 1,
+                codes,
+                src_code
+            );
+        }
     }
 }
