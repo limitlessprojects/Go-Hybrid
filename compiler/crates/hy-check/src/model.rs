@@ -300,6 +300,9 @@ pub(crate) struct FnState {
     /// time so call sites can analyze parameter/capture stores (`record_callee_param_stores`).
     pub closure_defs:
         HashMap<String, (Vec<hy_syntax::Param>, Vec<hy_syntax::FnResult>, hy_syntax::Block)>,
+    /// Active `defer <call>` sites seen prior to the current program point, paired
+    /// with eager per-argument borrow flags evaluated at the `defer` statement.
+    pub deferred_calls: Vec<(hy_syntax::Expr, Vec<bool>)>,
 }
 
 impl FnState {
