@@ -86,6 +86,13 @@ impl<'a> Checker<'a> {
         if let Some(target) = self.type_aliases.get(base) {
             return self.shape_of_type_depth(target, depth + 1);
         }
+        // Prelude `set[T]` is a struct wrapping a Go map, so a shallow copy
+        // shares the underlying map. Classify it as a named sharing type so
+        // alias tracking records `s2 := s1` and the boundary rules see the
+        // share (issue #884).
+        if base == "set" {
+            return TypeShape::Struct(Some(name.to_string()));
+        }
         match name {
             "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
             | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "usize"
@@ -129,15 +136,20 @@ impl<'a> Checker<'a> {
         }
         match shape {
             TypeShape::Array(elem) => self.shape_may_share_at(elem, depth + 1),
-            TypeShape::Struct(Some(name)) => self
-                .structs
-                .get(name)
-                .map(|fields| {
-                    fields
-                        .iter()
-                        .any(|(_, ty)| self.shape_may_share_at(&self.shape_of_type(ty), depth + 1))
-                })
-                .unwrap_or(false),
+            TypeShape::Struct(Some(name)) => {
+                // Prelude `set[T]` wraps a map (issue #884): a copy shares it.
+                if name == "set" || name.starts_with("set[") {
+                    return true;
+                }
+                self.structs
+                    .get(name)
+                    .map(|fields| {
+                        fields.iter().any(|(_, ty)| {
+                            self.shape_may_share_at(&self.shape_of_type(ty), depth + 1)
+                        })
+                    })
+                    .unwrap_or(false)
+            }
             _ => false,
         }
     }
