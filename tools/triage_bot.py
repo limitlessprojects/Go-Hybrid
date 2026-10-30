@@ -30,6 +30,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Event
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -57,6 +58,13 @@ class Gh:
         self.min_remaining = min_remaining
         self.calls = 0
         self.remaining = None
+        self._rate_limited = Event()
+        self._rate_limit_reason = None
+
+    def _trip_rate_guard(self, reason):
+        self._rate_limit_reason = reason
+        self._rate_limited.set()
+        raise RateGuard(reason)
 
     def req(self, method, path, body=None):
         """Returns (status, parsed_json_or_None). Raises RateGuard on low quota."""
@@ -64,6 +72,9 @@ class Gh:
         data = json.dumps(body).encode() if body is not None else None
         last_err = None
         for attempt in range(4):
+            # Requests already in flight can finish; queued work must not spend quota.
+            if self._rate_limited.is_set():
+                raise RateGuard(self._rate_limit_reason)
             r = Request(url, data=data, method=method)
             r.add_header("Authorization", "Bearer " + self.token)
             r.add_header("Accept", "application/vnd.github+json")
@@ -81,7 +92,7 @@ class Gh:
                         # only the core bucket is worth guarding.
                         self.remaining = int(rem)
                         if self.remaining < self.min_remaining:
-                            raise RateGuard(
+                            self._trip_rate_guard(
                                 "rate limit low: %s remaining" % self.remaining)
                     raw = resp.read().decode()
                     return resp.status, (json.loads(raw) if raw.strip() else None)
@@ -93,14 +104,12 @@ class Gh:
                     pass
                 if e.code == 404:
                     return 404, None
-                # GitHub secondary rate limits surface as 403 with a "rate
-                # limit" body, not 429 — retry those with a longer backoff
-                # (the window is typically 30-60s). Other 403s are permission
-                # errors: fail fast, retrying cannot help.
                 is_rate_403 = e.code == 403 and "rate limit" in body_txt.lower()
-                if (e.code in (429, 502, 503, 504) or is_rate_403) and attempt < 3:
-                    time.sleep([2, 5, 10][attempt] if e.code != 403
-                               else [5, 20, 45][attempt])
+                if e.code == 429 or is_rate_403 or (
+                        e.code == 403 and e.headers.get("x-ratelimit-remaining") == "0"):
+                    self._trip_rate_guard("HTTP %s rate limited: %s" % (e.code, body_txt))
+                if e.code in (502, 503, 504) and attempt < 3:
+                    time.sleep([2, 5, 10][attempt])
                     last_err = e
                     continue
                 raise RuntimeError("%s %s -> %s %s" % (method, path, e.code, body_txt))
@@ -180,51 +189,143 @@ def collect(cfg, gh, args):
     main_sha = gh.get("/repos/%s/commits/main" % gh.repo)["sha"]
     log("main: %s" % main_sha[:10])
 
+    # Cache loading for delta scanning
+    cache_items = {}
+    cache_main = None
+    cache_file = getattr(args, "cache", None)
+    if not cache_file and getattr(args, "out", None):
+        candidate = Path(args.out) / "TRIAGE.json"
+        if candidate.exists():
+            cache_file = str(candidate)
+    if cache_file and Path(cache_file).exists():
+        try:
+            cached_data = json.loads(Path(cache_file).read_text(encoding="utf-8"))
+            cache_main = cached_data.get("main")
+            for item in cached_data.get("items", []):
+                if isinstance(item, dict) and type(item.get("number")) is int:
+                    cache_items[item["number"]] = item
+            log("loaded cache from %s (%d items, main %s)" % (cache_file, len(cache_items), str(cache_main)[:10]))
+        except Exception as e:
+            log("could not load cache from %s: %s" % (cache_file, e))
+
     # overlap detection via the main-side compare is only worth its cost inside
     # the actionable rebase window; a PR 600 commits behind is a stale-base
     # close-candidate regardless of overlap.
     overlap_window = 100
+    measurement_fields = (
+        "mergeable", "mergeable_state", "files", "paths_sample", "additions",
+        "deletions", "behind_by", "overlap_risk", "tests_included",
+    )
 
     def one(pr):
         n = pr["number"]
-        full = gh.get("/repos/%s/pulls/%d" % (gh.repo, n))
-        files = gh.paginate("/repos/%s/pulls/%d/files?per_page=100" % (gh.repo, n))
-        paths = [f["filename"] for f in files]
-        pset = set(paths)
-        adds = sum(f.get("additions", 0) or 0 for f in files)
-        dels = sum(f.get("deletions", 0) or 0 for f in files)
-
-        behind_by, overlap_paths, merge_base = 0, set(), None
-        cmp1 = gh.get("/repos/%s/compare/%s...%s" % (gh.repo, main_sha, pr["head"]["sha"]))
-        if cmp1:
-            behind_by = cmp1.get("behind_by", 0) or 0
-            merge_base = (cmp1.get("merge_base_commit") or {}).get("sha")
-            if 0 < behind_by <= overlap_window and merge_base:
-                cmp2 = gh.get("/repos/%s/compare/%s...%s?per_page=250" % (gh.repo, merge_base, main_sha))
-                main_paths = {f["filename"] for f in (cmp2 or {}).get("files", [])}
-                overlap_paths = pset & main_paths
-        return {
+        pr_head = pr.get("head", {}).get("sha", "")[:12]
+        pr_updated = pr.get("updated_at")
+        is_draft = bool(pr.get("draft"))
+        metadata = {
             "number": n,
             "title": pr["title"][:90],
             "author": (pr.get("user") or {}).get("login", "unknown"),
             "created_at": pr["created_at"],
-            "updated_at": pr["updated_at"],
+            "updated_at": pr_updated,
             "age_days": age_days(pr["created_at"], now),
-            "idle_days": age_days(pr["updated_at"], now),
-            "draft": bool(pr.get("draft")),
-            "mergeable": full.get("mergeable"),
-            "mergeable_state": full.get("mergeable_state"),
-            "head_sha": pr["head"]["sha"][:12],
-            "files": len(paths),
-            "paths_sample": sorted(paths)[:12],
-            "additions": adds,
-            "deletions": dels,
-            "behind_by": behind_by,
-            "overlap_risk": sorted(overlap_paths)[:8],
-            "tests_included": any(
-                "tests/" in p or "/corpus" in p or p.endswith("_reject.hy") or p.endswith("_accept.hy")
-                for p in paths),
+            "idle_days": age_days(pr_updated, now),
+            "draft": is_draft,
+            "head_sha": pr_head,
         }
+
+        # Optimization 1: Cache re-use with comprehensive invalidation checks:
+        # Valid ONLY IF:
+        #   1. PR exists in cache
+        #   2. head SHA unchanged
+        #   3. updated_at unchanged
+        #   4. draft status unchanged
+        #   5. main SHA unchanged (ensures behind_by and overlap_risk are fresh)
+        #   6. complete, resolved measurements with no rate-limit degradation
+        cached = cache_items.get(n)
+        if (not is_draft and isinstance(cached, dict) and
+            cached.get("head_sha") == pr_head and
+            cached.get("updated_at") == pr_updated and
+            cached.get("draft") is False and
+            cache_main == main_sha and
+            not cached.get("degraded") and
+            all(key in cached for key in measurement_fields) and
+            type(cached["mergeable"]) is bool and
+            cached["mergeable_state"] != "rate_limited" and
+            (cached["mergeable_state"] is None or
+             isinstance(cached["mergeable_state"], str)) and
+            type(cached["tests_included"]) is bool and
+            all(type(cached[key]) is int and cached[key] >= 0
+                for key in ("files", "additions", "deletions", "behind_by")) and
+            all(isinstance(cached[key], list) and
+                all(isinstance(path, str) for path in cached[key])
+                for key in ("paths_sample", "overlap_risk"))):
+            # TRIAGE.json also contains classification and verification output.
+            return dict(metadata, **{key: cached[key] for key in measurement_fields})
+
+        # Optimization 2: Draft PR fast-path
+        # Drafts are non-mergeable WIPs; skip deep pull, files pagination, and compare
+        if is_draft:
+            return {
+                **metadata,
+                "mergeable": None,
+                "mergeable_state": "draft",
+                "files": None,
+                "paths_sample": [],
+                "additions": None,
+                "deletions": None,
+                "behind_by": None,
+                "overlap_risk": [],
+                "tests_included": None,
+            }
+
+        # Optimization 3: Preserve an explicitly incomplete row on RateGuard.
+        try:
+            full = gh.get("/repos/%s/pulls/%d" % (gh.repo, n))
+            files = gh.paginate("/repos/%s/pulls/%d/files?per_page=100" % (gh.repo, n))
+            paths = [f["filename"] for f in files]
+            pset = set(paths)
+            adds = sum(f.get("additions", 0) or 0 for f in files)
+            dels = sum(f.get("deletions", 0) or 0 for f in files)
+
+            behind_by, overlap_paths, merge_base = 0, set(), None
+            cmp1 = gh.get("/repos/%s/compare/%s...%s" % (gh.repo, main_sha, pr["head"]["sha"]))
+            if cmp1:
+                behind_by = cmp1.get("behind_by", 0) or 0
+                merge_base = (cmp1.get("merge_base_commit") or {}).get("sha")
+                if 0 < behind_by <= overlap_window and merge_base:
+                    cmp2 = gh.get("/repos/%s/compare/%s...%s?per_page=250" % (gh.repo, merge_base, main_sha))
+                    main_paths = {f["filename"] for f in (cmp2 or {}).get("files", [])}
+                    overlap_paths = pset & main_paths
+            return {
+                **metadata,
+                "mergeable": full.get("mergeable"),
+                "mergeable_state": full.get("mergeable_state"),
+                "files": len(paths),
+                "paths_sample": sorted(paths)[:12],
+                "additions": adds,
+                "deletions": dels,
+                "behind_by": behind_by,
+                "overlap_risk": sorted(overlap_paths)[:8],
+                "tests_included": any(
+                    "tests/" in p or "/corpus" in p or p.endswith("_reject.hy") or p.endswith("_accept.hy")
+                    for p in paths),
+            }
+        except RateGuard as e:
+            log("  [WARN] RateGuard tripped on #%d (%s); yielding degraded record" % (n, e))
+            return {
+                **metadata,
+                "mergeable": None,
+                "mergeable_state": "rate_limited",
+                "files": None,
+                "paths_sample": [],
+                "additions": None,
+                "deletions": None,
+                "behind_by": None,
+                "overlap_risk": [],
+                "tests_included": None,
+                "degraded": True,
+            }
 
     items = []
     workers = getattr(args, "jobs", 6)
@@ -237,9 +338,9 @@ def collect(cfg, gh, args):
                 log("  ... %d/%d scanned" % (len(items), len(prs)))
     items.sort(key=lambda x: -x["number"])
     for it in items:
-        log("  #%d %s — behind %d, mergeable %s, +%d/%d files %d" % (
-            it["number"], it["mergeable_state"], it["behind_by"], it["mergeable"],
-            it["additions"], it["deletions"], it["files"]))
+        log("  #%d %s — behind %s, mergeable %s, +%s/%s files %s" % (
+            it["number"], it.get("mergeable_state"), it.get("behind_by", 0), it.get("mergeable"),
+            it.get("additions", 0), it.get("deletions", 0), it.get("files", 0)))
     return items, main_sha
 
 
@@ -249,6 +350,9 @@ def classify(cfg, items):
     """Sets bucket/score/dup_of/labels on each item; returns (items, clusters)."""
     W = set(cfg["wildcard_holds"])
     D = set(cfg["drafts_parked"])
+    for it in items:
+        for key in ("dup_of", "dup_members", "bucket_new"):
+            it.pop(key, None)
 
     # duplicate clusters: union-find over file-set Jaccard
     parent = list(range(len(items)))
@@ -294,27 +398,29 @@ def classify(cfg, items):
             s -= 2
         if not it["wildcard_hold"] and not it["draft_parked"]:
             s += 2
-        if it["additions"] < 400:
+        if it["additions"] is not None and it["additions"] < 400:
             s += 1
-        if it["additions"] > cfg["mega_additions"]:
+        if it["additions"] is not None and it["additions"] > cfg["mega_additions"]:
             s -= 1
         if it["behind_by"] == 0:
             s += 1
-        if it["behind_by"] >= cfg["behind_threshold"]:
+        if it["behind_by"] is not None and it["behind_by"] >= cfg["behind_threshold"]:
             s -= 1
         if it.get("dup_of"):
             s -= 1
-        it["score"] = s
+        it["score"] = 0 if it.get("degraded") else s
 
         if it["wildcard_hold"]:
             it["bucket"] = "PARKED-WILDCARD"
             lab.append("triage:wildcard-hold")
         elif it["draft_parked"]:
             it["bucket"] = "PARKED-DRAFT"
+        elif it.get("degraded"):
+            it["bucket"] = "INCOMPLETE"
         elif it["mergeable"] is False:
             it["bucket"] = "CONFLICTS"
             lab.append("triage:conflicts")
-        elif it["behind_by"] >= cfg["behind_threshold"]:
+        elif it["behind_by"] is not None and it["behind_by"] >= cfg["behind_threshold"]:
             it["bucket"] = "STALE-BASE"
             lab.append("triage:behind")
         elif it.get("dup_of"):
@@ -337,9 +443,11 @@ def classify(cfg, items):
             it["action"] = "PARK (M1 wildcard hold — verdict 2026-11-01, do not merge)"
         elif it["draft_parked"]:
             it["action"] = "PARK (draft — leave with author)"
+        elif it.get("degraded"):
+            it["action"] = "Retry collection (rate limited; PR details unknown)"
         elif it["mergeable"] is False:
             it["action"] = "Rebase or close-with-thanks (conflicts vs main)"
-        elif it["behind_by"] >= cfg["behind_threshold"]:
+        elif it["behind_by"] is not None and it["behind_by"] >= cfg["behind_threshold"]:
             it["action"] = "Ask author to update branch (behind main by %d)" % it["behind_by"]
         elif it.get("dup_of"):
             it["action"] = "DUP of #%d — verify both takes, land strongest, credit both" % it["dup_of"]
@@ -410,10 +518,13 @@ def render_board(cfg, items, clusters, verdicts, now_s):
         out += ["| PR | title | author | age | +lines | files | tests | behind | score | action |",
                 "|---|---|---|---|---|---|---|---|---|---|"]
         for it in rows:
-            out.append("| #%d | %s | %s | %sd | +%d | %d | %s | %d | %d | %s |" % (
+            out.append("| #%d | %s | %s | %sd | %s | %s | %s | %s | %d | %s |" % (
                 it["number"], it["title"].replace("|", "\\|"), it["author"], it["age_days"],
-                it["additions"], it["files"], "Y" if it["tests_included"] else "-",
-                it["behind_by"], it["score"], it["action"]))
+                "?" if it["additions"] is None else "+%d" % it["additions"],
+                "?" if it["files"] is None else it["files"],
+                "?" if it["tests_included"] is None else ("Y" if it["tests_included"] else "-"),
+                "?" if it["behind_by"] is None else it["behind_by"],
+                it["score"], it["action"]))
         out.append("")
         return out
 
@@ -421,6 +532,10 @@ def render_board(cfg, items, clusters, verdicts, now_s):
     L += table(pareto, "_none this pass — run recon on the RECON bucket_")
     L += ["## Land-candidates (rest)", ""]
     L += table(cand[cfg["pareto_n"]:], "_none_")
+    incomplete = [i for i in items if i.get("degraded")]
+    if incomplete:
+        L += ["## Incomplete scans (rate limited; retry required)", ""]
+        L += table(incomplete)
     L += ["## Conflicts vs main", ""]
     L += table(buckets.get("CONFLICTS", []), "_none_")
     L += ["## Stale base (behind main >= %d)" % cfg["behind_threshold"], ""]
@@ -581,6 +696,7 @@ def main():
     p.add_argument("--verify", type=int, default=0, metavar="K",
                    help="run worktree merge gate on top-K land-candidates")
     p.add_argument("--jobs", type=int, default=6, help="parallel fetch workers")
+    p.add_argument("--cache", default=None, help="reuse previous TRIAGE.json as delta cache")
     p.set_defaults(fn=cmd_scan)
 
     p = sub.add_parser("approve", help="approve action_required CI runs")
