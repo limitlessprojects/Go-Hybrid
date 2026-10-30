@@ -52,6 +52,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from urllib.parse import unquote
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -213,7 +214,15 @@ def check(root: Path, table_path: Path, doc_override: str | None = None) -> list
         for target in LINK_RE.findall(evidence_md):
             if target.startswith(("http://", "https://", "#", "mailto:")):
                 continue
-            if not (root / target).exists():
+            # A markdown destination is a URL: the part before the first `#` is the
+            # path on disk, and that path may be percent-encoded (`a%20b.md` names
+            # `a b.md`). Split first, then decode, so `%23` still stands for a
+            # literal `#` in a filename. The diagnostic keeps the destination as
+            # written, so a genuinely missing file is reported whole.
+            path_rel = unquote(target.split("#", 1)[0])
+            if not path_rel:
+                continue
+            if not (root / path_rel).exists():
                 problems.append(f"{where}: evidence link `{target}` does not exist")
 
     for code, entry in sorted(codes.items()):
