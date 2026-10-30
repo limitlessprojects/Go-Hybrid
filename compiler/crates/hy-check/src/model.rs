@@ -725,6 +725,9 @@ pub(crate) struct Checker<'a> {
     /// Names each enclosing closure body rebinds, innermost last — the
     /// emit-guard deep walk skips them (addressable.rs).
     pub closure_bound: Vec<HashSet<String>>,
+    /// Names bound as locals/params at the statement under the builtin-args
+    /// pass (issue #1851): a callee base in this set is a value, not a crate.
+    pub named_arg_shadow: HashSet<String>,
 }
 
 /// Row 14 (discussion #4): the CLOSED category set — the invariant a
@@ -763,6 +766,7 @@ impl<'a> Checker<'a> {
             total_sites: 0,
             managed_audit: Vec::new(),
             closure_bound: Vec::new(),
+            named_arg_shadow: HashSet::new(),
         }
     }
 

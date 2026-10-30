@@ -11,7 +11,10 @@
 
 use crate::model::{unwrap_parens, Checker};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::{Expr, ForKind, LitKind, Place, PlaceKind, SelectArmKind, Stmt, UnOp};
+use hy_syntax::{
+    CallArg, Decl, Expr, ForKind, LitKind, MatchPattern, Place, PlaceKind, SelectArmKind, Stmt,
+    UnOp,
+};
 
 impl<'a> Checker<'a> {
     /// Pass-B entry: HYB-E2001 on `defer` + HYB-E2005 on builtin calls.
@@ -51,6 +54,10 @@ impl<'a> Checker<'a> {
     fn check_stmt_builtin_args_inner(&mut self, stmt: &Stmt, deep: bool) {
         match stmt {
             Stmt::Local(l) => {
+                if deep {
+                    // Closure-body locals are not in the flattened state.
+                    self.named_arg_shadow.extend(l.names.iter().cloned());
+                }
                 for v in &l.values {
                     self.check_expr_builtin_args(v);
                 }
@@ -93,6 +100,17 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::For { kind, body, .. } => {
+                if deep {
+                    match kind {
+                        ForKind::Iterate { vars, .. } => {
+                            self.named_arg_shadow.extend(vars.iter().cloned());
+                        }
+                        ForKind::Range { var, .. } => {
+                            self.named_arg_shadow.insert(var.clone());
+                        }
+                        _ => {}
+                    }
+                }
                 match kind {
                     ForKind::While { cond } => self.check_expr_builtin_args(cond),
                     ForKind::Range { lo, hi, .. } => {
@@ -115,6 +133,7 @@ impl<'a> Checker<'a> {
             }
             Stmt::Task { callee, args, .. } => {
                 self.check_expr_builtin_args(callee);
+                self.check_named_call_args(callee, args);
                 for a in args {
                     self.check_expr_builtin_args(&a.value);
                 }
@@ -133,6 +152,12 @@ impl<'a> Checker<'a> {
                         self.check_expr_builtin_args(g);
                     }
                     if deep {
+                        if let MatchPattern::Path {
+                            binding: Some(b), ..
+                        } = &arm.pattern
+                        {
+                            self.named_arg_shadow.insert(b.clone());
+                        }
                         for s in &arm.body.stmts {
                             self.check_stmt_builtin_args_inner(s, true);
                         }
@@ -159,6 +184,9 @@ impl<'a> Checker<'a> {
                         SelectArmKind::Default => {}
                     }
                     if deep {
+                        if let SelectArmKind::Recv { names, .. } = &arm.kind {
+                            self.named_arg_shadow.extend(names.iter().cloned());
+                        }
                         for s in &arm.body.stmts {
                             self.check_stmt_builtin_args_inner(s, true);
                         }
@@ -166,6 +194,43 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+    }
+
+    /// Issue #1851: only the rust-crate call surface places named arguments
+    /// (`sha3.stream_checksum(n, seed=7)`); Go has none, so on any other
+    /// callee the emitter would drop the name and pass by position while
+    /// some checker passes bind by name. Reject instead (HYB-E1002).
+    fn check_named_call_args(&mut self, callee: &Expr, args: &[CallArg]) {
+        let Some(named) = args.iter().find(|a| a.name.is_some()) else {
+            return;
+        };
+        if let Expr::Field { base, .. } = unwrap_parens(callee) {
+            if let Expr::Ident { name, .. } = unwrap_parens(base) {
+                let imported = self.file.decls.iter().any(|d| {
+                    matches!(d, Decl::Import { path, .. }
+                        if path.strip_prefix("rust/") == Some(name.as_str()))
+                });
+                // A local or parameter with the crate's name is a value.
+                if imported && !self.named_arg_shadow.contains(name.as_str()) {
+                    return;
+                }
+            }
+        }
+        let arg = named.name.as_deref().unwrap_or_default();
+        self.diags.push(
+            Diagnostic::error(
+                "HYB-E1002",
+                self.path.clone(),
+                named.value.span(),
+                format!(
+                    "named argument `{arg}=` is only supported on rust/ crate calls; Go has no named arguments (HYB-E1002)"
+                ),
+            )
+            .with_notes(vec![
+                "the emitter would pass the arguments by position and ignore the name, silently changing which parameter receives which value".to_string(),
+                "pass the arguments positionally, in declaration order".to_string(),
+            ]),
+        );
     }
 
     fn check_place_builtin_args(&mut self, place: &Place) {
@@ -185,6 +250,7 @@ impl<'a> Checker<'a> {
         match expr {
             Expr::Call { callee, args, span } => {
                 self.check_expr_builtin_args(callee);
+                self.check_named_call_args(callee, args);
                 let is_type_arg_builtin = matches!(
                     unwrap_parens(callee),
                     Expr::Ident { name, .. }
@@ -256,11 +322,15 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expr::FnLit { body, .. } => {
+            Expr::FnLit { params, body, .. } => {
                 // Closure bodies are not flattened into Pass B — deep-walk.
+                let saved = self.named_arg_shadow.clone();
+                self.named_arg_shadow
+                    .extend(params.iter().map(|p| p.name.clone()));
                 for stmt in &body.stmts {
                     self.check_stmt_builtin_args_inner(stmt, /*deep=*/ true);
                 }
+                self.named_arg_shadow = saved;
             }
             Expr::Ident { .. } | Expr::Lit { .. } => {}
         }

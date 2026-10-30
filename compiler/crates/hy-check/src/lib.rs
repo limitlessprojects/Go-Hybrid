@@ -590,7 +590,14 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         // misuse of make/len/cap/delete/close/new (HYB-E2005).
         // After the call/loan walk so it does not collide with upstream
         // inserts around check_uses (const-zero-divisor / LX14).
+        ck.named_arg_shadow = st
+            .env
+            .keys()
+            .chain(st.scopes.iter().flat_map(|l| l.keys()))
+            .cloned()
+            .collect();
         ck.check_stmt_builtins(stmt);
+        ck.named_arg_shadow.clear();
 
         // Issue #411: the iterable of `for x in e` must resolve to a
         // slice/array/string/map/chan (LX13) — HYB-E2009; fail-closed
