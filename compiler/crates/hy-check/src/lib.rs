@@ -260,6 +260,14 @@ fn build_tables(ck: &mut Checker<'_>) {
                     ck.declare_method(f);
                 } else {
                     ck.declare_pkg_name(&f.name, "fn", f.span);
+                    if f.name.contains('.') {
+                        // hy-emit lowers an associated `Type.name` to the
+                        // package-level Go identifier `Type_name`. Check that
+                        // emitted name too, or an ordinary `Type_name` decl
+                        // passes here and collides only at `go build`.
+                        let emitted_name = f.name.replace('.', "_");
+                        ck.declare_pkg_name(&emitted_name, "fn", f.span);
+                    }
                     ck.fns.insert(f.name.clone(), f);
                 }
             }
