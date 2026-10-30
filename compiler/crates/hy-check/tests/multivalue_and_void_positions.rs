@@ -194,3 +194,35 @@ fn single_value_calls_stay_accepted() {
         "fn one() int {\n    return 1\n}\n\nfn g(a int) {\n    fmt.println(\"{a}\")\n}\n\nfn main() {\n    g(one())\n}\n",
     );
 }
+
+#[test]
+fn multi_value_call_as_for_range_expr_is_rejected() {
+    let src = "fn two_slices() ([]int, []int) {\n    return []int{1, 2}, []int{3, 4}\n}\n\nfn main() {\n    for x in two_slices() {\n        _ = x\n    }\n}\n";
+    let cs = codes(src);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E1002"),
+        "expected HYB-E1002 for multi-value call in for-range expression, got {cs:?}"
+    );
+}
+
+#[test]
+fn void_call_as_for_range_expr_is_rejected() {
+    let src = "fn v() {}\n\nfn main() {\n    for x in v() {\n        _ = x\n    }\n}\n";
+    let cs = codes(src);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E1002"),
+        "expected HYB-E1002 for void call in for-range expression, got {cs:?}"
+    );
+}
+
+#[test]
+fn multi_value_call_as_for_range_bound_is_rejected() {
+    let src = "fn two() (int, int) {\n    return 1, 2\n}\n\nfn main() {\n    for i in two()..10 {\n        _ = i\n    }\n}\n";
+    let cs = codes(src);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E1002"),
+        "expected HYB-E1002 for multi-value call in for-range bound, got {cs:?}"
+    );
+}
+
+
