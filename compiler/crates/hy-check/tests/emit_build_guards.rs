@@ -515,6 +515,42 @@ fn negative_array_length_in_param_is_rejected() {
     rejects_with(ARRAY_PARAM_NEG_LEN, "HYB-E6004");
 }
 
+const ARRAY_NIL_LEN: &str = "\
+fn main() {
+    var a [nil]int
+    _ = a
+}
+";
+
+const ARRAY_COMPLEX_LEN: &str = "\
+fn main() {
+    var b [complex64(1)]byte
+    _ = b
+}
+";
+
+const ARRAY_COMPLEX128_LEN: &str = "\
+fn main() {
+    var c [complex128(2)]int
+    _ = c
+}
+";
+
+#[test]
+fn nil_array_length_is_rejected_e6004() {
+    rejects_with(ARRAY_NIL_LEN, "HYB-E6004");
+}
+
+#[test]
+fn complex64_array_length_is_rejected_e6004() {
+    rejects_with(ARRAY_COMPLEX_LEN, "HYB-E6004");
+}
+
+#[test]
+fn complex128_array_length_is_rejected_e6004() {
+    rejects_with(ARRAY_COMPLEX128_LEN, "HYB-E6004");
+}
+
 // ---------------------------------------------------------------------------
 // Method type parameters (HYB-E1002, issue #881)
 // ---------------------------------------------------------------------------

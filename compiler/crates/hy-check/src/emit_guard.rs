@@ -2501,9 +2501,11 @@ fn is_non_int_array_len_expr(expr: &Expr) -> bool {
             kind:
                 hy_syntax::LitKind::Bool(_)
                 | hy_syntax::LitKind::Str(_)
-                | hy_syntax::LitKind::RawStr(_),
+                | hy_syntax::LitKind::RawStr(_)
+                | hy_syntax::LitKind::Nil,
             ..
         } => true,
+        Expr::Ident { name, .. } if name == "nil" => true,
         Expr::Unary {
             op: hy_syntax::UnOp::Not,
             ..
@@ -2529,7 +2531,18 @@ fn is_non_int_array_len_expr(expr: &Expr) -> bool {
         Expr::Call { callee, .. } => matches!(
             unwrap_parens(callee),
             Expr::Ident { name, .. }
-                if matches!(name.as_str(), "bool" | "string" | "float32" | "float64")
+                if matches!(
+                    name.as_str(),
+                    "bool"
+                        | "string"
+                        | "float32"
+                        | "float64"
+                        | "complex64"
+                        | "complex128"
+                        | "complex"
+                        | "real"
+                        | "imag"
+                )
         ),
         _ => false,
     }
