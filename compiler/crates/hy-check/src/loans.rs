@@ -6773,6 +6773,22 @@ impl<'a> Checker<'a> {
             let already_ptr = matches!(self.shape_of_expr(st, &a.value), TypeShape::Pointer(_))
                 || as_addr_of(inner).is_some();
 
+            let indirect_callee_effect = |callee_expr: &Expr| -> (bool, bool) {
+                if let Some(hy_syntax::TypeExpr::Fn { params, .. }) =
+                    self.ty_of_expr(st, callee_expr).map(|t| self.resolve_type_alias(&t))
+                {
+                    let is_ptr = params.get(i).is_some_and(|p| {
+                        matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                            || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_))
+                    });
+                    (is_ptr, true)
+                } else if matches!(self.shape_of_expr(st, callee_expr), TypeShape::Closure) {
+                    (false, true)
+                } else {
+                    (false, false)
+                }
+            };
+
             let (param_is_ptr, mutates) = match callee {
                 Expr::Ident { name, .. } => {
                     if declared.contains(name) {
@@ -6786,21 +6802,8 @@ impl<'a> Checker<'a> {
                             }
                             None => (false, true),
                         }
-                    } else if let Some(b) = self.lookup_binding(st, name) {
-                        if let Some(hy_syntax::TypeExpr::Fn { params, .. }) = &b.ty {
-                            match params.get(i) {
-                                Some(p) => {
-                                    let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
-                                        || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_));
-                                    (is_ptr, true)
-                                }
-                                None => (false, true),
-                            }
-                        } else if matches!(b.shape, TypeShape::Closure) {
-                            (false, true)
-                        } else {
-                            (false, false)
-                        }
+                    } else if self.lookup_binding(st, name).is_some() {
+                        indirect_callee_effect(callee)
                     } else {
                         (false, false)
                     }
@@ -6825,7 +6828,7 @@ impl<'a> Checker<'a> {
                         };
                         (false, mutates)
                     } else if matches!(self.shape_of_expr(st, callee), TypeShape::Closure) {
-                        (false, true)
+                        indirect_callee_effect(callee)
                     } else {
                         let recv_base = match self.shape_of_expr(st, base) {
                             TypeShape::Struct(Some(s)) => Some(s),
@@ -6861,7 +6864,7 @@ impl<'a> Checker<'a> {
                     }
                     None => (false, true),
                 },
-                _ => (false, false),
+                _ => indirect_callee_effect(callee),
             };
 
             let const_name = self.const_arg_root(st, &a.value, declared).or_else(|| {
