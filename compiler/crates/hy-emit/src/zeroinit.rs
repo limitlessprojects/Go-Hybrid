@@ -97,7 +97,7 @@ impl Emitter {
     /// or as an empty type-as-value literal (`new(map[string]int)`).
     pub(crate) fn n5_new(&mut self, args: &[CallArg]) -> Option<String> {
         let [arg] = args else { return None };
-        let ty = match &arg.value {
+        let ty = match Self::peel_parens(&arg.value) {
             Expr::Ident { name, span } => TypeExpr::Named {
                 name: name.clone(),
                 span: *span,

@@ -26,7 +26,7 @@ fn emit_new_slice_chan_and_spec_primitive() {
     .expect("must emit");
     assert!(go.contains("new([]int)"), "got:\n{}", go);
     assert!(!go.contains("new([]int{})"), "got:\n{}", go);
-    assert!(go.contains("new(str_map)"), "got:\n{}", go);
+    assert!(go.contains("pm := &str_map{}"), "got:\n{}", go); // #1615: N5 like new(str_map)
     assert!(go.contains("new(chan int)"), "got:\n{}", go);
     assert!(go.contains("new(uint8)"), "got:\n{}", go);
 }
