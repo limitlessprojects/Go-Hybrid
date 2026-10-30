@@ -130,6 +130,9 @@ fn nested_and_ascribed_positions_are_rejected() {
         "fn main() {\n    var b u8 = u8(255) + 1\n    fmt.println(\"{b}\")\n}\n",
         "HYB-E6002",
     );
+    assert_code("fn main() {\n    a := -(u8(1) << 1)\n    fmt.println(\"{a}\")\n}\n", "HYB-E6002");
+    assert_code("fn main() {\n    a := -i8(127) - 2\n    fmt.println(\"{a}\")\n}\n", "HYB-E6002");
+    assert_code("fn main() {\n    a := (u8(1) << 7) + (u8(1) << 7)\n    fmt.println(\"{a}\")\n}\n", "HYB-E6002");
 }
 
 // ---------------------------------------------------------------------------
