@@ -431,6 +431,10 @@ struct Collector<'a> {
     loop_depth: usize,
     /// Lexical nesting depth within `select` statements.
     select_depth: usize,
+    /// Lexical nesting depth within `managed` blocks (O6.1 hatch): while
+    /// inside one, the #1112 chan-send element check is suppressed — the
+    /// `managed` hatch deliberately relaxes sendability there.
+    managed_depth: usize,
     defines: Vec<Define>,
     /// Every identifier mentioned in the file plus every dotted type root —
     /// the import-usage set (the emitter's declared-import header needs it).
@@ -455,6 +459,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             fn_results_error_tail: false,
             loop_depth: 0,
             select_depth: 0,
+            managed_depth: 0,
             defines: Vec::new(),
             roots: HashSet::new(),
             diags: Vec::new(),
@@ -1161,7 +1166,11 @@ impl<'a> Collector<'a> {
                     _ => {}
                 }
             }
-            Stmt::Managed { body, .. } => self.block_scoped(body),
+            Stmt::Managed { body, .. } => {
+                self.managed_depth += 1;
+                self.block_scoped(body);
+                self.managed_depth -= 1;
+            }
             Stmt::Match { subject, arms, .. } => {
                 self.expr(subject);
                 for arm in arms {
@@ -3178,6 +3187,11 @@ impl<'a> Collector<'a> {
     // `cannot use ... as <elem> value in send`. Fail open when the channel's
     // element type is unknown.
     fn check_send_elem(&mut self, chan: &Expr, value: &Expr) {
+        // O6.1: inside a `managed` block the sendability check is hatched
+        // (the block's contract already accepts unchecked sharing).
+        if self.managed_depth > 0 {
+            return;
+        }
         let ck = self.kind_of_expr(chan);
         let vk = self.kind_of_expr(value);
         if let OpKind::Chan(elem) = ck {
