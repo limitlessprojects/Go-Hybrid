@@ -714,6 +714,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         if !is_chan {
                             if may_share {
                                 ck.record_may_share(&mut st, name, expr);
+                                ck.record_move_const_and_a3_loans(&mut st, name, expr, idx);
                             }
                             if is_ref {
                                 if let Some(root) = expr.root_ident() {

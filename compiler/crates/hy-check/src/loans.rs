@@ -409,6 +409,7 @@ impl<'a> Checker<'a> {
         } else {
             let mut roots = Vec::new();
             collect_ref_roots(&first.value, &mut roots);
+            collect_move_ident_sources(&first.value, &mut roots);
             for r in roots {
                 self.emit_a3_if_live(st, &r, cr.span, idx, verb);
             }
@@ -589,6 +590,7 @@ impl<'a> Checker<'a> {
         for (i, a) in cr.args.iter().enumerate() {
             let mut aroots = Vec::new();
             collect_ref_roots(&a.value, &mut aroots);
+            collect_move_ident_sources(&a.value, &mut aroots);
             let arg_path_opt = walk::expr_path(&a.value);
             for arg_path in arg_path_opt.into_iter().chain(aroots) {
                 if !live.iter().any(|p| a3_paths_conflict(st, p, &arg_path)) {
@@ -838,6 +840,7 @@ impl<'a> Checker<'a> {
                         walk::ScopeEvent::MatchBind { name, subject } => {
                             let mut sroots = Vec::new();
                             collect_ref_roots(subject, &mut sroots);
+                            collect_move_ident_sources(subject, &mut sroots);
                             if sroots.iter().any(|r| alias_stack.last().unwrap().contains(r)) {
                                 alias_stack.last_mut().unwrap().insert(name.to_string());
                             }
@@ -898,6 +901,7 @@ impl<'a> Checker<'a> {
                         locals_stack.last_mut().unwrap().insert(name.clone());
                         let mut roots = Vec::new();
                         collect_ref_roots(val, &mut roots);
+                        collect_move_ident_sources(val, &mut roots);
                         if roots.iter().any(|r| pre_aliases.contains(r)) {
                             alias_stack.last_mut().unwrap().insert(name.clone());
                         } else {
@@ -910,6 +914,7 @@ impl<'a> Checker<'a> {
                         if let PlaceKind::Ident(name) = &t.kind {
                             let mut roots = Vec::new();
                             collect_ref_roots(val, &mut roots);
+                            collect_move_ident_sources(val, &mut roots);
                             if roots.iter().any(|r| pre_aliases.contains(r)) {
                                 alias_stack.last_mut().unwrap().insert(name.clone());
                             } else {
@@ -975,6 +980,7 @@ impl<'a> Checker<'a> {
         let arg_root_is_param = |a: &hy_syntax::CallArg| {
             let mut roots = Vec::new();
             collect_ref_roots(&a.value, &mut roots);
+            collect_move_ident_sources(&a.value, &mut roots);
             roots.iter().any(|r| r == param)
         };
         match cr.callee {
@@ -1021,7 +1027,11 @@ impl<'a> Checker<'a> {
     /// body may mutate — consumed at the closure's call sites (#111 form 4).
     /// The closure's own params are excluded: they are fresh bindings.
     pub(crate) fn record_closure_mutations(&self, st: &mut FnState, name: &str, value: &Expr) {
-        match unwrap_parens(value) {
+        let mut inner = unwrap_parens(value);
+        while let Expr::Move { operand, .. } = inner {
+            inner = unwrap_parens(operand);
+        }
+        match inner {
             Expr::FnLit {
                 params,
                 results,
@@ -1097,6 +1107,12 @@ impl<'a> Checker<'a> {
                 if !matches!(self.shape_of_expr(st, value), TypeShape::Closure) {
                     return;
                 }
+                if let Expr::Ident { name: fn_name, .. } = unwrap_parens(callee) {
+                    if (fn_name == "some" || fn_name == "ok") && args.len() == 1 {
+                        self.record_closure_mutations(st, name, &args[0].value);
+                        return;
+                    }
+                }
                 let mut mutated_roots = HashSet::new();
                 if let Expr::Ident { name: fn_name, .. } = unwrap_parens(callee) {
                     if let Some(decl) = self.fns.get(fn_name) {
@@ -1108,6 +1124,7 @@ impl<'a> Checker<'a> {
                             if mutates {
                                 let mut r = Vec::new();
                                 collect_ref_roots(&a.value, &mut r);
+                                collect_move_ident_sources(&a.value, &mut r);
                                 mutated_roots.extend(r);
                             }
                         }
@@ -1180,6 +1197,7 @@ impl<'a> Checker<'a> {
                         walk::ScopeEvent::MatchBind { name, subject } => {
                             let mut sroots = Vec::new();
                             collect_ref_roots(subject, &mut sroots);
+                            collect_move_ident_sources(subject, &mut sroots);
                             sroots.retain(|r| !bound.contains(r));
                             let current_shadows = shadow_stack.last().unwrap();
                             let current_aliases = alias_stack.last().unwrap();
@@ -1208,6 +1226,7 @@ impl<'a> Checker<'a> {
                         current_locals.insert(name.clone());
                         let mut roots = Vec::new();
                         collect_ref_roots(val, &mut roots);
+                        collect_move_ident_sources(val, &mut roots);
                         let resolved = roots.iter().find_map(|p| resolve(p, &pre_aliases, &pre_shadows));
                         if let Some(r) = resolved {
                             current_shadows.remove(name.as_str());
@@ -1225,6 +1244,7 @@ impl<'a> Checker<'a> {
                         if let PlaceKind::Ident(name) = &t.kind {
                             let mut roots = Vec::new();
                             collect_ref_roots(val, &mut roots);
+                            collect_move_ident_sources(val, &mut roots);
                             let resolved = roots.iter().find_map(|p| resolve(p, &pre_aliases, &pre_shadows));
                             if let Some(r) = resolved {
                                 current_shadows.remove(name.as_str());
@@ -1239,6 +1259,7 @@ impl<'a> Checker<'a> {
                 Stmt::Match { subject, arms, .. } => {
                     let mut sroots = Vec::new();
                     collect_ref_roots(subject, &mut sroots);
+                    collect_move_ident_sources(subject, &mut sroots);
                     sroots.retain(|r| !bound.contains(r));
                     for arm in arms {
                         if let hy_syntax::MatchPattern::Path {
@@ -1275,12 +1296,16 @@ impl<'a> Checker<'a> {
                 _ => {}
             }
             for v in fnlit_values {
+                let mut inner_v = unwrap_parens(v);
+                while let Expr::Move { operand, .. } = inner_v {
+                    inner_v = unwrap_parens(operand);
+                }
                 if let Expr::FnLit {
                     params: fp,
                     results: fr,
                     body: fb,
                     ..
-                } = unwrap_parens(v)
+                } = inner_v
                 {
                     let mut inner_bound: HashSet<String> =
                         fp.iter().map(|p| p.name.clone()).collect();
@@ -1302,6 +1327,7 @@ impl<'a> Checker<'a> {
                             if let Some(first) = cr.args.first() {
                                 let mut roots = Vec::new();
                                 collect_ref_roots(&first.value, &mut roots);
+                                collect_move_ident_sources(&first.value, &mut roots);
                                 for root in roots {
                                     if let Some(r) =
                                         resolve(&root, current_aliases, current_shadows)
@@ -1319,6 +1345,7 @@ impl<'a> Checker<'a> {
                             for (i, a) in cr.args.iter().enumerate() {
                                 let mut roots = Vec::new();
                                 collect_ref_roots(&a.value, &mut roots);
+                                collect_move_ident_sources(&a.value, &mut roots);
                                 for root in roots {
                                     let Some(r) =
                                         resolve(&root, current_aliases, current_shadows)
@@ -1342,6 +1369,7 @@ impl<'a> Checker<'a> {
                             for a in cr.args {
                                 let mut roots = Vec::new();
                                 collect_ref_roots(&a.value, &mut roots);
+                                collect_move_ident_sources(&a.value, &mut roots);
                                 for root in roots {
                                     if let Some(r) =
                                         resolve(&root, current_aliases, current_shadows)
@@ -1361,6 +1389,7 @@ impl<'a> Checker<'a> {
                         for a in cr.args {
                             let mut roots = Vec::new();
                             collect_ref_roots(&a.value, &mut roots);
+                            collect_move_ident_sources(&a.value, &mut roots);
                             for root in roots {
                                 if let Some(r) =
                                     resolve(&root, current_aliases, current_shadows)
@@ -1374,6 +1403,7 @@ impl<'a> Checker<'a> {
                         for a in cr.args {
                             let mut roots = Vec::new();
                             collect_ref_roots(&a.value, &mut roots);
+                            collect_move_ident_sources(&a.value, &mut roots);
                             for root in roots {
                                 if let Some(r) =
                                     resolve(&root, current_aliases, current_shadows)
@@ -1707,6 +1737,7 @@ impl<'a> Checker<'a> {
                 if move_operand_ident(value).is_some()
                     || matches!(unwrap_parens(value), Expr::Move { .. })
                 {
+                    let is_view = matches!(shape, TypeShape::BorrowHandle(_));
                     self.define_binding(st, name, shape, ty, immutable, managed, is_let);
                     if let Some(origin) = moved_non_owned {
                         if let Some(b) = st.env_lookup_mut(name) {
@@ -1714,6 +1745,10 @@ impl<'a> Checker<'a> {
                         }
                     }
                     self.record_move_const_and_a3_loans(st, name, value, idx);
+                    if is_view {
+                        self.extend_call_loans_to_view(st, value, name, idx);
+                    }
+                    self.record_closure_mutations(st, name, value);
                     continue;
                 }
                 // Self-shadowing define (`m := m`, `h := h`, `m := same(m)`
@@ -2032,6 +2067,7 @@ impl<'a> Checker<'a> {
         }
         let mut ref_roots = Vec::new();
         collect_ref_roots(inner, &mut ref_roots);
+        collect_move_ident_sources(inner, &mut ref_roots);
         ref_roots.iter().any(|r| {
             st.borrow_bindings.contains(r)
                 || st
@@ -2585,9 +2621,13 @@ impl<'a> Checker<'a> {
         if moved_srcs.is_empty() {
             return;
         }
+        let name_last = st.last_use.get(name).copied().unwrap_or(idx).max(idx);
         for src in moved_srcs {
             if src == name {
                 continue;
+            }
+            if st.borrow_bindings.contains(&src) {
+                st.borrow_bindings.insert(name.to_string());
             }
             let place = Place {
                 kind: PlaceKind::Ident(src.clone()),
@@ -2596,13 +2636,22 @@ impl<'a> Checker<'a> {
             if let Some(const_root) = self.const_write_root(st, &place) {
                 st.share_edge(name, &const_root);
             }
+            let resolved_src = crate::freeze::resolve_alias(st, &src);
+            for l in &mut st.loans {
+                if let LoanTarget::MapSlot { binding, .. } = &l.target {
+                    if (binding == &src || *binding == resolved_src)
+                        && (idx == 0 || l.created <= idx)
+                    {
+                        l.last = l.last.max(name_last);
+                    }
+                }
+            }
             let inherited: Vec<Loan> = st
                 .loans
                 .iter()
                 .filter_map(|l| match &l.target {
                     LoanTarget::MapSlot { binding, path, key }
-                        if l.created <= idx
-                            && idx <= l.last
+                        if (idx == 0 || (l.created <= idx && idx <= l.last))
                             && a3_paths_conflict(st, path, &src) =>
                     {
                         Some(Loan {
@@ -2613,6 +2662,22 @@ impl<'a> Checker<'a> {
                             },
                             created: l.created,
                             last: l.last,
+                            span: l.span,
+                            desc: l.desc.clone(),
+                        })
+                    }
+                    LoanTarget::MapSlot { binding, path, key }
+                        if (idx == 0 || l.created <= idx)
+                            && (binding == &src || *binding == resolved_src) =>
+                    {
+                        Some(Loan {
+                            target: LoanTarget::MapSlot {
+                                binding: name.to_string(),
+                                path: path.clone(),
+                                key: key.clone(),
+                            },
+                            created: l.created,
+                            last: l.last.max(name_last),
                             span: l.span,
                             desc: l.desc.clone(),
                         })
@@ -2651,8 +2716,10 @@ impl<'a> Checker<'a> {
         }
         let mut dst_roots = Vec::new();
         collect_ref_roots(&dst.value, &mut dst_roots);
+        collect_move_ident_sources(&dst.value, &mut dst_roots);
         let mut src_roots = Vec::new();
         collect_ref_roots(&src.value, &mut src_roots);
+        collect_move_ident_sources(&src.value, &mut src_roots);
         for d in &dst_roots {
             for s in &src_roots {
                 if d != s && self.binding_may_share(st, d) && (self.binding_may_share(st, s) || self.expr_slices_addressable_array(st, &src.value, s)) {
@@ -2714,6 +2781,7 @@ impl<'a> Checker<'a> {
                 CalleeSlotSource::Arg(dst_expr) => {
                     collect_ref_roots(dst_expr, &mut dst_roots);
                     collect_addr_of_roots(dst_expr, &mut dst_roots);
+                    collect_move_ident_sources(dst_expr, &mut dst_roots);
                 }
                 CalleeSlotSource::OuterBinding(name) => {
                     dst_roots.push(name.clone());
@@ -2725,6 +2793,7 @@ impl<'a> Checker<'a> {
                 CalleeSlotSource::Arg(src_expr) => {
                     collect_ref_roots(src_expr, &mut src_roots);
                     collect_addr_of_roots(src_expr, &mut src_roots);
+                    collect_move_ident_sources(src_expr, &mut src_roots);
                     let mut move_ops = Vec::new();
                     crate::model::collect_move_operands(src_expr, &mut move_ops);
                     for (op, _) in move_ops {
@@ -3053,6 +3122,7 @@ impl<'a> Checker<'a> {
         let inner = crate::model::unwrap_parens(expr);
         collect_ref_roots(inner, &mut roots);
         collect_addr_of_roots(inner, &mut roots);
+        collect_move_ident_sources(inner, &mut roots);
         let mut move_ops = Vec::new();
         crate::model::collect_move_operands(inner, &mut move_ops);
         for (op, _) in move_ops {
@@ -3874,13 +3944,16 @@ impl<'a> Checker<'a> {
         }
         for loan in st.loans.iter_mut() {
             if let LoanTarget::Handle { handle } = &loan.target {
-                if loan.created == idx && loan.last == idx && roots.iter().any(|r| r == handle) {
-                    loan.last = view_last;
+                if (idx == 0 || (loan.created == idx && loan.last == idx))
+                    && roots.iter().any(|r| r == handle)
+                {
+                    loan.last = loan.last.max(view_last);
                 }
             }
         }
         let mut ref_roots = Vec::new();
         collect_ref_roots(value, &mut ref_roots);
+        collect_move_ident_sources(value, &mut ref_roots);
         for src in ref_roots {
             if src == name {
                 continue;
@@ -3891,15 +3964,21 @@ impl<'a> Checker<'a> {
                 .unwrap_or(false);
             if is_borrow_src {
                 let group = st.share_group(&src);
+                let mut extended_handles = Vec::new();
                 for loan in st.loans.iter_mut() {
                     if let LoanTarget::Handle { handle } = &loan.target {
-                        if loan.created <= idx
-                            && idx <= loan.last
+                        if (idx == 0 || (loan.created <= idx && idx <= loan.last))
                             && (handle == &src || group.contains(handle))
                         {
                             loan.last = loan.last.max(view_last);
+                            if handle != &src && handle != name {
+                                extended_handles.push(handle.clone());
+                            }
                         }
                     }
+                }
+                for h in extended_handles {
+                    st.share_edge(name, &h);
                 }
             }
         }
@@ -4347,6 +4426,7 @@ impl<'a> Checker<'a> {
                      -> HashSet<String> {
                         let mut roots = Vec::new();
                         collect_ref_roots(e, &mut roots);
+                        collect_move_ident_sources(e, &mut roots);
                         self.collect_callee_const_return_roots(st, e, &mut roots, depth + 1);
                         let mut set = HashSet::new();
                         for r in roots {
@@ -4613,6 +4693,7 @@ impl<'a> Checker<'a> {
                         );
                         let mut dst_roots = Vec::new();
                         collect_ref_roots(&cr.args[0].value, &mut dst_roots);
+                        collect_move_ident_sources(&cr.args[0].value, &mut dst_roots);
                         for dr in dst_roots {
                             if !src_o.is_empty() {
                                 origins.entry(dr).or_default().extend(src_o.iter().cloned());
@@ -4649,6 +4730,7 @@ impl<'a> Checker<'a> {
                                 match dst_src {
                                     CalleeSlotSource::Arg(dst_e) => {
                                         collect_ref_roots(dst_e, &mut dst_roots);
+                                        collect_move_ident_sources(dst_e, &mut dst_roots);
                                         collect_addr_of_roots(dst_e, &mut dst_roots);
                                     }
                                     CalleeSlotSource::OuterBinding(bname) => {
@@ -5141,8 +5223,10 @@ impl<'a> Checker<'a> {
         let mut roots = Vec::new();
         collect_ref_roots(subject, &mut roots);
         self.collect_callee_const_return_roots(st, subject, &mut roots, 0);
+        let mut all_roots = roots.clone();
+        collect_move_ident_sources(subject, &mut all_roots);
 
-        let pre_tainted = roots.iter().any(|r| {
+        let pre_tainted = all_roots.iter().any(|r| {
             self.lookup_binding(st, r)
                 .map(|b| b.managed_taint)
                 .unwrap_or(false)
@@ -5151,19 +5235,22 @@ impl<'a> Checker<'a> {
             self.lookup_binding(st, r).and_then(|b| b.moved.clone())
         });
         let pre_origin = if self.shape_may_share(&shape) {
-            roots.iter().find_map(|r| {
-                self.non_owned_origin_of(st, r).map(|(o, via_share)| {
-                    if via_share || (!shape.is_reference_alias() && r != name) {
-                        format!("a may-share peer of {}", o)
-                    } else {
-                        o
-                    }
+            all_roots
+                .iter()
+                .find_map(|r| {
+                    self.non_owned_origin_of(st, r).map(|(o, via_share)| {
+                        if via_share || (!shape.is_reference_alias() && r != name) {
+                            format!("a may-share peer of {}", o)
+                        } else {
+                            o
+                        }
+                    })
                 })
-            })
+                .or_else(|| self.moved_non_owned_origin_in_expr(st, subject))
         } else {
             None
         };
-        let pre_const_root = roots.iter().find_map(|r| {
+        let pre_const_root = all_roots.iter().find_map(|r| {
             let p = Place {
                 kind: PlaceKind::Ident(r.clone()),
                 span: subject.span(),
@@ -5191,6 +5278,7 @@ impl<'a> Checker<'a> {
             }
         }
 
+        let carries_borrow = self.expr_carries_borrow(st, subject);
         let self_shadows_const = pre_const_root.as_deref() == Some(name);
         self.define_binding(
             st,
@@ -5201,9 +5289,17 @@ impl<'a> Checker<'a> {
             managed || pre_tainted,
             false,
         );
+        if carries_borrow {
+            st.borrow_bindings.insert(name.to_string());
+        }
 
         self.record_may_share(st, name, subject);
+        self.record_move_const_and_a3_loans(st, name, subject, 0);
+        if matches!(shape, TypeShape::BorrowHandle(_)) {
+            self.extend_call_loans_to_view(st, subject, name, 0);
+        }
         self.record_alias(st, name, subject);
+        self.record_closure_mutations(st, name, subject);
 
         for peer in &pre_share_peers {
             if peer != name {
@@ -5956,6 +6052,7 @@ impl<'a> Checker<'a> {
                             // shadows and clears alias/share state.
                             let mut roots = Vec::new();
                             collect_ref_roots(subject, &mut roots);
+                            collect_move_ident_sources(subject, &mut roots);
                             self.collect_callee_const_return_roots(&cst, subject, &mut roots, 0);
                             let croot = roots.iter().find_map(|r| {
                                 if self.lookup_binding(&cst, r).is_none() {
@@ -6184,6 +6281,7 @@ impl<'a> Checker<'a> {
                             if !is_chan {
                                 let mut roots = Vec::new();
                                 collect_ref_roots(expr, &mut roots);
+                                collect_move_ident_sources(expr, &mut roots);
                                 self.collect_callee_const_return_roots(&cst, expr, &mut roots, 0);
                                 for root in roots {
                                     if self.lookup_binding(&cst, &root).is_some() {

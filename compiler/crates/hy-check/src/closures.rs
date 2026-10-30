@@ -995,6 +995,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                         if !is_chan {
                             if may_share {
                                 ck.record_may_share(st, name, expr);
+                                ck.record_move_const_and_a3_loans(st, name, expr, 0);
                             }
                             if is_ref {
                                 if let Some(root) = expr.root_ident() {
