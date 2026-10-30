@@ -14,7 +14,7 @@ be relaxed, plus one policy that keeps the queue honest:
    than `SWEEPER_MIN_AGE_DAYS` (default 5) as not-planned, with a written
    reply on every close (the CONTRIBUTING "no silent closes" promise is
    unchanged). A PR survives only with a protected label —
-   `triage:wildcard-hold`, `triage:pareto`, or `triage:keep` — or by being
+   `triage:wildcard-hold`, `triage:pareto`, `triage:keep`, or `bot:land-candidate` — or by being
    listed in `triage_config.json` (wildcard holds, parked drafts). The daily
    triage board is what earns that protection: if a PR deserves review time,
    it must surface within its window. Closes are reopen-friendly by design;
@@ -28,9 +28,9 @@ be relaxed, plus one policy that keeps the queue honest:
 | `tools/triage_bot.py approve` | local / agent sessions | on demand | Approves `action_required` CI runs for open PR heads (was ~190 manual clicks per session). Quota-guarded: `--max N`. `--dry` previews. |
 | `tools/triage_bot.py labels` | local / agent sessions | on demand | Ensures the `triage:*` palette and applies per-PR labels (protects wildcard holds from staleness, flags conflicts/dups). |
 | `tools/triage_bot.py board --post` | `.github/workflows/triage-board.yml` | daily 04:30 UTC + manual | Rewrites the **Triage Board** issue: Pareto NOW list, land-candidates, conflicts, stale bases, duplicate clusters, new arrivals, wildcard holds. |
-| `actions/stale` | `.github/workflows/stale.yml` | daily 04:17 UTC | `triage:stale` label after 21 idle days. Never closes. Exempts `triage:wildcard-hold`, `triage:pareto`, `triage:keep`. |
+| `actions/stale` | `.github/workflows/stale.yml` | daily 04:17 UTC | `triage:stale` label after 21 idle days. Never closes. Exempts `triage:wildcard-hold`, `triage:pareto`, `triage:keep`, `bot:land-candidate`. |
 | `ci.yml` | every PR | per push | Already runs the full gate suite: census, cargo tests, corpus verdict agreement, differential loop, Go runtime hygiene, examples. |
-| `tools/queue_sweeper.py` | `.github/workflows/queue-sweeper.yml` | daily 05:15 UTC + manual | Closes unprotected PRs older than `SWEEPER_MIN_AGE_DAYS` (default 5) as not-planned, each with a reopen-path reply. Protected: the `triage:wildcard-hold` / `triage:pareto` / `triage:keep` labels plus config-listed wildcard/parked numbers. |
+| `tools/queue_sweeper.py` | `.github/workflows/queue-sweeper.yml` | daily 05:15 UTC + manual | Closes unprotected PRs older than `SWEEPER_MIN_AGE_DAYS` (default 5) as not-planned, each with a reopen-path reply. Protected: the `triage:wildcard-hold` / `triage:pareto` / `triage:keep` / `bot:land-candidate` labels plus config-listed wildcard/parked numbers. |
 | `tools/queue_sweeper.py --dry` | any run | before changes | Preview exactly what the next sweep would close — same policy, zero writes. |
 
 ## Session start (the 30-second context restore)

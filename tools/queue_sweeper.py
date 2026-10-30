@@ -5,7 +5,7 @@ Policy (doctrine change 2026-10-24, see AUTOMATION.md):
   The old rule "the bot never closes" produced a 400+ PR review-debt pile
   while ~65 new PRs/day kept arriving. Now an open PR survives only if it is
   PROTECTED:
-    - a protected label: triage:wildcard-hold / triage:pareto / triage:keep
+    - a protected label: triage:wildcard-hold / triage:pareto / triage:keep / bot:land-candidate
     - its number is listed in tools/triage_config.json (wildcard_holds +
       drafts_parked) — survives even if labels are lost
     - it is younger than SWEEPER_MIN_AGE_DAYS (default 5)
@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 REPO = os.environ.get("GITHUB_REPOSITORY", "limitlessprojects/Go-Hybrid")
 TOK = os.environ.get("GITHUB_TOKEN", "")
 MIN_AGE = int(os.environ.get("SWEEPER_MIN_AGE_DAYS", "5"))
-PROTECTED_LABELS = {"triage:wildcard-hold", "triage:pareto", "triage:keep"}
+PROTECTED_LABELS = {"triage:wildcard-hold", "triage:pareto", "triage:keep", "bot:land-candidate"}
 
 COMMENT = """Queue sweeper: this PR has been open past the review window ({age} days)
 without a protected label, so it is being closed as **not planned** to keep
@@ -68,6 +68,16 @@ def api(path, method="GET", body=None):
             time.sleep(4)
     return 0, None
 
+def is_protected(pr, protected_nums=None):
+    """Check if a PR is protected by label or config number."""
+    labels = {l["name"] for l in pr.get("labels", [])}
+    if labels & PROTECTED_LABELS:
+        return True
+    if protected_nums and pr.get("number") in protected_nums:
+        return True
+    return False
+
+
 def config_protected_numbers():
     nums = set()
     try:
@@ -104,10 +114,7 @@ def main():
 
     due = []
     for p in prs:
-        labels = {l["name"] for l in p.get("labels", [])}
-        if labels & PROTECTED_LABELS:
-            continue
-        if p["number"] in protected_nums:
+        if is_protected(p, protected_nums):
             continue
         if (p.get("created_at") or "") >= cutoff:
             continue  # fresh arrival — still inside its review window

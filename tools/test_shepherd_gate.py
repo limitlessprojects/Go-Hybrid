@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import shepherd as sh  # noqa: E402
+import queue_sweeper as qs  # noqa: E402
 
 
 class GateMatrix(unittest.TestCase):
@@ -115,6 +116,51 @@ class ProbeParser(unittest.TestCase):
         added = list(sh.added_lines(self.DIFF))
         self.assertTrue(any(re.search(rule["pattern"], ln) for ln in added))
         self.assertFalse(any("removed line" in ln for ln in added))
+
+
+
+
+class SyncLabelsTests(unittest.TestCase):
+    """sync-labels must promote LAND-CANDIDATE to both bot:land-candidate
+    and triage:pareto to keep land-candidates out of the 5-day sweep."""
+
+    def test_land_candidate_promotes_to_pareto_and_bot_label(self):
+        labels = sh.labels_for_item({"bucket": "LAND-CANDIDATE"})
+        self.assertIn("bot:land-candidate", labels)
+        self.assertIn("triage:pareto", labels)
+
+    def test_conflicts_and_stale_base(self):
+        self.assertEqual(sh.labels_for_item({"bucket": "CONFLICTS"}), ["bot:conflict"])
+        self.assertEqual(sh.labels_for_item({"bucket": "STALE-BASE"}), ["bot:stale-base"])
+
+    def test_wildcard_hold_and_draft_parked_skipped(self):
+        self.assertEqual(sh.labels_for_item({"bucket": "LAND-CANDIDATE", "wildcard_hold": True}), [])
+        self.assertEqual(sh.labels_for_item({"bucket": "LAND-CANDIDATE", "draft_parked": True}), [])
+
+    def test_other_buckets_return_empty(self):
+        self.assertEqual(sh.labels_for_item({"bucket": "RECON"}), [])
+
+
+class QueueSweeperProtectionTests(unittest.TestCase):
+    """The 5-day queue sweeper must protect land-candidates and pareto PRs."""
+
+    def test_protected_labels_includes_land_candidate_and_pareto(self):
+        self.assertIn("bot:land-candidate", qs.PROTECTED_LABELS)
+        self.assertIn("triage:pareto", qs.PROTECTED_LABELS)
+        self.assertIn("triage:wildcard-hold", qs.PROTECTED_LABELS)
+        self.assertIn("triage:keep", qs.PROTECTED_LABELS)
+
+    def test_is_protected_by_label(self):
+        self.assertTrue(qs.is_protected({"labels": [{"name": "bot:land-candidate"}]}))
+        self.assertTrue(qs.is_protected({"labels": [{"name": "triage:pareto"}]}))
+        self.assertTrue(qs.is_protected({"labels": [{"name": "triage:wildcard-hold"}]}))
+        self.assertTrue(qs.is_protected({"labels": [{"name": "triage:keep"}]}))
+
+    def test_is_protected_by_config_number(self):
+        self.assertTrue(qs.is_protected({"number": 999}, protected_nums={999}))
+
+    def test_unprotected_pr(self):
+        self.assertFalse(qs.is_protected({"labels": [{"name": "triage:conflicts"}], "number": 456}, protected_nums={999}))
 
 
 if __name__ == "__main__":
