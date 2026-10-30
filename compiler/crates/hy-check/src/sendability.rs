@@ -1890,7 +1890,11 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::SliceLit { elem, items, .. } => {
-                if let Some(elem_ty) = elem {
+                if let Some((_, inner_elem, _)) = expr.as_array_lit() {
+                    for i in items {
+                        self.check_expr_against_ty(i, inner_elem, env);
+                    }
+                } else if let Some(elem_ty) = elem {
                     for i in items {
                         self.check_expr_against_ty(i, elem_ty, env);
                     }
@@ -2031,7 +2035,11 @@ impl<'a> Checker<'a> {
         if let Some(got_ty) = self.dir_ty_of_expr(expr, env) {
             self.check_chan_dir_coercion(&got_ty, want_ty, expr.span(), &expr.render());
         }
-        match unwrap_parens(expr) {
+        let mut inner = expr;
+        while let Expr::Paren { inner: p, .. } | Expr::Move { operand: p, .. } = inner {
+            inner = p;
+        }
+        match inner {
             Expr::StructLit {
                 ty: None, fields, ..
             } => {
