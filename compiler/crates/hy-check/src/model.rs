@@ -32,6 +32,13 @@ pub(crate) enum TypeShape {
     /// any `chan` direction (class 2); carries the element shape for
     /// loop-variable and receive inference.
     Chan(Box<TypeShape>),
+    /// a receive-only channel (`<-chan T`, class 2 as a VALUE); carries the
+    /// element shape. Foreign stubs use this for APIs that hand back a
+    /// receive-only channel (`time.after` — the deadline pattern): the
+    /// channel reference itself is safe to share BY TYPE, but a send on it
+    /// is invalid Go and must be rejected at the send site (HYB-E3008),
+    /// which the directionless `Chan` shape cannot express.
+    RecvOnlyChan(Box<TypeShape>),
     /// `map[K]V` — mutable GC composite (NOT sendable).
     Map(Box<TypeShape>, Box<TypeShape>),
     /// `[]T` — mutable GC composite (NOT sendable).
@@ -64,7 +71,8 @@ impl TypeShape {
     /// O4.9 fail-closed boundary — HYB-E3005).
     pub(crate) fn is_sendable_by_type(&self) -> bool {
         match self {
-            TypeShape::Primitive | TypeShape::Str | TypeShape::Atomic | TypeShape::Chan(_) => true,
+            TypeShape::Primitive | TypeShape::Str | TypeShape::Atomic | TypeShape::Chan(_)
+            | TypeShape::RecvOnlyChan(_) => true,
             // `&atomic_binding` is the mediated share route (OQ6); a pointer
             // to anything else is a mutable pointee — strict reject.
             TypeShape::Pointer(inner) => matches!(**inner, TypeShape::Atomic),
@@ -96,7 +104,7 @@ impl TypeShape {
             TypeShape::Array(_) => "array",
             TypeShape::Struct(_) => "struct",
             TypeShape::Pointer(_) => "pointer",
-            TypeShape::Chan(_) => "channel",
+            TypeShape::Chan(_) | TypeShape::RecvOnlyChan(_) => "channel",
             TypeShape::Atomic => "atomic value",
             TypeShape::Str => "string",
             TypeShape::Primitive => "primitive value",
@@ -115,6 +123,7 @@ impl TypeShape {
             TypeShape::Str => "string".to_string(),
             TypeShape::Atomic => "atomic".to_string(),
             TypeShape::Chan(e) => format!("chan {}", e.render()),
+            TypeShape::RecvOnlyChan(e) => format!("<-chan {}", e.render()),
             TypeShape::Map(k, v) => format!("map[{}]{}", k.render(), v.render()),
             TypeShape::Slice(e) => format!("[]{}", e.render()),
             TypeShape::Array(e) => format!("[...]{}", e.render()),
