@@ -36,6 +36,14 @@ const A3_PURE_FNS: &[&str] = &[
 /// Read-only packages (`fmt.println(m)`, `strings.split(...)`) — their
 /// methods receive values without storing to them (#111).
 const A3_PURE_PKGS: &[&str] = &["fmt", "strings", "strconv", "math", "unicode"];
+const PREDECLARED_CALL_TARGETS: &[&str] = &[
+    "append", "cap", "clear", "close", "complex", "copy", "delete", "imag", "len", "make", "max",
+    "min", "new", "panic", "print", "println", "real", "recover", "bool", "byte", "complex64",
+    "complex128", "error", "float32", "float64", "int", "int8", "int16", "int32", "int64",
+    "rune", "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "any",
+    "comparable", "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64",
+    "usize", "isize", "some", "none",
+];
 
 /// First segment of a dotted path (`e.services` -> `e`): the binding whose
 /// storage the path reaches through.
@@ -4275,7 +4283,52 @@ impl<'a> Checker<'a> {
         out: &mut Vec<String>,
         depth: usize,
     ) {
-        if depth > 4 {
+        let mut walk_stack = HashSet::new();
+        self.collect_callee_const_return_roots_inner(st, value, out, depth, &mut walk_stack);
+    }
+
+    fn collect_callee_const_return_roots_inner(
+        &self,
+        st: &FnState,
+        value: &Expr,
+        out: &mut Vec<String>,
+        depth: usize,
+        walk_stack: &mut HashSet<String>,
+    ) {
+        if depth > 32 {
+            let is_external_pkg_or_builtin = match unwrap_parens(value) {
+                Expr::Call { callee, .. } => {
+                    let is_pkg = match unwrap_parens(callee) {
+                        Expr::Field { base, .. } => {
+                            if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                                self.lookup_binding(st, pkg).is_none() && self.known_package(pkg)
+                            } else {
+                                false
+                            }
+                        }
+                        _ => false,
+                    };
+                    let is_builtin = match unwrap_parens(callee) {
+                        Expr::Ident { name, .. } => {
+                            self.lookup_binding(st, name).is_none()
+                                && PREDECLARED_CALL_TARGETS.contains(&name.as_str())
+                        }
+                        _ => false,
+                    };
+                    is_pkg || is_builtin
+                }
+                _ => false,
+            };
+            if !is_external_pkg_or_builtin {
+                let shape = self.shape_of_expr(st, value);
+                if self.shape_may_share(&shape) || matches!(shape, TypeShape::Unknown) {
+                    for (cname, cb) in &self.consts {
+                        if self.shape_may_share(&cb.shape) && !out.contains(cname) {
+                            out.push(cname.clone());
+                        }
+                    }
+                }
+            }
             return;
         }
         match unwrap_parens(value) {
@@ -4290,34 +4343,77 @@ impl<'a> Checker<'a> {
                 operand,
                 ..
             } => {
-                self.collect_callee_const_return_roots(st, operand, out, depth);
+                self.collect_callee_const_return_roots_inner(st, operand, out, depth, walk_stack);
             }
             Expr::StructLit { fields, .. } => {
                 for f in fields {
-                    self.collect_callee_const_return_roots(st, &f.value, out, depth);
+                    self.collect_callee_const_return_roots_inner(st, &f.value, out, depth, walk_stack);
                 }
             }
             Expr::MapLit { entries, .. } => {
                 for (k, v) in entries {
-                    self.collect_callee_const_return_roots(st, k, out, depth);
-                    self.collect_callee_const_return_roots(st, v, out, depth);
+                    self.collect_callee_const_return_roots_inner(st, k, out, depth, walk_stack);
+                    self.collect_callee_const_return_roots_inner(st, v, out, depth, walk_stack);
                 }
             }
             Expr::SliceLit { items, .. } => {
                 for it in items {
-                    self.collect_callee_const_return_roots(st, it, out, depth);
+                    self.collect_callee_const_return_roots_inner(st, it, out, depth, walk_stack);
                 }
             }
             Expr::Call { callee, args, .. } => {
                 for a in args {
-                    self.collect_callee_const_return_roots(st, &a.value, out, depth);
+                    self.collect_callee_const_return_roots_inner(st, &a.value, out, depth, walk_stack);
                 }
-                self.collect_callee_const_return_roots(st, callee, out, depth);
+                self.collect_callee_const_return_roots_inner(st, callee, out, depth, walk_stack);
                 let Some((typed_params, typed_results, body)) =
                     self.resolve_call_expr_decl_or_fnlit(st, callee)
                 else {
+                    let is_external_pkg = match unwrap_parens(callee) {
+                        Expr::Field { base, .. } => {
+                            if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                                self.lookup_binding(st, pkg).is_none() && self.known_package(pkg)
+                            } else {
+                                false
+                            }
+                        }
+                        _ => false,
+                    };
+                    let is_predeclared = match unwrap_parens(callee) {
+                        Expr::Ident { name, .. } => {
+                            self.lookup_binding(st, name).is_none()
+                                && PREDECLARED_CALL_TARGETS.contains(&name.as_str())
+                        }
+                        _ => false,
+                    };
+                    if !is_external_pkg && !is_predeclared {
+                        let call_shape = self.shape_of_expr(st, value);
+                        if self.shape_may_share(&call_shape) || matches!(call_shape, TypeShape::Unknown) {
+                            for (cname, cb) in &self.consts {
+                                if self.shape_may_share(&cb.shape) && !out.contains(cname) {
+                                    out.push(cname.clone());
+                                }
+                            }
+                        }
+                    }
                     return;
                 };
+                let callee_key = match unwrap_parens(callee) {
+                    Expr::Ident { name, .. } => format!("fn:{name}"),
+                    Expr::Field { base, name, .. } => {
+                        let recv_str = self
+                            .ty_of_expr(st, base)
+                            .map(|t| t.render())
+                            .unwrap_or_else(|| self.shape_of_expr(st, base).render());
+                        format!("method:{recv_str}.{name}")
+                    }
+                    Expr::FnLit { span, .. } => format!("fnlit:{}", span.start),
+                    _ => format!("expr:{:?}", callee as *const _),
+                };
+                if walk_stack.contains(&callee_key) {
+                    return;
+                }
+                walk_stack.insert(callee_key.clone());
                 let mut shadowed: HashSet<String> =
                     typed_params.iter().map(|(n, _)| n.clone()).collect();
                 shadowed.extend(
@@ -4349,11 +4445,12 @@ impl<'a> Checker<'a> {
                 let expr_const_origins =
                     |e: &Expr,
                      aliases: &HashMap<String, HashSet<String>>,
-                     shadowed: &HashSet<String>|
+                     shadowed: &HashSet<String>,
+                     walk_stack: &mut HashSet<String>|
                      -> HashSet<String> {
                         let mut roots = Vec::new();
                         collect_ref_roots(e, &mut roots);
-                        self.collect_callee_const_return_roots(st, e, &mut roots, depth + 1);
+                        self.collect_callee_const_return_roots_inner(st, e, &mut roots, depth + 1, walk_stack);
                         let mut set = HashSet::new();
                         for r in roots {
                             if let Some(cs) = aliases.get(&r) {
@@ -4378,7 +4475,7 @@ impl<'a> Checker<'a> {
                                     shadowed.insert(n.clone());
                                 }
                             } else if l.values.len() == 1 && l.names.len() > 1 {
-                                let cs = expr_const_origins(&l.values[0], &aliases, &shadowed);
+                                let cs = expr_const_origins(&l.values[0], &aliases, &shadowed, walk_stack);
                                 for n in &l.names {
                                     if cs.is_empty() {
                                         aliases.remove(n);
@@ -4390,7 +4487,7 @@ impl<'a> Checker<'a> {
                                 }
                             } else {
                                 for (n, v) in l.names.iter().zip(l.values.iter()) {
-                                    let cs = expr_const_origins(v, &aliases, &shadowed);
+                                    let cs = expr_const_origins(v, &aliases, &shadowed, walk_stack);
                                     if cs.is_empty() {
                                         aliases.remove(n);
                                         shadowed.insert(n.clone());
@@ -4405,10 +4502,10 @@ impl<'a> Checker<'a> {
                             targets, values, ..
                         } => {
                             if targets.len() == values.len() {
-                                let rhs_cs: Vec<HashSet<String>> = values
-                                    .iter()
-                                    .map(|v| expr_const_origins(v, &aliases, &shadowed))
-                                    .collect();
+                                let mut rhs_cs = Vec::new();
+                                for v in values {
+                                    rhs_cs.push(expr_const_origins(v, &aliases, &shadowed, walk_stack));
+                                }
                                 for (t, cs) in targets.iter().zip(rhs_cs) {
                                     match &t.kind {
                                         PlaceKind::Ident(n) => {
@@ -4433,7 +4530,7 @@ impl<'a> Checker<'a> {
                                     }
                                 }
                             } else if values.len() == 1 && targets.len() > 1 {
-                                let cs = expr_const_origins(&values[0], &aliases, &shadowed);
+                                let cs = expr_const_origins(&values[0], &aliases, &shadowed, walk_stack);
                                 for t in targets {
                                     if let PlaceKind::Ident(n) = &t.kind {
                                         if cs.is_empty() {
@@ -4463,7 +4560,7 @@ impl<'a> Checker<'a> {
                                 }
                             } else {
                                 for v in values {
-                                    for c in expr_const_origins(v, &aliases, &shadowed) {
+                                    for c in expr_const_origins(v, &aliases, &shadowed, walk_stack) {
                                         if !out.contains(&c) {
                                             out.push(c);
                                         }
@@ -4474,11 +4571,11 @@ impl<'a> Checker<'a> {
                         _ => {}
                     }
                 }
+                walk_stack.remove(&callee_key);
             }
             _ => {}
         }
     }
-
     fn collect_sharing_origins_expr(
         &self,
         cst: &FnState,
