@@ -137,6 +137,10 @@ if [ "$PAYLOAD_BIN" = "$LAUNCHER_BIN" ]; then
     echo "install.sh: HYB_BIN_DIR must differ from HYB_INSTALL_DIR/bin; existing installation preserved" >&2
     exit 1
 fi
+if [ -d "$BIN_DIR/hyb" ]; then
+    echo "install.sh: launcher path is a directory; existing installation preserved" >&2
+    exit 1
+fi
 rm -rf "$INSTALL_DIR/runtime" "$INSTALL_DIR/bin"
 cp -R "$TMP/hybrid-${TAG}/runtime" "$INSTALL_DIR/runtime"
 mkdir -p "$INSTALL_DIR/bin"
@@ -152,7 +156,9 @@ shell_quote() {
     printf "'"
 }
 mkdir -p "$BIN_DIR"
-cat > "$BIN_DIR/hyb" <<LAUNCH
+# Replace the launcher entry instead of following an existing symlink. A link
+# to the payload would otherwise overwrite it with a launcher that execs itself.
+cat > "$TMP/hyb-launcher" <<LAUNCH
 #!/bin/sh
 # Hybrid launcher (installed by install.sh) — wires the packaged runtime.
 HYB_HOME=$(shell_quote "$INSTALL_DIR")
@@ -160,7 +166,8 @@ HYB_HOME=$(shell_quote "$INSTALL_DIR")
 export HYB_RUNTIME_DIR="\${HYB_RUNTIME_DIR:-\$HYB_HOME/runtime}"
 exec "\$HYB_HOME/bin/hyb" "\$@"
 LAUNCH
-chmod +x "$BIN_DIR/hyb"
+chmod +x "$TMP/hyb-launcher"
+mv -f "$TMP/hyb-launcher" "$BIN_DIR/hyb"
 
 # --- verify (hyb explain exits 0; hyb --help exits 2 BY DESIGN) ---
 if "$BIN_DIR/hyb" explain E0002 >/dev/null 2>&1; then

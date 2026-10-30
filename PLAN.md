@@ -1,5 +1,6 @@
 # Hybrid Language: Development Plan
 
+- Contributor PR #1182 revalidation (2026-10-25, PABixn): rebased the installer launcher-symlink fix onto main `1f0ff978f4deff78c77bca96db0e3e46f32de71b` after the queue reset. Against this main, the three symlink regressions fail and the healthy-upgrade control passes; with the fix all 27 offline installer tests pass on macOS (23.771 seconds). `sh -n install.sh` and `git diff --check` pass. Upstream CI and maintainer/bounty review remain required.
 - Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15

@@ -44,7 +44,7 @@ class LauncherRuntimeTests(unittest.TestCase):
         supported_arch = {"x86_64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
         if platform.system() not in supported_os or platform.machine() not in supported_arch:
             self.skipTest("install.sh supports Linux/macOS on amd64/arm64")
-        required_tools = ("sh", "uname", "mktemp", "mkdir", "rm", "tar", "gzip", "cp", "chmod", "cat", "sed", "head")
+        required_tools = ("sh", "uname", "mktemp", "mkdir", "rm", "mv", "tar", "gzip", "cp", "chmod", "cat", "sed", "head")
         system_tools = {
             name: shutil.which(name, path=os.defpath)
             for name in (*required_tools, "sha256sum", "shasum")
