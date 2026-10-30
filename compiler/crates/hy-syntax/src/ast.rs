@@ -643,6 +643,7 @@ pub enum BinOp {
 pub enum UnOp {
     Not,
     Neg,
+    BitNot,
     /// `&x` — also spelled `Expr::AddrOf` (both are legal AST).
     Addr,
 }
@@ -652,6 +653,7 @@ impl UnOp {
         match self {
             UnOp::Not => "!",
             UnOp::Neg => "-",
+            UnOp::BitNot => "^",
             UnOp::Addr => "&",
         }
     }

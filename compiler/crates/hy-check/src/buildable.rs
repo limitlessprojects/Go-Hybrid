@@ -1851,6 +1851,10 @@ impl<'a> Collector<'a> {
             Expr::Unary { op, operand, .. } => match op {
                 UnOp::Addr => OpKind::Pointer(Box::new(self.kind_of_expr(operand))),
                 UnOp::Not => OpKind::Bool,
+                UnOp::BitNot => match self.kind_of_expr(operand) {
+                    OpKind::Int => OpKind::Int,
+                    _ => OpKind::Unknown,
+                },
                 UnOp::Neg => match self.kind_of_expr(operand) {
                     OpKind::Float => OpKind::Float,
                     OpKind::Int => OpKind::Int,
@@ -2783,6 +2787,27 @@ impl<'a> Collector<'a> {
                             k.label()
                         ),
                         "unary `-` is only defined on integer and floating-point values",
+                    );
+                }
+            }
+            UnOp::BitNot => {
+                self.check_single_value_position(operand, "a unary complement", false);
+                let is_nil = matches!(
+                    unwrap_parens(operand),
+                    Expr::Lit {
+                        kind: LitKind::Nil,
+                        ..
+                    }
+                ) || matches!(unwrap_parens(operand), Expr::Ident { name, .. } if name == "nil");
+                if is_nil || !matches!(k, OpKind::Unknown | OpKind::Int) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "operator `^` not defined on `{}` (type `{}`) — unary `^` requires an integer operand (HYB-E1002)",
+                            operand.render(),
+                            k.label()
+                        ),
+                        "unary `^` complements the bits of an integer value",
                     );
                 }
             }

@@ -1716,6 +1716,15 @@ impl Parser {
                     span: self.span_from(start),
                 })
             }
+            Tok::Punct("^") => {
+                self.bump();
+                let operand = Box::new(self.parse_unary(lit)?);
+                Ok(Expr::Unary {
+                    op: UnOp::BitNot,
+                    operand,
+                    span: self.span_from(start),
+                })
+            }
             Tok::Punct("&") => {
                 // `&stats`, `&reg.counters[i]` — AddrOf is THE spelling used
                 // by this parser (synonymous with Unary{Addr} in the contract).

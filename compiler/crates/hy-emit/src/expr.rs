@@ -804,7 +804,9 @@ impl Emitter {
         //     name used to fall through to the verbatim emission below and
         //     die in Go as `undefined: u8`. Issue #147. ---
         if let Expr::Ident { name, .. } = callee {
-            if let Some(go) = super::shapes::go_primitive_name(name) {
+            if let Some(go) = super::shapes::go_primitive_name(name)
+                .filter(|_| !self.local_vars.contains(name) && !self.fn_shapes.contains_key(name))
+            {
                 if args.len() != 1 {
                     return Err(EmitError::unsupported(format!(
                         "`{}` conversion takes exactly one argument",
@@ -817,7 +819,12 @@ impl Emitter {
                 // SPEC-LANGUAGE line 1991 asserts `u8(300) == 44` as an
                 // executable test-claim. The fold computes that same
                 // two's-complement truncation at emit time.
-                if let Some(folded) = super::constconv::fold_constant(&args[0].value, name) {
+                if let Some(folded) =
+                    super::constconv::fold_constant_with(&args[0].value, name, &|candidate| {
+                        !self.local_vars.contains(candidate)
+                            && !self.fn_shapes.contains_key(candidate)
+                    })
+                {
                     return Ok(format!("{}({})", go, folded));
                 }
                 let a = self.emit_call_arg(&args[0])?;

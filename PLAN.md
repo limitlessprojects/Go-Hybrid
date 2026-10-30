@@ -1,5 +1,16 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — 2026-10-28
+
+- Implement the already documented unary integer `^` operator through parsing,
+  type checking, constant folding and Go emission. Preserve unsigned widths,
+  reject invalid operands, and retain function/local name shadowing in nested
+  conversions. Oversized literal operands retain overflow diagnostics.
+- Local validation on darwin/arm64 with Go 1.26.9 and Rust 1.99.0:
+  workspace 1,811 tests passed; 33 independent cases matched Go. The original
+  `^x` repro rejected with HYB-E0002 at main `1f0ff978`; the fix builds and
+  prints `-4`. Upstream CI, merge and any bounty decision remain pending.
+
 - Contributor amendment (2026-10-19, #656): current main already rejects direct pointer-receiver calls on map reads, call results, and literals. Apply its existing addressability rule when selecting method values and task callees too, preserving all other receiver rules. Regression suite covers the two residual defects and addressable controls (19 tests); full workspace/corpus/differential and CI verification remain delivery gates.
 - Contributor validation (2026-10-15): runner now checks linked-worktree Git metadata before setup/commands; wrong SHA and broken gitfile fail closed. Real-worktree regressions plus existing runner/SHA suites: 13 tests passed.
 ## Contributor validation — 2026-10-15

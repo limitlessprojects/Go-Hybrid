@@ -76,7 +76,7 @@ impl<'a> Checker<'a> {
         let Some((lo, hi)) = fixed_width_int_range(ty_name) else {
             return;
         };
-        match const_int_fold_with(value, &self.const_values, 0, st) {
+        match self.fold_int(value, st) {
             ConstFold::NotConst => {}
             ConstFold::TooBig => {
                 let span = value.span();
@@ -229,7 +229,7 @@ impl<'a> Checker<'a> {
         let Some((lo, hi)) = fixed_width_int_range(ty_name) else {
             return;
         };
-        match const_int_fold_with(value, &self.const_values, 0, st) {
+        match self.fold_int(value, st) {
             ConstFold::NotConst => {}
             ConstFold::TooBig => {
                 let span = value.span();
@@ -326,7 +326,7 @@ impl<'a> Checker<'a> {
         st: Option<&FnState>,
     ) {
         let (lo, hi) = target_int_range();
-        match const_int_fold_with(value, &self.const_values, 0, st) {
+        match self.fold_int(value, st) {
             ConstFold::NotConst => return,
             ConstFold::Val(v) if v >= lo && v <= hi => return,
             ConstFold::Val(_) | ConstFold::TooBig => {}
@@ -387,6 +387,10 @@ impl<'a> Checker<'a> {
     /// Fold a constant float expression (literals, identifiers, unary, binary).
     pub(crate) fn const_float_fold(&self, e: &Expr, st: Option<&FnState>) -> Option<f64> {
         const_float_fold_with(e, &self.const_values, 0, st)
+    }
+
+    pub(crate) fn fold_int(&self, e: &Expr, st: Option<&FnState>) -> ConstFold {
+        const_int_fold_with_file(e, &self.const_values, 0, st, Some(self.file))
     }
 
     // -----------------------------------------------------------------------
@@ -984,6 +988,12 @@ fn conv_const(e: &Expr) -> Option<ConvConst> {
             ConvConst::Huge { f, lt_512 } => Some(ConvConst::Huge { f: -f, lt_512 }),
             other => Some(other),
         },
+        Expr::Unary {
+            op: UnOp::BitNot, ..
+        } => match const_int_fold(e) {
+            ConstFold::Val(value) => Some(ConvConst::Int(value)),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -1147,6 +1157,19 @@ pub(crate) fn const_int_fold_with(
     depth: u32,
     st: Option<&FnState>,
 ) -> ConstFold {
+    const_int_fold_with_file(e, consts, depth, st, None)
+}
+
+pub(crate) fn const_int_fold_with_file(
+    e: &Expr,
+    consts: &HashMap<String, &Expr>,
+    depth: u32,
+    st: Option<&FnState>,
+    file: Option<&hy_syntax::File>,
+) -> ConstFold {
+    if depth > 32 {
+        return ConstFold::NotConst;
+    }
     match unwrap_parens(e) {
         Expr::Lit {
             kind: LitKind::Int(s),
@@ -1171,7 +1194,7 @@ pub(crate) fn const_int_fold_with(
                     // The function state guards the identifier at the *use
                     // site* only: a const's own initializer refers to the
                     // file-level scope, so expand it without `st`.
-                    return const_int_fold_with(v, consts, depth + 1, None);
+                    return const_int_fold_with_file(v, consts, depth + 1, None, file);
                 }
             }
             ConstFold::NotConst
@@ -1180,14 +1203,36 @@ pub(crate) fn const_int_fold_with(
             op: UnOp::Neg,
             operand,
             ..
-        } => match const_int_fold_with(operand, consts, depth + 1, st) {
-            ConstFold::Val(v) => v.checked_neg().map(ConstFold::Val).unwrap_or(ConstFold::TooBig),
+        } => match const_int_fold_with_file(operand, consts, depth + 1, st, file) {
+            ConstFold::Val(v) => v
+                .checked_neg()
+                .map(ConstFold::Val)
+                .unwrap_or(ConstFold::TooBig),
             ConstFold::NotConst => ConstFold::NotConst,
             ConstFold::TooBig => ConstFold::TooBig,
         },
+        Expr::Unary {
+            op: UnOp::BitNot,
+            operand,
+            ..
+        } => {
+            let value = match const_int_fold_with_file(operand, consts, depth + 1, st, file) {
+                ConstFold::Val(value) => value,
+                ConstFold::TooBig => {
+                    // Only a literal gives an exact magnitude claim here. A
+                    // compound TooBig is approximate and may cancel to zero.
+                    return complement_large_literal(operand).unwrap_or(ConstFold::NotConst);
+                }
+                ConstFold::NotConst => return ConstFold::NotConst,
+            };
+            match int_const_range(operand, file, depth + 1, st) {
+                Some(range) => ConstFold::Val(complement_int(value, range)),
+                None => ConstFold::NotConst,
+            }
+        }
         Expr::Binary { op, lhs, rhs, .. } => {
-            let l = const_int_fold_with(lhs, consts, depth + 1, st);
-            let r = const_int_fold_with(rhs, consts, depth + 1, st);
+            let l = const_int_fold_with_file(lhs, consts, depth + 1, st, file);
+            let r = const_int_fold_with_file(rhs, consts, depth + 1, st, file);
             fold_bin(*op, l, r)
         }
         // A fixed-width integer conversion of a constant is ITSELF a
@@ -1207,16 +1252,193 @@ pub(crate) fn const_int_fold_with(
             let Expr::Ident { name, .. } = unwrap_parens(callee) else {
                 return ConstFold::NotConst;
             };
-            let Some((lo, hi)) = fixed_width_int_range(name) else {
+            let Some((lo, hi)) = integer_type_range(name, file, 0) else {
                 return ConstFold::NotConst;
             };
-            match const_int_fold_with(&args[0].value, consts, depth + 1, st) {
+            match const_int_fold_with_file(&args[0].value, consts, depth + 1, st, file) {
                 ConstFold::Val(v) => ConstFold::Val(wrap_into(v, lo, hi)),
                 ConstFold::TooBig => ConstFold::TooBig,
                 ConstFold::NotConst => ConstFold::NotConst,
             }
         }
         _ => ConstFold::NotConst,
+    }
+}
+
+fn complement_large_literal(operand: &Expr) -> Option<ConstFold> {
+    let (literal, negated) = match unwrap_parens(operand) {
+        Expr::Lit {
+            kind: LitKind::Int(raw),
+            ..
+        } => (raw, false),
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => {
+            let Expr::Lit {
+                kind: LitKind::Int(raw),
+                ..
+            } = unwrap_parens(operand)
+            else {
+                return None;
+            };
+            (raw, true)
+        }
+        _ => return None,
+    };
+    match parse_int_lit(literal)? {
+        ConstInt::Value(_) => None,
+        ConstInt::PosOverflow if negated => {
+            // The positive token 2^127 is out of range, but -2^127 is
+            // i128::MIN and its complement is exactly i128::MAX.
+            let clean = literal.replace('_', "");
+            let (radix, digits) = if let Some(s) = clean
+                .strip_prefix("0x")
+                .or_else(|| clean.strip_prefix("0X"))
+            {
+                (16, s)
+            } else if let Some(s) = clean
+                .strip_prefix("0b")
+                .or_else(|| clean.strip_prefix("0B"))
+            {
+                (2, s)
+            } else if let Some(s) = clean
+                .strip_prefix("0o")
+                .or_else(|| clean.strip_prefix("0O"))
+            {
+                (8, s)
+            } else if clean.len() > 1 && clean.starts_with('0') {
+                (8, clean.as_str())
+            } else {
+                (10, clean.as_str())
+            };
+            if u128::from_str_radix(digits, radix) == Ok(1u128 << 127) {
+                Some(ConstFold::Val(i128::MAX))
+            } else {
+                Some(ConstFold::TooBig)
+            }
+        }
+        ConstInt::PosOverflow | ConstInt::NegOverflow => Some(ConstFold::TooBig),
+    }
+}
+
+/// Go's complement uses an all-ones mask of the operand's width for unsigned
+/// integers, and an infinite signed mask for signed or untyped integers.
+pub(crate) fn complement_int(value: i128, range: Option<(i128, i128)>) -> i128 {
+    match range {
+        Some((0, max)) => (!value) & max,
+        _ => !value,
+    }
+}
+
+pub(crate) fn integer_type_range(
+    name: &str,
+    file: Option<&hy_syntax::File>,
+    depth: u32,
+) -> Option<(i128, i128)> {
+    if depth > 32 {
+        return None;
+    }
+    if let Some(file) = file {
+        if let Some(alias) = file.decls.iter().find_map(|d| match d {
+            hy_syntax::Decl::TypeAlias(t) if t.name == name => Some(t),
+            _ => None,
+        }) {
+            return match &alias.ty {
+                TypeExpr::Named { name, .. } => integer_type_range(name, Some(file), depth + 1),
+                _ => None,
+            };
+        }
+        if file
+            .decls
+            .iter()
+            .any(|d| matches!(d, hy_syntax::Decl::Fn(f) if f.name == name))
+        {
+            return None;
+        }
+    }
+    fixed_width_int_range(name)
+}
+
+/// `Some(None)` is an untyped integer; `None` means its type is unknown.
+/// Keeping those separate prevents a named unsigned constant being folded as
+/// a signed value when its declaration is unavailable to a context-free fold.
+pub(crate) fn int_const_range(
+    e: &Expr,
+    file: Option<&hy_syntax::File>,
+    depth: u32,
+    st: Option<&FnState>,
+) -> Option<Option<(i128, i128)>> {
+    if depth > 32 {
+        return None;
+    }
+    match unwrap_parens(e) {
+        Expr::Lit {
+            kind: LitKind::Int(_) | LitKind::Char(_),
+            ..
+        } => Some(None),
+        Expr::Ident { name, .. } => {
+            if let Some(binding) = st.and_then(|s| s.env_lookup(name)) {
+                return match &binding.ty {
+                    Some(TypeExpr::Named { name, .. }) => {
+                        integer_type_range(name, file, 0).map(Some)
+                    }
+                    _ => None,
+                };
+            }
+            let declaration = file?.decls.iter().find_map(|d| match d {
+                hy_syntax::Decl::Const(c) if c.name == *name => Some(c),
+                _ => None,
+            })?;
+            if let Some(ty) = &declaration.ty {
+                return match ty {
+                    TypeExpr::Named { name, .. } => integer_type_range(name, file, 0).map(Some),
+                    _ => None,
+                };
+            }
+            int_const_range(&declaration.value, file, depth + 1, None)
+        }
+        Expr::Call { callee, args, .. } if args.len() == 1 && !args[0].spread => {
+            let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+                return None;
+            };
+            if st.is_some_and(|s| s.env_lookup(name).is_some()) {
+                return None;
+            }
+            integer_type_range(name, file, 0).map(Some)
+        }
+        Expr::Unary {
+            op: UnOp::Neg | UnOp::BitNot,
+            operand,
+            ..
+        } => int_const_range(operand, file, depth + 1, st),
+        Expr::Binary { op, lhs, rhs, .. } => {
+            let left = int_const_range(lhs, file, depth + 1, st)?;
+            if matches!(op, BinOp::Shl | BinOp::Shr) {
+                return Some(left);
+            }
+            if matches!(
+                op,
+                BinOp::Eq
+                    | BinOp::Ne
+                    | BinOp::Lt
+                    | BinOp::Le
+                    | BinOp::Gt
+                    | BinOp::Ge
+                    | BinOp::And
+                    | BinOp::Or
+            ) {
+                return None;
+            }
+            let right = int_const_range(rhs, file, depth + 1, st)?;
+            match (left, right) {
+                (Some(a), Some(b)) if a != b => None,
+                (Some(a), _) | (_, Some(a)) => Some(Some(a)),
+                _ => Some(None),
+            }
+        }
+        _ => None,
     }
 }
 

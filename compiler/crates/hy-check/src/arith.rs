@@ -64,6 +64,7 @@ impl<'a> Checker<'a> {
                             &self.const_values,
                             st,
                             &self.zd_defined,
+                            self.file,
                         ))
                 {
                     self.emit_const_zero_divisor(*span, assign_op_txt(*op));
@@ -204,10 +205,26 @@ impl<'a> Checker<'a> {
                     // the literal twin. Shadow-checked against the live env;
                     // names defined inside a deep-walked closure body fail open
                     // (`self.zd_defined`). Runtime divisors stay out of scope.
-                    if divisor_int_fold_is_zero(rhs, &self.const_values, st, &self.zd_defined)
-                        || is_float_literal_zero(rhs) && is_const_expr(lhs)
-                        || divisor_float_fold_is_zero(rhs, &self.const_values, st, &self.zd_defined)
-                            && is_const_map_expr(lhs, &self.const_values, st, &self.zd_defined)
+                    if divisor_int_fold_is_zero(
+                        rhs,
+                        &self.const_values,
+                        st,
+                        &self.zd_defined,
+                        self.file,
+                    ) || is_float_literal_zero(rhs) && is_const_expr(lhs)
+                        || divisor_float_fold_is_zero(
+                            rhs,
+                            &self.const_values,
+                            st,
+                            &self.zd_defined,
+                            self.file,
+                        ) && is_const_map_expr(
+                            lhs,
+                            &self.const_values,
+                            st,
+                            &self.zd_defined,
+                            self.file,
+                        )
                     {
                         self.emit_const_zero_divisor(*span, bin_op_txt(*op));
                     }
@@ -379,6 +396,7 @@ pub(crate) fn const_eval_int(expr: &Expr) -> Option<i128> {
             let val = const_eval_int(operand)?;
             match op {
                 UnOp::Neg => val.checked_neg(),
+                UnOp::BitNot => Some(!val),
                 _ => None,
             }
         }
@@ -702,8 +720,9 @@ fn divisor_int_fold(
     st: &crate::model::FnState,
     defined: &std::collections::HashSet<String>,
     depth: u32,
+    file: &hy_syntax::File,
 ) -> crate::const_overflow::ConstFold {
-    use crate::const_overflow::{const_int_fold_with, ConstFold};
+    use crate::const_overflow::{ConstFold, const_int_fold_with_file};
     if depth > 16 {
         return ConstFold::NotConst;
     }
@@ -717,16 +736,16 @@ fn divisor_int_fold(
                 return ConstFold::NotConst;
             }
             if let Some(v) = consts.get(name.as_str()) {
-                return divisor_int_fold(v, consts, st, defined, depth + 1);
+                return divisor_int_fold(v, consts, st, defined, depth + 1, file);
             }
             ConstFold::NotConst
         }
         Expr::Binary { op, lhs, rhs, .. } => {
-            let l = divisor_int_fold(lhs, consts, st, defined, depth + 1);
-            let r = divisor_int_fold(rhs, consts, st, defined, depth + 1);
+            let l = divisor_int_fold(lhs, consts, st, defined, depth + 1, file);
+            let r = divisor_int_fold(rhs, consts, st, defined, depth + 1, file);
             crate::const_overflow::fold_bin(*op, l, r)
         }
-        _ => const_int_fold_with(e, consts, depth, Some(st)),
+        _ => const_int_fold_with_file(e, consts, depth, Some(st), Some(file)),
     }
 }
 
@@ -735,9 +754,10 @@ fn divisor_int_fold_is_zero(
     consts: &std::collections::HashMap<String, &Expr>,
     st: &crate::model::FnState,
     defined: &std::collections::HashSet<String>,
+    file: &hy_syntax::File,
 ) -> bool {
     matches!(
-        divisor_int_fold(e, consts, st, defined, 0),
+        divisor_int_fold(e, consts, st, defined, 0, file),
         crate::const_overflow::ConstFold::Val(0)
     )
 }
@@ -750,6 +770,7 @@ fn divisor_float_conv_zero(
     st: &crate::model::FnState,
     defined: &std::collections::HashSet<String>,
     depth: u32,
+    file: &hy_syntax::File,
 ) -> bool {
     if depth > 16 {
         return false;
@@ -759,7 +780,7 @@ fn divisor_float_conv_zero(
             if let Expr::Ident { name, .. } = unwrap_parens(callee) {
                 if matches!(name.as_str(), "f32" | "f64" | "float32" | "float64") {
                     let a = &args[0].value;
-                    if divisor_int_fold_is_zero(a, consts, st, defined) {
+                    if divisor_int_fold_is_zero(a, consts, st, defined, file) {
                         return true;
                     }
                     if matches!(
@@ -780,8 +801,9 @@ fn divisor_float_fold_is_zero(
     consts: &std::collections::HashMap<String, &Expr>,
     st: &crate::model::FnState,
     defined: &std::collections::HashSet<String>,
+    file: &hy_syntax::File,
 ) -> bool {
-    if divisor_float_conv_zero(e, consts, st, defined, 0) {
+    if divisor_float_conv_zero(e, consts, st, defined, 0, file) {
         return true;
     }
     matches!(
@@ -797,12 +819,13 @@ fn is_const_map_expr(
     consts: &std::collections::HashMap<String, &Expr>,
     st: &crate::model::FnState,
     defined: &std::collections::HashSet<String>,
+    file: &hy_syntax::File,
 ) -> bool {
     if is_const_expr(e) {
         return true;
     }
     !matches!(
-        divisor_int_fold(e, consts, st, defined, 0),
+        divisor_int_fold(e, consts, st, defined, 0, file),
         crate::const_overflow::ConstFold::NotConst
     ) || crate::const_overflow::const_float_fold_with(e, consts, 0, Some(st)).is_some()
 }

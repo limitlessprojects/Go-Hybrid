@@ -299,12 +299,7 @@ impl<'a> Checker<'a> {
             return;
         };
         for (bound, role) in [(lo, "lo"), (hi, "hi")] {
-            let overflows = match crate::const_overflow::const_int_fold_with(
-                bound,
-                &self.const_values,
-                0,
-                Some(st),
-            ) {
+            let overflows = match self.fold_int(bound, Some(st)) {
                 crate::const_overflow::ConstFold::Val(v) => v < clo || v > chi,
                 crate::const_overflow::ConstFold::TooBig => true,
                 crate::const_overflow::ConstFold::NotConst => false,

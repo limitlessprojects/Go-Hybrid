@@ -372,6 +372,11 @@ FuncLit      = "fn" [ Signature ] Block .
 ArgList      = Expression { "," Expression } [ "," ] | Expression "=" Expression { "," … } .
 ```
 
+Unary `^` is Go's integer bitwise complement, with unary precedence:
+`^3` is `-4`, while a typed unsigned operand keeps its width
+(`^u8(0)` is `255`). Boolean, string, and floating-point operands are
+invalid. Binary `^` remains the additive-precedence exclusive-or operator.
+
 **LX17 — `?` (the try operator).** Postfix on an expression whose type is a
 multi-value result ending in `error`; it yields the non-error results and
 propagates the error (E3). Highest-binding postfix; `f()?` is one operand.

@@ -19,8 +19,8 @@
 //! exactly once via `Expr::FnLit`.
 
 use crate::const_overflow::{
-    const_float_value, const_int_fold_with, const_int_value, fixed_width_int_range, fold_bin,
-    parse_int_lit, ConstFold, ConstInt,
+    ConstFold, ConstInt, const_float_value, const_int_value, fixed_width_int_range, fold_bin,
+    parse_int_lit,
 };
 use crate::model::{as_addr_of, unwrap_parens, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};
@@ -1398,7 +1398,55 @@ impl<'a> Checker<'a> {
         self.const_int_value_at(&d.value, d.span.start, depth + 1)
     }
 
-    pub(crate) fn const_int_value_at(&self, expr: &Expr, use_pos: hy_diag::Pos, depth: usize) -> Option<i128> {
+    fn complement_operand_range_at(
+        &self,
+        expr: &Expr,
+        depth: usize,
+    ) -> Option<Option<(i128, i128)>> {
+        if depth > 32 {
+            return None;
+        }
+        match unwrap_parens(expr) {
+            Expr::Ident { name, span } => {
+                if let Some(sight) = self.resolve_local_binding_at(name, span.start) {
+                    if let Some(ty) = &sight.ty {
+                        return match self.resolve_type_alias(ty) {
+                            TypeExpr::Named { name, .. } => fixed_width_int_range(&name).map(Some),
+                            _ => None,
+                        };
+                    }
+                    return self
+                        .complement_operand_range_at(sight.constant_initializer()?, depth + 1);
+                }
+            }
+            Expr::Unary {
+                op: UnOp::Neg | UnOp::BitNot,
+                operand,
+                ..
+            } => return self.complement_operand_range_at(operand, depth + 1),
+            Expr::Binary { op, lhs, rhs, .. } => {
+                let left = self.complement_operand_range_at(lhs, depth + 1)?;
+                if matches!(op, BinOp::Shl | BinOp::Shr) {
+                    return Some(left);
+                }
+                let right = self.complement_operand_range_at(rhs, depth + 1)?;
+                return match (left, right) {
+                    (Some(a), Some(b)) if a != b => None,
+                    (Some(a), _) | (_, Some(a)) => Some(Some(a)),
+                    _ => Some(None),
+                };
+            }
+            _ => {}
+        }
+        crate::const_overflow::int_const_range(expr, Some(self.file), depth as u32, None)
+    }
+
+    pub(crate) fn const_int_value_at(
+        &self,
+        expr: &Expr,
+        use_pos: hy_diag::Pos,
+        depth: usize,
+    ) -> Option<i128> {
         if depth > 32 {
             return None;
         }
@@ -1443,6 +1491,15 @@ impl<'a> Checker<'a> {
             } => self
                 .const_int_value_at(operand, use_pos, depth)
                 .and_then(|v| v.checked_neg()),
+            Expr::Unary {
+                op: hy_syntax::UnOp::BitNot,
+                operand,
+                ..
+            } => {
+                let value = self.const_int_value_at(operand, use_pos, depth + 1)?;
+                let range = self.complement_operand_range_at(operand, depth + 1)?;
+                Some(crate::const_overflow::complement_int(value, range))
+            }
             Expr::Binary { op, lhs, rhs, .. } => {
                 let l = self.const_int_value_at(lhs, use_pos, depth)?;
                 let r = self.const_int_value_at(rhs, use_pos, depth)?;
@@ -2033,6 +2090,14 @@ impl<'a> Checker<'a> {
     /// gates a diagnostic, so an unknown shape must fail open.
     fn fixed_width_int_ty_of(&self, st: &FnState, e: &Expr) -> Option<(String, i128, i128)> {
         let e = unwrap_parens(e);
+        if let Expr::Unary {
+            op: UnOp::BitNot,
+            operand,
+            ..
+        } = e
+        {
+            return self.fixed_width_int_ty_of(st, operand);
+        }
         if let Some(ty) = self.ty_of_expr(st, e) {
             if let TypeExpr::Named { name, .. } = self.resolve_type_alias(&ty) {
                 if let Some((lo, hi)) = fixed_width_int_range(&name) {
@@ -2108,8 +2173,8 @@ impl<'a> Checker<'a> {
             return;
         };
 
-        let l = const_int_fold_with(lhs, &self.const_values, 0, Some(st));
-        let r = const_int_fold_with(rhs, &self.const_values, 0, Some(st));
+        let l = self.fold_int(lhs, Some(st));
+        let r = self.fold_int(rhs, Some(st));
         match fold_bin(op, l, r) {
             ConstFold::Val(v) if v < lo || v > hi => {
                 self.emit_typed_const_overflow(&ty_name, Some(v), lo, hi, span, expr);
@@ -2128,8 +2193,7 @@ impl<'a> Checker<'a> {
         let Some((ty_name, lo, hi)) = self.fixed_width_int_ty_of(st, operand) else {
             return;
         };
-        let ConstFold::Val(v) = const_int_fold_with(operand, &self.const_values, 0, Some(st))
-        else {
+        let ConstFold::Val(v) = self.fold_int(operand, Some(st)) else {
             return;
         };
         let Some(neg) = v.checked_neg() else {
@@ -2322,6 +2386,9 @@ impl<'a> Checker<'a> {
             Expr::Unary { op, operand, .. } => {
                 let v = self.fold_const_key(operand, st, depth + 1)?;
                 match op {
+                    UnOp::BitNot => self
+                        .const_int_value_at(expr, expr.span().start, 0)
+                        .map(ConstKeyVal::Int),
                     UnOp::Neg => match v {
                         ConstKeyVal::Int(i) => i.checked_neg().map(ConstKeyVal::Int),
                         ConstKeyVal::Float(bits) => {

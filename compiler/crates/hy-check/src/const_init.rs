@@ -66,7 +66,7 @@ impl<'a> Checker<'a> {
         match unwrap_parens(e) {
             Expr::Lit { kind, .. } => !matches!(kind, LitKind::Nil),
             Expr::Unary {
-                op: UnOp::Neg | UnOp::Not,
+                op: UnOp::Neg | UnOp::Not | UnOp::BitNot,
                 operand,
                 ..
             } => self.expr_is_constant_inner(operand, st, visiting, ref_depth),
