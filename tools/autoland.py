@@ -36,6 +36,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -142,7 +143,7 @@ def log_event(token_env: str, event: str, verdict: str, note: str, issue: int | 
     cmd = ["python3", "tools/shepherd.py", "--token-env", token_env, "log",
            "--event", event, "--verdict", verdict, "--note", note]
     if issue:
-        cmd += ["--issue", str(issue)]
+        cmd += ["--pr", str(issue)]
     sh(cmd)
 
 
@@ -163,9 +164,13 @@ def run_bundle(slug: str, live: bool, token_env: str) -> int:
     build()
     code, out = check_repro(repro_rel)
     if code != 0:
-        log_event(token_env, "autoland", "stale-premise",
-                  f"#{issue}: repro REJECTs on main (exit {code}) — stale or already fixed", issue, live=live)
-        return die("STALE-PREMISE", slug, f"repro rejects on main (exit {code}) — nothing landed", 3)
+        if code == 1:
+            log_event(token_env, "autoland", "stale-premise",
+                      f"#{issue}: repro REJECTs on main (exit {code}) — stale or already fixed", issue, live=live)
+            return die("STALE-PREMISE", slug, f"repro rejects on main (exit {code}) — nothing landed", 3)
+        log_event(token_env, "autoland", "blocked",
+                  f"#{issue}: checker failed during baseline (exit {code})", issue, live=live)
+        return die("CHECKER-FAILED", slug, f"checker failed during baseline (exit {code}): {out[:300]}", 8)
 
     if not live:
         print(f"AUTOLAND-DRYRUN: {slug} baseline ACCEPT ok — SHEPHERD_MODE!=live, stopping before apply")
@@ -182,7 +187,12 @@ def run_bundle(slug: str, live: bool, token_env: str) -> int:
         if code == 0:
             log_event(token_env, "autoland", "blocked", f"#{issue}: patch applied but repro still ACCEPTs — ineffective", issue, live=live)
             return die("INEFFECTIVE", slug, "repro still ACCEPTs after patch — nothing landed", 5)
-        if expected and expected not in out:
+        if code != 1:
+            log_event(token_env, "autoland", "blocked", f"#{issue}: checker failed after patch (exit {code})", issue, live=live)
+            return die("CHECKER-FAILED", slug, f"checker failed after patch (exit {code}): {out[:300]}", 8)
+        if expected and not re.search(
+            rf"(?<![\w-]){re.escape(expected)}(?![\w-])", out
+        ):
             log_event(token_env, "autoland", "blocked", f"#{issue}: repro rejected but without expected code {expected}", issue, live=live)
             return die("WRONG-CODE", slug, f"expected {expected} in diagnostics, got: {out[:300]}", 6)
 

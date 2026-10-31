@@ -28,6 +28,12 @@ SPECIALIZED_SPEC = importlib.util.spec_from_file_location(
 SPECIALIZED = importlib.util.module_from_spec(SPECIALIZED_SPEC)
 SPECIALIZED_SPEC.loader.exec_module(SPECIALIZED)
 
+AUTOLAND_SPEC = importlib.util.spec_from_file_location(
+    "autoland_subject", Path(__file__).with_name("autoland.py")
+)
+AUTOLAND = importlib.util.module_from_spec(AUTOLAND_SPEC)
+AUTOLAND_SPEC.loader.exec_module(AUTOLAND)
+
 CONTROL = "tests/checker-corpus/accept.hy"
 DIFF = """diff --git a/compiler/example.rs b/compiler/example.rs
 --- a/compiler/example.rs
@@ -224,6 +230,118 @@ class SpecializedReproVerdictTests(unittest.TestCase):
         by_path = {path: new for path, _old, new, *_rest in edits}
         for path, exp_new in expected.items():
             self.assertEqual(by_path[path], exp_new, f"dual-count drift in {path}")
+
+
+class AutolandReproVerdictTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="autoland-verdict-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.queue = self.root / "automation/land-queue"
+        self.slug = "bundle-123"
+        self.bundle_dir = self.queue / self.slug
+        self.bundle_dir.mkdir(parents=True, exist_ok=True)
+        self.git("init", "-q")
+        self.git("config", "user.name", "Test Fixture")
+        self.git("config", "user.email", "fixture@example.invalid")
+        self.write("compiler/example.rs", "// before\n")
+        self.commit()
+
+    def git(self, *args):
+        return subprocess.run(
+            ["git", *args], cwd=self.root, check=True, capture_output=True,
+            text=True, timeout=10,
+        )
+
+    def write(self, path, content):
+        target = self.root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+    def commit(self):
+        self.git("add", ".")
+        self.git("commit", "-qm", "fixture")
+
+    def run_autoland(self, baseline_res=(0, ""), patched_res=(1, "error[HYB-E6002]: rejected"), expected="HYB-E6002"):
+        self.git("checkout", "--", ".")
+        self.git("clean", "-fd")
+        self.bundle_dir.mkdir(parents=True, exist_ok=True)
+        meta = {
+            "issue": 123,
+            "expected_code": expected,
+            "basis": "autoland-test",
+            "status": "pending",
+        }
+        (self.bundle_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+        (self.bundle_dir / "fix.patch").write_text(DIFF)
+        (self.bundle_dir / "repro.hy").write_text("fn main() {}\n")
+
+        original_sh = AUTOLAND.sh
+        call_count = [0]
+
+        def fake_check_repro(repro_rel):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return baseline_res
+            return patched_res
+
+        def shell(args, **kwargs):
+            if args[:2] == ["git", "push"]:
+                return subprocess.CompletedProcess(args, 0, "", "")
+            return original_sh(args, **kwargs)
+
+        with contextlib.ExitStack() as stack:
+            for name, value in {
+                "ROOT": self.root, "COMPILER": self.root / "compiler",
+                "QUEUE": self.queue, "build": lambda: None,
+                "check_repro": fake_check_repro,
+                "battery": lambda: [("mock_gate", True, "")],
+                "land_commit": lambda slug, meta, repro: "1234567890abcdef",
+            }.items():
+                stack.enter_context(patch.object(AUTOLAND, name, value))
+            stack.enter_context(patch.object(AUTOLAND, "sh", side_effect=shell))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            result = AUTOLAND.run_bundle(self.slug, live=True, token_env="TEST_TOKEN")
+        return result
+
+    def test_baseline_exit_one_is_stale_premise(self):
+        result = self.run_autoland(baseline_res=(1, "error[HYB-E6002]: already rejects"))
+        self.assertEqual(result, 3)
+
+    def test_baseline_exit_two_is_checker_failed(self):
+        result = self.run_autoland(baseline_res=(2, "hyb: missing file or I/O error"))
+        self.assertEqual(result, 8)
+
+    def test_patched_exit_two_or_signal_is_checker_failed(self):
+        result_exit2 = self.run_autoland(baseline_res=(0, ""), patched_res=(2, "error[HYB-E6002]: crash"))
+        self.assertEqual(result_exit2, 8)
+        result_sig = self.run_autoland(baseline_res=(0, ""), patched_res=(-15, "error[HYB-E6002]: killed"))
+        self.assertEqual(result_sig, 8)
+
+    def test_patched_longer_code_prefix_is_wrong_code(self):
+        result = self.run_autoland(baseline_res=(0, ""), patched_res=(1, "error[HYB-E60020]: different error"))
+        self.assertEqual(result, 6)
+
+    def test_exact_rejection_lands_successfully(self):
+        result = self.run_autoland(baseline_res=(0, ""), patched_res=(1, "error[HYB-E6002]: exact match"))
+        self.assertEqual(result, 0)
+        meta = json.loads((self.bundle_dir / "meta.json").read_text())
+        self.assertEqual(meta["status"], "landed")
+        self.assertEqual(meta["landedSha"], "1234567890abcdef")
+
+    def test_log_event_forwards_pr_not_issue(self):
+        recorded_cmd = []
+
+        def fake_sh(cmd):
+            recorded_cmd.extend(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with patch.object(AUTOLAND, "sh", side_effect=fake_sh):
+            AUTOLAND.log_event("TEST_TOKEN", "autoland", "landed", "test note", issue=123, live=True)
+
+        self.assertIn("--pr", recorded_cmd)
+        self.assertIn("123", recorded_cmd)
+        self.assertNotIn("--issue", recorded_cmd)
 
 
 if __name__ == "__main__":
