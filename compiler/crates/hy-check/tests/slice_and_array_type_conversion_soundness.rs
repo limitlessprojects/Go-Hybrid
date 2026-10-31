@@ -105,3 +105,37 @@ fn valid_byte_and_rune_slice_conversions_accept() {
     let r = check(src);
     assert_eq!(r.verdict, Verdict::Accept, "expected accept, got diagnostics: {:?}", r.diagnostics);
 }
+
+#[test]
+fn slice_conversion_from_incompatible_slice_element_rejects_e1002() {
+    let src = "fn main() {\n    var s []string = []string{\"alpha\", \"beta\"}\n    _ = []int(s)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+    assert!(r.diagnostics.iter().any(|d| d.message.contains("cannot convert `s` (type `[]string`) to `[]int`")));
+}
+
+#[test]
+fn slice_byte_conversion_from_int_slice_rejects_e1002() {
+    let src = "fn main() {\n    var s []int = []int{1, 2}\n    _ = []byte(s)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+    assert!(r.diagnostics.iter().any(|d| d.message.contains("cannot convert `s` (type `[]int`) to `[]byte`")));
+}
+
+#[test]
+fn slice_same_element_conversion_accepts() {
+    let src = "fn main() {\n    var s []int = []int{1, 2}\n    _ = []int(s)\n    var b []byte = []byte(\"hi\")\n    _ = []uint8(b)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Accept, "expected accept, got diagnostics: {:?}", r.diagnostics);
+}
+
+#[test]
+fn slice_conversion_from_literal_incompatible_element_rejects_e1002() {
+    let src = "fn main() {\n    _ = []int([]string{\"a\", \"b\"})\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+

@@ -175,6 +175,33 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
     }
 }
 
+fn canonical_elem_type(name: &str) -> &str {
+    match name {
+        "byte" | "uint8" | "u8" => "byte",
+        "rune" | "int32" | "i32" => "rune",
+        "i64" => "int64",
+        "u64" => "uint64",
+        "i16" => "int16",
+        "u16" => "uint16",
+        "i8" => "int8",
+        "f32" => "float32",
+        "f64" => "float64",
+        "str" => "string",
+        other => other,
+    }
+}
+
+fn are_identical_elem_types(mut a: &str, mut b: &str) -> bool {
+    while a.starts_with("[]") && b.starts_with("[]") {
+        a = &a[2..];
+        b = &b[2..];
+    }
+    if a.starts_with("[]") || b.starts_with("[]") {
+        return false;
+    }
+    canonical_elem_type(a) == canonical_elem_type(b)
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -365,6 +392,8 @@ struct Collector<'a> {
     scopes: Vec<HashMap<String, Option<usize>>>,
     /// Parallel lexical scope stack tracking resolved operand kinds (#425).
     kind_scopes: Vec<HashMap<String, OpKind>>,
+    /// Parallel lexical scope stack tracking declared slice element type names.
+    slice_elem_scopes: Vec<HashMap<String, String>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
     /// Result kinds of the function whose body is currently being walked
@@ -401,6 +430,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             ck,
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
+            slice_elem_scopes: Vec::new(),
             file_consts: HashMap::new(),
             fn_results: Vec::new(),
             fn_results_all_named: false,
@@ -458,11 +488,13 @@ impl<'a> Collector<'a> {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.kind_scopes.push(HashMap::new());
+        self.slice_elem_scopes.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.kind_scopes.pop();
+        self.slice_elem_scopes.pop();
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -479,6 +511,62 @@ impl<'a> Collector<'a> {
             if let Some(top) = self.kind_scopes.last_mut() {
                 top.insert(name.to_string(), kind);
             }
+        }
+    }
+
+    fn bind_slice_elem(&mut self, name: &str, elem: String) {
+        if name != "_" {
+            if let Some(top) = self.slice_elem_scopes.last_mut() {
+                top.insert(name.to_string(), elem);
+            }
+        }
+    }
+
+    fn lookup_slice_elem(&self, name: &str) -> Option<String> {
+        for layer in self.slice_elem_scopes.iter().rev() {
+            if let Some(elem) = layer.get(name) {
+                return Some(elem.clone());
+            }
+        }
+        None
+    }
+
+    fn slice_elem_of_expr(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.lookup_slice_elem(name),
+            Expr::SliceLit { elem: Some(t), .. } => Some(t.render()),
+            Expr::Call { callee, args, .. } => {
+                let bare = unwrap_parens(callee);
+                if let Expr::Ident { name, .. } = bare {
+                    if name == "make" && !args.is_empty() {
+                        if let Expr::SliceLit {
+                            elem: Some(t),
+                            items,
+                            ..
+                        } = unwrap_parens(&args[0].value)
+                        {
+                            if items.is_empty() {
+                                return Some(t.render());
+                            }
+                        }
+                    }
+                    if let Some(rest) = name.strip_prefix("[]") {
+                        return Some(rest.to_string());
+                    }
+                }
+                if let Expr::SliceLit {
+                    elem: Some(t),
+                    items,
+                    ..
+                } = bare
+                {
+                    if items.is_empty() {
+                        return Some(t.render());
+                    }
+                }
+                None
+            }
+            _ => None,
         }
     }
 
@@ -740,17 +828,26 @@ impl<'a> Collector<'a> {
                 rk
             };
             self.bind_kind(&r.name, rk);
+            if let TypeExpr::Slice { elem, .. } = &r.ty {
+                self.bind_slice_elem(&r.name, elem.render());
+            }
         }
         for p in &f.params {
             self.exempt(&p.name);
             let pk = self.kind_of_ty(&p.ty, 0);
             self.bind_kind(&p.name, pk);
+            if let TypeExpr::Slice { elem, .. } = &p.ty {
+                self.bind_slice_elem(&p.name, elem.render());
+            }
         }
         for r in &f.results {
             if let Some(rname) = &r.name {
                 self.exempt(rname);
                 let rk = self.kind_of_ty(&r.ty, 0);
                 self.bind_kind(rname, rk);
+                if let TypeExpr::Slice { elem, .. } = &r.ty {
+                    self.bind_slice_elem(rname, elem.render());
+                }
             }
         }
         for r in &f.results {
@@ -896,6 +993,22 @@ impl<'a> Collector<'a> {
         let kinds = self.infer_local_kinds(l);
         for (name, kind) in l.names.iter().zip(kinds) {
             self.bind_kind(name, kind);
+        }
+        if let Some(ty) = &l.ty {
+            if let TypeExpr::Slice { elem, .. } = ty {
+                let el = elem.render();
+                for name in &l.names {
+                    self.bind_slice_elem(name, el.clone());
+                }
+            }
+        } else if l.names.len() == l.values.len() {
+            for (name, val) in l.names.iter().zip(l.values.iter()) {
+                if let Some(el) = self.slice_elem_of_expr(val) {
+                    self.bind_slice_elem(name, el);
+                }
+            }
+        }
+        for name in &l.names {
             if !track_read {
                 self.exempt(name);
                 continue;
@@ -1488,12 +1601,18 @@ impl<'a> Collector<'a> {
                     self.exempt(&p.name);
                     let pk = self.kind_of_ty(&p.ty, 0);
                     self.bind_kind(&p.name, pk);
+                    if let TypeExpr::Slice { elem, .. } = &p.ty {
+                        self.bind_slice_elem(&p.name, elem.render());
+                    }
                 }
                 for r in results {
                     if let Some(rname) = &r.name {
                         self.exempt(rname);
                         let rk = self.kind_of_ty(&r.ty, 0);
                         self.bind_kind(rname, rk);
+                        if let TypeExpr::Slice { elem, .. } = &r.ty {
+                            self.bind_slice_elem(rname, elem.render());
+                        }
                     }
                 }
                 for r in results {
@@ -3856,8 +3975,35 @@ impl<'a> Collector<'a> {
                     elem_str.as_str(),
                     "byte" | "uint8" | "u8" | "rune" | "int32" | "i32"
                 );
-                if is_byte_or_rune {
-                    if !matches!(ak, OpKind::Unknown | OpKind::Str | OpKind::Slice(_)) {
+                let target_elem_k = self.kind_of_ty(elem_ty, 0);
+                match &ak {
+                    OpKind::Slice(arg_elem) => {
+                        let arg_elem_name = self.slice_elem_of_expr(arg);
+                        let mismatch = kinds_conflict(&target_elem_k, arg_elem)
+                            || arg_elem_name
+                                .as_deref()
+                                .is_some_and(|a| !are_identical_elem_types(&elem_str, a));
+                        if mismatch {
+                            let arg_label = if let Some(el) = &arg_elem_name {
+                                format!("[]{}", el)
+                            } else {
+                                ak.label()
+                            };
+                            self.emit_e1002(
+                                arg.span(),
+                                format!(
+                                    "cannot convert `{}` (type `{}`) to `{}` (HYB-E1002)",
+                                    arg.render(),
+                                    arg_label,
+                                    target_str
+                                ),
+                                "slice type conversions require identical element types",
+                            );
+                        }
+                    }
+                    OpKind::Str if is_byte_or_rune => {}
+                    OpKind::Unknown => {}
+                    _ => {
                         self.emit_e1002(
                             arg.span(),
                             format!(
@@ -3866,20 +4012,13 @@ impl<'a> Collector<'a> {
                                 ak.label(),
                                 target_str
                             ),
-                            "`[]byte` and `[]rune` conversions require a string or compatible slice operand",
+                            if is_byte_or_rune {
+                                "`[]byte` and `[]rune` conversions require a string or compatible slice operand"
+                            } else {
+                                "slice type conversions require a string (for `[]byte`/`[]rune`) or compatible slice operand"
+                            },
                         );
                     }
-                } else if !matches!(ak, OpKind::Unknown | OpKind::Slice(_)) {
-                    self.emit_e1002(
-                        arg.span(),
-                        format!(
-                            "cannot convert `{}` (type `{}`) to `{}` (HYB-E1002)",
-                            arg.render(),
-                            ak.label(),
-                            target_str
-                        ),
-                        "slice type conversions require a string (for `[]byte`/`[]rune`) or compatible slice operand",
-                    );
                 }
             }
             Expr::Ident { name, .. } => {
