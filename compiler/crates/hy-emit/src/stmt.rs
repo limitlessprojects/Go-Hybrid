@@ -5,7 +5,7 @@ use hy_syntax::*;
 use super::{to_go_name, BindingKind, EmitError, Emitter};
 
 use super::expr::ATOM;
-use super::shapes::lookup_conversion;
+use super::shapes::{lookup_conversion, lookup_member, MemberKind};
 
 impl Emitter {
     pub fn emit_stmt(&mut self, s: &Stmt) -> Result<(), EmitError> {
@@ -1378,10 +1378,81 @@ impl Emitter {
         }
     }
 
+    fn struct_type_of_place(&self, p: &Place) -> Option<&str> {
+        match &p.kind {
+            PlaceKind::Ident(vn) => self.var_struct.get(vn).map(|s| s.as_str()),
+            PlaceKind::Field { base, name } => {
+                let sn = self.struct_type_of_place(base)?;
+                let fields = self.struct_fields.get(sn)?;
+                let (_, fty) = fields.iter().find(|(f, _)| f == name)?;
+                if self.struct_fields.contains_key(fty.as_str()) {
+                    Some(fty.as_str())
+                } else {
+                    None
+                }
+            }
+            PlaceKind::AddrOf { base } => self.struct_type_of_place(base),
+            _ => None,
+        }
+    }
+
+    pub fn type_of_place(&self, p: &Place) -> Option<&'static str> {
+        match &p.kind {
+            PlaceKind::Ident(name) => {
+                if let Some(BindingKind::ForeignTy(t)) = self.bindings.get(name) {
+                    return Some(t);
+                }
+                if let Some((ty, _)) = self.var_ty.get(name) {
+                    if let Some((k, _)) = super::shapes::SHAPES.iter().find(|(k, _)| *k == ty) {
+                        return Some(k);
+                    }
+                }
+                None
+            }
+            PlaceKind::Field { base, name } => {
+                if let Some(bt) = self.type_of_place(base) {
+                    if let Some(m) = lookup_member(bt, name) {
+                        return m.result;
+                    }
+                }
+                if let Some(sn) = self.struct_type_of_place(base) {
+                    if let Some(fields) = self.struct_fields.get(sn) {
+                        if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
+                            if let Some((k, _)) =
+                                super::shapes::SHAPES.iter().find(|(k, _)| *k == fty)
+                            {
+                                return Some(k);
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            PlaceKind::Index { base, .. } => {
+                if let Some(bt) = self.type_of_place(base) {
+                    if let Some(m) = lookup_member(bt, "index") {
+                        return m.result;
+                    }
+                }
+                None
+            }
+            PlaceKind::AddrOf { base } => self.type_of_place(base),
+        }
+    }
+
     /// Member-name normalization for a PLACE (assignment target). Same rule
     /// as the expression side: foreign package roots and Foreign bindings
     /// normalize; our own members stay verbatim.
     pub fn place_member_name(&self, base: &Place, name: &str) -> String {
+        if let Some(t) = self.type_of_place(base) {
+            if let Some(m) = lookup_member(t, name) {
+                return match m.kind {
+                    MemberKind::Field => m.go.to_string(),
+                    MemberKind::MethodZero => format!("{}()", m.go),
+                    MemberKind::Method => m.go.to_string(),
+                };
+            }
+        }
         let root = base.root();
         if self.is_unshadowed_pkg_root(root)
             || matches!(
