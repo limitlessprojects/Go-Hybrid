@@ -4431,6 +4431,26 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
+            "make" => {
+                for (idx, arg) in args.iter().enumerate().skip(1) {
+                    if builtins_already_flags_make_size(&arg.value) {
+                        continue;
+                    }
+                    let k = self.kind_of_expr(&arg.value);
+                    if !matches!(k, OpKind::Unknown | OpKind::Int) {
+                        let role = if idx == 1 { "size" } else { "capacity" };
+                        self.emit_e2005(
+                            span,
+                            format!(
+                                "`make` {role} must be an integer, found `{}` (type `{}`) (HYB-E2005)",
+                                arg.value.render(),
+                                k.label()
+                            ),
+                            "`make` size and capacity arguments must be of integer type",
+                        );
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -4499,6 +4519,10 @@ impl<'a> Collector<'a> {
 
 fn span_expr_label(lhs: &Expr, op: &str, rhs: &Expr) -> String {
     format!("{} {} {}", lhs.render(), op, rhs.render())
+}
+
+fn builtins_already_flags_make_size(e: &Expr) -> bool {
+    matches!(unwrap_parens(e), Expr::Lit { .. })
 }
 
 fn builtins_already_flags_close(e: &Expr) -> bool {
