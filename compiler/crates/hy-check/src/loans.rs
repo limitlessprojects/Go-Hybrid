@@ -190,6 +190,28 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         }
+                        if pkg == "serde_json" && method == "set" {
+                            if let Some(val_arg) = cr.args.get(2) {
+                                if let Some(val_root) = val_arg.value.root_ident() {
+                                    let active_handle = self
+                                        .lookup_binding(st, val_root)
+                                        .map(|b| b.shape.is_handle() && b.moved.is_none())
+                                        .unwrap_or(false);
+                                    if active_handle {
+                                        let rspan =
+                                            root_ident_span(&val_arg.value).unwrap_or(val_arg.span);
+                                        self.mark_move(
+                                            st,
+                                            val_root,
+                                            cr.span,
+                                            format!("the consuming call `{}`", cr.callee.render()),
+                                            MoveKind::Consumed,
+                                        );
+                                        stmt_consumes.push((rspan, cr.span));
+                                    }
+                                }
+                            }
+                        }
                     }
                     CallMode::Consume => {
                         for a in cr.args {
@@ -297,6 +319,37 @@ impl<'a> Checker<'a> {
                     }
                     CallMode::Mutate => {
                         self.check_a2_conflict(st, cr, &root, idx);
+                        // A7 / O13: `v.set(key, value_handle)` moves `value_handle`'s
+                        // payload into `v` (`hy_json_set` frees the value slot and
+                        // zeroes its handle ID). Check A2 conflicts on `value_handle`
+                        // and mark it consumed.
+                        if (tname == "serde_json.value" || tname == "serde_json.view")
+                            && method == "set"
+                        {
+                            if let Some(val_arg) = cr.args.get(1) {
+                                if let Some(val_root) = val_arg.value.root_ident() {
+                                    let active_handle = self
+                                        .lookup_binding(st, val_root)
+                                        .map(|b| b.shape.is_handle() && b.moved.is_none())
+                                        .unwrap_or(false);
+                                    if active_handle {
+                                        if val_root != root {
+                                            self.check_a2_conflict(st, cr, val_root, idx);
+                                        }
+                                        let rspan =
+                                            root_ident_span(&val_arg.value).unwrap_or(val_arg.span);
+                                        self.mark_move(
+                                            st,
+                                            val_root,
+                                            cr.span,
+                                            format!("the consuming call `{}`", cr.callee.render()),
+                                            MoveKind::Consumed,
+                                        );
+                                        stmt_consumes.push((rspan, cr.span));
+                                    }
+                                }
+                            }
+                        }
                     }
                     CallMode::Consume => {
                         // A7: own-transfer INTO the API — receiver moved-from
@@ -6723,7 +6776,8 @@ impl<'a> Checker<'a> {
                     .copied()
                 {
                     if let Some(r) = &decl.receiver {
-                        let ptr_recv = matches!(r.ty, hy_syntax::TypeExpr::Pointer { .. });
+                        let ptr_recv =
+                            r.is_pointer || matches!(r.ty, hy_syntax::TypeExpr::Pointer { .. });
                         let recv_const = if ptr_recv {
                             base.root_ident()
                                 .filter(|root| !declared.contains(*root))
