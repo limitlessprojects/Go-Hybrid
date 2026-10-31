@@ -219,6 +219,31 @@ fn equality_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
     kinds_conflict(a, b) && kinds_conflict(b, a)
 }
 
+fn is_numeric_literal(e: &Expr) -> bool {
+    let bare = unwrap_parens(e);
+    match bare {
+        Expr::Lit { kind, .. } => matches!(kind, LitKind::Int(_) | LitKind::Float(_)),
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => matches!(
+            unwrap_parens(operand),
+            Expr::Lit {
+                kind: LitKind::Int(_) | LitKind::Float(_),
+                ..
+            }
+        ),
+        _ => false,
+    }
+}
+
+fn numeric_kinds_mismatch(lk: &OpKind, rk: &OpKind, lhs: &Expr, rhs: &Expr) -> bool {
+    let numeric_conflict = (lk == &OpKind::Int && rk == &OpKind::Float)
+        || (lk == &OpKind::Float && rk == &OpKind::Int);
+    numeric_conflict && !is_numeric_literal(lhs) && !is_numeric_literal(rhs)
+}
+
 /// Does a type conversion `target(arg)` fail because the two types are incompatible in Go?
 ///
 /// In Go, type conversions `T(x)` require compatible types:
@@ -3013,9 +3038,10 @@ impl<'a> Collector<'a> {
                 };
                 let l_ok = matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
                 let r_ok = matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
-                let mismatch = lk != OpKind::Unknown
+                let mismatch = (lk != OpKind::Unknown
                     && rk != OpKind::Unknown
-                    && lk.is_numeric() != rk.is_numeric();
+                    && lk.is_numeric() != rk.is_numeric())
+                    || numeric_kinds_mismatch(&lk, &rk, lhs, rhs);
                 if !l_ok || !r_ok || mismatch {
                     self.emit_e1002(
                         span,
@@ -3034,9 +3060,10 @@ impl<'a> Collector<'a> {
             BinOp::Add => {
                 let l_ok = matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
                 let r_ok = matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
-                let mismatch = lk != OpKind::Unknown
+                let mismatch = (lk != OpKind::Unknown
                     && rk != OpKind::Unknown
-                    && lk.is_numeric() != rk.is_numeric();
+                    && lk.is_numeric() != rk.is_numeric())
+                    || numeric_kinds_mismatch(&lk, &rk, lhs, rhs);
                 if !l_ok || !r_ok || mismatch {
                     self.emit_e1002(
                         span,
@@ -3059,6 +3086,7 @@ impl<'a> Collector<'a> {
                 };
                 if !matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float)
+                    || numeric_kinds_mismatch(&lk, &rk, lhs, rhs)
                 {
                     self.emit_e1002(
                         span,
@@ -4909,6 +4937,38 @@ fn main() {
                 error_codes(&r)
             );
         }
+    }
+
+    #[test]
+    fn rejects_mismatched_numeric_binary_operands_1969() {
+        let src = "\
+fn main() {
+    x := 10
+    f := 2.5
+    _ = x - f
+    _ = x * f
+    _ = x / f
+    _ = x < f
+}
+";
+        let r = check(src);
+        assert_eq!(
+            r.verdict,
+            Verdict::Reject,
+            "expected reject for mismatched numeric binary operands"
+        );
+        let codes = error_codes(&r);
+        assert!(
+            codes.contains(&"HYB-E1002".to_string()),
+            "expected HYB-E1002, got {:?}",
+            codes
+        );
+        assert_eq!(
+            codes.iter().filter(|c| *c == "HYB-E1002").count(),
+            4,
+            "expected 4 HYB-E1002 diagnostics, got {:?}",
+            r.diagnostics
+        );
     }
 
     #[test]
