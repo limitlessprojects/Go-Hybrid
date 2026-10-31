@@ -593,7 +593,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         // misuse of make/len/cap/delete/close/new (HYB-E2005).
         // After the call/loan walk so it does not collide with upstream
         // inserts around check_uses (const-zero-divisor / LX14).
-        ck.check_stmt_builtins(stmt);
+        ck.check_stmt_builtins(&st, stmt);
 
         // Issue #411: the iterable of `for x in e` must resolve to a
         // slice/array/string/map/chan (LX13) — HYB-E2009; fail-closed
@@ -892,6 +892,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 lbody,
                 &pre_moved,
                 &mut reported_backedge,
+                &|idx| flat.in_managed(idx),
             );
         }
     }
@@ -941,6 +942,38 @@ impl<'a> Checker<'a> {
                         .to_string(),
                 ]),
             );
+        }
+        // #1917: the reason and tickets are interpolated into a single-line
+        // `// managed` comment by the emitter. A newline or carriage return
+        // would escape the comment and inject Go code into the output.
+        if reason.contains('\n') || reason.contains('\r') {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E0003",
+                    self.path.clone(),
+                    span,
+                    "managed reason must be a single line — a newline would escape the `// managed` comment and inject Go code (HYB-E0003)",
+                )
+                .with_notes(vec![
+                    "write the reason on one line; separate points with `;` or `,`".to_string(),
+                ]),
+            );
+        }
+        for ticket in tickets {
+            if ticket.trim().is_empty() || ticket.contains('\n') || ticket.contains('\r') {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E0003",
+                        self.path.clone(),
+                        span,
+                        "managed ticket must be a non-empty single-line string (HYB-E0003)",
+                    )
+                    .with_notes(vec![
+                        "a blank or multi-line ticket would inject blank lines or code into the `// managed` comment".to_string(),
+                    ]),
+                );
+                break;
+            }
         }
         if category.is_empty() {
             self.diags.push(

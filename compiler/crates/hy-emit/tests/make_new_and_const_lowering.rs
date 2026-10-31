@@ -26,7 +26,9 @@ fn emit_new_slice_chan_and_spec_primitive() {
     .expect("must emit");
     assert!(go.contains("new([]int)"), "got:\n{}", go);
     assert!(!go.contains("new([]int{})"), "got:\n{}", go);
-    assert!(go.contains("new(str_map)"), "got:\n{}", go);
+    // SPEC N5 (#1615): a map alias behind parentheses is still a zero map —
+    // allocate it so the first write cannot panic on a nil map.
+    assert!(go.contains("pm := &str_map{}"), "got:\n{}", go);
     assert!(go.contains("new(chan int)"), "got:\n{}", go);
     assert!(go.contains("new(uint8)"), "got:\n{}", go);
 }

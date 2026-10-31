@@ -605,6 +605,303 @@ impl<'a> Checker<'a> {
     /// loop-carried moves active; local definitions (`chunk := ...`, corpus 15)
     /// live in inner scopes and are discarded when `scopes` is truncated to
     /// `outer_depth`.
+    fn is_single_iteration_loop(for_stmt: Option<&hy_syntax::Stmt>) -> bool {
+        let Some(hy_syntax::Stmt::For { kind, .. }) = for_stmt else {
+            return false;
+        };
+        if let hy_syntax::ForKind::Range { lo, hi, inclusive, .. } = kind {
+            if let (Some(lo_val), Some(hi_val)) = (Self::as_int_lit(lo), Self::as_int_lit(hi)) {
+                let count = if *inclusive {
+                    if hi_val >= lo_val {
+                        hi_val.checked_sub(lo_val).and_then(|d| d.checked_add(1))
+                    } else {
+                        Some(0)
+                    }
+                } else {
+                    if hi_val > lo_val {
+                        hi_val.checked_sub(lo_val)
+                    } else {
+                        Some(0)
+                    }
+                };
+                if let Some(c) = count {
+                    if c <= 1 {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn as_int_lit(expr: &hy_syntax::Expr) -> Option<i64> {
+        match expr {
+            hy_syntax::Expr::Lit {
+                kind: hy_syntax::LitKind::Int(s),
+                ..
+            } => s.parse::<i64>().ok(),
+            hy_syntax::Expr::Unary {
+                op: hy_syntax::UnOp::Neg,
+                operand,
+                ..
+            } => Self::as_int_lit(operand).and_then(|v| v.checked_neg()),
+            _ => None,
+        }
+    }
+
+    fn check_loop_backedge_replay(
+        &mut self,
+        iter_st: &FnState,
+        loop_stmts: &[(&hy_syntax::Stmt, usize)],
+        events: &std::collections::HashMap<usize, Vec<crate::walk::ScopeEvent>>,
+        in_managed: &dyn Fn(usize) -> bool,
+    ) {
+        let has_loop_carried_state = iter_st
+            .env
+            .iter()
+            .chain(iter_st.scopes.iter().flat_map(|s| s.iter()))
+            .any(|(name, b)| {
+                b.moved.is_some()
+                    || self.non_owned_origin_of(iter_st, name).is_some()
+                    || iter_st.aliases.contains_key(name)
+                    || !iter_st.share_group(name).is_empty()
+            });
+        if !has_loop_carried_state {
+            return;
+        }
+
+        let mut replay_st = iter_st.clone();
+        let diags_len_before = self.diags.len();
+        let managed_blocks_before = self.managed_blocks;
+        let sites_via_managed_before = self.sites_via_managed;
+        let total_sites_before = self.total_sites;
+        let managed_audit_len_before = self.managed_audit.len();
+
+        for (i, (stmt, stmt_idx)) in loop_stmts.iter().enumerate() {
+            let idx = *stmt_idx;
+            let managed = in_managed(idx);
+
+            if let Some(evs) = events.get(&idx) {
+                for ev in evs {
+                    match ev {
+                        crate::walk::ScopeEvent::Push => replay_st.scope_push(),
+                        crate::walk::ScopeEvent::Pop => replay_st.scope_pop(),
+                        crate::walk::ScopeEvent::SelectRecv { names, chan } => {
+                            let elem = match self.shape_of_expr(&replay_st, chan) {
+                                crate::model::TypeShape::Chan(e) => *e,
+                                _ => crate::model::TypeShape::Unknown,
+                            };
+                            for (j, n) in names.iter().enumerate() {
+                                let shape = if j == 0 {
+                                    elem.clone()
+                                } else {
+                                    crate::model::TypeShape::Primitive
+                                };
+                                self.define_binding(
+                                    &mut replay_st,
+                                    n,
+                                    shape,
+                                    None,
+                                    false,
+                                    managed,
+                                    false,
+                                );
+                            }
+                        }
+                        crate::walk::ScopeEvent::MatchBind { name, subject } => {
+                            self.bind_match_arm(&mut replay_st, name, subject, managed);
+                        }
+                    }
+                }
+            }
+
+            if i == 0 {
+                if let hy_syntax::Stmt::For { kind, .. } = stmt {
+                    match kind {
+                        hy_syntax::ForKind::Iterate { vars, expr, .. } => {
+                            let elem = match self.shape_of_expr(&replay_st, expr) {
+                                crate::model::TypeShape::Slice(e) | crate::model::TypeShape::Array(e) => *e,
+                                crate::model::TypeShape::Chan(e) => *e,
+                                crate::model::TypeShape::Map(_, v) => *v,
+                                _ => crate::model::TypeShape::Unknown,
+                            };
+                            for (idx_var, v) in vars.iter().enumerate() {
+                                let shape = if idx_var == 0 && vars.len() > 1 {
+                                    crate::model::TypeShape::Primitive
+                                } else {
+                                    elem.clone()
+                                };
+                                self.define_binding(&mut replay_st, v, shape, None, false, managed, false);
+                            }
+                        }
+                        hy_syntax::ForKind::Range { var, .. } => {
+                            self.define_binding(
+                                &mut replay_st,
+                                var,
+                                crate::model::TypeShape::Primitive,
+                                None,
+                                false,
+                                managed,
+                                false,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                continue;
+            }
+
+            let mut uses = Vec::new();
+            crate::walk::own_uses_with_results(stmt, &replay_st.named_results, &mut uses);
+            self.check_uses(&replay_st, &uses);
+
+            match stmt {
+                hy_syntax::Stmt::Local(l) => {
+                    self.process_local(&mut replay_st, l, idx, managed);
+                    self.record_local_borrow_aliases(&mut replay_st, l);
+                    self.mark_slot_loans_local(&mut replay_st, l);
+                }
+                hy_syntax::Stmt::Assign {
+                    targets,
+                    op,
+                    values,
+                    span,
+                } => {
+                    self.process_assign(&mut replay_st, targets, *op, values, *span, idx);
+                    self.record_assign_borrow_aliases(&mut replay_st, targets, *op, values);
+                    self.mark_slot_loans_assign(&mut replay_st, targets, *op, values);
+                }
+                hy_syntax::Stmt::Task { callee, args, span } => {
+                    self.mark_move_in_value(
+                        &mut replay_st,
+                        callee,
+                        format!("the spawn callee `{}`", callee.render()),
+                    );
+                    let desc = format!("the spawn `task {}(...)`", callee.render());
+                    let vals: Vec<&hy_syntax::Expr> = args.iter().map(|a| &a.value).collect();
+                    let targets = self.spawn_param_shapes(&replay_st, callee, args.len());
+                    self.check_site(
+                        &mut replay_st,
+                        *span,
+                        "HYB-E3001",
+                        &vals,
+                        managed,
+                        &desc,
+                        false,
+                        Some(callee),
+                        targets.as_deref(),
+                    );
+                }
+                hy_syntax::Stmt::Send {
+                    chan,
+                    value,
+                    is_move,
+                    span,
+                } => {
+                    self.mark_move_in_value(
+                        &mut replay_st,
+                        chan,
+                        format!("the send target `{}`", chan.render()),
+                    );
+                    if self.check_send_target(&replay_st, chan, *span) {
+                        let desc = if *is_move {
+                            format!(
+                                "the move-send `{} <- move {}`",
+                                chan.render(),
+                                value.render()
+                            )
+                        } else {
+                            format!("the send `{} <- {}`", chan.render(), value.render())
+                        };
+                        self.check_site(
+                            &mut replay_st,
+                            *span,
+                            "HYB-E3002",
+                            &[value],
+                            managed,
+                            &desc,
+                            *is_move,
+                            None,
+                            None,
+                        );
+                    }
+                }
+                hy_syntax::Stmt::Select { arms, .. } => {
+                    for arm in arms {
+                        if let hy_syntax::SelectArmKind::Send {
+                            chan,
+                            value,
+                            is_move,
+                            ..
+                        } = &arm.kind
+                        {
+                            self.mark_move_in_value(
+                                &mut replay_st,
+                                chan,
+                                format!("the select-send target `{}`", chan.render()),
+                            );
+                            let span = chan.span().to(value.span());
+                            if self.check_send_target(&replay_st, chan, span) {
+                                let desc = if *is_move {
+                                    format!(
+                                        "the move-send `{} <- move {}`",
+                                        chan.render(),
+                                        value.render()
+                                    )
+                                } else {
+                                    format!(
+                                        "the select-send `{} <- {}`",
+                                        chan.render(),
+                                        value.render()
+                                    )
+                                };
+                                let vals: Vec<&hy_syntax::Expr> = vec![value];
+                                let targets = self.chan_elem_shape(&replay_st, chan);
+                                self.check_site(
+                                    &mut replay_st,
+                                    span,
+                                    "HYB-E3002",
+                                    &vals,
+                                    managed,
+                                    &desc,
+                                    *is_move,
+                                    None,
+                                    targets.as_ref().map(|v| &**v),
+                                );
+                            }
+                        }
+                    }
+                }
+                hy_syntax::Stmt::Defer { call, .. } => {
+                    self.mark_move_in_value(
+                        &mut replay_st,
+                        call,
+                        format!("the deferred call `defer {}`", call.render()),
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        self.managed_blocks = managed_blocks_before;
+        self.sites_via_managed = sites_via_managed_before;
+        self.total_sites = total_sites_before;
+        self.managed_audit.truncate(managed_audit_len_before);
+
+        let new_diags = self.diags.split_off(diags_len_before);
+        for d in new_diags {
+            if d.code == "HYB-E3003" || d.code == "HYB-E3004" {
+                if !self
+                    .diags
+                    .iter()
+                    .any(|existing| existing.code == d.code && existing.span == d.span)
+                {
+                    self.diags.push(d);
+                }
+            }
+        }
+    }
+
     pub(crate) fn check_loop_backedge(
         &mut self,
         st: &FnState,
@@ -614,6 +911,7 @@ impl<'a> Checker<'a> {
         loop_body: &hy_syntax::Block,
         pre_moved: &HashSet<String>,
         reported_backedge: &mut HashSet<String>,
+        in_managed: &dyn Fn(usize) -> bool,
     ) {
         if matches!(
             loop_body.stmts.last(),
@@ -623,10 +921,17 @@ impl<'a> Checker<'a> {
             return;
         }
 
+        if Self::is_single_iteration_loop(loop_stmts.first().map(|(s, _)| *s)) {
+            return;
+        }
+
         let mut iter_st = st.clone();
         while iter_st.scopes.len() > outer_depth {
             iter_st.scope_pop();
         }
+
+        self.check_loop_backedge_replay(&iter_st, loop_stmts, events, in_managed);
+
         let popped_st = iter_st.clone();
         let mut any_loop_carried = false;
         for (name, b) in iter_st

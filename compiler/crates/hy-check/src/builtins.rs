@@ -9,17 +9,25 @@
 //! Literal-only scope mirrors the landed #149 / #148 const-arith checks:
 //! variable operands stay a run-time concern, matching Go.
 
-use crate::model::{unwrap_parens, Checker};
+use crate::const_overflow::{const_int_fold_with, ConstFold};
+use crate::model::{unwrap_parens, Checker, FnState};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::{Expr, ForKind, LitKind, Place, PlaceKind, SelectArmKind, Stmt, UnOp};
+use hy_syntax::{ChanDir, Expr, ForKind, LitKind, Place, PlaceKind, SelectArmKind, Stmt, UnOp};
+use std::collections::HashSet;
 
 impl<'a> Checker<'a> {
     /// Pass-B entry: HYB-E2001 on `defer` + HYB-E2005 on builtin calls.
     /// Nested block bodies are NOT recursed — `walk::flatten` already lists
     /// those statements (same discipline as `arith.rs`).
-    pub(crate) fn check_stmt_builtins(&mut self, stmt: &Stmt) {
+    pub(crate) fn check_stmt_builtins(&mut self, st: &FnState, stmt: &Stmt) {
         self.check_stmt_defer_call(stmt);
+        self.zd_defined.clear();
+        self.zd_defined.extend(st.env.keys().cloned());
+        for sc in &st.scopes {
+            self.zd_defined.extend(sc.keys().cloned());
+        }
         self.check_stmt_builtin_args_inner(stmt, /*deep=*/ false);
+        self.zd_defined.clear();
     }
 
     pub(crate) fn check_stmt_defer_call(&mut self, stmt: &Stmt) {
@@ -121,9 +129,13 @@ impl<'a> Checker<'a> {
             }
             Stmt::Managed { body, .. } => {
                 if deep {
+                    // W-016 M3: escapes inside a walked `managed` block are the
+                    // declared hatch — raise the depth so HYB-E3013 stays quiet.
+                    self.managed_depth += 1;
                     for s in &body.stmts {
                         self.check_stmt_builtin_args_inner(s, true);
                     }
+                    self.managed_depth -= 1;
                 }
             }
             Stmt::Match { subject, arms, .. } => {
@@ -199,6 +211,10 @@ impl<'a> Checker<'a> {
                 if let Expr::Ident { name, .. } = unwrap_parens(callee) {
                     self.check_builtin_call(name, args, *span);
                 }
+                // W-016 M3: a closure that writes a captured binding and is
+                // passed to a foreign Go call is the A5 escape perimeter
+                // (HYB-E3013, SPEC §8.5 C9).
+                self.check_escape_site(callee, args, *span);
             }
             Expr::Binary { lhs, rhs, .. } => {
                 self.check_expr_builtin_args(lhs);
@@ -256,11 +272,12 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expr::FnLit { body, .. } => {
-                // Closure bodies are not flattened into Pass B — deep-walk.
+            Expr::FnLit { params, body, .. } => {
+                self.push_closure_bound(params, body);
                 for stmt in &body.stmts {
                     self.check_stmt_builtin_args_inner(stmt, /*deep=*/ true);
                 }
+                self.pop_closure_bound();
             }
             Expr::Ident { .. } | Expr::Lit { .. } => {}
         }
@@ -454,17 +471,17 @@ impl<'a> Checker<'a> {
             } if items.is_empty() && unwrapped.as_array_lit().is_none() => MakeTargetKind::Slice,
             Expr::MapLit { entries, .. } if entries.is_empty() => MakeTargetKind::Map,
             Expr::StructLit {
-                ty: Some(hy_syntax::TypeExpr::Chan { .. }),
+                ty: Some(hy_syntax::TypeExpr::Chan { dir, .. }),
                 fields,
                 ..
-            } if fields.is_empty() => MakeTargetKind::Chan,
+            } if fields.is_empty() => MakeTargetKind::Chan(*dir),
             Expr::Ident { name, .. } => {
                 let base = Self::base_named_type_str(name);
                 if let Some(ty) = self.type_aliases.get(base) {
                     match self.resolve_type_alias(ty) {
                         hy_syntax::TypeExpr::Slice { .. } => MakeTargetKind::Slice,
                         hy_syntax::TypeExpr::Map { .. } => MakeTargetKind::Map,
-                        hy_syntax::TypeExpr::Chan { .. } => MakeTargetKind::Chan,
+                        hy_syntax::TypeExpr::Chan { dir, .. } => MakeTargetKind::Chan(dir),
                         _ => MakeTargetKind::Invalid,
                     }
                 } else {
@@ -508,7 +525,7 @@ impl<'a> Checker<'a> {
                     return;
                 }
             }
-            MakeTargetKind::Map | MakeTargetKind::Chan => {
+            MakeTargetKind::Map => {
                 if args.len() > 2 {
                     self.emit_builtin(
                         span,
@@ -520,16 +537,48 @@ impl<'a> Checker<'a> {
                     return;
                 }
             }
+            MakeTargetKind::Chan(dir) => {
+                if args.len() > 2 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`make` requires 1 or 2 arguments (type[, size]) — or 3 for a slice (type, len, cap) — found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                    return;
+                }
+                // Go §Making slices, maps and channels: "The channel type
+                // must be bidirectional." A directional make target emits
+                // `make(chan<- T)` / `make(<-chan T)`, which `go build`
+                // rejects at compile time — the same
+                // accepted-should-buildable contract.
+                if dir != ChanDir::Both {
+                    self.emit_builtin(
+                        span,
+                        "`make` requires a bidirectional channel type — cannot make a send-only or receive-only channel (HYB-E2005)"
+                            .to_string(),
+                    );
+                    return;
+                }
+            }
         }
         let mut evaluated_sizes = Vec::new();
         for arg in args.iter().skip(1) {
-            match classify_make_size(&arg.value) {
+            match self.classify_make_size(&arg.value) {
                 MakeSize::Ok(v) => evaluated_sizes.push(Some(v)),
                 MakeSize::NonLiteral => evaluated_sizes.push(None),
                 MakeSize::Negative => {
                     self.emit_builtin(
                         span,
                         "`make` size must not be a negative constant (HYB-E2005)".to_string(),
+                    );
+                    evaluated_sizes.push(None);
+                }
+                MakeSize::Overflow => {
+                    self.emit_builtin(
+                        span,
+                        "`make` size constant overflows `int` (HYB-E2005)".to_string(),
                     );
                     evaluated_sizes.push(None);
                 }
@@ -599,12 +648,252 @@ impl<'a> Checker<'a> {
             ]),
         );
     }
+
+    /// W-016 M3 — the A5 Go-escape check-site (`HYB-E3013`).
+    ///
+    /// Closed-world rule (SPEC-LANGUAGE §8.5 C9): no curated Go API database is
+    /// consulted. The site fires when BOTH hold:
+    ///   1. the callee is `<pkg>.<fn>` and `<pkg>` is an imported package, and
+    ///   2. an argument is a `fn(...) { ... }` literal whose body writes a
+    ///      binding that is not declared inside that literal (a capture).
+    /// A site inside `managed(...)` is the declared escape hatch and is allowed.
+    fn check_escape_site(&mut self, callee: &Expr, args: &[hy_syntax::CallArg], span: Span) {
+        if self.in_managed() {
+            return;
+        }
+        let is_foreign = match unwrap_parens(callee) {
+            Expr::Field { base, .. } => match unwrap_parens(base) {
+                Expr::Ident { name, .. } => self.packages.contains(name.as_str()),
+                _ => false,
+            },
+            _ => false,
+        };
+        if !is_foreign {
+            return;
+        }
+        let mut captured: Option<String> = None;
+        for a in args {
+            if let Expr::FnLit { params, body, .. } = unwrap_parens(&a.value) {
+                if let Some(name) = closure_writes_captured(params, body) {
+                    captured = Some(name);
+                    break;
+                }
+            }
+        }
+        let Some(name) = captured else {
+            return;
+        };
+        self.diags.push(
+            Diagnostic::error(
+                "HYB-E3013",
+                self.path.clone(),
+                span,
+                format!(
+                    "closure writes the captured binding `{name}` and is passed to a foreign Go call — the escape must be explicit (HYB-E3013)"
+                ),
+            )
+            .with_notes(vec![
+                "SPEC-LANGUAGE §8.5 C9: a closure that writes a captured mutable binding and \
+                 escapes into foreign Go code must take `managed(\"...\", \"interop\")` at the call \
+                 site, or the capture must be `const`/non-`may_share`"
+                    .to_string(),
+            ]),
+        );
+    }
+
+    /// Is this call lexically inside a `managed(...)` block? `managed` is the
+    /// declared escape hatch, so an escape site there is permitted.
+    fn in_managed(&self) -> bool {
+        self.managed_depth > 0
+    }
+}
+
+/// W-016 M3 — does this closure body write a binding it captures?
+///
+/// Returns the first captured name written (a place root that is not bound
+/// inside the closure). Bindings declared by the closure's own parameters or
+/// by any local/`:=`/loop/match/select binder in its body are NOT captures.
+fn closure_writes_captured(
+    params: &[hy_syntax::Param],
+    body: &hy_syntax::Block,
+) -> Option<String> {
+    let mut locals: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+    collect_block_binders(body, &mut locals);
+    let mut hit: Option<String> = None;
+    walk_block_writes(body, &locals, &mut hit);
+    hit
+}
+
+/// Collect every name the closure body binds, so a write to one of them is not
+/// treated as a capture. Nested closure bodies are not descended into (their
+/// own binders belong to them; a write there is caught when *that* literal is
+/// itself an argument at a foreign call).
+fn collect_block_binders(body: &hy_syntax::Block, out: &mut HashSet<String>) {
+    for stmt in &body.stmts {
+        match stmt {
+            Stmt::Local(l) => {
+                for n in &l.names {
+                    out.insert(n.clone());
+                }
+            }
+            Stmt::If {
+                init,
+                then,
+                otherwise,
+                ..
+            } => {
+                if let Some(i) = init {
+                    collect_stmt_binders(i, out);
+                }
+                collect_block_binders(then, out);
+                if let Some(o) = otherwise {
+                    collect_stmt_binders(o, out);
+                }
+            }
+            Stmt::For { kind, body, .. } => {
+                match kind {
+                    ForKind::Range { var, .. } => {
+                        out.insert(var.clone());
+                    }
+                    ForKind::Iterate { vars, .. } => {
+                        for v in vars {
+                            out.insert(v.clone());
+                        }
+                    }
+                    ForKind::While { .. } | ForKind::Infinite => {}
+                }
+                collect_block_binders(body, out);
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    if let hy_syntax::MatchPattern::Path {
+                        binding: Some(b), ..
+                    } = &arm.pattern
+                    {
+                        out.insert(b.clone());
+                    }
+                    collect_block_binders(&arm.body, out);
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                for arm in arms {
+                    if let SelectArmKind::Recv { names, .. } = &arm.kind {
+                        for n in names {
+                            out.insert(n.clone());
+                        }
+                    }
+                    collect_block_binders(&arm.body, out);
+                }
+            }
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+                collect_block_binders(body, out);
+            }
+            Stmt::Assign { .. }
+            | Stmt::Expr { .. }
+            | Stmt::Send { .. }
+            | Stmt::Return { .. }
+            | Stmt::Task { .. }
+            | Stmt::Defer { .. }
+            | Stmt::Break { .. }
+            | Stmt::Continue { .. } => {}
+        }
+    }
+}
+
+fn collect_stmt_binders(stmt: &Stmt, out: &mut HashSet<String>) {
+    if let Stmt::Local(l) = stmt {
+        for n in &l.names {
+            out.insert(n.clone());
+        }
+    }
+}
+
+/// Writes are `Stmt::Assign` (the compound `x++` form included). Any place root
+/// that is not a closure-local is a capture write.
+fn walk_block_writes(body: &hy_syntax::Block, locals: &HashSet<String>, hit: &mut Option<String>) {
+    if hit.is_some() {
+        return;
+    }
+    for stmt in &body.stmts {
+        walk_stmt_writes(stmt, locals, hit);
+        if hit.is_some() {
+            return;
+        }
+    }
+}
+
+fn walk_stmt_writes(stmt: &Stmt, locals: &HashSet<String>, hit: &mut Option<String>) {
+    match stmt {
+        Stmt::Assign { targets, .. } => {
+            for t in targets {
+                if let Some(root) = place_root(t) {
+                    if !locals.contains(root) {
+                        *hit = Some(root.to_string());
+                        return;
+                    }
+                }
+            }
+        }
+        Stmt::If {
+            init,
+            then,
+            otherwise,
+            ..
+        } => {
+            if let Some(i) = init {
+                walk_stmt_writes(i, locals, hit);
+            }
+            walk_block_writes(then, locals, hit);
+            if let Some(o) = otherwise {
+                walk_stmt_writes(o, locals, hit);
+            }
+        }
+        Stmt::For { body, .. } => walk_block_writes(body, locals, hit),
+        Stmt::Match { arms, .. } => {
+            for arm in arms {
+                walk_block_writes(&arm.body, locals, hit);
+                if hit.is_some() {
+                    return;
+                }
+            }
+        }
+        Stmt::Select { arms, .. } => {
+            for arm in arms {
+                walk_block_writes(&arm.body, locals, hit);
+                if hit.is_some() {
+                    return;
+                }
+            }
+        }
+        Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+            walk_block_writes(body, locals, hit)
+        }
+        Stmt::Local(_)
+        | Stmt::Expr { .. }
+        | Stmt::Send { .. }
+        | Stmt::Return { .. }
+        | Stmt::Task { .. }
+        | Stmt::Defer { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. } => {}
+    }
+}
+
+/// The root identifier of an assignment target (`m["k"]` -> `m`, `h.f` -> `h`).
+fn place_root(place: &Place) -> Option<&str> {
+    // `Place::root()` walks Index/Field/AddrOf down to the root binding name.
+    let root = place.root();
+    if root.is_empty() {
+        None
+    } else {
+        Some(root)
+    }
 }
 
 enum MakeTargetKind {
     Slice,
     Map,
-    Chan,
+    Chan(ChanDir),
     Invalid,
 }
 
@@ -612,14 +901,17 @@ enum MakeSize {
     Ok(i128),
     NonLiteral,
     Negative,
+    Overflow,
     BadLiteral(&'static str),
 }
 
-fn classify_make_size(e: &Expr) -> MakeSize {
+impl<'a> Checker<'a> {
+fn classify_make_size(&self, e: &Expr) -> MakeSize {
     let bare = unwrap_parens(e);
     match bare {
         Expr::Lit { kind, .. } => match kind {
             LitKind::Int(_) => match crate::const_overflow::const_int_value(bare) {
+                Some(n) if n > i64::MAX as i128 => MakeSize::Overflow,
                 Some(n) if n >= 0 => MakeSize::Ok(n),
                 Some(_) => MakeSize::Negative,
                 None => MakeSize::BadLiteral("integer"),
@@ -644,11 +936,35 @@ fn classify_make_size(e: &Expr) -> MakeSize {
         {
             MakeSize::BadLiteral("float")
         }
-        _ => match crate::const_overflow::const_int_value(bare) {
-            Some(n) if n >= 0 => MakeSize::Ok(n),
-            Some(_) => MakeSize::Negative,
-            None => MakeSize::NonLiteral,
+        _ if expr_mentions_bound(bare, &self.zd_defined, &self.closure_bound) => {
+            MakeSize::NonLiteral
+        }
+        _ => match const_int_fold_with(bare, &self.const_values, 0, None) {
+            ConstFold::Val(n) if n < 0 => MakeSize::Negative,
+            ConstFold::Val(n) if n > i64::MAX as i128 => MakeSize::Overflow,
+            ConstFold::Val(n) => MakeSize::Ok(n),
+            ConstFold::TooBig => MakeSize::Overflow,
+            ConstFold::NotConst => MakeSize::NonLiteral,
         },
+    }
+}
+}
+
+fn expr_mentions_bound(
+    e: &Expr,
+    fn_bound: &std::collections::HashSet<String>,
+    closure_sets: &[std::collections::HashSet<String>],
+) -> bool {
+    match unwrap_parens(e) {
+        Expr::Ident { name, .. } => {
+            fn_bound.contains(name) || closure_sets.iter().any(|s| s.contains(name))
+        }
+        Expr::Unary { operand, .. } => expr_mentions_bound(operand, fn_bound, closure_sets),
+        Expr::Binary { lhs, rhs, .. } => {
+            expr_mentions_bound(lhs, fn_bound, closure_sets)
+                || expr_mentions_bound(rhs, fn_bound, closure_sets)
+        }
+        _ => false,
     }
 }
 
