@@ -114,9 +114,6 @@ const POP_PRELUDE: &str = concat!(
     "\tif n == 0 {\n",
     "\t\tpanic(\"HY-PANIC/pop-empty\")\n",
     "\t}\n",
-
-
-
     "\tv := (*s)[n-1]\n",
     "\t*s = (*s)[:n-1]\n",
     "\treturn v\n",
