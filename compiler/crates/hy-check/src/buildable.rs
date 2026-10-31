@@ -2499,6 +2499,59 @@ impl<'a> Collector<'a> {
         );
     }
 
+    /// #1650 — a call to a curated foreign package function must pass exactly
+    /// as many arguments as the Go function takes. Go refuses the emitted call
+    /// otherwise (`not enough arguments in call to time.Since`), so an accepted
+    /// program would not build (Row 13). Builtins, conversions, user fns, and
+    /// methods are already checked; the foreign path was the one that fell
+    /// through.
+    ///
+    /// Fires only for members `foreign::package_param_count` describes. A
+    /// variadic or undescribed target stays silent rather than guessed, and a
+    /// lone multi-value argument expands to one argument per result (`f(g())`
+    /// where `g` returns two values is two effective arguments).
+    fn check_package_call_arity(&mut self, pkg: &str, name: &str, args: &[CallArg], span: Span) {
+        if !crate::foreign::is_curated_package_root(pkg) {
+            return;
+        }
+        // `errors.wrap` has its own message a few lines up; do not double-report.
+        if pkg == "errors" && name == "wrap" {
+            return;
+        }
+        let Some(want) = crate::foreign::package_param_count(pkg, name) else {
+            return;
+        };
+        let got = self.multi_value_arg_count(args).unwrap_or(args.len());
+        if want == got {
+            return;
+        }
+        let target = format!("{}.{}", pkg, name);
+        let msg = if got < want {
+            format!(
+                "`{}` takes {} argument{} but is called with {} — Go refuses `not enough arguments in call to {}` (HYB-E1002)",
+                target,
+                want,
+                if want == 1 { "" } else { "s" },
+                got,
+                target
+            )
+        } else {
+            format!(
+                "`{}` takes {} argument{} but is called with {} — Go refuses `too many arguments in call to {}` (HYB-E1002)",
+                target,
+                want,
+                if want == 1 { "" } else { "s" },
+                got,
+                target
+            )
+        };
+        self.emit_e1002(
+            span,
+            msg,
+            "a foreign call must pass one argument per Go parameter; the emitted Go call is rejected at build time",
+        );
+    }
+
     fn check_user_fn_arg_types(&mut self, name: &str, args: &[CallArg]) {
         let head = Checker::base_named_type_str(name);
         let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
@@ -3933,6 +3986,7 @@ impl<'a> Collector<'a> {
                         );
                     }
                     if self.lookup_kind(pkg).is_none() {
+                        self.check_package_call_arity(pkg, name, args, span);
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
                         self.check_fn_type_arg_arity(&assoc_key, name, span);
