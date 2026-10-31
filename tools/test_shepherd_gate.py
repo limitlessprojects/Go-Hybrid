@@ -117,5 +117,25 @@ class ProbeParser(unittest.TestCase):
         self.assertFalse(any("removed line" in ln for ln in added))
 
 
+class PreflightWorkflowContract(unittest.TestCase):
+    """Preflight checks must never fail unconditionally on repositories lacking root go.mod (fixes #2168)."""
+
+    def test_preflight_guards_root_go_build(self):
+        workflow_path = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "shepherd-preflight.yml"
+        self.assertTrue(workflow_path.is_file(), f"Workflow not found: {workflow_path}")
+        content = workflow_path.read_text(encoding="utf-8")
+        # Ensure go build ./... is guarded with [ -f go.mod ]
+        self.assertIn("if [ -f go.mod ]; then", content)
+        self.assertIn("no root go.mod", content)
+
+    def test_preflight_structural_root_has_no_gomod(self):
+        root = Path(__file__).resolve().parent.parent
+        self.assertFalse((root / "go.mod").is_file(), "Repository root must have no go.mod (matches Issue #2168 premise)")
+
+    def test_preflight_matches_test_file_pattern(self):
+        # Ensure this test file is recognized by shepherd test-check as a valid test
+        self.assertTrue(any(p in "tools/test_shepherd_gate.py" for p in sh.TEST_PATTERNS))
+
+
 if __name__ == "__main__":
     unittest.main()
