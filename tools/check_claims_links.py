@@ -78,7 +78,7 @@ def marker_matches(marker, verdict):
     if marker == "reject":
         return verdict == "REJECT"
     if marker == "accept":
-        return verdict.startswith("ACCEPT")
+        return verdict in {"ACCEPT", "ACCEPT-MANAGED"}
     if marker == "managed":
         return verdict == "ACCEPT-MANAGED"
     return True
@@ -146,7 +146,7 @@ def check(root):
                 continue
             numbers_seen.add(number)
             refs += 1
-            if corpus_dir.is_dir() and not list(corpus_dir.glob("%02d-*.hy" % int(number))):
+            if not corpus_dir.is_dir() or not list(corpus_dir.glob("%02d-*.hy" % int(number))):
                 issues.append({"row": row_number, "kind": "missing-corpus-number", "target": number})
     return {"ok": not issues, "rows": rows, "links": links, "refs": refs, "issues": issues}
 
