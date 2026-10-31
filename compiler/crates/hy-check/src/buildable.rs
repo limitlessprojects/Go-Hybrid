@@ -243,6 +243,16 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         // Bool argument: bool cannot convert to anything (except bool or interface).
         (other, Bool) if !matches!(other, Unknown | Bool | Interface) => true,
 
+        // Pointer target: only another pointer can convert to a pointer.
+        (Pointer(_), other) if !matches!(other, Unknown | Pointer(_) | Interface) => true,
+        // Pointer argument: pointer cannot convert to non-pointer (except interface).
+        (other, Pointer(_)) if !matches!(other, Unknown | Pointer(_) | Interface) => true,
+
+        // Array target: can convert from another Array or Slice (Go 1.20+ [N]T(slice)).
+        (Array(_), other) if !matches!(other, Unknown | Array(_) | Slice(_) | Interface) => true,
+        // Array argument: cannot convert to Int, Float, Bool, Str, Slice, Map, Chan, Struct, Pointer.
+        (Int | Float | Bool | Str | Slice(_) | Map(_, _) | Chan(_) | Struct(_), Array(_)) => true,
+
         // Numeric targets (Int, Float): can convert between Int and Float.
         // Cannot convert Str, Slice, Map, Chan, Struct to numeric.
         (Int | Float, Str | Slice(_) | Map(_, _) | Chan(_) | Struct(_)) => true,
@@ -251,7 +261,7 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         // Cannot convert from Float, Bool, Map, Chan, Struct.
         (Str, Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
 
-        // Slice target: can convert from Str (to []byte/[]rune), or Slice/Array.
+        // Slice target: can convert from Str (to []byte/[]rune), or Slice.
         // Cannot convert from Int, Float, Bool, Map, Chan, Struct.
         (Slice(_), Int | Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
 
