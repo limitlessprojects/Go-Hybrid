@@ -1521,7 +1521,7 @@ impl<'a> Checker<'a> {
 }
 
 /// Does `block` contain any `continue` statement targeting the loop whose body
-/// is `block` (i.e. not enclosed in an inner `for` loop)?
+/// is `block` (i.e. not enclosed in an inner `for` loop, unless labeled)?
 fn block_has_continue_for_loop(block: &hy_syntax::Block) -> bool {
     block.stmts.iter().any(stmt_has_continue_for_loop)
 }
@@ -1547,9 +1547,33 @@ fn stmt_has_continue_for_loop(stmt: &hy_syntax::Stmt) -> bool {
         hy_syntax::Stmt::Block { block, .. } | hy_syntax::Stmt::Managed { body: block, .. } => {
             block_has_continue_for_loop(block)
         }
-        // A `continue` (or `continue loop`, LX14) inside an inner `for` targets
-        // that inner loop, not the outer loop.
-        hy_syntax::Stmt::For { .. } => false,
+        hy_syntax::Stmt::For { body, .. } => block_has_labeled_continue(body),
+        _ => false,
+    }
+}
+
+fn block_has_labeled_continue(block: &hy_syntax::Block) -> bool {
+    block.stmts.iter().any(stmt_has_labeled_continue)
+}
+
+fn stmt_has_labeled_continue(stmt: &hy_syntax::Stmt) -> bool {
+    match stmt {
+        hy_syntax::Stmt::Continue { label: Some(_), .. } => true,
+        hy_syntax::Stmt::If {
+            then, otherwise, ..
+        } => {
+            block_has_labeled_continue(then)
+                || otherwise.as_deref().is_some_and(stmt_has_labeled_continue)
+        }
+        hy_syntax::Stmt::Match { arms, .. } => {
+            arms.iter().any(|a| block_has_labeled_continue(&a.body))
+        }
+        hy_syntax::Stmt::Select { arms, .. } => {
+            arms.iter().any(|a| block_has_labeled_continue(&a.body))
+        }
+        hy_syntax::Stmt::Block { block, .. } => block_has_labeled_continue(block),
+        hy_syntax::Stmt::Managed { body, .. } => block_has_labeled_continue(body),
+        hy_syntax::Stmt::For { body, .. } => block_has_labeled_continue(body),
         _ => false,
     }
 }

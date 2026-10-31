@@ -232,6 +232,11 @@ pub(crate) struct FnState {
     /// shadowed outer binding at `depth` as moved.
     pub shadow_links: HashMap<String, HashSet<(String, usize)>>,
     pub shadow_link_scopes: Vec<HashMap<String, HashSet<(String, usize)>>>,
+    /// Saved `(moved, non_owned_origin)` per `(binding_name, scope_depth)` for
+    /// outer bindings across `scope_push` / `scope_pop`, so a conditional rebind
+    /// inside an inner block cannot wipe an outer binding's `moved` or
+    /// `non_owned_origin` state after the block exits.
+    pub outer_state_scopes: Vec<HashMap<(String, usize), (Option<MoveInfo>, Option<String>)>>,
     /// Block scopes, innermost last (issue #14): a define inside a nested
     /// block lands in the top layer and DIES at block exit, so an inner
     /// `m := 1` can no longer overwrite the outer `m`'s binding and launder
@@ -305,6 +310,23 @@ pub(crate) struct FnState {
 impl FnState {
     /// Enter a block scope (walk.rs's Push events).
     pub(crate) fn scope_push(&mut self) {
+        let mut saved_outer = HashMap::new();
+        for (k, b) in &self.env {
+            if b.moved.is_some() || b.non_owned_origin.is_some() {
+                saved_outer.insert((k.clone(), 0), (b.moved.clone(), b.non_owned_origin.clone()));
+            }
+        }
+        for (i, scope) in self.scopes.iter().enumerate() {
+            for (k, b) in scope {
+                if b.moved.is_some() || b.non_owned_origin.is_some() {
+                    saved_outer.insert(
+                        (k.clone(), i + 1),
+                        (b.moved.clone(), b.non_owned_origin.clone()),
+                    );
+                }
+            }
+        }
+        self.outer_state_scopes.push(saved_outer);
         self.scopes.push(HashMap::new());
         self.alias_scopes.push(self.aliases.clone());
         self.share_scopes.push(self.may_share.clone());
@@ -434,6 +456,20 @@ impl FnState {
             }
         }
         self.scopes.pop();
+        if let Some(saved_outer) = self.outer_state_scopes.pop() {
+            for ((name, depth), (saved_moved, saved_origin)) in saved_outer {
+                if depth <= self.scopes.len() {
+                    if let Some(b) = self.binding_at_depth_mut(&name, depth) {
+                        if b.moved.is_none() && saved_moved.is_some() {
+                            b.moved = saved_moved;
+                        }
+                        if b.non_owned_origin.is_none() && saved_origin.is_some() {
+                            b.non_owned_origin = saved_origin;
+                        }
+                    }
+                }
+            }
+        }
         if let Some(outer_shadows) = self.shadow_link_scopes.pop() {
             self.shadow_links = outer_shadows;
         }
