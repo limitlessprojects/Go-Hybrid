@@ -272,7 +272,7 @@ impl Emitter {
 
     fn emit_local_in_seq(&mut self, l: &LocalDecl, rest: &[Stmt]) -> Result<(), EmitError> {
         match l.kind {
-            LocalKind::Var => {
+            LocalKind::Var | LocalKind::Let if l.kind == LocalKind::Var || (l.ty.is_some() && !l.values.is_empty()) => {
                 let ty = l.ty.as_ref().map(|t| self.type_text(t));
                 match (&ty, l.values.first()) {
                     // N5: a zero map (or a struct carrying one) allocates
