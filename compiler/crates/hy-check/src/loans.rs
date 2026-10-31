@@ -719,11 +719,12 @@ impl<'a> Checker<'a> {
         let verb = format!("mutation via `{}`", cr.callee.render());
         let callee_path = walk::expr_path(cr.callee).unwrap_or_else(|| root.to_string());
         if let Some(sname) = recv_sname {
+            let sbase = Self::base_named_type_str(&sname);
             let found_decl = self.file.decls.iter().find_map(|d| match d {
                 hy_syntax::Decl::Fn(f) if f.name == method => {
                     let r = f.receiver.as_ref()?;
                     let b = Self::base_named_type(&r.ty)?;
-                    (b == sname).then_some(f)
+                    (b == sbase).then_some(f)
                 }
                 _ => None,
             });
@@ -4399,9 +4400,11 @@ impl<'a> Checker<'a> {
                 // A field of a struct declared in this file may hold a function
                 // value (`holder.cb()`), whose target we cannot see.
                 match self.shape_of_expr(st, base) {
-                    TypeShape::Struct(Some(s)) => self.structs.contains_key(&s),
+                    TypeShape::Struct(Some(s)) => {
+                        self.structs.contains_key(Self::base_named_type_str(&s))
+                    }
                     TypeShape::Pointer(inner) => {
-                        matches!(*inner, TypeShape::Struct(Some(ref s)) if self.structs.contains_key(s))
+                        matches!(*inner, TypeShape::Struct(Some(ref s)) if self.structs.contains_key(Self::base_named_type_str(s)))
                     }
                     _ => false,
                 }
@@ -6717,9 +6720,10 @@ impl<'a> Checker<'a> {
                 _ => None,
             };
             if let Some(rname) = recv_base {
+                let rbase = Self::base_named_type_str(&rname).to_string();
                 if let Some(decl) = self
                     .method_decls
-                    .get(&(rname, method_name.clone()))
+                    .get(&(rbase, method_name.clone()))
                     .copied()
                 {
                     if let Some(r) = &decl.receiver {
@@ -6843,7 +6847,8 @@ impl<'a> Checker<'a> {
                             _ => None,
                         };
                         if let Some(decl) = recv_base.and_then(|rb| {
-                            self.method_decls.get(&(rb, method_name.clone())).copied()
+                            let rbase = Self::base_named_type_str(&rb).to_string();
+                            self.method_decls.get(&(rbase, method_name.clone())).copied()
                         }) {
                             match decl.params.get(i) {
                                 Some(p) => {

@@ -79,8 +79,14 @@ impl<'a> Checker<'a> {
         // see `c.order` as the declared `[]k`, not an opaque Unknown).
         let base = Self::base_named_type_str(name);
         // User structs in package scope take precedence over predeclared types.
+        // Issue #2483: preserve the full instantiated spelling (`holder[[]int]`,
+        // `fn_box[cb]`, `holder[t]`) rather than collapsing to `base` so
+        // `shape_may_share`, `shape_holds_closure`, `shape_holds_unmovable_leaf`,
+        // `shape_carries_handle`, `shape_is_const_sendable`, and `field_shape`
+        // substitute concrete type arguments instead of seeing raw type-param
+        // names (`Unknown`). For non-generic structs `name == base`.
         if self.structs.contains_key(base) {
-            return TypeShape::Struct(Some(base.to_string()));
+            return TypeShape::Struct(Some(name.to_string()));
         }
         // User type aliases take precedence over predeclared types.
         if let Some(target) = self.type_aliases.get(base) {
@@ -89,11 +95,10 @@ impl<'a> Checker<'a> {
         // #884: the T9 prelude's `set[T]` lowers to a struct wrapping a Go
         // map (`type set[t comparable] struct { m map[t]struct{} }`), so a
         // shallow copy shares that map exactly like any other map-carrying
-        // struct. Without this arm `set[int]` resolved to `Unknown` and
-        // `shape_may_share` said no, which let O5.2/O5.4/T22 be bypassed by
-        // copying first and moving the original.
+        // struct. Preserve `name` (`set[int]`) so `iterate_var_shapes` and
+        // `range_iter` see the element spelling as well.
         if base == "set" {
-            return TypeShape::Struct(Some(base.to_string()));
+            return TypeShape::Struct(Some(name.to_string()));
         }
         match name {
             "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
@@ -142,16 +147,19 @@ impl<'a> Checker<'a> {
             // entry in `self.structs` (the prelude is emitted, not declared),
             // so the field walk below returned false for it. A shallow copy of
             // a set shares the underlying map; say so.
-            TypeShape::Struct(Some(name)) if name == "set" => true,
-            TypeShape::Struct(Some(name)) => self
-                .structs
-                .get(name)
-                .map(|fields| {
-                    fields
-                        .iter()
-                        .any(|(_, ty)| self.shape_may_share_at(&self.shape_of_type(ty), depth + 1))
-                })
-                .unwrap_or(false),
+            TypeShape::Struct(Some(name)) if Self::base_named_type_str(name) == "set" => true,
+            TypeShape::Struct(Some(name)) => {
+                if self.struct_has_unresolved_type_param(name) {
+                    return true;
+                }
+                self.struct_fields_for_sname(name)
+                    .map(|fields| {
+                        fields.iter().any(|(_, ty)| {
+                            self.shape_may_share_at(&self.shape_of_type(ty), depth + 1)
+                        })
+                    })
+                    .unwrap_or(false)
+            }
             _ => false,
         }
     }
@@ -183,8 +191,7 @@ impl<'a> Checker<'a> {
                     || self.shape_carries_handle_at(v, depth + 1)
             }
             TypeShape::Struct(Some(name)) => self
-                .structs
-                .get(name)
+                .struct_fields_for_sname(name)
                 .map(|fields| {
                     fields.iter().any(|(_, ty)| {
                         self.shape_carries_handle_at(&self.shape_of_type(ty), depth + 1)
@@ -198,8 +205,7 @@ impl<'a> Checker<'a> {
     /// Does this struct decl guard something with a `sync.*` lock? (Used for
     /// the contested-04 note: "Tier 0 does not credit locks at spawn sites".)
     pub(crate) fn struct_has_mutex_field(&self, sname: &str) -> bool {
-        self.structs
-            .get(sname)
+        self.struct_fields_for_sname(sname)
             .map(|fields| {
                 fields.iter().any(|(_, ty)| {
                     matches!(
@@ -315,10 +321,9 @@ impl<'a> Checker<'a> {
     pub(crate) fn field_shape(&self, base: &TypeShape, field: &str) -> TypeShape {
         match base {
             TypeShape::Struct(Some(sname)) => self
-                .structs
-                .get(sname)
-                .and_then(|fs| fs.iter().find(|(n, _)| n == field))
-                .map(|(_, t)| self.shape_of_type(t))
+                .struct_fields_for_sname(sname)
+                .and_then(|fs| fs.into_iter().find(|(n, _)| n == field))
+                .map(|(_, t)| self.shape_of_type(&t))
                 .unwrap_or(TypeShape::Unknown),
             TypeShape::Pointer(inner) => self.field_shape(inner, field),
             _ => TypeShape::Unknown,
@@ -653,6 +658,9 @@ impl<'a> Checker<'a> {
                             span: *span,
                         });
                     }
+                }
+                if let Some(fields) = self.struct_fields_for_type(&resolved) {
+                    return fields.into_iter().find(|(n, _)| n == name).map(|(_, t)| t);
                 }
                 let sname = Self::base_named_type(&resolved)?;
                 self.structs

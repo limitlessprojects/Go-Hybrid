@@ -1379,16 +1379,10 @@ impl<'a> Checker<'a> {
                 self.shape_is_proven_pure_value(inner, depth + 1)
             }
             crate::model::TypeShape::Struct(Some(sname)) => {
-                if self.file.decls.iter().any(|d| {
-                    matches!(
-                        d,
-                        hy_syntax::Decl::Struct(s)
-                            if s.name == *sname && !s.type_params.is_empty()
-                    )
-                }) {
+                if self.struct_has_unresolved_type_param(sname) {
                     return false;
                 }
-                let Some(fields) = self.structs.get(sname.as_str()) else {
+                let Some(fields) = self.struct_fields_for_sname(sname) else {
                     return false;
                 };
                 fields.iter().all(|(_, fty)| {
