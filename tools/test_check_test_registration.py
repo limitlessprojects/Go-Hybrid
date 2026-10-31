@@ -104,6 +104,13 @@ class PatternExtractionTests(unittest.TestCase):
             "python3 -m unittest discover -s tools -p test_disabled.py -p test_live.py\n"),
             ["test_live.py"])
 
+    def test_end_of_options_separator_does_not_reinterpret_script_as_discovery(self):
+        # fixes #2322: '--' ends interpreter options, so '-m' is a script operand rather than module flag
+        self.assertEqual(guard.registered_patterns(
+            "python3 -- -m unittest discover -s tools -p test_sentinel.py\n"), [])
+        self.assertTrue(guard.is_registered_direct(
+            "tests/test_direct.py", "python3 -- tests/test_direct.py\n"))
+
 
 class RegistrationTests(unittest.TestCase):
     def build(self, workflow, suites):
@@ -247,6 +254,13 @@ class RegistrationTests(unittest.TestCase):
                          ["tools/test_orphan.py"])
 
     # --- explicit-invocation end-to-end (from pr-600, fixes #596) ---
+
+    def test_end_of_options_sentinel_does_not_register_unexecuted_discoveries(self):
+        # fixes #2322: script operand '-m' after '--' does not run unittest discovery
+        workflow = "python3 -- -m unittest discover -s tools -p test_sentinel.py\n"
+        root, text = self.build(workflow, ["tools/test_sentinel.py"])
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
+                         ["tools/test_sentinel.py"])
 
     def test_successful_shell_with_disabled_tests_must_fail_registration(self):
         # The shell succeeds without running either deliberately failing test.
