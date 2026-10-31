@@ -400,42 +400,66 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
-            "min" => {
+            "min" | "max" => {
                 if args.is_empty() {
                     self.emit_builtin(
                         span,
-                        "`min` requires at least 1 argument, found 0 (HYB-E2005)".to_string(),
+                        format!("`{name}` requires at least 1 argument, found 0 (HYB-E2005)"),
                     );
+                } else {
+                    for a in args {
+                        match unwrap_parens(&a.value) {
+                            Expr::Lit {
+                                kind: LitKind::Nil, ..
+                            } => {
+                                self.emit_builtin(
+                                    span,
+                                    format!("use of untyped nil in argument to `{name}` (HYB-E2005)"),
+                                );
+                            }
+                            Expr::Lit {
+                                kind: LitKind::Bool(_),
+                                ..
+                            } => {
+                                self.emit_builtin(
+                                    span,
+                                    format!(
+                                        "`{name}` does not accept a bool literal operand — bool is not ordered (HYB-E2005)"
+                                    ),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
-            "max" => {
-                if args.is_empty() {
-                    self.emit_builtin(
-                        span,
-                        "`max` requires at least 1 argument, found 0 (HYB-E2005)".to_string(),
-                    );
-                }
-            }
-            "real" => {
+            "real" | "imag" => {
                 if args.len() != 1 {
                     self.emit_builtin(
                         span,
                         format!(
-                            "`real` requires exactly 1 complex argument, found {} (HYB-E2005)",
+                            "`{name}` requires exactly 1 complex argument, found {} (HYB-E2005)",
                             args.len()
                         ),
                     );
-                }
-            }
-            "imag" => {
-                if args.len() != 1 {
-                    self.emit_builtin(
-                        span,
-                        format!(
-                            "`imag` requires exactly 1 complex argument, found {} (HYB-E2005)",
-                            args.len()
-                        ),
-                    );
+                } else {
+                    let op = unwrap_parens(&args[0].value);
+                    if is_string_literal(op)
+                        || matches!(
+                            op,
+                            Expr::Lit {
+                                kind: LitKind::Bool(_) | LitKind::Nil,
+                                ..
+                            }
+                        )
+                    {
+                        self.emit_builtin(
+                            span,
+                            format!(
+                                "`{name}` argument must be a complex value or numeric constant, not string/bool/nil (HYB-E2005)"
+                            ),
+                        );
+                    }
                 }
             }
             "complex" => {
@@ -447,6 +471,27 @@ impl<'a> Checker<'a> {
                             args.len()
                         ),
                     );
+                } else {
+                    for (idx, a) in args.iter().enumerate() {
+                        let op = unwrap_parens(&a.value);
+                        if is_string_literal(op)
+                            || matches!(
+                                op,
+                                Expr::Lit {
+                                    kind: LitKind::Bool(_) | LitKind::Nil,
+                                    ..
+                                }
+                            )
+                        {
+                            self.emit_builtin(
+                                span,
+                                format!(
+                                    "`complex` argument {} must be a numeric value or constant, not string/bool/nil (HYB-E2005)",
+                                    idx + 1
+                                ),
+                            );
+                        }
+                    }
                 }
             }
             _ => {}
