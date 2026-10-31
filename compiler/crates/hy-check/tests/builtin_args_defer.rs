@@ -251,6 +251,37 @@ fn copy_and_clear_builtin_args_validated() {
 }
 
 #[test]
+fn issue_1696_composite_builtin_operands_rejected() {
+    // Case 1: close() on composite literals (slices, maps, structs)
+    let close_slice = check("fn main() {\n    close([]int{1, 2})\n}\n");
+    assert_has(&close_slice, "HYB-E2005");
+
+    let close_map = check("fn main() {\n    close(map[string]int{\"a\": 1})\n}\n");
+    assert_has(&close_map, "HYB-E2005");
+
+    let close_struct = check("struct Point { x int }\nfn main() {\n    close(Point{x: 1})\n}\n");
+    assert_has(&close_struct, "HYB-E2005");
+
+    // Case 2: clear() on struct literal
+    let clear_struct = check("struct Point { x int }\nfn main() {\n    clear(Point{x: 1})\n}\n");
+    assert_has(&clear_struct, "HYB-E2005");
+
+    // Case 3: copy() destination cannot be map or struct literal
+    let copy_map_dst = check("fn main() {\n    copy(map[string]int{}, []int{1})\n}\n");
+    assert_has(&copy_map_dst, "HYB-E2005");
+
+    let copy_struct_dst = check("struct Point { x int }\nfn main() {\n    copy(Point{x: 1}, []int{1})\n}\n");
+    assert_has(&copy_struct_dst, "HYB-E2005");
+
+    // Case 4: delete() first argument cannot be slice or struct literal
+    let delete_slice = check("fn main() {\n    delete([]int{1, 2}, 0)\n}\n");
+    assert_has(&delete_slice, "HYB-E2005");
+
+    let delete_struct = check("struct Point { x int }\nfn main() {\n    delete(Point{x: 1}, \"key\")\n}\n");
+    assert_has(&delete_struct, "HYB-E2005");
+}
+
+#[test]
 fn parenthesized_and_aliased_new_preserves_sendability_and_unmovable_checks() {
     let closure_paren = check(
         "struct holder {\n    f fn()\n}\nfn worker(p *holder) {\n    p.f()\n}\nfn main() {\n    p := new((holder))\n    task worker(move p)\n}\n",
