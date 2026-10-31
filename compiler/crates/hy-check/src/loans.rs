@@ -2091,7 +2091,7 @@ impl<'a> Checker<'a> {
     /// Does the binding `name` denote a value that a shallow Go copy
     /// would share mutable GC storage with? Includes file-level `const`
     /// composites (#125), which lower to package-level `var` in Go.
-    fn binding_may_share(&self, st: &FnState, name: &str) -> bool {
+    pub(crate) fn binding_may_share(&self, st: &FnState, name: &str) -> bool {
         self.lookup_binding(st, name)
             .map(|b| self.shape_may_share(&b.shape))
             .unwrap_or(false)
