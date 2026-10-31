@@ -180,3 +180,48 @@ fn legal_append_stays_accepted() {
         "struct p {\n    n int\n}\n\nfn main() {\n    xs := []p{}\n    ys := append(xs, p{n: 1})\n    fmt.println(\"{len(ys)}\")\n}\n",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #2375 — field-chain resolution across struct member hops
+// ---------------------------------------------------------------------------
+
+#[test]
+fn undefined_field_in_chain_is_rejected_issue_2375() {
+    // Repro 1: q.b.c where struct s has no field b
+    assert_code(
+        "struct s { a int }\nfn main() {\n    q := s{a: 1}\n    fmt.println(\"{q.b.c}\")\n}\n",
+        "HYB-E1002",
+    );
+    // Repro 2: middle hop undefined — q.x.n where out1 has no field x
+    assert_code(
+        "struct in1 { n int }\nstruct out1 { i in1 }\nfn main() {\n    q := out1{i: in1{n: 1}}\n    fmt.println(\"{q.x.n}\")\n}\n",
+        "HYB-E1002",
+    );
+    // Repro 3: single hop undefined field in value position
+    assert_code(
+        "struct s { a int }\nfn main() {\n    q := s{a: 1}\n    fmt.println(\"{q.b}\")\n}\n",
+        "HYB-E1002",
+    );
+    // Repro 4: index on undefined field
+    assert_code(
+        "struct s { a []int }\nfn main() {\n    q := s{a: []int{1}}\n    fmt.println(\"{q.b[0]}\")\n}\n",
+        "HYB-E1002",
+    );
+    // Repro 5: assignment target on undefined field
+    assert_code(
+        "struct s { a int }\nfn main() {\n    var q s\n    q.b = 2\n}\n",
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn valid_field_chain_stays_accepted_issue_2375() {
+    // Valid multi-hop struct fields
+    assert_ok(
+        "struct in1 { n int }\nstruct out1 { i in1 }\nfn main() {\n    q := out1{i: in1{n: 1}}\n    fmt.println(\"{q.i.n}\")\n}\n",
+    );
+    // Valid assignment through field chain
+    assert_ok(
+        "struct in1 { n int }\nstruct out1 { i in1 }\nfn main() {\n    var q out1\n    q.i.n = 5\n    fmt.println(\"{q.i.n}\")\n}\n",
+    );
+}
