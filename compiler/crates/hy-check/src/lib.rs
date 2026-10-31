@@ -706,11 +706,20 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         format!("the loop header `{}`", expr.render()),
                     );
                     let is_chan = matches!(ck.shape_of_expr(&st, expr), TypeShape::Chan(_));
+                    let iter_carries_borrow = !is_chan && ck.expr_carries_borrow(&st, expr);
                     let shapes = ck.iterate_var_shapes(&st, expr, vars.len());
                     for (name, shape) in vars.iter().zip(shapes) {
                         let is_ref = shape.is_reference_alias();
                         let may_share = ck.shape_may_share(&shape);
+                        let borrow_slot = ck.shape_can_hold_borrow(&shape);
                         ck.define_binding(&mut st, name, shape, None, false, managed, false);
+                        if name != "_" {
+                            if borrow_slot && iter_carries_borrow {
+                                st.borrow_bindings.insert(name.clone());
+                            } else {
+                                st.borrow_bindings.remove(name);
+                            }
+                        }
                         if !is_chan {
                             if may_share {
                                 ck.record_may_share(&mut st, name, expr);
