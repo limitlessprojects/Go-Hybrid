@@ -4677,7 +4677,7 @@ fn collect_comparable_type_params<'a>(
     }
 }
 
-fn split_top_level_type_args(s: &str) -> Vec<&str> {
+pub(crate) fn split_top_level_type_args(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut depth = 0usize;
     let mut start = 0usize;

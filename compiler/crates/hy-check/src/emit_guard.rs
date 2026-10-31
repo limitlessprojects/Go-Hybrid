@@ -18,6 +18,7 @@
 //! walk stays shallow (`deep = false`) and closure bodies are recursed
 //! exactly once via `Expr::FnLit`.
 
+use crate::buildable::split_top_level_type_args;
 use crate::const_overflow::{
     const_float_value, const_int_fold_with, const_int_value, fixed_width_int_range, fold_bin,
     parse_int_lit, ConstFold, ConstInt,
@@ -25,7 +26,7 @@ use crate::const_overflow::{
 use crate::model::{as_addr_of, unwrap_parens, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
-    AssignOp, BinOp, CallArg, Expr, FnDecl, ForKind, InterpPart, LitKind, Place, PlaceKind,
+    AssignOp, BinOp, CallArg, Decl, Expr, FnDecl, ForKind, InterpPart, LitKind, Place, PlaceKind,
     SelectArmKind, Stmt, TypeExpr, UnOp,
 };
 
@@ -96,7 +97,7 @@ impl<'a> Checker<'a> {
         match stmt {
             Stmt::Local(l) => {
                 if let Some(t) = &l.ty {
-                    self.check_type_expr_with_state(Some(st), t);
+                    self.check_decl_type_expr(Some(st), t);
                     for v in &l.values {
                         self.check_local_array_lit_len_match(t, v);
                     }
@@ -968,6 +969,7 @@ impl<'a> Checker<'a> {
     // ------------------------------------------------------------------
 
     /// Walk a type expression checking every array length inside it.
+    #[allow(dead_code)]
     pub(crate) fn check_type_expr(&mut self, ty: &TypeExpr) {
         self.check_type_expr_with_state(None, ty);
     }
@@ -1016,6 +1018,178 @@ impl<'a> Checker<'a> {
                 }
             }
             TypeExpr::Named { .. } => {}
+        }
+    }
+
+    /// Walk a type expression at a declaration site, checking both array-length
+    /// validity (HYB-E6004) and resolving named type leaves (HYB-E1002, issue #1583).
+    pub(crate) fn check_decl_type_expr(&mut self, st: Option<&FnState>, ty: &TypeExpr) {
+        self.check_type_expr_with_state(st, ty);
+        self.check_decl_type_expr_inner(ty);
+    }
+
+    fn check_decl_type_expr_inner(&mut self, ty: &TypeExpr) {
+        match ty {
+            TypeExpr::Named { name, span } => {
+                self.check_named_type_resolution(name, *span);
+            }
+            TypeExpr::Pointer { to, .. }
+            | TypeExpr::Slice { elem: to, .. }
+            | TypeExpr::Option { elem: to, .. }
+            | TypeExpr::Chan { elem: to, .. } => self.check_decl_type_expr_inner(to),
+            TypeExpr::Array { elem, .. } => self.check_decl_type_expr_inner(elem),
+            TypeExpr::Map { key, value, .. } => {
+                self.check_decl_type_expr_inner(key);
+                self.check_decl_type_expr_inner(value);
+            }
+            TypeExpr::Fn {
+                params, results, ..
+            } => {
+                for p in params {
+                    self.check_decl_type_expr_inner(&p.ty);
+                }
+                for r in results {
+                    self.check_decl_type_expr_inner(r);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn is_known_type_name(&self, name: &str) -> bool {
+        let name = name.trim();
+        if name.is_empty() {
+            return true;
+        }
+        // Dotted foreign types are checked by foreign/shape tables
+        if name.contains('.') {
+            return true;
+        }
+        // Strip type prefixes / modifiers
+        if let Some(rest) = name
+            .strip_prefix('*')
+            .or_else(|| name.strip_prefix("[]"))
+            .or_else(|| name.strip_prefix("[...]"))
+            .or_else(|| name.strip_prefix("<-chan "))
+            .or_else(|| name.strip_prefix("chan<- "))
+            .or_else(|| name.strip_prefix("chan "))
+        {
+            return self.is_known_type_name(rest);
+        }
+        // Check generic type arguments: e.g. box[missing] or map[string]int
+        let (head, _inner_opt) = match name.find('[') {
+            Some(i) if name.ends_with(']') => (&name[..i], Some(&name[i + 1..name.len() - 1])),
+            _ => (name, None),
+        };
+        let head = head.trim();
+        if head.is_empty() {
+            return true;
+        }
+        if head.contains('.') {
+            return true;
+        }
+        // 1. Go predeclared types + SPEC spellings
+        if crate::resolve::is_predeclared_type_name(head) {
+            return true;
+        }
+        // 2. Numeric / conversion type names
+        if crate::const_init::is_conversion_type_name(head) {
+            return true;
+        }
+        // 3. Prelude types
+        if matches!(head, "option" | "set" | "map" | "chan") {
+            return true;
+        }
+        // 4. File-level declared types: structs, zero-field structs, enums, type aliases
+        if self.structs.contains_key(head)
+            || self.struct_type_params.contains_key(head)
+            || self.pkg_names.get(head) == Some(&"struct")
+            || self.enums.contains_key(head)
+            || self.type_aliases.contains_key(head)
+        {
+            return true;
+        }
+        // 5. In-scope generic type parameters in the file
+        if self
+            .struct_type_params
+            .values()
+            .any(|tps| tps.iter().any(|tp| tp.name == head))
+        {
+            return true;
+        }
+        if self
+            .fns
+            .values()
+            .any(|f| f.type_params.iter().any(|tp| tp.name == head))
+        {
+            return true;
+        }
+        // Also check any Decl in the file for type parameters (including methods and receivers)
+        if self.file.decls.iter().any(|d| match d {
+            Decl::Fn(f) => {
+                f.type_params.iter().any(|tp| tp.name == head)
+                    || f.receiver.as_ref().is_some_and(|r| {
+                        let r_str = r.ty.render();
+                        if let Some(i) = r_str.find('[') {
+                            if r_str.ends_with(']') {
+                                let inner = &r_str[i + 1..r_str.len() - 1];
+                                split_top_level_type_args(inner).contains(&head)
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    })
+            }
+            Decl::Struct(s) => s.type_params.iter().any(|tp| tp.name == head),
+            _ => false,
+        }) {
+            return true;
+        }
+
+        false
+    }
+
+    pub(crate) fn check_named_type_resolution(&mut self, name: &str, span: Span) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        if name.contains('.') {
+            return;
+        }
+        if let Some(rest) = name
+            .strip_prefix('*')
+            .or_else(|| name.strip_prefix("[]"))
+            .or_else(|| name.strip_prefix("[...]"))
+            .or_else(|| name.strip_prefix("<-chan "))
+            .or_else(|| name.strip_prefix("chan<- "))
+            .or_else(|| name.strip_prefix("chan "))
+        {
+            self.check_named_type_resolution(rest, span);
+            return;
+        }
+        let (head, inner_opt) = match name.find('[') {
+            Some(i) if name.ends_with(']') => (&name[..i], Some(&name[i + 1..name.len() - 1])),
+            _ => (name, None),
+        };
+        let head = head.trim();
+        if !head.is_empty() && !head.contains('.') && !self.is_known_type_name(head) {
+            let msg = format!("undefined: {} (HYB-E1002)", head);
+            self.diags.push(
+                Diagnostic::error("HYB-E1002", self.path.clone(), span, msg).with_notes(vec![
+                    format!(
+                        "why: Go rejects undeclared type names (`undefined: {}`), so the emitted module would not build (HYB-E1002)",
+                        head
+                    ),
+                    "fix: declare a struct, enum, or type alias, use a predeclared type, or qualify a foreign type with its package prefix (e.g. `pkg.Type`)".to_string(),
+                ]),
+            );
+        }
+        if let Some(inner) = inner_opt {
+            for arg in split_top_level_type_args(inner) {
+                self.check_named_type_resolution(arg, span);
+            }
         }
     }
 
