@@ -36,6 +36,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -75,6 +76,41 @@ def check_repro(repro_rel: str) -> tuple[int, str]:
     r = sh([str(HYB), "check", repro_rel])
     out = (r.stdout or "") + (r.stderr or "")
     return r.returncode, out
+
+
+def expected_code_in(expected: str, out: str) -> bool:
+    """Token-bounded match of an expected diagnostic code in checker output.
+
+    Substring matching lets HYB-E60020 satisfy expected=HYB-E6002; the
+    lookaround guards reject that. Same contract as author_stage.py /
+    specialized_brain.py.
+    """
+    if not expected:
+        return False
+    return re.search(rf"(?<![\w-]){re.escape(expected)}(?![\w-])", out) is not None
+
+
+def baseline_verdict(code: int) -> str:
+    """Classify an unpatched-tree checker exit: 'accept' | 'stale-premise' | 'checker-failed'.
+
+    hyb check uses 0 for accept and 1 for a checked rejection. Exit 2 is an
+    invocation/I-O failure and negative codes are signals — a failed checker
+    is not a verdict, so it must not read as 'stale or already fixed'.
+    """
+    if code == 0:
+        return "accept"
+    if code == 1:
+        return "stale-premise"
+    return "checker-failed"
+
+
+def patched_verdict(code: int) -> str:
+    """Classify a patched-tree checker exit: 'reject' | 'ineffective' | 'checker-failed'."""
+    if code == 1:
+        return "reject"
+    if code == 0:
+        return "ineffective"
+    return "checker-failed"
 
 
 def battery() -> list[tuple[str, bool, str]]:
@@ -142,7 +178,10 @@ def log_event(token_env: str, event: str, verdict: str, note: str, issue: int | 
     cmd = ["python3", "tools/shepherd.py", "--token-env", token_env, "log",
            "--event", event, "--verdict", verdict, "--note", note]
     if issue:
-        cmd += ["--issue", str(issue)]
+        # shepherd.py log takes --pr (the session-log record's reference
+        # field); it has no --issue flag, so autoland events carry the
+        # driving issue number there.
+        cmd += ["--pr", str(issue)]
     sh(cmd)
 
 
@@ -162,7 +201,15 @@ def run_bundle(slug: str, live: bool, token_env: str) -> int:
     # ---- 1. BASELINE: the unpatched tree must ACCEPT the repro ----
     build()
     code, out = check_repro(repro_rel)
-    if code != 0:
+    verdict = baseline_verdict(code)
+    # hyb check uses 0 for accept, 1 for a checked rejection, and other
+    # codes (2 for invocation/I-O failures, negatives for signals) for
+    # process failures — a failed checker is not a verdict.
+    if verdict == "checker-failed":
+        log_event(token_env, "autoland", "blocked",
+                  f"#{issue}: baseline checker failed (exit {code}) — not a verdict, retriable", issue, live=live)
+        return die("CHECKER-FAILED", slug, f"baseline checker failed (exit {code}):\n{out[-400:]}", 8)
+    if verdict == "stale-premise":
         log_event(token_env, "autoland", "stale-premise",
                   f"#{issue}: repro REJECTs on main (exit {code}) — stale or already fixed", issue, live=live)
         return die("STALE-PREMISE", slug, f"repro rejects on main (exit {code}) — nothing landed", 3)
@@ -179,10 +226,17 @@ def run_bundle(slug: str, live: bool, token_env: str) -> int:
     try:
         build()
         code, out = check_repro(repro_rel)
-        if code == 0:
+        # Same verdict discipline as the baseline gate: only exit 1 is a
+        # checked REJECT; exit 0 means the patch is ineffective, anything
+        # else is a process failure, not a verdict.
+        verdict = patched_verdict(code)
+        if verdict == "ineffective":
             log_event(token_env, "autoland", "blocked", f"#{issue}: patch applied but repro still ACCEPTs — ineffective", issue, live=live)
             return die("INEFFECTIVE", slug, "repro still ACCEPTs after patch — nothing landed", 5)
-        if expected and expected not in out:
+        if verdict == "checker-failed":
+            log_event(token_env, "autoland", "blocked", f"#{issue}: checker failed after patch (exit {code}) — not a verdict, retriable", issue, live=live)
+            return die("CHECKER-FAILED", slug, f"patched checker failed (exit {code}):\n{out[-400:]}", 8)
+        if expected and not expected_code_in(expected, out):
             log_event(token_env, "autoland", "blocked", f"#{issue}: repro rejected but without expected code {expected}", issue, live=live)
             return die("WRONG-CODE", slug, f"expected {expected} in diagnostics, got: {out[:300]}", 6)
 

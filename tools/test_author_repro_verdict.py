@@ -226,5 +226,82 @@ class SpecializedReproVerdictTests(unittest.TestCase):
             self.assertEqual(by_path[path], exp_new, f"dual-count drift in {path}")
 
 
+class AutolandReproVerdictTests(unittest.TestCase):
+    """Issue #2424: autoland gate verdicts must match the author-stage contract.
+
+    The baseline gate must separate a checked REJECT (exit 1 = stale premise)
+    from a checker failure (exit 2 / signal = not a verdict). The patched gate
+    must only accept exit 1 as a rejection and must match the expected code
+    token-bounded (HYB-E60020 does not satisfy HYB-E6002). log_event forwards
+    the driving issue via shepherd.py log's --pr flag (--issue is not a valid
+    flag there and made every live audit record exit 2, silently dropped).
+    """
+
+    def setUp(self):
+        autoland_spec = importlib.util.spec_from_file_location(
+            "autoland_verdict_subject",
+            Path(__file__).with_name("autoland.py"),
+        )
+        assert autoland_spec is not None and autoland_spec.loader is not None
+        self.autoland = importlib.util.module_from_spec(autoland_spec)
+        autoland_spec.loader.exec_module(self.autoland)
+
+    def test_baseline_verdict_exit_one_is_stale_premise(self):
+        self.assertEqual(self.autoland.baseline_verdict(1), "stale-premise")
+
+    def test_baseline_verdict_exit_two_is_checker_failed(self):
+        self.assertEqual(self.autoland.baseline_verdict(2), "checker-failed")
+
+    def test_baseline_verdict_signal_is_checker_failed(self):
+        self.assertEqual(self.autoland.baseline_verdict(-15), "checker-failed")
+
+    def test_baseline_verdict_zero_is_accept(self):
+        self.assertEqual(self.autoland.baseline_verdict(0), "accept")
+
+    def test_patched_verdict_exit_one_is_reject(self):
+        self.assertEqual(self.autoland.patched_verdict(1), "reject")
+
+    def test_patched_verdict_zero_is_ineffective(self):
+        self.assertEqual(self.autoland.patched_verdict(0), "ineffective")
+
+    def test_patched_verdict_two_and_signal_are_checker_failed(self):
+        self.assertEqual(self.autoland.patched_verdict(2), "checker-failed")
+        self.assertEqual(self.autoland.patched_verdict(-15), "checker-failed")
+
+    def test_longer_code_does_not_match_expected(self):
+        self.assertFalse(self.autoland.expected_code_in("HYB-E6002", "error[HYB-E60020]: rejected"))
+
+    def test_exact_code_matches(self):
+        self.assertTrue(self.autoland.expected_code_in("HYB-E6002", "error[HYB-E6002]: rejected"))
+
+    def test_shorter_code_does_not_match_expected(self):
+        self.assertFalse(self.autoland.expected_code_in("HYB-E60020", "error[HYB-E6002]: rejected"))
+
+    def test_log_event_forwards_issue_as_pr(self):
+        received = []
+
+        def fake_sh(args, **kwargs):
+            received.append(args)
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with patch.object(self.autoland, "sh", side_effect=fake_sh):
+            self.autoland.log_event("GITHUB_TOKEN", "autoland", "landed", "note", 123, live=True)
+        self.assertIn("--pr", received[0])
+        self.assertEqual(received[0][received[0].index("--pr") + 1], "123")
+        self.assertNotIn("--issue", received[0])
+
+    def test_log_event_omits_reference_when_issue_missing(self):
+        received = []
+
+        def fake_sh(args, **kwargs):
+            received.append(args)
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with patch.object(self.autoland, "sh", side_effect=fake_sh):
+            self.autoland.log_event("GITHUB_TOKEN", "autoland", "blocked", "note", None, live=True)
+        self.assertNotIn("--pr", received[0])
+        self.assertNotIn("--issue", received[0])
+
+
 if __name__ == "__main__":
     unittest.main()
