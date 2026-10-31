@@ -1811,8 +1811,12 @@ impl Emitter {
                         "for {}, {} := {}, {} <= {}; {}; {}++ {{",
                         v, cont, lo_once, lo_once, hi_once, cont, v
                     )
-                } else {
+                } else if !Self::expr_mentions_ident(hi, &v) && !Self::expr_has_call_or_recv(hi) {
                     format!("for {} := {}; {} < {}; {}++ {{", v, lo_t, v, hi_t, v)
+                } else {
+                    let hi_once = self.next_temp("hyHi");
+                    self.push(&format!("{} := {}", hi_once, hi_t));
+                    format!("for {} := {}; {} < {}; {}++ {{", v, lo_t, v, hi_once, v)
                 }
             }
             ForKind::Iterate { vars, expr } => {
