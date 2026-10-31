@@ -105,3 +105,54 @@ fn valid_byte_and_rune_slice_conversions_accept() {
     let r = check(src);
     assert_eq!(r.verdict, Verdict::Accept, "expected accept, got diagnostics: {:?}", r.diagnostics);
 }
+
+#[test]
+fn array_conversion_from_incompatible_slice_rejects_e1002() {
+    let src = "fn main() {\n    var s []string\n    _ = [3]int{}(s)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+    assert!(r.diagnostics.iter().any(|d| d.message.contains("cannot convert `s` (type `[]string`) to `[3]int`")));
+}
+
+#[test]
+fn array_conversion_from_incompatible_array_rejects_e1002() {
+    let src = "fn main() {\n    var a [3]float64\n    _ = [3]int{}(a)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+    assert!(r.diagnostics.iter().any(|d| d.message.contains("cannot convert `a` (type `[N]float64`) to `[3]int`")));
+}
+
+#[test]
+fn array_conversion_alias_from_incompatible_slice_rejects_e1002() {
+    let src = "type arr_t = [3]int\nfn main() {\n    var s []string\n    _ = arr_t(s)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn array_conversion_alias_from_incompatible_array_rejects_e1002() {
+    let src = "type arr_t = [3]int\nfn main() {\n    var a [3]float64\n    _ = arr_t(a)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn array_conversion_from_compatible_slice_accepts() {
+    let src = "fn main() {\n    var s []int\n    _ = [3]int{}(s)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Accept, "expected accept, got diagnostics: {:?}", r.diagnostics);
+}
+
+#[test]
+fn array_conversion_from_compatible_array_accepts() {
+    let src = "fn main() {\n    var a [3]int\n    _ = [3]int{}(a)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Accept, "expected accept, got diagnostics: {:?}", r.diagnostics);
+}
+
+
+

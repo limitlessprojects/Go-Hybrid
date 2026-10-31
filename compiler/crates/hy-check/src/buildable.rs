@@ -255,6 +255,18 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         // Cannot convert from Int, Float, Bool, Map, Chan, Struct.
         (Slice(_), Int | Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
 
+        // Array target: cannot convert from scalars, pointers, maps, chans, or structs.
+        (Array(_), Int | Float | Bool | Str | Map(_, _) | Chan(_) | Struct(_) | Pointer(_)) => true,
+
+        // Array target: can convert from Slice or Array with identical element types.
+        (Array(target_elem), Slice(arg_elem) | Array(arg_elem))
+            if **target_elem != OpKind::Unknown
+                && **arg_elem != OpKind::Unknown
+                && (**target_elem != **arg_elem || kinds_conflict(target_elem, arg_elem)) =>
+        {
+            true
+        }
+
         // Map target: cannot convert from Int, Float, Bool, Str, Slice, Chan, Struct.
         (Map(_, _), Int | Float | Bool | Str | Slice(_) | Chan(_) | Struct(_)) => true,
 
@@ -3802,7 +3814,7 @@ impl<'a> Collector<'a> {
                 items,
                 ..
             } if items.is_empty() => {
-                if let Some((_, _, arr_ty)) = bare.as_array_lit() {
+                if let Some((_, inner_elem, arr_ty)) = bare.as_array_lit() {
                     let target_str = arr_ty.render();
                     if args.len() != 1 {
                         self.emit_e1002(
@@ -3820,17 +3832,38 @@ impl<'a> Collector<'a> {
                     let arg = &args[0].value;
                     self.check_single_value_position(arg, "a type conversion", false);
                     let ak = self.kind_of_expr(arg);
-                    if !matches!(ak, OpKind::Unknown | OpKind::Slice(_) | OpKind::Array(_)) {
-                        self.emit_e1002(
-                            arg.span(),
-                            format!(
-                                "cannot convert `{}` (type `{}`) to `{}` (HYB-E1002)",
-                                arg.render(),
-                                ak.label(),
-                                target_str
-                            ),
-                            "array type conversions require a slice or array operand",
-                        );
+                    let target_elem_k = self.kind_of_ty(inner_elem, 0);
+                    match &ak {
+                        OpKind::Slice(arg_elem) | OpKind::Array(arg_elem) => {
+                            if target_elem_k != OpKind::Unknown
+                                && **arg_elem != OpKind::Unknown
+                                && (target_elem_k != **arg_elem || kinds_conflict(&target_elem_k, arg_elem))
+                            {
+                                self.emit_e1002(
+                                    arg.span(),
+                                    format!(
+                                        "cannot convert `{}` (type `{}`) to `{}` (HYB-E1002)",
+                                        arg.render(),
+                                        ak.label(),
+                                        target_str
+                                    ),
+                                    "array type conversions require a slice or array operand with identical element types",
+                                );
+                            }
+                        }
+                        OpKind::Unknown => {}
+                        _ => {
+                            self.emit_e1002(
+                                arg.span(),
+                                format!(
+                                    "cannot convert `{}` (type `{}`) to `{}` (HYB-E1002)",
+                                    arg.render(),
+                                    ak.label(),
+                                    target_str
+                                ),
+                                "array type conversions require a slice or array operand",
+                            );
+                        }
                     }
                     return;
                 }
