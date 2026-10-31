@@ -893,32 +893,83 @@ impl<'a> Collector<'a> {
         // set (Define|Let|Var|Const) drives which locals get unused-read
         // tracking; #430's operand-kind inference runs for EVERY name so
         // `kind_of_expr` resolves binding-shaped operands (issue #425).
+        if matches!(l.kind, LocalKind::Var | LocalKind::Const) {
+            self.check_repeated_bindings(&l.names, l.span);
+        }
         let kinds = self.infer_local_kinds(l);
         for (name, kind) in l.names.iter().zip(kinds) {
-            self.bind_kind(name, kind);
             if !track_read {
+                self.bind_kind(name, kind);
                 self.exempt(name);
                 continue;
             }
             if name == "_" {
                 continue;
             }
-            let existing_let = self
+            let existing_entry = self
                 .scopes
                 .last()
-                .and_then(|top| top.get(name.as_str()).copied().flatten())
-                .is_some_and(|id| self.defines[id].kind == LocalKind::Let);
-            if existing_let {
-                self.emit_let_reassign_error(name, l.span);
-                continue;
+                .and_then(|top| top.get(name.as_str()).copied());
+            if let Some(Some(id)) = existing_entry {
+                if self.defines[id].kind == LocalKind::Let {
+                    self.emit_let_reassign_error(name, l.span);
+                    continue;
+                }
+                if self.defines[id].kind == LocalKind::Const {
+                    self.emit_e1002(
+                        l.span,
+                        format!(
+                            "`{}` redeclared in this block (previously declared as `const`) — Go refuses redeclaring or reassigning a constant (HYB-E1002)",
+                            name
+                        ),
+                        "a `const` binding cannot be redeclared or reassigned in the same block",
+                    );
+                    continue;
+                }
             }
-            let Some(top) = self.scopes.last_mut() else {
-                continue;
-            };
-            if top.contains_key(name.as_str()) {
+            if existing_entry.is_some() {
+                if matches!(l.kind, LocalKind::Var | LocalKind::Const)
+                    || (l.kind == LocalKind::Let && l.names.len() > 1)
+                {
+                    self.emit_e1002(
+                        l.span,
+                        format!(
+                            "`{}` redeclared in this block — Go refuses same-scope redeclaration (HYB-E1002)",
+                            name
+                        ),
+                        "an identifier may only be declared once in a block (including function parameters and named results); use `=` to assign or choose a distinct name",
+                    );
+                    continue;
+                }
+                if let Some(ek) = self
+                    .kind_scopes
+                    .last()
+                    .and_then(|top| top.get(name.as_str()))
+                    .cloned()
+                {
+                    if kinds_conflict(&ek, &kind) {
+                        self.emit_e1002(
+                            l.span,
+                            format!(
+                                "cannot redeclare `{}` (type `{}`) with a value of type `{}` in `:=` — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
+                                name,
+                                ek.label(),
+                                kind.label(),
+                                ek.label()
+                            ),
+                            "a short variable declaration (`:=`) that re-binds an existing variable in the same scope acts as an assignment and must match its declared type",
+                        );
+                    }
+                } else {
+                    self.bind_kind(name, kind);
+                }
                 // Same-scope re-define: Go keeps the existing variable.
                 continue;
             }
+            self.bind_kind(name, kind);
+            let Some(top) = self.scopes.last_mut() else {
+                continue;
+            };
             let id = self.defines.len();
             self.defines.push(Define {
                 name: name.clone(),
