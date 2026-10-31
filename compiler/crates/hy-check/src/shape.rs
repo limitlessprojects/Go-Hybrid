@@ -709,6 +709,44 @@ impl<'a> Checker<'a> {
                 results: results.iter().map(|r| r.ty.clone()).collect(),
                 span: *span,
             }),
+            Expr::Lit { kind, span } => match kind {
+                hy_syntax::LitKind::Int(_) => Some(TypeExpr::Named {
+                    name: "int".to_string(),
+                    span: *span,
+                }),
+                hy_syntax::LitKind::Float(_) => Some(TypeExpr::Named {
+                    name: "float64".to_string(),
+                    span: *span,
+                }),
+                hy_syntax::LitKind::Bool(_) => Some(TypeExpr::Named {
+                    name: "bool".to_string(),
+                    span: *span,
+                }),
+                hy_syntax::LitKind::Str(_) | hy_syntax::LitKind::RawStr(_) => Some(TypeExpr::Named {
+                    name: "string".to_string(),
+                    span: *span,
+                }),
+                hy_syntax::LitKind::Char(_) => Some(TypeExpr::Named {
+                    name: "rune".to_string(),
+                    span: *span,
+                }),
+                hy_syntax::LitKind::Nil => None,
+            },
+            Expr::Interp { span, .. } => Some(TypeExpr::Named {
+                name: "string".to_string(),
+                span: *span,
+            }),
+            Expr::Unary { op, operand, span } => match op {
+                hy_syntax::UnOp::Not => Some(TypeExpr::Named {
+                    name: "bool".to_string(),
+                    span: *span,
+                }),
+                hy_syntax::UnOp::Neg => self.ty_of_expr(st, operand),
+                hy_syntax::UnOp::Addr => self.ty_of_expr(st, operand).map(|elem| TypeExpr::Pointer {
+                    to: Box::new(elem),
+                    span: *span,
+                }),
+            },
             Expr::Move { operand, .. }
             | Expr::Try { operand, .. }
             | Expr::Paren { inner: operand, .. } => self.ty_of_expr(st, operand),
@@ -809,7 +847,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             },
-            Expr::Binary { op, lhs, rhs, .. } => {
+            Expr::Binary { op, lhs, rhs, span } => {
                 if matches!(
                     op,
                     hy_syntax::BinOp::Add
@@ -822,6 +860,21 @@ impl<'a> Checker<'a> {
                         | hy_syntax::BinOp::BitXor
                 ) {
                     self.ty_of_expr(st, lhs).or_else(|| self.ty_of_expr(st, rhs))
+                } else if matches!(
+                    op,
+                    hy_syntax::BinOp::Eq
+                        | hy_syntax::BinOp::Ne
+                        | hy_syntax::BinOp::Lt
+                        | hy_syntax::BinOp::Le
+                        | hy_syntax::BinOp::Gt
+                        | hy_syntax::BinOp::Ge
+                        | hy_syntax::BinOp::And
+                        | hy_syntax::BinOp::Or
+                ) {
+                    Some(TypeExpr::Named {
+                        name: "bool".to_string(),
+                        span: *span,
+                    })
                 } else {
                     None
                 }
