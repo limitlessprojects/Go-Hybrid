@@ -116,3 +116,47 @@ fn main() {
     assert_eq!(r.verdict, Verdict::Accept);
     assert!(error_codes(&r).is_empty(), "expected 0 errors, got {:?}", r.diagnostics);
 }
+
+
+// ---------------------------------------------------------------- operand kind regression (issue #1765)
+
+#[test]
+fn real_and_imag_reject_invalid_literal_operands_e2005() {
+    let r_str = check("fn main() {\n    _ = real(\"hello\")\n}\n");
+    assert_eq!(r_str.verdict, Verdict::Reject);
+    assert!(error_codes(&r_str).contains(&"HYB-E2005".to_string()));
+
+    let r_nil = check("fn main() {\n    _ = real(nil)\n}\n");
+    assert_eq!(r_nil.verdict, Verdict::Reject);
+    assert!(error_codes(&r_nil).contains(&"HYB-E2005".to_string()));
+
+    let i_bool = check("fn main() {\n    _ = imag(true)\n}\n");
+    assert_eq!(i_bool.verdict, Verdict::Reject);
+    assert!(error_codes(&i_bool).contains(&"HYB-E2005".to_string()));
+
+    let i_nil = check("fn main() {\n    _ = imag(nil)\n}\n");
+    assert_eq!(i_nil.verdict, Verdict::Reject);
+    assert!(error_codes(&i_nil).contains(&"HYB-E2005".to_string()));
+}
+
+#[test]
+fn complex_rejects_non_numeric_literal_operands_e2005() {
+    let r1 = check("fn main() {\n    _ = complex(\"a\", \"b\")\n}\n");
+    assert_eq!(r1.verdict, Verdict::Reject);
+    assert!(error_codes(&r1).contains(&"HYB-E2005".to_string()));
+
+    let r2 = check("fn main() {\n    _ = complex(nil, nil)\n}\n");
+    assert_eq!(r2.verdict, Verdict::Reject);
+    assert!(error_codes(&r2).contains(&"HYB-E2005".to_string()));
+}
+
+#[test]
+fn min_max_reject_nil_e2005() {
+    let r_min = check("fn main() {\n    _ = min(nil)\n}\n");
+    assert_eq!(r_min.verdict, Verdict::Reject);
+    assert!(error_codes(&r_min).contains(&"HYB-E2005".to_string()));
+
+    let r_max = check("fn main() {\n    _ = max(nil)\n}\n");
+    assert_eq!(r_max.verdict, Verdict::Reject);
+    assert!(error_codes(&r_max).contains(&"HYB-E2005".to_string()));
+}
