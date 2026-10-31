@@ -3932,7 +3932,9 @@ impl<'a> Collector<'a> {
             {
                 continue;
             }
-            if !kinds_conflict(&expected, &ik) {
+            if !kinds_conflict(&expected, &ik)
+                && !(expected == OpKind::Float && ik == OpKind::Int)
+            {
                 continue;
             }
             self.emit_e1002(
@@ -3966,7 +3968,8 @@ impl<'a> Collector<'a> {
                     && !(exp_key == OpKind::Float
                         && kk == OpKind::Int
                         && crate::const_overflow::const_int_value(k).is_some())
-                    && kinds_conflict(&exp_key, &kk)
+                    && (kinds_conflict(&exp_key, &kk)
+                        || (exp_key == OpKind::Float && kk == OpKind::Int))
                 {
                     self.emit_e1002(
                         k.span(),
@@ -3991,7 +3994,8 @@ impl<'a> Collector<'a> {
                     && !(exp_val == OpKind::Float
                         && vk == OpKind::Int
                         && crate::const_overflow::const_int_value(v).is_some())
-                    && kinds_conflict(&exp_val, &vk)
+                    && (kinds_conflict(&exp_val, &vk)
+                        || (exp_val == OpKind::Float && vk == OpKind::Int))
                 {
                     self.emit_e1002(
                         v.span(),
