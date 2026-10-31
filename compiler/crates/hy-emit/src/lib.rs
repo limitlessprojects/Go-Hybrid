@@ -447,6 +447,22 @@ pub(crate) fn base_ty_name(t: &TypeExpr) -> Option<String> {
     }
 }
 
+pub(crate) fn is_pointer_element_type(ty: &TypeExpr) -> bool {
+    match ty {
+        TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+            matches!(elem.as_ref(), TypeExpr::Pointer { .. })
+        }
+        TypeExpr::Pointer { to, .. } => match to.as_ref() {
+            TypeExpr::Array { elem, .. } => matches!(elem.as_ref(), TypeExpr::Pointer { .. }),
+            _ => false,
+        },
+        TypeExpr::Map { value, .. } => {
+            matches!(value.as_ref(), TypeExpr::Pointer { .. })
+        }
+        _ => false,
+    }
+}
+
 /// Is this ident a foreign package root we recognize? (Import collection is
 /// usage-driven: any dotted name's first segment gets an import line.)
 pub(crate) fn is_package_root(name: &str) -> bool {
@@ -631,6 +647,10 @@ pub struct Emitter {
     var_ty: BTreeMap<String, (String, bool)>,
     /// Variables known to hold a pointer type in the current function frame.
     pointer_vars: BTreeSet<String>,
+    ptr_elem_vars: BTreeSet<String>,
+    method_shapes: BTreeMap<(String, String), FnShape>,
+    method_ptr_results: BTreeSet<(String, String)>,
+    struct_field_types: BTreeMap<(String, String), TypeExpr>,
     /// Local/parameter/receiver/result names bound in the current function frame.
     local_vars: BTreeSet<String>,
     /// Functions whose first result is a pointer type.
@@ -647,6 +667,7 @@ pub(crate) struct ScopeSnapshot {
     var_ty: BTreeMap<String, (String, bool)>,
     var_struct: BTreeMap<String, String>,
     pointer_vars: BTreeSet<String>,
+    ptr_elem_vars: BTreeSet<String>,
 }
 
 impl Emitter {
@@ -681,6 +702,10 @@ impl Emitter {
             var_struct: BTreeMap::new(),
             var_ty: BTreeMap::new(),
             pointer_vars: BTreeSet::new(),
+            ptr_elem_vars: BTreeSet::new(),
+            method_shapes: BTreeMap::new(),
+            method_ptr_results: BTreeSet::new(),
+            struct_field_types: BTreeMap::new(),
             local_vars: BTreeSet::new(),
             ptr_returning_fns: BTreeSet::new(),
             explicit_imports: BTreeMap::new(),
@@ -700,6 +725,7 @@ impl Emitter {
             var_ty: self.var_ty.clone(),
             var_struct: self.var_struct.clone(),
             pointer_vars: self.pointer_vars.clone(),
+            ptr_elem_vars: self.ptr_elem_vars.clone(),
         }
     }
 
@@ -709,6 +735,7 @@ impl Emitter {
         self.var_ty = saved.var_ty;
         self.var_struct = saved.var_struct;
         self.pointer_vars = saved.pointer_vars;
+        self.ptr_elem_vars = saved.ptr_elem_vars;
     }
 
     pub(crate) fn shadow_local_name(&mut self, name: &str) {
@@ -718,6 +745,7 @@ impl Emitter {
             self.var_ty.remove(name);
             self.var_struct.remove(name);
             self.pointer_vars.remove(name);
+            self.ptr_elem_vars.remove(name);
         }
     }
 
@@ -796,6 +824,63 @@ impl Emitter {
                 _ => None,
             })
             .collect();
+        self.struct_field_types = file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Struct(s) => {
+                    let s_base = s.name.split('[').next().unwrap_or(&s.name);
+                    Some(s.fields.iter().map(move |f| {
+                        ((s_base.to_string(), f.name.clone()), f.ty.clone())
+                    }))
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let mut method_shapes = BTreeMap::new();
+        let mut method_ptr_results = BTreeSet::new();
+        for f in file.fns() {
+            if let Some(recv) = &f.receiver {
+                if let Some(r_base) = base_ty_name(&recv.ty) {
+                    let r_head = r_base.split('[').next().unwrap_or(&r_base).to_string();
+                    let err = matches!(
+                        f.results.last(),
+                        Some(FnResult {
+                            ty: TypeExpr::Named { name, .. },
+                            ..
+                        }) if name == "error"
+                    );
+                    let kind = f
+                        .results
+                        .first()
+                        .and_then(|r| self.binding_kind_of_ty(&r.ty));
+                    let ptr_params = f
+                        .params
+                        .iter()
+                        .map(|p| match &p.ty {
+                            TypeExpr::Pointer { to, .. } => base_ty_name(to),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    method_shapes.insert(
+                        (r_head.clone(), f.name.clone()),
+                        (f.results.len(), err, kind, ptr_params),
+                    );
+                    if matches!(
+                        f.results.first(),
+                        Some(FnResult {
+                            ty: TypeExpr::Pointer { .. },
+                            ..
+                        })
+                    ) {
+                        method_ptr_results.insert((r_head, f.name.clone()));
+                    }
+                }
+            }
+        }
+        self.method_shapes = method_shapes;
+        self.method_ptr_results = method_ptr_results;
         self.ptr_returning_fns = file
             .fns()
             .filter(|f| {
@@ -1309,6 +1394,7 @@ impl Emitter {
         self.closure_shapes.clear();
         self.var_ty.clear();
         self.pointer_vars.clear();
+        self.ptr_elem_vars.clear();
         self.local_vars.clear();
         self.temp_n = 0;
         self.try_temps.clear();
@@ -1380,6 +1466,9 @@ impl Emitter {
                     if matches!(r.ty, TypeExpr::Pointer { .. }) {
                         self.pointer_vars.insert(name.clone());
                     }
+                    if is_pointer_element_type(&r.ty) {
+                        self.ptr_elem_vars.insert(name.clone());
+                    }
                     if let Some(kind) = self.binding_kind_of_ty(&r.ty) {
                         self.bindings.insert(name.clone(), kind);
                     }
@@ -1404,6 +1493,9 @@ impl Emitter {
                 if let Some((_, ptr)) = self.var_ty.get_mut(&recv.name) {
                     *ptr = true;
                 }
+            }
+            if is_pointer_element_type(&recv.ty) {
+                self.ptr_elem_vars.insert(recv.name.clone());
             }
             let recv_ty = self.type_text(&recv.ty);
             let star = if recv.is_pointer { "*" } else { "" };
@@ -1607,21 +1699,116 @@ impl Emitter {
             if matches!(p.ty, TypeExpr::Pointer { .. }) {
                 self.pointer_vars.insert(p.name.clone());
             }
+            if is_pointer_element_type(&p.ty) {
+                self.ptr_elem_vars.insert(p.name.clone());
+            }
             self.register_var_ty(&p.name, &p.ty);
+        }
+    }
+
+    pub(crate) fn struct_name_of_expr(&self, e: &Expr) -> Option<String> {
+        match Self::unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.var_struct.get(name).cloned(),
+            Expr::AddrOf { operand, .. } => self.struct_name_of_expr(operand.as_ref()),
+            Expr::Paren { inner, .. } => self.struct_name_of_expr(inner.as_ref()),
+            Expr::Field { base, name, .. } => {
+                let parent_struct = self.struct_name_of_expr(base.as_ref())?;
+                let fields = self.struct_fields.get(&parent_struct)?;
+                let (_, fty) = fields.iter().find(|(f, _)| f == name)?;
+                let head = fty.split('[').next().unwrap_or(fty);
+                if self.struct_fields.contains_key(head) {
+                    Some(head.to_string())
+                } else {
+                    None
+                }
+            }
+            Expr::StructLit { ty: Some(t), .. } => {
+                let s = base_ty_name(t)?;
+                let head = s.split('[').next().unwrap_or(&s);
+                if self.struct_fields.contains_key(head) {
+                    Some(head.to_string())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn expr_is_pointer_elem(&self, e: &Expr) -> bool {
+        match Self::unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.ptr_elem_vars.contains(name),
+            Expr::SliceLit { elem: Some(t), .. } => matches!(t.as_ref(), TypeExpr::Pointer { .. }),
+            Expr::SliceLit { elem: None, items, .. } => {
+                items.first().map_or(false, |it| self.expr_is_pointer(it))
+            }
+            Expr::MapLit { value, .. } => matches!(value.as_ref(), TypeExpr::Pointer { .. }),
+            Expr::Field { base, name, .. } => {
+                if let Some(sname) = self.struct_name_of_expr(base.as_ref()) {
+                    if let Some(fty) = self.struct_field_types.get(&(sname, name.clone())) {
+                        is_pointer_element_type(fty)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            Expr::Call { callee, args, .. } => {
+                if matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "make") {
+                    if let Some(first) = args.first() {
+                        match &first.value {
+                            Expr::SliceLit { elem: Some(t), .. } => {
+                                matches!(t.as_ref(), TypeExpr::Pointer { .. })
+                            }
+                            Expr::MapLit { value, .. } => {
+                                matches!(value.as_ref(), TypeExpr::Pointer { .. })
+                            }
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            _ => false,
         }
     }
 
     pub(crate) fn expr_is_pointer(&self, e: &Expr) -> bool {
         match e {
             Expr::AddrOf { .. } => true,
-            Expr::Paren { inner, .. } => self.expr_is_pointer(inner),
-            Expr::Try { operand, .. } => self.expr_is_pointer(operand),
+            Expr::Paren { inner, .. } => self.expr_is_pointer(inner.as_ref()),
+            Expr::Try { operand, .. } => self.expr_is_pointer(operand.as_ref()),
+            Expr::Move { operand, .. } => self.expr_is_pointer(operand.as_ref()),
             Expr::Ident { name, .. } => self.pointer_vars.contains(name),
-            Expr::Call { callee, .. } => {
-                if let Expr::Ident { name, .. } = callee.as_ref() {
-                    self.ptr_returning_fns.contains(name)
+            Expr::Index { base, .. } => self.expr_is_pointer_elem(base.as_ref()),
+            Expr::Field { base, name, .. } => {
+                if let Some(sname) = self.struct_name_of_expr(base.as_ref()) {
+                    if let Some(fty) = self.struct_field_types.get(&(sname, name.clone())) {
+                        matches!(fty, TypeExpr::Pointer { .. })
+                    } else {
+                        false
+                    }
                 } else {
                     false
+                }
+            }
+            Expr::Call { callee, .. } => {
+                match callee.as_ref() {
+                    Expr::Ident { name, .. } => {
+                        name == "new" || self.ptr_returning_fns.contains(name)
+                    }
+                    Expr::Field { base, name, .. } => {
+                        if let Some(sname) = self.struct_name_of_expr(base.as_ref()) {
+                            self.method_ptr_results.contains(&(sname, name.clone()))
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
                 }
             }
             _ => false,
