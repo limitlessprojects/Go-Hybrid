@@ -3148,6 +3148,46 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Walk `block` as its own lexical scope (#854). Defines inside the
+    /// block land in a fresh env layer, and at the closing brace every name
+    /// the block itself declared gets back the alias entry it had in the
+    /// enclosing scope right before the shadowing define. Capturing the entry
+    /// at the define (rather than at block entry) keeps an assignment to the
+    /// outer variable that precedes the shadow (`src = other; src := ..`).
+    fn walk_scoped_block_param_stores(
+        &self,
+        block: &Block,
+        cst: &mut FnState,
+        aliases: &mut std::collections::HashMap<String, HashSet<usize>>,
+        param_names: &HashSet<String>,
+        depth: usize,
+        out: &mut HashSet<(usize, usize)>,
+    ) {
+        cst.scopes.push(HashMap::new());
+        let mut outer_entries: HashMap<String, Option<HashSet<usize>>> = HashMap::new();
+        for s in &block.stmts {
+            if let Stmt::Local(l) = s {
+                for name in &l.names {
+                    if !outer_entries.contains_key(name) {
+                        outer_entries.insert(name.clone(), aliases.get(name).cloned());
+                    }
+                }
+            }
+            self.walk_stmt_param_stores(s, cst, aliases, param_names, depth, out);
+        }
+        cst.scopes.pop();
+        for (name, entry) in outer_entries {
+            match entry {
+                Some(v) => {
+                    aliases.insert(name, v);
+                }
+                None => {
+                    aliases.remove(&name);
+                }
+            }
+        }
+    }
+
     fn walk_stmt_param_stores(
         &self,
         stmt: &Stmt,
@@ -3398,7 +3438,7 @@ impl<'a> Checker<'a> {
                 }
                 let mut then_cst = branch_cst.clone();
                 let mut then_aliases = branch_aliases.clone();
-                self.walk_block_param_stores(
+                self.walk_scoped_block_param_stores(
                     then,
                     &mut then_cst,
                     &mut then_aliases,
@@ -3426,50 +3466,95 @@ impl<'a> Checker<'a> {
                 }
             }
             Stmt::For { kind, body, .. } => {
-                let mut body_cst = cst.clone();
-                let mut body_aliases = aliases.clone();
-                if let hy_syntax::ForKind::Iterate { vars, expr } = kind {
-                    let shapes = self.iterate_var_shapes(&body_cst, expr, vars.len());
-                    let raw = Self::raw_expr_slot_origins(expr, &body_aliases);
-                    for (vname, vshape) in vars.iter().zip(shapes) {
-                        let carries =
-                            self.shape_may_share(&vshape) || matches!(vshape, TypeShape::Unknown);
-                        body_cst.env_define(
-                            vname,
-                            Binding {
-                                shape: vshape,
-                                ty: None,
-                                immutable: false,
-                                is_let: false,
-                                managed_taint: false,
-                                moved: None,
-                                non_owned_origin: None,
-                                slot_loan: false,
-                            },
-                        );
-                        if carries && !raw.is_empty() {
-                            body_aliases.insert(vname.clone(), raw.clone());
-                        } else {
-                            body_aliases.remove(vname);
+                // A loop body runs zero or more times, and an alias assigned in
+                // one iteration is live in the next (`dst[0] = tmp; tmp = src`
+                // stores `src` into `dst` on the second pass). Walk the body to
+                // a fixpoint over the loop-head alias state: every pass starts
+                // from the pre-loop state joined with all back edges seen so
+                // far. `head` only grows (set union over the function's names
+                // and parameter slots, both finite) and the walk is
+                // deterministic in its input, so this terminates; in practice
+                // it settles in two or three passes.
+                let mut loop_bound: HashSet<&str> = HashSet::new();
+                match kind {
+                    hy_syntax::ForKind::Iterate { vars, .. } => {
+                        loop_bound.extend(vars.iter().map(String::as_str));
+                    }
+                    hy_syntax::ForKind::Range { var, .. } => {
+                        loop_bound.insert(var.as_str());
+                    }
+                    hy_syntax::ForKind::While { .. } | hy_syntax::ForKind::Infinite => {}
+                }
+                let mut head = aliases.clone();
+                loop {
+                    let mut body_cst = cst.clone();
+                    let mut body_aliases = head.clone();
+                    match kind {
+                        hy_syntax::ForKind::Iterate { vars, expr } => {
+                            let shapes = self.iterate_var_shapes(&body_cst, expr, vars.len());
+                            let raw = Self::raw_expr_slot_origins(expr, &body_aliases);
+                            for (vname, vshape) in vars.iter().zip(shapes) {
+                                let carries = self.shape_may_share(&vshape)
+                                    || matches!(vshape, TypeShape::Unknown);
+                                body_cst.env_define(
+                                    vname,
+                                    Binding {
+                                        shape: vshape,
+                                        ty: None,
+                                        immutable: false,
+                                        is_let: false,
+                                        managed_taint: false,
+                                        moved: None,
+                                        non_owned_origin: None,
+                                        slot_loan: false,
+                                    },
+                                );
+                                if carries && !raw.is_empty() {
+                                    body_aliases.insert(vname.clone(), raw.clone());
+                                } else {
+                                    body_aliases.remove(vname);
+                                }
+                            }
                         }
+                        hy_syntax::ForKind::Range { var, .. } => {
+                            body_aliases.remove(var);
+                        }
+                        hy_syntax::ForKind::While { cond } => {
+                            // The condition is re-evaluated before every
+                            // iteration, so calls in it see loop-carried
+                            // aliases too (the pre-loop evaluation is covered
+                            // by the `own_calls` walk above).
+                            let mut ccalls = Vec::new();
+                            walk::expr_calls(cond, &mut ccalls);
+                            for cr in &ccalls {
+                                self.walk_call_param_stores(
+                                    cr,
+                                    &body_cst,
+                                    &mut body_aliases,
+                                    param_names,
+                                    depth,
+                                    out,
+                                );
+                            }
+                        }
+                        hy_syntax::ForKind::Infinite => {}
+                    }
+                    self.walk_scoped_block_param_stores(
+                        body,
+                        &mut body_cst,
+                        &mut body_aliases,
+                        param_names,
+                        depth,
+                        out,
+                    );
+                    if !Self::join_scoped_param_aliases(&mut head, body_aliases, cst, &loop_bound) {
+                        break;
                     }
                 }
-                self.walk_block_param_stores(
-                    body,
-                    &mut body_cst,
-                    &mut body_aliases,
-                    param_names,
-                    depth,
-                    out,
-                );
-                for (k, v) in body_aliases {
-                    if aliases.contains_key(&k) {
-                        aliases.entry(k).or_default().extend(v);
-                    }
-                }
+                *aliases = head;
             }
             Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
-                self.walk_block_param_stores(body, cst, aliases, param_names, depth, out);
+                self.walk_scoped_block_param_stores(body, cst, aliases, param_names, depth, out);
             }
             Stmt::Match { subject, arms, .. } => {
                 let subj_origins = self.expr_slot_origins(cst, subject, aliases);
@@ -3501,7 +3586,7 @@ impl<'a> Checker<'a> {
                             arm_aliases.insert(bname.clone(), subj_origins.clone());
                         }
                     }
-                    self.walk_block_param_stores(
+                    self.walk_scoped_block_param_stores(
                         &arm.body,
                         &mut arm_cst,
                         &mut arm_aliases,
@@ -3509,18 +3594,21 @@ impl<'a> Checker<'a> {
                         depth,
                         out,
                     );
-                    for (k, v) in arm_aliases {
-                        if aliases.contains_key(&k) {
-                            aliases.entry(k).or_default().extend(v);
-                        }
-                    }
+                    let arm_bound: HashSet<&str> = match &arm.pattern {
+                        hy_syntax::MatchPattern::Path {
+                            binding: Some(bname),
+                            ..
+                        } => HashSet::from([bname.as_str()]),
+                        _ => HashSet::new(),
+                    };
+                    Self::join_scoped_param_aliases(aliases, arm_aliases, cst, &arm_bound);
                 }
             }
             Stmt::Select { arms, .. } => {
                 for arm in arms {
                     let mut arm_cst = cst.clone();
                     let mut arm_aliases = aliases.clone();
-                    self.walk_block_param_stores(
+                    self.walk_scoped_block_param_stores(
                         &arm.body,
                         &mut arm_cst,
                         &mut arm_aliases,
@@ -3528,15 +3616,44 @@ impl<'a> Checker<'a> {
                         depth,
                         out,
                     );
-                    for (k, v) in arm_aliases {
-                        if aliases.contains_key(&k) {
-                            aliases.entry(k).or_default().extend(v);
-                        }
-                    }
+                    Self::join_scoped_param_aliases(aliases, arm_aliases, cst, &HashSet::new());
                 }
             }
             _ => {}
         }
+    }
+
+    /// Join the alias state at the end of a nested scope (a loop body, a
+    /// match or select arm) back into the enclosing state `into`.
+    ///
+    /// A name is kept when it is visible in the enclosing scope: either it
+    /// already has an alias entry there, or it is bound in `outer_cst`. The
+    /// second test matters because a local declared without a sharing
+    /// initializer (`var tmp map[string]int`, `tmp := map[string]int{}`) has
+    /// no alias entry before the scope, yet an assignment to it inside the
+    /// scope is visible after it (#854). Names that only the scope binds
+    /// (`exclude`: loop variables, a match arm binding) are dropped.
+    /// Returns whether `into` grew.
+    fn join_scoped_param_aliases(
+        into: &mut std::collections::HashMap<String, HashSet<usize>>,
+        from: std::collections::HashMap<String, HashSet<usize>>,
+        outer_cst: &FnState,
+        exclude: &HashSet<&str>,
+    ) -> bool {
+        let mut grew = false;
+        for (k, v) in from {
+            if v.is_empty() || exclude.contains(k.as_str()) {
+                continue;
+            }
+            if !into.contains_key(&k) && outer_cst.env_lookup(&k).is_none() {
+                continue;
+            }
+            let e = into.entry(k).or_default();
+            let before = e.len();
+            e.extend(v);
+            grew |= e.len() != before;
+        }
+        grew
     }
 
     fn walk_call_param_stores(

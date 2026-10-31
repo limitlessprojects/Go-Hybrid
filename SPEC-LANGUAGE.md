@@ -1629,6 +1629,12 @@ mux.handle("/x", http.handler(fn(w http.response_writer) {
   idiomatic AND receivers can be proven read-only, the rule may relax to
   writes-only as a logged decision — and the §9.2 claims paragraph narrows
   in the same edit.*
+  When a callee stores one parameter into another (`dst[0] = src`), the two
+  arguments are aliases at the call site. This includes a store that
+  only happens on a later loop iteration (`dst[0] = tmp` then `tmp = src`)
+  and an assignment, inside a loop body, `match` arm, `select` arm, or inner
+  block, to a variable declared outside it; a binding declared inside an
+  inner block does not outlive the block (#854).
 - **O5.3 — Fresh literals and immutable values are not frozen** (nothing
   aliased exists to freeze); channels are never frozen (class 2 — sharing
   them is their purpose).
