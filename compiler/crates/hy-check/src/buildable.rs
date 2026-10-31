@@ -1801,6 +1801,23 @@ impl<'a> Collector<'a> {
         map
     }
 
+    fn fn_type_arg_map(&self, f: &FnDecl, full_name: &str) -> Option<HashMap<String, String>> {
+        let open = full_name.find('[')?;
+        if !full_name.ends_with(']') {
+            return None;
+        }
+        let inner = &full_name[open + 1..full_name.len() - 1];
+        let args = split_top_level_type_args(inner);
+        if args.len() != f.type_params.len() {
+            return None;
+        }
+        let mut map = HashMap::new();
+        for (tp, arg) in f.type_params.iter().zip(args.into_iter()) {
+            map.insert(tp.name.clone(), arg.to_string());
+        }
+        Some(map)
+    }
+
     fn kind_of_place(&self, p: &Place) -> OpKind {
         match &p.kind {
             PlaceKind::Ident(n) => self.lookup_kind(n).unwrap_or(OpKind::Unknown),
@@ -1857,10 +1874,11 @@ impl<'a> Collector<'a> {
                 }
                 let head = Checker::base_named_type_str(name);
                 if let Some(f) = self.ck.fns.get(name.as_str()).or_else(|| self.ck.fns.get(head)) {
+                    let subst = self.fn_type_arg_map(f, name).unwrap_or_default();
                     return OpKind::Fn(
                         f.results
                             .iter()
-                            .map(|r| self.kind_of_ty(&r.ty, 0))
+                            .map(|r| self.kind_of_ty_with_subst(&r.ty, &subst, 0))
                             .collect(),
                         Some(f.params.len()),
                     );
@@ -2047,10 +2065,11 @@ impl<'a> Collector<'a> {
                 }
                 let head = Checker::base_named_type_str(name);
                 if let Some(f) = self.ck.fns.get(name.as_str()).or_else(|| self.ck.fns.get(head)) {
+                    let subst = self.fn_type_arg_map(f, name).unwrap_or_default();
                     return Some(
                         f.results
                             .iter()
-                            .map(|r| self.kind_of_ty(&r.ty, 0))
+                            .map(|r| self.kind_of_ty_with_subst(&r.ty, &subst, 0))
                             .collect(),
                     );
                 }
@@ -2401,9 +2420,19 @@ impl<'a> Collector<'a> {
             return;
         };
         // Generic instantiations (`id[int](x)`) carry type arguments the
-        // parameter list does not describe; leave them to the type checker.
+        // parameter list does not describe; leave uninstantiated calls to the
+        // type argument checker.
         if !f.type_params.is_empty() {
-            return;
+            let Some(open) = name.find('[') else {
+                return;
+            };
+            if !name.ends_with(']') {
+                return;
+            }
+            let inner = &name[open + 1..name.len() - 1];
+            if split_top_level_type_args(inner).len() != f.type_params.len() {
+                return;
+            }
         }
         // A lone multi-value call IS the whole argument list and expands to one
         // argument per result: `g(two())` for a 2-param `g` is one written
@@ -2504,9 +2533,14 @@ impl<'a> Collector<'a> {
         let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
             return;
         };
-        if !f.type_params.is_empty() {
-            return;
-        }
+        let subst = if !f.type_params.is_empty() {
+            let Some(subst) = self.fn_type_arg_map(f, name) else {
+                return;
+            };
+            subst
+        } else {
+            HashMap::new()
+        };
         if self.multi_value_arg_count(args).is_some() {
             return;
         }
@@ -2514,7 +2548,7 @@ impl<'a> Collector<'a> {
             return;
         }
         for (p, a) in f.params.iter().zip(args.iter()) {
-            let want = self.kind_of_ty(&p.ty, 0);
+            let want = self.kind_of_ty_with_subst(&p.ty, &subst, 0);
             let got = self.kind_of_expr(&a.value);
             if let OpKind::Pointer(inner) = &want {
                 if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
@@ -4909,6 +4943,53 @@ fn main() {
                 error_codes(&r)
             );
         }
+    }
+
+    #[test]
+    fn rejects_mismatched_generic_fn_call_arity_and_arg_types_1961() {
+        // Arity mismatch on instantiated generic function -> HYB-E1002.
+        let src_arity = "\
+fn identity[t](x t) t {
+    return x
+}
+
+fn main() {
+    v := identity[int](10, 20, 30)
+    _ = v
+}
+";
+        let r = check(src_arity);
+        assert_eq!(r.verdict, Verdict::Reject, "expected reject for generic fn arity mismatch");
+        let codes = error_codes(&r);
+        assert!(codes.contains(&"HYB-E1002".to_string()), "expected HYB-E1002, got {:?}", codes);
+
+        // Argument type mismatch on instantiated generic function -> HYB-E1002.
+        let src_types = "\
+fn identity[t](x t) t {
+    return x
+}
+
+fn add[t](a t, b t) t {
+    return a
+}
+
+fn main() {
+    v2 := identity[int](\"not an int\")
+    v3 := add[int](1, \"invalid\")
+    _ = v2
+    _ = v3
+}
+";
+        let r2 = check(src_types);
+        assert_eq!(r2.verdict, Verdict::Reject, "expected reject for generic fn arg type mismatch");
+        let codes2 = error_codes(&r2);
+        assert!(codes2.contains(&"HYB-E1002".to_string()), "expected HYB-E1002, got {:?}", codes2);
+        assert_eq!(
+            codes2.iter().filter(|c| *c == "HYB-E1002").count(),
+            2,
+            "expected 2 HYB-E1002 diagnostics for v2 and v3, got {:?}",
+            r2.diagnostics
+        );
     }
 
     #[test]
