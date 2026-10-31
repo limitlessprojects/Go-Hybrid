@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "comment": "W-2220 M2 applies the production registry to all 20 rows without editing it. This overlay only adds spike-local negative-falsifier fixtures where guarantees.json has none yet (rows 14 and 15). A production migration would move these programs into tests/checker-corpus and update the census.",
+  "fixtures": {
+    "14": [
+      {
+        "path": "spikes/w2220-guarantees-as-code/fixtures/14-unsafe-reserved.hy",
+        "expect": "reject"
+      }
+    ],
+    "15": [
+      {
+        "path": "spikes/w2220-guarantees-as-code/fixtures/15-cgo-import.hy",
+        "expect": "reject"
+      }
+    ]
+  }
+}
