@@ -204,10 +204,17 @@ impl<'a> Checker<'a> {
                     // the literal twin. Shadow-checked against the live env;
                     // names defined inside a deep-walked closure body fail open
                     // (`self.zd_defined`). Runtime divisors stay out of scope.
-                    if divisor_int_fold_is_zero(rhs, &self.const_values, st, &self.zd_defined)
-                        || is_float_literal_zero(rhs) && is_const_expr(lhs)
-                        || divisor_float_fold_is_zero(rhs, &self.const_values, st, &self.zd_defined)
-                            && is_const_map_expr(lhs, &self.const_values, st, &self.zd_defined)
+                    if !self.calls_user_fn(lhs)
+                        && !self.calls_user_fn(rhs)
+                        && (divisor_int_fold_is_zero(rhs, &self.const_values, st, &self.zd_defined)
+                            || (is_float_literal_zero(rhs)
+                                || divisor_float_fold_is_zero(
+                                    rhs,
+                                    &self.const_values,
+                                    st,
+                                    &self.zd_defined,
+                                ))
+                                && is_const_map_expr(lhs, &self.const_values, st, &self.zd_defined))
                     {
                         self.emit_const_zero_divisor(*span, bin_op_txt(*op));
                     }
@@ -269,22 +276,45 @@ impl<'a> Checker<'a> {
                 // Their scopes differ from `st`: a closure-local shadow of a
                 // file const is invisible to env_lookup, so resolution fails
                 // open on every name the body defines (issue #758 guard).
-                {
-                    let mut defined = std::collections::HashSet::new();
-                    for p in params {
-                        defined.insert(p.name.clone());
-                    }
-                    for stmt in &body.stmts {
-                        stmt_defined_names(stmt, &mut defined);
-                    }
-                    self.zd_defined = defined;
-                }
+                let prev_defined = std::mem::take(&mut self.zd_defined);
+                let mut defined = prev_defined.clone();
+                defined.extend(params.iter().map(|p| p.name.clone()));
                 for stmt in &body.stmts {
-                    self.check_stmt_const_zero_divisor_inner(st, stmt, /*deep=*/ true);
+                    stmt_defined_names(stmt, &mut defined);
                 }
-                self.zd_defined.clear();
+                let mut cst = st.clone();
+                cst.scope_push();
+                for stmt in &body.stmts {
+                    if let Stmt::Local(l) = stmt {
+                        if matches!(l.kind, hy_syntax::LocalKind::Const) {
+                            for (n, v) in l.names.iter().zip(l.values.iter()) {
+                                bind_closure_name(&mut cst, n, Some(v.clone()));
+                            }
+                        }
+                    }
+                }
+                for d in &defined {
+                    bind_closure_name(&mut cst, d, None);
+                }
+                self.zd_defined = defined;
+                for stmt in &body.stmts {
+                    self.check_stmt_const_zero_divisor_inner(&cst, stmt, /*deep=*/ true);
+                }
+                self.zd_defined = prev_defined;
             }
             Expr::Ident { .. } | Expr::Lit { .. } => {}
+        }
+    }
+
+    fn calls_user_fn(&self, e: &Expr) -> bool {
+        match unwrap_parens(e) {
+            Expr::Call { callee, args, .. } => {
+                matches!(unwrap_parens(callee), Expr::Ident { name, .. } if self.fns.contains_key(name))
+                    || args.iter().any(|a| self.calls_user_fn(&a.value))
+            }
+            Expr::Unary { operand, .. } => self.calls_user_fn(operand),
+            Expr::Binary { lhs, rhs, .. } => self.calls_user_fn(lhs) || self.calls_user_fn(rhs),
+            _ => false,
         }
     }
 
@@ -534,11 +564,23 @@ fn expr_defined_names(expr: &Expr, out: &mut std::collections::HashSet<String>) 
     }
 }
 
+fn bind_closure_name(st: &mut crate::model::FnState, name: &str, const_val: Option<Expr>) {
+    if name == "_" {
+        return;
+    }
+    st.env_define(name, crate::model::Binding { shape: crate::model::TypeShape::Unknown, ty: None, immutable: const_val.is_some(), is_let: false, managed_taint: false, moved: None, non_owned_origin: None, slot_loan: false });
+    if let Some(v) = const_val {
+        st.env_define_local_const(name, v);
+    }
+}
+
 fn stmt_defined_names(stmt: &Stmt, out: &mut std::collections::HashSet<String>) {
     match stmt {
         Stmt::Local(l) => {
-            for n in &l.names {
-                out.insert(n.clone());
+            if !matches!(l.kind, hy_syntax::LocalKind::Const) {
+                for n in &l.names {
+                    out.insert(n.clone());
+                }
             }
             for v in &l.values {
                 expr_defined_names(v, out);
@@ -656,6 +698,7 @@ fn stmt_defined_names(stmt: &Stmt, out: &mut std::collections::HashSet<String>) 
 fn const_len_str_value(
     e: &Expr,
     consts: &std::collections::HashMap<String, &Expr>,
+    st: &crate::model::FnState,
     defined: &std::collections::HashSet<String>,
     depth: u32,
 ) -> Option<i128> {
@@ -671,15 +714,13 @@ fn const_len_str_value(
                         kind: LitKind::Str(s) | LitKind::RawStr(s),
                         ..
                     } => Some(s),
-                    Expr::Ident { name: n, .. } if !defined.contains(n) => {
-                        consts.get(n.as_str()).and_then(|v| match unwrap_parens(v) {
-                            Expr::Lit {
-                                kind: LitKind::Str(s) | LitKind::RawStr(s),
-                                ..
-                            } => Some(s),
+                    Expr::Ident { name: n, .. } if !defined.contains(n) => st
+                        .local_const_lookup(n)
+                        .or_else(|| st.env_lookup(n).is_none().then(|| consts.get(n.as_str()).copied()).flatten())
+                        .and_then(|v| match unwrap_parens(v) {
+                            Expr::Lit { kind: LitKind::Str(s) | LitKind::RawStr(s), .. } => Some(s),
                             _ => None,
-                        })
-                    }
+                        }),
                     _ => None,
                 };
                 if let Some(s) = s {
@@ -703,28 +744,42 @@ fn divisor_int_fold(
     defined: &std::collections::HashSet<String>,
     depth: u32,
 ) -> crate::const_overflow::ConstFold {
-    use crate::const_overflow::{const_int_fold_with, ConstFold};
+    use crate::const_overflow::{
+        const_int_fold_with, fixed_width_int_range, wrap_into, ConstFold,
+    };
     if depth > 16 {
         return ConstFold::NotConst;
     }
     let bare = unwrap_parens(e);
-    if let Some(n) = const_len_str_value(bare, consts, defined, depth) {
+    if let Some(n) = const_len_str_value(bare, consts, st, defined, depth) {
         return ConstFold::Val(n);
     }
     match bare {
         Expr::Ident { name, .. } => {
-            if st.env_lookup(name).is_some() || defined.contains(name) {
+            if defined.contains(name) {
                 return ConstFold::NotConst;
             }
-            if let Some(v) = consts.get(name.as_str()) {
+            if let Some(v) = st.local_const_lookup(name).or_else(|| st.env_lookup(name).is_none().then(|| consts.get(name.as_str()).copied()).flatten()) {
                 return divisor_int_fold(v, consts, st, defined, depth + 1);
             }
             ConstFold::NotConst
         }
+        Expr::Unary { op: UnOp::Neg, operand, .. } => match divisor_int_fold(operand, consts, st, defined, depth + 1) {
+            ConstFold::Val(v) => v.checked_neg().map(ConstFold::Val).unwrap_or(ConstFold::TooBig),
+            other => other,
+        },
         Expr::Binary { op, lhs, rhs, .. } => {
             let l = divisor_int_fold(lhs, consts, st, defined, depth + 1);
             let r = divisor_int_fold(rhs, consts, st, defined, depth + 1);
             crate::const_overflow::fold_bin(*op, l, r)
+        }
+        Expr::Call { callee, args, .. } if args.len() == 1 && !args[0].spread => {
+            if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                if let (Some((lo, hi)), ConstFold::Val(v)) = (fixed_width_int_range(name), divisor_int_fold(&args[0].value, consts, st, defined, depth + 1)) {
+                    return ConstFold::Val(wrap_into(v, lo, hi));
+                }
+            }
+            ConstFold::NotConst
         }
         _ => const_int_fold_with(e, consts, depth, Some(st)),
     }

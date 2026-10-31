@@ -307,12 +307,17 @@ pub(crate) struct FnState {
     /// Active `defer <call>` sites seen prior to the current program point, paired
     /// with eager per-argument borrow flags evaluated at the `defer` statement.
     pub deferred_calls: Vec<(hy_syntax::Expr, Vec<bool>)>,
+    /// Local `const` initializers at the base scope (`env`) and per block scope (`scopes[i]`).
+    /// Shadowed by any non-const binding at the same or inner depth.
+    pub local_const_values: HashMap<String, Expr>,
+    pub local_const_scopes: Vec<HashMap<String, Expr>>,
 }
 
 impl FnState {
     /// Enter a block scope (walk.rs's Push events).
     pub(crate) fn scope_push(&mut self) {
         self.scopes.push(HashMap::new());
+        self.local_const_scopes.push(HashMap::new());
         self.alias_scopes.push(self.aliases.clone());
         self.share_scopes.push(self.may_share.clone());
         self.shadow_link_scopes.push(self.shadow_links.clone());
@@ -441,6 +446,7 @@ impl FnState {
             }
         }
         self.scopes.pop();
+        self.local_const_scopes.pop();
         if let Some(outer_shadows) = self.shadow_link_scopes.pop() {
             self.shadow_links = outer_shadows;
         }
@@ -589,6 +595,20 @@ impl FnState {
         } else {
             self.env.insert(name.to_string(), b);
         }
+        self.local_const_scopes.last_mut().unwrap_or(&mut self.local_const_values).remove(name);
+    }
+
+    pub(crate) fn env_define_local_const(&mut self, name: &str, expr: Expr) {
+        self.local_const_scopes.last_mut().unwrap_or(&mut self.local_const_values).insert(name.to_string(), expr);
+    }
+
+    pub(crate) fn local_const_lookup(&self, name: &str) -> Option<&Expr> {
+        for (layer, const_layer) in self.scopes.iter().zip(self.local_const_scopes.iter()).rev() {
+            if layer.contains_key(name) {
+                return const_layer.get(name);
+            }
+        }
+        self.env.contains_key(name).then(|| self.local_const_values.get(name)).flatten()
     }
 
     /// Record that `a` and `b` may share mutable GC storage (#27). Undirected:
