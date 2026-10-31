@@ -2368,7 +2368,7 @@ mod tests {
         let r = check(
             "fn main() {\n\
                counts := map[string]int{}\n\
-               ch := make(chan int, 1)\n\
+               ch := make(chan map[string]int, 1)\n\
                mux := http.new_serve_mux()\n\
                mux.handle(\"/x\", http.handler(fn(w http.response_writer) {\n\
                  managed(\"handler serializes access\", \"mutex\") { ch <- counts }\n\
