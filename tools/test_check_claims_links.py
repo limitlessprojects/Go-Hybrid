@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -100,6 +101,47 @@ class CheckClaimsLinksTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         report = json.loads(result.stdout)
         self.assertEqual(report["issues"][0]["kind"], "missing-claims-file")
+
+    def test_undeclared_accept_prefix_is_rejected(self):
+        # `ACCEPTED` and `ACCEPT-NONSENSE` are not verdicts this project declares:
+        # only `ACCEPT` and `ACCEPT-MANAGED` satisfy an `(accept)` marker.
+        for verdict in ("ACCEPTED", "ACCEPT-NONSENSE"):
+            with self.subTest(verdict=verdict):
+                (self.root / "tests" / "checker-corpus" / "15-good.hy").write_text(
+                    "// EXPECTED-VERDICT: %s\nfn main() {}\n" % verdict, encoding="utf-8")
+                result = self.run_tool()
+                self.assertEqual(result.returncode, 1)
+                report = json.loads(result.stdout)
+                mismatch = [i for i in report["issues"] if i["kind"] == "verdict-mismatch"]
+                self.assertEqual(len(mismatch), 1)
+                self.assertEqual(mismatch[0]["found"], verdict)
+
+    def test_accept_managed_still_satisfies_accept_marker(self):
+        (self.root / "tests" / "checker-corpus" / "15-good.hy").write_text(
+            "// EXPECTED-VERDICT: ACCEPT-MANAGED\nfn main() {}\n", encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(json.loads(result.stdout)["ok"])
+
+    def test_missing_corpus_directory_is_reported(self):
+        # A `corpus <n>` reference cannot resolve when the root is gone: the row
+        # must fail instead of passing for want of anywhere to look the number up.
+        shutil.rmtree(self.root / "tests" / "checker-corpus")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 1)
+        report = json.loads(result.stdout)
+        kinds = [i["kind"] for i in report["issues"]]
+        self.assertIn("missing-corpus-dir", kinds)
+        self.assertFalse(report["ok"])
+
+    def test_corpus_directory_as_file_is_reported(self):
+        corpus = self.root / "tests" / "checker-corpus"
+        shutil.rmtree(corpus)
+        corpus.write_text("not a directory\n", encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 1)
+        kinds = [i["kind"] for i in json.loads(result.stdout)["issues"]]
+        self.assertIn("missing-corpus-dir", kinds)
 
 
 if __name__ == "__main__":

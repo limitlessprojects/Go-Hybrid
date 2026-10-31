@@ -10,8 +10,12 @@ claims it for. This tool closes that gap:
   * every relative markdown link in the claims table must resolve to a file
     (http(s) links and pure anchors are skipped),
   * a corpus link followed by `(reject)`, `(accept)` or `(managed)` must point
-    at a file whose `EXPECTED-VERDICT` header agrees with the marker,
-  * a cited corpus program with no verdict header at all is an error.
+    at a file whose `EXPECTED-VERDICT` header agrees with the marker — `accept`
+    matches exactly `ACCEPT` and `ACCEPT-MANAGED`, not any `ACCEPT*` spelling,
+  * a cited corpus program with no verdict header at all is an error,
+  * a `corpus <n>` reference needs the corpus root to be there: a missing (or
+    non-directory) `tests/checker-corpus` is an error by itself, so a number
+    cannot pass for want of anywhere to look it up.
 
 Exit 0 when every citation checks out, 1 otherwise. `--json` prints a
 machine-readable report. Stdlib only.
@@ -28,6 +32,10 @@ LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 INLINE_CORPUS_RE = re.compile(r"`(\d{2}-[a-z0-9][a-z0-9-]*(?:\.hy)?)`")
 CORPUS_NUM_RE = re.compile(r"\bcorpus\s+(\d{1,3})\b")
 MARKER_RE = re.compile(r"^\s*\((reject|accept|managed)\)", re.IGNORECASE)
+# The verdicts an `(accept)` marker may match. Deliberately a closed set: a
+# prefix test would bless `ACCEPTED` or `ACCEPT-NONSENSE`, i.e. a citation
+# could point at a program that declares a verdict the project does not have.
+ACCEPT_VERDICTS = frozenset({"ACCEPT", "ACCEPT-MANAGED"})
 VERDICT_RE = re.compile(r"EXPECTED-VERDICT:\s*([A-Za-z-]+)")
 CHECKED_SUFFIXES = {
     ".md", ".py", ".rs", ".go", ".hy", ".yml", ".yaml", ".json", ".txt", ".toml",
@@ -78,7 +86,7 @@ def marker_matches(marker, verdict):
     if marker == "reject":
         return verdict == "REJECT"
     if marker == "accept":
-        return verdict.startswith("ACCEPT")
+        return verdict in ACCEPT_VERDICTS
     if marker == "managed":
         return verdict == "ACCEPT-MANAGED"
     return True
@@ -140,13 +148,23 @@ def check(root):
                 issues.append({"row": row_number, "kind": "missing-inline-corpus", "target": target})
         corpus_dir = root / "tests" / "checker-corpus"
         numbers_seen = set()
+        dir_reported = False
         for match in CORPUS_NUM_RE.finditer(evidence):
             number = match.group(1)
             if number in numbers_seen:
                 continue
             numbers_seen.add(number)
             refs += 1
-            if corpus_dir.is_dir() and not list(corpus_dir.glob("%02d-*.hy" % int(number))):
+            if not corpus_dir.is_dir():
+                # No corpus root, no number can be pinned: reporting only that
+                # the number is missing would pass a row whose evidence has
+                # nowhere to resolve, so the absence of the root is the issue.
+                if not dir_reported:
+                    issues.append({"row": row_number, "kind": "missing-corpus-dir",
+                                   "target": "tests/checker-corpus"})
+                    dir_reported = True
+                continue
+            if not list(corpus_dir.glob("%02d-*.hy" % int(number))):
                 issues.append({"row": row_number, "kind": "missing-corpus-number", "target": number})
     return {"ok": not issues, "rows": rows, "links": links, "refs": refs, "issues": issues}
 
