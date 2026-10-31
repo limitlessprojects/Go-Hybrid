@@ -39,6 +39,43 @@ DEFAULT_TOKEN_FILE = "/home/z/my-project/.gh_token"
 BOARD_MARKER = "triage-bot:board:v1"
 API = "https://api.github.com"
 
+# Does this change-set ship a test the repository actually runs? The SAME
+# question the shepherd's W3 gate answers with `tools/shepherd.py:TEST_PATTERNS`
+# — and the two must agree on every convention the repo uses, because the scan's
+# answer is worth +3 of the 6 points that put a PR into the Pareto list the
+# landing sessions work from. The narrow `"tests/" in path` test this module used
+# before missed every test in the repo's own conventions (`tools/test_*.py`,
+# which ci.yml runs one line per tool; `spikes/*/test_*.py`; `<crate>/src/tests.rs`,
+# the emitter's unit-test module), so 64 of 200 open PRs were scored as testless
+# while W3 reported "tests: present" for the same diffs (issue #2508).
+#
+# The patterns are matched against the file NAME (not as loose substrings): the
+# W3 list's bare `"test_"` also matches `tools/latest_report.py`, which is not a
+# test — the scan keeps that precision deliberately, and
+# tools/test_triage_bot.py pins both the agreement and the difference.
+TEST_BASENAME_SUFFIXES = ("_test.go", "_test.rs", "_accept.hy", "_reject.hy")
+TEST_BASENAMES = ("tests.rs", "test.rs", "tests.go", "test.go")
+TEST_BASENAME_PREFIXES = ("test_",)
+
+
+def _is_test_path(path):
+    """One changed path, matched against the repository's test conventions."""
+    if "tests/" in path or "/corpus" in path:
+        return True                      # integration tests + checker corpus
+    name = path.rsplit("/", 1)[-1]
+    if name.endswith(TEST_BASENAME_SUFFIXES):
+        return True                      # foo_test.rs, foo_test.go, *_accept.hy, *_reject.hy
+    if name in TEST_BASENAMES:
+        return True                      # <crate>/src/tests.rs unit-test module
+    return name.startswith(TEST_BASENAME_PREFIXES) and name.endswith((".py", ".rs"))
+
+
+def tests_included(paths):
+    """True when any changed path matches a repository test convention."""
+    return any(_is_test_path(p) for p in paths)
+
+
+
 
 def log(msg):
     print(msg, flush=True)
@@ -225,9 +262,7 @@ def collect(cfg, gh, args):
             "deletions": dels,
             "behind_by": behind_by,
             "overlap_risk": sorted(overlap_paths)[:8],
-            "tests_included": any(
-                "tests/" in p or "/corpus" in p or p.endswith("_reject.hy") or p.endswith("_accept.hy")
-                for p in paths),
+            "tests_included": tests_included(paths),
         }
 
     items = []
