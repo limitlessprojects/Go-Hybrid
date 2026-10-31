@@ -697,6 +697,22 @@
       "tier0_rule_id": "MANAGED"
     },
     {
+      "code": "HYB-E8002",
+      "name": "cancel-oblivious",
+      "category": "lint",
+      "severity": "warning",
+      "title": "blocking site a task cannot leave after cancellation (opt-in, W-006)",
+      "summary": "Reported only under `hyb check --report-cancel` / `--deny-cancel` (W-006 spike, #352). A spawn argument is a cancellation token when the spawner closes that same binding (declared once, never reassigned) or holds it as a token. close() unblocks receivers only, so in task code every send, receive, `for … in` over a channel, and `select` without `default` must be a token receive, a `select` with a token receive arm, a `time.tick` arm, or a `time.after` arm that is fresh in the arm or bound in the same loop body and waited on once (a timer bound outside the loop, or waited on twice, does not count), or it is reported here. Warnings can never fail the build; `--deny-cancel` fails the check by policy.",
+      "fixits": [
+        "add a receive arm on the task's cancellation token to the blocking `select` (`<-done: return`)",
+        "pass the channel the spawner closes as a task argument so it becomes a token",
+        "bound the wait with a fresh `time.after(…)` in the arm or a `time.tick` arm, or make the operation non-blocking with `default`"
+      ],
+      "example": "fn worker(done chan bool, jobs chan int) { v := <-jobs }   // warning: HYB-E8002 under --report-cancel — `jobs` is not a token",
+      "rule": "W-006",
+      "tier0_rule_id": null
+    },
+    {
       "code": "HYB-E9001",
       "name": "toolchain-mismatch",
       "category": "tooling",

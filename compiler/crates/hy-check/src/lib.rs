@@ -63,6 +63,9 @@ mod walk;
 mod builtins;
 mod range_iter;
 mod recv;
+mod cancel;
+
+pub use cancel::{check_cancel, CancelReport};
 
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
 

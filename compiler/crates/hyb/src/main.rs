@@ -53,7 +53,7 @@ fn main() -> ExitCode {
             eprintln!("hyb — the Hybrid compiler CLI (MVP-0)");
             eprintln!();
             eprintln!("usage:");
-            eprintln!("  hyb check <file.hy> [--json] [--report-managed] [--deny-managed]");
+            eprintln!("  hyb check <file.hy> [--json] [--report-managed] [--deny-managed] [--report-cancel] [--deny-cancel]");
             eprintln!("  hyb generate [--check] [--binding-prefix <path>] <paths...>  (existing go.mod projects)");
             eprintln!("  hyb vendor-runtime <dir>  (vendored runtime for a go.mod project)");
             eprintln!("  hyb explain <HYB-Exxxx | Exxxx | xxxx | machine-name>");
@@ -92,11 +92,13 @@ fn cmd_explain(args: &[String]) -> ExitCode {
 
 fn cmd_check(args: &[String]) -> ExitCode {
     const USAGE: &str =
-        "usage: hyb check [--json] [--report-managed] [--deny-managed] [--] <file.hy>";
+        "usage: hyb check [--json] [--report-managed] [--deny-managed] [--report-cancel] [--deny-cancel] [--] <file.hy>";
     let mut file = None;
     let mut json = false;
     let mut report_managed = false;
     let mut deny_managed = false;
+    let mut report_cancel = false;
+    let mut deny_cancel = false;
     let mut end_of_options = false;
     // Validate the entire invocation before reading or checking any source.
     // Otherwise a second file or a mistyped option can silently go unchecked.
@@ -117,6 +119,16 @@ fn cmd_check(args: &[String]) -> ExitCode {
                 }
                 "--deny-managed" => {
                     deny_managed = true;
+                    continue;
+                }
+                "--report-cancel" => {
+                    report_cancel = true;
+                    continue;
+                }
+                "--deny-cancel" => {
+                    // Implies --report-cancel.
+                    deny_cancel = true;
+                    report_cancel = true;
                     continue;
                 }
                 value if value.starts_with('-') => {
@@ -168,7 +180,15 @@ fn cmd_check(args: &[String]) -> ExitCode {
     };
 
     // check
-    let result = hy_check::check_file(&ast);
+    let mut result = hy_check::check_file(&ast);
+    // W-006 (#352): opt-in; default output is unchanged.
+    let cancel = report_cancel.then(|| hy_check::check_cancel(&ast));
+    if let Some(c) = &cancel {
+        result.diagnostics.extend(c.diagnostics.iter().cloned());
+        result
+            .diagnostics
+            .sort_by_key(|d| (d.span.start.line, d.span.start.col));
+    }
     let errors = result
         .diagnostics
         .iter()
@@ -237,9 +257,36 @@ fn cmd_check(args: &[String]) -> ExitCode {
                 println!("  block: [{}] \"{}\"{}", b.category, b.reason, tickets);
             }
         }
+        if let Some(c) = &cancel {
+            println!(
+                "cancel: {} cancel-oblivious site(s) (HYB-E8002), {} context(s) analyzed, {} foreign call(s) in task code and {} blocking site(s) in tasks nothing cancels (both outside the claim)",
+                c.diagnostics.len(),
+                c.contexts,
+                c.foreign_calls,
+                c.uncancelled_sites
+            );
+        }
         if result.diagnostics.is_empty() {
             println!("{}: OK (0 diagnostics)", file);
         }
+    }
+
+    // --deny-cancel: policy gate like --deny-managed (E8002 stays a warning).
+    if let Some(c) = cancel
+        .as_ref()
+        .filter(|c| deny_cancel && !c.diagnostics.is_empty())
+    {
+        let msg = format!(
+            "deny-cancel: {} cancel-oblivious site(s) — check failed by policy (--deny-cancel); \
+             see HYB-E8002 (`hyb explain HYB-E8002`)",
+            c.diagnostics.len()
+        );
+        if json {
+            eprintln!("{}", msg);
+        } else {
+            println!("{}", msg);
+        }
+        return ExitCode::FAILURE;
     }
 
     // CI policy gate (--deny-managed): any managed block fails the check.
