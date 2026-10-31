@@ -383,6 +383,36 @@ impl Emitter {
                     self.handler_writer = Some(name);
                 }
                 self.fnlit_depth += 1;
+                let saved_in_main_closure = std::mem::replace(&mut self.in_main_closure, false);
+                let saved_option_result = self.cur_option_result.take();
+                let saved_conv_result = self.cur_fn_conv_result.take();
+                if results.len() == 1 && results[0].name.is_none() {
+                    let rt = self.type_text(&results[0].ty);
+                    if rt.starts_with("option[") {
+                        self.cur_option_result = Some(rt);
+                    }
+                    if let Some(conv_key) = self.result_conv_key(&results[0].ty) {
+                        self.cur_fn_conv_result = Some(conv_key);
+                    }
+                }
+                let saved_error_returns = self.cur_fn_error_returns.take();
+                if !results.is_empty() {
+                    let last_is_err = matches!(
+                        &results.last().unwrap().ty,
+                        TypeExpr::Named { name, .. } if name == "error"
+                    );
+                    if last_is_err {
+                        let mut texts = Vec::new();
+                        for (i, r) in results.iter().enumerate() {
+                            if i == results.len() - 1 {
+                                texts.push(String::new());
+                            } else {
+                                texts.push(self.zero_value(&r.ty));
+                            }
+                        }
+                        self.cur_fn_error_returns = Some(texts);
+                    }
+                }
                 // Labels do not cross func boundaries: a labeled break/continue
                 // must find its loop INSIDE the literal — reset the depth so
                 // an outer loop's count cannot bless a closure-nested label.
@@ -409,6 +439,10 @@ impl Emitter {
                 self.branch_inherit = saved_inherit;
                 self.loan_frames = saved_loans;
                 self.loop_labels = saved_loop_labels;
+                self.in_main_closure = saved_in_main_closure;
+                self.cur_option_result = saved_option_result;
+                self.cur_fn_conv_result = saved_conv_result;
+                self.cur_fn_error_returns = saved_error_returns;
                 let closure_body = std::mem::take(&mut self.body);
                 self.body = main_body;
                 self.fnlit_depth -= 1;
