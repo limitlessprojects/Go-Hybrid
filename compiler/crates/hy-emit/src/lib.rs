@@ -635,6 +635,10 @@ pub struct Emitter {
     /// and user type alias → its target, for zero values that allocate.
     n5_structs: BTreeMap<String, Vec<FieldDecl>>,
     n5_aliases: BTreeMap<String, TypeExpr>,
+    /// File-level `const` declarations seeded into each function frame so
+    /// composite/foreign constants lowered to Go `var` retain M4 member and
+    /// receiver normalization.
+    file_consts: Vec<ConstDecl>,
 }
 
 pub(crate) struct ScopeSnapshot {
@@ -682,6 +686,7 @@ impl Emitter {
             explicit_imports: BTreeMap::new(),
             n5_structs: BTreeMap::new(),
             n5_aliases: BTreeMap::new(),
+            file_consts: Vec::new(),
         }
     }
 
@@ -757,9 +762,17 @@ impl Emitter {
             .map(|f| f.name.clone())
             .collect();
 
-        // Eager tables (Batch I): user-struct field types + per-fn result
-        // shapes. Both are needed BEFORE pass 1 — calls type-resolve against
-        // fns declared later in the file.
+        // Eager tables (Batch I): aliases first so struct field types,
+        // per-fn result shapes, and file-level constants resolve through user
+        // type aliases before pass 1.
+        self.n5_aliases = file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::TypeAlias(t) => Some((t.name.clone(), t.ty.clone())),
+                _ => None,
+            })
+            .collect();
         self.struct_fields = file
             .decls
             .iter()
@@ -768,7 +781,10 @@ impl Emitter {
                     s.name.clone(),
                     s.fields
                         .iter()
-                        .map(|f| (f.name.clone(), base_ty_name(&f.ty).unwrap_or_default()))
+                        .map(|f| {
+                            let resolved = self.n5_resolve_alias(&f.ty);
+                            (f.name.clone(), base_ty_name(&resolved).unwrap_or_default())
+                        })
                         .collect::<Vec<_>>(),
                 )),
                 _ => None,
@@ -784,11 +800,11 @@ impl Emitter {
                 _ => None,
             })
             .collect();
-        self.n5_aliases = file
+        self.file_consts = file
             .decls
             .iter()
             .filter_map(|d| match d {
-                Decl::TypeAlias(t) => Some((t.name.clone(), t.ty.clone())),
+                Decl::Const(c) => Some(c.clone()),
                 _ => None,
             })
             .collect();
@@ -969,10 +985,7 @@ impl Emitter {
         // values (slices/maps/structs — 17's `const thresholds = [10, …]`,
         // 18's seed_urls) lower to `var`: same identifier surface, the
         // immutability contract is the checker's business, not Go's.
-        let composite = matches!(
-            Self::peel_parens(&c.value),
-            Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
-        );
+        let composite = Self::is_non_go_const_init(&c.value);
         let kw = if composite { "var" } else { "const" };
         match &c.ty {
             Some(t) => {
@@ -1301,6 +1314,7 @@ impl Emitter {
         self.var_ty.clear();
         self.pointer_vars.clear();
         self.local_vars.clear();
+        self.seed_file_consts();
         self.temp_n = 0;
         self.try_temps.clear();
         self.loop_labels.clear();
@@ -1381,9 +1395,7 @@ impl Emitter {
 
         // Hints from parameter types (dotted foreign types → Foreign).
         if let Some(recv) = &f.receiver {
-            if recv.name != "_" {
-                self.local_vars.insert(recv.name.clone());
-            }
+            self.shadow_local_name(&recv.name);
             if recv.is_pointer {
                 self.pointer_vars.insert(recv.name.clone());
             }
@@ -1606,6 +1618,7 @@ impl Emitter {
         match e {
             Expr::AddrOf { .. } => true,
             Expr::Paren { inner, .. } => self.expr_is_pointer(inner),
+            Expr::Move { operand, .. } => self.expr_is_pointer(operand),
             Expr::Try { operand, .. } => self.expr_is_pointer(operand),
             Expr::Ident { name, .. } => self.pointer_vars.contains(name),
             Expr::Call { callee, .. } => {
@@ -1623,9 +1636,13 @@ impl Emitter {
     /// dotted (`atomic.int64`) lands in var_ty with its pointer-ness; one
     /// whose type is a user struct (`pool_stats`, value or pointer) lands
     /// in var_struct — `stats.mu.lock()` types through struct_fields.
-    fn register_var_ty(&mut self, name: &str, ty: &TypeExpr) {
-        let (base, ptr) = match ty {
-            TypeExpr::Pointer { to, .. } => (base_ty_name(to), true),
+    pub(crate) fn register_var_ty(&mut self, name: &str, ty: &TypeExpr) {
+        let resolved = self.n5_resolve_alias(ty);
+        let (base, ptr) = match &resolved {
+            TypeExpr::Pointer { to, .. } => {
+                let inner = self.n5_resolve_alias(to);
+                (base_ty_name(&inner), true)
+            }
             t => (base_ty_name(t), false),
         };
         let Some(base) = base else { return };
@@ -1644,11 +1661,12 @@ impl Emitter {
     /// Binding kind from a TYPE (Batch E): a dotted type that the shape
     /// table knows gives ForeignTy(key) — members resolve field-vs-method;
     /// any other dotted type stays generic Foreign.
-    fn binding_kind_of_ty(&self, t: &TypeExpr) -> Option<BindingKind> {
-        if matches!(t, TypeExpr::Chan { .. }) {
+    pub(crate) fn binding_kind_of_ty(&self, t: &TypeExpr) -> Option<BindingKind> {
+        let resolved = self.n5_resolve_alias(t);
+        if matches!(resolved, TypeExpr::Chan { .. }) {
             return Some(BindingKind::Chan);
         }
-        let name = match t {
+        let name = match &resolved {
             TypeExpr::Named { name, .. } => name.as_str(),
             TypeExpr::Pointer { to, .. } => return self.binding_kind_of_ty(to),
             _ => return None,
@@ -1667,6 +1685,16 @@ impl Emitter {
             ))
         } else {
             Some(BindingKind::Foreign)
+        }
+    }
+
+    /// Dotted foreign type key (`"http.server"`, `"url.url"`) after resolving
+    /// user type aliases and pointer wrappers, or `None` for local/builtin types.
+    pub(crate) fn foreign_type_key(&self, t: &TypeExpr) -> Option<String> {
+        match self.n5_resolve_alias(t) {
+            TypeExpr::Named { name, .. } if name.contains('.') => Some(name),
+            TypeExpr::Pointer { to, .. } => self.foreign_type_key(&to),
+            _ => None,
         }
     }
 
@@ -1689,7 +1717,8 @@ impl Emitter {
     }
 
     fn type_is_foreign(&self, t: &TypeExpr) -> bool {
-        match t {
+        let resolved = self.n5_resolve_alias(t);
+        match &resolved {
             TypeExpr::Named { name, .. } => name.contains('.'),
             TypeExpr::Pointer { to, .. } => self.type_is_foreign(to),
             TypeExpr::Slice { elem, .. } => self.type_is_foreign(elem),

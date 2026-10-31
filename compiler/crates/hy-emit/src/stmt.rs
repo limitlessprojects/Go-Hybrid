@@ -328,28 +328,7 @@ impl Emitter {
                         ));
                     }
                 }
-                self.hint_from_values(&l.names, &l.values);
-                // Typed var decls carry receiver knowledge (Batch I):
-                // `var hits atomic.int64` → shape-known, not a pointer.
-                if let Some(t) = &l.ty {
-                    if matches!(t, TypeExpr::Pointer { .. }) {
-                        for n in &l.names {
-                            if n != "_" {
-                                self.pointer_vars.insert(n.clone());
-                            }
-                        }
-                    }
-                    if let Some(kind) = self.binding_kind_of_ty(t) {
-                        for n in &l.names {
-                            if n != "_" {
-                                self.bindings.insert(n.clone(), kind);
-                            }
-                        }
-                    }
-                    if l.names.len() == 1 && l.names[0] != "_" {
-                        self.register_var_ty(&l.names[0], t);
-                    }
-                }
+                self.register_local_decl_types(&l.names, l.ty.as_ref(), &l.values);
                 return Ok(());
             }
             LocalKind::Const => {
@@ -358,10 +337,7 @@ impl Emitter {
                     .first()
                     .ok_or_else(|| EmitError::unsupported("`const` without an initializer"))?;
                 let value = self.emit_expr(first, 0)?;
-                let composite = matches!(
-                    Self::peel_parens(first),
-                    Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
-                );
+                let composite = Self::is_non_go_const_init(first);
                 let kw = if composite { "var" } else { "const" };
                 let names = l.names.join(", ");
                 match &l.ty {
@@ -371,7 +347,7 @@ impl Emitter {
                     }
                     None => self.push(&format!("{} {} = {}", kw, names, value)),
                 }
-                self.shadow_local_names(&l.names);
+                self.register_local_decl_types(&l.names, l.ty.as_ref(), &l.values);
                 return Ok(());
             }
             // `:=` and `let` both render as Go's short declaration —
@@ -1051,6 +1027,80 @@ impl Emitter {
         Ok(())
     }
 
+    pub(crate) fn is_non_go_const_init(mut e: &Expr) -> bool {
+        loop {
+            match e {
+                Expr::Paren { inner, .. }
+                | Expr::Move { operand: inner, .. }
+                | Expr::AddrOf { operand: inner, .. } => e = inner,
+                _ => break,
+            }
+        }
+        matches!(
+            e,
+            Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
+        )
+    }
+
+    fn unwrap_struct_lit_ty(mut e: &Expr) -> Option<(&TypeExpr, bool)> {
+        let mut is_ptr = false;
+        loop {
+            match e {
+                Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } => e = inner,
+                Expr::AddrOf { operand: inner, .. } => {
+                    is_ptr = true;
+                    e = inner;
+                }
+                _ => break,
+            }
+        }
+        if let Expr::StructLit { ty: Some(t), .. } = e {
+            Some((t, is_ptr))
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn seed_file_consts(&mut self) {
+        let consts = self.file_consts.clone();
+        for c in &consts {
+            let names = [c.name.clone()];
+            let values = [c.value.clone()];
+            self.register_local_decl_types(&names, c.ty.as_ref(), &values);
+        }
+    }
+
+    pub(crate) fn register_local_decl_types(
+        &mut self,
+        names: &[String],
+        ty: Option<&TypeExpr>,
+        values: &[Expr],
+    ) {
+        self.hint_from_values(names, values);
+        if let Some(t) = ty {
+            let resolved = self.n5_resolve_alias(t);
+            if matches!(resolved, TypeExpr::Pointer { .. }) {
+                for n in names {
+                    if n != "_" {
+                        self.pointer_vars.insert(n.clone());
+                    }
+                }
+            }
+            if let Some(kind) = self.binding_kind_of_ty(t) {
+                for n in names {
+                    if n != "_" {
+                        self.bindings.insert(n.clone(), kind);
+                    }
+                }
+            }
+            for n in names {
+                if n != "_" {
+                    self.register_var_ty(n, t);
+                }
+            }
+        }
+    }
+
     /// Binding hints from the defining values (see `BindingKind`).
     fn hint_from_values(&mut self, names: &[String], values: &[Expr]) {
         let single_hint = if names.len() == 1 && values.len() == 1 && names[0] != "_" {
@@ -1068,8 +1118,13 @@ impl Emitter {
             if kind != BindingKind::Plain {
                 self.bindings.insert(names[0].clone(), kind);
             }
-            if let Some(Expr::StructLit { ty: Some(t), .. }) = values.first() {
+            if let Some((t, is_ptr)) = values.first().and_then(Self::unwrap_struct_lit_ty) {
                 self.register_var_ty(&names[0], t);
+                if is_ptr {
+                    if let Some((_, ptr)) = self.var_ty.get_mut(&names[0]) {
+                        *ptr = true;
+                    }
+                }
             }
         }
         for (name, is_ptr) in names.iter().zip(ptr_flags) {
@@ -1080,12 +1135,12 @@ impl Emitter {
     }
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
-        let e = Self::peel_parens(e);
-        if let Expr::StructLit { ty: Some(t), .. } = e {
+        if let Some((t, _)) = Self::unwrap_struct_lit_ty(e) {
             if let Some(kind) = self.binding_kind_of_ty(t) {
                 return kind;
             }
         }
+        let e = Self::peel_parens(e);
         let (call, args) = match e {
             Expr::Try { operand, .. } => match operand.as_ref() {
                 Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),

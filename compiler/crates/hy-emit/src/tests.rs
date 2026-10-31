@@ -3053,3 +3053,116 @@ fn main() {}
     assert!(go6.contains("func read_url() int {"));
     assert!(go6.contains("func read_u_r_l() int {"));
 }
+
+#[test]
+fn foreign_struct_literal_fields_normalize_to_go_exported_names() {
+    let src = r#"
+import "net/http"
+import "net/url"
+
+type my_server = http.server
+
+fn main() {
+    srv := http.server{addr: ":8080", max_header_bytes: 4096}
+    alias_srv := my_server{addr: ":9090"}
+    req := http.request{method: "GET", url: &url.url{scheme: "https", raw_query: "a=1"}}
+    servers := []http.server{{addr: ":8081"}}
+    ptr_servers := []*http.server{{addr: ":8082"}}
+    by_name := map[string]http.server{"primary": {addr: ":8083"}}
+    _ = srv.addr
+    _ = alias_srv.addr
+    _ = req.url.raw_query
+    _ = servers
+    _ = ptr_servers
+    _ = by_name
+}
+"#;
+    let go = emit(src);
+    assert!(
+        go.contains(r#"srv := http.Server{Addr: ":8080", MaxHeaderBytes: 4096}"#),
+        "expected foreign struct literal fields to normalize to Go CamelCase, got:
+{go}"
+    );
+    assert!(
+        go.contains(r#"alias_srv := my_server{Addr: ":9090"}"#),
+        "expected aliased foreign struct literal fields to normalize, got:
+{go}"
+    );
+    assert!(
+        go.contains(r#"req := http.Request{Method: "GET", URL: &url.URL{Scheme: "https", RawQuery: "a=1"}}"#),
+        "expected shape-table initialism fields (URL, RawQuery) in foreign struct literal, got:
+{go}"
+    );
+    assert!(
+        go.contains(r#"servers := []http.Server{http.Server{Addr: ":8081"}}"#),
+        "expected elided slice element foreign struct literal fields to normalize, got:
+{go}"
+    );
+    assert!(
+        go.contains(r#"ptr_servers := []*http.Server{&http.Server{Addr: ":8082"}}"#),
+        "expected elided pointer-slice element foreign struct literal to emit &T{{...}}, got:
+{go}"
+    );
+    assert!(
+        go.contains(r#"by_name := map[string]http.Server{"primary": http.Server{Addr: ":8083"}}"#),
+        "expected elided map value foreign struct literal fields to normalize, got:
+{go}"
+    );
+    assert!(
+        go.contains("_ = srv.Addr") && go.contains("_ = alias_srv.Addr"),
+        "expected member access on foreign and aliased struct bindings to normalize, got:
+{go}"
+    );
+}
+
+#[test]
+fn local_and_file_const_composite_bindings_preserve_member_and_receiver_shapes() {
+    let src = r#"
+import "net/http"
+
+struct holder {
+    hdr http.header
+}
+
+const global_srv = http.server{addr: ":8080"}
+const global_holder = holder{}
+const global_ptr_holder = &holder{}
+
+fn main() {
+    const local_srv = http.server{addr: ":9090"}
+    const local_holder = holder{}
+    const local_ptr_srv = &http.server{addr: ":7070"}
+    _ = global_srv.addr
+    _ = local_srv.addr
+    _ = local_ptr_srv.addr
+    _ = global_holder.hdr.get("Accept")
+    _ = global_ptr_holder.hdr.get("Accept")
+    _ = local_holder.hdr.get("Accept")
+}
+"#;
+    let go = emit(src);
+    assert!(
+        go.contains("var global_ptr_holder = &holder{}"),
+        "expected address-of composite file const to lower to var, got:
+{go}"
+    );
+    assert!(
+        go.contains(r#"var local_ptr_srv = &http.Server{Addr: ":7070"}"#),
+        "expected address-of composite local const to lower to var with normalized field, got:
+{go}"
+    );
+    assert!(
+        go.contains("_ = global_srv.Addr")
+            && go.contains("_ = local_srv.Addr")
+            && go.contains("_ = local_ptr_srv.Addr"),
+        "expected foreign member normalization on file and local composite consts, got:
+{go}"
+    );
+    assert!(
+        go.contains(r#"_ = global_holder.hdr.Get("Accept")"#)
+            && go.contains(r#"_ = global_ptr_holder.hdr.Get("Accept")"#)
+            && go.contains(r#"_ = local_holder.hdr.Get("Accept")"#),
+        "expected user-struct field receiver typing on file and local composite consts, got:
+{go}"
+    );
+}

@@ -64,7 +64,11 @@ impl Emitter {
     /// literal type `ty` that the literal does not key itself (`given`).
     /// Empty for anything that is not a non-generic user struct.
     pub(crate) fn n5_missing_fields(&mut self, ty: &TypeExpr, given: &[FieldInit]) -> Vec<String> {
-        let TypeExpr::Named { name, .. } = self.n5_resolve_alias(ty) else {
+        let resolved = match self.n5_resolve_alias(ty) {
+            TypeExpr::Pointer { to, .. } => self.n5_resolve_alias(&to),
+            other => other,
+        };
+        let TypeExpr::Named { name, .. } = resolved else {
             return Vec::new();
         };
         let Some(fields) = self.n5_structs.get(&name).cloned() else {
@@ -137,7 +141,7 @@ impl Emitter {
 
     /// Follow user type aliases (`type counts = map[string]int`) to the
     /// type they name; anything else is returned as written.
-    fn n5_resolve_alias(&self, ty: &TypeExpr) -> TypeExpr {
+    pub(crate) fn n5_resolve_alias(&self, ty: &TypeExpr) -> TypeExpr {
         let mut cur = ty.clone();
         for _ in 0..MAX_DEPTH {
             let next = match &cur {
