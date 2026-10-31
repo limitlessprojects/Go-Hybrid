@@ -3053,3 +3053,69 @@ fn main() {}
     assert!(go6.contains("func read_url() int {"));
     assert!(go6.contains("func read_u_r_l() int {"));
 }
+
+
+// ---------------------------------------------------------------------------
+// Issue #2209: MethodZero accessor in call position emits ()() on non-":=" receivers
+// ---------------------------------------------------------------------------
+
+#[test]
+fn issue_2209_method_zero_accessor_call_position_no_double_call() {
+    // 1. var + assign receiver
+    let src1 = r#"
+import "time"
+import "fmt"
+
+fn main() {
+    var d time.duration
+    d = time.milliseconds(5)
+    fmt.println("v={d.milliseconds()}")
+}
+"#;
+    let go1 = emit(src1);
+    assert!(go1.contains(".Milliseconds()"), "must contain .Milliseconds():\n{}", go1);
+    assert!(!go1.contains(".Milliseconds()()"), "must NOT contain .Milliseconds()():\n{}", go1);
+
+    // 2. param receiver
+    let src2 = r#"
+import "time"
+
+fn check_dur(d time.duration) int {
+    return d.milliseconds()
+}
+"#;
+    let go2 = emit(src2);
+    assert!(go2.contains("d.Milliseconds()"), "must contain d.Milliseconds():\n{}", go2);
+    assert!(!go2.contains("d.Milliseconds()()"), "must NOT contain d.Milliseconds()():\n{}", go2);
+
+    // 3. struct field receiver
+    let src3 = r#"
+import "time"
+
+struct stats {
+    elapsed time.duration
+}
+
+fn check_stats(s stats) int {
+    return s.elapsed.milliseconds()
+}
+"#;
+    let go3 = emit(src3);
+    assert!(go3.contains(".Milliseconds()"), "must contain .Milliseconds():\n{}", go3);
+    assert!(!go3.contains(".Milliseconds()()"), "must NOT contain .Milliseconds()():\n{}", go3);
+
+    // 4. Positive control: property form continues to emit correctly
+    let src4 = r#"
+import "time"
+import "fmt"
+
+fn main() {
+    var d time.duration
+    d = time.milliseconds(5)
+    fmt.println("v={d.milliseconds}")
+}
+"#;
+    let go4 = emit(src4);
+    assert!(go4.contains(".Milliseconds()"), "must contain .Milliseconds():\n{}", go4);
+    assert!(!go4.contains(".Milliseconds()()"), "must NOT contain .Milliseconds()():\n{}", go4);
+}
