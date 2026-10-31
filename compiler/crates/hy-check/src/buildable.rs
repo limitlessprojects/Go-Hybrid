@@ -453,6 +453,81 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
 }
 
 impl<'a> Collector<'a> {
+    fn is_untyped_numeric_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit { kind, .. } => matches!(kind, LitKind::Int(_) | LitKind::Float(_)),
+            Expr::Ident { name, .. } => {
+                if let Some(d) = self.ck.file.decls.iter().find_map(|d| match d {
+                    Decl::Const(cd) if &cd.name == name => Some(cd),
+                    _ => None,
+                }) {
+                    return d.ty.is_none() && self.is_untyped_numeric_const(&d.value);
+                }
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        let def = &self.defines[*id];
+                        if def.kind == LocalKind::Const {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnOp::Neg) && self.is_untyped_numeric_const(operand)
+            }
+            Expr::Binary { op, lhs, rhs, .. } => {
+                matches!(
+                    op,
+                    BinOp::Add
+                        | BinOp::Sub
+                        | BinOp::Mul
+                        | BinOp::Div
+                        | BinOp::Mod
+                        | BinOp::BitAnd
+                        | BinOp::BitOr
+                        | BinOp::BitXor
+                        | BinOp::Shl
+                        | BinOp::Shr
+                ) && self.is_untyped_numeric_const(lhs)
+                    && self.is_untyped_numeric_const(rhs)
+            }
+            _ => false,
+        }
+    }
+
+    fn expr_kinds_conflict(&self, want: &OpKind, expr: &Expr, got: &OpKind) -> bool {
+        if kinds_conflict(want, got) {
+            return true;
+        }
+        if *want == OpKind::Float && *got == OpKind::Int && !self.is_untyped_numeric_const(expr) {
+            return true;
+        }
+        false
+    }
+
+    fn check_send_operand(&mut self, chan: &Expr, value: &Expr) {
+        let ck = self.kind_of_expr(chan);
+        if let OpKind::Chan(elem) = ck {
+            if *elem != OpKind::Unknown {
+                let vk = self.kind_of_expr(value);
+                if vk != OpKind::Unknown && self.expr_kinds_conflict(&elem, value, &vk) {
+                    self.emit_e1002(
+                        value.span(),
+                        format!(
+                            "cannot use `{}` (type `{}`) as `{}` value in send — Go refuses `cannot use ... as {} value in send` (HYB-E1002)",
+                            value.render(),
+                            vk.label(),
+                            elem.label(),
+                            elem.label()
+                        ),
+                        "the sent value must be assignable to the channel's element type",
+                    );
+                }
+            }
+        }
+    }
+
     // -- scope bookkeeping ---------------------------------------------------
 
     fn push_scope(&mut self) {
@@ -1023,6 +1098,7 @@ impl<'a> Collector<'a> {
                 // `ch <- noop()` / `ch <- pair()`, which Go rejects.
                 self.check_single_value_position(value, "a channel send", false);
                 self.expr(value);
+                self.check_send_operand(chan, value);
             }
             Stmt::If {
                 init,
@@ -1181,6 +1257,7 @@ impl<'a> Collector<'a> {
                     self.check_single_value_position(value, "a channel send", false);
                             self.expr(chan);
                             self.expr(value);
+                            self.check_send_operand(chan, value);
                         }
                         SelectArmKind::Recv { names, chan } => {
                             self.check_repeated_bindings(names, chan.span());
