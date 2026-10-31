@@ -464,6 +464,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             }
         }
         ck.record_callee_param_stores(st, cr);
+        ck.check_call_const_writes(st, cr, &std::collections::HashSet::new());
     }
     // Issue #288 integration: closure bodies sit outside the Tier-0 flat
     // walk, where builtins.rs owns the HYB-E2001 defer-operand rule — so a
@@ -806,6 +807,15 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 st,
                 callee,
                 format!("the spawn callee `{}`", callee.render()),
+            );
+            ck.check_call_const_writes(
+                st,
+                &crate::walk::CallRef {
+                    callee,
+                    args,
+                    span: *span,
+                },
+                &std::collections::HashSet::new(),
             );
             let desc = format!("the spawn `task {}(...)`", callee.render());
             let vals: Vec<&Expr> = args.iter().map(|a| &a.value).collect();
