@@ -219,6 +219,20 @@ fn equality_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
     kinds_conflict(a, b) && kinds_conflict(b, a)
 }
 
+/// Non-nilable types in Go and Hybrid cannot be compared to untyped nil (SPEC §3.1 N1).
+/// Nilable types: pointer, interface, slice, map, channel, function.
+fn is_non_nilable(k: &OpKind) -> bool {
+    matches!(
+        k,
+        OpKind::Int
+            | OpKind::Float
+            | OpKind::Bool
+            | OpKind::Str
+            | OpKind::Struct(_)
+            | OpKind::Array(_)
+    )
+}
+
 /// Does a type conversion `target(arg)` fail because the two types are incompatible in Go?
 ///
 /// In Go, type conversions `T(x)` require compatible types:
@@ -1578,10 +1592,99 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn strip_leading_bracket_group(s: &str) -> Option<(&str, &str)> {
+        if !s.starts_with('[') {
+            return None;
+        }
+        let mut depth = 0usize;
+        for (i, ch) in s.char_indices() {
+            match ch {
+                '[' => depth += 1,
+                ']' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some((&s[1..i], &s[i + 1..]));
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn substitute_type_str(s: &str, subst: &HashMap<String, String>) -> String {
+        let s = s.trim();
+        if let Some(repl) = subst.get(s) {
+            return repl.clone();
+        }
+        if let Some(rest) = s.strip_prefix('*') {
+            return format!("*{}", Self::substitute_type_str(rest, subst));
+        }
+        if let Some(rest) = s.strip_prefix("[]") {
+            return format!("[]{}", Self::substitute_type_str(rest, subst));
+        }
+        for pfx in ["<-chan ", "chan<- ", "chan "] {
+            if let Some(rest) = s.strip_prefix(pfx) {
+                return format!("{}{}", pfx, Self::substitute_type_str(rest, subst));
+            }
+        }
+        if s.starts_with('[') {
+            if let Some((inside, rest)) = Self::strip_leading_bracket_group(s) {
+                if !rest.trim().is_empty() {
+                    return format!("[{}]{}", inside, Self::substitute_type_str(rest, subst));
+                }
+            }
+        }
+        if let Some(after_map) = s.strip_prefix("map") {
+            if let Some((k, v)) = Self::strip_leading_bracket_group(after_map) {
+                if !v.trim().is_empty() {
+                    return format!(
+                        "map[{}]{}",
+                        Self::substitute_type_str(k, subst),
+                        Self::substitute_type_str(v, subst)
+                    );
+                }
+            }
+        }
+        if let Some(open) = s.find('[') {
+            if s.ends_with(']') {
+                let head = &s[..open];
+                let inner = &s[open + 1..s.len() - 1];
+                let args: Vec<String> = split_top_level_type_args(inner)
+                    .into_iter()
+                    .map(|a| Self::substitute_type_str(a, subst))
+                    .collect();
+                return format!("{}[{}]", head, args.join(", "));
+            }
+        }
+        s.to_string()
+    }
+
     fn incomparable_type_noun(&self, ty_str: &str) -> Option<&'static str> {
+        self.incomparable_type_noun_depth(ty_str, 0)
+    }
+
+    fn incomparable_type_noun_depth(&self, ty_str: &str, depth: usize) -> Option<&'static str> {
+        if depth > 16 {
+            return None;
+        }
         let trimmed = ty_str.trim();
+        if trimmed.starts_with('*')
+            || trimmed.starts_with("chan ")
+            || trimmed.starts_with("<-chan ")
+            || trimmed.starts_with("chan<- ")
+        {
+            return None;
+        }
         if trimmed.starts_with("[]") {
             return Some("slice");
+        }
+        if trimmed.starts_with('[') {
+            if let Some((inside, rest)) = Self::strip_leading_bracket_group(trimmed) {
+                if !inside.is_empty() && !rest.trim().is_empty() {
+                    return self.incomparable_type_noun_depth(rest, depth + 1);
+                }
+            }
         }
         if trimmed.starts_with("map[") {
             return Some("map");
@@ -1595,6 +1698,9 @@ impl<'a> Collector<'a> {
         if trimmed.starts_with("option[") || trimmed == "option" {
             return Some("option");
         }
+        if let Some(alias_ty) = self.ck.type_aliases.get(trimmed) {
+            return self.incomparable_type_noun_depth(&alias_ty.render(), depth + 1);
+        }
         for d in &self.ck.file.decls {
             if let hy_syntax::Decl::Enum(e) = d {
                 if e.name == trimmed && e.variants.iter().any(|v| v.payload.is_some()) {
@@ -1602,10 +1708,16 @@ impl<'a> Collector<'a> {
                 }
             }
         }
-        if let Some(fields) = self.ck.structs.get(trimmed) {
+        let base = Checker::base_named_type_str(trimmed);
+        if let Some(fields) = self.ck.structs.get(base) {
+            let subst = self.struct_type_arg_map(trimmed);
             for (_, fty) in fields {
-                let render = fty.render();
-                if let Some(n) = self.incomparable_type_noun(&render) {
+                let render = if subst.is_empty() {
+                    fty.render()
+                } else {
+                    Self::substitute_type_str(&fty.render(), &subst)
+                };
+                if let Some(n) = self.incomparable_type_noun_depth(&render, depth + 1) {
                     return Some(n);
                 }
             }
@@ -1625,6 +1737,23 @@ impl<'a> Collector<'a> {
         {
             self.check_named_type_instantiation(rest, span);
             return;
+        }
+        if name.starts_with('[') {
+            if let Some((inside, rest)) = Self::strip_leading_bracket_group(name) {
+                if !inside.is_empty() && !rest.trim().is_empty() {
+                    self.check_named_type_instantiation(rest, span);
+                    return;
+                }
+            }
+        }
+        if let Some(after_map) = name.strip_prefix("map") {
+            if let Some((k, v)) = Self::strip_leading_bracket_group(after_map) {
+                if !v.trim().is_empty() {
+                    self.check_named_type_instantiation(k, span);
+                    self.check_named_type_instantiation(v, span);
+                    return;
+                }
+            }
         }
         let (head, inner_opt) = match name.find('[') {
             Some(i) if name.ends_with(']') => (&name[..i], Some(&name[i + 1..name.len() - 1])),
@@ -3018,23 +3147,57 @@ impl<'a> Collector<'a> {
         match op {
             // `==` / `!=`: incomparable shapes (slice, map, func) are rejected
             // by `emit_guard.rs` (HYB-E2006). Mismatched concrete operand types
-            // are rejected here under HYB-E1002 (rule `BUILDABLE`).
+            // and comparisons between non-nilable types and nil are rejected
+            // here under HYB-E1002 (rule `BUILDABLE` / SPEC §3.1 N1).
             BinOp::Eq | BinOp::Ne => {
                 let op_str = if matches!(op, BinOp::Eq) { "==" } else { "!=" };
-                if !Checker::is_nil_literal(lhs)
-                    && !Checker::is_nil_literal(rhs)
-                    && equality_kinds_conflict(&lk, &rk)
-                {
+                let lhs_is_nil = Checker::is_nil_literal(lhs);
+                let rhs_is_nil = Checker::is_nil_literal(rhs);
+                if lhs_is_nil && rhs_is_nil {
                     self.emit_e1002(
                         span,
                         format!(
-                            "invalid operation `{}`: operator `{}` requires comparable operands of matching type, found `{}` and `{}` (HYB-E1002)",
+                            "invalid operation `{}`: operator `{}` not defined on untyped nil (HYB-E1002)",
+                            span_expr_label(lhs, op_str, rhs),
+                            op_str
+                        ),
+                        "untyped nil cannot be compared with untyped nil",
+                    );
+                } else if !lhs_is_nil && !rhs_is_nil {
+                    if equality_kinds_conflict(&lk, &rk) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "invalid operation `{}`: operator `{}` requires comparable operands of matching type, found `{}` and `{}` (HYB-E1002)",
+                                span_expr_label(lhs, op_str, rhs),
+                                op_str,
+                                lk.label(),
+                                rk.label()
+                            ),
+                            "equality operators (`==`, `!=`) require operands of matching type",
+                        );
+                    }
+                } else if lhs_is_nil && is_non_nilable(&rk) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid operation `{}`: operator `{}` not defined between untyped nil and `{}` (HYB-E1002)",
                             span_expr_label(lhs, op_str, rhs),
                             op_str,
-                            lk.label(),
                             rk.label()
                         ),
-                        "equality operators (`==`, `!=`) require operands of matching type",
+                        "operator `==` and `!=` cannot compare untyped nil to non-nilable types (SPEC §3.1 N1)",
+                    );
+                } else if rhs_is_nil && is_non_nilable(&lk) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid operation `{}`: operator `{}` not defined between `{}` and untyped nil (HYB-E1002)",
+                            span_expr_label(lhs, op_str, rhs),
+                            op_str,
+                            lk.label()
+                        ),
+                        "operator `==` and `!=` cannot compare untyped nil to non-nilable types (SPEC §3.1 N1)",
                     );
                 }
             }

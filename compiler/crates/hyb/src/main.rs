@@ -609,13 +609,17 @@ fn generate_one(
     let out_disp = out_path.display().to_string();
 
     // Overwrite guard: never clobber a hand-written file.
-    if let Ok(existing) = std::fs::read_to_string(&out_path) {
-        if !existing.starts_with(GENERATED_HEADER_PREFIX) {
-            return Err(format!(
-                "{} exists and is NOT hyb-generated — refusing to overwrite a hand-written file",
-                out_disp
-            ));
+    match std::fs::read_to_string(&out_path) {
+        Ok(existing) => {
+            if !existing.starts_with(GENERATED_HEADER_PREFIX) {
+                return Err(format!(
+                    "{} exists and is NOT hyb-generated — refusing to overwrite a hand-written file",
+                    out_disp
+                ));
+            }
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("reading {}: {}", out_disp, e)),
     }
 
     if check_only {
