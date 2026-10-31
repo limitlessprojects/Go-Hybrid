@@ -117,5 +117,63 @@ class ProbeParser(unittest.TestCase):
         self.assertFalse(any("removed line" in ln for ln in added))
 
 
+import contextlib
+import io
+from unittest.mock import patch
+import queue_sweeper
+
+
+class QueueSweeperStatusTests(unittest.TestCase):
+    def _run_sweeper_with_statuses(self, patch_status, post_status):
+        calls = []
+
+        def mock_api(path, method="GET", body=None):
+            calls.append({"path": path, "method": method, "body": body})
+            if "/pulls?" in path:
+                return 200, [{"number": 101, "created_at": "2020-01-01T00:00:00Z", "labels": []}]
+            if method == "PATCH":
+                return patch_status, None
+            if method == "POST":
+                return post_status, None
+            return 200, {"open_issues_count": 0}
+
+        out = io.StringIO()
+        with patch.object(queue_sweeper, "TOK", "test-token"), \
+             patch.object(queue_sweeper, "api", mock_api), \
+             patch.object(queue_sweeper, "config_protected_numbers", return_value=set()), \
+             patch.object(queue_sweeper.time, "sleep"), \
+             patch.object(sys, "argv", ["queue_sweeper.py"]), \
+             contextlib.redirect_stdout(out):
+            queue_sweeper.main()
+
+        output = out.getvalue()
+        done_line = [line for line in output.splitlines() if "DONE:" in line][0]
+        return done_line, calls
+
+    def test_patch_200_post_201_succeeds_both(self):
+        done, calls = self._run_sweeper_with_statuses(200, 201)
+        self.assertIn("closed=1 fails=0 comment_fails=0", done)
+        self.assertEqual(len([c for c in calls if c["method"] == "PATCH"]), 1)
+        self.assertEqual(len([c for c in calls if c["method"] == "POST"]), 1)
+
+    def test_patch_422_counted_as_closure_failure(self):
+        done, calls = self._run_sweeper_with_statuses(422, 201)
+        self.assertIn("closed=0 fails=1 comment_fails=0", done)
+        self.assertEqual(len([c for c in calls if c["method"] == "POST"]), 0)
+
+    def test_patch_500_counted_as_closure_failure(self):
+        done, calls = self._run_sweeper_with_statuses(500, 201)
+        self.assertIn("closed=0 fails=1 comment_fails=0", done)
+        self.assertEqual(len([c for c in calls if c["method"] == "POST"]), 0)
+
+    def test_patch_200_post_422_counted_as_comment_failure(self):
+        done, calls = self._run_sweeper_with_statuses(200, 422)
+        self.assertIn("closed=1 fails=0 comment_fails=1", done)
+
+    def test_patch_200_post_403_counted_as_comment_failure(self):
+        done, calls = self._run_sweeper_with_statuses(200, 403)
+        self.assertIn("closed=1 fails=0 comment_fails=1", done)
+
+
 if __name__ == "__main__":
     unittest.main()
