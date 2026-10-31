@@ -120,24 +120,32 @@ def main():
         print("DRY RUN — nothing closed")
         return
 
-    n = fails = 0
+    n = fails = comment_fails = 0
     t0 = time.time()
     for p in due:
         age = (datetime.now(timezone.utc) -
                datetime.fromisoformat(p["created_at"].replace("Z", "+00:00"))).days
         st, _ = api(f"/repos/{REPO}/pulls/{p['number']}", "PATCH",
                     {"state": "closed", "state_reason": "not_planned"})
-        ok = st in (200, 422)
-        if ok:
+        closed = (st == 200)
+        if st == 422:
+            v_st, v_pr = api(f"/repos/{REPO}/pulls/{p['number']}")
+            if v_st == 200 and isinstance(v_pr, dict) and v_pr.get("state") == "closed":
+                closed = True
+        if closed:
+            n += 1
             cs, _ = api(f"/repos/{REPO}/issues/{p['number']}/comments", "POST",
                         {"body": COMMENT.format(age=age)})
-            ok = cs in (201, 403, 422)
-        if ok: n += 1
-        else: fails += 1; print(f"  FAIL #{p['number']} st={st}", flush=True)
+            if cs not in (201, 403):
+                comment_fails += 1
+                print(f"  WARN #{p['number']}: comment delivery failed st={cs}", flush=True)
+        else:
+            fails += 1
+            print(f"  FAIL #{p['number']} st={st}", flush=True)
         if (n + fails) % 25 == 0:
-            print(f"  progress {n+fails}/{len(due)} closed={n} fails={fails} ({time.time()-t0:.0f}s)", flush=True)
+            print(f"  progress {n+fails}/{len(due)} closed={n} fails={fails} comment_fails={comment_fails} ({time.time()-t0:.0f}s)", flush=True)
         time.sleep(0.3)
-    print(f"DONE: closed={n} fails={fails} elapsed={time.time()-t0:.0f}s")
+    print(f"DONE: closed={n} fails={fails} comment_fails={comment_fails} elapsed={time.time()-t0:.0f}s")
     st, repo = api(f"/repos/{REPO}")
     if st == 200:
         print(f"open issues+PRs now: {repo.get('open_issues_count')}")
