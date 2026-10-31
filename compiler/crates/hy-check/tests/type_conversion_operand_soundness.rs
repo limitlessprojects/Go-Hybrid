@@ -125,3 +125,75 @@ fn valid_interface_conversion_accepts() {
     let r = check(src);
     assert_eq!(r.verdict, Verdict::Accept, "expected accept, got diagnostics: {:?}", r.diagnostics);
 }
+
+#[test]
+fn pointer_conversion_to_int_rejects_e1002() {
+    let src = "fn main() {\n    x := 42\n    p := &x\n    _ = int(p)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn pointer_conversion_to_float_rejects_e1002() {
+    let src = "fn main() {\n    x := 42\n    p := &x\n    _ = float64(p)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn pointer_conversion_to_string_rejects_e1002() {
+    let src = "fn main() {\n    x := 42\n    p := &x\n    _ = string(p)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn array_conversion_to_int_rejects_e1002() {
+    let src = "fn main() {\n    var arr [4]int\n    _ = int(arr)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn array_conversion_to_float_rejects_e1002() {
+    let src = "fn main() {\n    var arr [4]int\n    _ = float64(arr)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn array_conversion_to_string_rejects_e1002() {
+    let src = "fn main() {\n    var arr [4]int\n    _ = string(arr)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn array_conversion_to_slice_rejects_e1002() {
+    let src = "fn main() {\n    var arr [4]int\n    _ = []int(arr)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn named_pointer_conversion_from_int_rejects_e1002() {
+    let src = "type int_ptr = *int\nfn main() {\n    x := 42\n    _ = int_ptr(x)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn named_array_conversion_from_int_rejects_e1002() {
+    let src = "type my_arr = [4]int\nfn main() {\n    x := 42\n    _ = my_arr(x)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
