@@ -212,6 +212,10 @@ def collect(cfg, gh, args):
             "age_days": age_days(pr["created_at"], now),
             "idle_days": age_days(pr["updated_at"], now),
             "draft": bool(pr.get("draft")),
+            # the PR object already carries its labels; recording them here is
+            # free (no extra API call) and lets cmd_labels diff instead of
+            # re-posting every label on every run.
+            "current_labels": [l["name"] for l in (pr.get("labels") or [])],
             "mergeable": full.get("mergeable"),
             "mergeable_state": full.get("mergeable_state"),
             "head_sha": pr["head"]["sha"][:12],
@@ -517,18 +521,32 @@ def cmd_labels(args):
     items = json.loads(Path(args.from_scan).read_text())["items"] if args.from_scan else None
     if items is None:
         items, _ = classify(cfg, collect(cfg, gh, args)[0])
+    # Only POST the delta. The scan already carries each PR's current labels, so
+    # re-posting an unchanged set is pure rate-limit burn: with ~590 open PRs and
+    # shepherd-board firing on every pull_request/issues event, an unconditional
+    # loop would cost tens of thousands of writes a day against a 1000/hour
+    # budget. Compute what is actually missing and touch only those.
+    added = skipped = 0
     for it in items:
         want = it["labels"]
         if not want:
             continue
+        have = set(it.get("current_labels") or [])
+        missing = [l for l in want if l not in have]
+        if not missing:
+            skipped += 1
+            continue
         if args.dry:
-            log("  #%d -> %s" % (it["number"], ",".join(want)))
+            log("  #%d -> %s" % (it["number"], ",".join(missing)))
+            added += 1
             continue
         try:
-            gh.post("/repos/%s/issues/%d/labels" % (gh.repo, it["number"]), {"labels": want})
+            gh.post("/repos/%s/issues/%d/labels" % (gh.repo, it["number"]), {"labels": missing})
+            added += 1
         except RuntimeError as e:
             log("  FAIL #%d: %s" % (it["number"], e))
-    log("labels applied (%d calls total, %s remaining)" % (gh.calls, gh.remaining))
+    log("labels applied: %d changed, %d already current (%d calls total, %s remaining)"
+        % (added, skipped, gh.calls, gh.remaining))
 
 
 # ---------------------------------------------------------------- board
