@@ -1296,7 +1296,7 @@ pub(crate) fn fold_bin(op: BinOp, l: ConstFold, r: ConstFold) -> ConstFold {
         }
         // Bitwise masking can shrink a `TooBig` value back into range —
         // give up (fail-open) rather than guess.
-        BitAnd | BitOr | BitXor => {
+        BitAnd | BitAndNot | BitOr | BitXor => {
             if matches!(l, ConstFold::TooBig) || matches!(r, ConstFold::TooBig) {
                 return ConstFold::NotConst;
             }
@@ -1305,6 +1305,7 @@ pub(crate) fn fold_bin(op: BinOp, l: ConstFold, r: ConstFold) -> ConstFold {
             };
             let v = match op {
                 BitAnd => a & b,
+                BitAndNot => a & !b,
                 BitOr => a | b,
                 _ => a ^ b,
             };

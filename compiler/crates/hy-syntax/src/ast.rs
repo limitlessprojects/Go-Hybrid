@@ -400,11 +400,12 @@ pub enum AssignOp {
     ModAssign,   // %=
     Inc,         // ++ (values empty)
     Dec,         // -- (values empty)
-    BitOrAssign,   // |=
-    BitAndAssign,  // &=
-    BitXorAssign,  // ^=
-    ShlAssign,     // <<=
-    ShrAssign,     // >>=
+    BitOrAssign,      // |=
+    BitAndAssign,     // &=
+    BitAndNotAssign,  // &^=
+    BitXorAssign,     // ^=
+    ShlAssign,        // <<=
+    ShrAssign,        // >>=
 }
 
 /// Assignable lvalue.
@@ -635,6 +636,7 @@ pub enum BinOp {
     BitOr,
     BitXor,
     BitAnd,
+    BitAndNot,
     Shl,
     Shr,
 }
@@ -860,6 +862,7 @@ impl BinOp {
             BinOp::BitOr => "|",
             BinOp::BitXor => "^",
             BinOp::BitAnd => "&",
+            BinOp::BitAndNot => "&^",
             BinOp::Shl => "<<",
             BinOp::Shr => ">>",
         }

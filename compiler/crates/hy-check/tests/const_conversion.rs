@@ -214,3 +214,23 @@ fn controls_untouched() {
         "struct pair { n int } fn main() { p := pair{ n: 1 } x := int8(p.n) _ = x }",
     );
 }
+
+#[test]
+fn bitclear_typecheck_and_const_overflow_issue_1672() {
+    // 300 &^ 256 == 44, which fits in u8; 300 &^ 4 == 296, which overflows u8 (HYB-E6002).
+    let ok = check("fn main() {\n    var x u8 = 300 &^ 256\n    _ = x\n}\n");
+    assert_eq!(ok.verdict, Verdict::Accept, "{:?}", ok.diagnostics);
+
+    let overflow = check("fn main() {\n    var x u8 = 300 &^ 4\n    _ = x\n}\n");
+    assert_eq!(overflow.verdict, Verdict::Reject);
+    assert!(error_codes(&overflow).contains(&"HYB-E6002".to_string()), "{:?}", overflow.diagnostics);
+
+    for bad in [
+        "fn main() {\n    _ = \"a\" &^ \"b\"\n}\n",
+        "fn main() {\n    var s string = \"a\"\n    s &^= \"b\"\n}\n",
+    ] {
+        let r = check(bad);
+        assert_eq!(r.verdict, Verdict::Reject, "expected Reject for {bad:?}");
+        assert!(error_codes(&r).contains(&"HYB-E1002".to_string()), "{:?}", r.diagnostics);
+    }
+}
