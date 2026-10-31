@@ -1578,6 +1578,41 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn incomparable_type_noun(&self, ty_str: &str) -> Option<&'static str> {
+        let trimmed = ty_str.trim();
+        if trimmed.starts_with("[]") {
+            return Some("slice");
+        }
+        if trimmed.starts_with("map[") {
+            return Some("map");
+        }
+        if trimmed.starts_with("func(") || trimmed.starts_with("fn(") {
+            return Some("function");
+        }
+        if trimmed.starts_with("set[") || trimmed == "set" {
+            return Some("set");
+        }
+        if trimmed.starts_with("option[") || trimmed == "option" {
+            return Some("option");
+        }
+        for d in &self.ck.file.decls {
+            if let hy_syntax::Decl::Enum(e) = d {
+                if e.name == trimmed && e.variants.iter().any(|v| v.payload.is_some()) {
+                    return Some("data-carrying enum");
+                }
+            }
+        }
+        if let Some(fields) = self.ck.structs.get(trimmed) {
+            for (_, fty) in fields {
+                let render = fty.render();
+                if let Some(n) = self.incomparable_type_noun(&render) {
+                    return Some(n);
+                }
+            }
+        }
+        None
+    }
+
     fn check_named_type_instantiation(&mut self, name: &str, span: Span) {
         let name = name.trim();
         if let Some(rest) = name
@@ -1600,7 +1635,26 @@ impl<'a> Collector<'a> {
                 self.check_named_type_instantiation(arg, span);
             }
         }
-        if head == "set" || head == "option" || head == "map" {
+        if head == "set" {
+            if let Some(inner) = inner_opt {
+                let args = split_top_level_type_args(inner);
+                if args.len() == 1 {
+                    let elem_ty = args[0].trim();
+                    if let Some(noun) = self.incomparable_type_noun(elem_ty) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "invalid set element type `{}`: {} is not comparable — `set[T]` requires comparable `T` (SPEC §2.3 T9) (HYB-E1002)",
+                                elem_ty, noun
+                            ),
+                            "set element types must be comparable (primitives, pointers, or structs without slice/map fields)",
+                        );
+                    }
+                }
+            }
+            return;
+        }
+        if head == "option" || head == "map" {
             return;
         }
         let Some(tparams) = self.ck.struct_type_params.get(head) else {

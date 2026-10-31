@@ -23,7 +23,7 @@ help:
 	@echo "make test-quick       — sandbox unit tests (grows with the compiler)"
 	@echo "make ci               — what CI runs on push"
 	@echo "make examples         — the ten target programs, byte-exact acceptance"
-	@echo "make corpus           — Tier-0 corpus verdicts (129/122)"
+	@echo "make corpus           — Tier-0 corpus verdicts (129/129)"
 	@echo "make census           — every stated corpus count matches the corpus"
 	@echo "make guarantees       — GUARANTEES.md claims table matches the rules and corpus"
 	@echo "make differential     — the differential corpus loop (accept + reject)"

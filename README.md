@@ -109,7 +109,7 @@ skip the cgo runtime.
 | What does a Go→Rust call cost? | **2.8 ns** safe stack-switched trampoline vs **46.8 ns** cgo — 16.5× faster, 0 allocs | ✅ [spike 1](spikes/spike1-call-overhead/RESULTS.md) · [G2 bench: fast path 3.37 ns ≤ 5 ns on the live bridge](gates/G2.md) |
 | Can consumers skip the toolchain? | Yes — generated Go + prebuilt artifact; a plain `go run` imports a Hybrid package | ✅ [example 09](examples/09-go-imports-hybrid/) |
 | Can a scheduler-safe checked language work at all? | Bounded blocking pool, two-tier budgets, race-clean under `-race` | ✅ [spike 4: 100k-cell matrix](spikes/spike4-scheduling/RESULTS.md) |
-| Ownership rules without visible lifetimes? | Tier-0 checker: 6 sendable classes, move/freeze, loans, fail-closed boundary | ✅ [checker corpus 129/122](tests/checker-corpus/) + [differential loop 40/40 + 80/80](tools/differential_loop.py) |
+| Ownership rules without visible lifetimes? | Tier-0 checker: 6 sendable classes, move/freeze, loans, fail-closed boundary | ✅ [checker corpus 129/129](tests/checker-corpus/) + [differential loop 40/40 + 80/80](tools/differential_loop.py) |
 | Scheduling with blocking Rust calls | resolved: pool + Go-scheduler fallback, budgets pinned | ✅ spike 4 |
 
 ## Quick start

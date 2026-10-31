@@ -1,7 +1,7 @@
 //! Integration test: EVERY must-parse file parses cleanly.
 //!
 
-//!   * tests/checker-corpus/*.hy            (127 programs — the checker corpus;
+//!   * tests/checker-corpus/*.hy            (129 programs — the checker corpus;
 //!     61-string-escape-fail-closed.hy is the corpus's first PARSE-reject
 //!     fixture and is pinned to fail closed instead)
 //!   * spikes/spike6-ownership/work/*.hy    (10 programs — Tier-0 rewrites)
@@ -51,7 +51,7 @@ fn must_parse(path: &PathBuf) {
 fn checker_corpus_all_parse() {
     let files = hy_files_under("tests/checker-corpus");
 
-    assert_eq!(files.len(), 129, "expected exactly 127 corpus programs",);
+    assert_eq!(files.len(), 129, "expected exactly 129 corpus programs",);
     // 61-string-escape-fail-closed.hy is the corpus's first PARSE-reject
     // fixture (a malformed LX7 string escape must be named by the lexer,
     // never silently accepted): it is excluded from the must-parse loop
