@@ -908,46 +908,215 @@ pub(crate) fn collect_ref_roots(e: &Expr, out: &mut Vec<String>) {
 /// (e.g. `[]*T{&x}`, `map[K]*T{"k": &x}`, nested composite literals).
 /// Ordinary calls, binary operations, indexing, and fields do not propagate borrow roots into results.
 pub(crate) fn collect_addr_of_roots(e: &Expr, out: &mut Vec<String>) {
+    collect_addr_of_roots_scoped(e, &[], out);
+}
+
+fn collect_addr_of_roots_scoped(e: &Expr, scopes: &[HashSet<String>], out: &mut Vec<String>) {
     match unwrap_parens(e) {
-        Expr::AddrOf { operand, .. } => {
-            if let Some(id) = operand.root_ident() {
-                if id != "_" {
-                    out.push(id.to_string());
-                }
-            }
-            collect_addr_of_roots(operand, out);
-        }
-        Expr::Unary {
+        Expr::AddrOf { operand, .. }
+        | Expr::Unary {
             op: hy_syntax::UnOp::Addr,
             operand,
             ..
         } => {
             if let Some(id) = operand.root_ident() {
-                if id != "_" {
+                if id != "_" && !scopes.iter().any(|s| s.contains(id)) {
                     out.push(id.to_string());
                 }
             }
-            collect_addr_of_roots(operand, out);
+            collect_addr_of_roots_scoped(operand, scopes, out);
         }
-        Expr::Try { operand, .. } => collect_addr_of_roots(operand, out),
-        Expr::Move { operand, .. } => collect_addr_of_roots(operand, out),
+        Expr::Try { operand, .. }
+        | Expr::Move { operand, .. }
+        | Expr::Field { base: operand, .. }
+        | Expr::Index { base: operand, .. }
+        | Expr::Slice { base: operand, .. } => collect_addr_of_roots_scoped(operand, scopes, out),
+        Expr::Call { callee, args, .. } => match unwrap_parens(callee) {
+            Expr::Ident { name, .. }
+                if matches!(name.as_str(), "some" | "ok" | "err" | "append")
+                    && !scopes.iter().any(|s| s.contains(name.as_str())) =>
+            {
+                for a in args {
+                    collect_addr_of_roots_scoped(&a.value, scopes, out);
+                }
+            }
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => {
+                for a in args {
+                    collect_addr_of_roots_scoped(&a.value, scopes, out);
+                }
+                collect_fnlit_addr_of_roots(params, results, body, scopes, out);
+            }
+            _ => {}
+        },
+        Expr::FnLit {
+            params,
+            results,
+            body,
+            ..
+        } => collect_fnlit_addr_of_roots(params, results, body, scopes, out),
         Expr::StructLit { fields, .. } => {
             for f in fields {
-                collect_addr_of_roots(&f.value, out);
+                collect_addr_of_roots_scoped(&f.value, scopes, out);
             }
         }
         Expr::MapLit { entries, .. } => {
             for (k, v) in entries {
-                collect_addr_of_roots(k, out);
-                collect_addr_of_roots(v, out);
+                collect_addr_of_roots_scoped(k, scopes, out);
+                collect_addr_of_roots_scoped(v, scopes, out);
             }
         }
         Expr::SliceLit { items, .. } => {
             for it in items {
-                collect_addr_of_roots(it, out);
+                collect_addr_of_roots_scoped(it, scopes, out);
             }
         }
         _ => {}
+    }
+}
+
+fn collect_fnlit_addr_of_roots(
+    params: &[hy_syntax::Param],
+    results: &[hy_syntax::FnResult],
+    body: &hy_syntax::Block,
+    outer_scopes: &[HashSet<String>],
+    out: &mut Vec<String>,
+) {
+    let mut scopes = outer_scopes.to_vec();
+    let mut sig: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+    sig.extend(results.iter().filter_map(|r| r.name.clone()));
+    scopes.push(sig);
+    collect_block_addr_of_roots(body, &mut scopes, out);
+}
+
+fn collect_block_addr_of_roots(
+    body: &hy_syntax::Block,
+    scopes: &mut Vec<HashSet<String>>,
+    out: &mut Vec<String>,
+) {
+    scopes.push(HashSet::new());
+    for stmt in &body.stmts {
+        collect_stmt_addr_of_roots(stmt, scopes, out);
+    }
+    scopes.pop();
+}
+
+fn collect_stmt_addr_of_roots(
+    stmt: &hy_syntax::Stmt,
+    scopes: &mut Vec<HashSet<String>>,
+    out: &mut Vec<String>,
+) {
+    use hy_syntax::{ForKind, MatchPattern, SelectArmKind, Stmt};
+    match stmt {
+        Stmt::Local(l) => {
+            l.values
+                .iter()
+                .for_each(|v| collect_addr_of_roots_scoped(v, scopes, out));
+            if let Some(top) = scopes.last_mut() {
+                top.extend(l.names.iter().filter(|n| n.as_str() != "_").cloned());
+            }
+        }
+        Stmt::Assign { values, .. } | Stmt::Return { values, .. } => {
+            values
+                .iter()
+                .for_each(|v| collect_addr_of_roots_scoped(v, scopes, out));
+        }
+        Stmt::Expr { expr, .. } | Stmt::Defer { call: expr, .. } => {
+            collect_addr_of_roots_scoped(expr, scopes, out);
+        }
+        Stmt::Send { chan, value, .. } => {
+            collect_addr_of_roots_scoped(chan, scopes, out);
+            collect_addr_of_roots_scoped(value, scopes, out);
+        }
+        Stmt::Task { callee, args, .. } => {
+            collect_addr_of_roots_scoped(callee, scopes, out);
+            args.iter()
+                .for_each(|a| collect_addr_of_roots_scoped(&a.value, scopes, out));
+        }
+        Stmt::If {
+            init,
+            cond,
+            then,
+            otherwise,
+            ..
+        } => {
+            scopes.push(HashSet::new());
+            if let Some(i) = init {
+                collect_stmt_addr_of_roots(i, scopes, out);
+            }
+            collect_addr_of_roots_scoped(cond, scopes, out);
+            collect_block_addr_of_roots(then, scopes, out);
+            if let Some(o) = otherwise {
+                scopes.push(HashSet::new());
+                collect_stmt_addr_of_roots(o, scopes, out);
+                scopes.pop();
+            }
+            scopes.pop();
+        }
+        Stmt::For { kind, body, .. } => {
+            let mut ls = HashSet::new();
+            match kind {
+                ForKind::Range { var, lo, hi, .. } => {
+                    collect_addr_of_roots_scoped(lo, scopes, out);
+                    collect_addr_of_roots_scoped(hi, scopes, out);
+                    ls.insert(var.clone());
+                }
+                ForKind::Iterate { vars, expr } => {
+                    collect_addr_of_roots_scoped(expr, scopes, out);
+                    ls.extend(vars.iter().cloned());
+                }
+                ForKind::While { cond } => collect_addr_of_roots_scoped(cond, scopes, out),
+                ForKind::Infinite => {}
+            }
+            scopes.push(ls);
+            collect_block_addr_of_roots(body, scopes, out);
+            scopes.pop();
+        }
+        Stmt::Match { subject, arms, .. } => {
+            collect_addr_of_roots_scoped(subject, scopes, out);
+            for arm in arms {
+                let mut s = HashSet::new();
+                if let MatchPattern::Path {
+                    binding: Some(b), ..
+                } = &arm.pattern
+                {
+                    s.insert(b.clone());
+                }
+                scopes.push(s);
+                if let Some(g) = &arm.guard {
+                    collect_addr_of_roots_scoped(g, scopes, out);
+                }
+                collect_block_addr_of_roots(&arm.body, scopes, out);
+                scopes.pop();
+            }
+        }
+        Stmt::Select { arms, .. } => {
+            for arm in arms {
+                let mut s = HashSet::new();
+                match &arm.kind {
+                    SelectArmKind::Send { chan, value, .. } => {
+                        collect_addr_of_roots_scoped(chan, scopes, out);
+                        collect_addr_of_roots_scoped(value, scopes, out);
+                    }
+                    SelectArmKind::Recv { names, chan, .. } => {
+                        collect_addr_of_roots_scoped(chan, scopes, out);
+                        s.extend(names.iter().cloned());
+                    }
+                    SelectArmKind::Default => {}
+                }
+                scopes.push(s);
+                collect_block_addr_of_roots(&arm.body, scopes, out);
+                scopes.pop();
+            }
+        }
+        Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+            collect_block_addr_of_roots(body, scopes, out);
+        }
+        Stmt::Break { .. } | Stmt::Continue { .. } => {}
     }
 }
 
