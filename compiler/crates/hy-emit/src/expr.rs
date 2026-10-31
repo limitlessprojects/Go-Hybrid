@@ -29,7 +29,7 @@ fn bin_prec(op: BinOp) -> u8 {
         BinOp::Mul | BinOp::Div | BinOp::Mod => 5,
         // SPEC-LANGUAGE 1.4: `|` `^` are AddOp level, `&` `<<` `>>` are MulOp level.
         BinOp::BitOr | BinOp::BitXor => 4,
-        BinOp::BitAnd | BinOp::Shl | BinOp::Shr => 5,
+        BinOp::BitAnd | BinOp::BitAndNot | BinOp::Shl | BinOp::Shr => 5,
     }
 }
 

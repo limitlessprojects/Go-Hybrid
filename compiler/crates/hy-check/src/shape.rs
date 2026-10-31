@@ -951,6 +951,7 @@ impl<'a> Checker<'a> {
                         | hy_syntax::BinOp::Div
                         | hy_syntax::BinOp::Mod
                         | hy_syntax::BinOp::BitAnd
+                        | hy_syntax::BinOp::BitAndNot
                         | hy_syntax::BinOp::BitOr
                         | hy_syntax::BinOp::BitXor
                 ) {
