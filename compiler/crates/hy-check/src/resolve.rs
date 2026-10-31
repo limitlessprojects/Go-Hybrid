@@ -591,8 +591,14 @@ fn collect_file_tables(file: &hy_syntax::File) -> HashSet<String> {
             Decl::TypeAlias(a) => {
                 s.insert(a.name.clone());
             }
+            // A method lives in its receiver's method set, and `func init`
+            // is never a declared package-level name in Go, so neither is
+            // reachable as a bare identifier (`undefined: m` / `undefined:
+            // init` in the emitted Go).
             Decl::Fn(f) => {
-                s.insert(f.name.clone());
+                if f.receiver.is_none() && f.name != "init" {
+                    s.insert(f.name.clone());
+                }
             }
         }
     }
