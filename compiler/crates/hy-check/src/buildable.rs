@@ -3014,6 +3014,25 @@ impl<'a> Collector<'a> {
         // "multiple-value ... in single-value context" / "(no value) used as
         // value". Same check a binary operand already runs.
         self.check_single_value_position(operand, "a unary operand", /*binding_position=*/ false);
+        // Issue #1777: `kind_of_expr` maps a nil literal to `Unknown`, and
+        // `Unknown` is permissive in the gates below — so `!nil` and `-nil`
+        // passed check and failed `go build`
+        // (`invalid operation: operator ! not defined on nil`). `&nil` needs
+        // no guard: the literal is not addressable (E1002 loc A).
+        if matches!(op, UnOp::Not | UnOp::Neg) && Checker::is_nil_literal(operand) {
+            let sym = op.render();
+            self.emit_e1002(
+                span,
+                format!(
+                    "invalid operation `{}{}`: nil is not a valid operand of `{}` (HYB-E1002)",
+                    sym,
+                    operand.render(),
+                    sym
+                ),
+                "unary operators are not defined on `nil` — compare the nilable value explicitly instead",
+            );
+            return;
+        }
         let k = self.kind_of_expr(operand);
         match op {
             UnOp::Not => {
@@ -3136,6 +3155,46 @@ impl<'a> Collector<'a> {
 
     /// Family B3/B4/B5 (#425): binary operator operand-kind checks.
     fn check_binary_operands(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr, span: Span) {
+        // Issue #1777: a literal `nil` is not a valid operand of ANY operator
+        // except the equality surface — and equality (`Eq`/`Ne`) is the
+        // deliberate nil-comparison exception (E2006 returns early above).
+        // `kind_of_expr` maps nil to `Unknown` because nil has no single
+        // static type; `Unknown` is then permissive in every per-op gate
+        // below, so `1 << nil`, `nil << 1`, `1 + nil`, `nil && false` all
+        // sailed through to `go build` errors like
+        // `cannot convert nil to type uint` / `untyped nil in shift`.
+        // Ordered comparisons (`<` … `>=`) are already nil-closed
+        // (nil-funnel rejections above) — leave them exactly where they are.
+        if !matches!(
+            op,
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+        ) && (Checker::is_nil_literal(lhs) || Checker::is_nil_literal(rhs))
+        {
+            let op_str = match op {
+                BinOp::Add => "+",
+                BinOp::Sub => "-",
+                BinOp::Mul => "*",
+                BinOp::Div => "/",
+                BinOp::Mod => "%",
+                BinOp::BitAnd => "&",
+                BinOp::BitOr => "|",
+                BinOp::BitXor => "^",
+                BinOp::And => "&&",
+                BinOp::Or => "||",
+                BinOp::Shl => "<<",
+                _ => ">>",
+            };
+            self.emit_e1002(
+                span,
+                format!(
+                    "invalid operation `{}`: nil is not a valid operand of `{}` (HYB-E1002)",
+                    span_expr_label(lhs, op_str, rhs),
+                    op_str
+                ),
+                "`nil` only combines with `==` and `!=`, or as an assignment value for a nilable (error/foreign) type",
+            );
+            return;
+        }
         // #682 U6: an operand must be exactly one value. `two() + 1` is Go's
         // `multiple-value two() (value of type (int, int)) in single-value
         // context`, and the kind inference below would otherwise take the
@@ -3453,6 +3512,24 @@ impl<'a> Collector<'a> {
             }
             AssignOp::AddAssign => {
                 let Some(val) = values.first() else { return };
+                // Issue #1777 (belt for the N1-silent shape): nil is
+                // fail-open only in the `Unknown`-target gates — a literal
+                // `nil` as the compound value is a `go build` error for
+                // EVERY operator in this arm (`invalid operation: e += nil`).
+                // Known-shaped targets already reject via E4001 (N1); here we
+                // close the `Unknown`-target gap only, to stay layered.
+                if tk == OpKind::Unknown && Checker::is_nil_literal(val) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid compound assignment `{} {} {}`: nil is not a valid compound-assignment value (HYB-E1002)",
+                            target.render(),
+                            "+=",
+                            val.render()
+                        ),
+                        "`nil` only combines with `==` and `!=`, or as an assignment value for a nilable (error/foreign) type",
+                    );
+                }
                 let vk = self.kind_of_expr(val);
                 let t_ok = matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
                 let v_ok = matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
@@ -3475,6 +3552,23 @@ impl<'a> Collector<'a> {
             }
             AssignOp::SubAssign | AssignOp::MulAssign | AssignOp::DivAssign => {
                 let Some(val) = values.first() else { return };
+                if tk == OpKind::Unknown && Checker::is_nil_literal(val) {
+                    let op_sym = match op {
+                        AssignOp::SubAssign => "-=",
+                        AssignOp::MulAssign => "*=",
+                        _ => "/=",
+                    };
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid compound assignment `{} {} {}`: nil is not a valid compound-assignment value (HYB-E1002)",
+                            target.render(),
+                            op_sym,
+                            val.render()
+                        ),
+                        "`nil` only combines with `==` and `!=`, or as an assignment value for a nilable (error/foreign) type",
+                    );
+                }
                 let vk = self.kind_of_expr(val);
                 let op_sym = match op {
                     AssignOp::SubAssign => "-=",
@@ -3506,6 +3600,26 @@ impl<'a> Collector<'a> {
             | AssignOp::ShlAssign
             | AssignOp::ShrAssign => {
                 let Some(val) = values.first() else { return };
+                if tk == OpKind::Unknown && Checker::is_nil_literal(val) {
+                    let op_sym = match op {
+                        AssignOp::ModAssign => "%=",
+                        AssignOp::BitOrAssign => "|=",
+                        AssignOp::BitAndAssign => "&=",
+                        AssignOp::BitXorAssign => "^=",
+                        AssignOp::ShlAssign => "<<=",
+                        _ => ">>=",
+                    };
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid compound assignment `{} {} {}`: nil is not a valid compound-assignment value (HYB-E1002)",
+                            target.render(),
+                            op_sym,
+                            val.render()
+                        ),
+                        "`nil` only combines with `==` and `!=`, or as an assignment value for a nilable (error/foreign) type",
+                    );
+                }
                 let vk = self.kind_of_expr(val);
                 if !matches!(tk, OpKind::Unknown | OpKind::Int)
                     || !matches!(vk, OpKind::Unknown | OpKind::Int)
