@@ -155,3 +155,29 @@ fn a_hy_file_named_like_the_prelude_is_refused() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+// N5 (`make([]T, n)` of a map-carrying struct) lowers through the
+// package-level `hy_n5_make` helper, so it must join the shared prelude too:
+// two files using it used to redeclare `hy_n5_make` in the same package.
+const N5_A_HY: &str = "struct bag_a {\n    m map[string]int\n}\n\npub fn first() int {\n    xs := make([]bag_a, 2)\n    xs[0].m[\"k\"] = 1\n    return len(xs) + xs[0].m[\"k\"]\n}\n";
+const N5_B_HY: &str = "struct bag_b {\n    m map[string]int\n}\n\npub fn second() int {\n    ys := make([]bag_b, 3)\n    ys[2].m[\"k\"] = 2\n    return len(ys) + ys[2].m[\"k\"]\n}\n";
+
+#[test]
+fn two_files_using_n5_make_share_one_helper() {
+    let m = Module::new("n5make");
+    m.write("a.hy", N5_A_HY);
+    m.write("b.hy", N5_B_HY);
+    assert_success(&m.hyb(&["generate", "."]));
+
+    let prelude = fs::read_to_string(m.0.join("hybrid_prelude.hy.go")).unwrap();
+    assert_eq!(prelude.matches("func hy_n5_make[").count(), 1, "{prelude}");
+    for f in ["a.hy.go", "b.hy.go"] {
+        let go = fs::read_to_string(m.0.join(f)).unwrap();
+        assert!(go.contains("hy_n5_make("), "{f} should call the helper:\n{go}");
+        assert!(!go.contains("func hy_n5_make["), "{f} must not redeclare it:\n{go}");
+    }
+
+    let run = m.go_run();
+    assert_success(&run);
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "3 5");
+}
