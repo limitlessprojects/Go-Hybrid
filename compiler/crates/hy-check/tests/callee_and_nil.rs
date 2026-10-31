@@ -269,3 +269,28 @@ fn zero_values_stay_legal() {
     );
     assert_eq!(r.verdict, Verdict::Accept);
 }
+
+#[test]
+fn nil_map_key_is_e4001() {
+    // Map composite literal with nil in non-nilable key slot -> HYB-E4001 (Row 13 / N1)
+    let r = check("fn main() {\n    _ = map[int]string{nil: \"v\"}\n}\n");
+    assert!(
+        codes(&r).iter().any(|c| c == "HYB-E4001"),
+        "expected HYB-E4001 for `nil` map key, got {:?}",
+        codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn nil_map_value_is_e4001() {
+    // Map composite literal with nil in non-nilable value slot -> HYB-E4001 (Row 13 / N1)
+    let r = check("fn main() {\n    _ = map[string]int{\"k\": nil}\n}\n");
+    assert!(
+        codes(&r).iter().any(|c| c == "HYB-E4001"),
+        "expected HYB-E4001 for `nil` map value, got {:?}",
+        codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+

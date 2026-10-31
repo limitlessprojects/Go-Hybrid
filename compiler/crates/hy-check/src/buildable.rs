@@ -3743,49 +3743,51 @@ impl<'a> Collector<'a> {
         let exp_val = self.kind_of_ty(&resolved_val, 0);
         for (k, v) in entries {
             if exp_key != OpKind::Unknown {
-                let kk = self.kind_of_expr(k);
-                if kk != OpKind::Unknown
-                    && kk != exp_key
-                    && !(exp_key == OpKind::Float
-                        && kk == OpKind::Int
-                        && crate::const_overflow::const_int_value(k).is_some())
-                    && kinds_conflict(&exp_key, &kk)
-                {
-                    self.emit_e1002(
-                        k.span(),
-                        format!(
-                            "cannot use `{}` (type `{}`) as `{}` value in map key (HYB-E1002)",
-                            k.render(),
-                            kk.label(),
-                            key_ty.render()
-                        ),
-                        "every key of a map composite literal `map[K]V{...}` must be assignable to the key type `K`",
-                    );
+                let bare_k = unwrap_parens(k);
+                if !matches!(bare_k, Expr::Lit { kind: LitKind::Nil, .. }) {
+                    let kk = self.kind_of_expr(k);
+                    if kk != OpKind::Unknown
+                        && kk != exp_key
+                        && !(exp_key == OpKind::Float
+                            && kk == OpKind::Int
+                            && crate::const_overflow::const_int_value(k).is_some())
+                        && kinds_conflict(&exp_key, &kk)
+                    {
+                        self.emit_e1002(
+                            k.span(),
+                            format!(
+                                "cannot use `{}` (type `{}`) as `{}` value in map key (HYB-E1002)",
+                                k.render(),
+                                kk.label(),
+                                key_ty.render()
+                            ),
+                            "every key of a map composite literal `map[K]V{...}` must be assignable to the key type `K`",
+                        );
+                    }
                 }
             }
             if exp_val != OpKind::Unknown {
                 let bare_v = unwrap_parens(v);
-                if matches!(bare_v, Expr::Lit { kind: LitKind::Nil, .. }) {
-                    continue;
-                }
-                let vk = self.kind_of_expr(v);
-                if vk != OpKind::Unknown
-                    && vk != exp_val
-                    && !(exp_val == OpKind::Float
-                        && vk == OpKind::Int
-                        && crate::const_overflow::const_int_value(v).is_some())
-                    && kinds_conflict(&exp_val, &vk)
-                {
-                    self.emit_e1002(
-                        v.span(),
-                        format!(
-                            "cannot use `{}` (type `{}`) as `{}` value in map value (HYB-E1002)",
-                            v.render(),
-                            vk.label(),
-                            val_ty.render()
-                        ),
-                        "every value of a map composite literal `map[K]V{...}` must be assignable to the value type `V`",
-                    );
+                if !matches!(bare_v, Expr::Lit { kind: LitKind::Nil, .. }) {
+                    let vk = self.kind_of_expr(v);
+                    if vk != OpKind::Unknown
+                        && vk != exp_val
+                        && !(exp_val == OpKind::Float
+                            && vk == OpKind::Int
+                            && crate::const_overflow::const_int_value(v).is_some())
+                        && kinds_conflict(&exp_val, &vk)
+                    {
+                        self.emit_e1002(
+                            v.span(),
+                            format!(
+                                "cannot use `{}` (type `{}`) as `{}` value in map value (HYB-E1002)",
+                                v.render(),
+                                vk.label(),
+                                val_ty.render()
+                            ),
+                            "every value of a map composite literal `map[K]V{...}` must be assignable to the value type `V`",
+                        );
+                    }
                 }
             }
         }
