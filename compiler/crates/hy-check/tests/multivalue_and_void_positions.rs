@@ -194,3 +194,24 @@ fn single_value_calls_stay_accepted() {
         "fn one() int {\n    return 1\n}\n\nfn g(a int) {\n    fmt.println(\"{a}\")\n}\n\nfn main() {\n    g(one())\n}\n",
     );
 }
+
+#[test]
+fn multi_value_call_as_receive_operand_is_rejected() {
+    let src = "fn two_chans() (chan int, chan int) {\n    c1 := make(chan int, 1)\n    c2 := make(chan int, 1)\n    return c1, c2\n}\n\nfn main() {\n    _ = <-two_chans()\n}\n";
+    let cs = codes(src);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E1002"),
+        "expected HYB-E1002 for multi-value call as receive operand, got {cs:?}"
+    );
+}
+
+#[test]
+fn void_call_as_receive_operand_is_rejected() {
+    let src = "fn v() {}\n\nfn main() {\n    _ = <-v()\n}\n";
+    let cs = codes(src);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E1002"),
+        "expected HYB-E1002 for void call as receive operand, got {cs:?}"
+    );
+}
+

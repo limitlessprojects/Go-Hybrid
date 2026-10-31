@@ -1335,7 +1335,14 @@ impl<'a> Collector<'a> {
             }
             Expr::Move { operand, .. } => self.expr(operand),
             Expr::Try { operand, .. } => self.expr(operand),
-            Expr::Receive { chan, .. } => self.expr(chan),
+            Expr::Receive { chan, .. } => {
+                self.check_single_value_position(
+                    chan,
+                    "a receive operation",
+                    /*binding_position=*/ false,
+                );
+                self.expr(chan);
+            }
             Expr::Index {
                 base, index, span, ..
             } => {
