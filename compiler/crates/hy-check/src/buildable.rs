@@ -175,6 +175,42 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
     }
 }
 
+fn is_untyped_numeric_const(expr: &Expr) -> bool {
+    match unwrap_parens(expr) {
+        Expr::Lit { kind, .. } => matches!(kind, LitKind::Int(_) | LitKind::Float(_)),
+        Expr::Unary { op, operand, .. } => {
+            matches!(op, UnOp::Neg) && is_untyped_numeric_const(operand)
+        }
+        Expr::Binary { op, lhs, rhs, .. } => {
+            matches!(
+                op,
+                BinOp::Add
+                    | BinOp::Sub
+                    | BinOp::Mul
+                    | BinOp::Div
+                    | BinOp::Mod
+                    | BinOp::BitAnd
+                    | BinOp::BitOr
+                    | BinOp::BitXor
+                    | BinOp::Shl
+                    | BinOp::Shr
+            ) && is_untyped_numeric_const(lhs)
+                && is_untyped_numeric_const(rhs)
+        }
+        _ => false,
+    }
+}
+
+fn expr_kinds_conflict(want: &OpKind, expr: &Expr, got: &OpKind) -> bool {
+    if kinds_conflict(want, got) {
+        return true;
+    }
+    if *want == OpKind::Float && *got == OpKind::Int && !is_untyped_numeric_const(expr) {
+        return true;
+    }
+    false
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -2741,15 +2777,57 @@ impl<'a> Collector<'a> {
             _ => return,
         };
         for extra in &args[1..] {
-            // `append(a, b...)` — a variadic spread passes the whole slice, so
-            // the argument's kind is the SLICE type, not an element. Go accepts
-            // it (for a matching element type), so it must not be compared
-            // against the element kind.
+            self.check_single_value_position(&extra.value, "an append argument", false);
             if extra.spread {
+                let got = self.kind_of_expr(&extra.value);
+                match got {
+                    OpKind::Unknown => continue,
+                    OpKind::Slice(spread_elem) => {
+                        let conflict = match (&elem, &*spread_elem) {
+                            (OpKind::Unknown, _) | (_, OpKind::Unknown) => false,
+                            (d, s) => d != s,
+                        };
+                        if conflict {
+                            self.emit_e1002(
+                                extra.value.span(),
+                                format!(
+                                    "cannot append a slice with element type `{}` to a `{}` — Go refuses `cannot use ... as {} value in argument to append` (HYB-E1002)",
+                                    spread_elem.label(),
+                                    self.kind_of_expr(&first.value).label(),
+                                    elem.label()
+                                ),
+                                "the appended slice elements must match the destination slice's element type",
+                            );
+                        }
+                    }
+                    OpKind::Str => {
+                        if !matches!(elem, OpKind::Unknown | OpKind::Int) {
+                            self.emit_e1002(
+                                extra.value.span(),
+                                format!(
+                                    "cannot append `string` to a `{}` — Go refuses `cannot use string as {} value in argument to append` (HYB-E1002)",
+                                    self.kind_of_expr(&first.value).label(),
+                                    elem.label()
+                                ),
+                                "appending a string with `...` requires a byte slice destination (`[]byte`)",
+                            );
+                        }
+                    }
+                    _ => {
+                        self.emit_e1002(
+                            extra.value.span(),
+                            format!(
+                                "cannot use `{}` as slice value in append with `...` (HYB-E1002)",
+                                got.label()
+                            ),
+                            "variadic append `...` requires a slice or string argument",
+                        );
+                    }
+                }
                 continue;
             }
             let got = self.kind_of_expr(&extra.value);
-            if kinds_conflict(&elem, &got) {
+            if expr_kinds_conflict(&elem, &extra.value, &got) {
                 self.emit_e1002(
                     extra.value.span(),
                     format!(
@@ -4386,7 +4464,11 @@ impl<'a> Collector<'a> {
 
                 match (&dk, &sk) {
                     (OpKind::Slice(dst_elem), OpKind::Slice(src_elem)) => {
-                        if kinds_conflict(dst_elem, src_elem) {
+                        let conflict = match (&**dst_elem, &**src_elem) {
+                            (OpKind::Unknown, _) | (_, OpKind::Unknown) => false,
+                            (d, s) => d != s,
+                        };
+                        if conflict {
                             self.emit_e1002(
                                 span,
                                 format!(
