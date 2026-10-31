@@ -209,6 +209,27 @@ fn example02_try_desugar_and_defer() {
     );
 }
 
+#[test]
+fn bare_error_fn_under_try_emits_zero_value_temps() {
+    // #726: `fn step() error` returns ONE Go value. The fn shape used to count
+    // the trailing error as a value too, so `step()?` emitted
+    // `hyT0, hyErr1 := step()` against `func step() error` — go build failed
+    // with "assignment mismatch: 2 variables but step returns 1 value".
+    let go = emit(
+        &"fn step() error {\n    return nil\n}\n\nfn run() error {\n    step()?\n    return nil\n}",
+    );
+    assert!(
+        go.contains("hyErr0 := step()"),
+        "bare-error try must emit a single error temp, got:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("hyT0, hyErr0 := step()"),
+        "no value temp may be declared for a bare-error result:\n{}",
+        go
+    );
+}
+
     #[test]
     fn defer_call_argument_try_hoists_before_the_defer() {
         // P1 (§7): a deferred call's arguments are evaluated at defer time, so a

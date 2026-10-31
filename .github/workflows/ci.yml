@@ -23,12 +23,19 @@ jobs:
         run: |
           set -e
 
-          python3 -m py_compile tools/runner/runner.py tools/job.py worker/script.py tools/corpus_harness.py tools/test_corpus_harness.py tools/test_corpus_utf8.py tools/extract_offsets.py tools/test_extract_offsets.py tools/triage_bot.py tools/shepherd.py
+          python3 -m py_compile tools/runner/runner.py tools/job.py worker/script.py tools/corpus_harness.py tools/test_corpus_harness.py tools/test_corpus_utf8.py tools/extract_offsets.py tools/test_extract_offsets.py tools/triage_bot.py tools/shepherd.py tools/check_guarantees.py tools/test_check_guarantees.py
           # Fail closed on a committed merge-conflict marker: a marker in a
           # tracked file is invisible to the suites but can make the whole
           # workflow unparseable and take every run (and every PR) down.
           python3 tools/check_conflict_markers.py
           python3 -m unittest discover -s tools -p test_check_conflict_markers.py -v
+          # GUARANTEES.md is rendered from guarantees.json (issue #710): this fails
+          # closed on a row whose rule is gone, a fixture whose EXPECTED-VERDICT
+          # contradicts the row that pins it, a scoped rule in no row, an evidence
+          # link that does not resolve, or a doc edited out of step with the table.
+          python3 tools/check_guarantees.py
+          python3 -m unittest discover -s tools -p test_check_guarantees.py -v
+          python3 -m unittest discover -s tools -p test_author_repro_verdict.py -v
           python3 -m unittest discover -s tools -p test_shepherd_gate.py -v
           python3 -m unittest discover -s tools -p test_check_corpus_census.py -v
           python3 -m unittest discover -s tools/fuzz -p 'test_hyfuzz.py'
@@ -60,9 +67,14 @@ jobs:
           python3 -m unittest discover -s tools -p test_check_test_registration.py -v
           python3 -m unittest discover -s tools -p test_package_version.py -v
           python3 -m unittest discover -s tools -p test_corpus_utf8.py -v
+          python3 -m unittest discover -s tools -p test_check_claims_links.py -v
           # Fail closed if any tools/**/test_*.py is matched by no -p pattern
           # above: a suite outside this list would pass CI by never running.
           python3 tools/check_test_registration.py
+          # Every evidence link cited by GUARANTEES.md must resolve, and a
+          # corpus citation marked (accept)/(reject)/(managed) must agree with
+          # the program's EXPECTED-VERDICT header.
+          python3 tools/check_claims_links.py
           # runner self-test: execute a trivial inline job end-to-end
           mkdir -p /tmp/selftest && cd /tmp/selftest
           cat > job.json <<'EOF'
@@ -148,7 +160,7 @@ jobs:
           cd compiler
           cargo test --workspace --quiet
 
-      - name: Checker corpus verdict agreement (127/122 + tripwire)
+      - name: Checker corpus verdict agreement (129/129 + tripwire)
         run: |
           set -e
           cd compiler && cargo build -p hyb --quiet

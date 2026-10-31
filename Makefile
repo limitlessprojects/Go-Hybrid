@@ -15,7 +15,7 @@ HYB_BIN := $(CARGO_TARGET_DIR)/debug/hyb
 
 .PHONY: help env check test-quick ci corpus workspace examples differential bench spike0-kaggle spike0-kaggle-status spike0-kaggle-fetch \
         spike0-actions-4 spike0-actions-20 spike-1 spike-2 spike-3 kaggle-job kaggle-status kaggle-fetch kaggle-wait \
-        actions-dispatch actions-watch census clean
+        actions-dispatch actions-watch census guarantees clean
 
 help:
 	@echo "make env              — verify pinned toolchains (source tools/env.sh)"
@@ -23,8 +23,9 @@ help:
 	@echo "make test-quick       — sandbox unit tests (grows with the compiler)"
 	@echo "make ci               — what CI runs on push"
 	@echo "make examples         — the ten target programs, byte-exact acceptance"
-	@echo "make corpus           — Tier-0 corpus verdicts (127/122)"
+	@echo "make corpus           — Tier-0 corpus verdicts (129/129)"
 	@echo "make census           — every stated corpus count matches the corpus"
+	@echo "make guarantees       — GUARANTEES.md claims table matches the rules and corpus"
 	@echo "make differential     — the differential corpus loop (accept + reject)"
 	@echo "make bench            — G2 call-overhead bench on the live bridge (hyb bench-overhead)"
 	@echo "make spike0-kaggle    — submit Spike 0 part A to the Kaggle worker"
@@ -39,9 +40,10 @@ env:
 check:
 	@$(MAKE) -n examples >/dev/null 2>&1 || { echo "MAKE SYNTAX BROKEN (recipes must be TAB-indented)"; exit 1; }
 	@echo "make-syntax OK"
-	@$(PY) -m py_compile tools/runner/runner.py tools/job.py worker/script.py tools/corpus_harness.py tools/differential_loop.py && echo "py-syntax OK"
+	@$(PY) -m py_compile tools/runner/runner.py tools/job.py worker/script.py tools/corpus_harness.py tools/differential_loop.py tools/check_guarantees.py tools/test_check_guarantees.py && echo "py-syntax OK"
 
 	@$(PY) -m unittest discover -s tools -p test_differential_loop.py -v
+	@$(PY) -m unittest discover -s tools -p test_check_guarantees.py -v
 	@$(PY) -m unittest discover -s tools -p test_check_versions.py -v
 	@$(PY) -m unittest discover -s tools -p test_workload_run.py -v
 	@$(PY) -m unittest discover -s tools -p test_runner_env_report.py -v
@@ -50,7 +52,10 @@ check:
 	@$(PY) -m unittest discover -s tools/runner -p test_runner.py -v
 	@$(PY) -m unittest discover -s tools -p test_check_test_registration.py -v
 	@$(PY) -m unittest discover -s tools -p test_check_corpus_census.py -v
+	@$(PY) -m unittest discover -s tools -p test_check_claims_links.py -v
 	@$(PY) tools/check_corpus_census.py && echo "corpus census OK"
+	@$(PY) tools/check_claims_links.py && echo "claims links OK"
+	@$(PY) tools/check_guarantees.py && echo "guarantees OK"
 	@$(PY) tools/check_test_registration.py && echo "test registration OK"
 	@bash tools/check-versions.sh --no-toolchain && echo "versions OK"
 	@$(PY) tools/check_conflict_markers.py && echo "conflict markers OK"
@@ -83,6 +88,13 @@ corpus:
 
 census:
 	@$(PY) tools/check_corpus_census.py
+
+# GUARANTEES.md claims table is rendered from guarantees.json; this fails when a
+# row names a rule the registry no longer has, when a fixture EXPECTED-VERDICT
+# contradicts the row that pins it, when a scoped rule appears in no row, when an
+# evidence link does not resolve, or when the doc drifts from the table (#710).
+guarantees:
+	@$(PY) tools/check_guarantees.py
 
 # The differential corpus loop (Batch I): accepted corpus programs must
 # survive the full pipeline (hyb build + run, exit 0); rejected programs

@@ -195,6 +195,7 @@
     },
     {
       "code": "HYB-E2008",
+      "tier0_rule_id": "BUILDABLE",
       "name": "receive-non-channel",
       "category": "type",
       "severity": "error",
@@ -427,6 +428,22 @@
       "example": "var sc chan<- int = make(chan int, 1)\nvar rc <-chan int = sc   // reject: HYB-E3012 — `chan<- int` cannot convert to `<-chan int`",
       "rule": "O4",
       "tier0_rule_id": "A1c"
+    },
+    {
+      "code": "HYB-E3013",
+      "name": "go-escape-captured-write",
+      "category": "ownership-sendability",
+      "severity": "error",
+      "title": "closure that writes a captured binding escapes into a foreign Go call",
+      "summary": "A closure passed as an argument to a package-qualified foreign Go call (`mux.handle(...)`, `time.after_func(...)`) may run on a goroutine the checker never sees, while the closure writes a binding captured from its enclosing Hybrid scope. That is the A5 Go-escape perimeter: the value crosses into Go code that can observe or mutate it concurrently, which no Hybrid spawn/send check covers. The closed-world rule (SPEC-LANGUAGE §8.5 C9, decided W-016) needs no curated Go API database: (1) the closure body writes a captured binding and (2) the closure is passed to a foreign call. The call site must take `managed(\"...\", \"interop\")`, or the capture must be `const`, or it must be non-may_share.",
+      "fixits": [
+        "wrap the foreign call site in `managed(\"why\", \"interop\")` so the escape is an auditable decision",
+        "make the captured binding `const` so the closure cannot write it",
+        "pass a value that carries no shared reference storage (a fresh copy) instead of the captured binding"
+      ],
+      "example": "fn main() {\n    hits := 0\n    mux.handle(\"/x\", fn() { hits++ })\n}   // reject: HYB-E3013 — closure writes captured `hits` and escapes into mux.handle",
+      "rule": "A5",
+      "tier0_rule_id": "A5"
     },
     {
       "code": "HYB-E3101",
