@@ -2808,6 +2808,10 @@ impl<'a> Collector<'a> {
 
     /// Family A (#425): `if cond` and `for cond` require a boolean condition.
     fn check_bool_condition(&mut self, cond: &Expr, construct: &str) {
+        // The condition sits in a single-value context: `if two_bools()` is
+        // Go's `multiple-value ... in single-value context`, and the kind
+        // check below would otherwise read only the first result (#1862).
+        self.check_single_value_position(cond, "a condition", /*binding_position=*/ false);
         let k = self.kind_of_expr(cond);
         if !matches!(k, OpKind::Unknown | OpKind::Bool) {
             self.emit_e1002(
