@@ -215,19 +215,32 @@ impl<'a> Checker<'a> {
         }
         if let Some(ty) = self.ty_of_expr(st, expr) {
             let resolved = self.resolve_type_alias(&ty);
-            if let TypeExpr::Named { name, .. } = &resolved {
-                if matches!(
-                    name.as_str(),
-                    "bool"
-                        | "float32"
-                        | "float64"
-                        | "f32"
-                        | "f64"
-                        | "complex64"
-                        | "complex128"
-                        | "string"
-                        | "error"
-                ) {
+            match &resolved {
+                TypeExpr::Named { name, .. } => {
+                    if matches!(
+                        name.as_str(),
+                        "bool"
+                            | "float32"
+                            | "float64"
+                            | "f32"
+                            | "f64"
+                            | "complex64"
+                            | "complex128"
+                            | "string"
+                            | "error"
+                    ) || (crate::const_overflow::fixed_width_int_range(name).is_none()
+                        && !matches!(name.as_str(), "int" | "uint" | "uintptr" | "byte" | "rune"))
+                    {
+                        return Some(resolved.render());
+                    }
+                }
+                TypeExpr::Slice { .. }
+                | TypeExpr::Array { .. }
+                | TypeExpr::Map { .. }
+                | TypeExpr::Chan { .. }
+                | TypeExpr::Pointer { .. }
+                | TypeExpr::Fn { .. }
+                | TypeExpr::Option { .. } => {
                     return Some(resolved.render());
                 }
             }
