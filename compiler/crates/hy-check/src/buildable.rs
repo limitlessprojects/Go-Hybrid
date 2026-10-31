@@ -244,22 +244,25 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         (other, Bool) if !matches!(other, Unknown | Bool | Interface) => true,
 
         // Numeric targets (Int, Float): can convert between Int and Float.
-        // Cannot convert Str, Slice, Map, Chan, Struct to numeric.
-        (Int | Float, Str | Slice(_) | Map(_, _) | Chan(_) | Struct(_)) => true,
+        // Cannot convert Str, Slice, Array, Map, Chan, Struct to numeric.
+        (Int | Float, Str | Slice(_) | Array(_) | Map(_, _) | Chan(_) | Struct(_)) => true,
 
         // String target: can convert from Int (rune/byte code point) or Slice (byte/rune slice) or Str.
-        // Cannot convert from Float, Bool, Map, Chan, Struct.
-        (Str, Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
+        // Cannot convert from Float, Bool, Array, Map, Chan, Struct.
+        (Str, Float | Bool | Array(_) | Map(_, _) | Chan(_) | Struct(_)) => true,
 
         // Slice target: can convert from Str (to []byte/[]rune), or Slice/Array.
         // Cannot convert from Int, Float, Bool, Map, Chan, Struct.
         (Slice(_), Int | Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
 
-        // Map target: cannot convert from Int, Float, Bool, Str, Slice, Chan, Struct.
-        (Map(_, _), Int | Float | Bool | Str | Slice(_) | Chan(_) | Struct(_)) => true,
+        // Array targets: Go forbids converting from scalars, Maps, Chans, or Structs.
+        (Array(_), Int | Float | Bool | Str | Map(_, _) | Chan(_) | Struct(_)) => true,
 
-        // Chan target: cannot convert from Int, Float, Bool, Str, Slice, Map, Struct.
-        (Chan(_), Int | Float | Bool | Str | Slice(_) | Map(_, _) | Struct(_)) => true,
+        // Map target: cannot convert from Int, Float, Bool, Str, Slice, Array, Chan, Struct.
+        (Map(_, _), Int | Float | Bool | Str | Slice(_) | Array(_) | Chan(_) | Struct(_)) => true,
+
+        // Chan target: cannot convert from Int, Float, Bool, Str, Slice, Array, Map, Struct.
+        (Chan(_), Int | Float | Bool | Str | Slice(_) | Array(_) | Map(_, _) | Struct(_)) => true,
 
         // Pointer targets and arguments: Go only converts between pointers.
         // A pointer cannot convert to or from any non-pointer type; the one
