@@ -2163,6 +2163,7 @@ impl<'a> Collector<'a> {
 
         // U14 + value type: unknown names, then assignability.
         for f in fields {
+            self.check_single_value_position(&f.value, "a struct literal field", false);
             match declared.iter().find(|(n, _)| n == &f.name) {
                 None => self.emit_e1002(
                     f.span,
@@ -3613,6 +3614,7 @@ impl<'a> Collector<'a> {
             return;
         }
         for item in items {
+            self.check_single_value_position(item, "an array literal element", false);
             let bare = unwrap_parens(item);
             if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
                 continue;
@@ -3634,6 +3636,9 @@ impl<'a> Collector<'a> {
                 ty: None, fields, ..
             } = bare
             {
+                for f in fields {
+                    self.check_single_value_position(&f.value, "a struct literal field", false);
+                }
                 if matches!(expected, OpKind::Struct(_))
                     || (fields.is_empty()
                         && matches!(
@@ -3674,6 +3679,7 @@ impl<'a> Collector<'a> {
             return;
         }
         for item in items {
+            self.check_single_value_position(item, "a slice literal element", false);
             let bare = unwrap_parens(item);
             if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
                 continue;
@@ -3695,6 +3701,9 @@ impl<'a> Collector<'a> {
                 ty: None, fields, ..
             } = bare
             {
+                for f in fields {
+                    self.check_single_value_position(&f.value, "a struct literal field", false);
+                }
                 if matches!(expected, OpKind::Struct(_))
                     || (fields.is_empty()
                         && matches!(
@@ -3742,6 +3751,8 @@ impl<'a> Collector<'a> {
         let resolved_val = self.ck.resolve_type_alias(val_ty);
         let exp_val = self.kind_of_ty(&resolved_val, 0);
         for (k, v) in entries {
+            self.check_single_value_position(k, "a map key", false);
+            self.check_single_value_position(v, "a map value", false);
             if exp_key != OpKind::Unknown {
                 let kk = self.kind_of_expr(k);
                 if kk != OpKind::Unknown
