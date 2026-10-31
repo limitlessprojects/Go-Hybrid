@@ -3057,7 +3057,7 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
-            // B5: ordered comparisons `<`, `<=`, `>`, `>=` are defined only on numeric or string operands.
+            // B5: ordered comparisons `<`, `<=`, `>`, `>=` are defined only on numeric or string operands of matching type.
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
                 let op_str = match op {
                     BinOp::Lt => "<",
@@ -3069,7 +3069,11 @@ impl<'a> Collector<'a> {
                 let r_ok = matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
                 let mismatch = lk != OpKind::Unknown
                     && rk != OpKind::Unknown
-                    && lk.is_numeric() != rk.is_numeric();
+                    && (lk.is_numeric() != rk.is_numeric()
+                        || (lk == OpKind::Int && rk == OpKind::Float
+                            || lk == OpKind::Float && rk == OpKind::Int)
+                            && !is_untyped_numeric_const(lhs)
+                            && !is_untyped_numeric_const(rhs));
                 if !l_ok || !r_ok || mismatch {
                     self.emit_e1002(
                         span,
@@ -3080,17 +3084,21 @@ impl<'a> Collector<'a> {
                             rk.label(),
                             span_expr_label(lhs, op_str, rhs)
                         ),
-                        "ordered comparisons (`<`, `<=`, `>`, `>=`) require two numeric values or two strings",
+                        "ordered comparisons (`<`, `<=`, `>`, `>=`) require two numeric values or two strings of matching types",
                     );
                 }
             }
-            // B3: `+` accepts numeric+numeric or string+string.
+            // B3: `+` accepts numeric+numeric or string+string of matching type.
             BinOp::Add => {
                 let l_ok = matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
                 let r_ok = matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
                 let mismatch = lk != OpKind::Unknown
                     && rk != OpKind::Unknown
-                    && lk.is_numeric() != rk.is_numeric();
+                    && (lk.is_numeric() != rk.is_numeric()
+                        || (lk == OpKind::Int && rk == OpKind::Float
+                            || lk == OpKind::Float && rk == OpKind::Int)
+                            && !is_untyped_numeric_const(lhs)
+                            && !is_untyped_numeric_const(rhs));
                 if !l_ok || !r_ok || mismatch {
                     self.emit_e1002(
                         span,
@@ -3100,19 +3108,24 @@ impl<'a> Collector<'a> {
                             lk.label(),
                             rk.label()
                         ),
-                        "`+` requires two numeric operands or two strings; use string interpolation `\"{x}{s}\"` to format mixed values",
+                        "`+` requires two numeric operands or two strings of matching types; use string interpolation `\"{x}{s}\"` to format mixed values",
                     );
                 }
             }
-            // `-`, `*`, `/` require numeric operands.
+            // `-`, `*`, `/` require numeric operands of matching type.
             BinOp::Sub | BinOp::Mul | BinOp::Div => {
                 let op_str = match op {
                     BinOp::Sub => "-",
                     BinOp::Mul => "*",
                     _ => "/",
                 };
+                let mismatch = (lk == OpKind::Int && rk == OpKind::Float
+                    || lk == OpKind::Float && rk == OpKind::Int)
+                    && !is_untyped_numeric_const(lhs)
+                    && !is_untyped_numeric_const(rhs);
                 if !matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float)
+                    || mismatch
                 {
                     self.emit_e1002(
                         span,
@@ -3123,11 +3136,10 @@ impl<'a> Collector<'a> {
                             lk.label(),
                             rk.label()
                         ),
-                        "arithmetic `-`, `*`, `/` require numeric operands",
+                        "arithmetic `-`, `*`, `/` require numeric operands of matching type",
                     );
                 }
             }
-            // `%`, bitwise, and shifts require integer operands.
             BinOp::Mod
             | BinOp::BitOr
             | BinOp::BitXor
@@ -4553,6 +4565,11 @@ impl<'a> Collector<'a> {
 
 fn span_expr_label(lhs: &Expr, op: &str, rhs: &Expr) -> String {
     format!("{} {} {}", lhs.render(), op, rhs.render())
+}
+
+fn is_untyped_numeric_const(e: &Expr) -> bool {
+    crate::const_overflow::const_int_value(e).is_some()
+        || crate::const_overflow::const_float_value(e).is_some()
 }
 
 fn builtins_already_flags_close(e: &Expr) -> bool {
