@@ -480,7 +480,8 @@ words (B1, B2).
 **T7 — Slices `[]T`.** Reference to a backing array with Go semantics:
 `make([]T, n)`, `append` (with `items...` variadic spread, Go), `s[a:b]`,
 `len`, `cap`, `copy`, and the corpus-pinned `.pop()` (removes and returns
-the last element; panics on empty — example 08). Zero value is the
+the last element; panics on empty with `HY-PANIC/pop-empty` — example 08,
+issue #2442). Zero value is the
 **empty slice** — observationally identical to Go's nil slice (`len` 0,
 `append` works, `for` iterates zero times); the nil/empty distinction is not
 observable in Hybrid (N4). Slices are GC values; reads of elements are
