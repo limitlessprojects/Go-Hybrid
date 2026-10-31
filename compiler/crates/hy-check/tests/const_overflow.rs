@@ -1847,3 +1847,42 @@ fn assign_literal_overflow_still_rejected() {
     );
     assert_eq!(r.verdict, Verdict::Reject);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #1682: bool(constant) conversion validation.
+// In Go, bool is not convertible from integer, float, string, or nil constants.
+// bool(1) / bool(0) / bool("true") are illegal compile-time conversions.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bool_int_constant_conversion_is_e6006() {
+    let r = check("fn main() {\n    b := bool(1)\n    _ = b\n}\n");
+    assert!(
+        error_codes(&r).iter().any(|c| c == "HYB-E6006"),
+        "expected HYB-E6006 for `bool(1)`, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn bool_string_constant_conversion_is_e6006() {
+    let r = check("fn main() {\n    b := bool(\"true\")\n    _ = b\n}\n");
+    assert!(
+        error_codes(&r).iter().any(|c| c == "HYB-E6006"),
+        "expected HYB-E6006 for `bool(\"true\")`, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+}
+
+#[test]
+fn bool_literal_conversion_accepts() {
+    let r = check("fn main() {\n    b := bool(true)\n    _ = b\n}\n");
+    assert!(
+        error_codes(&r).is_empty(),
+        "expected bool(true) to accept, got {:?}",
+        error_codes(&r)
+    );
+    assert_eq!(r.verdict, Verdict::Accept);
+}
