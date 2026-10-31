@@ -2647,6 +2647,11 @@ impl<'a> Collector<'a> {
                 && ((nv == 0 && self.fn_results_all_named) || self.fn_results_error_tail);
             if short_ok {
                 for (v, w) in values.iter().zip(want.iter()) {
+                    self.check_single_value_position(
+                        v,
+                        "a return statement",
+                        /*binding_position=*/ false,
+                    );
                     let got = self.kind_of_expr(v);
                     self.report_return_conflict(&got, w, v.span());
                 }
@@ -2675,6 +2680,11 @@ impl<'a> Collector<'a> {
             return;
         }
         for (v, w) in values.iter().zip(want.iter()) {
+            self.check_single_value_position(
+                v,
+                "a return statement",
+                /*binding_position=*/ false,
+            );
             let got = self.kind_of_expr(v);
             self.report_return_conflict(&got, w, v.span());
         }

@@ -194,3 +194,24 @@ fn single_value_calls_stay_accepted() {
         "fn one() int {\n    return 1\n}\n\nfn g(a int) {\n    fmt.println(\"{a}\")\n}\n\nfn main() {\n    g(one())\n}\n",
     );
 }
+
+#[test]
+fn multi_value_call_in_return_statement_is_rejected() {
+    let src = "fn two() (int, int) {\n    return 1, 2\n}\n\nfn test_return() (int, string) {\n    return two(), \"hello\"\n}\n\nfn main() {\n    _, _ = test_return()\n}\n";
+    let cs = codes(src);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E1002"),
+        "expected HYB-E1002 for multi-value call in return statement, got {cs:?}"
+    );
+}
+
+#[test]
+fn void_call_in_multi_return_statement_is_rejected() {
+    let src = "fn v() {}\n\nfn test_return() (int, string) {\n    return v(), \"hello\"\n}\n\nfn main() {\n    _, _ = test_return()\n}\n";
+    let cs = codes(src);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E1002"),
+        "expected HYB-E1002 for void call in return statement, got {cs:?}"
+    );
+}
+
