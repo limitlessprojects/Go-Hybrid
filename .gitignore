@@ -68,3 +68,5 @@ examples/gomod-integration/hybridrt/
 # the sample module build output
 examples/gomod-integration/hybrid-demo
 a.out.go
+
+.gwen/
