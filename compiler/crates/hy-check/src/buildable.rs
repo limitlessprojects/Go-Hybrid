@@ -247,19 +247,29 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         // Cannot convert Str, Slice, Map, Chan, Struct to numeric.
         (Int | Float, Str | Slice(_) | Map(_, _) | Chan(_) | Struct(_)) => true,
 
-        // String target: can convert from Int (rune/byte code point) or Slice (byte/rune slice) or Str.
-        // Cannot convert from Float, Bool, Map, Chan, Struct.
+        // String target: can convert from Int (rune/byte code point) or byte/rune Slice (Slice(Int)) or Str.
+        // Cannot convert from Float, Bool, Map, Chan, Struct, or non-int Slices.
         (Str, Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
+        (Str, Slice(elem)) if !matches!(**elem, Unknown | Int) => true,
 
-        // Slice target: can convert from Str (to []byte/[]rune), or Slice/Array.
-        // Cannot convert from Int, Float, Bool, Map, Chan, Struct.
+        // Slice target: can convert from Str (to []byte/[]rune), or Slice/Array of identical element type.
+        // Cannot convert from Int, Float, Bool, Map, Chan, Struct, or Str to non-int Slices.
         (Slice(_), Int | Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
+        (Slice(elem), Str) if !matches!(**elem, Unknown | Int) => true,
+        (Slice(a), Slice(b)) | (Slice(a), Array(b)) | (Array(a), Slice(b)) | (Array(a), Array(b)) => {
+            a != b && **a != Unknown && **b != Unknown
+        }
 
-        // Map target: cannot convert from Int, Float, Bool, Str, Slice, Chan, Struct.
+        // Map target: cannot convert from Int, Float, Bool, Str, Slice, Chan, Struct, or Map with mismatched key/value.
         (Map(_, _), Int | Float | Bool | Str | Slice(_) | Chan(_) | Struct(_)) => true,
+        (Map(k1, v1), Map(k2, v2)) => {
+            (k1 != k2 && **k1 != Unknown && **k2 != Unknown)
+                || (v1 != v2 && **v1 != Unknown && **v2 != Unknown)
+        }
 
-        // Chan target: cannot convert from Int, Float, Bool, Str, Slice, Map, Struct.
+        // Chan target: cannot convert from Int, Float, Bool, Str, Slice, Map, Struct, or Chan with mismatched element.
         (Chan(_), Int | Float | Bool | Str | Slice(_) | Map(_, _) | Struct(_)) => true,
+        (Chan(a), Chan(b)) => a != b && **a != Unknown && **b != Unknown,
 
         // Pointer targets and arguments: Go only converts between pointers.
         // A pointer cannot convert to or from any non-pointer type; the one
