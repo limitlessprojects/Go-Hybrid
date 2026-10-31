@@ -911,3 +911,16 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - WRITTEN REPLIES: #2458 + #2469 landings (incl. byte-audit disclosure on #2469). No silent anything.
 - Suite trajectory: 183 -> 184. Final main 09c0749, ls-remote == HEAD, tree clean.
 - NEXT TICK QUEUE: #2467 (jdjioe5-cpu follow-up, same-author pair), #2310 (N5 zero maps, +144/14 files), #2432 (Dimany4 E1001 folded brackets), #1811/#1780/#1766/#1767 (9xj89gzrtw-hue batch), #2438 (tungnguyen84 escape_sites nesting), #2288 (receiver type declared, +292/11 files), #2451 (borrow_ffi spike +295/7).
+
+## Session 28 — 2026-10-31 evening (tick 487193: 3 landed, 2 gate-fails evidence-replied)
+
+- Sandbox recycled (9th); toolchains re-restored; warm target cache survived again (build slice 16s). Approve 40/125.
+- LANDED:
+  668b6d3 Merge PR #2492 (dextermos-dev, fixes #2471) — Eq/Ne restructure: nil==nil rejects (Go-conformant), non-nilable kinds (int/float/bool/string/struct/array) vs nil reject E1002 + N1 hint; nilable kinds unchanged; zero side-shifts. 184 suites, FULL 41/88.
+  19c63c1 Merge PR #2499 (ocakciomursel-pixel, fixes #2497) — #2469 T9 follow-up: arrays, type aliases, generic struct substitution (struct_type_arg_map + substitute_type_str), pointer/chan nilable-comparable, folded type args reach inner set (box[[2]set[[]int]]); fixtures byte-audited bracket-safely pre-verify. 185 suites, FULL 41/88.
+  7440766 Merge PR #2299 (ocakciomursel-pixel, fixes #1199) — lexer: \\xNN/\\NNN bytes buffered + utf8_chunks flush at string boundaries (LX7/T3 "\\xc3\\xa9" -> é; invalid bytes byte-for-byte); rune literals keep 0..=255 semantics. 185 suites, corpus tripwire not fired (129 programs byte-exact), FULL 41/88.
+- GATE FAILS (evidence replies, not landed): #2389 + #2388 (ket4min-susan, same-author siblings) — both rebased and both introduced the identical API drift in their tests' codes() helper: `check_file(&file).into_iter()` on CheckResult (E0599: not an iterator). Merge gates CLEAN; checker-side changes reviewed correct (#2383 slot loans / #2382 deferred-move surfaces). Fix is one line (check(&file) iterator API, or check_file(&file).diagnostics) — invited, will land same-tick on push.
+- Bracket-safety rule applied: #2499's test fixtures audited via python bracket-encoded print before verification (display layer still mangling).
+- WRITTEN REPLIES: #2492/#2499/#2299 landings, #2389/#2388 evidence. No silent anything.
+- Suite trajectory: 184 -> 185. Final main 7440766, ls-remote == HEAD, tree clean.
+- NEXT TICK QUEUE: #2389/#2388 (await one-line fix), #2310 (N5 zero maps, +145/14), #2425 (autoland, 0-behind again), #1811/#1780/#1766/#1767 (9xj89gzrtw-hue batch), #2290 (Yumihariii method-value arity), #2390 (O8 slot-loan snapshot), #2438 (escape_sites nesting), #2288 (+292/11), #2451 (borrow_ffi spike).
