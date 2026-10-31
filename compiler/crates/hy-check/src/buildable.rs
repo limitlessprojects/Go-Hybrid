@@ -3150,7 +3150,10 @@ impl<'a> Collector<'a> {
                     let is_loan_shape = as_addr_of(&values[0])
                         .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }));
                     let vk = self.kind_of_expr(&values[0]);
-                    if !is_loan_shape && kinds_conflict(&tk, &vk) {
+                    let int_float_conflict = tk == OpKind::Float
+                        && vk == OpKind::Int
+                        && !self.is_untyped_int_const(&values[0]);
+                    if !is_loan_shape && (kinds_conflict(&tk, &vk) || int_float_conflict) {
                         self.emit_e1002(
                             span,
                             format!(
@@ -3188,7 +3191,10 @@ impl<'a> Collector<'a> {
                         }
                         let tpk = self.kind_of_place(t);
                         let vk = self.kind_of_expr(v);
-                        if kinds_conflict(&tpk, &vk) {
+                        let int_float_conflict = tpk == OpKind::Float
+                            && vk == OpKind::Int
+                            && !self.is_untyped_int_const(v);
+                        if kinds_conflict(&tpk, &vk) || int_float_conflict {
                             self.emit_e1002(
                                 v.span(),
                                 format!(
@@ -3346,9 +3352,12 @@ impl<'a> Collector<'a> {
         // For slices, arrays, and strings, the index must be an integer.
         self.check_single_value_position(index, "an index expression", /*binding_position=*/ false);
         if let OpKind::Map(key_kind, _) = bk {
+            let int_float_conflict = **key_kind == OpKind::Float
+                && *ik == OpKind::Int
+                && !self.is_untyped_int_const(index);
             if **key_kind != OpKind::Unknown
                 && *ik != OpKind::Unknown
-                && kinds_conflict(key_kind, ik)
+                && (kinds_conflict(key_kind, ik) || int_float_conflict)
             {
                 self.emit_e1002(
                     index.span(),
@@ -3566,6 +3575,34 @@ impl<'a> Collector<'a> {
             }
         }
         false
+    }
+
+    fn is_untyped_int_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit {
+                kind: LitKind::Int(_) | LitKind::Char(_),
+                ..
+            } => true,
+            Expr::Ident { name, .. } => {
+                if self.file_consts.contains_key(name) {
+                    return true;
+                }
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        return matches!(self.defines[*id].kind, LocalKind::Const);
+                    }
+                }
+                false
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnOp::Neg)
+                    && self.is_untyped_int_const(operand)
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.is_untyped_int_const(lhs) && self.is_untyped_int_const(rhs)
+            }
+            _ => false,
+        }
     }
 
     fn expr_has_non_const_local(&self, e: &Expr) -> bool {
