@@ -241,11 +241,19 @@ impl Emitter {
             }
 
             Expr::SliceLit { elem, items, .. } => {
-                if let Some((_, inner_elem, arr_ty)) = e.as_array_lit() {
+                if let Some((len, inner_elem, arr_ty)) = e.as_array_lit() {
+                    // N5: `[N]T{}` and the trailing elements of a partial `[N]T{…}`
+                    // are zero values — allocate their maps (zeroinit.rs).
+                    if let (true, Some(init)) = (items.is_empty(), self.n5_zero_init(arr_ty)) {
+                        return Ok(init);
+                    }
                     let head = self.type_text(arr_ty);
                     let mut parts = Vec::new();
                     for i in items {
                         parts.push(self.emit_expr_exp(i, 0, Some(inner_elem))?);
+                    }
+                    if let (Some(Expr::Lit { kind: LitKind::Int(n), .. }), Some(init)) = (len, self.n5_zero_init(inner_elem)) {
+                        parts.resize(n.replace('_', "").parse().unwrap_or(0).max(parts.len()), init);
                     }
                     return Ok(format!("{}{{{}}}", head, parts.join(", ")));
                 }
@@ -947,6 +955,26 @@ impl Emitter {
         let mut parts = vec![ty_text];
         for a in &args[1..] {
             parts.push(self.emit_call_arg(a)?);
+        }
+        // N5: `make([]T, n[, c])` elements are zero values too — allocate their
+        // maps through hy_n5_make (zeroinit.rs, N5_MAKE_PRELUDE). Go's `make`
+        // takes any integer type for the sizes; the helper takes `int`.
+        let elem = match first_val {
+            Expr::SliceLit { elem: Some(t), items, .. } if items.is_empty() && first_val.as_array_lit().is_none() => Some(t.as_ref().clone()),
+            Expr::Ident { name, span } => match self.n5_resolve_alias(&TypeExpr::Named { name: name.clone(), span: *span }) {
+                TypeExpr::Slice { elem, .. } => Some(*elem),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((elem, init)) = elem.and_then(|t| self.n5_zero_init(&t).map(|init| (t, init))) {
+            parts[0] = format!("func() {} {{ return {} }}", self.type_text(&elem), init);
+            for (a, s) in args[1..].iter().zip(&mut parts[1..]) {
+                if !matches!(a.value, Expr::Lit { kind: LitKind::Int(_), .. }) {
+                    *s = format!("int({})", s);
+                }
+            }
+            return Ok(format!("hy_n5_make({})", parts.join(", ")));
         }
         Ok(format!("make({})", parts.join(", ")))
     }

@@ -938,3 +938,18 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - All five: merge gate CLEAN, tripwire not fired, differential FULL 41/41+88/88, ls-remote==HEAD asserted, written landing replies posted (#787 #1713 #2488 #2302 #1725).
 - Suite trajectory: 185 -> 188. Differential unchanged. Final main 0cd551e, tree clean.
 - NEXT TICK QUEUE: #1709 (option match arm guards/order), #2305 (shepherd verify-assert git fetch), #2306 (hyb generate fail-closed ownership), #2389/#2388 (await API-drift fix), #2310 (N5 zero maps), #2425 (autoland), #1811/#1780/#1766/#1767 (hue batch), #2513/#2530/#2486/#2503/#2494 (new ocakciomursel-pixel + theheiszt arrivals), #1715 (wildcard spike).
+
+## Session 30 — 2026-10-31 late night (tick 487193: 6 landed, 0 gate-fails)
+
+- Sandbox recycled (11th; target cache wiped, cold rebuild inside first verify). cwd resets between tool calls — every command re-cd's.
+- Scan: approve 40/109. Pareto NOW top-down; #2310 had shrunk to +75/5 on rebase.
+- LANDED:
+  a28ec74 Merge PR #2310 (planners1490, #1206 part 1) — N5 zero maps at allocation sites: make([]T,n[,c]) -> hy_n5_make prelude (slots to capacity), [N]T{} / partial literals / arrays via n5_zero_init IIFE; corpus +1 (n5-zero-map-allocation-sites.hy). 4-file conflict on corpus-count lines (PR predates #2458's dual-count fix): resolved 129/129 + PR 130 -> 130/130, disclosed in merge message; make census OK post-merge (7 surfaces, 130/40/2/88). differential rose 41->42 accept side (new fixture ran live). 188 suites.
+  465df48 Merge PR #2305 (ocakciomursel-pixel, fixes #1558) — shepherd verify-assert fails closed on fetch failure (stale FETCH_HEAD could confirm landing); git-shim offline tests 4/4 + ci.yml registration (36 files/33 patterns). 188 suites.
+  6bda793 Merge PR #2306 (ocakciomursel-pixel, fixes #1569) — hyb generate overwrite guard fail-closed: only NotFound counts as absent; unreadable/non-UTF-8 hand-written outputs refused pre-write (generate + --check). 188 suites.
+  70f64b4 Merge PR #2389 (ket4min-susan) — slot-loan line: 'a, b :=/= &m[k]' destructures create MapSlot loans; Assign rebind emits A3 on live Ident/plain targets; author applied the session-28 invited API-drift fix (helper returns CheckResult) — verified clean. 189 suites.
+  d791497 Merge PR #2388 (ket4min-susan) — select move-sends ('case ch <- move x:' -> MoveInfo chan..value) + recv-side channel expr move-checked. 190 suites.
+  ad859a2 Merge PR #2571 (gttps) — radix int literals >= 2^127 fold to finite f64 (huge_int_as_f64 digit-fold fallback; const_float_fold_with routes Pos/NegOverflow there instead of None/NotConst). 191 suites.
+- All six: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written landing replies posted.
+- Suite trajectory: 188 -> 191. Corpus 129 -> 130 (ACCEPT 40). Final main ad859a2, tree clean.
+- NEXT TICK QUEUE: #1709 (option match arm guards/order), #2425 (autoland repro verdicts), #1811/#2290/#2390/#2566/#1780 (Pareto), hue batch #1766/#1767, #2467/#2432 (13-behind, aging), new arrivals #2513/#2530/#2486/#2503/#2494/#2571-siblings.

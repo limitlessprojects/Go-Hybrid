@@ -6434,6 +6434,21 @@ impl<'a> Checker<'a> {
             walk::own_fnlits(stmt, &mut fnlits);
             for flit in fnlits {
                 let mut merged = cst.clone();
+                let sp = flit.span();
+                let pos = (sp.start.line as usize, sp.start.col as usize);
+                if let Some((s_env, s_aliases, s_share)) = st.closure_scoped_envs.get(&pos) {
+                    for (k, v) in s_env {
+                        merged.env.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                    for (k, v) in s_aliases {
+                        merged.aliases.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                    for (k, peers) in s_share {
+                        for p in peers {
+                            merged.share_edge(k, p);
+                        }
+                    }
+                }
                 // Also preserve any top-level alias/share edges from the completed
                 // enclosing state `st` for bindings that are not shadowed in an
                 // inner scope of `merged` (covers post-closure rebinds to a const).
