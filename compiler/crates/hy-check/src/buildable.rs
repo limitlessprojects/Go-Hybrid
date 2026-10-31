@@ -1244,6 +1244,22 @@ impl<'a> Collector<'a> {
     fn place(&mut self, p: &Place, op: AssignOp) {
         match &p.kind {
             PlaceKind::Ident(n) => {
+                // Issue #1574: an assignment target must be a VARIABLE. A
+                // package-scope fn / package / predeclared name / type name
+                // is not one, and Go rejects the store
+                // (`cannot assign to f (neither addressable nor a map index
+                // expression)`, `use of package fmt not in selector`, …).
+                // Checked only when no binding in any enclosing scope shadows
+                // the name — `len := 5; len = 6` is a legal local write.
+                if n != "_"
+                    && !self
+                        .scopes
+                        .iter()
+                        .rev()
+                        .any(|layer| layer.contains_key(n))
+                {
+                    self.check_non_variable_write_target(n, p.span);
+                }
                 // A bare `x = v` store is the ONE target form Go does not
                 // count as a read; `x++`, `x += 1` and every non-ident
                 // target (`x[k] = v`, `x.f = v`, `&x`) read the root.
@@ -1270,6 +1286,72 @@ impl<'a> Collector<'a> {
             PlaceKind::Field { .. } | PlaceKind::AddrOf { .. } => {
                 self.place_read(p);
             }
+        }
+    }
+
+    /// Issue #1574: the target of a store / `++` / compound assignment is a
+    /// name that resolves to a package-scope DECLARATION rather than a
+    /// variable. `f = 2`, `f++`, `f += 1`, `f, x = 1, 2`, `fmt = 1`,
+    /// `len = 1`, `holder = 1` and `error = 1` all passed `hyb check` with 0
+    /// diagnostics and then failed `go build` (Row 13 BUILDABLE).
+    ///
+    /// Only names declared in THIS file (or the curated package table) reject:
+    /// an undefined name is E1001's business, and a binding in any enclosing
+    /// scope (checked by the caller) shadows everything here.
+    fn check_non_variable_write_target(&mut self, name: &str, span: Span) {
+        // A file-level const is a value, and the const-write rule (E3006)
+        // owns it with a more precise message.
+        if self.ck.consts.contains_key(name) {
+            return;
+        }
+        let head = Checker::base_named_type_str(name);
+        if self.ck.fns.contains_key(name) || self.ck.fns.contains_key(head) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot assign to `{}` — it is a function declaration, not a variable (Go: `cannot assign to {} (neither addressable nor a map index expression)`) (HYB-E1002)",
+                    name, name
+                ),
+                "a top-level `fn` names a function value; Go rejects a store into it, so an accepted Hybrid program would emit unbuildable Go (issue #1574)",
+            );
+            return;
+        }
+        let is_type_name = self.ck.structs.contains_key(name)
+            || self.ck.enums.contains_key(name)
+            || self.ck.type_aliases.contains_key(name)
+            || crate::const_init::is_conversion_type_name(name)
+            || matches!(name, "error" | "any" | "comparable");
+        if is_type_name {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot assign to `{}` — it is a type, not a variable (Go: `{} (type) is not an expression`) (HYB-E1002)",
+                    name, name
+                ),
+                "a type name is not a value; Go rejects a store into it, so an accepted Hybrid program would emit unbuildable Go (issue #1574)",
+            );
+            return;
+        }
+        if self.ck.packages.contains(name) || crate::foreign::BUILTIN_PACKAGES.contains(&name) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot assign to `{}` — it is an imported package, not a variable (Go: `use of package {} not in selector`) (HYB-E1002)",
+                    name, name
+                ),
+                "a package name is not a value; Go rejects a store into it, so an accepted Hybrid program would emit unbuildable Go (issue #1574)",
+            );
+            return;
+        }
+        if crate::resolve::is_predeclared_name(name) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot assign to `{}` — it is a predeclared identifier, not a variable (Go: `{} (built-in) must be called`) (HYB-E1002)",
+                    name, name
+                ),
+                "a builtin function is not a variable; Go rejects a store into it, so an accepted Hybrid program would emit unbuildable Go (issue #1574)",
+            );
         }
     }
 
