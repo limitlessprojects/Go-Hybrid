@@ -19,7 +19,7 @@
 //!     hatch is explicit and auditable: `managed` (HYB-E8001, counted by
 //!     --report-managed).
 
-use crate::model::{as_addr_of, unwrap_parens, Binding, Checker, FnState, MoveKind, TypeShape};
+use crate::model::{as_addr_of, unwrap_parens, unwrap_parens_and_move, Binding, Checker, FnState, MoveKind, TypeShape};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{Expr, LitKind, TypeExpr};
 
@@ -239,11 +239,20 @@ impl<'a> Checker<'a> {
     }
 
     pub(crate) fn classify_value(&self, st: &FnState, expr: &Expr) -> Outcome {
+        let expr = unwrap_parens(expr);
         // `move x` — class 3; validate that `x` resolves to a movable shape
         // (never Unknown, Closure, BorrowHandle, or ForeignOpaque).
-        if let Expr::Move { operand, .. } = unwrap_parens(expr) {
-            if let Expr::Ident { name, .. } = unwrap_parens(operand) {
+        if let Expr::Move { operand, .. } = expr {
+            let op = unwrap_parens(operand);
+            if let Expr::Ident { name, .. } = op {
                 return self.classify_move_ident(st, name);
+            }
+            if matches!(op, Expr::Field { .. })
+                && matches!(self.shape_of_expr(st, op), TypeShape::OwnHandle(_))
+            {
+                if let Some(root) = op.root_ident() {
+                    return self.classify_move_ident(st, root);
+                }
             }
             return Outcome::Ok;
         }
@@ -1203,10 +1212,24 @@ impl<'a> Checker<'a> {
                             moves.push((root.to_string(), v.span()));
                         }
                     }
-                } else if !managed {
+                } else {
                     self.check_o54_non_ident_move(st, op, v.span());
+                    if let Some(root) = op.root_ident() {
+                        if self.lookup_binding(st, root).is_some() {
+                            moves.push((root.to_string(), v.span()));
+                        }
+                    }
                 }
-                if let Expr::Ident { name, .. } = op {
+                let move_root = match op {
+                    Expr::Ident { name, .. } => Some(name.as_str()),
+                    Expr::Field { .. }
+                        if matches!(self.shape_of_expr(st, op), TypeShape::OwnHandle(_)) =>
+                    {
+                        op.root_ident()
+                    }
+                    _ => None,
+                };
+                if let Some(name) = move_root {
                     match self.classify_move_ident(st, name) {
                         Outcome::Ok => {}
                         Outcome::Managed { desc, risky } => {
@@ -1247,8 +1270,13 @@ impl<'a> Checker<'a> {
                             moves.push((root.to_string(), mspan));
                         }
                     }
-                } else if !managed {
+                } else {
                     self.check_o54_non_ident_move(st, op, mspan);
+                    if let Some(root) = op.root_ident() {
+                        if self.lookup_binding(st, root).is_some() {
+                            moves.push((root.to_string(), mspan));
+                        }
+                    }
                 }
             }
 
@@ -1890,7 +1918,11 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::SliceLit { elem, items, .. } => {
-                if let Some(elem_ty) = elem {
+                let elem_ty = expr
+                    .as_array_lit()
+                    .map(|(_, inner_elem, _)| inner_elem)
+                    .or(elem.as_deref());
+                if let Some(elem_ty) = elem_ty {
                     for i in items {
                         self.check_expr_against_ty(i, elem_ty, env);
                     }
@@ -2031,7 +2063,7 @@ impl<'a> Checker<'a> {
         if let Some(got_ty) = self.dir_ty_of_expr(expr, env) {
             self.check_chan_dir_coercion(&got_ty, want_ty, expr.span(), &expr.render());
         }
-        match unwrap_parens(expr) {
+        match unwrap_parens_and_move(expr) {
             Expr::StructLit {
                 ty: None, fields, ..
             } => {
@@ -3018,6 +3050,7 @@ impl<'a> Checker<'a> {
                             return Some(*elem);
                         }
                     }
+                    if (head == "unwrap" && args.is_empty()) || (head == "or" && args.len() == 1) { if let TypeExpr::Option { elem, .. } = resolved_base { return Some(*elem); } }
                     let recv_base = Self::base_named_type(&resolved_base)
                         .or_else(|| Self::base_named_type(&base_ty))?;
                     if let Some(m) = self

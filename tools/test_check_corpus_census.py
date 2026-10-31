@@ -124,6 +124,35 @@ class DriftTests(_ProblemsMixin, unittest.TestCase):
         self.assertEqual(len(hits), 1)
         self.assertIn("says 99", hits[0])
 
+    def test_stale_second_number_in_dual_count_surfaces_is_named(self):
+        """A drifted denominator or message count on a dual-number surface must fail."""
+        for rel, content, stale in (
+            (
+                "compiler/crates/hy-syntax/tests/parse_all.rs",
+                '    assert_eq!(files.len(), 3, "expected exactly 2 corpus programs",);\n',
+                "says 2",
+            ),
+            (
+                ".github/workflows/ci.yml",
+                "      - name: x (verdict agreement (3/2 + tripwire)\n",
+                "says 2",
+            ),
+            (
+                "Makefile",
+                '\t@echo "make corpus           — Tier-0 corpus verdicts (3/2)"\n',
+                "says 2",
+            ),
+            (
+                "README.md",
+                "| x | y | z [checker corpus 3/2](tests/checker-corpus/) |\n",
+                "says 2",
+            ),
+        ):
+            with self.subTest(rel=rel):
+                hits = self._problems_with(rel, content)
+                self.assertEqual(len(hits), 1)
+                self.assertIn(stale, hits[0])
+
     def test_spike6_assertion_is_not_mistaken_for_the_corpus(self):
         """parse_all.rs asserts the spike-6 count with the same shape."""
         hits = self._problems_with(

@@ -28,7 +28,7 @@ this file is the human-normative record.
 | A2 | handle-loan rule (spike-added): mutating-mode calls on a boundary handle conflict with live borrow-mode loans on the same handle | `HYB-E3101` |
 | A3 | map-slot borrows `&m[k]`: legal, non-lexical (creation → last use), invalidated by any map insert/delete inside the live window | `HYB-E3102` |
 | A4 | Go-heap reads are copies, not loans (positive rule; exercised by 09 / 15 / 17) | — (enabling rule) |
-| A5 | Go-API escape perimeter: values escaping into foreign Go code are outside the checked subset under the scoped-claim ruling | — (scope rule; opt-in lint TBD) |
+| A5 | Go-API escape perimeter: a closure that writes a captured mutable binding and is passed to a foreign Go call is a fourth check-site (SPEC §8.5 C9, W-016 M2/M3) | A5 / HYB-E3013 |
 | A6 | struct fields never hold borrow-handles (owned / GC / ids / own-handles only) | `HYB-E3103` |
 | A7 | handles passed to functions are borrow-by-default; own-transfer happens only at `return` and at consuming APIs | `HYB-E3003` (use-after-consume) |
 | A8 | top-level `?` exit contract — NOT exercised by this corpus (noted so nobody mistakes absence for coverage) | — |
@@ -53,7 +53,7 @@ renumbered).
 | 07 | 07-a2-mutate-during-handle-loan | REJECT | A2 | `doc.set(...)` (mutating-mode) while element-view borrow loans on `doc` are live |
 | 08 | 08-a3-map-slot-invalidated | REJECT | A3 | map INSERT inside the live `&m[k]` slot-loan window (rehash invalidation) |
 | 09 | 09-a3-map-slot-valid | ACCEPT | — | 08 with the insert moved after the loan's last use: A3's non-lexical window respected; A4 in passing |
-| 10 | 10-a5-http-handler-capture | ACCEPT (contested) | — (A5 scoped claim) | mutable value captured by a closure escaping into net/http — no Hybrid check site exists; **contested — see OQ1** |
+| 10 | 10-a5-http-handler-capture | REJECT | A5 | mutable value captured by a closure escaping into net/http — the A5 fourth check-site (HYB-E3013) rejects it; the fix is `managed("...", "interop")`, an atomic, or a const capture |
 | 11 | 11-a6-borrow-in-struct-field | REJECT | A6 | borrow-handle (`serde_json.view`) stored in a struct field — the #1 annotation-forcing shape, forbidden by rule |
 | 12 | 12-a7-borrow-by-default | ACCEPT | — | handle passed to two read calls and mutated afterwards: pins A7 borrow-by-default + A2 non-lexical windows |
 | 13 | 13-a7-own-transfer-at-return | ACCEPT | — | own handle returned out of a function; caller mutates the returned handle: the A7 return-transfer route |
@@ -1074,4 +1074,5 @@ With this registration the corpus is **126 programs: ACCEPT 38 ·
 ACCEPT-MANAGED 2 · REJECT 86** — main's 125 plus this one.
 by the autonomous pipeline (bundles author-758 / author-827, landings
 0107658 / d0a2db5). Sibling-take credit: sonson0910's stale-base
-companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.
+companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.| local-composite-chan-recv-accept | ACCEPT | — | — | a local bound from a composite of bidirectional channels (`sub := append(chs, ch)`) carries the composite-projected type, so a later `<-sub[0]` receive stays legal end to end — checker accept, emitted Go builds, run exits 0 (rows added in-merge; the PR missed the README's own VERDICTS.md contract) |
+| local-composite-chan-recv-reject-e2008 | REJECT | BUILDABLE | `HYB-E2008` | same shape, send-only channels: `sub` previously carried no `ty`, so `<-sub[0]` in a type position passed with 0 diagnostics; the composite_type_expr fallback in process_local projects `chan<- int` through the Index arm and the direction check fires (rows added in-merge) |

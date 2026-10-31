@@ -121,7 +121,7 @@ pub(crate) fn is_iterable_handle(name: &str) -> bool {
 /// Mode of a package-level call: `serde_json.parse(...)`, `fmt.println(...)`.
 pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
     match (pkg, method) {
-        ("serde_json", "parse") | ("serde_json", "new_object") | ("flate2", "new_writer") => {
+        ("serde_json", "parse") | ("serde_json", "new_object" | "new_array") | ("flate2", "new_writer") => {
             CallMode::Produce
         }
         ("serde_json", "to_string_pretty")
@@ -129,7 +129,7 @@ pub(crate) fn package_mode(pkg: &str, method: &str) -> CallMode {
         | ("serde_json", "get")
         | ("serde_json", "int")
         | ("serde_json", "string") => CallMode::Borrow,
-        ("serde_json", "set") | ("serde_json", "remove") => CallMode::Mutate,
+        ("serde_json", "set") | ("serde_json", "remove" | "push_string") => CallMode::Mutate,
         ("flate2", "write") => CallMode::Mutate,
         ("flate2", "finish") => CallMode::Consume,
         _ => CallMode::Safe,
@@ -158,7 +158,7 @@ pub(crate) fn package_mutated_arg(pkg: &str, method: &str) -> Option<usize> {
 /// Result shape of a package-level call (for defines / loop variables).
 pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
     match (pkg, method) {
-        ("serde_json", "parse") | ("serde_json", "new_object") => {
+        ("serde_json", "parse") | ("serde_json", "new_object" | "new_array") => {
             TypeShape::OwnHandle("serde_json.value".into())
         }
         ("flate2", "new_writer") => TypeShape::OwnHandle("flate2.writer".into()),
@@ -177,7 +177,7 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("http", "handler") => TypeShape::ForeignOpaque("http.handler".into()),
         // `atomic.load_pointer` / `atomic.swap_pointer` return an
         // unsafe.Pointer to arbitrary state — not a primitive (row 11)
-        ("atomic", "load_pointer" | "swap_pointer") => TypeShape::Unknown,
+        ("atomic", "load_pointer" | "swap_pointer" | "compare_and_swap_pointer" | "value" | "pointer") => TypeShape::Unknown,
         ("errors", "new" | "wrap" | "New" | "Wrap") => TypeShape::ForeignOpaque("error".into()),
         ("errors", "is" | "Is") => TypeShape::Primitive,
         _ if pkg == "atomic" => TypeShape::Primitive,
@@ -311,26 +311,107 @@ pub(crate) fn method_mode(recv_type: &str, method: &str) -> CallMode {
         return CallMode::Safe;
     }
     match (recv_type, method) {
+        // #2200 / foreign-surface drift: this list must be a SUBSET of
+        // hy-emit's SHAPES members for the same key (shapes.rs, "serde_json.value":
+        // array, int, string, set, push_string) and of the Go methods the
+        // vendored binding actually ships (runtime/go/jsonbinding: Array, Int,
+        // String, Set, PushString). `get`, `remove` and `to_string_pretty` are
+        // NOT methods on a Value — they are package-level names (and only
+        // `to_string_pretty` is in the pinned binding surface at all). Blessing
+        // them here made `doc.get("a")` pass `hyb check` and then fail
+        // `go build` with `doc.Get undefined (type jsonbinding.Value has no
+        // field or method Get)`. Keep the two tables in lockstep by hand:
+        // hy-check does not depend on hy-emit (that would be a crate cycle), so
+        // no automated cross-crate pin is possible. The same-surface tests in
+        // `tests/foreign_method_surface.rs` cover the checker side.
         (
             "serde_json.value" | "serde_json.view",
-            "array" | "get" | "int" | "string" | "to_string_pretty",
+            "array" | "int" | "string",
         ) => CallMode::Borrow,
-        ("serde_json.value" | "serde_json.view", "set" | "remove") => CallMode::Mutate,
+        ("serde_json.value" | "serde_json.view", "set" | "push_string") => CallMode::Mutate,
         ("flate2.writer", "write") => CallMode::Mutate,
         ("flate2.writer", "finish") => CallMode::Consume,
         _ => CallMode::Unknown,
     }
 }
 
+/// The COMPLETE method surface of a foreign handle type, or `None` when
+/// `recv_type` is not a handle this module models.
+///
+/// `method_mode`/`method_result` are deliberately fail-open (`Unknown`), which
+/// is right for shapes the checker cannot see — but a handle whose binding is
+/// vendored in `runtime/go/` is perfectly visible, and Go will reject any name
+/// outside its surface at `go build` with `<recv>.<Name> undefined (type
+/// <T> has no field or method <Name>)`. Returning the surface here lets a
+/// caller fail CLOSED on those exact names instead of blessing them (#2200).
+///
+/// This list is the single source of truth for handle METHODS. It must stay a
+/// subset of `hy-emit`'s SHAPES members for the matching key, and of the Go
+/// methods `runtime/go/*binding` actually ships. That agreement is maintained
+/// by hand: `hy-check` cannot depend on `hy-emit` without a crate cycle, so
+/// there is no automated cross-crate pin.
+pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'static str]> {
+    /// `serde_json.value`: jsonbinding.Value — Array, Int, String, Set,
+    /// PushString. Package-level `Parse`/`NewObject`/`NewArray`/
+    /// `ToStringPretty` are functions, NOT methods, and `Get`/`Remove` are
+    /// not shipped at all.
+    const SERDE_JSON_VALUE: &[&str] = &["array", "int", "string", "set", "push_string"];
+    /// `flate2.writer`: the A7 consume-mode fixture (deliberately unbound,
+    /// see UNBOUND_RUST_CRATES — the surface is still pinned so the checker
+    /// does not invent names).
+    const FLATE2_WRITER: &[&str] = &["write", "finish"];
+    /// `sync.Mutex` — the predeclared Go type's own methods. Hybrid spells
+    /// them lowercased; `sync.mutex` resolves to `ForeignOpaque`, which made
+    /// `s.mu.totally_fake()` pass `hyb check` and die in `go build` with
+    /// `type "sync".Mutex has no field or method totally_fake`. Same bug
+    /// class as #2200, different handle.
+    const SYNC_MUTEX: &[&str] = &["lock", "unlock", "try_lock"];
+    /// `sync.RWMutex`.
+    const SYNC_RWMUTEX: &[&str] = &["lock", "unlock", "try_lock", "rlock", "runlock", "try_rlock"];
+    match recv_type {
+        "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
+        "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
+        // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
+        // depending on context: ranging `doc.array(k)` yields element
+        // `jsonbinding.Value` handles (real methods), while the `array` result
+        // itself binds to a plain `[]jsonbinding.Value` slice with no methods
+        // at all (`len(v)` is the call form, not `v.len()`). The checker
+        // cannot tell the two apart from the shape alone, so rejecting names
+        // here would break legal element code — view stays fail-open.
+        "serde_json.value" => Some(SERDE_JSON_VALUE),
+        "flate2.writer" => Some(FLATE2_WRITER),
+        // NOTE: atomics are deliberately NOT gated here, and this is a
+        // deliberate regression-free choice, not an oversight.
+        //
+        // `receiver_type_name` collapses every `TypeShape::Atomic` to the single
+        // key `"atomic.int"` (shape.rs) — the shape carries no element type, so
+        // the checker cannot tell `atomic.bool` from `atomic.int64`. Their Go
+        // surfaces genuinely differ: `Bool` has {Load, Store, Swap,
+        // CompareAndSwap} while the integer atomics add {Add, And, Or}. No
+        // single list is correct for both:
+        //   * the union blesses `atomic.Bool.Add`, which Go lacks (#2200's own
+        //     bug class, left open), and
+        //   * the intersection rejects `atomic.Int64.And`/`Or`, which Go has
+        //     since 1.23 and which `go build` accepts (a NEW false rejection).
+        //
+        // Pinning this correctly needs `TypeShape::Atomic` to carry its element
+        // type — a change to the shape model, not to this table — so atomics
+        // keep their existing fail-open behaviour here and are tracked
+        // separately. This keeps the #2200 fix to the handles whose surface is
+        // actually knowable.
+        _ => None,
+    }
+}
+
 /// Result shape of a method call on a typed receiver.
 pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
     match (recv_type, method) {
-        ("serde_json.value" | "serde_json.view", "array" | "get") => {
+        ("serde_json.value" | "serde_json.view", "array") => {
             // element views: iterating the result yields borrow handles
             TypeShape::BorrowHandle("serde_json.view".into())
         }
         ("serde_json.value" | "serde_json.view", "int") => TypeShape::Primitive,
-        ("serde_json.value" | "serde_json.view", "string" | "to_string_pretty") => TypeShape::Str,
+        ("serde_json.value" | "serde_json.view", "string") => TypeShape::Str,
         ("flate2.writer", "write") => TypeShape::Primitive,
         ("flate2.writer", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
         // scalar atomics only ("atomic.int" is receiver_type_name's key for
