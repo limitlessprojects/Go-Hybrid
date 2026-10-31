@@ -1,4 +1,4 @@
-//! buildable.rs — issue #134: an accepted program must emit buildable Go.
+ompiler/crates/hy-check/src/buildable.rs//! buildable.rs — issue #134: an accepted program must emit buildable Go.
 //!
 //! Go's front-end rejects four declaration shapes that `hyb check` used to
 //! accept with 0 diagnostics, so the emitted module could never build:
@@ -1015,7 +1015,10 @@ impl<'a> Collector<'a> {
                 }
                 self.check_assign_operands(targets, *op, values, *span);
             }
-            Stmt::Expr { expr, .. } => self.expr(expr),
+            Stmt::Expr { expr, span } => {
+                self.expr(expr);
+                self.check_stmt_expr_used(expr, *span);
+            }
             Stmt::Send { chan, value, .. } => {
                 self.expr(chan);
                 // #887: the sent value is a single-value position. A void call
@@ -1136,6 +1139,7 @@ impl<'a> Collector<'a> {
                 // #682 U4: the deferred call's arity is checked like any other
                 // call's. `builtins.rs` owns the "must be a call" half.
                 self.check_defer_arity(call, *span);
+                self.check_defer_target(call, *span);
             }
             Stmt::Break { span, label } => {
                 if label.is_none() && self.loop_depth == 0 && self.select_depth == 0 {
@@ -2804,6 +2808,175 @@ impl<'a> Collector<'a> {
             ),
             "the deferred call is checked like any other call: one argument per declared parameter",
         );
+    }
+
+    fn has_error_in_span(&self, span: Span) -> bool {
+        self.ck.diags.iter().chain(self.diags.iter()).any(|d| {
+            d.severity == hy_diag::Severity::Error
+                && (d.span.start.line, d.span.start.col) >= (span.start.line, span.start.col)
+                && (d.span.end.line, d.span.end.col) <= (span.end.line, span.end.col)
+        })
+    }
+
+    fn is_value_only_builtin_name(name: &str) -> bool {
+        matches!(
+            name,
+            "len" | "cap" | "make" | "new" | "append" | "min" | "max" | "complex" | "real" | "imag"
+        )
+    }
+
+    fn type_conversion_callee_name(&self, callee: &Expr) -> Option<String> {
+        let bare = unwrap_parens(callee);
+        match bare {
+            Expr::SliceLit {
+                elem: Some(elem_ty),
+                items,
+                ..
+            } if items.is_empty() => {
+                if let Some((_, _, arr_ty)) = bare.as_array_lit() {
+                    Some(arr_ty.render())
+                } else {
+                    Some(format!("[]{}", elem_ty.render()))
+                }
+            }
+            Expr::Ident { name, .. } => {
+                if self.lookup_kind(name).is_some() {
+                    return None;
+                }
+                let head = Checker::base_named_type_str(name);
+                if self.ck.fns.contains_key(name.as_str()) || self.ck.fns.contains_key(head) {
+                    return None;
+                }
+                if self.ck.type_aliases.contains_key(head)
+                    || !matches!(self.kind_of_named(name, 0), OpKind::Unknown)
+                {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Issue #971: a bare expression statement `Stmt::Expr` must be a function/method
+    /// call or a channel receive `<-ch`, and when it is a call, it must not be a
+    /// pure/allocating builtin (`len`, `cap`, `make`, `new`, `append`, `min`, `max`,
+    /// `complex`, `real`, `imag`) or a type conversion (`T(x)`). Go refuses all of
+    /// those at build time with `... evaluated but not used` / `conversion to ... not used`.
+    fn check_stmt_expr_used(&mut self, expr: &Expr, span: Span) {
+        if self.has_error_in_span(span) {
+            return;
+        }
+        let mut inner = unwrap_parens(expr);
+        while let Expr::Try { operand, .. } = inner {
+            inner = unwrap_parens(operand);
+        }
+        match inner {
+            Expr::Receive { .. } => {}
+            Expr::Call { callee, .. } => {
+                if let Some(conv_ty) = self.type_conversion_callee_name(callee) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "conversion to `{}` in `{}` is evaluated but not used — Go refuses `{} (value of type {}) is not used` (HYB-E1002)",
+                            conv_ty,
+                            expr.render(),
+                            expr.render(),
+                            conv_ty
+                        ),
+                        "bind the converted value (`x := T(v)`) or discard it explicitly (`_ = T(v)`)",
+                    );
+                    return;
+                }
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if self.lookup_kind(name).is_none()
+                        && !self.ck.fns.contains_key(name.as_str())
+                        && Self::is_value_only_builtin_name(name)
+                    {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "built-in `{}` call `{}` is evaluated but not used — Go refuses `{} (value of type ...) is not used` (HYB-E1002)",
+                                name,
+                                expr.render(),
+                                expr.render()
+                            ),
+                            "bind the result (`x := ...`) or discard it explicitly (`_ = ...`)",
+                        );
+                    }
+                }
+            }
+            _ => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "expression `{}` is evaluated but not used — Go refuses `{}` as a standalone statement (HYB-E1002)",
+                        expr.render(),
+                        expr.render()
+                    ),
+                    "a standalone expression statement must be a function/method call or channel receive `<-ch`; bind the value or write `_ = ...`",
+                );
+            }
+        }
+    }
+
+    /// Issue #971: `defer` requires a side-effecting function/method call — Go
+    /// refuses `defer` on type conversions (`defer requires function call, not conversion`)
+    /// and on value-only builtins (`defer discards result of ...`).
+    fn check_defer_target(&mut self, call: &Expr, span: Span) {
+        if self.has_error_in_span(span) {
+            return;
+        }
+        let mut inner = unwrap_parens(call);
+        if let Expr::Try { operand, .. } = inner {
+            inner = unwrap_parens(operand);
+        }
+        let Expr::Call { callee, .. } = inner else {
+            return;
+        };
+        if let Some(conv_ty) = self.type_conversion_callee_name(callee) {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E2001",
+                    self.path.clone(),
+                    span,
+                    format!(
+                        "`defer` requires a function call, not type conversion `{}` in `defer {}` (HYB-E2001)",
+                        conv_ty,
+                        call.render()
+                    ),
+                )
+                .with_notes(vec![
+                    "Go forbids deferring a type conversion (`defer requires function call, not conversion`)".to_string(),
+                    "call a function or method in `defer`, or perform the conversion outside `defer`".to_string(),
+                ]),
+            );
+            return;
+        }
+        if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+            if self.lookup_kind(name).is_none()
+                && !self.ck.fns.contains_key(name.as_str())
+                && Self::is_value_only_builtin_name(name)
+            {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E2001",
+                        self.path.clone(),
+                        span,
+                        format!(
+                            "`defer` discards result of built-in `{}` in `defer {}` — Go forbids deferring `{}` (HYB-E2001)",
+                            name,
+                            call.render(),
+                            name
+                        ),
+                    )
+                    .with_notes(vec![
+                        "Go only permits `defer` on side-effecting built-ins (`close`, `copy`, `delete`, `clear`, `panic`, `print`, `println`, `recover`)".to_string(),
+                    ]),
+                );
+            }
+        }
     }
 
     /// Family A (#425): `if cond` and `for cond` require a boolean condition.
