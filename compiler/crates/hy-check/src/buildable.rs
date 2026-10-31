@@ -491,6 +491,68 @@ impl<'a> Collector<'a> {
         self.file_consts.get(name).cloned()
     }
 
+    /// #1112 — `kinds_conflict` plus the value-shaped narrow clause: a typed
+    /// `int` value may not satisfy a `float64` target unless the value is an
+    /// untyped constant. Go's untyped-constant conversion (`var f float64 = 1`
+    /// builds) is the ONLY implicit numeric conversion, and it never applies
+    /// to an `int` variable (`var y int = 3; var f float64 = y` refuses
+    /// `assignment mismatch`/`cannot use y ...`). The kind model alone cannot
+    /// tell the two `int`s apart — the expression decides here.
+    fn value_conflicts(&self, want: &OpKind, got: &OpKind, value: &Expr) -> bool {
+        kinds_conflict(want, got)
+            || (matches!(want, OpKind::Float)
+                && matches!(got, OpKind::Int)
+                && !self.is_untyped_constant(value))
+    }
+
+    /// Is `e` an untyped constant expression — the sole carrier of Go's
+    /// implicit int→float conversion (#1112)? Structural and conservative:
+    /// int and rune literals, a unary minus over one, arithmetic over two,
+    /// and a reference to an untyped `const`. Everything else (variables,
+    /// calls, receives, index, field) is typed by construction in Go, so it
+    /// answers `false` — which makes `value_conflicts` stricter, never
+    /// looser, than `kinds_conflict`.
+    fn is_untyped_constant(&self, e: &Expr) -> bool {
+        match unwrap_parens(e) {
+            Expr::Lit { kind, .. } => matches!(kind, LitKind::Int(_) | LitKind::Char(_)),
+            Expr::Unary { op: UnOp::Neg, operand, .. } => self.is_untyped_constant(operand),
+            Expr::Move { operand, .. } | Expr::Try { operand, .. } => {
+                self.is_untyped_constant(operand)
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.is_untyped_constant(lhs) && self.is_untyped_constant(rhs)
+            }
+            Expr::Ident { name, .. } => self.is_const_binding(name),
+            _ => false,
+        }
+    }
+
+    /// Does `name` resolve to an untyped `const` (#1112)? A fn-local `const`
+    /// comes from the define table; a file-level `const` from the declaration
+    /// list — and only when declared WITHOUT a type annotation: Go's
+    /// `const k int = 3` is typed `int` exactly like a variable, while
+    /// `const k = 3` is untyped. Params, receivers, `:=` and `var` bindings
+    /// are typed values (a local const has no recorded annotation, so it
+    /// fails open as untyped — same fail-open direction as `kinds_conflict`).
+    fn is_const_binding(&self, name: &str) -> bool {
+        for layer in self.scopes.iter().rev() {
+            if let Some(entry) = layer.get(name) {
+                return match entry {
+                    Some(id) => self.defines[*id].kind == LocalKind::Const,
+                    None => false,
+                };
+            }
+        }
+        if !self.file_consts.contains_key(name) {
+            return false;
+        }
+        self.ck
+            .file
+            .decls
+            .iter()
+            .any(|d| matches!(d, Decl::Const(cd) if cd.name == name && cd.ty.is_none()))
+    }
+
     /// A `for`-iterate or `select`-receive binding is elided to `_` at
     /// emission when completely untouched, but if the body assigns to it
     /// (`v = ...`) without ever reading it, the emitter must keep the binding
@@ -857,7 +919,7 @@ impl<'a> Collector<'a> {
             let want = self.kind_of_ty(t, 0);
             if l.values.len() == 1 && l.names.len() == 1 {
                 let vk = self.kind_of_expr(&l.values[0]);
-                if kinds_conflict(&want, &vk) {
+                if self.value_conflicts(&want, &vk, &l.values[0]) {
                     self.emit_e1002(
                         l.span,
                         format!(
@@ -873,7 +935,7 @@ impl<'a> Collector<'a> {
             } else if l.values.len() > 1 && l.values.len() == l.names.len() {
                 for (name, v) in l.names.iter().zip(l.values.iter()) {
                     let vk = self.kind_of_expr(v);
-                    if kinds_conflict(&want, &vk) {
+                    if self.value_conflicts(&want, &vk, v) {
                         self.emit_e1002(
                             l.span,
                             format!(
@@ -1023,6 +1085,31 @@ impl<'a> Collector<'a> {
                 // `ch <- noop()` / `ch <- pair()`, which Go rejects.
                 self.check_single_value_position(value, "a channel send", false);
                 self.expr(value);
+                // #1112: `ch <- y` on a `chan float64` with a typed `int` y —
+                // Go refuses `cannot use y (value of type int) as float64
+                // value in send statement`. Deliberately narrow: only the
+                // untyped-constant clause of `value_conflicts` is applied
+                // (the kind-level chan element conflict is HYB-E3011's
+                // shape rules' territory — applying `kinds_conflict` here
+                // would double-report shapes E3011 already owns).
+                if let OpKind::Chan(elem) = self.kind_of_expr(chan) {
+                    let got = self.kind_of_expr(value);
+                    if matches!(*elem, OpKind::Float)
+                        && matches!(got, OpKind::Int)
+                        && !self.is_untyped_constant(value)
+                    {
+                        self.emit_e1002(
+                            value.span(),
+                            format!(
+                                "cannot send a value of type `{}` on a `chan {}` channel — Go refuses `cannot use ... as {} value in send statement` (HYB-E1002)",
+                                got.label(),
+                                elem.label(),
+                                elem.label()
+                            ),
+                            "the channel's element type is fixed; write an explicit conversion when a conversion is intended",
+                        );
+                    }
+                }
             }
             Stmt::If {
                 init,
@@ -2175,7 +2262,7 @@ impl<'a> Collector<'a> {
                 Some((_, fty)) => {
                     let want = self.kind_of_ty_with_subst(fty, &subst, 0);
                     let got = self.kind_of_expr(&f.value);
-                    if kinds_conflict(&want, &got) {
+                    if self.value_conflicts(&want, &got, &f.value) {
                         self.emit_e1002(
                             f.value.span(),
                             format!(
@@ -2517,11 +2604,13 @@ impl<'a> Collector<'a> {
             let want = self.kind_of_ty(&p.ty, 0);
             let got = self.kind_of_expr(&a.value);
             if let OpKind::Pointer(inner) = &want {
-                if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
+                if !self.value_conflicts(inner, &got, &a.value)
+                    && self.is_addressable_value_receiver(&a.value)
+                {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            if self.value_conflicts(&want, &got, &a.value) {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -2557,11 +2646,13 @@ impl<'a> Collector<'a> {
             let want = self.kind_of_ty(&p.ty, 0);
             let got = self.kind_of_expr(&a.value);
             if let OpKind::Pointer(inner) = &want {
-                if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
+                if !self.value_conflicts(inner, &got, &a.value)
+                    && self.is_addressable_value_receiver(&a.value)
+                {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            if self.value_conflicts(&want, &got, &a.value) {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -2592,7 +2683,7 @@ impl<'a> Collector<'a> {
                 if let Some(res) = self.call_result_kinds(callee, args) {
                     if res.len() == want.len() {
                         for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(r, w, values[0].span());
+                            self.report_return_conflict(r, w, &values[0]);
                         }
                         return;
                     }
@@ -2601,7 +2692,7 @@ impl<'a> Collector<'a> {
                         && res.len() + 1 == want.len()
                     {
                         for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(r, w, values[0].span());
+                            self.report_return_conflict(r, w, &values[0]);
                         }
                         return;
                     }
@@ -2648,7 +2739,7 @@ impl<'a> Collector<'a> {
             if short_ok {
                 for (v, w) in values.iter().zip(want.iter()) {
                     let got = self.kind_of_expr(v);
-                    self.report_return_conflict(&got, w, v.span());
+                    self.report_return_conflict(&got, w, v);
                 }
                 return;
             }
@@ -2676,16 +2767,18 @@ impl<'a> Collector<'a> {
         }
         for (v, w) in values.iter().zip(want.iter()) {
             let got = self.kind_of_expr(v);
-            self.report_return_conflict(&got, w, v.span());
+            self.report_return_conflict(&got, w, v);
         }
     }
 
-    fn report_return_conflict(&mut self, got: &OpKind, want: &OpKind, span: Span) {
-        if !kinds_conflict(want, got) {
+    fn report_return_conflict(&mut self, got: &OpKind, want: &OpKind, value: &Expr) {
+        // #1112: pass the value expression through so an untyped int constant
+        // still satisfies a `float64` result (`fn f() float64 { return 1 }`).
+        if !self.value_conflicts(want, got, value) {
             return;
         }
         self.emit_e1002(
-            span,
+            value.span(),
             format!(
                 "cannot return a value of type `{}` from a function declaring `{}` — Go refuses `cannot use ... as {} value in return statement` (HYB-E1002)",
                 got.label(),
@@ -2749,7 +2842,7 @@ impl<'a> Collector<'a> {
                 continue;
             }
             let got = self.kind_of_expr(&extra.value);
-            if kinds_conflict(&elem, &got) {
+            if self.value_conflicts(&elem, &got, &extra.value) {
                 self.emit_e1002(
                     extra.value.span(),
                     format!(
@@ -3150,7 +3243,7 @@ impl<'a> Collector<'a> {
                     let is_loan_shape = as_addr_of(&values[0])
                         .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }));
                     let vk = self.kind_of_expr(&values[0]);
-                    if !is_loan_shape && kinds_conflict(&tk, &vk) {
+                    if !is_loan_shape && self.value_conflicts(&tk, &vk, &values[0]) {
                         self.emit_e1002(
                             span,
                             format!(
@@ -3188,7 +3281,7 @@ impl<'a> Collector<'a> {
                         }
                         let tpk = self.kind_of_place(t);
                         let vk = self.kind_of_expr(v);
-                        if kinds_conflict(&tpk, &vk) {
+                        if self.value_conflicts(&tpk, &vk, v) {
                             self.emit_e1002(
                                 v.span(),
                                 format!(
@@ -3242,7 +3335,7 @@ impl<'a> Collector<'a> {
                 let mismatch = tk != OpKind::Unknown
                     && vk != OpKind::Unknown
                     && tk.is_numeric() != vk.is_numeric();
-                if !t_ok || !v_ok || mismatch || kinds_conflict(&tk, &vk) {
+                if !t_ok || !v_ok || mismatch || self.value_conflicts(&tk, &vk, val) {
                     self.emit_e1002(
                         span,
                         format!(
@@ -3266,7 +3359,7 @@ impl<'a> Collector<'a> {
                 };
                 if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float)
-                    || kinds_conflict(&tk, &vk)
+                    || self.value_conflicts(&tk, &vk, val)
                 {
                     self.emit_e1002(
                         span,
@@ -3348,7 +3441,7 @@ impl<'a> Collector<'a> {
         if let OpKind::Map(key_kind, _) = bk {
             if **key_kind != OpKind::Unknown
                 && *ik != OpKind::Unknown
-                && kinds_conflict(key_kind, ik)
+                && self.value_conflicts(key_kind, ik, index)
             {
                 self.emit_e1002(
                     index.span(),
@@ -3648,10 +3741,7 @@ impl<'a> Collector<'a> {
             if ik == OpKind::Unknown || ik == expected {
                 continue;
             }
-            if expected == OpKind::Float
-                && ik == OpKind::Int
-                && crate::const_overflow::const_int_value(item).is_some()
-            {
+            if !self.value_conflicts(&expected, &ik, item) {
                 continue;
             }
             self.emit_e1002(
@@ -3709,13 +3799,7 @@ impl<'a> Collector<'a> {
             if ik == OpKind::Unknown || ik == expected {
                 continue;
             }
-            if expected == OpKind::Float
-                && ik == OpKind::Int
-                && crate::const_overflow::const_int_value(item).is_some()
-            {
-                continue;
-            }
-            if !kinds_conflict(&expected, &ik) {
+            if !self.value_conflicts(&expected, &ik, item) {
                 continue;
             }
             self.emit_e1002(
@@ -3746,10 +3830,7 @@ impl<'a> Collector<'a> {
                 let kk = self.kind_of_expr(k);
                 if kk != OpKind::Unknown
                     && kk != exp_key
-                    && !(exp_key == OpKind::Float
-                        && kk == OpKind::Int
-                        && crate::const_overflow::const_int_value(k).is_some())
-                    && kinds_conflict(&exp_key, &kk)
+                    && self.value_conflicts(&exp_key, &kk, k)
                 {
                     self.emit_e1002(
                         k.span(),
@@ -3771,10 +3852,7 @@ impl<'a> Collector<'a> {
                 let vk = self.kind_of_expr(v);
                 if vk != OpKind::Unknown
                     && vk != exp_val
-                    && !(exp_val == OpKind::Float
-                        && vk == OpKind::Int
-                        && crate::const_overflow::const_int_value(v).is_some())
-                    && kinds_conflict(&exp_val, &vk)
+                    && self.value_conflicts(&exp_val, &vk, v)
                 {
                     self.emit_e1002(
                         v.span(),
@@ -4386,7 +4464,12 @@ impl<'a> Collector<'a> {
 
                 match (&dk, &sk) {
                     (OpKind::Slice(dst_elem), OpKind::Slice(src_elem)) => {
-                        if kinds_conflict(dst_elem, src_elem) {
+                        // #1112: element kinds compare like a value position —
+                        // `copy(fs, is)` ([]float64, []int) never builds, and
+                        // the source expression decides the untyped-constant
+                        // clause (a slice is never an untyped constant, so a
+                        // mixed Float/Int element pair always conflicts).
+                        if self.value_conflicts(dst_elem, src_elem, src_arg) {
                             self.emit_e1002(
                                 span,
                                 format!(
