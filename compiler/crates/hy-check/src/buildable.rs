@@ -1098,6 +1098,11 @@ impl<'a> Collector<'a> {
                 }
                 match unwrap_parens(callee) {
                     Expr::Ident { name, .. } => {
+                        if let Some(OpKind::Fn(_, Some(want))) = self.lookup_kind(name) {
+                            if want != args.len() {
+                                self.report_local_arity(name, want, args.len(), *span);
+                            }
+                        }
                         self.check_user_fn_arity(name, args, *span);
                         self.check_user_fn_arg_types(name, args);
                     }
@@ -1105,6 +1110,9 @@ impl<'a> Collector<'a> {
                         let bk = self.kind_of_expr(base);
                         self.check_method_arity(&bk, name, args, *span);
                         self.check_method_arg_types(&bk, name, args);
+                    }
+                    Expr::FnLit { params, .. } => {
+                        self.check_fn_lit_call(params, args, *span);
                     }
                     _ => {}
                 }
@@ -2578,6 +2586,38 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_fn_lit_call(&mut self, params: &[Param], args: &[CallArg], span: Span) {
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        let (want, got) = (params.len(), args.len());
+        if want != got {
+            self.report_local_arity("func literal", want, got, span);
+            return;
+        }
+        for (p, a) in params.iter().zip(args.iter()) {
+            let want = self.kind_of_ty(&p.ty, 0);
+            let got = self.kind_of_expr(&a.value);
+            if let OpKind::Pointer(inner) = &want {
+                if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
+                    continue;
+                }
+            }
+            if kinds_conflict(&want, &got) {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to func literal — Go refuses mismatched argument types (HYB-E1002)",
+                        a.value.render(),
+                        got.label(),
+                        want.label(),
+                    ),
+                    "argument types must match closure parameter types",
+                );
+            }
+        }
+    }
+
     /// #577 C10 — a `return` must supply the enclosing function's result
     /// list: the same number of values, each assignable to its result type.
     /// Go refuses the emitted statement otherwise (Row 13).
@@ -2702,14 +2742,17 @@ impl<'a> Collector<'a> {
         let Some(n) = self.multi_value_arg_count(args) else {
             return;
         };
-        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
-            return;
+        let (want, name) = match unwrap_parens(callee) {
+            Expr::Ident { name, .. } => {
+                let head = Checker::base_named_type_str(name);
+                let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
+                    return;
+                };
+                (f.params.len(), name.as_str())
+            }
+            Expr::FnLit { params, .. } => (params.len(), "func literal"),
+            _ => return,
         };
-        let head = Checker::base_named_type_str(name);
-        let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
-            return;
-        };
-        let want = f.params.len();
         if want == n {
             return;
         }
@@ -4022,6 +4065,9 @@ impl<'a> Collector<'a> {
                     self.check_method_arity(&bk, name, args, span);
                     self.check_method_arg_types(&bk, name, args);
                 }
+            }
+            Expr::FnLit { params, .. } => {
+                self.check_fn_lit_call(params, args, span);
             }
             _ => {
                 let ck = self.kind_of_expr(bare);
