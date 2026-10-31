@@ -610,8 +610,6 @@ impl<'a> Checker<'a> {
             return false;
         };
         if let hy_syntax::ForKind::Range { var, lo, hi, inclusive } = kind {
-            // If the loop induction variable is mutated or has its address taken,
-            // the loop cannot soundly be assumed to execute only once.
             if Self::is_loop_var_mutated(var, body) {
                 return false;
             }
@@ -639,8 +637,6 @@ impl<'a> Checker<'a> {
         false
     }
 
-    /// Check if the loop induction variable `var` is mutated or has its address taken
-    /// anywhere inside `body` (or inside closures declared within `body`).
     pub(crate) fn is_loop_var_mutated(var: &str, body: &hy_syntax::Block) -> bool {
         body.stmts.iter().any(|s| Self::stmt_mutates_var(var, s))
     }
@@ -648,7 +644,6 @@ impl<'a> Checker<'a> {
     fn stmt_mutates_var(var: &str, stmt: &hy_syntax::Stmt) -> bool {
         match stmt {
             hy_syntax::Stmt::Assign { targets, values, .. } => {
-                // If any target writes to `var` (i = ..., i += ..., i--, i[0] = ...):
                 for t in targets {
                     if t.root() == var {
                         return true;
@@ -663,19 +658,12 @@ impl<'a> Checker<'a> {
                                 p = base;
                             }
                             hy_syntax::PlaceKind::Field { base, .. }
-                            | hy_syntax::PlaceKind::AddrOf { base } => {
-                                p = base;
-                            }
+                            | hy_syntax::PlaceKind::AddrOf { base } => p = base,
                             hy_syntax::PlaceKind::Ident(_) => break,
                         }
                     }
                 }
-                for v in values {
-                    if Self::expr_mutates_or_escapes_var(var, v) {
-                        return true;
-                    }
-                }
-                false
+                values.iter().any(|v| Self::expr_mutates_or_escapes_var(var, v))
             }
             hy_syntax::Stmt::Local(l) => {
                 l.values.iter().any(|v| Self::expr_mutates_or_escapes_var(var, v))
@@ -686,24 +674,21 @@ impl<'a> Checker<'a> {
                     || Self::expr_mutates_or_escapes_var(var, value)
             }
             hy_syntax::Stmt::If { init, cond, then, otherwise, .. } => {
-                init.as_ref().map_or(false, |s| Self::stmt_mutates_var(var, s))
+                init.as_ref().is_some_and(|s| Self::stmt_mutates_var(var, s))
                     || Self::expr_mutates_or_escapes_var(var, cond)
                     || Self::is_loop_var_mutated(var, then)
-                    || otherwise.as_ref().map_or(false, |s| Self::stmt_mutates_var(var, s))
+                    || otherwise.as_ref().is_some_and(|s| Self::stmt_mutates_var(var, s))
             }
             hy_syntax::Stmt::For { kind, body, .. } => {
-                let kind_mutates = match kind {
+                let km = match kind {
                     hy_syntax::ForKind::While { cond } => Self::expr_mutates_or_escapes_var(var, cond),
                     hy_syntax::ForKind::Range { lo, hi, .. } => {
-                        Self::expr_mutates_or_escapes_var(var, lo)
-                            || Self::expr_mutates_or_escapes_var(var, hi)
+                        Self::expr_mutates_or_escapes_var(var, lo) || Self::expr_mutates_or_escapes_var(var, hi)
                     }
-                    hy_syntax::ForKind::Iterate { expr, .. } => {
-                        Self::expr_mutates_or_escapes_var(var, expr)
-                    }
+                    hy_syntax::ForKind::Iterate { expr, .. } => Self::expr_mutates_or_escapes_var(var, expr),
                     hy_syntax::ForKind::Infinite => false,
                 };
-                kind_mutates || Self::is_loop_var_mutated(var, body)
+                km || Self::is_loop_var_mutated(var, body)
             }
             hy_syntax::Stmt::Return { values, .. } => {
                 values.iter().any(|v| Self::expr_mutates_or_escapes_var(var, v))
@@ -716,7 +701,7 @@ impl<'a> Checker<'a> {
             hy_syntax::Stmt::Match { subject, arms, .. } => {
                 Self::expr_mutates_or_escapes_var(var, subject)
                     || arms.iter().any(|a| {
-                        a.guard.as_ref().map_or(false, |g| Self::expr_mutates_or_escapes_var(var, g))
+                        a.guard.as_ref().is_some_and(|g| Self::expr_mutates_or_escapes_var(var, g))
                             || Self::is_loop_var_mutated(var, &a.body)
                     })
             }
@@ -728,8 +713,9 @@ impl<'a> Checker<'a> {
                         || Self::expr_mutates_or_escapes_var(var, value)
                         || Self::is_loop_var_mutated(var, &a.body)
                 }
-                hy_syntax::SelectArmKind::Recv { chan, .. } => {
-                    Self::expr_mutates_or_escapes_var(var, chan)
+                hy_syntax::SelectArmKind::Recv { names, chan } => {
+                    names.iter().any(|n| n == var)
+                        || Self::expr_mutates_or_escapes_var(var, chan)
                         || Self::is_loop_var_mutated(var, &a.body)
                 }
                 hy_syntax::SelectArmKind::Default => Self::is_loop_var_mutated(var, &a.body),
@@ -741,19 +727,12 @@ impl<'a> Checker<'a> {
     fn expr_mutates_or_escapes_var(var: &str, expr: &hy_syntax::Expr) -> bool {
         match expr {
             hy_syntax::Expr::Ident { .. } | hy_syntax::Expr::Lit { .. } => false,
-            hy_syntax::Expr::Unary {
-                op: hy_syntax::UnOp::Addr,
-                operand,
-                ..
-            }
-            | hy_syntax::Expr::AddrOf { operand, .. } => {
-                match crate::model::unwrap_parens(operand) {
-                    hy_syntax::Expr::Ident { name, .. } if name == var => true,
-                    other => Self::expr_mutates_or_escapes_var(var, other),
-                }
-            }
+            hy_syntax::Expr::Unary { op: hy_syntax::UnOp::Addr, operand, .. }
+            | hy_syntax::Expr::AddrOf { operand, .. } => match crate::model::unwrap_parens(operand) {
+                hy_syntax::Expr::Ident { name, .. } if name == var => true,
+                other => Self::expr_mutates_or_escapes_var(var, other),
+            },
             hy_syntax::Expr::FnLit { params, results, body, .. } => {
-                // If shadowed by parameter or named result, var is not touched:
                 if params.iter().any(|p| p.name == var)
                     || results.iter().any(|r| r.name.as_deref() == Some(var))
                 {
@@ -763,23 +742,19 @@ impl<'a> Checker<'a> {
                 }
             }
             hy_syntax::Expr::Binary { lhs, rhs, .. } => {
-                Self::expr_mutates_or_escapes_var(var, lhs)
-                    || Self::expr_mutates_or_escapes_var(var, rhs)
+                Self::expr_mutates_or_escapes_var(var, lhs) || Self::expr_mutates_or_escapes_var(var, rhs)
             }
             hy_syntax::Expr::Unary { operand, .. }
             | hy_syntax::Expr::Move { operand, .. }
-            | hy_syntax::Expr::Try { operand, .. } => {
-                Self::expr_mutates_or_escapes_var(var, operand)
-            }
+            | hy_syntax::Expr::Try { operand, .. } => Self::expr_mutates_or_escapes_var(var, operand),
             hy_syntax::Expr::Receive { chan, .. } => Self::expr_mutates_or_escapes_var(var, chan),
             hy_syntax::Expr::Index { base, index, .. } => {
-                Self::expr_mutates_or_escapes_var(var, base)
-                    || Self::expr_mutates_or_escapes_var(var, index)
+                Self::expr_mutates_or_escapes_var(var, base) || Self::expr_mutates_or_escapes_var(var, index)
             }
             hy_syntax::Expr::Slice { base, lo, hi, .. } => {
                 Self::expr_mutates_or_escapes_var(var, base)
-                    || lo.as_ref().map_or(false, |e| Self::expr_mutates_or_escapes_var(var, e))
-                    || hi.as_ref().map_or(false, |e| Self::expr_mutates_or_escapes_var(var, e))
+                    || lo.as_ref().is_some_and(|e| Self::expr_mutates_or_escapes_var(var, e))
+                    || hi.as_ref().is_some_and(|e| Self::expr_mutates_or_escapes_var(var, e))
             }
             hy_syntax::Expr::Field { base, .. } => Self::expr_mutates_or_escapes_var(var, base),
             hy_syntax::Expr::Call { callee, args, .. } => {
@@ -793,8 +768,7 @@ impl<'a> Checker<'a> {
                 items.iter().any(|i| Self::expr_mutates_or_escapes_var(var, i))
             }
             hy_syntax::Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
-                Self::expr_mutates_or_escapes_var(var, k)
-                    || Self::expr_mutates_or_escapes_var(var, v)
+                Self::expr_mutates_or_escapes_var(var, k) || Self::expr_mutates_or_escapes_var(var, v)
             }),
             hy_syntax::Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
                 hy_syntax::InterpPart::Expr(e) => Self::expr_mutates_or_escapes_var(var, e),
@@ -806,42 +780,12 @@ impl<'a> Checker<'a> {
 
     fn as_int_lit(expr: &hy_syntax::Expr) -> Option<i64> {
         match expr {
-            hy_syntax::Expr::Lit {
-                kind: hy_syntax::LitKind::Int(s),
-                ..
-            } => {
-                let clean: String = s.chars().filter(|c| *c != '_').collect();
-                if clean.is_empty() {
-                    return None;
-                }
-                let s = clean.as_str();
-                let (radix, digits) =
-                    if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-                        (16, rest)
-                    } else if let Some(rest) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B"))
-                    {
-                        (2, rest)
-                    } else if let Some(rest) = s.strip_prefix("0o").or_else(|| s.strip_prefix("0O"))
-                    {
-                        (8, rest)
-                    } else if s.len() > 1 && s.starts_with('0') {
-                        if s.chars().any(|c| c == '8' || c == '9') {
-                            return None;
-                        }
-                        (8, s)
-                    } else {
-                        (10, s)
-                    };
-                if digits.is_empty() {
-                    return None;
-                }
-                i64::from_str_radix(digits, radix).ok()
+            hy_syntax::Expr::Lit { kind: hy_syntax::LitKind::Int(s), .. } => {
+                crate::arith::int_lit_value(s).and_then(|v| i64::try_from(v).ok())
             }
-            hy_syntax::Expr::Unary {
-                op: hy_syntax::UnOp::Neg,
-                operand,
-                ..
-            } => Self::as_int_lit(operand).and_then(|v| v.checked_neg()),
+            hy_syntax::Expr::Unary { op: hy_syntax::UnOp::Neg, operand, .. } => {
+                Self::as_int_lit(operand).and_then(|v| v.checked_neg())
+            }
             hy_syntax::Expr::Paren { inner, .. } => Self::as_int_lit(inner),
             _ => None,
         }
