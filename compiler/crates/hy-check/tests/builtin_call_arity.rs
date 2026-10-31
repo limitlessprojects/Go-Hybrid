@@ -116,3 +116,62 @@ fn main() {
     assert_eq!(r.verdict, Verdict::Accept);
     assert!(error_codes(&r).is_empty(), "expected 0 errors, got {:?}", r.diagnostics);
 }
+
+#[test]
+fn real_and_imag_invalid_literal_operands_reject_e2005_issue_1765() {
+    for src in [
+        "fn main() {\n    _ = real(\"invalid\")\n}\n",
+        "fn main() {\n    _ = real(true)\n}\n",
+        "fn main() {\n    _ = real(nil)\n}\n",
+        "fn main() {\n    _ = imag(\"invalid\")\n}\n",
+        "fn main() {\n    _ = imag(false)\n}\n",
+        "fn main() {\n    _ = imag(nil)\n}\n",
+    ] {
+        let r = check(src);
+        assert_eq!(r.verdict, Verdict::Reject, "expected Reject for {src:?}");
+        assert!(
+            error_codes(&r).contains(&"HYB-E2005".to_string()),
+            "expected HYB-E2005 for {src:?}, got {:?}",
+            r.diagnostics
+        );
+    }
+}
+
+#[test]
+fn complex_invalid_literal_operands_reject_e2005_issue_1765() {
+    for src in [
+        "fn main() {\n    _ = complex(\"a\", \"b\")\n}\n",
+        "fn main() {\n    _ = complex(1.0, \"b\")\n}\n",
+        "fn main() {\n    _ = complex(true, 1.0)\n}\n",
+        "fn main() {\n    _ = complex(1.0, nil)\n}\n",
+        "fn main() {\n    _ = complex(nil, 2.0)\n}\n",
+    ] {
+        let r = check(src);
+        assert_eq!(r.verdict, Verdict::Reject, "expected Reject for {src:?}");
+        assert!(
+            error_codes(&r).contains(&"HYB-E2005".to_string()),
+            "expected HYB-E2005 for {src:?}, got {:?}",
+            r.diagnostics
+        );
+    }
+}
+
+#[test]
+fn min_and_max_nil_or_bool_literal_operands_reject_e2005_issue_1765() {
+    for src in [
+        "fn main() {\n    _ = min(nil)\n}\n",
+        "fn main() {\n    _ = min(1, nil)\n}\n",
+        "fn main() {\n    _ = max(nil)\n}\n",
+        "fn main() {\n    _ = max(1, nil)\n}\n",
+        "fn main() {\n    _ = min(true, false)\n}\n",
+        "fn main() {\n    _ = max(true)\n}\n",
+    ] {
+        let r = check(src);
+        assert_eq!(r.verdict, Verdict::Reject, "expected Reject for {src:?}");
+        assert!(
+            error_codes(&r).contains(&"HYB-E2005".to_string()),
+            "expected HYB-E2005 for {src:?}, got {:?}",
+            r.diagnostics
+        );
+    }
+}
