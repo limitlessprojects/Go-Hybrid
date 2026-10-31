@@ -130,6 +130,19 @@ impl OpKind {
 /// NOTE: open PR #620 introduces this same helper for return-statement
 /// checking. Whichever of the two lands second should drop one copy — the two
 /// are textually identical on purpose.
+/// Integer element types other than `byte`/`uint8`, by their Go or Hybrid names.
+fn is_wide_int_type(ty: &TypeExpr) -> bool {
+    matches!(
+        ty,
+        TypeExpr::Named { name, .. } if matches!(
+            name.as_str(),
+            "int" | "int8" | "int16" | "int32" | "int64" | "uint" | "uint16"
+                | "uint32" | "uint64" | "uintptr" | "rune"
+                | "i8" | "i16" | "i32" | "i64" | "u16" | "u32" | "u64"
+        )
+    )
+}
+
 fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
     use OpKind::*;
     match (want, got) {
@@ -365,6 +378,10 @@ struct Collector<'a> {
     scopes: Vec<HashMap<String, Option<usize>>>,
     /// Parallel lexical scope stack tracking resolved operand kinds (#425).
     kind_scopes: Vec<HashMap<String, OpKind>>,
+    /// Parallel scopes marking locals known to be a slice of a non-byte
+    /// integer type (`[]int`, `[]rune`, ...). `OpKind::Int` merges all integer
+    /// types, so this is what `copy(dst, string)` needs to tell `[]byte` apart.
+    wide_slice_scopes: Vec<HashMap<String, bool>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
     /// Result kinds of the function whose body is currently being walked
@@ -401,6 +418,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             ck,
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
+            wide_slice_scopes: Vec::new(),
             file_consts: HashMap::new(),
             fn_results: Vec::new(),
             fn_results_all_named: false,
@@ -458,11 +476,13 @@ impl<'a> Collector<'a> {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.kind_scopes.push(HashMap::new());
+        self.wide_slice_scopes.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.kind_scopes.pop();
+        self.wide_slice_scopes.pop();
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -479,6 +499,48 @@ impl<'a> Collector<'a> {
             if let Some(top) = self.kind_scopes.last_mut() {
                 top.insert(name.to_string(), kind);
             }
+            if let Some(top) = self.wide_slice_scopes.last_mut() {
+                top.insert(name.to_string(), false);
+            }
+        }
+    }
+
+    fn mark_wide_slice(&mut self, name: &str) {
+        if name != "_" {
+            if let Some(top) = self.wide_slice_scopes.last_mut() {
+                top.insert(name.to_string(), true);
+            }
+        }
+    }
+
+    fn is_wide_slice_name(&self, name: &str) -> bool {
+        for layer in self.wide_slice_scopes.iter().rev() {
+            if let Some(w) = layer.get(name) {
+                return *w;
+            }
+        }
+        false
+    }
+
+    /// True when `e` is provably a slice whose element is a non-byte integer
+    /// type. Fail-open (false) for anything the checker cannot see through.
+    fn is_wide_int_slice_expr(&self, e: &Expr) -> bool {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.is_wide_slice_name(name),
+            Expr::Slice { base, .. } => self.is_wide_int_slice_expr(base),
+            lit @ Expr::SliceLit { elem: Some(t), .. } => {
+                lit.as_array_lit().is_none() && is_wide_int_type(t)
+            }
+            Expr::Call { callee, args, .. } => match unwrap_parens(callee) {
+                conv @ Expr::SliceLit { elem: Some(t), .. } => {
+                    conv.as_array_lit().is_none() && is_wide_int_type(t)
+                }
+                Expr::Ident { name, .. } if name == "make" => args
+                    .first()
+                    .is_some_and(|a| self.is_wide_int_slice_expr(&a.value)),
+                _ => false,
+            },
+            _ => false,
         }
     }
 
@@ -745,6 +807,9 @@ impl<'a> Collector<'a> {
             self.exempt(&p.name);
             let pk = self.kind_of_ty(&p.ty, 0);
             self.bind_kind(&p.name, pk);
+            if matches!(&p.ty, TypeExpr::Slice { elem, .. } if is_wide_int_type(elem)) {
+                self.mark_wide_slice(&p.name);
+            }
         }
         for r in &f.results {
             if let Some(rname) = &r.name {
@@ -894,8 +959,18 @@ impl<'a> Collector<'a> {
         // tracking; #430's operand-kind inference runs for EVERY name so
         // `kind_of_expr` resolves binding-shaped operands (issue #425).
         let kinds = self.infer_local_kinds(l);
-        for (name, kind) in l.names.iter().zip(kinds) {
+        for (i, (name, kind)) in l.names.iter().zip(kinds).enumerate() {
             self.bind_kind(name, kind);
+            let wide = match &l.ty {
+                Some(t) => matches!(t, TypeExpr::Slice { elem, .. } if is_wide_int_type(elem)),
+                None => {
+                    l.values.len() == l.names.len()
+                        && self.is_wide_int_slice_expr(&l.values[i])
+                }
+            };
+            if wide {
+                self.mark_wide_slice(name);
+            }
             if !track_read {
                 self.exempt(name);
                 continue;
@@ -1488,6 +1563,9 @@ impl<'a> Collector<'a> {
                     self.exempt(&p.name);
                     let pk = self.kind_of_ty(&p.ty, 0);
                     self.bind_kind(&p.name, pk);
+                    if matches!(&p.ty, TypeExpr::Slice { elem, .. } if is_wide_int_type(elem)) {
+                        self.mark_wide_slice(&p.name);
+                    }
                 }
                 for r in results {
                     if let Some(rname) = &r.name {
@@ -4399,7 +4477,9 @@ impl<'a> Collector<'a> {
                         }
                     }
                     (OpKind::Slice(dst_elem), OpKind::Str) => {
-                        if !matches!(**dst_elem, OpKind::Unknown | OpKind::Int) {
+                        if !matches!(**dst_elem, OpKind::Unknown | OpKind::Int)
+                            || self.is_wide_int_slice_expr(dst_arg)
+                        {
                             self.emit_e1002(
                                 span,
                                 format!(
