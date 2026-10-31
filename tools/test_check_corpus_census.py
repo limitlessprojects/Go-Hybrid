@@ -180,6 +180,42 @@ class FailClosedTests(_ProblemsMixin, unittest.TestCase):
         self.assertEqual(len(hits), 1)
         self.assertIn("no corpus count found", hits[0])
 
+    def test_malformed_verdict_headers_are_reported_not_counted(self):
+        """ACCEPT-UNKNOWN, ACCEPT junk, and REJECT without a rule must be rejected."""
+        for malformed in ["ACCEPT-UNKNOWN", "ACCEPT junk", "REJECT"]:
+            with self.subTest(header=malformed):
+                files = consistent_tree()
+                files["tests/checker-corpus/f00.hy"] = f"// EXPECTED-VERDICT: {malformed}\nfn main() {{}}\n"
+                tmp, root = make_tree(files)
+                self.addCleanup(tmp.cleanup)
+                problems, total, counts = MOD.collect_problems(root)
+                self.assertTrue(any("corpus error" in p for p in problems), f"expected error for {malformed}, got {problems}")
+                self.assertEqual(counts.get("INVALID", 0), 1)
+
+    def test_duplicate_verdict_headers_are_reported(self):
+        """Duplicate EXPECTED-VERDICT headers in the same file must be rejected."""
+        files = consistent_tree()
+        files["tests/checker-corpus/f00.hy"] = (
+            "// EXPECTED-VERDICT: ACCEPT\n"
+            "// EXPECTED-VERDICT: REJECT A1c\n"
+            "fn main() {}\n"
+        )
+        tmp, root = make_tree(files)
+        self.addCleanup(tmp.cleanup)
+        problems, total, counts = MOD.collect_problems(root)
+        self.assertTrue(any("multiple EXPECTED-VERDICT headers" in p for p in problems))
+        self.assertEqual(counts.get("INVALID", 0), 1)
+
+    def test_indented_valid_verdict_header_is_accepted(self):
+        """A valid verdict header with leading whitespace is accepted (parity with corpus_harness)."""
+        files = consistent_tree()
+        files["tests/checker-corpus/f00.hy"] = "   // EXPECTED-VERDICT: ACCEPT\nfn main() {}\n"
+        tmp, root = make_tree(files)
+        self.addCleanup(tmp.cleanup)
+        problems, total, counts = MOD.collect_problems(root)
+        self.assertEqual(problems, [])
+        self.assertEqual(counts["ACCEPT"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

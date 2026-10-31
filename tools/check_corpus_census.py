@@ -33,12 +33,17 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+TOOLS_DIR = Path(__file__).resolve().parent
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
+
+try:
+    from corpus_harness import read_expected
+except ImportError:
+    from tools.corpus_harness import read_expected
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CORPUS_REL = Path("tests") / "checker-corpus"
-
-VERDICT_RE = re.compile(
-    r"^//\s*EXPECTED-VERDICT:\s*(ACCEPT-MANAGED|ACCEPT|REJECT)\b", re.M
-)
 
 # (path, regex with one capture group holding the claimed total, what it is)
 TOTAL_SURFACES: list[tuple[str, str, str]] = [
@@ -83,14 +88,22 @@ README_BREAKDOWN = (
 )
 
 
-def census(corpus_dir: Path) -> tuple[int, Counter]:
+def census(corpus_dir: Path, errors: list[str] | None = None) -> tuple[int, Counter]:
     """The truth: derived from the corpus files, never from another claim."""
     files = sorted(corpus_dir.glob("*.hy"))
     counts: Counter = Counter()
     for path in files:
-        text = path.read_text(encoding="utf-8")
-        match = VERDICT_RE.search(text)
-        counts[match.group(1) if match else "NO-VERDICT"] += 1
+        try:
+            expected = read_expected(str(path))
+            if expected is None:
+                counts["NO-VERDICT"] += 1
+            else:
+                verdict, _ = expected
+                counts[verdict] += 1
+        except ValueError as err:
+            counts["INVALID"] += 1
+            if errors is not None:
+                errors.append(str(err))
     return len(files), counts
 
 
@@ -149,11 +162,12 @@ def collect_problems(root: Path) -> tuple[list[str], int, Counter]:
     if not corpus_dir.is_dir():
         return [f"no corpus directory at {corpus_dir}"], 0, Counter()
 
-    total, counts = census(corpus_dir)
+    errors: list[str] = []
+    total, counts = census(corpus_dir, errors=errors)
     if total == 0:
         return ["the corpus is empty; refusing to certify a count"], 0, counts
 
-    problems = check_total_surfaces(root, total) + check_breakdown(root, total, counts)
+    problems = errors + check_total_surfaces(root, total) + check_breakdown(root, total, counts)
     no_verdict = counts.get("NO-VERDICT", 0)
     if no_verdict:
         problems.append(
