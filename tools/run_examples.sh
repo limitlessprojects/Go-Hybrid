@@ -8,6 +8,7 @@
 # built as `cat` so the <prog>: prefix matches the pinned expected output).
 #
 # Usage: tools/run_examples.sh [01 02 03]   (default: all emittable)
+# Full directory names (e.g. 01-hello) are also accepted.
 # Exit:  0 = all green, 1 = any mismatch.
 set -uo pipefail
 
@@ -175,11 +176,21 @@ run_example() {
     esac
 }
 
+EXAMPLES=(01-hello 02-cli-cat 03-worker-pool 04-pipeline-backpressure 05-json-transform 06-http-server 07-lru-generics 08-graph-ownership 09-go-imports-hybrid 10-rust-crate-import)
+
 if [ $# -eq 0 ]; then
-    set -- 01-hello 02-cli-cat 03-worker-pool 04-pipeline-backpressure 05-json-transform 06-http-server 07-lru-generics 08-graph-ownership 09-go-imports-hybrid 10-rust-crate-import
+    set -- "${EXAMPLES[@]}"
 fi
 
 for name in "$@"; do
+    # Resolve only the documented two-digit selectors, not arbitrary prefixes
+    # or globs. Keep full names and invalid selections on their existing path.
+    for example in "${EXAMPLES[@]}"; do
+        if [ "$name" = "${example%%-*}" ]; then
+            name="$example"
+            break
+        fi
+    done
     dir="$ROOT/examples/$name"
     if [ ! -f "$dir/program.hy" ]; then
         note "FAIL $name (no program.hy at $dir)"
