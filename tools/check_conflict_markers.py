@@ -57,7 +57,7 @@ WORKFLOW_DIR = os.path.join(".github", "workflows")
 WORKFLOW_EXTS = {".yml", ".yaml"}
 WORKFLOW_EXT = ".yml"
 TOP_LEVEL_KEY_RE = re.compile(
-    r"^(?:[A-Za-z_][A-Za-z0-9_.\-]*|'[^'\n]+'|\"[^\"\n]+\")\s*:"
+    r"^(?:[A-Za-z_][A-Za-z0-9_.\-]*|'[^'\n]+'|\"[^\"\n]+\")\s*:(?=[ \t]|$)"
 )
 
 
