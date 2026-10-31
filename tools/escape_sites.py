@@ -14,33 +14,44 @@ Scanning rules (post-fix, 2026-10-31):
     position-preserving pass BEFORE any structural scanning, so a `//`
     inside a string (URLs) or a `{`/`}` inside an interpolation string
     can no longer unbalance the brace/paren walks.
+  - Closures with optional return types (`fn() int { ... }`,
+    `fn() (int, error) { ... }`) are recognized while bare `fn(...)` type
+    annotations without a body block are skipped.
   - Closures nested inside other closures are scanned (the scan resumes
     inside each body after processing it); every `fn` is processed once,
-    outermost first.
-  - `x :=` inside a closure body is a LOCAL DECLARATION, not a write to
-    an enclosing binding — it is not a capture. Capture-writes are the
-    forms that necessarily reference an existing binding: `x =`, `x +=`,
-    `x -=`, `x++`, `x--`.
+    outermost first, with nested closure bodies masked while extracting
+    writes for the enclosing closure.
+  - Closure parameters and closure-local declarations (`:=`, `var`, `let`,
+    `const`) are tracked per closure and excluded from outer capture-writes.
+  - Capture-writes cover plain, multi-LHS, compound (`+=`, `-=`, `*=`, `/=`,
+    `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`), and inc/dec (`++`, `--`) mutations,
+    attributing field/index place writes (`state.hits++`, `counts["k"] += 1`)
+    to the root binding (`state`, `counts`).
   - The foreign-call boundary is the OUTERMOST qualified (pkg.fn) call on
     the enclosing-paren chain: in
     `mux.handle("/ping", http.handler(fn(...) {...}))` the closure
     escapes through `mux.handle`, so that is the reported call.
 
-Known M1 limitation (documented, not hidden): the capture set of an
-outer closure includes writes performed by closures nested inside it
-when the outer closure is itself foreign-enclosed. The two kill-criteria
-files below do not exercise that shape; M3 (the checker) must tighten it.
-
 Usage:
     python tools/escape_sites.py <file.hy>
+    python tools/escape_sites.py --self-test
 
 M1 kill criteria:
   - examples/06-http-server/program.hy must yield exactly 0 triples
   - tests/checker-corpus/10-a5-http-handler-capture.hy must yield exactly 1 triple
 """
 
+import json
+from pathlib import Path
 import re
 import sys
+
+KEYWORDS = {
+    "fn", "var", "let", "const", "type", "struct", "interface", "return",
+    "if", "else", "for", "range", "match", "select", "case", "default",
+    "break", "continue", "defer", "task", "move", "true", "false", "nil",
+    "none", "some", "ok", "err", "_",
+}
 
 
 def mask_comments_and_strings(src: str) -> str:
@@ -115,16 +126,186 @@ def _qualified_callee_before_paren(clean_src: str, open_idx: int):
     return None
 
 
+def _find_closure_body_open(clean_src: str, after_params_idx: int) -> int:
+    """Locate the opening '{' of a closure body after its parameter list `(...)`.
+
+    Accepts optional return type annotations (`int`, `(int, error)`, `[]byte`,
+    `map[string]int`, `*pkg.Type`, etc.) between `)` and `{`. Returns -1 when
+    the `fn(...)` is a type signature without a body block.
+    """
+    n = len(clean_src)
+    k = after_params_idx
+    paren_depth = 0
+    bracket_depth = 0
+    while k < n:
+        c = clean_src[k]
+        if paren_depth == 0 and bracket_depth == 0:
+            if c == '{':
+                return k
+            if c in ' \t\r\n':
+                k += 1
+                continue
+            if c == '(':
+                paren_depth += 1
+                k += 1
+                continue
+            if c == '[':
+                bracket_depth += 1
+                k += 1
+                continue
+            if c.isalnum() or c in '_.*,':
+                k += 1
+                continue
+            return -1
+        else:
+            if c == '(':
+                paren_depth += 1
+            elif c == ')':
+                paren_depth -= 1
+            elif c == '[':
+                bracket_depth += 1
+            elif c == ']':
+                bracket_depth -= 1
+            elif c == '{':
+                return -1
+            k += 1
+    return -1
+
+
+def _extract_param_names(params_src: str) -> set:
+    """Extract parameter binding names from inside `fn(...)`."""
+    chars = list(params_src)
+    paren_depth = 0
+    bracket_depth = 0
+    for idx, c in enumerate(chars):
+        if c == '(':
+            paren_depth += 1
+            chars[idx] = ' '
+        elif c == ')':
+            paren_depth = max(0, paren_depth - 1)
+            chars[idx] = ' '
+        elif c == '[':
+            bracket_depth += 1
+            chars[idx] = ' '
+        elif c == ']':
+            bracket_depth = max(0, bracket_depth - 1)
+            chars[idx] = ' '
+        elif paren_depth > 0 or bracket_depth > 0:
+            chars[idx] = ' '
+    flat = ''.join(chars)
+    names = set()
+    for part in flat.split(','):
+        tokens = re.findall(r'[a-zA-Z_]\w*', part)
+        if tokens and tokens[0] not in KEYWORDS:
+            names.add(tokens[0])
+    return names
+
+
+def _mask_nested_closures(body_src: str) -> str:
+    """Blank nested `fn(...) ... { ... }` literals inside `body_src`."""
+    out = list(body_src)
+    n = len(body_src)
+    i = 0
+    while i < n:
+        fn_idx = body_src.find('fn', i)
+        if fn_idx == -1:
+            break
+        if fn_idx > 0 and (body_src[fn_idx - 1].isalnum() or body_src[fn_idx - 1] == '_'):
+            i = fn_idx + 2
+            continue
+        if fn_idx + 2 >= n or body_src[fn_idx + 2] != '(':
+            i = fn_idx + 2
+            continue
+        depth = 1
+        j = fn_idx + 3
+        while j < n and depth > 0:
+            if body_src[j] == '(':
+                depth += 1
+            elif body_src[j] == ')':
+                depth -= 1
+            j += 1
+        if depth != 0:
+            i = fn_idx + 2
+            continue
+        b_start = _find_closure_body_open(body_src, j)
+        if b_start == -1:
+            i = j
+            continue
+        b_depth = 1
+        b_end = b_start + 1
+        while b_end < n and b_depth > 0:
+            if body_src[b_end] == '{':
+                b_depth += 1
+            elif body_src[b_end] == '}':
+                b_depth -= 1
+            b_end += 1
+        if b_depth != 0:
+            i = j
+            continue
+        for k in range(fn_idx, b_end):
+            if out[k] != '\n':
+                out[k] = ' '
+        i = b_end
+    return ''.join(out)
+
+
+def _extract_closure_writes(params_src: str, body_src: str) -> set:
+    """Return outer variables mutated inside `body_src` (excluding locals/params)."""
+    own_body = _mask_nested_closures(body_src)
+    locals_set = _extract_param_names(params_src)
+
+    # Short declarations: `x := ...`, `a, b := ...`, `for i, v := range ...`
+    for m in re.finditer(r'([a-zA-Z_]\w*(?:\s*,\s*[a-zA-Z_]\w*)*)\s*:=', own_body):
+        for ident in re.findall(r'[a-zA-Z_]\w*', m.group(1)):
+            if ident not in KEYWORDS:
+                locals_set.add(ident)
+
+    # `var` / `let` / `const` declarations: record declared names and blank the
+    # declaration LHS through `=` so `var x int = 1` does not trigger a write on `int`.
+    body_chars = list(own_body)
+    decl_pat = re.compile(
+        r'\b(?:var|let|const)\s+([a-zA-Z_]\w*(?:\s*,\s*[a-zA-Z_]\w*)*)([^\n;=]*=\s*(?!=))?'
+    )
+    for m in decl_pat.finditer(own_body):
+        for ident in re.findall(r'[a-zA-Z_]\w*', m.group(1)):
+            if ident not in KEYWORDS:
+                locals_set.add(ident)
+        for k in range(m.start(), m.end()):
+            if body_chars[k] != '\n':
+                body_chars[k] = ' '
+    scan_body = ''.join(body_chars)
+
+    place_pat = r'(?<![.\w])([a-zA-Z_]\w*)(?:(?:\.[a-zA-Z_]\w*)|(?:\[[^\]]*\]))*'
+    writes = set()
+
+    # Increment / decrement: `x++`, `x--`, `state.hits++`, `counts["k"]--`
+    for m in re.finditer(place_pat + r'\s*(?:\+\+|--)', scan_body):
+        writes.add(m.group(1))
+
+    # Compound assignments: `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`
+    for m in re.finditer(
+        place_pat + r'\s*(?:\+=|-=|\*=|/=|%=|&=|\|=|\^=|<<=|>>=)(?!=)',
+        scan_body,
+    ):
+        writes.add(m.group(1))
+
+    # Plain assignments (single or multi-LHS): `x = 1`, `state.hits = 1`, `a, b = 1, 2`
+    lhs_item = r'(?<![.\w])[a-zA-Z_]\w*(?:(?:\.[a-zA-Z_]\w*)|(?:\[[^\]]*\]))*'
+    multi_assign_pat = re.compile(
+        r'(' + lhs_item + r'(?:\s*,\s*' + lhs_item + r')*)\s*(?<![:!<>+\-*/%&|^=])=\s*(?!=)'
+    )
+    for m in multi_assign_pat.finditer(scan_body):
+        lhs_list = m.group(1)
+        for item in lhs_list.split(','):
+            root_match = re.match(r'\s*([a-zA-Z_]\w*)', item)
+            if root_match:
+                writes.add(root_match.group(1))
+
+    return {w for w in writes if w not in locals_set and w not in KEYWORDS}
+
+
 def find_escape_sites(src: str) -> list:
     """Find capture-write-at-foreign-call triples in .hy source.
-
-    We use a lightweight recursive-descent scan over brace/paren structure
-    to find fn(...) closures that:
-      (a) contain a write to a variable defined outside the closure
-          (`x =`, `x +=`, `x -=`, `x++`, `x--` — `x :=` declares a local
-          and is deliberately NOT a capture), and
-      (b) are passed as an argument to a call on a qualified name (pkg.fn)
-          — the outermost qualified call on the enclosing chain is reported.
 
     Returns list of dicts: {'capture': str, 'closure_line': int, 'foreign_call': str}
     """
@@ -132,18 +313,14 @@ def find_escape_sites(src: str) -> list:
 
     triples = []
 
-    # Find all `fn(` closures — look for `fn(` followed by paren-matching
     i = 0
     while i < len(clean_src):
-        # Find next 'fn'
         fn_idx = clean_src.find('fn', i)
         if fn_idx == -1:
             break
-        # Check it's a keyword, not part of another word
         if fn_idx > 0 and (clean_src[fn_idx - 1].isalnum() or clean_src[fn_idx - 1] == '_'):
             i = fn_idx + 2
             continue
-        # Check next char is '('
         if fn_idx + 2 >= len(clean_src) or clean_src[fn_idx + 2] != '(':
             i = fn_idx + 2
             continue
@@ -162,12 +339,8 @@ def find_escape_sites(src: str) -> list:
             i = fn_idx + 2
             continue
 
-        # Now we have fn(...) from fn_idx to j (exclusive of closing paren at j-1)
-        # Find the body: after the parameter list parens, there should be '{'
-        body_start = j
-        while body_start < len(clean_src) and clean_src[body_start] in ' \t\n':
-            body_start += 1
-        if body_start >= len(clean_src) or clean_src[body_start] != '{':
+        body_start = _find_closure_body_open(clean_src, j)
+        if body_start == -1:
             i = j
             continue
 
@@ -185,33 +358,12 @@ def find_escape_sites(src: str) -> list:
             i = j
             continue
 
+        params_src = clean_src[fn_idx + 3:j - 1]
         body = clean_src[body_start + 1:body_end - 1]
+        captures = _extract_closure_writes(params_src, body)
 
-        # Find captured variables written in the body.
-        # A capture-write necessarily references an EXISTING binding:
-        #   x = ...   (plain assignment; == excluded)
-        #   x += ...  / x -= ...
-        #   x++       / x--
-        # `x :=` is a short DEFINE — it declares a new local inside the
-        # closure and is deliberately not treated as a capture-write.
-        captures = set()
-
-        for m in re.finditer(r'\b([a-zA-Z_]\w*)\s*\+=', body):
-            captures.add(m.group(1))
-        for m in re.finditer(r'\b([a-zA-Z_]\w*)\s*-=(?!=)', body):
-            captures.add(m.group(1))
-        for m in re.finditer(r'\b([a-zA-Z_]\w*)\s*\+\+', body):
-            captures.add(m.group(1))
-        for m in re.finditer(r'\b([a-zA-Z_]\w*)\s*--', body):
-            captures.add(m.group(1))
-        for m in re.finditer(r'\b([a-zA-Z_]\w*)\s*=\s*(?!=)', body):
-            captures.add(m.group(1))
-
-        # Check if this closure is passed to a foreign call.
         # Walk the enclosing-paren chain outward; the OUTERMOST qualified
-        # (pkg.fn) callee on the chain is the reported boundary:
-        #   mux.handle("/ping", http.handler(fn(...) {...}))
-        #   -> chain calees: http.handler, mux.handle -> reports mux.handle.
+        # (pkg.fn) callee on the chain is the reported boundary.
         foreign_call = None
         pos = fn_idx
         while True:
@@ -231,7 +383,7 @@ def find_escape_sites(src: str) -> list:
                 break
             callee = _qualified_callee_before_paren(clean_src, last_open)
             if callee:
-                foreign_call = callee  # keep walking; outermost qualified wins
+                foreign_call = callee
             pos = last_open
 
         if captures and foreign_call:
@@ -243,12 +395,36 @@ def find_escape_sites(src: str) -> list:
                     'foreign_call': foreign_call,
                 })
 
-        # Resume INSIDE the body so closures nested in this one are scanned
-        # too; each `fn` keyword is still processed exactly once because the
-        # scan position always advances past the current fn's header.
+        # Resume INSIDE the body so closures nested in this one are scanned too.
         i = body_start + 1
 
     return triples
+
+
+def run_self_test() -> int:
+    repo_root = Path(__file__).resolve().parent.parent
+    cases_path = Path(__file__).resolve().parent / "tests" / "escape_sites_cases.json"
+    spec = json.loads(cases_path.read_text(encoding="utf-8"))
+    for case in spec["cases"]:
+        if "file" in case:
+            src = (repo_root / case["file"]).read_text(encoding="utf-8")
+        else:
+            src = case["source"]
+        triples = find_escape_sites(src)
+        if len(triples) != case["expected_count"]:
+            print(
+                f"FAIL {case['name']}: expected {case['expected_count']} triples, got {triples}",
+                file=sys.stderr,
+            )
+            return 1
+        if "expected_triples" in case and triples != case["expected_triples"]:
+            print(
+                f"FAIL {case['name']}: expected {case['expected_triples']}, got {triples}",
+                file=sys.stderr,
+            )
+            return 1
+    print(f"OK: {len(spec['cases'])} escape_sites cases passed")
+    return 0
 
 
 def main():
@@ -256,8 +432,11 @@ def main():
         print("Usage: python escape_sites.py <file.hy>", file=sys.stderr)
         sys.exit(1)
 
+    if sys.argv[1] == "--self-test":
+        sys.exit(run_self_test())
+
     filepath = sys.argv[1]
-    with open(filepath, 'r') as f:
+    with open(filepath, 'r', encoding='utf-8') as f:
         src = f.read()
 
     triples = find_escape_sites(src)
