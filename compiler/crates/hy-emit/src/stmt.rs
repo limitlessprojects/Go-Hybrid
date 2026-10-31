@@ -2826,7 +2826,8 @@ impl Emitter {
         Ok(())
     }
 
-    /// Leading identifier of a rendered loan place (`m["a"]` -> `m`, `h.m[k]` -> `h`).
+    /// Leading identifier of a rendered loan place (`m["a"]` -> `m`, `h.m[k]` -> `h`, `(m)["a"]` -> `m`).
+    /// Issue #2064: strip leading '(' so parenthesized loan bases correctly expose their root identifier.
     fn place_root(place: &str) -> &str {
         let place = place.trim_start_matches('(');
         let end = place
