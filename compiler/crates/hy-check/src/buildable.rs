@@ -1106,6 +1106,9 @@ impl<'a> Collector<'a> {
                         self.check_method_arity(&bk, name, args, *span);
                         self.check_method_arg_types(&bk, name, args);
                     }
+                    // #1877: `task (fn(x int) {})(1)` is checked like the
+                    // ordinary call form.
+                    Expr::FnLit { params, .. } => self.check_fnlit_call(params, args, *span),
                     _ => {}
                 }
             }
@@ -2441,6 +2444,31 @@ impl<'a> Collector<'a> {
             msg,
             "a call must pass one argument per declared parameter; the emitted Go call is rejected at build time",
         );
+    }
+
+    /// #1877 — an immediately-invoked function literal (`(fn(x int) {})(1)`)
+    /// carries its parameter list, so arity and argument types are checkable
+    /// exactly like a named function's.
+    fn check_fnlit_call(&mut self, params: &[Param], args: &[CallArg], span: Span) {
+        if params.len() != args.len() {
+            self.report_local_arity("a function literal", params.len(), args.len(), span);
+            return;
+        }
+        for (p, a) in params.iter().zip(args.iter()) {
+            let want = self.kind_of_ty(&p.ty, 0);
+            let got = self.kind_of_expr(&a.value);
+            if kinds_conflict(&want, &got) {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use a value of type `{}` as `{}` in a call to a function literal (HYB-E1002)",
+                        got.label(),
+                        want.label()
+                    ),
+                    "the closure's parameter type is fixed; write an explicit conversion when one is intended",
+                );
+            }
+        }
     }
 
     /// #577 C9 — method calls (`x.bump(k)`) declare their receiver
@@ -4023,6 +4051,9 @@ impl<'a> Collector<'a> {
                     self.check_method_arg_types(&bk, name, args);
                 }
             }
+            // #1877: the literal's own parameter list is available here, so
+            // the arity and argument types are checkable.
+            Expr::FnLit { params, .. } => self.check_fnlit_call(params, args, span),
             _ => {
                 let ck = self.kind_of_expr(bare);
                 if !matches!(ck, OpKind::Unknown | OpKind::Fn(..)) {
