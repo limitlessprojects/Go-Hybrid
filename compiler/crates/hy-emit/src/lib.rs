@@ -586,6 +586,11 @@ pub struct Emitter {
     /// The current (non-main) fn's per-result RETURN texts when its results
     /// end in `error` — E3 propagates via `return <zeros…, err>`.
     cur_fn_error_returns: Option<Vec<String>>,
+    /// Names assigned inside any closure literal of the current fn (#2386):
+    /// a call can run such a closure mid-statement-list, so a statement scan
+    /// cannot see the write. An O8 slot loan keyed by one of these names
+    /// always snapshots its key.
+    closure_written: BTreeSet<String>,
     /// Per-fn result shapes, collected eagerly (Batch I): name →
     /// (n_results, ends_in_error, first_result's binding kind, per-param
     /// pointer-base types). Drives the `?` hoist arity (13:
@@ -650,6 +655,7 @@ impl Emitter {
             binding_prefix: "hybrid.program".to_string(),
             export_pub: false,
             cur_fn_error_returns: None,
+            closure_written: BTreeSet::new(),
             fn_shapes: BTreeMap::new(),
             struct_fields: BTreeMap::new(),
             var_struct: BTreeMap::new(),
@@ -1323,6 +1329,10 @@ impl Emitter {
         // E3 in an error-result fn (package mode, example 09): the
         // propagation tail returns the zero results + the error.
         self.cur_fn_error_returns = None;
+        self.closure_written.clear();
+        if let Some(body) = &f.body {
+            Self::collect_closure_writes_block(body, false, &mut self.closure_written);
+        }
         if !is_main && !f.results.is_empty() && !main_needs_wrapper {
             let last_is_err = matches!(
                 &f.results.last().unwrap().ty,
