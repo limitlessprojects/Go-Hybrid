@@ -24,7 +24,8 @@ HYB = ROOT / "compiler" / "target" / "debug" / "hyb"
 
 
 def claims_rows() -> dict[int, dict]:
-    return gate.claim_rows(json.loads((ROOT / "guarantees.json").read_text()))
+    claims, _ = gate.load_claims(ROOT, "guarantees.json", "spikes/w2220-guarantees-as-code/m2_overrides.json")
+    return gate.claim_rows(claims)
 
 
 def policy() -> dict:
@@ -82,6 +83,34 @@ class DemotionStateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             gate.claim_rows({"rows": []})
 
+    def test_overlay_adds_fixtures_without_mutating_source(self):
+        source = {"rows": [{"id": 14, "strength": "no-claim", "claim": "x"}]}
+        overlay = {"fixtures": {"14": [{"path": "fixture.hy", "expect": "reject"}]}}
+        merged = gate.apply_overrides(source, overlay)
+        self.assertEqual(merged["rows"][0]["fixtures"], overlay["fixtures"]["14"])
+        self.assertNotIn("fixtures", source["rows"][0])
+
+    def test_overlay_naming_an_unknown_row_is_an_error(self):
+        source = {"rows": [{"id": 1, "strength": "guaranteed", "claim": "x"}]}
+        with self.assertRaises(ValueError):
+            gate.apply_overrides(source, {"fixtures": {"14": []}})
+
+    def test_coverage_wall_is_twelve_not_executable(self):
+        states = {}
+        for rid in range(1, 21):
+            status = "executable" if rid <= 8 else "prose-only"
+            states[rid] = {"status": status}
+        summary = gate.coverage_summary(states)
+        self.assertEqual(summary["executable"], 8)
+        self.assertEqual(summary["not_executable"], 12)
+        self.assertTrue(summary["wall"])
+
+    def test_coverage_wall_is_not_hit_below_twelve(self):
+        states = {rid: {"status": "executable" if rid <= 9 else "prose-only"} for rid in range(1, 21)}
+        summary = gate.coverage_summary(states)
+        self.assertEqual(summary["not_executable"], 11)
+        self.assertFalse(summary["wall"])
+
 
 class RenderTests(unittest.TestCase):
     def test_render_shows_every_state(self):
@@ -111,11 +140,18 @@ class IntegrationTests(unittest.TestCase):
         rows = claims_rows()
         self.assertEqual(len(rows), 20)
         pol = policy()
-        states, problems = gate.check_structure(rows, pol)
+        states, problems = gate.check_structure(rows, pol, ROOT)
         self.assertEqual(problems, [], problems)
-        self.assertEqual(states[1]["status"], "executable")
-        self.assertEqual(states[8]["status"], "executable")
-        self.assertEqual(states[16]["status"], "executable")
+        executable = {rid for rid, state in states.items() if state["status"] == "executable"}
+        self.assertEqual(
+            executable,
+            {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 15, 16, 18, 19, 20},
+        )
+        prose_only = {rid for rid, state in states.items() if state["status"] == "prose-only"}
+        self.assertEqual(prose_only, {12, 13, 17})
+        summary = gate.coverage_summary(states)
+        self.assertEqual(summary["not_executable"], 3)
+        self.assertFalse(summary["wall"])
         self.assertEqual(gate.self_test(rows, pol, str(HYB), "go", ROOT), 0)
 
 

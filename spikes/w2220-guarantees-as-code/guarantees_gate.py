@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""guarantees_gate.py — W-2220 M1: execute the claims table, not just render it.
+"""guarantees_gate.py — W-2220: execute the claims table, not just render it.
 
 `tools/check_guarantees.py` (issue #710) made `guarantees.json` the source of
 the GUARANTEES.md table and `tools/check_claims_links.py` (#2221) verified its
@@ -8,19 +8,22 @@ citations. This spike adds the missing half of the W-2220 proposal:
 1. **Verifier kinds.** A row's evidence is a typed verifier that the gate
    executes: `corpus_pair` (run the checker on the accept/reject pair),
    `run_gate` (run `tools/managed_gate.py`, including a new-block rejection
-   probe), and `runtime_pin` (build the emitted Go and pin a runtime panic
-   under `-race`).
+   probe), `runtime_pin` (build the emitted Go and pin a runtime panic under
+   `-race`), `test_suite` (run a focused suite and check a static invariant),
+   and `benchmark` (run a measured bench and require its PASS verdict).
 2. **Demotion state machine.** A row is `executable` only while its verifier
    passes. `prose-only` requires an owner, an expiry, and a debt ticket; an
    expired row renders as **demoted to no claim**, never as prose that still
    reads like a guarantee.
 3. **Seeded-mutation self-test.** `--self-test` mutates the registry/policy in
-   five ways and fails unless every mutation is caught. A gate that cannot
+   eight ways and fails unless every mutation is caught. A gate that cannot
    fail is not a gate.
 
-M1 scope is rows 1, 8 and 16 (guaranteed / managed gate / negative falsifier).
-Rows without a policy entry render as `unregistered (M1 out of scope)` rather
-than silently inheriting a claim.
+M1 scope was rows 1, 8 and 16. M2 applies the production registry to **all 20
+rows** through `m2_overrides.json` (spike-local fixtures only; production files
+are untouched) and publishes the coverage table: which rows became executable,
+which are prose-only with an expiry and why, and whether the pre-registered
+wall (>=12 rows not executable) was hit.
 
 Usage:
     python3 spikes/w2220-guarantees-as-code/guarantees_gate.py
@@ -29,7 +32,7 @@ Usage:
     python3 spikes/w2220-guarantees-as-code/guarantees_gate.py \
         --hyb compiler/target/debug/hyb --go go
 
-Exit codes: 0 = every executable row verified and the rendered table matches;
+Exit codes: 0 = every executable row verified and both rendered tables match;
 1 = a violation or a caught self-test mutation; 2 = CLI misuse.
 """
 
@@ -39,21 +42,43 @@ import argparse
 import copy
 import datetime
 import json
+import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 SPIKE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SPIKE_DIR.parents[1]
 
 M1_REQUIRED = {1: "corpus_pair", 8: "run_gate", 16: "runtime_pin"}
-ALLOWED_KINDS = {"corpus_pair", "run_gate", "runtime_pin", "argument"}
-EXECUTABLE_KINDS = {"corpus_pair", "run_gate", "runtime_pin"}
+M2_REQUIRED = set(range(1, 21))
+WALL_THRESHOLD = 12
+ALLOWED_KINDS = {
+    "corpus_pair",
+    "run_gate",
+    "runtime_pin",
+    "test_suite",
+    "benchmark",
+    "argument",
+}
+EXECUTABLE_KINDS = {
+    "corpus_pair",
+    "run_gate",
+    "runtime_pin",
+    "test_suite",
+    "benchmark",
+}
 EXPECT_TO_OBSERVED = {"reject": "REJECT", "accept": "ACCEPT", "accept-managed": "ACCEPT"}
 
 PROSE_PREFIX = "**No claim (prose-only)**"
 DEMOTED_PREFIX = "**Demoted to no claim**"
+UNREGISTERED_CLAIM = "unregistered (no policy entry)"
+COVERAGE_HEADER = (
+    "| Row | Surface | Strength | State | Verifier | Why this verifier / why not executable | "
+    "Owner · expiry/debt |"
+)
 
 
 def utc_today() -> datetime.date:
@@ -81,6 +106,43 @@ def claim_rows(claims: dict) -> dict[int, dict]:
     return {int(row["id"]): row for row in raw}
 
 
+def apply_overrides(claims: dict, overlay: dict | None) -> dict:
+    """Return a copy of the registry with M2's spike-local fixture additions.
+
+    The production `guarantees.json` is never edited: M2 only adds fixtures
+    where the registry has none yet (rows 14/15), so the coverage table can
+    distinguish "no executable evidence exists" from "evidence exists but the
+    production migration has not happened".
+    """
+    merged = copy.deepcopy(claims)
+    if not overlay:
+        return merged
+    by_id = {int(row["id"]): row for row in merged.get("rows", [])}
+    for rid_s, fixtures in (overlay.get("fixtures") or {}).items():
+        row = by_id.get(int(rid_s))
+        if row is None:
+            raise ValueError(f"overlay names row {rid_s}, which is not in the registry")
+        row["fixtures"] = copy.deepcopy(fixtures)
+    return merged
+
+
+def load_claims(root: Path, claims_rel: str, overlay_rel: str | None) -> tuple[dict, dict | None]:
+    claims = load_json(root / claims_rel)
+    overlay = None
+    if overlay_rel:
+        overlay_path = root / overlay_rel
+        if overlay_path.exists():
+            overlay = load_json(overlay_path)
+    return apply_overrides(claims, overlay), overlay
+
+
+def substitute(cmd: list[str], hyb: str, go_bin: str) -> list[str]:
+    return [
+        str(part).replace("{hyb}", hyb).replace("{go}", go_bin)
+        for part in cmd
+    ]
+
+
 def verifier_label(verifier: dict | None) -> str:
     if not verifier:
         return "-"
@@ -89,6 +151,9 @@ def verifier_label(verifier: dict | None) -> str:
     for key in ("gate", "runtime"):
         if verifier.get(key):
             extra.append(str(verifier[key]))
+    command = verifier.get("command")
+    if command:
+        extra.append(" ".join(str(part) for part in command))
     if verifier.get("expect"):
         extra.append("expect=" + str(verifier["expect"]))
     return kind + ("(" + ", ".join(extra) + ")" if extra else "")
@@ -106,7 +171,7 @@ def row_state(rid: int, row: dict, pol: dict | None) -> dict:
         "review_by": None,
         "verifier": None,
         "problems": [],
-        "effective_claim": "unregistered (M1 out of scope)",
+        "effective_claim": UNREGISTERED_CLAIM,
     }
     if pol is None:
         return state
@@ -175,13 +240,25 @@ def row_state(rid: int, row: dict, pol: dict | None) -> dict:
     return state
 
 
-def check_structure(rows: dict[int, dict], policy: dict) -> tuple[dict[int, dict], list[str]]:
+def check_structure(
+    rows: dict[int, dict], policy: dict, root: Path = REPO_ROOT
+) -> tuple[dict[int, dict], list[str]]:
     problems: list[str] = []
     states = {rid: row_state(rid, row, policy.get("rows", {}).get(str(rid))) for rid, row in rows.items()}
 
     for rid_s in policy.get("rows", {}):
         if int(rid_s) not in rows:
             problems.append(f"policy names row {rid_s}, which is not in guarantees.json")
+
+    # M2: silence is not a claim. Every row in the production registry must be
+    # classified (executable or prose-only with an expiry), so a new row cannot
+    # slip into the table without a decision.
+    missing = sorted(M2_REQUIRED - set(rows))
+    if missing:
+        problems.append(f"M2: rows missing from guarantees.json: {missing}")
+    for rid in sorted(set(rows)):
+        if policy.get("rows", {}).get(str(rid)) is None:
+            problems.append(f"M2 row {rid} has no demotion policy entry")
 
     for rid, required in M1_REQUIRED.items():
         row = rows.get(rid)
@@ -199,17 +276,36 @@ def check_structure(rows: dict[int, dict], policy: dict) -> tuple[dict[int, dict
         kind = (state["verifier"] or {}).get("kind")
         if kind != required:
             problems.append(f"M1 row {rid} wants verifier `{required}`, got `{kind}`")
-        if kind == "corpus_pair" and not row.get("fixtures"):
-            problems.append(f"M1 row {rid}: corpus_pair has no fixtures")
-        if kind == "run_gate":
-            baseline = (state["verifier"] or {}).get("baseline")
-            if not baseline:
-                problems.append(f"M1 row {rid}: run_gate has no baseline")
-            elif not (REPO_ROOT / baseline).exists():
-                problems.append(f"M1 row {rid}: baseline {baseline} does not exist")
 
     for rid, state in states.items():
         problems.extend(state["problems"])
+        if state["status"] != "executable":
+            continue
+        row = rows[rid]
+        verifier = state["verifier"] or {}
+        kind = verifier.get("kind")
+        if kind == "corpus_pair" and not row.get("fixtures"):
+            problems.append(f"row {rid}: corpus_pair has no fixtures")
+        if kind == "run_gate":
+            baseline = verifier.get("baseline")
+            if not baseline:
+                problems.append(f"row {rid}: run_gate has no baseline")
+            elif not (root / baseline).exists():
+                problems.append(f"row {rid}: baseline {baseline} does not exist")
+        if kind in {"test_suite", "benchmark"}:
+            command = verifier.get("command")
+            if not command or not isinstance(command, list):
+                problems.append(f"row {rid}: {kind} needs a command list")
+            for req in verifier.get("requires") or []:
+                path = root / req.get("path", "")
+                if not path.exists():
+                    problems.append(f"row {rid}: required invariant file {req.get('path')} does not exist")
+                elif req.get("contains") and req["contains"] not in path.read_text():
+                    problems.append(
+                        f"row {rid}: {req.get('path')} does not contain {req['contains']!r}"
+                    )
+        if kind == "runtime_pin" and not verifier.get("expect"):
+            problems.append(f"row {rid}: runtime_pin needs an expected panic string")
 
     if rows.get(16) and rows[16].get("strength") != "no-claim":
         problems.append("row 16 is the negative falsifier and must keep strength `no-claim`")
@@ -301,6 +397,53 @@ def run_runtime_pin(verifier: dict, hyb: str, go_bin: str, root: Path) -> tuple[
     return True, f"checker accepts; go run -race: {expect}"
 
 
+def run_test_suite(verifier: dict, hyb: str, go_bin: str, root: Path) -> tuple[bool, str]:
+    command = verifier.get("command")
+    if not command:
+        return False, "test_suite needs a command"
+    cwd = root / verifier.get("cwd", ".")
+    timeout = int(verifier.get("timeout", 600))
+    expect_exit = int(verifier.get("expect_exit", 0))
+    code, out = run(substitute(command, hyb, go_bin), cwd, timeout)
+    if code != expect_exit:
+        return False, f"exit {code}, want {expect_exit}: {out.strip()[:200]}"
+    needle = verifier.get("expect_output")
+    if needle and needle not in out:
+        return False, f"output did not contain {needle!r}: {out.strip()[:200]}"
+    for req in verifier.get("requires") or []:
+        path = root / req.get("path", "")
+        if not path.exists():
+            return False, f"required invariant file missing: {req.get('path')}"
+        if req.get("contains") and req["contains"] not in path.read_text():
+            return False, f"{req.get('path')} does not contain {req['contains']!r}"
+    detail = f"`{' '.join(str(part) for part in command)}` exit {code}"
+    if verifier.get("requires"):
+        detail += f"; {len(verifier['requires'])} static invariant(s)"
+    return True, detail
+
+
+def run_benchmark(verifier: dict, hyb: str, go_bin: str, root: Path) -> tuple[bool, str]:
+    command = verifier.get("command")
+    expect = verifier.get("expect", "VERDICT: PASS")
+    if not command:
+        return False, "benchmark needs a command"
+    cwd = root / verifier.get("cwd", ".")
+    timeout = int(verifier.get("timeout", 600))
+    code, out = run(substitute(command, hyb, go_bin), cwd, timeout)
+    if code != 0:
+        return False, f"bench exited {code}: {out.strip()[:200]}"
+    if expect not in out:
+        return False, f"bench output did not contain {expect!r}: {out.strip()[:200]}"
+    match = re.search(r"fast path\s+([\d.]+)\s*ns\s*[≤<=]+\s*([\d.]+)\s*ns", out)
+    if match:
+        measured, budget = float(match.group(1)), float(match.group(2))
+        ceiling = verifier.get("max_ns")
+        if ceiling is not None and measured > float(ceiling):
+            return False, f"measured {measured} ns exceeds max_ns {ceiling}"
+        return True, f"bench verdict PASS; fast path {measured} ns ≤ {budget} ns"
+    return True, f"bench verdict PASS ({expect})"
+
+
 def execute_verifier(state: dict, row: dict, hyb: str, go_bin: str, root: Path) -> tuple[bool, str]:
     verifier = state["verifier"] or {}
     kind = verifier.get("kind")
@@ -310,7 +453,11 @@ def execute_verifier(state: dict, row: dict, hyb: str, go_bin: str, root: Path) 
         return run_run_gate(row, verifier, hyb, root)
     if kind == "runtime_pin":
         return run_runtime_pin(verifier, hyb, go_bin, root)
-    return False, f"verifier kind {kind!r} is not executable in M1"
+    if kind == "test_suite":
+        return run_test_suite(verifier, hyb, go_bin, root)
+    if kind == "benchmark":
+        return run_benchmark(verifier, hyb, go_bin, root)
+    return False, f"verifier kind {kind!r} is not executable"
 
 
 def render(rows: dict[int, dict], states: dict[int, dict]) -> str:
@@ -338,6 +485,64 @@ def render(rows: dict[int, dict], states: dict[int, dict]) -> str:
     return "\n".join(out)
 
 
+def coverage_summary(states: dict[int, dict]) -> dict:
+    counts = {"executable": 0, "prose-only": 0, "demoted": 0, "invalid": 0, "unregistered": 0}
+    for state in states.values():
+        counts[state["status"]] = counts.get(state["status"], 0) + 1
+    not_executable = len(states) - counts["executable"]
+    return {
+        **counts,
+        "total": len(states),
+        "not_executable": not_executable,
+        "wall": not_executable >= WALL_THRESHOLD,
+    }
+
+
+def render_coverage(rows: dict[int, dict], states: dict[int, dict], policy: dict) -> str:
+    out = [
+        "<!-- GENERATED by spikes/w2220-guarantees-as-code/guarantees_gate.py --render -->",
+        "# W-2220 M2 coverage — the claims registry, applied to every row",
+        "",
+        COVERAGE_HEADER,
+        "|-----|---------|----------|-------|----------|----------------------------------------|----------------------|",
+    ]
+    for rid in sorted(rows):
+        row = rows[rid]
+        state = states[rid]
+        pol = policy.get("rows", {}).get(str(rid), {})
+        reason = pol.get("reason") or (
+            "executed by the gate" if state["status"] == "executable" else "-"
+        )
+        debt = state["debt"] or state["expires"] or state["review_by"] or "-"
+        out.append(
+            "| {} | {} | {} | {} | {} | {} | {} · {} |".format(
+                rid,
+                str(row.get("surface", "-")).replace("|", "\\|"),
+                row.get("strength", "-"),
+                state["status"],
+                verifier_label(state["verifier"]).replace("|", "\\|"),
+                reason.replace("|", "\\|"),
+                state["owner"] or "-",
+                debt,
+            )
+        )
+    summary = coverage_summary(states)
+    wall = "HIT — the approach is a documented wall" if summary["wall"] else "NOT HIT"
+    out += [
+        "",
+        "## Summary",
+        "",
+        f"- executable: **{summary['executable']}/{summary['total']}**",
+        f"- prose-only (owner + expiry + debt): **{summary['prose-only']}/{summary['total']}**",
+        f"- demoted / invalid / unregistered: "
+        f"**{summary['demoted'] + summary['invalid'] + summary['unregistered']}/{summary['total']}**",
+        f"- pre-registered falsifier: **{summary['not_executable']} row(s) not executable** "
+        f"(wall = {WALL_THRESHOLD} or more) — **{wall}**",
+        "",
+    ]
+    return "\n".join(out)
+
+
 def self_test(rows: dict[int, dict], policy: dict, hyb: str, go_bin: str, root: Path) -> int:
     cases: list[tuple[str, bool]] = []
 
@@ -349,7 +554,7 @@ def self_test(rows: dict[int, dict], policy: dict, hyb: str, go_bin: str, root: 
 
     mutated_pol = copy.deepcopy(policy)
     del mutated_pol["rows"]["1"]
-    _, problems = check_structure(rows, mutated_pol)
+    _, problems = check_structure(rows, mutated_pol, root)
     cases.append(("policy drop: row 1 is not left unregistered", any("row 1" in p for p in problems)))
 
     mutated_pol = copy.deepcopy(policy)
@@ -357,7 +562,7 @@ def self_test(rows: dict[int, dict], policy: dict, hyb: str, go_bin: str, root: 
     mutated_pol["rows"]["1"]["verifier"] = {"kind": "argument"}
     mutated_pol["rows"]["1"]["expires"] = "2099-01-01"
     mutated_pol["rows"]["1"]["debt"] = "SELFTEST"
-    _, problems = check_structure(rows, mutated_pol)
+    _, problems = check_structure(rows, mutated_pol, root)
     cases.append(("guaranteed prose-only: refused", any("guaranteed" in p for p in problems)))
 
     mutated_pol = copy.deepcopy(policy)
@@ -367,10 +572,27 @@ def self_test(rows: dict[int, dict], policy: dict, hyb: str, go_bin: str, root: 
     cases.append(("runtime pin: wrong panic text is rejected", not ok))
 
     mutated_pol = copy.deepcopy(policy)
-    mutated_pol["rows"]["9"]["expires"] = "2020-01-01"
-    state = row_state(9, rows[9], mutated_pol["rows"]["9"])
+    mutated_pol["rows"]["12"]["expires"] = "2020-01-01"
+    state = row_state(12, rows[12], mutated_pol["rows"]["12"])
     text = render(rows, {rid: row_state(rid, row, mutated_pol["rows"].get(str(rid))) for rid, row in rows.items()})
     cases.append(("prose expiry: rendered row is demoted", state["status"] == "demoted" and DEMOTED_PREFIX in text))
+
+    mutated_pol = copy.deepcopy(policy)
+    mutated_pol["rows"]["18"]["verifier"]["command"] = [sys.executable, "-c", "import sys; sys.exit(1)"]
+    state = row_state(18, rows[18], mutated_pol["rows"]["18"])
+    ok, _ = run_test_suite(state["verifier"], hyb, go_bin, root)
+    cases.append(("test_suite: a failing command is rejected", not ok))
+
+    mutated_pol = copy.deepcopy(policy)
+    mutated_pol["rows"]["20"]["verifier"]["expect"] = "VERDICT: IMPOSSIBLE"
+    state = row_state(20, rows[20], mutated_pol["rows"]["20"])
+    ok, _ = run_benchmark(state["verifier"], hyb, go_bin, root)
+    cases.append(("benchmark: a wrong verdict is rejected", not ok))
+
+    mutated_pol = copy.deepcopy(policy)
+    del mutated_pol["rows"]["20"]
+    _, problems = check_structure(rows, mutated_pol, root)
+    cases.append(("M2 coverage: a dropped row is caught", any("row 20" in p for p in problems)))
 
     for name, caught in cases:
         print(("  PASS  " if caught else "  FAIL  ") + name)
@@ -383,12 +605,19 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", default=str(REPO_ROOT), help="repository root")
     ap.add_argument("--claims", default="guarantees.json", help="claims registry (relative to root)")
+    ap.add_argument(
+        "--overlay",
+        default=str(SPIKE_DIR / "m2_overrides.json"),
+        help="M2 fixture overlay (relative to root; empty string disables it)",
+    )
     ap.add_argument("--policy", default=str(SPIKE_DIR / "demotion_policy.json"))
     ap.add_argument("--rendered", default=str(SPIKE_DIR / "rendered_claims.md"))
+    ap.add_argument("--coverage", default=str(SPIKE_DIR / "coverage.md"))
     ap.add_argument("--hyb", default=None)
     ap.add_argument("--go", default="go")
-    ap.add_argument("--render", action="store_true", help="rewrite the rendered table and exit")
+    ap.add_argument("--render", action="store_true", help="rewrite the rendered tables and exit")
     ap.add_argument("--self-test", action="store_true", help="run the seeded-mutation self-test")
+    ap.add_argument("--timing", action="store_true", help="print per-row and total gate wall time")
     args = ap.parse_args(argv)
 
     root = Path(args.root).resolve()
@@ -401,14 +630,20 @@ def main(argv: list[str]) -> int:
         print(f"GATE ERROR: checker not found: {hyb} (build with `cargo build -p hyb`)", file=sys.stderr)
         return 2
 
-    claims = load_json(claims_path)
+    try:
+        claims, _overlay = load_claims(root, args.claims, args.overlay or None)
+    except ValueError as exc:
+        print(f"GATE ERROR: {exc}", file=sys.stderr)
+        return 2
     rows = claim_rows(claims)
     policy = load_json(Path(args.policy))
-    states, problems = check_structure(rows, policy)
+    states, problems = check_structure(rows, policy, root)
     table = render(rows, states)
+    coverage = render_coverage(rows, states, policy)
+    summary = coverage_summary(states)
 
     if args.self_test:
-        print("guarantees-as-code M1 self-test")
+        print("guarantees-as-code M2 self-test")
         problems.extend([f"structure: {p}" for p in problems])
         rc = self_test(rows, policy, hyb, args.go, root)
         if problems:
@@ -419,33 +654,53 @@ def main(argv: list[str]) -> int:
 
     if args.render:
         Path(args.rendered).write_text(table)
+        Path(args.coverage).write_text(coverage)
         print(f"rendered {args.rendered}")
+        print(f"rendered {args.coverage}")
         return 0 if not problems else 1
 
+    started = time.perf_counter()
     for rid in sorted(states):
         state = states[rid]
         row = rows[rid]
         if state["status"] != "executable":
             print(f"  row {rid:<2} {verifier_label(state['verifier']):<34} {state['status'].upper()}")
             continue
+        row_started = time.perf_counter()
         ok, detail = execute_verifier(state, row, hyb, args.go, root)
-        print(f"  row {rid:<2} {verifier_label(state['verifier']):<34} {'OK' if ok else 'FAIL'}  {detail}")
+        elapsed = time.perf_counter() - row_started
+        timing = f"  [{elapsed:.3f}s]" if args.timing else ""
+        print(
+            f"  row {rid:<2} {verifier_label(state['verifier']):<34} "
+            f"{'OK' if ok else 'FAIL'}  {detail}{timing}"
+        )
         if not ok:
             problems.append(f"row {rid}: {detail}")
+    if args.timing:
+        print(f"gate wall time: {time.perf_counter() - started:.3f}s")
 
-    try:
-        committed = Path(args.rendered).read_text()
-    except FileNotFoundError:
-        committed = None
-    if committed != table:
-        problems.append("rendered table drift: run --render and commit the result")
+    for label, path, expected in (
+        ("rendered table", Path(args.rendered), table),
+        ("coverage table", Path(args.coverage), coverage),
+    ):
+        try:
+            committed = path.read_text()
+        except FileNotFoundError:
+            committed = None
+        if committed != expected:
+            problems.append(f"{label} drift: run --render and commit the result")
 
     if problems:
         for problem in problems:
             print("GATE: " + problem, file=sys.stderr)
-        print("guarantees-as-code M1: FAIL")
+        print("guarantees-as-code M2: FAIL")
         return 1
-    print("guarantees-as-code M1: PASS (all executable rows verified; rendered table matches)")
+    print(
+        "guarantees-as-code M2: PASS "
+        f"({summary['executable']}/{summary['total']} executable, "
+        f"{summary['prose-only']}/{summary['total']} prose-only; "
+        f"wall {'HIT' if summary['wall'] else 'NOT HIT'})"
+    )
     return 0
 
 
