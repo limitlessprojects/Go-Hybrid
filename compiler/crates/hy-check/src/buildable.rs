@@ -98,6 +98,19 @@ impl OpKind {
         matches!(self, OpKind::Int | OpKind::Float)
     }
 
+    fn is_nilable(&self) -> bool {
+        matches!(
+            self,
+            OpKind::Pointer(_)
+                | OpKind::Slice(_)
+                | OpKind::Map(_, _)
+                | OpKind::Chan(_)
+                | OpKind::Interface
+                | OpKind::Fn(..)
+                | OpKind::Unknown
+        )
+    }
+
     fn label(&self) -> String {
         match self {
             OpKind::Unknown => "unknown".to_string(),
@@ -2174,20 +2187,35 @@ impl<'a> Collector<'a> {
                 ),
                 Some((_, fty)) => {
                     let want = self.kind_of_ty_with_subst(fty, &subst, 0);
-                    let got = self.kind_of_expr(&f.value);
-                    if kinds_conflict(&want, &got) {
-                        self.emit_e1002(
-                            f.value.span(),
-                            format!(
-                                "cannot use a value of type `{}` for field `{}` of `{}` (declared `{}`) — Go refuses `cannot use ... as {} value in struct literal` (HYB-E1002)",
-                                got.label(),
-                                f.name,
-                                full_name,
-                                want.label(),
-                                want.label()
-                            ),
-                            "the field's declared type is fixed; write an explicit conversion when a conversion is intended",
-                        );
+                    let bare_v = unwrap_parens(&f.value);
+                    if matches!(bare_v, Expr::Lit { kind: LitKind::Nil, .. }) {
+                        if !want.is_nilable() {
+                            self.emit_e1002(
+                                f.value.span(),
+                                format!(
+                                    "cannot use `nil` as `{}` value in struct field `{}` (HYB-E1002)",
+                                    fty.render(),
+                                    f.name
+                                ),
+                                "every field value in a struct composite literal must be assignable to the field type",
+                            );
+                        }
+                    } else {
+                        let got = self.kind_of_expr(&f.value);
+                        if kinds_conflict(&want, &got) {
+                            self.emit_e1002(
+                                f.value.span(),
+                                format!(
+                                    "cannot use a value of type `{}` for field `{}` of `{}` (declared `{}`) — Go refuses `cannot use ... as {} value in struct literal` (HYB-E1002)",
+                                    got.label(),
+                                    f.name,
+                                    full_name,
+                                    want.label(),
+                                    want.label()
+                                ),
+                                "the field's declared type is fixed; write an explicit conversion when a conversion is intended",
+                            );
+                        }
                     }
                 }
             }
@@ -3615,6 +3643,16 @@ impl<'a> Collector<'a> {
         for item in items {
             let bare = unwrap_parens(item);
             if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
+                if !expected.is_nilable() {
+                    self.emit_e1002(
+                        item.span(),
+                        format!(
+                            "cannot use `nil` as `{}` value in array literal (HYB-E1002)",
+                            elem_ty.render()
+                        ),
+                        "every element of an array composite literal `[N]T{...}` / `[...]T{...}` must be assignable to the element type `T`",
+                    );
+                }
                 continue;
             }
             if let Expr::SliceLit {
@@ -3676,6 +3714,16 @@ impl<'a> Collector<'a> {
         for item in items {
             let bare = unwrap_parens(item);
             if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
+                if !expected.is_nilable() {
+                    self.emit_e1002(
+                        item.span(),
+                        format!(
+                            "cannot use `nil` as `{}` value in slice literal (HYB-E1002)",
+                            elem_ty.render()
+                        ),
+                        "every element of a slice composite literal `[]T{...}` must be assignable to the element type `T`",
+                    );
+                }
                 continue;
             }
             if let Expr::SliceLit {
@@ -3743,29 +3791,53 @@ impl<'a> Collector<'a> {
         let exp_val = self.kind_of_ty(&resolved_val, 0);
         for (k, v) in entries {
             if exp_key != OpKind::Unknown {
-                let kk = self.kind_of_expr(k);
-                if kk != OpKind::Unknown
-                    && kk != exp_key
-                    && !(exp_key == OpKind::Float
-                        && kk == OpKind::Int
-                        && crate::const_overflow::const_int_value(k).is_some())
-                    && kinds_conflict(&exp_key, &kk)
-                {
-                    self.emit_e1002(
-                        k.span(),
-                        format!(
-                            "cannot use `{}` (type `{}`) as `{}` value in map key (HYB-E1002)",
-                            k.render(),
-                            kk.label(),
-                            key_ty.render()
-                        ),
-                        "every key of a map composite literal `map[K]V{...}` must be assignable to the key type `K`",
-                    );
+                let bare_k = unwrap_parens(k);
+                if matches!(bare_k, Expr::Lit { kind: LitKind::Nil, .. }) {
+                    if !exp_key.is_nilable() {
+                        self.emit_e1002(
+                            k.span(),
+                            format!(
+                                "cannot use `nil` as `{}` value in map key (HYB-E1002)",
+                                key_ty.render()
+                            ),
+                            "every key of a map composite literal `map[K]V{...}` must be assignable to the key type `K`",
+                        );
+                    }
+                } else {
+                    let kk = self.kind_of_expr(k);
+                    if kk != OpKind::Unknown
+                        && kk != exp_key
+                        && !(exp_key == OpKind::Float
+                            && kk == OpKind::Int
+                            && crate::const_overflow::const_int_value(k).is_some())
+                        && kinds_conflict(&exp_key, &kk)
+                    {
+                        self.emit_e1002(
+                            k.span(),
+                            format!(
+                                "cannot use `{}` (type `{}`) as `{}` value in map key (HYB-E1002)",
+                                k.render(),
+                                kk.label(),
+                                key_ty.render()
+                            ),
+                            "every key of a map composite literal `map[K]V{...}` must be assignable to the key type `K`",
+                        );
+                    }
                 }
             }
             if exp_val != OpKind::Unknown {
                 let bare_v = unwrap_parens(v);
                 if matches!(bare_v, Expr::Lit { kind: LitKind::Nil, .. }) {
+                    if !exp_val.is_nilable() {
+                        self.emit_e1002(
+                            v.span(),
+                            format!(
+                                "cannot use `nil` as `{}` value in map value (HYB-E1002)",
+                                val_ty.render()
+                            ),
+                            "every value of a map composite literal `map[K]V{...}` must be assignable to the value type `V`",
+                        );
+                    }
                     continue;
                 }
                 let vk = self.kind_of_expr(v);
@@ -4940,5 +5012,43 @@ fn main() {
             "unexpected diagnostics: {:?}",
             r.diagnostics
         );
+    }
+
+    #[test]
+    fn rejects_nil_in_non_nilable_composite_literals_2036() {
+        for src in [
+            "fn main() {\n    s := []int{nil}\n    fmt.println(s)\n}\n",
+            "fn main() {\n    a := [2]string{nil, nil}\n    fmt.println(a)\n}\n",
+            "fn main() {\n    b := []bool{nil}\n    fmt.println(b)\n}\n",
+            "fn main() {\n    m := map[string]int{\"k\": nil}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[int]int{nil: 1}\n    fmt.println(m)\n}\n",
+            "struct point {\n    x int\n    y int\n}\nfn main() {\n    p := point{ x: nil, y: 0 }\n    fmt.println(p)\n}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                error_codes(&r).contains(&"HYB-E1002".to_string()),
+                "expected HYB-E1002, got {:?} for:\n{src}",
+                error_codes(&r)
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_valid_composite_literals_2036() {
+        for src in [
+            "fn main() {\n    s := []int{1, 2}\n    fmt.println(s)\n}\n",
+            "fn main() {\n    a := [2]string{\"a\", \"b\"}\n    fmt.println(a)\n}\n",
+            "fn main() {\n    m := map[string]int{\"k\": 1}\n    fmt.println(m)\n}\n",
+            "struct point {\n    x int\n    y int\n}\nfn main() {\n    p := point{ x: 1, y: 2 }\n    fmt.println(p)\n}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(
+                r.verdict,
+                Verdict::Accept,
+                "unexpected diagnostics for:\n{src}\n{:?}",
+                r.diagnostics
+            );
+        }
     }
 }
