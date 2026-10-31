@@ -6,6 +6,7 @@ or network are used. These tests exercise the runner, not the compiler.
 
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,15 +24,29 @@ PKG_EXAMPLE = "09-go-imports-hybrid"
 PKG_EXPECTED = (ROOT / "examples" / PKG_EXAMPLE / "expected.txt").read_text(encoding="utf-8")
 
 
+def find_bash():
+    if os.name == "nt":
+        git = shutil.which("git")
+        if git:
+            for rel in ("bin/bash.exe", "usr/bin/bash.exe"):
+                candidate = Path(git).resolve().parents[1] / rel
+                if candidate.exists():
+                    return str(candidate)
+    return shutil.which("bash") or "bash"
+
+
 class ExampleExitTests(unittest.TestCase):
     def run_example(self, output=EXPECTED, exit_code=0, build_exit=0,
                     stderr="", example=EXAMPLE):
-        with tempfile.TemporaryDirectory(prefix="hybrid-example-test-") as directory:
+        kwargs = {"prefix": "hybrid-example-test-"}
+        if sys.version_info >= (3, 10):
+            kwargs["ignore_cleanup_errors"] = True
+        with tempfile.TemporaryDirectory(**kwargs) as directory:
             root = Path(directory)
             program = (
                 f"#!{sys.executable}\nimport sys\n"
-                f"sys.stdout.write({output!r})\n"
-                f"sys.stderr.write({stderr!r})\n"
+                f"sys.stdout.buffer.write({output.encode('utf-8')!r})\n"
+                f"sys.stderr.buffer.write({stderr.encode('utf-8')!r})\n"
                 f"sys.exit({exit_code})\n"
             )
             builder = root / "hyb"
@@ -56,12 +71,17 @@ class ExampleExitTests(unittest.TestCase):
             mktemp = root / "mktemp"
             mktemp.write_text(
                 f"#!{sys.executable}\nimport tempfile\n"
-                f"print(tempfile.mkdtemp(dir={str(root)!r}))\n", encoding="utf-8")
+                f"print(tempfile.mkdtemp(dir={root.as_posix()!r}))\n", encoding="utf-8")
             mktemp.chmod(0o755)
+            bash = find_bash()
+            script = (ROOT / "tools" / "run_examples.sh").as_posix()
             return subprocess.run(
-                ["bash", str(ROOT / "tools" / "run_examples.sh"), example],
-                env={**os.environ, "HYB_BIN": str(builder),
-                     "TMPDIR": str(root),
+                [bash, script, example],
+                cwd=ROOT,
+                env={**os.environ, "HYB_BIN": builder.as_posix(),
+                     "TMPDIR": root.as_posix(),
+                     "PYTHONUTF8": "1",
+                     "PYTHONIOENCODING": "utf-8",
                      "PATH": str(root) + os.pathsep + os.environ.get("PATH", "")},
                 capture_output=True, text=True, encoding="utf-8", timeout=15,
             )
