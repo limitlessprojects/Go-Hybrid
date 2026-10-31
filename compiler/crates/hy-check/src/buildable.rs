@@ -1112,16 +1112,23 @@ impl<'a> Collector<'a> {
             Stmt::Managed { body, .. } => self.block_scoped(body),
             Stmt::Match { subject, arms, .. } => {
                 self.expr(subject);
+                let subject_kind = self.kind_of_expr(subject);
                 for arm in arms {
                     self.push_scope();
-                    if let MatchPattern::Path { segments, binding } = &arm.pattern {
-                        if let Some(root) = segments.first() {
-                            self.mention(root);
+                    match &arm.pattern {
+                        MatchPattern::Path { segments, binding } => {
+                            if let Some(root) = segments.first() {
+                                self.mention(root);
+                            }
+                            if let Some(b) = binding {
+                                self.define_elidable(b, subject.span());
+                                self.bind_kind(b, OpKind::Unknown);
+                            }
                         }
-                        if let Some(b) = binding {
-                            self.define_elidable(b, subject.span());
-                            self.bind_kind(b, OpKind::Unknown);
+                        MatchPattern::Lit(lit) => {
+                            self.check_match_lit_pattern(&subject_kind, lit, subject.span());
                         }
+                        MatchPattern::Wildcard => {}
                     }
                     if let Some(g) = &arm.guard {
                         self.expr(g);
@@ -2804,6 +2811,35 @@ impl<'a> Collector<'a> {
             ),
             "the deferred call is checked like any other call: one argument per declared parameter",
         );
+    }
+
+    fn check_match_lit_pattern(&mut self, subject_kind: &OpKind, lit: &LitKind, span: Span) {
+        let pat_kind = match lit {
+            LitKind::Int(_) | LitKind::Char(_) => OpKind::Int,
+            LitKind::Float(_) => OpKind::Float,
+            LitKind::Bool(_) => OpKind::Bool,
+            LitKind::Str(_) | LitKind::RawStr(_) => OpKind::Str,
+            LitKind::Nil => OpKind::Unknown,
+        };
+        if kinds_conflict(subject_kind, &pat_kind) {
+            let lit_str = match lit {
+                LitKind::Int(s) | LitKind::Float(s) | LitKind::Str(s) | LitKind::RawStr(s) => s.as_str(),
+                LitKind::Bool(true) => "true",
+                LitKind::Bool(false) => "false",
+                LitKind::Char(_) => "char",
+                LitKind::Nil => "nil",
+            };
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use match pattern `{}` (type `{}`) on subject of type `{}` — Go refuses `invalid case ... in switch on ... (mismatched types)` (HYB-E1002)",
+                    lit_str,
+                    pat_kind.label(),
+                    subject_kind.label(),
+                ),
+                "ensure match arm patterns match the subject expression's type",
+            );
+        }
     }
 
     /// Family A (#425): `if cond` and `for cond` require a boolean condition.
