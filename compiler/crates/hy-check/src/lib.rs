@@ -939,6 +939,34 @@ impl<'a> Checker<'a> {
                         .to_string(),
                 ]),
             );
+        } else if reason.contains('\n') || reason.contains('\r') {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E0003",
+                    self.path.clone(),
+                    span,
+                    "managed block reason must be a single-line string without `\n` or `\r` (HYB-E0003)",
+                )
+                .with_notes(vec![
+                    "newlines in `managed` metadata break single-line Go comment emission and `--report-managed` audit records".to_string(),
+                ]),
+            );
+        }
+        if tickets
+            .iter()
+            .any(|t| t.trim().is_empty() || t.contains('\n') || t.contains('\r'))
+        {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E0003",
+                    self.path.clone(),
+                    span,
+                    "managed block ticket string must be non-empty and single-line without `\n` or `\r` (HYB-E0003)",
+                )
+                .with_notes(vec![
+                    "tickets feed single-line Go comment emission and `--report-managed` audit records".to_string(),
+                ]),
+            );
         }
         // #1917: the reason and tickets are interpolated into a single-line
         // `// managed` comment by the emitter. A newline or carriage return
