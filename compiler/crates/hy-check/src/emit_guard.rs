@@ -368,6 +368,10 @@ impl<'a> Checker<'a> {
                 let ty = l.ty.clone().or_else(|| self.ty_of_expr(st, val));
                 self.define_binding(st, name, shape, ty, immutable, false, is_let);
             }
+        } else {
+            for name in &l.names {
+                self.define_binding(st, name, TypeShape::Unknown, None, immutable, false, is_let);
+            }
         }
     }
 

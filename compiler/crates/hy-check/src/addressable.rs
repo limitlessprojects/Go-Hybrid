@@ -30,9 +30,6 @@ use hy_syntax::{Block, Expr, ForKind, MatchPattern, Param, Place, PlaceKind, Sel
 impl<'a> Checker<'a> {
     /// `target` of an assignment (any operator, including `++`/`--`).
     pub(crate) fn check_assign_target_addressable(&mut self, st: &FnState, target: &Place) {
-        if self.closure_rebinds(target.root()) {
-            return;
-        }
         let Some(elem) = self.place_unassignable_at(st, target) else {
             return;
         };
@@ -53,9 +50,6 @@ impl<'a> Checker<'a> {
             return;
         };
         if !matches!(operand, Expr::Index { .. } | Expr::Field { .. }) {
-            return;
-        }
-        if expr_root(operand).is_some_and(|r| self.closure_rebinds(r)) {
             return;
         }
         let Some(elem) = self.expr_unassignable_at(st, operand) else {
