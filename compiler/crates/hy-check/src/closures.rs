@@ -1242,6 +1242,24 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                             ck.extend_map_slot_loan_to_alias(st, name, val, idx);
                         }
                     }
+                } else if l.values.len() == 1 && l.names.len() == 2 {
+                    let val = &l.values[0];
+                    if let Some(path) = walk::addr_of_index_base_path(val) {
+                        let binding = l.names[0].clone();
+                        let key = walk::addr_of_index_slot_key(val);
+                        let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
+                        st.loans.push(Loan {
+                            target: LoanTarget::MapSlot {
+                                binding: binding.clone(),
+                                path,
+                                key,
+                            },
+                            created: idx,
+                            last,
+                            span: val.span(),
+                            desc: format!("`{} := {}`", l.names.join(", "), val.render()),
+                        });
+                    }
                 }
             }
             Stmt::Assign {
@@ -1274,11 +1292,40 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                             }
                         }
                     }
+                } else if *op == hy_syntax::AssignOp::Assign
+                    && values.len() == 1
+                    && targets.len() == 2
+                {
+                    let v = &values[0];
+                    if let hy_syntax::PlaceKind::Ident(name) = &targets[0].kind {
+                        if let Some(path) = walk::addr_of_index_base_path(v) {
+                            let binding = name.clone();
+                            let key = walk::addr_of_index_slot_key(v);
+                            let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
+                            st.loans.push(Loan {
+                                target: LoanTarget::MapSlot {
+                                    binding: binding.clone(),
+                                    path,
+                                    key,
+                                },
+                                created: idx,
+                                last,
+                                span: v.span(),
+                                desc: format!("`{} = {}`", binding, v.render()),
+                            });
+                        }
+                    }
                 }
                 for t in targets {
                     if matches!(t.kind, hy_syntax::PlaceKind::Index { .. }) {
                         if let Some(path) = walk::place_path(t) {
                             ck.emit_a3_if_live_pub(st, &path, t.span, idx, "insert");
+                        }
+                    } else if *op == hy_syntax::AssignOp::Assign {
+                        if let hy_syntax::PlaceKind::Ident(name) = &t.kind {
+                            ck.emit_a3_if_live_pub(st, name, t.span, idx, "rebind");
+                        } else if let Some(path) = walk::place_path(t) {
+                            ck.emit_a3_if_live_pub(st, &path, t.span, idx, "rebind");
                         }
                     }
                 }
