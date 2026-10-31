@@ -522,4 +522,20 @@ mod tests {
         assert_severity_code_coherence("HYB-E8001", Severity::Warning);
         assert_severity_code_coherence("HYB-E3001", Severity::Error);
     }
+
+    #[test]
+    fn e8001_example_uses_required_managed_arguments() {
+        let reg = Registry::global();
+        let entry = reg.lookup("HYB-E8001").expect("HYB-E8001 registered");
+        assert!(
+            entry.example.contains("managed(\"") && entry.example.contains("\", \""),
+            "HYB-E8001 example must include managed(reason, category) arguments so it does not fail with HYB-E0003: {}",
+            entry.example
+        );
+        assert!(
+            !entry.example.contains("managed {"),
+            "HYB-E8001 example must not teach bare `managed {{ ... }}`: {}",
+            entry.example
+        );
+    }
 }
