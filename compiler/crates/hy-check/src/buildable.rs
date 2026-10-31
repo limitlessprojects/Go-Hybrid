@@ -1036,6 +1036,29 @@ impl<'a> Collector<'a> {
                 // or a multi-value call here passed the checker and emitted
                 // `ch <- noop()` / `ch <- pair()`, which Go rejects.
                 self.check_single_value_position(value, "a channel send", false);
+                let ck = self.kind_of_expr(chan);
+                if let OpKind::Chan(elem) = ck {
+                    let vk = self.kind_of_expr(value);
+                    let int_float_conflict = *elem == OpKind::Float
+                        && vk == OpKind::Int
+                        && !self.is_untyped_int_const(value);
+                    if *elem != OpKind::Unknown
+                        && vk != OpKind::Unknown
+                        && int_float_conflict
+                    {
+                        self.emit_e1002(
+                            value.span(),
+                            format!(
+                                "cannot use `{}` (type `{}`) as `{}` value in send to `{}` (HYB-E1002)",
+                                value.render(),
+                                vk.label(),
+                                elem.label(),
+                                chan.render()
+                            ),
+                            "the sent value must match the channel's element type",
+                        );
+                    }
+                }
                 self.expr(value);
             }
             Stmt::If {
@@ -2775,7 +2798,7 @@ impl<'a> Collector<'a> {
                 if let Some(res) = self.call_result_kinds(callee, args) {
                     if res.len() == want.len() {
                         for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(r, w, values[0].span());
+                            self.report_return_conflict(r, w, &values[0], values[0].span());
                         }
                         return;
                     }
@@ -2784,7 +2807,7 @@ impl<'a> Collector<'a> {
                         && res.len() + 1 == want.len()
                     {
                         for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(r, w, values[0].span());
+                            self.report_return_conflict(r, w, &values[0], values[0].span());
                         }
                         return;
                     }
@@ -2831,7 +2854,7 @@ impl<'a> Collector<'a> {
             if short_ok {
                 for (v, w) in values.iter().zip(want.iter()) {
                     let got = self.kind_of_expr(v);
-                    self.report_return_conflict(&got, w, v.span());
+                    self.report_return_conflict(&got, w, v, v.span());
                 }
                 return;
             }
@@ -2859,12 +2882,15 @@ impl<'a> Collector<'a> {
         }
         for (v, w) in values.iter().zip(want.iter()) {
             let got = self.kind_of_expr(v);
-            self.report_return_conflict(&got, w, v.span());
+            self.report_return_conflict(&got, w, v, v.span());
         }
     }
 
-    fn report_return_conflict(&mut self, got: &OpKind, want: &OpKind, span: Span) {
-        if !kinds_conflict(want, got) {
+    fn report_return_conflict(&mut self, got: &OpKind, want: &OpKind, val: &Expr, span: Span) {
+        let int_float_conflict = *want == OpKind::Float
+            && *got == OpKind::Int
+            && !self.is_untyped_int_const(val);
+        if !kinds_conflict(want, got) && !int_float_conflict {
             return;
         }
         self.emit_e1002(
@@ -3783,6 +3809,34 @@ impl<'a> Collector<'a> {
             }
         }
         false
+    }
+
+    fn is_untyped_int_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit {
+                kind: LitKind::Int(_) | LitKind::Char(_),
+                ..
+            } => true,
+            Expr::Ident { name, .. } => {
+                if self.file_consts.contains_key(name) {
+                    return true;
+                }
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        return matches!(self.defines[*id].kind, LocalKind::Const);
+                    }
+                }
+                false
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnOp::Neg)
+                    && self.is_untyped_int_const(operand)
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.is_untyped_int_const(lhs) && self.is_untyped_int_const(rhs)
+            }
+            _ => false,
+        }
     }
 
     fn expr_has_non_const_local(&self, e: &Expr) -> bool {
