@@ -164,6 +164,44 @@ fn append_with_wrong_element_type_is_rejected() {
 }
 
 #[test]
+fn append_with_incompatible_spread_slice_is_rejected() {
+    // Incompatible slice element types: append([]int, []string...)
+    assert_code(
+        "fn main() {\n    nums := []int{1, 2}\n    strs := []string{\"a\", \"b\"}\n    _ = append(nums, strs...)\n}\n",
+        "HYB-E1002",
+    );
+    // Incompatible numeric slice element types: append([]int, []float64...)
+    assert_code(
+        "fn main() {\n    nums := []int{1, 2}\n    floats := []float64{1.0, 2.0}\n    _ = append(nums, floats...)\n}\n",
+        "HYB-E1002",
+    );
+    // Incompatible struct slice element types
+    assert_code(
+        "struct p {\n    n int\n}\n\nstruct t {\n    n int\n}\n\nfn main() {\n    ps := []p{}\n    ts := []t{}\n    _ = append(ps, ts...)\n}\n",
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn append_with_non_slice_spread_is_rejected() {
+    // Scalar int spread: append([]int, 42...)
+    assert_code(
+        "fn main() {\n    nums := []int{1, 2}\n    x := 42\n    _ = append(nums, x...)\n}\n",
+        "HYB-E1002",
+    );
+    // Bool spread: append([]bool, false...)
+    assert_code(
+        "fn main() {\n    bs := []bool{true}\n    b := false\n    _ = append(bs, b...)\n}\n",
+        "HYB-E1002",
+    );
+    // String spread into non-byte/non-int slice: append([]float64, "hello"...)
+    assert_code(
+        "fn main() {\n    floats := []float64{1.0, 2.0}\n    _ = append(floats, \"hello\"...)\n}\n",
+        "HYB-E1002",
+    );
+}
+
+#[test]
 fn legal_append_stays_accepted() {
     assert_ok("fn main() {\n    xs := []int{1}\n    ys := append(xs, 2, 3)\n    fmt.println(\"{len(ys)}\")\n}\n");
     assert_ok("fn main() {\n    s := []string{\"a\"}\n    t := append(s, \"b\")\n    fmt.println(\"{len(t)}\")\n}\n");
@@ -171,6 +209,8 @@ fn legal_append_stays_accepted() {
     assert_ok(
         "fn main() {\n    a := []int{1}\n    b := []int{2}\n    c := append(a, b...)\n    fmt.println(\"{len(c)}\")\n}\n",
     );
+    // String spread into byte slice
+    assert_ok("fn main() {\n    bytes := []byte{65}\n    _ = append(bytes, \"hello\"...)\n}\n");
     // An untyped int constant IS assignable to a float64 element.
     assert_ok(
         "fn main() {\n    xs := []float64{}\n    ys := append(xs, 1)\n    fmt.println(\"{len(ys)}\")\n}\n",
