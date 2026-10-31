@@ -1360,7 +1360,9 @@ pub(crate) fn extract_go_package_name(src: &str) -> Option<String> {
     s = skip_ws_and_comments(s)?;
     let after_kw = s.strip_prefix("package")?;
     let first_after = after_kw.chars().next()?;
-    if !first_after.is_whitespace() && !after_kw.starts_with("/*") {
+    // Both comment forms can separate the keyword from its identifier.
+    // A line comment does not insert a semicolon after the `package` keyword.
+    if !first_after.is_whitespace() && !after_kw.starts_with("/*") && !after_kw.starts_with("//") {
         return None;
     }
     let after_sep = skip_ws_and_comments(after_kw)?;
