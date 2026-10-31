@@ -123,6 +123,20 @@ def main():
     n = fails = 0
     t0 = time.time()
     for p in due:
+        # The queue may take minutes to drain. A maintainer can protect a PR
+        # after listing it; never close it using only that stale snapshot.
+        st, latest = api(f"/repos/{REPO}/pulls/{p['number']}")
+        if (st != 200 or not isinstance(latest, dict)
+                or latest.get("number") != p["number"]
+                or latest.get("state") != "open"
+                or not isinstance(latest.get("labels"), list)
+                or any(not isinstance(label, dict) or not isinstance(label.get("name"), str)
+                       for label in latest["labels"])):
+            print(f"  SKIP #{p['number']}: current open/protection state unavailable", flush=True)
+            continue
+        if {label["name"] for label in latest["labels"]} & PROTECTED_LABELS:
+            print(f"  SKIP #{p['number']}: now protected", flush=True)
+            continue
         age = (datetime.now(timezone.utc) -
                datetime.fromisoformat(p["created_at"].replace("Z", "+00:00"))).days
         st, _ = api(f"/repos/{REPO}/pulls/{p['number']}", "PATCH",
