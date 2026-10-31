@@ -1211,6 +1211,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 call,
                 format!("the deferred call `defer {}`", call.render()),
             );
+            ck.record_defer_mutations(st, call);
             sync_nested_moves(st, nested);
             collect_stmt_direct_fnlits(stmt, st, nested);
         }

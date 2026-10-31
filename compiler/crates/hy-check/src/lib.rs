@@ -869,6 +869,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     call,
                     format!("the deferred call `defer {}`", call.render()),
                 );
+                ck.record_defer_mutations(&mut st, call);
             }
 
             // If-init Locals and blocks: already covered by the flat walk
