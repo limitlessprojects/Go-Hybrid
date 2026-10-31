@@ -3856,7 +3856,24 @@ impl<'a> Collector<'a> {
                     elem_str.as_str(),
                     "byte" | "uint8" | "u8" | "rune" | "int32" | "i32"
                 );
-                if is_byte_or_rune {
+                if let OpKind::Slice(arg_elem) = &ak {
+                    // Go: slice-to-slice conversion needs identical element types.
+                    let target_elem_k = self.kind_of_ty(elem_ty, 0);
+                    if kinds_conflict(&target_elem_k, arg_elem) {
+                        self.emit_e1002(
+                            arg.span(),
+                            format!(
+                                "cannot convert `{}` (type `{}`) to `{}`: incompatible element types `{}` and `{}` (HYB-E1002)",
+                                arg.render(),
+                                ak.label(),
+                                target_str,
+                                arg_elem.label(),
+                                target_elem_k.label()
+                            ),
+                            "slice type conversions require identical element types",
+                        );
+                    }
+                } else if is_byte_or_rune {
                     if !matches!(ak, OpKind::Unknown | OpKind::Str | OpKind::Slice(_)) {
                         self.emit_e1002(
                             arg.span(),
