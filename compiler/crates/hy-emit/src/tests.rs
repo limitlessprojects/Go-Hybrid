@@ -288,6 +288,23 @@ fn bare_error_fn_under_try_emits_zero_value_temps() {
         );
     }
 
+    #[test]
+    fn defer_try_wrapped_call_operand_emits_bare_call() {
+        // Issue #2384: the checker accepts `defer cleanup()?` (the documented
+        // HYB-E2001 shape), so the emitter must unwrap the outer Try instead
+        // of refusing it as "? outside a binding position".
+        for src in [
+            "fn cleanup() error {\n    return nil\n}\n\nfn main() {\n    defer cleanup()?\n}\n",
+            "fn cleanup() error {\n    return nil\n}\n\nfn main() {\n    defer (cleanup()?)\n}\n",
+            "fn cleanup() error {\n    return nil\n}\n\nfn main() {\n    defer (cleanup())?\n}\n",
+        ] {
+            let go = emit(src);
+            assert!(go.contains("defer cleanup()"), ":\n{}", go);
+            assert!(!go.contains("defer ("), "no parens in defer://n{}", go);
+            assert!(!go.contains('?'), "no `?` in emitted defer://n{}", go);
+        }
+    }
+
 // ---------------------------------------------------------------------------
 // Example 03 — worker pool (structs-first, task→go, send/receive, close)
 // ---------------------------------------------------------------------------
