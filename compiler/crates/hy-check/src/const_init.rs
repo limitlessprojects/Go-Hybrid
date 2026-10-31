@@ -101,7 +101,11 @@ impl<'a> Checker<'a> {
                         && !args[0].spread
                         && !args[1].spread
                         && self.expr_is_constant_inner(&args[0].value, st, visiting, ref_depth)
-                        && self.expr_is_constant_inner(&args[1].value, st, visiting, ref_depth);
+                        && self.expr_is_constant_inner(&args[1].value, st, visiting, ref_depth)
+                        && !self.is_non_numeric_const_expr(&args[0].value, st, ref_depth)
+                        && !self.is_non_numeric_const_expr(&args[1].value, st, ref_depth)
+                        && !self.is_const_complex_expr(&args[0].value, st, ref_depth)
+                        && !self.is_const_complex_expr(&args[1].value, st, ref_depth);
                 }
                 if ty_name == "real" || ty_name == "imag" {
                     if self.type_aliases.contains_key(ty_name) {
@@ -109,7 +113,8 @@ impl<'a> Checker<'a> {
                     }
                     return args.len() == 1
                         && !args[0].spread
-                        && self.expr_is_constant_inner(&args[0].value, st, visiting, ref_depth);
+                        && self.expr_is_constant_inner(&args[0].value, st, visiting, ref_depth)
+                        && !self.is_non_numeric_const_expr(&args[0].value, st, ref_depth);
                 }
                 if args.len() != 1 || args[0].spread {
                     return false;
@@ -122,6 +127,11 @@ impl<'a> Checker<'a> {
                         && self.is_const_string_expr(&args[0].value, st, ref_depth);
                 }
                 if !self.is_const_conversion_target(ty_name) {
+                    return false;
+                }
+                if self.is_const_string_conversion_target(ty_name, st)
+                    && !self.is_const_string_expr(&args[0].value, st, ref_depth)
+                {
                     return false;
                 }
                 self.expr_is_constant_inner(&args[0].value, st, visiting, ref_depth)
@@ -204,7 +214,130 @@ impl<'a> Checker<'a> {
                 self.is_const_string_conversion_target(ty_name, st)
                     && args.len() == 1
                     && !args[0].spread
+                    && self.is_const_string_expr(&args[0].value, st, ref_depth + 1)
             }
+            _ => false,
+        }
+    }
+
+    fn is_non_numeric_const_expr(&self, e: &Expr, st: Option<&FnState>, ref_depth: usize) -> bool {
+        self.is_const_string_expr(e, st, ref_depth) || self.is_const_bool_expr(e, st, ref_depth)
+    }
+
+    fn is_named_primitive_target(&self, name: &str, expected: &[&str], st: Option<&FnState>) -> bool {
+        if st.is_some_and(|s| s.env_lookup(name).is_some())
+            || self.fns.contains_key(name)
+            || self.structs.contains_key(name)
+            || self.consts.contains_key(name)
+        {
+            return false;
+        }
+        if let Some(ty) = self.type_aliases.get(name) {
+            return matches!(
+                self.resolve_type_alias(ty),
+                hy_syntax::TypeExpr::Named { name: target, .. }
+                    if expected.contains(&target.as_str()) && !self.structs.contains_key(target.as_str())
+            );
+        }
+        expected.contains(&name)
+    }
+
+    fn is_const_bool_expr(&self, e: &Expr, st: Option<&FnState>, ref_depth: usize) -> bool {
+        if ref_depth > 32 {
+            return false;
+        }
+        match unwrap_parens(e) {
+            Expr::Lit { kind: LitKind::Bool(_), .. } => true,
+            Expr::Unary { op: UnOp::Not, .. } => true,
+            Expr::Binary {
+                op:
+                    BinOp::Eq
+                    | BinOp::Ne
+                    | BinOp::Lt
+                    | BinOp::Le
+                    | BinOp::Gt
+                    | BinOp::Ge
+                    | BinOp::And
+                    | BinOp::Or,
+                ..
+            } => true,
+            Expr::Ident { name, .. } => {
+                if let Some(b) = st.and_then(|s| s.env_lookup(name)) {
+                    return b.immutable
+                        && b.ty.as_ref().is_some_and(|t| {
+                            matches!(
+                                self.resolve_type_alias(t),
+                                hy_syntax::TypeExpr::Named { name: tn, .. }
+                                    if tn == "bool" && !self.structs.contains_key("bool")
+                            )
+                        });
+                }
+                if let Some(cdecl) = self.file_const_decl(name) {
+                    if let Some(ty) = &cdecl.ty {
+                        return matches!(
+                            self.resolve_type_alias(ty),
+                            hy_syntax::TypeExpr::Named { name: tn, .. }
+                                if tn == "bool" && !self.structs.contains_key("bool")
+                        );
+                    }
+                    return self.is_const_bool_expr(&cdecl.value, None, ref_depth + 1);
+                }
+                false
+            }
+            Expr::Call { callee, args, .. } => {
+                conversion_callee_name(callee).is_some_and(|n| {
+                    self.is_named_primitive_target(n, &["bool"], st)
+                        && args.len() == 1
+                        && !args[0].spread
+                })
+            }
+            _ => false,
+        }
+    }
+
+    fn is_const_complex_expr(&self, e: &Expr, st: Option<&FnState>, ref_depth: usize) -> bool {
+        if ref_depth > 32 {
+            return false;
+        }
+        match unwrap_parens(e) {
+            Expr::Unary { op: UnOp::Neg, operand, .. } => {
+                self.is_const_complex_expr(operand, st, ref_depth + 1)
+            }
+            Expr::Binary {
+                op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div,
+                lhs,
+                rhs,
+                ..
+            } => {
+                self.is_const_complex_expr(lhs, st, ref_depth + 1)
+                    || self.is_const_complex_expr(rhs, st, ref_depth + 1)
+            }
+            Expr::Ident { name, .. } => {
+                if st.is_some_and(|s| s.env_lookup(name).is_some()) {
+                    return false;
+                }
+                if let Some(cdecl) = self.file_const_decl(name) {
+                    if let Some(ty) = &cdecl.ty {
+                        if matches!(
+                            self.resolve_type_alias(ty),
+                            hy_syntax::TypeExpr::Named { name: tn, .. }
+                                if matches!(tn.as_str(), "complex64" | "complex128")
+                                    && !self.structs.contains_key(tn.as_str())
+                        ) {
+                            return true;
+                        }
+                    }
+                    return self.is_const_complex_expr(&cdecl.value, None, ref_depth + 1);
+                }
+                false
+            }
+            Expr::Call { callee, .. } => conversion_callee_name(callee).is_some_and(|n| {
+                (n == "complex"
+                    && !self.type_aliases.contains_key("complex")
+                    && !st.is_some_and(|s| s.env_lookup("complex").is_some())
+                    && !self.fns.contains_key("complex"))
+                    || self.is_named_primitive_target(n, &["complex64", "complex128"], st)
+            }),
             _ => false,
         }
     }
