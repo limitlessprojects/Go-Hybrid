@@ -214,6 +214,17 @@ class SpecializedReproVerdictTests(unittest.TestCase):
         self.assertTrue(verdict, reason)
         self.assertEqual(len(later), 2)
 
+    def test_surface_edits_updates_both_numbers_in_dual_count_surfaces(self):
+        fixture_path = Path(__file__).parent / "tests" / "specialized_brain_census_cases.json"
+        spec = json.loads(fixture_path.read_text(encoding="utf-8"))
+        surfaces = spec["surfaces"]
+        expected = spec["expected_replacements"]
+        with patch.object(SPECIALIZED, "head", side_effect=lambda p: surfaces[p]):
+            edits = SPECIALIZED.surface_edits(999, "99-fixture.hy", "Regression fixture.")
+        by_path = {path: new for path, _old, new, *_rest in edits}
+        for path, exp_new in expected.items():
+            self.assertEqual(by_path[path], exp_new, f"dual-count drift in {path}")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -108,7 +108,10 @@ impl Emitter {
                 // `defer f.Close()` — emitting `defer (f.Close())` would be
                 // invalid Go. A non-call operand (which the checker rejects)
                 // is left peeled-but-ungated and fails loudly below.
-                let operand = Self::peel_parens(call);
+                let mut operand = Self::peel_parens(call);
+                while let Expr::Try { operand: inner, .. } = operand {
+                    operand = Self::peel_parens(inner);
+                }
                 if matches!(operand, Expr::Call { .. }) {
                     self.hoist_tries_expr(operand)?;
                 }

@@ -886,3 +886,16 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - WRITTEN REPLIES: #2312 #1745 #1776 #1746 landings + #2196 follow-up disclosure (cross-PR honesty). No silent anything.
 - Suite trajectory: 176 -> 179. Final main 2c91e26, ls-remote == HEAD, tree clean.
 - NEXT TICK QUEUE: kevin9327 batch tail #1782 (TypeShape preservation, 0-behind) + #1807 (void/multi-value arity, 0-behind); #2310 (N5 zero maps, 0-behind); #2415 (preludes once per generate, score 9); #2395 (O8 slot-loan snapshot, 5-behind); #2055/#2378 (11-behind — rebase ask candidates); #1974 (5-behind w/ conflicts — rebase-or-close verdict pending).
+
+## Session 26 — 2026-10-31 afternoon (tick 487193: 4 landed, all gates green)
+
+- Sandbox recycled (7th); toolchains re-restored (rust 1.99.0 + go1.26.9). Cold build lesson re-learned: background builds (nohup AND setsid) are reaped between tool calls in this sandbox — foreground `timeout 560 flock` slices only (the resume-from-warm-cache last slice finished in 9.5s). cargo index cache wiped each recycle; first slice re-downloads.
+- CI approve 40/172.
+- LANDED (Pareto front, all score-9 0-behind):
+  4a00c8e Merge PR #2387 (ket4min-susan, fixes #2384) — hy-emit unwraps outer Expr::Try on Stmt::Defer call operand (Row 13 BUILDABLE: `defer f.close()?` emits `defer f.Close()`); 180 suites (+1 defer_try_emit), FULL 41/88.
+  41f73d1 Merge PR #2439 (tungnguyen84) — surface_edits replaces ALL digit runs on dual-count census surfaces; live drift on main confirmed first (parse_all.rs `files.len(), 129, "expected exactly 127 corpus programs"`); heterogeneous surfaces (corpus README/VERDICTS.md) bypass bump() so the sweep is safe; PR's own criterion executed per tools rule (1/1 + full 17/17 OK on PR tree); 180 suites, FULL 41/88.
+  f57ca5e Merge PR #2430 (kevin9327, fixes #2421) — prelude set[T] equality rejects HYB-E2006 with set-specific hint; name-shadowing guard keeps user `struct set` comparable; option/array/struct carriers reject via incomparable_rec; ZERO differential side-shifts (no fixture ever compared sets); 182 suites (+2), FULL 41/88.
+  a1142cd Merge PR #2440 (tungnguyen84) — sync.RWMutex lowered (both spellings, RLock/RUnlock/TryRLock + initialisms), atomic and/or -> And/Or on all five shapes, receiver_type_name generalizes Pointer(inner) recursion so *sync.mutex enforces the curated surface (user structs behind pointers stay fail-open); 183 suites (+1), FULL 41/88.
+- WRITTEN REPLIES: all four landings with battery evidence + bounty rail (discussion #295). No silent anything.
+- Suite trajectory: 179 -> 183. Final main a1142cd, ls-remote == HEAD, tree clean.
+- NEXT TICK QUEUE: #2389 (ket4min-susan, multi-value slot loans, fetched/diff-read) -> #2388 (select move-sends) -> #2425 (autoland repro verdicts) -> #2290/#2432/#2431/#2390/#2310 (score-9 back half); kevin9327 batch tail #1782/#1807; note #2388+#2389 both edit closures.rs (different functions — sequential merges expected clean).

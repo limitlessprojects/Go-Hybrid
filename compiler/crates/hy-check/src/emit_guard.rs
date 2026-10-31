@@ -748,6 +748,7 @@ impl<'a> Checker<'a> {
                 noun,
                 match noun {
                     "map" => "map can only be compared to nil",
+                    "set" => "struct containing map cannot be compared",
                     "slice" => "slice can only be compared to nil",
                     "function value" => "func can only be compared to nil",
                     _ => "cannot be compared",
@@ -755,6 +756,7 @@ impl<'a> Checker<'a> {
             ),
             match noun {
                 "map" => "fix: compare membership or length (`len(a) == len(b)`), or a specific entry (`a[k] == b[k]`), instead of whole-map equality".to_string(),
+                "set" => "fix: compare membership (`a.has(x)`) or length (`len(a) == len(b)`) instead of whole-set equality".to_string(),
                 "slice" => "fix: compare lengths or elements pairwise — whole-slice equality has no Go meaning".to_string(),
                 "function value" => "fix: a function value is only comparable to `nil` — compare behaviour (call both) instead".to_string(),
                 _ => "fix: compare the comparable fields individually — the struct carries an incomparable field".to_string(),
@@ -795,6 +797,9 @@ impl<'a> Checker<'a> {
             // `[N]T` is comparable exactly when `T` is.
             TypeShape::Array(elem) => self.incomparable_rec(elem, seen),
             TypeShape::Struct(Some(name)) => {
+                if name == "set" && !self.structs.contains_key("set") {
+                    return Some("set");
+                }
                 if seen.iter().any(|n| n == name) {
                     return None; // value cycle — Go rejects the type itself elsewhere
                 }

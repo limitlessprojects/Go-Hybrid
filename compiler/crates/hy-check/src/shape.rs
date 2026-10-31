@@ -1261,9 +1261,7 @@ pub(crate) fn receiver_type_name(shape: &TypeShape) -> Option<String> {
             Some(t.clone())
         }
         TypeShape::Atomic => Some("atomic.int".to_string()),
-        TypeShape::Pointer(inner) if matches!(**inner, TypeShape::Atomic) => {
-            Some("atomic.int".to_string())
-        }
+        TypeShape::Pointer(inner) => receiver_type_name(inner),
         _ => None,
     }
 }

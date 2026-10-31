@@ -369,8 +369,8 @@ pub(crate) fn foreign_method_surface(recv_type: &str) -> Option<&'static [&'stat
     /// `sync.RWMutex`.
     const SYNC_RWMUTEX: &[&str] = &["lock", "unlock", "try_lock", "rlock", "runlock", "try_rlock"];
     match recv_type {
-        "sync.mutex" => Some(SYNC_MUTEX),
-        "sync.rwmutex" => Some(SYNC_RWMUTEX),
+        "sync.mutex" | "sync.Mutex" => Some(SYNC_MUTEX),
+        "sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex" => Some(SYNC_RWMUTEX),
         // NOTE: deliberately NOT `serde_json.view`. A "view" is TWO Go types
         // depending on context: ranging `doc.array(k)` yields element
         // `jsonbinding.Value` handles (real methods), while the `array` result
