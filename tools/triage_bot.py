@@ -508,8 +508,14 @@ def cmd_approve(args):
 def cmd_labels(args):
     cfg = load_cfg()
     gh = Gh(cfg["repo"], load_token(args))
+    # POSTing an already existing label returns 422 and still spends quota.
+    # Reconcile the palette once, just as PR labels below use a delta.
+    existing_palette = set()
+    if not args.dry:
+        existing_palette = {label["name"] for label in
+                            gh.paginate("/repos/%s/labels" % gh.repo)}
     for name, meta in cfg["labels"].items():
-        if args.dry:
+        if args.dry or name in existing_palette:
             continue
         try:
             gh.post("/repos/%s/labels" % gh.repo,
