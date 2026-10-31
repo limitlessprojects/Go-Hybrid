@@ -994,6 +994,116 @@ impl<'a> Checker<'a> {
             }
         }
 
+        // T13/T14/T20 (corpus 128/129): variant patterns are only defined for
+        // `option[T]` and enum subjects. A subject that resolves to anything
+        // else would silently pitch the matcher into an "option match" below
+        // (the pass-2 upgrade re-classes `some`/`none` arms wholesale, so
+        // exhaustiveness passes); the emitter then lowers those arms to
+        // `hyMatchN.ok`/`.val` field accesses on the raw subject — Go rejects
+        // those as undefined fields (accepted-but-unbuildable, row 13).
+        // Fail closed: any variant-pattern arm on a subject known to be
+        // neither `option[T]` nor a declared enum rejects with a dedicated
+        // type error.
+        let resolved_subject = self
+            .ty_of_expr(st, subject)
+            .map(|t| self.resolve_type_alias(&t));
+        // Defines without an ascription (`n := 5`) carry no TypeExpr at all —
+        // only a shape (`binding_ty_str` falls back to the shape render the
+        // same way). A shape-only Known subject gets a stub Named render so
+        // the type guard covers it; an unresolvable subject stays ungated.
+        let subject_ty: Option<TypeExpr> = resolved_subject.clone().or_else(|| {
+            let shape = self.shape_of_expr(st, subject);
+            match shape {
+                TypeShape::Unknown | TypeShape::Struct(_) | TypeShape::OwnHandle(_) => None,
+                TypeShape::Str => Some(TypeExpr::Named {
+                    name: "string".to_string(),
+                    span: subject.span(),
+                }),
+                _ => Some(TypeExpr::Named {
+                    name: shape.render(),
+                    span: subject.span(),
+                }),
+            }
+        });
+        let is_option_pattern = |arm: &hy_syntax::MatchArm| {
+            matches!(&arm.pattern, MatchPattern::Path { segments, .. }
+                if segments.as_slice() == ["some"] || segments.as_slice() == ["none"])
+        };
+        let is_enum_pattern = |arm: &hy_syntax::MatchArm| match &arm.pattern {
+            MatchPattern::Path { segments, .. } => {
+                (segments.len() == 1 && self.enums.values().any(|vs| vs.contains(&segments[0])))
+                    || (segments.len() == 2 && self.enums.contains_key(segments[0].as_str()))
+            }
+            _ => false,
+        };
+        // Three-way subject classification. `option[T]` carries its own
+        // variant machinery (both pattern families' exhaustiveness lives
+        // below), a declared enum carries only its variants, and anything
+        // else resolved carries neither — variant arms on it reject.
+        let subject_is_option = matches!(subject_ty.as_ref(), Some(TypeExpr::Option { .. }));
+        let subject_enum: Option<String> = match subject_ty.as_ref() {
+            Some(TypeExpr::Option { .. }) => None,
+            Some(TypeExpr::Named { name, .. }) => {
+                // As-written base name must be a declared enum; unnamed /
+                // non-enum subjects fall through to the gate below.
+                let base = Self::base_named_type_str(name);
+                if self.enums.contains_key(base) {
+                    Some(base.to_string())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        let missing_machinery: Option<&'static str> = if subject_is_option {
+            // both pattern families are defined on `option[T]`
+            None
+        } else if let Some(_enum_name) = &subject_enum {
+            // enum subject: only its own variant paths are defined; an
+            // option-pattern arm (`some`/`none`) has no meaning there (T20 —
+            // absence mechanisms stay distinct).
+            if arms.iter().any(is_option_pattern) {
+                Some("`some`/`none` patterns")
+            } else {
+                None
+            }
+        } else if subject_ty.is_some() {
+            // resolved non-option, non-enum subject: any variant pattern
+            // rejects.
+            if arms.iter().any(is_option_pattern) {
+                Some("`some`/`none` patterns")
+            } else if arms.iter().any(is_enum_pattern) {
+                Some("enum variant patterns")
+            } else {
+                None
+            }
+        } else {
+            // unresolvable subject: nothing proven, gate stays open (the
+            // existing pass-1/pass-2 target inference handles it below).
+            None
+        };
+        if let Some(which) = missing_machinery {
+            let got = subject_ty
+                .as_ref()
+                .map(|t| t.render())
+                .unwrap_or_else(|| "<unknown>".to_string());
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E5002",
+                    self.path.clone(),
+                    span,
+                    format!(
+                        "variant patterns ({which}) are not defined for a subject of type `{got}` (HYB-E5002)"
+                    ),
+                )
+                .with_notes(vec![
+                    "why: `some`/`none` match only `option[T]` subjects (T20) and enum variant paths match only their own enum (T13/T14) — on any other resolved type the emitter lowers a `.val`/`.ok` field access the Go compiler rejects, so an accepted program can no longer build".to_string(),
+                    "fix: match the subject's actual type (an `option[T]`, a declared enum, or scalar literal patterns), or remove the variant arms".to_string(),
+                ]),
+            );
+            return;
+        }
+
         match target {
             MatchTarget::Option => {
                 let mut has_some = false;
