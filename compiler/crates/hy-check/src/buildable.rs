@@ -3923,16 +3923,13 @@ impl<'a> Collector<'a> {
                 }
             }
             let ik = self.kind_of_expr(item);
-            if ik == OpKind::Unknown || ik == expected {
+            if ik == OpKind::Unknown || ik == expected || expected == OpKind::Interface {
                 continue;
             }
             if expected == OpKind::Float
                 && ik == OpKind::Int
                 && crate::const_overflow::const_int_value(item).is_some()
             {
-                continue;
-            }
-            if !kinds_conflict(&expected, &ik) {
                 continue;
             }
             self.emit_e1002(
@@ -3959,14 +3956,13 @@ impl<'a> Collector<'a> {
         let resolved_val = self.ck.resolve_type_alias(val_ty);
         let exp_val = self.kind_of_ty(&resolved_val, 0);
         for (k, v) in entries {
-            if exp_key != OpKind::Unknown {
+            if exp_key != OpKind::Unknown && exp_key != OpKind::Interface {
                 let kk = self.kind_of_expr(k);
                 if kk != OpKind::Unknown
                     && kk != exp_key
                     && !(exp_key == OpKind::Float
                         && kk == OpKind::Int
                         && crate::const_overflow::const_int_value(k).is_some())
-                    && kinds_conflict(&exp_key, &kk)
                 {
                     self.emit_e1002(
                         k.span(),
@@ -3980,7 +3976,7 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
-            if exp_val != OpKind::Unknown {
+            if exp_val != OpKind::Unknown && exp_val != OpKind::Interface {
                 let bare_v = unwrap_parens(v);
                 if matches!(bare_v, Expr::Lit { kind: LitKind::Nil, .. }) {
                     continue;
@@ -3991,7 +3987,6 @@ impl<'a> Collector<'a> {
                     && !(exp_val == OpKind::Float
                         && vk == OpKind::Int
                         && crate::const_overflow::const_int_value(v).is_some())
-                    && kinds_conflict(&exp_val, &vk)
                 {
                     self.emit_e1002(
                         v.span(),
