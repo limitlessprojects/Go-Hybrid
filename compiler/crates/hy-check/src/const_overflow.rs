@@ -534,7 +534,7 @@ impl<'a> Checker<'a> {
                 self.check_place_type_conversions(base);
                 self.check_expr_type_conversions(index);
             }
-            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } | PlaceKind::Deref { base } => {
                 self.check_place_type_conversions(base)
             }
         }

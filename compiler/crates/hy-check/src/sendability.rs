@@ -1804,7 +1804,7 @@ impl<'a> Checker<'a> {
                 self.walk_place_chan_dir(base, env);
                 self.walk_expr_chan_dir(index, env);
             }
-            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } | PlaceKind::Deref { base } => {
                 self.walk_place_chan_dir(base, env);
             }
         }
@@ -2798,6 +2798,13 @@ impl<'a> Checker<'a> {
                 self.struct_fields_for_type(&base_ty)
                     .and_then(|fs| fs.into_iter().find(|(n, _)| n == name))
                     .map(|(_, t)| t)
+            }
+            PlaceKind::Deref { base } => {
+                let base_ty = self.dir_ty_of_place(base, env)?;
+                match self.resolve_type_alias(&base_ty) {
+                    TypeExpr::Pointer { to, .. } => Some(*to),
+                    _ => None,
+                }
             }
             PlaceKind::Index { base, .. } => {
                 let base_ty = self.dir_ty_of_place(base, env)?;

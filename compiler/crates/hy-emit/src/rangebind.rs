@@ -139,7 +139,7 @@ fn place_reads(p: &hy_syntax::Place, target: &str) -> bool {
         PlaceKind::Index { base, index } => {
             place_reads(base, target) || expr_reads(index, target)
         }
-        PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => place_reads(base, target),
+        PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } | PlaceKind::Deref { base } => place_reads(base, target),
     }
 }
 
