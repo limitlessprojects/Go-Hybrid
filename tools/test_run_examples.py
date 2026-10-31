@@ -58,8 +58,9 @@ class ExampleExitTests(unittest.TestCase):
                 f"#!{sys.executable}\nimport tempfile\n"
                 f"print(tempfile.mkdtemp(dir={str(root)!r}))\n", encoding="utf-8")
             mktemp.chmod(0o755)
+            selectors = [example] if isinstance(example, str) else list(example)
             return subprocess.run(
-                ["bash", str(ROOT / "tools" / "run_examples.sh"), example],
+                ["bash", str(ROOT / "tools" / "run_examples.sh"), *selectors],
                 env={**os.environ, "HYB_BIN": str(builder),
                      "TMPDIR": str(root),
                      "PATH": str(root) + os.pathsep + os.environ.get("PATH", "")},
@@ -121,6 +122,61 @@ class ExampleExitTests(unittest.TestCase):
 
     def test_timing_example_compares_only_stdout(self):
         self.check_streams([EXAMPLE])
+
+
+class ExampleSelectorTests(unittest.TestCase):
+    run_example = ExampleExitTests.run_example
+    assert_result = ExampleExitTests.assert_result
+
+    EXAMPLES = (
+        "01-hello", "02-cli-cat", "03-worker-pool", "04-pipeline-backpressure",
+        "05-json-transform", "06-http-server", "07-lru-generics",
+        "08-graph-ownership", "09-go-imports-hybrid", "10-rust-crate-import",
+    )
+
+    def test_documented_short_selectors_reach_the_builder(self):
+        # A deliberate build failure pins selection for all ten examples,
+        # including cat's separate runtime contract, without any toolchain.
+        for example in self.EXAMPLES:
+            with self.subTest(example=example):
+                result = self.run_example(example=example[:2], build_exit=3)
+                self.assert_result(result, 1)
+                self.assertIn(f"--- {example}\n", result.stdout)
+                self.assertIn(f"FAIL {example} (", result.stdout)
+                self.assertNotIn("no program.hy", result.stdout)
+
+    def test_short_selectors_match_full_names(self):
+        for example in (STD_EXAMPLE, PKG_EXAMPLE, EXAMPLE):
+            expected = (ROOT / "examples" / example / "expected.txt").read_text(encoding="utf-8")
+            with self.subTest(example=example):
+                short = self.run_example(example=example[:2], output=expected)
+                full = self.run_example(example=example, output=expected)
+                self.assert_result(short, 0)
+                self.assert_result(full, 0)
+                self.assertEqual(short.stdout, full.stdout)
+
+    def test_multiple_short_and_full_selectors(self):
+        result = self.run_example(example=["01", STD_EXAMPLE, "01"], output=STD_EXPECTED)
+        self.assert_result(result, 0)
+        self.assertEqual(result.stdout.count("PASS 01-hello (stdout == expected.txt)"), 3)
+
+    def test_unknown_short_selector_still_fails(self):
+        result = self.run_example(example="11")
+        self.assert_result(result, 1)
+        self.assertIn("FAIL 11 (no program.hy", result.stdout)
+
+    def test_partial_and_missing_names_still_fail(self):
+        for selector in ("0", "1", "01-hell", "missing-example"):
+            with self.subTest(selector=selector):
+                result = self.run_example(example=selector)
+                self.assert_result(result, 1)
+                self.assertIn(f"FAIL {selector} (no program.hy", result.stdout)
+
+    def test_no_selectors_still_runs_all_examples(self):
+        result = self.run_example(example=[], build_exit=3)
+        self.assert_result(result, 1)
+        selected = [line[4:] for line in result.stdout.splitlines() if line.startswith("--- ")]
+        self.assertEqual(selected, list(self.EXAMPLES))
 
 
 class StandardExampleExitTests(unittest.TestCase):
