@@ -219,6 +219,25 @@ fn equality_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
     kinds_conflict(a, b) && kinds_conflict(b, a)
 }
 
+fn is_numeric_literal(e: &Expr) -> bool {
+    let bare = unwrap_parens(e);
+    match bare {
+        Expr::Lit { kind, .. } => matches!(kind, LitKind::Int(_) | LitKind::Float(_)),
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => matches!(
+            unwrap_parens(operand),
+            Expr::Lit {
+                kind: LitKind::Int(_) | LitKind::Float(_),
+                ..
+            }
+        ),
+        _ => false,
+    }
+}
+
 /// Does a type conversion `target(arg)` fail because the two types are incompatible in Go?
 ///
 /// In Go, type conversions `T(x)` require compatible types:
@@ -2967,9 +2986,13 @@ impl<'a> Collector<'a> {
             // are rejected here under HYB-E1002 (rule `BUILDABLE`).
             BinOp::Eq | BinOp::Ne => {
                 let op_str = if matches!(op, BinOp::Eq) { "==" } else { "!=" };
+                let numeric_mismatch = ((lk == OpKind::Int && rk == OpKind::Float)
+                    || (lk == OpKind::Float && rk == OpKind::Int))
+                    && !is_numeric_literal(lhs)
+                    && !is_numeric_literal(rhs);
                 if !Checker::is_nil_literal(lhs)
                     && !Checker::is_nil_literal(rhs)
-                    && equality_kinds_conflict(&lk, &rk)
+                    && (equality_kinds_conflict(&lk, &rk) || numeric_mismatch)
                 {
                     self.emit_e1002(
                         span,
@@ -3242,7 +3265,10 @@ impl<'a> Collector<'a> {
                 let mismatch = tk != OpKind::Unknown
                     && vk != OpKind::Unknown
                     && tk.is_numeric() != vk.is_numeric();
-                if !t_ok || !v_ok || mismatch || kinds_conflict(&tk, &vk) {
+                let numeric_assign_conflict = tk == OpKind::Float
+                    && vk == OpKind::Int
+                    && !is_numeric_literal(val);
+                if !t_ok || !v_ok || mismatch || kinds_conflict(&tk, &vk) || numeric_assign_conflict {
                     self.emit_e1002(
                         span,
                         format!(
@@ -3264,9 +3290,13 @@ impl<'a> Collector<'a> {
                     AssignOp::MulAssign => "*=",
                     _ => "/=",
                 };
+                let numeric_assign_conflict = tk == OpKind::Float
+                    && vk == OpKind::Int
+                    && !is_numeric_literal(val);
                 if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || kinds_conflict(&tk, &vk)
+                    || numeric_assign_conflict
                 {
                     self.emit_e1002(
                         span,
@@ -4909,6 +4939,40 @@ fn main() {
                 error_codes(&r)
             );
         }
+    }
+
+    #[test]
+    fn rejects_mismatched_equality_and_compound_assign_1970() {
+        let src = "\
+fn main() {
+    f := 3.14
+    i := 2
+    if f == i {
+        fmt.println(\"equal\")
+    }
+    f += i
+    f -= i
+    fmt.println(f)
+}
+";
+        let r = check(src);
+        assert_eq!(
+            r.verdict,
+            Verdict::Reject,
+            "expected reject for float vs int equality and compound arithmetic"
+        );
+        let codes = error_codes(&r);
+        assert!(
+            codes.contains(&"HYB-E1002".to_string()),
+            "expected HYB-E1002, got {:?}",
+            codes
+        );
+        assert_eq!(
+            codes.iter().filter(|c| *c == "HYB-E1002").count(),
+            3,
+            "expected 3 HYB-E1002 diagnostics (f == i, f += i, f -= i), got {:?}",
+            r.diagnostics
+        );
     }
 
     #[test]
