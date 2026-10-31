@@ -1490,6 +1490,95 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Is this dividend integer-typed? It decides the untyped-`0.0` divisor rule
+    /// (#2426): Go converts the untyped constant to the dividend's type, so an
+    /// integer dividend turns `0.0` into the integer zero and the division fails
+    /// to compile (`x := 10; _ = x / 0.0`), while a `float64` dividend keeps
+    /// IEEE-754 division at run time and stays accepted.
+    ///
+    /// The declared type settles it when there is one (`var x int` /
+    /// `var f float64`); otherwise the initializer does, through the same
+    /// per-function binding chain the constant folders use — `x := 10` is an
+    /// integer, `x := 1.5` is not.
+    pub(crate) fn int_typed_dividend_at(&self, e: &Expr, st: &FnState, depth: u32) -> bool {
+        if depth > 16 {
+            return false;
+        }
+        match unwrap_parens(e) {
+            Expr::Lit {
+                kind: LitKind::Int(_) | LitKind::Char(_),
+                ..
+            } => true,
+            Expr::Call { callee, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    // `len`/`cap` are integers, and so is every integer conversion.
+                    return name == "len" || name == "cap" || self.is_int_conversion_name(name);
+                }
+                false
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.int_typed_dividend_at(lhs, st, depth + 1)
+                    && self.int_typed_dividend_at(rhs, st, depth + 1)
+            }
+            Expr::Ident { name, span } => {
+                if self.zd_defined.contains(name) {
+                    return false;
+                }
+                if let Some(ty) = st.env_lookup(name).and_then(|b| b.ty.as_ref()) {
+                    if let TypeExpr::Named { name: target, .. } = self.resolve_type_alias(ty) {
+                        if is_int_primitive_type_name(&target) {
+                            return true;
+                        }
+                        // An empty name is "not known here", not "not an
+                        // integer": fall through to the initializer.
+                        if !target.is_empty() {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+                if let Some(sight) = self.resolve_local_binding_at(name, span.start) {
+                    if let Some(v) = sight.value {
+                        return self.int_typed_dividend_at(v, st, depth + 1);
+                    }
+                }
+                match self.const_values.get(name.as_str()) {
+                    Some(v) => self.int_typed_dividend_at(v, st, depth + 1),
+                    None => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// The same integer-typed question for an assignment target (`x /= 0.0`).
+    pub(crate) fn int_typed_place_target(&self, place: &Place, st: &FnState) -> bool {
+        if let PlaceKind::Ident(name) = &place.kind {
+            if let Some(ty) = st.env_lookup(name).and_then(|b| b.ty.as_ref()) {
+                if let TypeExpr::Named { name: target, .. } = self.resolve_type_alias(ty) {
+                    if is_int_primitive_type_name(&target) {
+                        return true;
+                    }
+                    if !target.is_empty() {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            }
+            if let Some(sight) = self.resolve_local_binding_at(name, place.span.start) {
+                if let Some(v) = sight.value {
+                    return self.int_typed_dividend_at(v, st, 0);
+                }
+            }
+            if let Some(v) = self.const_values.get(name.as_str()) {
+                return self.int_typed_dividend_at(v, st, 0);
+            }
+        }
+        false
+    }
+
     pub(crate) fn const_string_len_at(&self, expr: &Expr, use_pos: hy_diag::Pos, depth: usize) -> Option<i128> {
         if depth > 32 {
             return None;
@@ -2585,7 +2674,7 @@ fn is_non_int_array_len_expr(expr: &Expr) -> bool {
     }
 }
 
-fn is_int_primitive_type_name(name: &str) -> bool {
+pub(crate) fn is_int_primitive_type_name(name: &str) -> bool {
     matches!(
         name,
         "int"
