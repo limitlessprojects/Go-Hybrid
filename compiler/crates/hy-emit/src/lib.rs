@@ -194,6 +194,62 @@ pub fn emit_go_package(
     em.emit_file(file)
 }
 
+/// The Hybrid preludes (`option`, `set`, `hy_pop`) one emitted file needs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PreludeNeeds {
+    pub option: bool,
+    pub set: bool,
+    pub pop: bool,
+}
+
+impl PreludeNeeds {
+    pub fn any(&self) -> bool {
+        self.option || self.set || self.pop
+    }
+
+    pub fn union(&mut self, other: PreludeNeeds) {
+        self.option |= other.option;
+        self.set |= other.set;
+        self.pop |= other.pop;
+    }
+}
+
+/// Package mode for `hyb generate`, where several `.hy` files join ONE Go
+/// package: the preludes are package-level declarations, so emitting them
+/// into every file redeclares `option`/`some`/`set`/`hy_pop` as soon as two
+/// files use them. Returns the file WITHOUT preludes plus what it needs;
+/// the caller writes the union once with [`package_prelude_file`].
+pub fn emit_go_package_shared_prelude(
+    file: &File,
+    pkg_name: &str,
+    binding_prefix: &str,
+) -> Result<(String, PreludeNeeds), EmitError> {
+    let mut em = Emitter::new();
+    em.package_name = pkg_name.to_string();
+    em.binding_prefix = binding_prefix.to_string();
+    em.export_pub = true;
+    em.omit_prelude = true;
+    let go = em.emit_file(file)?;
+    Ok((go, em.prelude_needs))
+}
+
+/// The body of a package's shared prelude file (after the caller's
+/// generated-file header): `package <name>` plus each needed prelude once.
+pub fn package_prelude_file(pkg_name: &str, needs: PreludeNeeds) -> String {
+    let mut out = format!("package {}\n", pkg_name);
+    for (want, text) in [
+        (needs.option, OPTION_PRELUDE),
+        (needs.set, SET_PRELUDE),
+        (needs.pop, POP_PRELUDE),
+    ] {
+        if want {
+            out.push('\n');
+            out.push_str(text);
+        }
+    }
+    out
+}
+
 /// Which rust-binding packages does the emitted Go call? (`hyb build`
 /// assembles those into the build workspace.) Scans for the binding roots'
 /// call prefix — the emitter only emits `<root>.` for KNOWN crates, so the
@@ -597,6 +653,10 @@ pub struct Emitter {
     package_name: String,
     binding_prefix: String,
     export_pub: bool,
+    /// Package mode with a shared prelude file (`hyb generate`): record the
+    /// needed preludes in `prelude_needs` instead of emitting them inline.
+    omit_prelude: bool,
+    prelude_needs: PreludeNeeds,
     /// The current (non-main) fn's per-result RETURN texts when its results
     /// end in `error` — E3 propagates via `return <zeros…, err>`.
     cur_fn_error_returns: Option<Vec<String>>,
@@ -666,6 +726,8 @@ impl Emitter {
             package_name: "main".to_string(),
             binding_prefix: "hybrid.program".to_string(),
             export_pub: false,
+            omit_prelude: false,
+            prelude_needs: PreludeNeeds::default(),
             cur_fn_error_returns: None,
             fn_shapes: BTreeMap::new(),
             closure_shapes: BTreeMap::new(),
@@ -939,7 +1001,12 @@ impl Emitter {
             || body.contains(".contains(")
             || body.contains(".insert(");
         let needs_pop = body.contains("hy_pop(");
-        if needs_option || needs_set || needs_pop {
+        self.prelude_needs = PreludeNeeds {
+            option: needs_option,
+            set: needs_set,
+            pop: needs_pop,
+        };
+        if !self.omit_prelude && (needs_option || needs_set || needs_pop) {
             out.push('\n');
             if needs_option {
                 out.push_str(OPTION_PRELUDE);
