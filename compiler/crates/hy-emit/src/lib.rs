@@ -627,6 +627,11 @@ pub struct Emitter {
     /// True when the current fn declares any named result item (so Go's
     /// result signature is fully named and bare `return` returns live slots).
     cur_fn_has_named_results: bool,
+    /// The Go name of the current fn frame's error result, when a deferred
+    /// `defer f()?` can store into it at exit: `hyErr` in main's wrapper
+    /// closure, or the (named) error result of a fn whose body defers a
+    /// `?` call. None = no landing spot (emit_defer_try refuses).
+    defer_err_target: Option<String>,
     /// Per-fn result shapes, collected eagerly (Batch I): name →
     /// (n_results, ends_in_error, first_result's binding kind, per-param
     /// pointer-base types). Drives the `?` hoist arity (13:
@@ -698,6 +703,7 @@ impl Emitter {
             cur_fn_error_returns: None,
             closure_written: BTreeSet::new(),
             cur_fn_has_named_results: false,
+            defer_err_target: None,
             fn_shapes: BTreeMap::new(),
             closure_shapes: BTreeMap::new(),
             struct_fields: BTreeMap::new(),
@@ -1431,6 +1437,7 @@ impl Emitter {
             Self::collect_closure_writes_block(body, false, &mut self.closure_written);
         }
         self.cur_fn_has_named_results = f.results.iter().any(|r| r.name.is_some());
+        self.defer_err_target = None;
         if !is_main && !f.results.is_empty() && !main_needs_wrapper {
             let last_is_err = matches!(
                 &f.results.last().unwrap().ty,
@@ -1521,6 +1528,7 @@ impl Emitter {
             self.indent += 1;
             let saved = self.in_main_closure;
             self.in_main_closure = true;
+            self.defer_err_target = Some("hyErr".to_string());
             self.emit_hints_from_params(&f.params);
             if let Some(body) = &f.body {
                 // The closure-body level is already pushed above;
@@ -1537,6 +1545,7 @@ impl Emitter {
             // returns hyErr == nil, exactly the E6 contract's ok path.
             self.push("return");
             self.in_main_closure = saved;
+            self.defer_err_target = None;
             self.indent -= 1;
             self.push("}()");
             self.push("if hyErr != nil {");
@@ -1558,6 +1567,38 @@ impl Emitter {
             self.use_package("fmt");
             self.use_package("os");
             self.use_package("path/filepath");
+            return Ok(());
+        }
+
+        // `defer f()?` (emit_defer_try) stores into the error result at
+        // exit, which Go only allows through a NAMED result: name every
+        // result (user names kept; `hyR<i>` / `hyErr` otherwise — Hybrid
+        // identifiers are snake_case, so the camelCase temps cannot clash).
+        if self.cur_fn_error_returns.is_some()
+            && f.results.len() <= 2
+            && f.body.as_ref().map(Self::block_has_defer_try).unwrap_or(false)
+        {
+            let last = f.results.len() - 1;
+            let mut parts = Vec::with_capacity(f.results.len());
+            for (i, r) in f.results.iter().enumerate() {
+                let ty = self.type_text(&r.ty);
+                let name = match &r.name {
+                    Some(n) if n != "_" => n.clone(),
+                    _ if i == last => "hyErr".to_string(),
+                    _ => format!("hyR{}", i),
+                };
+                if i == last {
+                    self.defer_err_target = Some(name.clone());
+                }
+                parts.push(format!("{} {}", name, ty));
+            }
+            self.push_raw(&format!(" ({}) {{\n", parts.join(", ")));
+            self.emit_hints_from_params(&f.params);
+            if let Some(body) = &f.body {
+                self.emit_block_body(&body.stmts)?;
+            }
+            self.push("}");
+            self.defer_err_target = None;
             return Ok(());
         }
 
@@ -1781,6 +1822,43 @@ impl Emitter {
             TypeExpr::Map { key, value, .. } => {
                 self.type_is_foreign(key) || self.type_is_foreign(value)
             }
+            _ => false,
+        }
+    }
+
+    /// Does this fn body (closure literals excluded — they bind `?` to
+    /// their own results) contain a `defer <call>?`?
+    fn block_has_defer_try(b: &Block) -> bool {
+        b.stmts.iter().any(Self::stmt_has_defer_try)
+    }
+
+    fn stmt_has_defer_try(s: &Stmt) -> bool {
+        match s {
+            Stmt::Defer { call, .. } => {
+                let mut e = call;
+                while let Expr::Paren { inner, .. } = e {
+                    e = inner;
+                }
+                matches!(e, Expr::Try { .. })
+            }
+            Stmt::If {
+                init,
+                then,
+                otherwise,
+                ..
+            } => {
+                init.as_deref().map(Self::stmt_has_defer_try).unwrap_or(false)
+                    || Self::block_has_defer_try(then)
+                    || otherwise
+                        .as_deref()
+                        .map(Self::stmt_has_defer_try)
+                        .unwrap_or(false)
+            }
+            Stmt::For { body, .. } => Self::block_has_defer_try(body),
+            Stmt::Block { block, .. } => Self::block_has_defer_try(block),
+            Stmt::Managed { body, .. } => Self::block_has_defer_try(body),
+            Stmt::Match { arms, .. } => arms.iter().any(|a| Self::block_has_defer_try(&a.body)),
+            Stmt::Select { arms, .. } => arms.iter().any(|a| Self::block_has_defer_try(&a.body)),
             _ => false,
         }
     }
