@@ -3053,3 +3053,98 @@ fn main() {}
     assert!(go6.contains("func read_url() int {"));
     assert!(go6.contains("func read_u_r_l() int {"));
 }
+
+#[test]
+fn if_init_slot_loan_lowers_copy_read_and_branch_handoff() {
+    // 1. Plain `if p := &m["a"]; ...` and `else if q := &m["b"]; ...` must
+    // lower the O8 slot loan to copy-read + store-back rather than emitting
+    // `if p := &m["a"]; ...` verbatim (which fails `go build` with
+    // `cannot take address of m["a"]`).
+    let src1 = "\
+struct item {
+    n int
+}
+
+fn main() {
+    m := map[string]item{\"a\": item{n: 1}, \"b\": item{n: 2}}
+    if p := &m[\"a\"]; p.n > 0 {
+        p.n = 7
+    } else if q := &m[\"b\"]; q.n > 0 {
+        q.n = 8
+    }
+}
+";
+    let go1 = emit(src1);
+    assert!(
+        !go1.contains("&m["),
+        "must not emit address-of map index in Go output:\n{go1}"
+    );
+    assert!(
+        go1.contains("p := m[\"a\"]") && go1.contains("m[\"a\"] = p"),
+        "expected copy-read and store-back for if-init slot loan:\n{go1}"
+    );
+    assert!(
+        go1.contains("q := m[\"b\"]") && go1.contains("m[\"b\"] = q"),
+        "expected copy-read and store-back for else-if-init slot loan:\n{go1}"
+    );
+
+    // 2. When `if p := &m[k]; ok(p.n)?` has a hoistable `?` in `<cond>`,
+    // the desugared block must run through `emit_block_body` so key mutations
+    // snapshot `hyKeyN` and `move m` inside a branch receives `branch_inherit`
+    // store-back BEFORE `go worker(m, done)` instead of racing after the `if`.
+    let src2 = "\
+struct item {
+    n int
+}
+
+fn ok(v int) (bool, error) {
+    return v > 0, nil
+}
+
+fn worker(m map[string]item, done chan int) {
+    done <- m[\"a\"].n
+}
+
+fn run() (int, error) {
+    m := map[string]item{\"a\": item{n: 1}}
+    k := \"a\"
+    if p := &m[k]; ok(p.n)? {
+        k = \"b\"
+        p.n = 7
+    }
+    done := make(chan int, 1)
+    if p := &m[\"a\"]; ok(p.n)? {
+        p.n = 9
+        task worker(move m, done)
+    } else {
+        done <- 0
+    }
+    return <-done, nil
+}
+
+fn main() {}
+";
+    let go2 = emit(src2);
+    assert!(
+        go2.contains("hyKey0 := k") && go2.contains("m[hyKey0] = p"),
+        "expected key snapshot for mutated key in if-init slot loan with `?`:\n{go2}"
+    );
+    let spawn_pos = go2.find("go worker(m, done)").expect("worker spawn");
+    let branch_store_pos = go2[..spawn_pos]
+        .rfind("m[\"a\"] = p")
+        .expect("store-back must precede `go worker(m, done)`");
+    let assign_pos = go2.find("p.n = 9").expect("p.n = 9");
+    assert!(
+        assign_pos < branch_store_pos && branch_store_pos < spawn_pos,
+        "store-back must occur after `p.n = 9` and before `go worker(m, done)`:\n{go2}"
+    );
+    let after_spawn = &go2[spawn_pos..];
+    let else_pos = after_spawn.find("} else {").expect("else branch");
+    let after_else = &after_spawn[else_pos..];
+    let recv_pos = after_else.find("return <-done, nil").expect("return");
+    assert!(
+        !after_else[..recv_pos].contains("}
+		m[\"a\"] = p"),
+        "must not emit post-if store-back after `go worker(m, done)`:\n{go2}"
+    );
+}

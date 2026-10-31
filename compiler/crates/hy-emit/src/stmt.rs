@@ -533,6 +533,23 @@ impl Emitter {
         }
     }
 
+    pub(crate) fn stmt_has_slot_loan(s: &Stmt) -> bool {
+        match s {
+            Stmt::Local(l) => l
+                .values
+                .iter()
+                .any(|v| Self::as_slot_loan_operand(v).is_some()),
+            Stmt::Assign {
+                op: AssignOp::Assign,
+                values,
+                ..
+            } => values
+                .iter()
+                .any(|v| Self::as_slot_loan_operand(v).is_some()),
+            _ => false,
+        }
+    }
+
     pub(crate) fn place_has_hoistable_try(p: &Place) -> bool {
         match &p.kind {
             PlaceKind::Ident(_) => false,
@@ -1442,20 +1459,24 @@ impl Emitter {
         // so bindings introduced by `<init>` are in scope for `<cond>`'s
         // hoisted statements and remain scoped to the if/else construct.
         if let Some(i) = init {
-            if Self::stmt_has_hoistable_try(i) || Self::expr_has_hoistable_try(cond) {
+            if Self::stmt_has_hoistable_try(i)
+                || Self::expr_has_hoistable_try(cond)
+                || Self::stmt_has_slot_loan(i)
+            {
+                let desugared = [
+                    i.clone(),
+                    Stmt::If {
+                        init: None,
+                        cond: cond.clone(),
+                        then: then.clone(),
+                        otherwise: otherwise.map(|o| Box::new(o.clone())),
+                        span: then.span,
+                    },
+                ];
                 self.push("{");
-                self.loan_frames.push(Vec::new());
-                self.indent += 1;
-                self.emit_stmt(i)?;
-                self.hoist_tries_expr(cond)?;
-                self.emit_if_at(None, cond, then, otherwise, true)?;
-                let frame = self.loan_frames.pop().unwrap_or_default();
-                for (_, store) in frame {
-                    self.push(&store);
-                }
-                self.indent -= 1;
+                let r = self.emit_block_body(&desugared);
                 self.push("}");
-                return Ok(());
+                return r;
             }
         }
         // E3 expression form: a `?` in the condition hoists BEFORE the if
@@ -1532,7 +1553,7 @@ impl Emitter {
             }) => {
                 if init
                     .as_deref()
-                    .map(Self::stmt_has_hoistable_try)
+                    .map(|i| Self::stmt_has_hoistable_try(i) || Self::stmt_has_slot_loan(i))
                     .unwrap_or(false)
                     || Self::expr_has_hoistable_try(cond)
                 {
