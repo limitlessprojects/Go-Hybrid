@@ -237,7 +237,33 @@ impl<'a> Checker<'a> {
         // the initializer through the file const map (#998 pattern) and
         // classify the literal. Block-scoped consts stay fail-open (no
         // const-value map in FnState — the #998 precedent).
-        if let Expr::Ident { name, .. } = unwrap_parens(expr) {
+        if let Expr::Ident { name, span } = unwrap_parens(expr) {
+            if let Some(sight) = self.resolve_local_binding_at(name, span.start) {
+                if let Some(ty) = sight.ty {
+                    let resolved = self.resolve_type_alias(ty);
+                    if let TypeExpr::Named { name: tname, .. } = &resolved {
+                        if matches!(
+                            tname.as_str(),
+                            "bool"
+                                | "float32"
+                                | "float64"
+                                | "f32"
+                                | "f64"
+                                | "complex64"
+                                | "complex128"
+                                | "string"
+                                | "error"
+                        ) {
+                            return Some(resolved.render());
+                        }
+                    }
+                }
+                if let Some(val) = sight.value {
+                    if let Some(k) = self.non_integer_bound_kind_at(st, val, depth + 1) {
+                        return Some(k);
+                    }
+                }
+            }
             if st.env_lookup(name).is_none() {
                 if let Some(init) = self.const_values.get(name.as_str()) {
                     if let Some(k) = self.non_integer_bound_kind_at(st, init, depth + 1) {
