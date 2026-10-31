@@ -251,6 +251,66 @@ fn copy_and_clear_builtin_args_validated() {
 }
 
 #[test]
+fn issue_1732_real_imag_complex_new_operands_rejected() {
+    // new(composite literal) rejected
+    let new_struct = check("struct Point { x int }\nfn main() { _ = new(Point{x: 1}) }\n");
+    assert_has(&new_struct, "HYB-E2005");
+
+    let new_slice = check("fn main() { _ = new([]int{1, 2}) }\n");
+    assert_has(&new_slice, "HYB-E2005");
+
+    let new_map = check("fn main() { _ = new(map[string]int{\"a\": 1}) }\n");
+    assert_has(&new_map, "HYB-E2005");
+
+    // real(non-complex) rejected
+    let real_str = check("fn main() { _ = real(\"hello\") }\n");
+    assert_has(&real_str, "HYB-E2005");
+
+    let real_bool = check("fn main() { _ = real(true) }\n");
+    assert_has(&real_bool, "HYB-E2005");
+
+    let real_nil = check("fn main() { _ = real(nil) }\n");
+    assert_has(&real_nil, "HYB-E2005");
+
+    let real_comp = check("struct Point { x int }\nfn main() { _ = real(Point{x: 1}) }\n");
+    assert_has(&real_comp, "HYB-E2005");
+
+    // imag(non-complex) rejected
+    let imag_str = check("fn main() { _ = imag(\"world\") }\n");
+    assert_has(&imag_str, "HYB-E2005");
+
+    let imag_bool = check("fn main() { _ = imag(false) }\n");
+    assert_has(&imag_bool, "HYB-E2005");
+
+    let imag_nil = check("fn main() { _ = imag(nil) }\n");
+    assert_has(&imag_nil, "HYB-E2005");
+
+    let imag_comp = check("struct Point { x int }\nfn main() { _ = imag(Point{x: 1}) }\n");
+    assert_has(&imag_comp, "HYB-E2005");
+
+    // complex(non-float) rejected
+    let comp_str = check("fn main() { _ = complex(\"a\", \"b\") }\n");
+    assert_has(&comp_str, "HYB-E2005");
+
+    let comp_bool = check("fn main() { _ = complex(true, false) }\n");
+    assert_has(&comp_bool, "HYB-E2005");
+
+    let comp_nil = check("fn main() { _ = complex(nil, nil) }\n");
+    assert_has(&comp_nil, "HYB-E2005");
+
+    let comp_struct = check("struct Point { x int }\nfn main() { _ = complex(Point{x: 1}, Point{x: 2}) }\n");
+    assert_has(&comp_struct, "HYB-E2005");
+
+    // Valid calls accepted
+    let valid_new = check("struct Point { x int }\nfn main() { _ = new(Point) }\n");
+    assert_lacks(&valid_new, "HYB-E2005");
+
+    let valid_comp = check("fn main() { _ = complex(1.0, 2.0) }\n");
+    assert_lacks(&valid_comp, "HYB-E2005");
+}
+
+
+#[test]
 fn parenthesized_and_aliased_new_preserves_sendability_and_unmovable_checks() {
     let closure_paren = check(
         "struct holder {\n    f fn()\n}\nfn worker(p *holder) {\n    p.f()\n}\nfn main() {\n    p := new((holder))\n    task worker(move p)\n}\n",
