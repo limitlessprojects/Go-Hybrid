@@ -2,7 +2,7 @@
 
 use hy_syntax::*;
 
-use super::{to_go_name, BindingKind, EmitError, Emitter};
+use super::{base_ty_name, to_go_name, BindingKind, EmitError, Emitter};
 
 use super::expr::ATOM;
 use super::shapes::lookup_conversion;
@@ -844,11 +844,16 @@ impl Emitter {
                 }
                 None
             }
-            // User fns: the eagerly collected declared shape.
+            // User fns: the eagerly collected declared shape, falling back from local closures.
             Expr::Ident { name, .. } => self
-                .fn_shapes
+                .closure_shapes
                 .get(name.as_str())
-                .map(|(n, err, _, _)| (*n, *err)),
+                .map(|(n, err, _, _)| (*n, *err))
+                .or_else(|| {
+                    self.fn_shapes
+                        .get(name.as_str())
+                        .map(|(n, err, _, _)| (*n, *err))
+                }),
             _ => None,
         }
     }
@@ -1045,6 +1050,36 @@ impl Emitter {
                 self.pointer_vars.insert(name.clone());
             }
         }
+        for (name, val) in names.iter().zip(values.iter()) {
+            if name != "_" {
+                self.record_closure_shape(name, val);
+            }
+        }
+    }
+
+    fn record_closure_shape(&mut self, name: &str, val: &Expr) {
+        if let Expr::FnLit { results, params, .. } = Self::peel_parens(val) {
+            let err = matches!(
+                results.last(),
+                Some(FnResult {
+                    ty: TypeExpr::Named { name, .. },
+                    ..
+                }) if name == "error"
+            );
+            let kind = results
+                .first()
+                .and_then(|r| self.binding_kind_of_ty(&r.ty));
+            let ptr_params = params
+                .iter()
+                .map(|p| match &p.ty {
+                    TypeExpr::Pointer { to, .. } => base_ty_name(to),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let value_count = if err { results.len() - 1 } else { results.len() };
+            self.closure_shapes
+                .insert(name.to_string(), (value_count, err, kind, ptr_params));
+        }
     }
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
@@ -1092,7 +1127,7 @@ impl Emitter {
         // `s := summary(doc)?` — s.set normalizes like any rust-call
         // result).
         if let Expr::Ident { name, .. } = call {
-            if let Some((_, _, Some(kind), _)) = self.fn_shapes.get(name.as_str()) {
+            if let Some((_, _, Some(kind), _)) = self.closure_shapes.get(name.as_str()).or_else(|| self.fn_shapes.get(name.as_str())) {
                 return *kind;
             }
         }
@@ -1324,6 +1359,15 @@ impl Emitter {
             .iter()
             .map(|v| self.emit_expr(v, 0))
             .collect::<Result<Vec<_>, _>>()?;
+        if op == AssignOp::Assign && targets.len() == values.len() {
+            for (t, v) in targets.iter().zip(values.iter()) {
+                if let PlaceKind::Ident(name) = &t.kind {
+                    if name != "_" {
+                        self.record_closure_shape(name, v);
+                    }
+                }
+            }
+        }
         self.push(&format!("{} {} {}", ts.join(", "), op_text, vs.join(", ")));
         Ok(())
     }

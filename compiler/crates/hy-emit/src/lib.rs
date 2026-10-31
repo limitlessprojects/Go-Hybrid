@@ -501,7 +501,7 @@ pub(crate) enum MemberSpecial {
 
 /// One fn's result shape row: (n_results, ends_in_error, first result's
 /// binding kind, per-param pointer-base types). See Emitter::fn_shapes.
-type FnShape = (usize, bool, Option<BindingKind>, Vec<Option<String>>);
+pub(crate) type FnShape = (usize, bool, Option<BindingKind>, Vec<Option<String>>);
 
 pub struct Emitter {
     /// Function/decl body under assembly (header assembled last — bug #1).
@@ -594,6 +594,8 @@ pub struct Emitter {
     /// normalizes like any rust-call — and the pointer-param auto-address
     /// at call sites (09: `scale_then_register(e, …)` with `e *env`).
     fn_shapes: BTreeMap<String, FnShape>,
+    /// Per-function closure shapes: variable name -> FnShape (for local closure bindings).
+    closure_shapes: BTreeMap<String, FnShape>,
     /// User-struct field types (Batch I): struct → (field, declared hy type
     /// name — dotted for shape-known fields, "" otherwise). Receiver typing
     /// for `stats.mu.lock()` (18).
@@ -651,6 +653,7 @@ impl Emitter {
             export_pub: false,
             cur_fn_error_returns: None,
             fn_shapes: BTreeMap::new(),
+            closure_shapes: BTreeMap::new(),
             struct_fields: BTreeMap::new(),
             var_struct: BTreeMap::new(),
             var_ty: BTreeMap::new(),
@@ -1283,6 +1286,7 @@ impl Emitter {
         self.loop_labels.clear();
         self.loop_label_n = 0;
         self.expr_temps.clear();
+        self.closure_shapes.clear();
 
         // Associated functions (`lru_cache.new`) mangle to
         // `lru_cache_new` — Go has no dotted identifiers. Call sites mangle

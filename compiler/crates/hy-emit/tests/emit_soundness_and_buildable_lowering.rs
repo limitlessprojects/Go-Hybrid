@@ -328,3 +328,49 @@ fn main() {
     );
 }
 
+
+#[test]
+fn closure_bound_by_name_returning_bare_error_emits_single_assignment_issue_2403() {
+    let go = emit_src(
+        "\
+fn main() {
+    check := fn() error {
+        return nil
+    }
+    check()?
+    fmt.println(\"ok\")
+}
+",
+    );
+    assert!(
+        go.contains("hyErr0 := check()"),
+        "expected `hyErr0 := check()` without value temp, got:\n{go}"
+    );
+    assert!(
+        !go.contains("hyT0, hyErr1 :="),
+        "must not emit arity-2 assignment against 1-result bare-error closure, got:\n{go}"
+    );
+}
+
+#[test]
+fn closure_bound_by_name_in_error_fn_emits_single_assignment_issue_2403() {
+    let go = emit_src(
+        "\
+fn run() error {
+    step := fn() error {
+        return nil
+    }
+    step()?
+    return nil
+}
+",
+    );
+    assert!(
+        go.contains("hyErr0 := step()"),
+        "expected `hyErr0 := step()` without value temp, got:\n{go}"
+    );
+    assert!(
+        !go.contains("hyT0, hyErr1 :="),
+        "must not emit arity-2 assignment against 1-result bare-error closure, got:\n{go}"
+    );
+}

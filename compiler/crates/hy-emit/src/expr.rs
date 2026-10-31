@@ -868,7 +868,7 @@ impl Emitter {
         let mut ptr_params: Vec<bool> = Vec::new();
         if let Expr::Ident { name, .. } = callee {
             let (fn_head, _) = split_type_args(name);
-            if let Some((_, _, _, params)) = self.fn_shapes.get(fn_head) {
+            if let Some((_, _, _, params)) = self.closure_shapes.get(fn_head).or_else(|| self.fn_shapes.get(fn_head)) {
                 ptr_params = params.iter().map(|p| p.is_some()).collect();
             }
         }
