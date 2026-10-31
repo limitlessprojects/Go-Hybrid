@@ -368,6 +368,7 @@ struct Define {
     used: bool,
     written: bool,
     elidable: bool,
+    is_untyped: bool,
 }
 
 struct Collector<'a> {
@@ -381,6 +382,7 @@ struct Collector<'a> {
     kind_scopes: Vec<HashMap<String, OpKind>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
+    file_untyped_consts: HashSet<String>,
     /// Result kinds of the function whose body is currently being walked
     /// (#577 C9/C10). Empty for a fn declared with no results — which is also
     /// the state outside any body, so `Stmt::Return` can only ever see it
@@ -416,6 +418,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
             file_consts: HashMap::new(),
+            file_untyped_consts: HashSet::new(),
             fn_results: Vec::new(),
             fn_results_all_named: false,
             fn_results_error_tail: false,
@@ -434,6 +437,9 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
                     .map(|t| c.kind_of_ty(t, 0))
                     .unwrap_or_else(|| c.kind_of_expr(&cd.value));
                 c.file_consts.insert(cd.name.clone(), k);
+                if cd.ty.is_none() {
+                    c.file_untyped_consts.insert(cd.name.clone());
+                }
             }
         }
         for d in &file.decls {
@@ -527,6 +533,7 @@ impl<'a> Collector<'a> {
             used: false,
             written: false,
             elidable: true,
+            is_untyped: false,
         });
         top.insert(name.to_string(), Some(id));
     }
@@ -941,6 +948,7 @@ impl<'a> Collector<'a> {
                 used: false,
                 written: false,
                 elidable: false,
+                is_untyped: matches!(l.kind, LocalKind::Const) && l.ty.is_none(),
             });
             top.insert(name.clone(), Some(id));
         }
@@ -1037,6 +1045,7 @@ impl<'a> Collector<'a> {
                 // `ch <- noop()` / `ch <- pair()`, which Go rejects.
                 self.check_single_value_position(value, "a channel send", false);
                 self.expr(value);
+                self.check_chan_send_operand_kinds(chan, value);
             }
             Stmt::If {
                 init,
@@ -1190,11 +1199,12 @@ impl<'a> Collector<'a> {
                     self.push_scope();
                     match &arm.kind {
                         SelectArmKind::Send { chan, value, .. } => {
-                    // #887: a channel send in a select arm is also a single-value
-                    // position.
-                    self.check_single_value_position(value, "a channel send", false);
+                            // #887: a channel send in a select arm is also a single-value
+                            // position.
+                            self.check_single_value_position(value, "a channel send", false);
                             self.expr(chan);
                             self.expr(value);
+                            self.check_chan_send_operand_kinds(chan, value);
                         }
                         SelectArmKind::Recv { names, chan } => {
                             self.check_repeated_bindings(names, chan.span());
@@ -2775,7 +2785,7 @@ impl<'a> Collector<'a> {
                 if let Some(res) = self.call_result_kinds(callee, args) {
                     if res.len() == want.len() {
                         for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(r, w, values[0].span());
+                            self.report_return_conflict(r, w, &values[0], values[0].span());
                         }
                         return;
                     }
@@ -2784,7 +2794,7 @@ impl<'a> Collector<'a> {
                         && res.len() + 1 == want.len()
                     {
                         for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(r, w, values[0].span());
+                            self.report_return_conflict(r, w, &values[0], values[0].span());
                         }
                         return;
                     }
@@ -2831,7 +2841,7 @@ impl<'a> Collector<'a> {
             if short_ok {
                 for (v, w) in values.iter().zip(want.iter()) {
                     let got = self.kind_of_expr(v);
-                    self.report_return_conflict(&got, w, v.span());
+                    self.report_return_conflict(&got, w, v, v.span());
                 }
                 return;
             }
@@ -2859,12 +2869,15 @@ impl<'a> Collector<'a> {
         }
         for (v, w) in values.iter().zip(want.iter()) {
             let got = self.kind_of_expr(v);
-            self.report_return_conflict(&got, w, v.span());
+            self.report_return_conflict(&got, w, v, v.span());
         }
     }
 
-    fn report_return_conflict(&mut self, got: &OpKind, want: &OpKind, span: Span) {
-        if !kinds_conflict(want, got) {
+    fn report_return_conflict(&mut self, got: &OpKind, want: &OpKind, val: &Expr, span: Span) {
+        let int_float_conflict = *want == OpKind::Float
+            && *got == OpKind::Int
+            && !self.is_untyped_int_const(val);
+        if !kinds_conflict(want, got) && !int_float_conflict {
             return;
         }
         self.emit_e1002(
@@ -3770,6 +3783,72 @@ impl<'a> Collector<'a> {
                     "the lower slice bound `lo` in `x[lo:hi]` must satisfy `lo <= hi`",
                 );
             }
+        }
+    }
+
+    fn is_untyped_int_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit {
+                kind: LitKind::Int(_) | LitKind::Char(_),
+                ..
+            } => true,
+            Expr::Ident { name, .. } => {
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        let d = &self.defines[*id];
+                        if d.kind == LocalKind::Const && d.is_untyped {
+                            return self.lookup_kind(name) == Some(OpKind::Int);
+                        }
+                        return false;
+                    }
+                }
+                if self.file_untyped_consts.contains(name) {
+                    return self.file_consts.get(name) == Some(&OpKind::Int);
+                }
+                false
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnOp::Neg)
+                    && self.is_untyped_int_const(operand)
+            }
+            Expr::Binary { op, lhs, rhs, .. } => {
+                matches!(
+                    op,
+                    BinOp::Add
+                        | BinOp::Sub
+                        | BinOp::Mul
+                        | BinOp::Div
+                        | BinOp::Mod
+                        | BinOp::BitAnd
+                        | BinOp::BitOr
+                        | BinOp::BitXor
+                        | BinOp::Shl
+                        | BinOp::Shr
+                ) && self.is_untyped_int_const(lhs)
+                    && self.is_untyped_int_const(rhs)
+            }
+            _ => false,
+        }
+    }
+
+    fn check_chan_send_operand_kinds(&mut self, chan: &Expr, value: &Expr) {
+        let ck = self.kind_of_expr(chan);
+        let OpKind::Chan(elem) = ck else {
+            return;
+        };
+        let vk = self.kind_of_expr(value);
+        if *elem == OpKind::Float && vk == OpKind::Int && !self.is_untyped_int_const(value) {
+            self.emit_e1002(
+                value.span(),
+                format!(
+                    "cannot use `{}` (type `{}`) as `{}` value in send to `{}` (HYB-E1002)",
+                    value.render(),
+                    vk.label(),
+                    elem.label(),
+                    chan.render()
+                ),
+                "the sent value must match the channel's element type",
+            );
         }
     }
 
