@@ -59,12 +59,10 @@ impl<'a> Checker<'a> {
                 if matches!(op, AssignOp::DivAssign | AssignOp::ModAssign)
                     && values.len() == 1
                     && (is_int_literal_zero(&values[0])
-                        || divisor_int_fold_is_zero(
-                            &values[0],
-                            &self.const_values,
-                            st,
-                            &self.zd_defined,
-                        ))
+                        || self.divisor_int_fold_is_zero(&values[0], st)
+                        || targets.len() == 1
+                            && self.divisor_untyped_float_zero(&values[0], st)
+                            && self.place_is_known_int(st, &targets[0]))
                 {
                     self.emit_const_zero_divisor(*span, assign_op_txt(*op));
                 }
@@ -204,10 +202,12 @@ impl<'a> Checker<'a> {
                     // the literal twin. Shadow-checked against the live env;
                     // names defined inside a deep-walked closure body fail open
                     // (`self.zd_defined`). Runtime divisors stay out of scope.
-                    if divisor_int_fold_is_zero(rhs, &self.const_values, st, &self.zd_defined)
+                    if self.divisor_int_fold_is_zero(rhs, st)
                         || is_float_literal_zero(rhs) && is_const_expr(lhs)
-                        || divisor_float_fold_is_zero(rhs, &self.const_values, st, &self.zd_defined)
-                            && is_const_map_expr(lhs, &self.const_values, st, &self.zd_defined)
+                        || self.divisor_float_fold_is_zero(rhs, st)
+                            && self.is_const_map_expr(lhs, st)
+                        || self.divisor_untyped_float_zero(rhs, st)
+                            && self.expr_is_known_int(st, lhs)
                     {
                         self.emit_const_zero_divisor(*span, bin_op_txt(*op));
                     }
@@ -650,161 +650,282 @@ fn stmt_defined_names(stmt: &Stmt, out: &mut std::collections::HashSet<String>) 
     }
 }
 
-/// `len("abc")` — Go evaluates the length of a constant string at compile
-/// time (spec: constant expression). Named const strings resolve through
-/// the same map. The length is the BYTE length (Go `len` on a string).
-fn const_len_str_value(
-    e: &Expr,
-    consts: &std::collections::HashMap<String, &Expr>,
-    defined: &std::collections::HashSet<String>,
-    depth: u32,
-) -> Option<i128> {
-    if depth > 16 {
-        return None;
+impl<'a> Checker<'a> {
+    fn is_unshadowed_arith_callee(&self, name: &str, st: &crate::model::FnState) -> bool {
+        st.env_lookup(name).is_none()
+            && !self.zd_defined.contains(name)
+            && !self.fns.contains_key(name)
+            && !self.structs.contains_key(name)
+            && !self.consts.contains_key(name)
     }
-    if let Expr::Call { callee, args, .. } = unwrap_parens(e) {
-        if let Expr::Ident { name, .. } = unwrap_parens(callee) {
-            if name == "len" && args.len() == 1 && !args[0].spread {
-                let a = unwrap_parens(&args[0].value);
-                let s: Option<&String> = match a {
-                    Expr::Lit {
-                        kind: LitKind::Str(s) | LitKind::RawStr(s),
-                        ..
-                    } => Some(s),
-                    Expr::Ident { name: n, .. } if !defined.contains(n) => {
-                        consts.get(n.as_str()).and_then(|v| match unwrap_parens(v) {
-                            Expr::Lit {
-                                kind: LitKind::Str(s) | LitKind::RawStr(s),
-                                ..
-                            } => Some(s),
-                            _ => None,
-                        })
+
+    fn is_arith_int_type_name(&self, name: &str) -> bool {
+        is_arith_int_primitive(name)
+            || self.type_aliases.get(name).is_some_and(|ty| {
+                matches!(self.resolve_type_alias(ty), hy_syntax::TypeExpr::Named { name: t, .. }
+                    if is_arith_int_primitive(&t) && !self.structs.contains_key(t.as_str()))
+            })
+    }
+
+    fn is_arith_float_type_name(&self, name: &str) -> bool {
+        matches!(name, "f32" | "f64" | "float32" | "float64")
+            || self.type_aliases.get(name).is_some_and(|ty| {
+                matches!(self.resolve_type_alias(ty), hy_syntax::TypeExpr::Named { name: t, .. }
+                    if matches!(t.as_str(), "f32" | "f64" | "float32" | "float64") && !self.structs.contains_key(t.as_str()))
+            })
+    }
+
+    fn zd_shadows_expr(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Ident { name, .. } => self.zd_defined.contains(name),
+            Expr::Binary { lhs, rhs, .. } => self.zd_shadows_expr(lhs) || self.zd_shadows_expr(rhs),
+            Expr::Unary { operand, .. } | Expr::AddrOf { operand, .. } => self.zd_shadows_expr(operand),
+            _ => false,
+        }
+    }
+
+    fn extract_complex_part<'e>(&'e self, e: &'e Expr, is_imag: bool, st: &crate::model::FnState, depth: u32) -> Option<&'e Expr> {
+        if depth > 16 { return None; }
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } if st.env_lookup(name).is_none() && !self.zd_defined.contains(name) => {
+                self.extract_complex_part(self.const_values.get(name.as_str())?, is_imag, st, depth + 1)
+            }
+            Expr::Call { callee, args, .. } if args.len() == 2 && !args[0].spread && !args[1].spread => {
+                matches!(unwrap_parens(callee), Expr::Ident { name, .. }
+                    if name == "complex" && self.is_unshadowed_arith_callee("complex", st) && !self.type_aliases.contains_key("complex"))
+                    .then(|| &args[usize::from(is_imag)].value)
+            }
+            _ => None,
+        }
+    }
+
+    fn divisor_int_fold(&self, e: &Expr, st: &crate::model::FnState, depth: u32) -> crate::const_overflow::ConstFold {
+        use crate::const_overflow::{const_int_fold_with, ConstFold};
+        if depth > 16 { return ConstFold::NotConst; }
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                if st.env_lookup(name).is_some() || self.zd_defined.contains(name) {
+                    return ConstFold::NotConst;
+                }
+                self.const_values.get(name.as_str()).map_or(ConstFold::NotConst, |v| self.divisor_int_fold(v, st, depth + 1))
+            }
+            Expr::Unary { op: UnOp::Neg, operand, .. } => match self.divisor_int_fold(operand, st, depth + 1) {
+                ConstFold::Val(v) => v.checked_neg().map_or(ConstFold::NotConst, ConstFold::Val),
+                other => other,
+            },
+            Expr::Binary { op, lhs, rhs, .. } => crate::const_overflow::fold_bin(
+                *op,
+                self.divisor_int_fold(lhs, st, depth + 1),
+                self.divisor_int_fold(rhs, st, depth + 1),
+            ),
+            Expr::Call { callee, args, span } if args.len() == 1 && !args[0].spread => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    let arg = &args[0].value;
+                    if (name == "len" || name == "cap")
+                        && self.is_unshadowed_arith_callee(name, st)
+                        && !self.type_aliases.contains_key(name.as_str())
+                        && !self.zd_shadows_expr(arg)
+                    {
+                        if name == "len" {
+                            if let Some(n) = self.const_string_len_at(arg, span.start, 0) {
+                                return ConstFold::Val(n);
+                            }
+                        }
+                        if !expr_has_call_or_recv(arg) {
+                            if let Some(n) = self.const_array_len_at(arg, span.start, 0) {
+                                return ConstFold::Val(n);
+                            }
+                        }
                     }
-                    _ => None,
-                };
-                if let Some(s) = s {
-                    return Some(s.len() as i128);
+                    if (name == "real" || name == "imag")
+                        && self.is_unshadowed_arith_callee(name, st)
+                        && !self.type_aliases.contains_key(name.as_str())
+                    {
+                        if let Some(part) = self.extract_complex_part(arg, name == "imag", st, depth + 1) {
+                            return self.divisor_int_fold(part, st, depth + 1);
+                        }
+                    }
+                    if self.is_unshadowed_arith_callee(name, st) && self.is_arith_int_type_name(name) {
+                        if matches!(self.divisor_int_fold(arg, st, depth + 1), ConstFold::Val(0))
+                            || self.divisor_float_fold_is_zero_at(arg, st, depth + 1)
+                        {
+                            return ConstFold::Val(0);
+                        }
+                    }
+                }
+                const_int_fold_with(e, &self.const_values, depth, Some(st))
+            }
+            _ => const_int_fold_with(e, &self.const_values, depth, Some(st)),
+        }
+    }
+
+    fn divisor_int_fold_is_zero(&self, e: &Expr, st: &crate::model::FnState) -> bool {
+        matches!(self.divisor_int_fold(e, st, 0), crate::const_overflow::ConstFold::Val(0))
+    }
+
+    fn divisor_float_fold_is_zero(&self, e: &Expr, st: &crate::model::FnState) -> bool {
+        self.divisor_float_fold_is_zero_at(e, st, 0)
+    }
+
+    fn divisor_float_fold_is_zero_at(&self, e: &Expr, st: &crate::model::FnState, depth: u32) -> bool {
+        if depth > 16 { return false; }
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } if st.env_lookup(name).is_none() && !self.zd_defined.contains(name) => {
+                if let Some(v) = self.const_values.get(name.as_str()) {
+                    return self.divisor_float_fold_is_zero_at(v, st, depth + 1);
                 }
             }
-        }
-    }
-    None
-}
-
-/// The #758 divisor fold: literals, named consts (shadow-checked against
-/// the live env AND the deep-walk tree's defines), binary arithmetic over
-/// folded leaves, and `len()` of constant strings. Everything else —
-/// including fixed-width int conversions of constants — delegates to the
-/// shared `const_int_fold_with` (#725 machinery).
-fn divisor_int_fold(
-    e: &Expr,
-    consts: &std::collections::HashMap<String, &Expr>,
-    st: &crate::model::FnState,
-    defined: &std::collections::HashSet<String>,
-    depth: u32,
-) -> crate::const_overflow::ConstFold {
-    use crate::const_overflow::{const_int_fold_with, ConstFold};
-    if depth > 16 {
-        return ConstFold::NotConst;
-    }
-    let bare = unwrap_parens(e);
-    if let Some(n) = const_len_str_value(bare, consts, defined, depth) {
-        return ConstFold::Val(n);
-    }
-    match bare {
-        Expr::Ident { name, .. } => {
-            if st.env_lookup(name).is_some() || defined.contains(name) {
-                return ConstFold::NotConst;
-            }
-            if let Some(v) = consts.get(name.as_str()) {
-                return divisor_int_fold(v, consts, st, defined, depth + 1);
-            }
-            ConstFold::NotConst
-        }
-        Expr::Binary { op, lhs, rhs, .. } => {
-            let l = divisor_int_fold(lhs, consts, st, defined, depth + 1);
-            let r = divisor_int_fold(rhs, consts, st, defined, depth + 1);
-            crate::const_overflow::fold_bin(*op, l, r)
-        }
-        _ => const_int_fold_with(e, consts, depth, Some(st)),
-    }
-}
-
-fn divisor_int_fold_is_zero(
-    e: &Expr,
-    consts: &std::collections::HashMap<String, &Expr>,
-    st: &crate::model::FnState,
-    defined: &std::collections::HashSet<String>,
-) -> bool {
-    matches!(
-        divisor_int_fold(e, consts, st, defined, 0),
-        crate::const_overflow::ConstFold::Val(0)
-    )
-}
-
-/// Float-conversion zero leaves: `float64(0)`, `f64(1 - 1)` — the float
-/// mirror of the int-conversion arm in `const_int_fold_with` (#725).
-fn divisor_float_conv_zero(
-    e: &Expr,
-    consts: &std::collections::HashMap<String, &Expr>,
-    st: &crate::model::FnState,
-    defined: &std::collections::HashSet<String>,
-    depth: u32,
-) -> bool {
-    if depth > 16 {
-        return false;
-    }
-    if let Expr::Call { callee, args, .. } = unwrap_parens(e) {
-        if args.len() == 1 && !args[0].spread {
-            if let Expr::Ident { name, .. } = unwrap_parens(callee) {
-                if matches!(name.as_str(), "f32" | "f64" | "float32" | "float64") {
+            Expr::Unary { op: UnOp::Neg, operand, .. } => return self.divisor_float_fold_is_zero_at(operand, st, depth + 1),
+            Expr::Call { callee, args, .. } if args.len() == 1 && !args[0].spread => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
                     let a = &args[0].value;
-                    if divisor_int_fold_is_zero(a, consts, st, defined) {
-                        return true;
+                    if self.is_unshadowed_arith_callee(name, st) && self.is_arith_float_type_name(name) {
+                        return matches!(self.divisor_int_fold(a, st, depth + 1), crate::const_overflow::ConstFold::Val(0))
+                            || self.divisor_float_fold_is_zero_at(a, st, depth + 1);
                     }
-                    if matches!(
-                        crate::const_overflow::const_float_fold_with(a, consts, 0, Some(st)),
-                        Some(f) if f == 0.0
-                    ) {
-                        return true;
+                    if (name == "real" || name == "imag")
+                        && self.is_unshadowed_arith_callee(name, st)
+                        && !self.type_aliases.contains_key(name.as_str())
+                    {
+                        if let Some(part) = self.extract_complex_part(a, name == "imag", st, depth + 1) {
+                            return matches!(self.divisor_int_fold(part, st, depth + 1), crate::const_overflow::ConstFold::Val(0))
+                                || self.divisor_float_fold_is_zero_at(part, st, depth + 1);
+                        }
                     }
                 }
             }
+            _ => {}
+        }
+        matches!(crate::const_overflow::const_float_fold_with(bare, &self.const_values, depth, Some(st)), Some(f) if f == 0.0)
+    }
+
+    fn divisor_untyped_float_zero(&self, e: &Expr, st: &crate::model::FnState) -> bool {
+        self.divisor_float_fold_is_zero(e, st) && !self.expr_has_explicit_float_type(e, st, 0)
+    }
+
+    fn expr_has_explicit_float_type(&self, e: &Expr, st: &crate::model::FnState, depth: u32) -> bool {
+        if depth > 16 { return true; }
+        match unwrap_parens(e) {
+            Expr::Call { callee, .. } => matches!(unwrap_parens(callee), Expr::Ident { name, .. }
+                if self.is_unshadowed_arith_callee(name, st) && (self.is_arith_float_type_name(name) || name == "real" || name == "imag")),
+            Expr::Ident { name, .. } => self.file.decls.iter().any(|d| match d {
+                hy_syntax::Decl::Const(c) if c.name == *name => {
+                    c.ty.as_ref().is_some_and(|t| matches!(self.resolve_type_alias(t), hy_syntax::TypeExpr::Named { name: tn, .. } if self.is_arith_float_type_name(&tn)))
+                        || self.expr_has_explicit_float_type(&c.value, st, depth + 1)
+                }
+                _ => false,
+            }),
+            Expr::Unary { operand, .. } => self.expr_has_explicit_float_type(operand, st, depth + 1),
+            Expr::Binary { lhs, rhs, .. } => self.expr_has_explicit_float_type(lhs, st, depth + 1) || self.expr_has_explicit_float_type(rhs, st, depth + 1),
+            _ => false,
         }
     }
-    false
+
+    fn place_is_known_int(&self, st: &crate::model::FnState, place: &Place) -> bool {
+        matches!(&place.kind, PlaceKind::Ident(name) if self.ident_is_known_int(st, name, place.span.start))
+    }
+
+    fn expr_is_known_int(&self, st: &crate::model::FnState, expr: &Expr) -> bool {
+        if let Some(ty) = self.ty_of_expr(st, expr) {
+            return matches!(self.resolve_type_alias(&ty), hy_syntax::TypeExpr::Named { name, .. } if self.is_arith_int_type_name(&name));
+        }
+        match unwrap_parens(expr) {
+            Expr::Ident { name, span } => self.ident_is_known_int(st, name, span.start),
+            Expr::Lit { kind: LitKind::Int(_), .. } => true,
+            Expr::Unary { op: UnOp::Neg, operand, .. } => self.expr_is_known_int(st, operand),
+            Expr::Binary { lhs, rhs, .. } => self.expr_is_known_int(st, lhs) && self.expr_is_known_int(st, rhs),
+            Expr::Call { callee, args, .. } if args.len() == 1 && !args[0].spread => matches!(
+                unwrap_parens(callee),
+                Expr::Ident { name, .. } if self.is_unshadowed_arith_callee(name, st) && (name == "len" || name == "cap" || self.is_arith_int_type_name(name))
+            ),
+            _ => false,
+        }
+    }
+
+    fn ident_is_known_int(&self, st: &crate::model::FnState, name: &str, pos: hy_diag::Pos) -> bool {
+        if self.zd_defined.contains(name) { return false; }
+        if let Some(ty) = self.lookup_binding(st, name).and_then(|b| b.ty.as_ref()) {
+            return matches!(self.resolve_type_alias(ty), hy_syntax::TypeExpr::Named { name: tn, .. } if self.is_arith_int_type_name(&tn));
+        }
+        for decl in &self.file.decls {
+            let hy_syntax::Decl::Fn(f) = decl else { continue };
+            if pos_in_arith_span(f.span, pos) {
+                let mut out = None;
+                if let Some(body) = &f.body { self.scan_block_int_local(st, &body.stmts, name, pos, &mut out); }
+                return out.unwrap_or(false);
+            }
+        }
+        false
+    }
+
+    fn scan_block_int_local(&self, st: &crate::model::FnState, stmts: &[Stmt], target: &str, pos: hy_diag::Pos, out: &mut Option<bool>) {
+        for s in stmts {
+            if (pos.line, pos.col) <= (s.span().start.line, s.span().start.col) { break; }
+            match s {
+                Stmt::Local(l) => {
+                    for (i, n) in l.names.iter().enumerate().filter(|(_, n)| n.as_str() == target) {
+                        let _ = n;
+                        *out = Some(if let Some(ty) = &l.ty {
+                            matches!(self.resolve_type_alias(ty), hy_syntax::TypeExpr::Named { name: tn, .. } if self.is_arith_int_type_name(&tn))
+                        } else {
+                            l.values.len() == l.names.len() && self.expr_is_known_int(st, &l.values[i])
+                        });
+                    }
+                }
+                Stmt::For { kind, body, .. } if pos_in_arith_span(body.span, pos) => {
+                    if matches!(kind, ForKind::Range { var, .. } if var == target) { *out = Some(true); }
+                    self.scan_block_int_local(st, &body.stmts, target, pos, out);
+                }
+                Stmt::If { init, then, otherwise, .. } => {
+                    if let Some(i) = init { self.scan_block_int_local(st, std::slice::from_ref(i.as_ref()), target, pos, out); }
+                    if pos_in_arith_span(then.span, pos) {
+                        self.scan_block_int_local(st, &then.stmts, target, pos, out);
+                    } else if let Some(o) = otherwise {
+                        self.scan_block_int_local(st, std::slice::from_ref(o.as_ref()), target, pos, out);
+                    }
+                }
+                Stmt::Block { block: b, .. } | Stmt::Managed { body: b, .. } if pos_in_arith_span(b.span, pos) => {
+                    self.scan_block_int_local(st, &b.stmts, target, pos, out);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn is_const_map_expr(&self, e: &Expr, st: &crate::model::FnState) -> bool {
+        is_const_expr(e)
+            || !matches!(self.divisor_int_fold(e, st, 0), crate::const_overflow::ConstFold::NotConst)
+            || crate::const_overflow::const_float_fold_with(e, &self.const_values, 0, Some(st)).is_some()
+    }
 }
 
-fn divisor_float_fold_is_zero(
-    e: &Expr,
-    consts: &std::collections::HashMap<String, &Expr>,
-    st: &crate::model::FnState,
-    defined: &std::collections::HashSet<String>,
-) -> bool {
-    if divisor_float_conv_zero(e, consts, st, defined, 0) {
-        return true;
-    }
-    matches!(
-        crate::const_overflow::const_float_fold_with(e, consts, 0, Some(st)),
-        Some(f) if f == 0.0
-    )
+fn pos_in_arith_span(span: Span, pos: hy_diag::Pos) -> bool {
+    (span.start.line, span.start.col) <= (pos.line, pos.col) && (pos.line, pos.col) <= (span.end.line, span.end.col)
 }
 
-/// Const-ness of the float-branch dividend, map-aware: the syntactic rule
-/// (`is_const_expr`) plus anything the int/float folds can prove.
-fn is_const_map_expr(
-    e: &Expr,
-    consts: &std::collections::HashMap<String, &Expr>,
-    st: &crate::model::FnState,
-    defined: &std::collections::HashSet<String>,
-) -> bool {
-    if is_const_expr(e) {
-        return true;
+fn is_arith_int_primitive(name: &str) -> bool {
+    crate::const_overflow::fixed_width_int_range(name).is_some()
+        || matches!(name, "int" | "uint" | "uintptr" | "isize" | "usize")
+}
+
+fn expr_has_call_or_recv(expr: &Expr) -> bool {
+    match unwrap_parens(expr) {
+        Expr::Call { .. } | Expr::Receive { .. } => true,
+        Expr::Unary { operand, .. } | Expr::AddrOf { operand, .. } | Expr::Move { operand, .. }
+        | Expr::Try { operand, .. } | Expr::Field { base: operand, .. } => expr_has_call_or_recv(operand),
+        Expr::Binary { lhs, rhs, .. } | Expr::Index { base: lhs, index: rhs, .. } => {
+            expr_has_call_or_recv(lhs) || expr_has_call_or_recv(rhs)
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            expr_has_call_or_recv(base) || lo.as_deref().is_some_and(expr_has_call_or_recv) || hi.as_deref().is_some_and(expr_has_call_or_recv)
+        }
+        Expr::SliceLit { items, .. } => items.iter().any(expr_has_call_or_recv),
+        Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| expr_has_call_or_recv(k) || expr_has_call_or_recv(v)),
+        Expr::StructLit { fields, .. } => fields.iter().any(|f| expr_has_call_or_recv(&f.value)),
+        Expr::Interp { parts, .. } => parts.iter().any(|p| matches!(p, InterpPart::Expr(e) if expr_has_call_or_recv(e))),
+        Expr::Lit { .. } | Expr::Ident { .. } | Expr::FnLit { .. } | Expr::Paren { .. } => false,
     }
-    !matches!(
-        divisor_int_fold(e, consts, st, defined, 0),
-        crate::const_overflow::ConstFold::NotConst
-    ) || crate::const_overflow::const_float_fold_with(e, consts, 0, Some(st)).is_some()
 }
 
 #[cfg(test)]
