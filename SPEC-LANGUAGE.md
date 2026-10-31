@@ -655,6 +655,16 @@ actually need. **Why scoped:** deep immutability for reference types is a
 type-system feature, not a keyword; faking it would create a false safety
 claim. [decided: honesty over wishlist completeness; reversal = design the
 type qualifier when corpus demands]
+A write through a `const` root is HYB-E3006 (#37), including a write
+through a copy or alias of the `const` (#123). Loops are checked as if
+unrolled: a binding that becomes a `const` alias late in a loop body
+(`t["a"] = i` then `t = tags`) is still that alias at the top of the next
+iteration, so the earlier write is HYB-E3006. This holds in function
+bodies, in closure bodies, and in a callee that rebinds a local to a
+parameter inside a loop when a `const` is passed for that parameter. A loop
+is never stricter than its unrolled form: rebinding a binding that is
+already a `const` alias is HYB-E3006 in straight-line code, so it is also
+HYB-E3006 when the alias comes from an earlier iteration (#2309).
 
 ### 2.8 Tuples — decided: no
 
