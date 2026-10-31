@@ -406,10 +406,271 @@ struct Collector<'a> {
     path: String,
 }
 
+// Issue #777: Prelude collision detection helpers.
+
+fn type_uses_set(t: &TypeExpr) -> bool {
+    match t {
+        TypeExpr::Named { name, .. } => name == "set" || name.starts_with("set["),
+        TypeExpr::Pointer { to, .. } => type_uses_set(to),
+        TypeExpr::Slice { elem, .. }
+        | TypeExpr::Array { elem, .. }
+        | TypeExpr::Chan { elem, .. }
+        | TypeExpr::Option { elem, .. } => type_uses_set(elem),
+        TypeExpr::Map { key, value, .. } => type_uses_set(key) || type_uses_set(value),
+        TypeExpr::Fn {
+            params, results, ..
+        } => {
+            params.iter().any(|p| type_uses_set(&p.ty)) || results.iter().any(type_uses_set)
+        }
+    }
+}
+
+fn expr_uses_set(e: &Expr) -> bool {
+    match e {
+        Expr::Field { name, base, .. } => {
+            name == "insert" || name == "contains" || name == "remove" || expr_uses_set(base)
+        }
+        Expr::StructLit { ty, fields, .. } => {
+            ty.as_ref().map_or(false, type_uses_set)
+                || fields.iter().any(|f| expr_uses_set(&f.value))
+        }
+        Expr::Call { callee, args, .. } => {
+            expr_uses_set(callee) || args.iter().any(|a| expr_uses_set(&a.value))
+        }
+        Expr::SliceLit { elem, items, .. } => {
+            elem.as_ref().map_or(false, |t| type_uses_set(t))
+                || items.iter().any(expr_uses_set)
+        }
+        Expr::MapLit {
+            key,
+            value,
+            entries,
+            ..
+        } => {
+            type_uses_set(key)
+                || type_uses_set(value)
+                || entries.iter().any(|(k, v)| expr_uses_set(k) || expr_uses_set(v))
+        }
+        Expr::Binary { lhs, rhs, .. } => expr_uses_set(lhs) || expr_uses_set(rhs),
+        Expr::Unary { operand, .. }
+        | Expr::AddrOf { operand, .. }
+        | Expr::Move { operand, .. }
+        | Expr::Try { operand, .. } => expr_uses_set(operand),
+        Expr::Index { base, index, .. } => expr_uses_set(base) || expr_uses_set(index),
+        Expr::Slice {
+            base, lo, hi, ..
+        } => {
+            expr_uses_set(base)
+                || lo.as_ref().map_or(false, |x| expr_uses_set(x))
+                || hi.as_ref().map_or(false, |x| expr_uses_set(x))
+        }
+        Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+            InterpPart::Expr(x) => expr_uses_set(x),
+            InterpPart::Lit(_) => false,
+        }),
+        Expr::Receive { chan, .. } => expr_uses_set(chan),
+        Expr::FnLit {
+            params,
+            results,
+            body,
+            ..
+        } => {
+            params.iter().any(|p| type_uses_set(&p.ty))
+                || results.iter().any(|r| type_uses_set(&r.ty))
+                || block_uses_set(body)
+        }
+        Expr::Paren { inner, .. } => expr_uses_set(inner),
+        Expr::Ident { .. } | Expr::Lit { .. } => false,
+    }
+}
+
+fn stmt_uses_set(s: &Stmt) -> bool {
+    match s {
+        Stmt::Local(l) => {
+            l.ty.as_ref().map_or(false, type_uses_set) || l.values.iter().any(expr_uses_set)
+        }
+        Stmt::Assign { values, .. } => values.iter().any(expr_uses_set),
+        Stmt::Expr { expr, .. } => expr_uses_set(expr),
+        Stmt::Defer { call, .. } => expr_uses_set(call),
+        Stmt::If {
+            init,
+            cond,
+            then,
+            otherwise,
+            ..
+        } => {
+            init.as_ref().map_or(false, |s| stmt_uses_set(s))
+                || expr_uses_set(cond)
+                || block_uses_set(then)
+                || otherwise.as_ref().map_or(false, |s| stmt_uses_set(s))
+        }
+        Stmt::For { kind, body, .. } => {
+            let k = match kind {
+                ForKind::Infinite => false,
+                ForKind::While { cond } => expr_uses_set(cond),
+                ForKind::Range { lo, hi, .. } => expr_uses_set(lo) || expr_uses_set(hi),
+                ForKind::Iterate { expr, .. } => expr_uses_set(expr),
+            };
+            k || block_uses_set(body)
+        }
+        Stmt::Match {
+            subject, arms, ..
+        } => {
+            expr_uses_set(subject)
+                || arms.iter().any(|a| {
+                    a.guard.as_ref().map_or(false, |g| expr_uses_set(g))
+                        || block_uses_set(&a.body)
+                })
+        }
+        Stmt::Select { arms, .. } => arms.iter().any(|a| match &a.kind {
+            SelectArmKind::Recv { chan, .. } => expr_uses_set(chan) || block_uses_set(&a.body),
+            SelectArmKind::Send { chan, value, .. } => {
+                expr_uses_set(chan) || expr_uses_set(value) || block_uses_set(&a.body)
+            }
+            SelectArmKind::Default => block_uses_set(&a.body),
+        }),
+        Stmt::Return { values, .. } => values.iter().any(expr_uses_set),
+        Stmt::Task { callee, args, .. } => {
+            expr_uses_set(callee) || args.iter().any(|a| expr_uses_set(&a.value))
+        }
+        Stmt::Managed { body, .. } => block_uses_set(body),
+        Stmt::Block { block, .. } => block_uses_set(block),
+        Stmt::Send { chan, value, .. } => expr_uses_set(chan) || expr_uses_set(value),
+        Stmt::Break { .. } | Stmt::Continue { .. } => false,
+    }
+}
+
+fn block_uses_set(b: &Block) -> bool {
+    b.stmts.iter().any(stmt_uses_set)
+}
+
+fn file_uses_set(file: &File) -> bool {
+    file.decls.iter().any(|d| match d {
+        Decl::Import { .. } => false,
+        Decl::Const(c) => c.ty.as_ref().map_or(false, type_uses_set) || expr_uses_set(&c.value),
+        Decl::Struct(s) => s.fields.iter().any(|f| type_uses_set(&f.ty)),
+        Decl::Enum(e) => e
+            .variants
+            .iter()
+            .any(|v| v.payload.as_ref().map_or(false, type_uses_set)),
+        Decl::TypeAlias(t) => type_uses_set(&t.ty),
+        Decl::Fn(f) => {
+            f.receiver.as_ref().map_or(false, |r| type_uses_set(&r.ty))
+                || f.params.iter().any(|p| type_uses_set(&p.ty))
+                || f.results.iter().any(|r| type_uses_set(&r.ty))
+                || f.body.as_ref().map_or(false, block_uses_set)
+        }
+    })
+}
+
+fn expr_uses_pop(e: &Expr) -> bool {
+    match e {
+        Expr::Field { name, base, .. } => name == "pop" || expr_uses_pop(base),
+        Expr::Call { callee, args, .. } => {
+            expr_uses_pop(callee) || args.iter().any(|a| expr_uses_pop(&a.value))
+        }
+        Expr::SliceLit { items, .. } => items.iter().any(expr_uses_pop),
+        Expr::MapLit { entries, .. } => {
+            entries.iter().any(|(k, v)| expr_uses_pop(k) || expr_uses_pop(v))
+        }
+        Expr::StructLit { fields, .. } => fields.iter().any(|f| expr_uses_pop(&f.value)),
+        Expr::Binary { lhs, rhs, .. } => expr_uses_pop(lhs) || expr_uses_pop(rhs),
+        Expr::Unary { operand, .. }
+        | Expr::AddrOf { operand, .. }
+        | Expr::Move { operand, .. }
+        | Expr::Try { operand, .. } => expr_uses_pop(operand),
+        Expr::Index { base, index, .. } => expr_uses_pop(base) || expr_uses_pop(index),
+        Expr::Slice {
+            base, lo, hi, ..
+        } => {
+            expr_uses_pop(base)
+                || lo.as_ref().map_or(false, |x| expr_uses_pop(x))
+                || hi.as_ref().map_or(false, |x| expr_uses_pop(x))
+        }
+        Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+            InterpPart::Expr(x) => expr_uses_pop(x),
+            InterpPart::Lit(_) => false,
+        }),
+        Expr::Receive { chan, .. } => expr_uses_pop(chan),
+        Expr::FnLit { body, .. } => block_uses_pop(body),
+        Expr::Paren { inner, .. } => expr_uses_pop(inner),
+        Expr::Ident { .. } | Expr::Lit { .. } => false,
+    }
+}
+
+fn stmt_uses_pop(s: &Stmt) -> bool {
+    match s {
+        Stmt::Local(l) => l.values.iter().any(expr_uses_pop),
+        Stmt::Assign { values, .. } => values.iter().any(expr_uses_pop),
+        Stmt::Expr { expr, .. } => expr_uses_pop(expr),
+        Stmt::Defer { call, .. } => expr_uses_pop(call),
+        Stmt::If {
+            init,
+            cond,
+            then,
+            otherwise,
+            ..
+        } => {
+            init.as_ref().map_or(false, |s| stmt_uses_pop(s))
+                || expr_uses_pop(cond)
+                || block_uses_pop(then)
+                || otherwise.as_ref().map_or(false, |s| stmt_uses_pop(s))
+        }
+        Stmt::For { kind, body, .. } => {
+            let k = match kind {
+                ForKind::Infinite => false,
+                ForKind::While { cond } => expr_uses_pop(cond),
+                ForKind::Range { lo, hi, .. } => expr_uses_pop(lo) || expr_uses_pop(hi),
+                ForKind::Iterate { expr, .. } => expr_uses_pop(expr),
+            };
+            k || block_uses_pop(body)
+        }
+        Stmt::Match {
+            subject, arms, ..
+        } => {
+            expr_uses_pop(subject)
+                || arms.iter().any(|a| {
+                    a.guard.as_ref().map_or(false, |g| expr_uses_pop(g))
+                        || block_uses_pop(&a.body)
+                })
+        }
+        Stmt::Select { arms, .. } => arms.iter().any(|a| match &a.kind {
+            SelectArmKind::Recv { chan, .. } => expr_uses_pop(chan) || block_uses_pop(&a.body),
+            SelectArmKind::Send { chan, value, .. } => {
+                expr_uses_pop(chan) || expr_uses_pop(value) || block_uses_pop(&a.body)
+            }
+            SelectArmKind::Default => block_uses_pop(&a.body),
+        }),
+        Stmt::Return { values, .. } => values.iter().any(expr_uses_pop),
+        Stmt::Task { callee, args, .. } => {
+            expr_uses_pop(callee) || args.iter().any(|a| expr_uses_pop(&a.value))
+        }
+        Stmt::Managed { body, .. } => block_uses_pop(body),
+        Stmt::Block { block, .. } => block_uses_pop(block),
+        Stmt::Send { chan, value, .. } => expr_uses_pop(chan) || expr_uses_pop(value),
+        Stmt::Break { .. } | Stmt::Continue { .. } => false,
+    }
+}
+
+fn block_uses_pop(b: &Block) -> bool {
+    b.stmts.iter().any(stmt_uses_pop)
+}
+
+fn file_uses_pop(file: &File) -> bool {
+    file.decls.iter().any(|d| match d {
+        Decl::Import { .. } => false,
+        Decl::Const(c) => expr_uses_pop(&c.value),
+        Decl::Struct(_) | Decl::Enum(_) | Decl::TypeAlias(_) => false,
+        Decl::Fn(f) => f.body.as_ref().map_or(false, block_uses_pop),
+    })
+}
+
 /// Entry point: `check_file` calls this once per file (after the per-fn
 /// passes; diagnostics are sorted into source order by the caller).
 pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
     let file: &File = ck.file;
+    let uses_set = file_uses_set(file);
+    let uses_pop = file_uses_pop(file);
     let diags = {
         let mut c = Collector {
             ck,
@@ -440,23 +701,34 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             match d {
                 Decl::Import { .. } => {}
                 Decl::Const(cd) => {
+                    c.check_prelude_collision(&cd.name, "const", cd.span, uses_set, uses_pop);
                     c.ty_opt(&cd.ty);
                     c.expr(&cd.value);
                 }
                 Decl::Struct(s) => {
+                    c.check_prelude_collision(&s.name, "struct", s.span, uses_set, uses_pop);
                     for f in &s.fields {
                         c.ty(&f.ty);
                     }
                 }
                 Decl::Enum(e) => {
+                    c.check_prelude_collision(&e.name, "enum", e.span, uses_set, uses_pop);
                     for v in &e.variants {
                         if let Some(t) = &v.payload {
                             c.ty(t);
                         }
                     }
                 }
-                Decl::TypeAlias(t) => c.ty(&t.ty),
-                Decl::Fn(f) => c.fn_decl(f),
+                Decl::TypeAlias(t) => {
+                    c.check_prelude_collision(&t.name, "type", t.span, uses_set, uses_pop);
+                    c.ty(&t.ty);
+                }
+                Decl::Fn(f) => {
+                    if f.receiver.is_none() {
+                        c.check_prelude_collision(&f.name, "fn", f.span, uses_set, uses_pop);
+                    }
+                    c.fn_decl(f);
+                }
             }
         }
         c.check_imports(file);
@@ -467,6 +739,70 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
 }
 
 impl<'a> Collector<'a> {
+    /// Issue #777: reject package-level user declarations that collide with names
+    /// injected by the Hybrid prelude (`some`, `option`, `none`, `hy_pop`, `set`, `len`).
+    fn check_prelude_collision(
+        &mut self,
+        name: &str,
+        kind: &'static str,
+        span: Span,
+        uses_set: bool,
+        uses_pop: bool,
+    ) {
+        let collides = match name {
+            "some" | "option" | "none" | "hy_pop" => true,
+            "set" => {
+                if kind != "fn" && kind != "const" {
+                    // struct set, type set, enum set always collide with stdlib set type
+                    true
+                } else {
+                    // fn set, const set collide when the set prelude is active in the package
+                    uses_set
+                }
+            }
+            "len" => {
+                // fn len, const len collide when set or pop prelude is active because
+                // prelude internal calls len(s.m) or len(*s) would capture the user fn
+                uses_set || uses_pop
+            }
+            _ => false,
+        };
+
+        if collides {
+            let (why, fix) = if name == "len" {
+                (
+                    format!(
+                        "why: Go keeps a single package block; the injected prelude calls `len`, which would capture `{name}` and fail `go build` (issue #777)"
+                    ),
+                    format!(
+                        "fix: rename the {kind} `{name}` to avoid shadowing the builtin used by the prelude"
+                    ),
+                )
+            } else {
+                (
+                    format!(
+                        "why: Go keeps a single package block; the Hybrid prelude injects `{name}`, so the emitted module would fail `go build` with `{name} redeclared in this block` (issue #777)"
+                    ),
+                    format!(
+                        "fix: rename the {kind} `{name}` to a non-prelude identifier"
+                    ),
+                )
+            };
+
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E1002",
+                    self.path.clone(),
+                    span,
+                    format!(
+                        "`{name}` collides with the injected prelude — user declarations cannot reuse `{name}` (HYB-E1002)"
+                    ),
+                )
+                .with_notes(vec![why, fix]),
+            );
+        }
+    }
+
     // -- scope bookkeeping ---------------------------------------------------
 
     fn push_scope(&mut self) {
