@@ -71,7 +71,8 @@ mod try_context;
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
 
 use hy_syntax::{Decl, Expr, File, FnDecl, ForKind, SelectArmKind, Stmt};
-use model::{Binding, Checker, FnState, MANAGED_CATEGORIES, TypeShape};
+use model::{Binding, Checker, FnState, MoveInfo, MANAGED_CATEGORIES, TypeShape};
+use std::collections::{HashMap, HashSet};
 
 /// The result of checking one file.
 #[derive(Debug, Default)]
@@ -451,12 +452,21 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     st.last_use = flat.last_use.clone();
     st.loop_end = flat.loop_end.clone();
 
+    #[derive(Clone, Debug)]
+    struct LoopBreakSnapshot {
+        aliases: HashMap<String, String>,
+        may_share: HashMap<String, HashSet<String>>,
+        non_owned_origins: Vec<(String, String)>,
+        moved: Vec<(String, MoveInfo)>,
+    }
+
     let mut active_loops: Vec<(
         usize,
         usize,
         usize,
         &hy_syntax::Block,
         std::collections::HashSet<String>,
+        Vec<LoopBreakSnapshot>,
     )> = Vec::new();
     let mut reported_backedge: std::collections::HashSet<String> =
         std::collections::HashSet::new();
@@ -504,7 +514,14 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 .filter(|(_, b)| b.moved.is_some())
                 .map(|(k, _)| k.clone())
                 .collect();
-            active_loops.push((idx, flat.loop_end_of(idx), outer_depth, lbody, pre_moved));
+            active_loops.push((
+                idx,
+                flat.loop_end_of(idx),
+                outer_depth,
+                lbody,
+                pre_moved,
+                Vec::new(),
+            ));
         }
         if let Stmt::Managed {
             reason,
@@ -899,16 +916,98 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 st.deferred_calls.push((call.clone(), arg_borrows));
             }
 
+            Stmt::Break { label, .. } => {
+                let in_enclosing_select = flat.select_end.iter().any(|(&s_start, &s_end)| {
+                    s_start < idx
+                        && idx <= s_end
+                        && active_loops
+                            .last()
+                            .map_or(true, |(f_idx, _, _, _, _, _)| *f_idx < s_start)
+                });
+                if (!in_enclosing_select || label.is_some()) && !active_loops.is_empty() {
+                    let target_idx = if let Some(lbl) = label {
+                        if lbl == "loop" {
+                            active_loops
+                                .iter()
+                                .rposition(|(f_idx, _, _, _, _, _)| {
+                                    flat.infinite_loop_end.contains_key(f_idx)
+                                })
+                                .unwrap_or_else(|| active_loops.len() - 1)
+                        } else {
+                            active_loops.len() - 1
+                        }
+                    } else {
+                        active_loops.len() - 1
+                    };
+                    let (_, _, outer_depth, _, _, break_snaps) = &mut active_loops[target_idx];
+                    let od = *outer_depth;
+                    let is_outer = |name: &str| -> bool {
+                        st.env.contains_key(name)
+                            || st.scopes[..od.min(st.scopes.len())]
+                                .iter()
+                                .any(|s| s.contains_key(name))
+                    };
+                    let mut snap_aliases = HashMap::new();
+                    for (k, v) in &st.aliases {
+                        if is_outer(k) {
+                            let root = crate::freeze::resolve_alias(&st, v);
+                            if is_outer(&root) {
+                                snap_aliases.insert(k.clone(), root);
+                            } else if is_outer(v) {
+                                snap_aliases.insert(k.clone(), v.clone());
+                            }
+                        }
+                    }
+                    let mut snap_share = HashMap::new();
+                    for (a, peers) in &st.may_share {
+                        if is_outer(a) {
+                            let outer_peers: HashSet<String> =
+                                peers.iter().filter(|p| is_outer(p)).cloned().collect();
+                            if !outer_peers.is_empty() {
+                                snap_share.insert(a.clone(), outer_peers);
+                            }
+                        }
+                    }
+                    let mut snap_origins = Vec::new();
+                    let mut snap_moved = Vec::new();
+                    for (k, b) in &st.env {
+                        if let Some(orig) = &b.non_owned_origin {
+                            snap_origins.push((k.clone(), orig.clone()));
+                        }
+                        if let Some(mv) = &b.moved {
+                            snap_moved.push((k.clone(), mv.clone()));
+                        }
+                    }
+                    for s in &st.scopes[..od.min(st.scopes.len())] {
+                        for (k, b) in s {
+                            if let Some(orig) = &b.non_owned_origin {
+                                snap_origins.push((k.clone(), orig.clone()));
+                            }
+                            if let Some(mv) = &b.moved {
+                                snap_moved.push((k.clone(), mv.clone()));
+                            }
+                        }
+                    }
+                    break_snaps.push(LoopBreakSnapshot {
+                        aliases: snap_aliases,
+                        may_share: snap_share,
+                        non_owned_origins: snap_origins,
+                        moved: snap_moved,
+                    });
+                }
+            }
+
             // If-init Locals and blocks: already covered by the flat walk
             // (init is its own statement entry) and the uses/calls collected above.
             _ => {}
         }
 
-        while let Some((_, loop_end, _, _, _)) = active_loops.last() {
+        while let Some((_, loop_end, _, _, _, _)) = active_loops.last() {
             if *loop_end != idx {
                 break;
             }
-            let (for_idx, loop_end, outer_depth, lbody, pre_moved) = active_loops.pop().unwrap();
+            let (for_idx, loop_end, outer_depth, lbody, pre_moved, break_snaps) =
+                active_loops.pop().unwrap();
             ck.check_loop_backedge(
                 &st,
                 outer_depth,
@@ -919,6 +1018,30 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 &mut reported_backedge,
                 &|idx| flat.in_managed(idx),
             );
+            for snap in break_snaps {
+                for (k, v) in snap.aliases {
+                    st.aliases.insert(k, v);
+                }
+                for (a, peers) in snap.may_share {
+                    for b in peers {
+                        st.share_edge(&a, &b);
+                    }
+                }
+                for (k, orig) in snap.non_owned_origins {
+                    if let Some(b) = st.env_lookup_mut(&k) {
+                        if b.non_owned_origin.is_none() {
+                            b.non_owned_origin = Some(orig);
+                        }
+                    }
+                }
+                for (k, mv) in snap.moved {
+                    if let Some(b) = st.env_lookup_mut(&k) {
+                        if b.moved.is_none() {
+                            b.moved = Some(mv);
+                        }
+                    }
+                }
+            }
         }
     }
 
