@@ -175,6 +175,8 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
     }
 }
 
+
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -467,6 +469,59 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
 }
 
 impl<'a> Collector<'a> {
+    fn is_untyped_numeric_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit { kind, .. } => matches!(kind, LitKind::Int(_) | LitKind::Float(_)),
+            Expr::Ident { name, .. } => {
+                if let Some(d) = self.ck.file.decls.iter().find_map(|d| match d {
+                    Decl::Const(cd) if &cd.name == name => Some(cd),
+                    _ => None,
+                }) {
+                    return d.ty.is_none() && self.is_untyped_numeric_const(&d.value);
+                }
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        let def = &self.defines[*id];
+                        if def.kind == LocalKind::Const {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnOp::Neg) && self.is_untyped_numeric_const(operand)
+            }
+            Expr::Binary { op, lhs, rhs, .. } => {
+                matches!(
+                    op,
+                    BinOp::Add
+                        | BinOp::Sub
+                        | BinOp::Mul
+                        | BinOp::Div
+                        | BinOp::Mod
+                        | BinOp::BitAnd
+                        | BinOp::BitOr
+                        | BinOp::BitXor
+                        | BinOp::Shl
+                        | BinOp::Shr
+                ) && self.is_untyped_numeric_const(lhs)
+                    && self.is_untyped_numeric_const(rhs)
+            }
+            _ => false,
+        }
+    }
+
+    fn expr_kinds_conflict(&self, want: &OpKind, expr: &Expr, got: &OpKind) -> bool {
+        if kinds_conflict(want, got) {
+            return true;
+        }
+        if *want == OpKind::Float && *got == OpKind::Int && !self.is_untyped_numeric_const(expr) {
+            return true;
+        }
+        false
+    }
+
     // -- scope bookkeeping ---------------------------------------------------
 
     fn push_scope(&mut self) {
@@ -3367,7 +3422,7 @@ impl<'a> Collector<'a> {
                     let is_loan_shape = as_addr_of(&values[0])
                         .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }));
                     let vk = self.kind_of_expr(&values[0]);
-                    if !is_loan_shape && kinds_conflict(&tk, &vk) {
+                    if !is_loan_shape && self.expr_kinds_conflict(&tk, &values[0], &vk) {
                         self.emit_e1002(
                             span,
                             format!(
@@ -3405,7 +3460,7 @@ impl<'a> Collector<'a> {
                         }
                         let tpk = self.kind_of_place(t);
                         let vk = self.kind_of_expr(v);
-                        if kinds_conflict(&tpk, &vk) {
+                        if self.expr_kinds_conflict(&tpk, v, &vk) {
                             self.emit_e1002(
                                 v.span(),
                                 format!(
@@ -3459,7 +3514,7 @@ impl<'a> Collector<'a> {
                 let mismatch = tk != OpKind::Unknown
                     && vk != OpKind::Unknown
                     && tk.is_numeric() != vk.is_numeric();
-                if !t_ok || !v_ok || mismatch || kinds_conflict(&tk, &vk) {
+                if !t_ok || !v_ok || mismatch || self.expr_kinds_conflict(&tk, val, &vk) {
                     self.emit_e1002(
                         span,
                         format!(
@@ -3483,7 +3538,7 @@ impl<'a> Collector<'a> {
                 };
                 if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float)
-                    || kinds_conflict(&tk, &vk)
+                    || self.expr_kinds_conflict(&tk, val, &vk)
                 {
                     self.emit_e1002(
                         span,
@@ -3565,7 +3620,7 @@ impl<'a> Collector<'a> {
         if let OpKind::Map(key_kind, _) = bk {
             if **key_kind != OpKind::Unknown
                 && *ik != OpKind::Unknown
-                && kinds_conflict(key_kind, ik)
+                && self.expr_kinds_conflict(key_kind, index, ik)
             {
                 self.emit_e1002(
                     index.span(),
