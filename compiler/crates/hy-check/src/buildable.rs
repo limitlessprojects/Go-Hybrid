@@ -158,8 +158,8 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         // an untyped constant from an `int` variable, so this direction must
         // stay allowed or the check would reject buildable programs.
         (Float, Int) => false,
-        // A struct whose name did not resolve is not evidence of a mismatch.
-        (Struct(None), _) | (_, Struct(None)) => false,
+        // A type-elided struct literal `{...}` matches a struct target.
+        (Struct(_), Struct(None)) | (Struct(None), Struct(_)) => false,
         (a, b) if a == b => false,
         // Same container shape: recurse into the element kinds.
         (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) => {
@@ -2130,9 +2130,43 @@ impl<'a> Collector<'a> {
         fields: &[FieldInit],
         span: Span,
     ) {
-        let Some(t) = ty else { return };
-        let sk = self.kind_of_ty(t, 0);
-        let Some(full_name) = self.struct_name(&sk) else {
+        self.check_struct_literal_with_expected(ty, None, fields, span);
+    }
+
+    fn check_struct_literal_with_expected(
+        &mut self,
+        explicit_ty: Option<&TypeExpr>,
+        expected_struct_name: Option<&str>,
+        fields: &[FieldInit],
+        span: Span,
+    ) {
+        let full_name_opt = explicit_ty
+            .and_then(|t| {
+                let sk = self.kind_of_ty(t, 0);
+                self.struct_name(&sk)
+            })
+            .or_else(|| expected_struct_name.map(|s| s.to_string()));
+
+        // U15: a name repeated in one literal. Reported once per name, on the
+        // second and later occurrences.
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for f in fields {
+            let n = seen.entry(f.name.clone()).or_insert(0);
+            *n += 1;
+            if *n == 2 {
+                let desc = full_name_opt.as_deref().unwrap_or("struct");
+                self.emit_e1002(
+                    f.span,
+                    format!(
+                        "duplicate field `{}` in `{}` literal — Go refuses `duplicate field name {} in struct literal` (HYB-E1002)",
+                        f.name, desc, f.name
+                    ),
+                    "each field may be set at most once in one struct literal",
+                );
+            }
+        }
+
+        let Some(full_name) = full_name_opt else {
             return;
         };
         let sname = Checker::base_named_type_str(&full_name).to_string();
@@ -2142,24 +2176,6 @@ impl<'a> Collector<'a> {
             return;
         };
         let subst = self.struct_type_arg_map(&full_name);
-
-        // U15: a name repeated in one literal. Reported once per name, on the
-        // second and later occurrences.
-        let mut seen: HashMap<String, usize> = HashMap::new();
-        for f in fields {
-            let n = seen.entry(f.name.clone()).or_insert(0);
-            *n += 1;
-            if *n == 2 {
-                self.emit_e1002(
-                    f.span,
-                    format!(
-                        "duplicate field `{}` in `{}` literal — Go refuses `duplicate field name {} in struct literal` (HYB-E1002)",
-                        f.name, full_name, f.name
-                    ),
-                    "each field may be set at most once in one struct literal",
-                );
-            }
-        }
 
         // U14 + value type: unknown names, then assignability.
         for f in fields {
@@ -2174,20 +2190,56 @@ impl<'a> Collector<'a> {
                 ),
                 Some((_, fty)) => {
                     let want = self.kind_of_ty_with_subst(fty, &subst, 0);
-                    let got = self.kind_of_expr(&f.value);
-                    if kinds_conflict(&want, &got) {
-                        self.emit_e1002(
-                            f.value.span(),
-                            format!(
-                                "cannot use a value of type `{}` for field `{}` of `{}` (declared `{}`) — Go refuses `cannot use ... as {} value in struct literal` (HYB-E1002)",
-                                got.label(),
-                                f.name,
-                                full_name,
-                                want.label(),
-                                want.label()
-                            ),
-                            "the field's declared type is fixed; write an explicit conversion when a conversion is intended",
-                        );
+                    let bare_val = unwrap_parens(&f.value);
+                    if let Expr::StructLit {
+                        ty: None,
+                        fields: inner_fields,
+                        span: inner_span,
+                    } = bare_val
+                    {
+                        if let Some(target) = self.struct_name(&want) {
+                            self.check_struct_literal_with_expected(
+                                None,
+                                Some(&target),
+                                inner_fields,
+                                *inner_span,
+                            );
+                        } else if matches!(want, OpKind::Struct(None)) {
+                            self.check_struct_literal_with_expected(
+                                None,
+                                None,
+                                inner_fields,
+                                *inner_span,
+                            );
+                        } else if !matches!(want, OpKind::Unknown | OpKind::Interface) {
+                            self.emit_e1002(
+                                f.value.span(),
+                                format!(
+                                    "cannot use struct literal for field `{}` of `{}` (declared `{}`) — Go refuses `cannot use ... as {} value in struct literal` (HYB-E1002)",
+                                    f.name,
+                                    full_name,
+                                    want.label(),
+                                    want.label()
+                                ),
+                                "the field's declared type is fixed; write an explicit conversion when a conversion is intended",
+                            );
+                        }
+                    } else {
+                        let got = self.kind_of_expr(&f.value);
+                        if kinds_conflict(&want, &got) {
+                            self.emit_e1002(
+                                f.value.span(),
+                                format!(
+                                    "cannot use a value of type `{}` for field `{}` of `{}` (declared `{}`) — Go refuses `cannot use ... as {} value in struct literal` (HYB-E1002)",
+                                    got.label(),
+                                    f.name,
+                                    full_name,
+                                    want.label(),
+                                    want.label()
+                                ),
+                                "the field's declared type is fixed; write an explicit conversion when a conversion is intended",
+                            );
+                        }
                     }
                 }
             }
@@ -3631,16 +3683,37 @@ impl<'a> Collector<'a> {
                 }
             }
             if let Expr::StructLit {
-                ty: None, fields, ..
+                ty: None,
+                fields,
+                span,
             } = bare
             {
-                if matches!(expected, OpKind::Struct(_))
-                    || (fields.is_empty()
-                        && matches!(
-                            expected,
-                            OpKind::Array(_) | OpKind::Slice(_) | OpKind::Map(_, _)
-                        ))
+                if let Some(target) = self.struct_name(&expected) {
+                    self.check_struct_literal_with_expected(None, Some(&target), fields, *span);
+                    continue;
+                } else if matches!(expected, OpKind::Struct(None)) {
+                    self.check_struct_literal_with_expected(None, None, fields, *span);
+                    continue;
+                } else if fields.is_empty()
+                    && matches!(
+                        expected,
+                        OpKind::Array(_)
+                            | OpKind::Slice(_)
+                            | OpKind::Map(_, _)
+                            | OpKind::Unknown
+                            | OpKind::Interface
+                    )
                 {
+                    continue;
+                } else {
+                    self.emit_e1002(
+                        item.span(),
+                        format!(
+                            "cannot use struct literal as `{}` value in array literal (HYB-E1002)",
+                            elem_ty.render()
+                        ),
+                        "every element of an array composite literal `[N]T{...}` / `[...]T{...}` must be assignable to the element type `T`",
+                    );
                     continue;
                 }
             }
@@ -3692,16 +3765,37 @@ impl<'a> Collector<'a> {
                 }
             }
             if let Expr::StructLit {
-                ty: None, fields, ..
+                ty: None,
+                fields,
+                span,
             } = bare
             {
-                if matches!(expected, OpKind::Struct(_))
-                    || (fields.is_empty()
-                        && matches!(
-                            expected,
-                            OpKind::Array(_) | OpKind::Slice(_) | OpKind::Map(_, _)
-                        ))
+                if let Some(target) = self.struct_name(&expected) {
+                    self.check_struct_literal_with_expected(None, Some(&target), fields, *span);
+                    continue;
+                } else if matches!(expected, OpKind::Struct(None)) {
+                    self.check_struct_literal_with_expected(None, None, fields, *span);
+                    continue;
+                } else if fields.is_empty()
+                    && matches!(
+                        expected,
+                        OpKind::Array(_)
+                            | OpKind::Slice(_)
+                            | OpKind::Map(_, _)
+                            | OpKind::Unknown
+                            | OpKind::Interface
+                    )
                 {
+                    continue;
+                } else {
+                    self.emit_e1002(
+                        item.span(),
+                        format!(
+                            "cannot use struct literal as `{}` value in slice literal (HYB-E1002)",
+                            elem_ty.render()
+                        ),
+                        "every element of a slice composite literal `[]T{...}` must be assignable to the element type `T`",
+                    );
                     continue;
                 }
             }
@@ -3743,24 +3837,47 @@ impl<'a> Collector<'a> {
         let exp_val = self.kind_of_ty(&resolved_val, 0);
         for (k, v) in entries {
             if exp_key != OpKind::Unknown {
-                let kk = self.kind_of_expr(k);
-                if kk != OpKind::Unknown
-                    && kk != exp_key
-                    && !(exp_key == OpKind::Float
-                        && kk == OpKind::Int
-                        && crate::const_overflow::const_int_value(k).is_some())
-                    && kinds_conflict(&exp_key, &kk)
+                let bare_k = unwrap_parens(k);
+                if let Expr::StructLit {
+                    ty: None,
+                    fields,
+                    span,
+                } = bare_k
                 {
-                    self.emit_e1002(
-                        k.span(),
-                        format!(
-                            "cannot use `{}` (type `{}`) as `{}` value in map key (HYB-E1002)",
-                            k.render(),
-                            kk.label(),
-                            key_ty.render()
-                        ),
-                        "every key of a map composite literal `map[K]V{...}` must be assignable to the key type `K`",
-                    );
+                    if let Some(target) = self.struct_name(&exp_key) {
+                        self.check_struct_literal_with_expected(None, Some(&target), fields, *span);
+                    } else if matches!(exp_key, OpKind::Struct(None)) {
+                        self.check_struct_literal_with_expected(None, None, fields, *span);
+                    } else {
+                        self.emit_e1002(
+                            k.span(),
+                            format!(
+                                "cannot use struct literal as `{}` value in map key (HYB-E1002)",
+                                key_ty.render()
+                            ),
+                            "every key of a map composite literal `map[K]V{...}` must be assignable to the key type `K`",
+                        );
+                    }
+                } else {
+                    let kk = self.kind_of_expr(k);
+                    if kk != OpKind::Unknown
+                        && kk != exp_key
+                        && !(exp_key == OpKind::Float
+                            && kk == OpKind::Int
+                            && crate::const_overflow::const_int_value(k).is_some())
+                        && kinds_conflict(&exp_key, &kk)
+                    {
+                        self.emit_e1002(
+                            k.span(),
+                            format!(
+                                "cannot use `{}` (type `{}`) as `{}` value in map key (HYB-E1002)",
+                                k.render(),
+                                kk.label(),
+                                key_ty.render()
+                            ),
+                            "every key of a map composite literal `map[K]V{...}` must be assignable to the key type `K`",
+                        );
+                    }
                 }
             }
             if exp_val != OpKind::Unknown {
@@ -3768,24 +3885,57 @@ impl<'a> Collector<'a> {
                 if matches!(bare_v, Expr::Lit { kind: LitKind::Nil, .. }) {
                     continue;
                 }
-                let vk = self.kind_of_expr(v);
-                if vk != OpKind::Unknown
-                    && vk != exp_val
-                    && !(exp_val == OpKind::Float
-                        && vk == OpKind::Int
-                        && crate::const_overflow::const_int_value(v).is_some())
-                    && kinds_conflict(&exp_val, &vk)
+                if let Expr::StructLit {
+                    ty: None,
+                    fields,
+                    span,
+                } = bare_v
                 {
-                    self.emit_e1002(
-                        v.span(),
-                        format!(
-                            "cannot use `{}` (type `{}`) as `{}` value in map value (HYB-E1002)",
-                            v.render(),
-                            vk.label(),
-                            val_ty.render()
-                        ),
-                        "every value of a map composite literal `map[K]V{...}` must be assignable to the value type `V`",
-                    );
+                    if let Some(target) = self.struct_name(&exp_val) {
+                        self.check_struct_literal_with_expected(None, Some(&target), fields, *span);
+                    } else if matches!(exp_val, OpKind::Struct(None)) {
+                        self.check_struct_literal_with_expected(None, None, fields, *span);
+                    } else if fields.is_empty()
+                        && matches!(
+                            exp_val,
+                            OpKind::Array(_)
+                                | OpKind::Slice(_)
+                                | OpKind::Map(_, _)
+                                | OpKind::Unknown
+                                | OpKind::Interface
+                        )
+                    {
+                        // empty composite literal allowed
+                    } else {
+                        self.emit_e1002(
+                            v.span(),
+                            format!(
+                                "cannot use struct literal as `{}` value in map value (HYB-E1002)",
+                                val_ty.render()
+                            ),
+                            "every value of a map composite literal `map[K]V{...}` must be assignable to the value type `V`",
+                        );
+                    }
+                } else {
+                    let vk = self.kind_of_expr(v);
+                    if vk != OpKind::Unknown
+                        && vk != exp_val
+                        && !(exp_val == OpKind::Float
+                            && vk == OpKind::Int
+                            && crate::const_overflow::const_int_value(v).is_some())
+                        && kinds_conflict(&exp_val, &vk)
+                    {
+                        self.emit_e1002(
+                            v.span(),
+                            format!(
+                                "cannot use `{}` (type `{}`) as `{}` value in map value (HYB-E1002)",
+                                v.render(),
+                                vk.label(),
+                                val_ty.render()
+                            ),
+                            "every value of a map composite literal `map[K]V{...}` must be assignable to the value type `V`",
+                        );
+                    }
                 }
             }
         }
