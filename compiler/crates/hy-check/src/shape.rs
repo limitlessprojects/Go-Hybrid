@@ -111,6 +111,177 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Bind a generic callee's type parameters for one call site (issue #2490).
+    ///
+    /// Two sources, in this order: explicit arguments the parser folded into the
+    /// callee name (`f[map[int]int](…)` arrives as the ident `f[map[int]int]`),
+    /// then argument inference — each declared parameter type is unified with the
+    /// shape of the argument in that position (`f(m)` binds `t ↦ Map(…)`,
+    /// `f(fn() { … })` binds `t ↦ Closure`). A parameter neither source binds
+    /// simply stays absent, so the substitution leaves the declared shape in
+    /// place and the boundary rules keep failing closed on it.
+    fn generic_type_param_bindings(
+        &self,
+        st: &FnState,
+        f: &hy_syntax::FnDecl,
+        callee_name: &str,
+        args: &[CallArg],
+    ) -> std::collections::HashMap<String, TypeShape> {
+        let mut bindings = std::collections::HashMap::new();
+        if f.type_params.is_empty() {
+            return bindings;
+        }
+        if let Some((_, inside)) = callee_name.split_once('[') {
+            if let Some(inside) = inside.strip_suffix(']') {
+                for (tp, text) in f.type_params.iter().zip(inside.split(',')) {
+                    bindings.insert(tp.name.clone(), self.shape_of_type_spelling(text));
+                }
+            }
+        }
+        for (p, a) in f.params.iter().zip(args.iter()) {
+            let arg_shape = self.shape_of_expr(st, &a.value);
+            self.bind_type_param_from_arg(&p.ty, &arg_shape, f, &mut bindings, 0);
+        }
+        bindings
+    }
+
+    /// Unify one declared parameter type against the shape the call actually
+    /// passed, recording `type_param -> shape` for the parameters it mentions
+    /// (#2490). Only containers are walked; an unrecognised pairing binds
+    /// nothing, which leaves the declared shape — and the fail-closed reading of
+    /// it — untouched.
+    fn bind_type_param_from_arg(
+        &self,
+        param_ty: &TypeExpr,
+        arg_shape: &TypeShape,
+        f: &hy_syntax::FnDecl,
+        bindings: &mut std::collections::HashMap<String, TypeShape>,
+        depth: usize,
+    ) {
+        if depth > Self::MAX_TYPE_RESOLUTION_DEPTH {
+            return;
+        }
+        let is_type_param = |name: &str| f.type_params.iter().any(|t| t.name == name);
+        match (param_ty, arg_shape) {
+            (TypeExpr::Named { name, .. }, shape) if is_type_param(name) => {
+                if shape != &TypeShape::Unknown {
+                    bindings.entry(name.clone()).or_insert_with(|| shape.clone());
+                }
+            }
+            (TypeExpr::Pointer { to, .. }, TypeShape::Pointer(inner))
+            | (TypeExpr::Slice { elem: to, .. }, TypeShape::Slice(inner))
+            | (TypeExpr::Array { elem: to, .. }, TypeShape::Array(inner))
+            | (TypeExpr::Chan { elem: to, .. }, TypeShape::Chan(inner)) => {
+                self.bind_type_param_from_arg(to, inner, f, bindings, depth + 1);
+            }
+            (TypeExpr::Map { key, value, .. }, TypeShape::Map(k, v)) => {
+                self.bind_type_param_from_arg(key, k, f, bindings, depth + 1);
+                self.bind_type_param_from_arg(value, v, f, bindings, depth + 1);
+            }
+            // `option[t]` carries `t` by value, so the payload shape IS the
+            // argument's shape.
+            (TypeExpr::Option { elem, .. }, shape) => {
+                self.bind_type_param_from_arg(elem, shape, f, bindings, depth + 1);
+            }
+            _ => {}
+        }
+    }
+
+    /// `shape_of_type` with this call site's type-parameter bindings applied
+    /// (#2490): a leaf that IS a bound parameter takes the argument's shape;
+    /// everything else keeps the declared resolution.
+    fn shape_of_type_subst(
+        &self,
+        ty: &TypeExpr,
+        bindings: &std::collections::HashMap<String, TypeShape>,
+        depth: usize,
+    ) -> TypeShape {
+        if depth > Self::MAX_TYPE_RESOLUTION_DEPTH {
+            return TypeShape::Unknown;
+        }
+        match ty {
+            TypeExpr::Named { name, .. } => match bindings.get(name) {
+                Some(shape) => shape.clone(),
+                None => self.named_shape_depth(name, depth),
+            },
+            TypeExpr::Pointer { to, .. } => {
+                TypeShape::Pointer(Box::new(self.shape_of_type_subst(to, bindings, depth + 1)))
+            }
+            TypeExpr::Slice { elem, .. } => {
+                TypeShape::Slice(Box::new(self.shape_of_type_subst(elem, bindings, depth + 1)))
+            }
+            TypeExpr::Array { elem, .. } => {
+                TypeShape::Array(Box::new(self.shape_of_type_subst(elem, bindings, depth + 1)))
+            }
+            TypeExpr::Map { key, value, .. } => TypeShape::Map(
+                Box::new(self.shape_of_type_subst(key, bindings, depth + 1)),
+                Box::new(self.shape_of_type_subst(value, bindings, depth + 1)),
+            ),
+            TypeExpr::Chan { elem, .. } => {
+                TypeShape::Chan(Box::new(self.shape_of_type_subst(elem, bindings, depth + 1)))
+            }
+            TypeExpr::Option { elem, .. } => self.shape_of_type_subst(elem, bindings, depth + 1),
+            // fn-typed values are closures (the A5 perimeter) — as in
+            // `shape_of_type_depth`.
+            TypeExpr::Fn { .. } => TypeShape::Closure,
+        }
+    }
+
+    /// Shape of a *rendered* type argument. The parser folds explicit type
+    /// arguments into the callee name as text, so the explicit half of the
+    /// substitution reads them back here (#2490). Only the container kind is
+    /// needed for the boundary rules; leaves keep their declared resolution and
+    /// an unknown leaf stays `Unknown` (fail-closed).
+    fn shape_of_type_spelling(&self, text: &str) -> TypeShape {
+        let t = text.trim();
+        if t.is_empty() {
+            return TypeShape::Unknown;
+        }
+        if let Some(rest) = t.strip_prefix("[]") {
+            return TypeShape::Slice(Box::new(self.shape_of_type_spelling(rest)));
+        }
+        if t.starts_with('[') {
+            if let Some(close) = t.find(']') {
+                return TypeShape::Array(Box::new(self.shape_of_type_spelling(&t[close + 1..])));
+            }
+        }
+        if let Some(rest) = t.strip_prefix("map[") {
+            // Split the key at ITS closing bracket — the key may be a container.
+            let mut depth = 0usize;
+            for (i, c) in rest.char_indices() {
+                match c {
+                    '[' => depth += 1,
+                    ']' if depth == 0 => {
+                        return TypeShape::Map(
+                            Box::new(self.shape_of_type_spelling(&rest[..i])),
+                            Box::new(self.shape_of_type_spelling(&rest[i + 1..])),
+                        );
+                    }
+                    ']' => depth -= 1,
+                    _ => {}
+                }
+            }
+        }
+        if let Some(rest) = t.strip_prefix('*') {
+            return TypeShape::Pointer(Box::new(self.shape_of_type_spelling(rest)));
+        }
+        if let Some(rest) = t.strip_prefix("<-chan ") {
+            return TypeShape::Chan(Box::new(self.shape_of_type_spelling(rest)));
+        }
+        if let Some(rest) = t.strip_prefix("chan ") {
+            return TypeShape::Chan(Box::new(self.shape_of_type_spelling(rest)));
+        }
+        if let Some(rest) = t.strip_prefix("option[") {
+            if let Some(inner) = rest.strip_suffix(']') {
+                return self.shape_of_type_spelling(inner);
+            }
+        }
+        if t.starts_with("fn(") {
+            return TypeShape::Closure;
+        }
+        self.named_shape_depth(t, 0)
+    }
+
     /// May a value of this shape share mutable GC storage with a shallow Go
     /// copy of it? True for reference types (map/slice/pointer), and — the
     /// #27 gap — transitively true for a struct or array that CARRIES a
@@ -398,12 +569,25 @@ impl<'a> Checker<'a> {
                     }
                     _ => {
                         let head = Self::base_named_type_str(name);
-                        self.fns
-                            .get(name.as_str())
-                            .or_else(|| self.fns.get(head))
-                            .and_then(|f| f.results.first())
-                            .map(|r| self.shape_of_type(&r.ty))
-                            .unwrap_or(TypeShape::Unknown)
+                        match self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
+                            // Issue #2490: a generic callee's result type is written
+                            // over its type parameters (`[1]t`, `[]t`, `map[k]v`), so
+                            // resolving the declared result directly collapsed the
+                            // shape to container-of-`Unknown`, and the O5.2/O7
+                            // freeze, A5 closure and O4.9 boundary rules all read
+                            // that as sendable. Bind the parameters for THIS call
+                            // site first — explicit (`f[map[int]int](…)`, folded
+                            // into the callee name by the parser) and inferred from
+                            // the arguments (`f(m)`, `f(fn() { … })`).
+                            Some(f) => {
+                                let bindings = self.generic_type_param_bindings(st, f, name, args);
+                                f.results
+                                    .first()
+                                    .map(|r| self.shape_of_type_subst(&r.ty, &bindings, 0))
+                                    .unwrap_or(TypeShape::Unknown)
+                            }
+                            None => TypeShape::Unknown,
+                        }
                     }
                 }
             }

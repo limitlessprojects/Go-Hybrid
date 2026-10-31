@@ -92,6 +92,20 @@ impl<'a> Checker<'a> {
                 risky: !b.shape.is_sendable_by_type(),
             };
         }
+        // Issue #2490: a binding whose declared type still mentions an active
+        // type parameter (`fn relay[t](xs []t, ch chan []t) { ch <- move xs }`)
+        // is not instantiated at this site, so its container shape is only
+        // container-of-`Unknown` — reading that as sendable is what let O4.9
+        // fail open. Fail closed (HYB-E3005) unless an explicit `managed` block
+        // already took responsibility above.
+        if let Some(ty) = &b.ty {
+            if self.ty_mentions_type_params(ty, &st.type_params) {
+                return Outcome::Unproven(UnprovenInfo {
+                    value: name.to_string(),
+                    reason: "the declared type still mentions a type parameter this function does not instantiate, so the container's element shape is unknown at this boundary (O4.9 fail-closed)".to_string(),
+                });
+            }
+        }
         match &b.shape {
             TypeShape::Unknown => Outcome::Unproven(UnprovenInfo {
                 value: name.to_string(),
@@ -146,6 +160,55 @@ impl<'a> Checker<'a> {
                 })
             }
             _ => Outcome::Ok,
+        }
+    }
+
+    /// Does this declared type mention one of `params` (issue #2490)?
+    ///
+    /// Covers the folded generic spelling the parser produces — `box[t]` arrives
+    /// as a single `Named` name with the argument inside it — plus every
+    /// container form the result substitution walks (`[]t`, `[N]t`, `map[k]v`,
+    /// `*t`, `chan t`, `option[t]`, `fn(t) t`).
+    fn ty_mentions_type_params(
+        &self,
+        ty: &hy_syntax::TypeExpr,
+        params: &std::collections::HashSet<String>,
+    ) -> bool {
+        if params.is_empty() {
+            return false;
+        }
+        match ty {
+            hy_syntax::TypeExpr::Named { name, .. } => {
+                if params.contains(name) {
+                    return true;
+                }
+                match name.split_once('[').and_then(|(_, rest)| rest.strip_suffix(']')) {
+                    Some(inside) => inside
+                        .split(',')
+                        .map(|part| part.trim().split_whitespace().next().unwrap_or("").to_string())
+                        .any(|part| params.contains(&part)),
+                    None => false,
+                }
+            }
+            hy_syntax::TypeExpr::Pointer { to, .. }
+            | hy_syntax::TypeExpr::Slice { elem: to, .. }
+            | hy_syntax::TypeExpr::Array { elem: to, .. }
+            | hy_syntax::TypeExpr::Chan { elem: to, .. }
+            | hy_syntax::TypeExpr::Option { elem: to, .. } => {
+                self.ty_mentions_type_params(to, params)
+            }
+            hy_syntax::TypeExpr::Map { key, value, .. } => {
+                self.ty_mentions_type_params(key, params)
+                    || self.ty_mentions_type_params(value, params)
+            }
+            hy_syntax::TypeExpr::Fn {
+                params: ps,
+                results,
+                ..
+            } => {
+                ps.iter().any(|p| self.ty_mentions_type_params(&p.ty, params))
+                    || results.iter().any(|r| self.ty_mentions_type_params(r, params))
+            }
         }
     }
 

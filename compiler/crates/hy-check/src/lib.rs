@@ -349,6 +349,11 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
 
     // environment seed: receiver + params
     let mut st = FnState::default();
+    // Issue #2490: the function's own type parameters. A `move` of a value whose
+    // declared type still mentions one of them is not instantiated here, so the
+    // container shape can only be container-of-`Unknown` — the boundary rules
+    // must fail closed on it instead of reading the collapsed shape as sendable.
+    st.type_params = f.type_params.iter().map(|t| t.name.clone()).collect();
     if let Some(r) = &f.receiver {
         let base_shape = ck.shape_of_type(&r.ty);
         let (shape, ty) = if r.is_pointer {
