@@ -269,8 +269,9 @@ impl<'a> Checker<'a> {
                 // Their scopes differ from `st`: a closure-local shadow of a
                 // file const is invisible to env_lookup, so resolution fails
                 // open on every name the body defines (issue #758 guard).
+                let prev_zd = self.zd_defined.clone();
                 {
-                    let mut defined = std::collections::HashSet::new();
+                    let mut defined = prev_zd.clone();
                     for p in params {
                         defined.insert(p.name.clone());
                     }
@@ -282,7 +283,7 @@ impl<'a> Checker<'a> {
                 for stmt in &body.stmts {
                     self.check_stmt_const_zero_divisor_inner(st, stmt, /*deep=*/ true);
                 }
-                self.zd_defined.clear();
+                self.zd_defined = prev_zd;
             }
             Expr::Ident { .. } | Expr::Lit { .. } => {}
         }
@@ -488,6 +489,10 @@ fn expr_defined_names(expr: &Expr, out: &mut std::collections::HashSet<String>) 
         | Expr::Paren { inner: operand, .. }
         | Expr::Field { base: operand, .. }
         | Expr::Receive { chan: operand, .. } => expr_defined_names(operand, out),
+        Expr::Binary { lhs, rhs, .. } => {
+            expr_defined_names(lhs, out);
+            expr_defined_names(rhs, out);
+        }
         Expr::Index { base, index, .. } => {
             expr_defined_names(base, out);
             expr_defined_names(index, out);
@@ -721,10 +726,54 @@ fn divisor_int_fold(
             }
             ConstFold::NotConst
         }
+        Expr::Unary { op, operand, .. } => match op {
+            hy_syntax::UnOp::Neg => match divisor_int_fold(operand, consts, st, defined, depth + 1) {
+                ConstFold::Val(v) => v.checked_neg().map(ConstFold::Val).unwrap_or(ConstFold::TooBig),
+                ConstFold::NotConst => ConstFold::NotConst,
+                ConstFold::TooBig => ConstFold::TooBig,
+            },
+            hy_syntax::UnOp::Not => match divisor_int_fold(operand, consts, st, defined, depth + 1) {
+                ConstFold::Val(v) => ConstFold::Val(!v),
+                ConstFold::NotConst => ConstFold::NotConst,
+                ConstFold::TooBig => ConstFold::TooBig,
+            },
+            _ => ConstFold::NotConst,
+        },
         Expr::Binary { op, lhs, rhs, .. } => {
             let l = divisor_int_fold(lhs, consts, st, defined, depth + 1);
             let r = divisor_int_fold(rhs, consts, st, defined, depth + 1);
             crate::const_overflow::fold_bin(*op, l, r)
+        }
+        Expr::Call { callee, args, .. } if args.len() == 1 && !args[0].spread => {
+            if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                if matches!(
+                    name.as_str(),
+                    "int"
+                        | "i8"
+                        | "i16"
+                        | "i32"
+                        | "i64"
+                        | "int8"
+                        | "int16"
+                        | "int32"
+                        | "int64"
+                        | "uint"
+                        | "u8"
+                        | "u16"
+                        | "u32"
+                        | "u64"
+                        | "uint8"
+                        | "uint16"
+                        | "uint32"
+                        | "uint64"
+                ) {
+                    divisor_int_fold(&args[0].value, consts, st, defined, depth + 1)
+                } else {
+                    const_int_fold_with(e, consts, depth, Some(st))
+                }
+            } else {
+                const_int_fold_with(e, consts, depth, Some(st))
+            }
         }
         _ => const_int_fold_with(e, consts, depth, Some(st)),
     }
@@ -759,6 +808,11 @@ fn divisor_float_conv_zero(
             if let Expr::Ident { name, .. } = unwrap_parens(callee) {
                 if matches!(name.as_str(), "f32" | "f64" | "float32" | "float64") {
                     let a = &args[0].value;
+                    if let Expr::Ident { name, .. } = unwrap_parens(a) {
+                        if st.env_lookup(name).is_some() || defined.contains(name) {
+                            return false;
+                        }
+                    }
                     if divisor_int_fold_is_zero(a, consts, st, defined) {
                         return true;
                     }
@@ -781,7 +835,21 @@ fn divisor_float_fold_is_zero(
     st: &crate::model::FnState,
     defined: &std::collections::HashSet<String>,
 ) -> bool {
-    if divisor_float_conv_zero(e, consts, st, defined, 0) {
+    let bare = unwrap_parens(e);
+    if let Expr::Ident { name, .. } = bare {
+        if st.env_lookup(name).is_some() || defined.contains(name) {
+            return false;
+        }
+    }
+    if let Expr::Unary {
+        op: hy_syntax::UnOp::Neg,
+        operand,
+        ..
+    } = bare
+    {
+        return divisor_float_fold_is_zero(operand, consts, st, defined);
+    }
+    if divisor_float_conv_zero(bare, consts, st, defined, 0) {
         return true;
     }
     matches!(
