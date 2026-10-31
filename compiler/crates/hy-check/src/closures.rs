@@ -798,6 +798,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 if let Some(v) = l.values.first() {
                     ck.link_multi_value_return_aliases(st, v, &l.names);
                 }
+                ck.record_local_borrow_aliases(st, l);
             }
             sync_nested_moves(st, nested);
         }
@@ -1207,7 +1208,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
 fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block) {
     use crate::model::{Loan, LoanTarget};
     use crate::walk;
-    let flat = walk::flatten(body);
+    let flat = walk::flatten_with_results(body, &st.named_results);
     let saved_last_use = std::mem::replace(&mut st.last_use, flat.last_use.clone());
     let saved_loop_end = std::mem::replace(&mut st.loop_end, flat.loop_end.clone());
     let saved_loans = std::mem::take(&mut st.loans);
