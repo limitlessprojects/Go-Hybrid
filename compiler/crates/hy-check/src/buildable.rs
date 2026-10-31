@@ -248,12 +248,25 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         (Int | Float, Str | Slice(_) | Map(_, _) | Chan(_) | Struct(_)) => true,
 
         // String target: can convert from Int (rune/byte code point) or Slice (byte/rune slice) or Str.
-        // Cannot convert from Float, Bool, Map, Chan, Struct.
-        (Str, Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
+        // Cannot convert from Float, Bool, Map, Chan, Struct, Array, or non-int Slice.
+        (Str, Float | Bool | Map(_, _) | Chan(_) | Struct(_) | Array(_)) => true,
+        (Str, Slice(elem)) if !matches!(**elem, Unknown | Int) => true,
 
         // Slice target: can convert from Str (to []byte/[]rune), or Slice/Array.
         // Cannot convert from Int, Float, Bool, Map, Chan, Struct.
         (Slice(_), Int | Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
+        (Slice(elem), Str) if !matches!(**elem, Unknown | Int) => true,
+
+        // Array target: cannot convert from Str directly.
+        (Array(_), Str) => true,
+
+        // Slice and Array conversions require matching element kinds.
+        (Slice(e1), Slice(e2))
+        | (Array(e1), Array(e2))
+        | (Slice(e1), Array(e2))
+        | (Array(e1), Slice(e2)) => {
+            **e1 != Unknown && **e2 != Unknown && e1 != e2
+        },
 
         // Map target: cannot convert from Int, Float, Bool, Str, Slice, Chan, Struct.
         (Map(_, _), Int | Float | Bool | Str | Slice(_) | Chan(_) | Struct(_)) => true,
