@@ -973,3 +973,22 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - All ten landings: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies posted.
 - Suite trajectory: 191 -> 200. Final main 605adf5, tree clean.
 - NEXT TICK QUEUE: #2390/#2566/#1780 (Pareto), #1811 (await one-hunk fix), hue batch #1766/#1767, #1715 (wildcard spike), #2467/#2432 (aging), new arrivals #2513/#2530/#2486/#2503/#2494.
+
+## Session 32 — 2026-11-01 small hours (tick 487193: 9 landed, 0 gate-fails)
+
+- Sandbox recycled (13th; toolchains re-restored, cold rebuild inside first verify). cwd resets between tool calls — every command re-cd's. ls-remote assert raced the push twice (transient empty/queued read); both re-checked fine — rule: sleep 2-3 after push before asserting.
+- Baseline 41589d5 (session 31 worklog). Scan timed out once at 180s (known API slowness), retry OK; approve 40/84. Dimank92 dropped a 4-PR float64-strictness family overnight.
+- LANDED (Pareto NOW top-down):
+  cbc373f Merge PR #2605 (Dimank92, fixes #2548) — float64 slice/map literal positions reject typed int variables; scope-aware untyped-const infra (Define::is_untyped + file_untyped_consts + is_untyped_int_const: literals/untyped consts/neg/const-arithmetic); any-positions skip. 201 suites.
+  afad51f Merge PR #2602 (Dimank92, fixes #2551) — same discipline on assignment (simple+typical), struct field init, returns (report_return_conflict now sees the value expr). 202 suites. Trial merge auto-resolved the byte-identical infra hunks vs #2605.
+  a904863 Merge PR #2600 (Dimank92, fixes #2556) — fn/method call args (both want sites) + append() into float slices. 203 suites.
+  4040a89 Merge PR #2601 (Dimank92, fixes #2553) — binary arithmetic + compound assignment; family complete (4 PRs, zero side-shifts each). 204 suites.
+  6071581 Merge PR #2390 (ket4min-susan, fixes #2386) — O8 slot-loan key snapshot forced when any closure literal in the fn writes the key name (collect_closure_writes_* conservative walker); shadowed closure writes do NOT force. 205 suites.
+  712bce4 Merge PR #1780 (hue, fixes #1777) — literal nil: unary !/-, binary non-equality ops (Eq/Ne exception kept; ordered already closed), compound-assign values on Unknown targets — all HYB-E1002; reuses Checker::is_nil_literal. 206 suites.
+  4d35ba7 Merge PR #1766 (hue, fixes #1776) — value-position type names in struct/slice/map literals fail closed (Row 13 BUILDABLE); fail-open for predeclared names (resolve::is_predeclared_type_name) + fn generic type params (fn_type_params per body). 207 suites.
+  da02523 Merge PR #2513 (ocakciomursel-pixel, fixes #2512) — option[T] receivers peel to element type, set[T] + sync.* method results typed; Unknown-permissive escape closed. 208 suites.
+  2c527a1 Merge PR #1767 (hue, fixes #1778) — select recv-arm bodies that top-level re-declare the case binding get wrapped (Go 'no new variables' conformance); nested-block shadows untouched. 209 suites.
+- All nine: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written landing replies posted.
+- #1811 rechecked: head unchanged (8a1f058) — the invited one-hunk fix (alias -> conversion-target fallthrough) has not been pushed; session 31 evidence reply stands.
+- Suite trajectory: 200 -> 209. Final main 2c527a1, tree clean.
+- NEXT TICK QUEUE: #2295 (Yumihariii user-struct field chains recursive), #2604 (ket4min-susan closure capture move-freeze), #1811 (await one-hunk), #2292/#2291 (Yumihariii rejects), #391 (aged ocakciomursel-pixel const-pointer immutability), #2486/#2503/#2300/#2494 (ocakciomursel-pixel generics batch), #2417/#2481 (ket4min-susan spikes), #1675 (enums, 769 lines), #1715 (wildcard spike), #2467/#2432 (aging).
