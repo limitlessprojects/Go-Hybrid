@@ -615,12 +615,16 @@ pub struct Emitter {
     /// name — dotted for shape-known fields, "" otherwise). Receiver typing
     /// for `stats.mu.lock()` (18).
     struct_fields: BTreeMap<String, Vec<(String, String)>>,
+    /// User-struct field AST type expressions for element and member resolution.
+    struct_field_tys: BTreeMap<String, Vec<(String, TypeExpr)>>,
     /// var → user-struct name (value or pointer): `stats := pool_stats{}` /
     /// `worker(..., stats *pool_stats)`.
     var_struct: BTreeMap<String, String>,
     /// var → (shape-known dotted type, is_pointer): `var hits atomic.int64`
     /// / `hits *atomic.int64` — the MethodFunc receiver's address-of form.
     var_ty: BTreeMap<String, (String, bool)>,
+    /// Channel variable/param → element type expression for element propagation.
+    chan_elem_types: BTreeMap<String, TypeExpr>,
     /// Variables known to hold a pointer type in the current function frame.
     pointer_vars: BTreeSet<String>,
     /// Local/parameter/receiver/result names bound in the current function frame.
@@ -639,6 +643,7 @@ pub(crate) struct ScopeSnapshot {
     var_ty: BTreeMap<String, (String, bool)>,
     var_struct: BTreeMap<String, String>,
     pointer_vars: BTreeSet<String>,
+    chan_elem_types: BTreeMap<String, TypeExpr>,
 }
 
 impl Emitter {
@@ -670,8 +675,10 @@ impl Emitter {
             fn_shapes: BTreeMap::new(),
             closure_shapes: BTreeMap::new(),
             struct_fields: BTreeMap::new(),
+            struct_field_tys: BTreeMap::new(),
             var_struct: BTreeMap::new(),
             var_ty: BTreeMap::new(),
+            chan_elem_types: BTreeMap::new(),
             pointer_vars: BTreeSet::new(),
             local_vars: BTreeSet::new(),
             ptr_returning_fns: BTreeSet::new(),
@@ -692,6 +699,7 @@ impl Emitter {
             var_ty: self.var_ty.clone(),
             var_struct: self.var_struct.clone(),
             pointer_vars: self.pointer_vars.clone(),
+            chan_elem_types: self.chan_elem_types.clone(),
         }
     }
 
@@ -701,6 +709,7 @@ impl Emitter {
         self.var_ty = saved.var_ty;
         self.var_struct = saved.var_struct;
         self.pointer_vars = saved.pointer_vars;
+        self.chan_elem_types = saved.chan_elem_types;
     }
 
     pub(crate) fn shadow_local_name(&mut self, name: &str) {
@@ -710,6 +719,7 @@ impl Emitter {
             self.var_ty.remove(name);
             self.var_struct.remove(name);
             self.pointer_vars.remove(name);
+            self.chan_elem_types.remove(name);
         }
     }
 
@@ -765,6 +775,20 @@ impl Emitter {
                     s.fields
                         .iter()
                         .map(|f| (f.name.clone(), base_ty_name(&f.ty).unwrap_or_default()))
+                        .collect::<Vec<_>>(),
+                )),
+                _ => None,
+            })
+            .collect();
+        self.struct_field_tys = file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Struct(s) => Some((
+                    s.name.clone(),
+                    s.fields
+                        .iter()
+                        .map(|f| (f.name.clone(), f.ty.clone()))
                         .collect::<Vec<_>>(),
                 )),
                 _ => None,
@@ -1297,6 +1321,7 @@ impl Emitter {
         self.var_ty.clear();
         self.pointer_vars.clear();
         self.local_vars.clear();
+        self.chan_elem_types.clear();
         self.temp_n = 0;
         self.try_temps.clear();
         self.loop_labels.clear();
@@ -1586,15 +1611,56 @@ impl Emitter {
     fn emit_hints_from_params(&mut self, params: &[Param]) {
         for p in params {
             self.shadow_local_name(&p.name);
-            if let Some(kind) = self.binding_kind_of_ty(&p.ty) {
-                self.bindings.insert(p.name.clone(), kind);
-            } else if matches!(p.ty, TypeExpr::Chan { .. }) {
-                self.bindings.insert(p.name.clone(), BindingKind::Chan);
+            self.register_binding_from_ty(&p.name, &p.ty);
+        }
+    }
+
+    pub(crate) fn register_binding_from_ty(&mut self, name: &str, ty: &TypeExpr) {
+        if name == "_" {
+            return;
+        }
+        if let Some(kind) = self.binding_kind_of_ty(ty) {
+            self.bindings.insert(name.to_string(), kind);
+        } else if matches!(ty, TypeExpr::Chan { .. }) {
+            self.bindings.insert(name.to_string(), BindingKind::Chan);
+        }
+        if matches!(ty, TypeExpr::Pointer { .. }) {
+            self.pointer_vars.insert(name.to_string());
+        }
+        if let TypeExpr::Chan { elem, .. } = ty {
+            self.chan_elem_types.insert(name.to_string(), (**elem).clone());
+        }
+        self.register_var_ty(name, ty);
+    }
+
+    pub(crate) fn chan_elem_type_of(&self, e: &Expr) -> Option<TypeExpr> {
+        let e = Self::peel_parens(e);
+        match e {
+            Expr::Ident { name, .. } => self.chan_elem_types.get(name).cloned(),
+            Expr::Receive { chan, .. } => {
+                if let Some(inner) = self.chan_elem_type_of(chan) {
+                    if let TypeExpr::Chan { elem, .. } = inner {
+                        return Some(*elem);
+                    }
+                }
+                None
             }
-            if matches!(p.ty, TypeExpr::Pointer { .. }) {
-                self.pointer_vars.insert(p.name.clone());
+            Expr::Field { base, name, .. } => {
+                let base = Self::peel_parens(base);
+                if let Expr::Ident { name: vn, .. } = base {
+                    if let Some(sn) = self.var_struct.get(vn) {
+                        if let Some(fields) = self.struct_field_tys.get(sn) {
+                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
+                                if let TypeExpr::Chan { elem, .. } = fty {
+                                    return Some((**elem).clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                None
             }
-            self.register_var_ty(&p.name, &p.ty);
+            _ => None,
         }
     }
 

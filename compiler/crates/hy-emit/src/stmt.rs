@@ -242,6 +242,11 @@ impl Emitter {
                                 }
                             };
                             self.shadow_local_names(names);
+                            if let Some(elem_ty) = self.chan_elem_type_of(chan) {
+                                if !names.is_empty() {
+                                    self.register_binding_from_ty(&names[0], &elem_ty);
+                                }
+                            }
                             self.push(&head);
                         }
                         SelectArmKind::Send { chan, value, .. } => {
@@ -329,22 +334,8 @@ impl Emitter {
                 // Typed var decls carry receiver knowledge (Batch I):
                 // `var hits atomic.int64` → shape-known, not a pointer.
                 if let Some(t) = &l.ty {
-                    if matches!(t, TypeExpr::Pointer { .. }) {
-                        for n in &l.names {
-                            if n != "_" {
-                                self.pointer_vars.insert(n.clone());
-                            }
-                        }
-                    }
-                    if let Some(kind) = self.binding_kind_of_ty(t) {
-                        for n in &l.names {
-                            if n != "_" {
-                                self.bindings.insert(n.clone(), kind);
-                            }
-                        }
-                    }
-                    if l.names.len() == 1 && l.names[0] != "_" {
-                        self.register_var_ty(&l.names[0], t);
+                    for n in &l.names {
+                        self.register_binding_from_ty(n, t);
                     }
                 }
                 return Ok(());
@@ -1074,6 +1065,30 @@ impl Emitter {
                 self.pointer_vars.insert(name.clone());
             }
         }
+        if let Some(v) = values.first() {
+            let v = Self::peel_parens(v);
+            if let Expr::Receive { chan, .. } = v {
+                if let Some(elem_ty) = self.chan_elem_type_of(chan) {
+                    if !names.is_empty() {
+                        self.register_binding_from_ty(&names[0], &elem_ty);
+                    }
+                }
+            } else if let Expr::Call { callee, args, .. } = v {
+                if matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "make") {
+                    if let Some(first) = args.first() {
+                        if let Expr::StructLit {
+                            ty: Some(TypeExpr::Chan { elem, .. }),
+                            ..
+                        } = &first.value
+                        {
+                            if !names.is_empty() && names[0] != "_" {
+                                self.chan_elem_types.insert(names[0].clone(), (**elem).clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
@@ -1148,6 +1163,7 @@ impl Emitter {
     /// make(chan ...), or a function returning a channel). Channel ranges in
     /// Go permit only one iteration variable and bind the received value directly.
     fn is_channel_expr(&self, e: &Expr) -> bool {
+        let e = Self::peel_parens(e);
         match e {
             Expr::Ident { name, .. } => {
                 matches!(self.bindings.get(name), Some(BindingKind::Chan))
@@ -1155,6 +1171,26 @@ impl Emitter {
             Expr::Paren { inner, .. } => self.is_channel_expr(inner),
             Expr::Call { .. } | Expr::Try { .. } => {
                 self.binding_kind_of(e) == BindingKind::Chan
+            }
+            Expr::Receive { chan, .. } => {
+                if let Some(inner) = self.chan_elem_type_of(chan) {
+                    matches!(inner, TypeExpr::Chan { .. })
+                } else {
+                    false
+                }
+            }
+            Expr::Field { base, name, .. } => {
+                let base = Self::peel_parens(base);
+                if let Expr::Ident { name: vn, .. } = base {
+                    if let Some(sn) = self.var_struct.get(vn) {
+                        if let Some(fields) = self.struct_field_tys.get(sn) {
+                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
+                                return matches!(fty, TypeExpr::Chan { .. });
+                            }
+                        }
+                    }
+                }
+                false
             }
             _ => false,
         }
@@ -1575,22 +1611,8 @@ impl Emitter {
                     .collect::<Result<Vec<_>, _>>()?;
                 self.hint_from_values(&l.names, &l.values);
                 if let Some(t) = &l.ty {
-                    if matches!(t, TypeExpr::Pointer { .. }) {
-                        for n in &l.names {
-                            if n != "_" {
-                                self.pointer_vars.insert(n.clone());
-                            }
-                        }
-                    }
-                    if let Some(kind) = self.binding_kind_of_ty(t) {
-                        for n in &l.names {
-                            if n != "_" {
-                                self.bindings.insert(n.clone(), kind);
-                            }
-                        }
-                    }
-                    if l.names.len() == 1 && l.names[0] != "_" {
-                        self.register_var_ty(&l.names[0], t);
+                    for n in &l.names {
+                        self.register_binding_from_ty(n, t);
                     }
                 }
                 let names = l.names.join(", ");
@@ -1844,6 +1866,11 @@ impl Emitter {
                             let over_chan = self.is_channel_expr(expr);
                             if over_chan {
                                 self.shadow_local_names(vars);
+                                if let Some(elem_ty) = self.chan_elem_type_of(expr) {
+                                    if !vars.is_empty() {
+                                        self.register_binding_from_ty(&vars[0], &elem_ty);
+                                    }
+                                }
                                 format!("for {} := range {} {{", vars[0], e)
                             } else {
                                 // A rust-handle slice (ForeignTy binding)
