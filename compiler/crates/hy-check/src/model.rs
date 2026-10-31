@@ -296,6 +296,7 @@ pub(crate) struct FnState {
     /// composite literal containing `&...`), for O2 `LOAN-ESCAPE` on
     /// named-result / variable returns (`out = &x; return` / `return out`).
     pub borrow_bindings: HashSet<String>,
+    pub borrow_binding_scopes: Vec<HashSet<String>>,
     /// Local closure bindings -> `(params, results, body)` recorded at define/rebind
     /// time so call sites can analyze parameter/capture stores (`record_callee_param_stores`).
     pub closure_defs:
@@ -309,6 +310,7 @@ impl FnState {
         self.alias_scopes.push(self.aliases.clone());
         self.share_scopes.push(self.may_share.clone());
         self.shadow_link_scopes.push(self.shadow_links.clone());
+        self.borrow_binding_scopes.push(self.borrow_bindings.clone());
         self.fnlit_scopes.push(Vec::new());
     }
 
@@ -434,6 +436,14 @@ impl FnState {
             }
         }
         self.scopes.pop();
+        if let Some(mut merged) = self.borrow_binding_scopes.pop() {
+            for b in &self.borrow_bindings {
+                if !popped_scope.contains_key(b) {
+                    merged.insert(b.clone());
+                }
+            }
+            self.borrow_bindings = merged;
+        }
         if let Some(outer_shadows) = self.shadow_link_scopes.pop() {
             self.shadow_links = outer_shadows;
         }
