@@ -280,6 +280,10 @@ fn build_tables(ck: &mut Checker<'_>) {
                     e.name.clone(),
                     e.variants.iter().map(|v| v.name.clone()).collect(),
                 );
+                ck.enum_is_data_carrying.insert(
+                    e.name.clone(),
+                    e.variants.iter().any(|v| v.payload.is_some()),
+                );
                 ck.declare_pkg_name(&e.name, "enum", e.span);
             }
             Decl::TypeAlias(ta) => {

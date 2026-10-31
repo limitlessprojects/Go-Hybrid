@@ -40,6 +40,8 @@ pub(crate) enum TypeShape {
     Array(Box<TypeShape>),
     /// a struct (local decl name if known) — mutable GC composite.
     Struct(Option<String>),
+    /// an enum (local decl name if known) — SPEC T16.
+    Enum(Option<String>),
     /// `*T` — pointer; sendable only when the pointee is atomic (OQ6).
     Pointer(Box<TypeShape>),
     /// an L3 own handle, e.g. `serde_json.value`, `flate2.writer` (O13).
@@ -95,6 +97,7 @@ impl TypeShape {
             TypeShape::Slice(_) => "slice",
             TypeShape::Array(_) => "array",
             TypeShape::Struct(_) => "struct",
+            TypeShape::Enum(_) => "enum",
             TypeShape::Pointer(_) => "pointer",
             TypeShape::Chan(_) => "channel",
             TypeShape::Atomic => "atomic value",
@@ -118,6 +121,8 @@ impl TypeShape {
             TypeShape::Map(k, v) => format!("map[{}]{}", k.render(), v.render()),
             TypeShape::Slice(e) => format!("[]{}", e.render()),
             TypeShape::Array(e) => format!("[...]{}", e.render()),
+            TypeShape::Enum(Some(n)) => n.clone(),
+            TypeShape::Enum(None) => "enum".to_string(),
             TypeShape::Struct(Some(n)) => n.clone(),
             TypeShape::Struct(None) => "struct".to_string(),
             TypeShape::Pointer(t) => format!("*{}", t.render()),
@@ -688,6 +693,8 @@ pub(crate) struct Checker<'a> {
     pub enums: HashMap<String, Vec<String>>,
     /// enum name -> whether the first variant is payload-free (N3 HYB-E4002).
     pub enum_has_zero_value: HashMap<String, bool>,
+    /// enum name -> whether the enum has any data-carrying variant (T16 HYB-E2006).
+    pub enum_is_data_carrying: HashMap<String, bool>,
     /// type alias name -> target TypeExpr.
     pub type_aliases: HashMap<String, TypeExpr>,
     /// fn name -> decl (return-type inference for single-value defines).
@@ -752,6 +759,7 @@ impl<'a> Checker<'a> {
             struct_type_params: HashMap::new(),
             enums: HashMap::new(),
             enum_has_zero_value: HashMap::new(),
+            enum_is_data_carrying: HashMap::new(),
             type_aliases: HashMap::new(),
             fns: HashMap::new(),
             zd_defined: std::collections::HashSet::new(),
@@ -773,6 +781,10 @@ impl<'a> Checker<'a> {
 
     /// Binding lookup: locals first (innermost scope wins), then file-level
     /// consts.
+    pub(crate) fn is_data_carrying_enum(&self, name: &str) -> bool {
+        self.enum_is_data_carrying.get(name).copied().unwrap_or(false)
+    }
+
     pub(crate) fn lookup_binding<'b>(&'b self, st: &'b FnState, name: &str) -> Option<&'b Binding> {
         st.env_lookup(name).or_else(|| self.consts.get(name))
     }

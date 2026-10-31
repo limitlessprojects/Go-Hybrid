@@ -5342,10 +5342,20 @@ impl<'a> Checker<'a> {
         subject: &Expr,
         managed: bool,
     ) {
-        let shape = self.shape_of_expr(st, subject);
-        let ty = match self.ty_of_expr(st, subject) {
-            Some(hy_syntax::TypeExpr::Option { elem, .. }) => Some(*elem),
-            other => other,
+        let raw_shape = self.shape_of_expr(st, subject);
+        let is_enum = matches!(raw_shape, TypeShape::Enum(_));
+        let shape = if is_enum {
+            TypeShape::Unknown
+        } else {
+            raw_shape
+        };
+        let ty = if is_enum {
+            None
+        } else {
+            match self.ty_of_expr(st, subject) {
+                Some(hy_syntax::TypeExpr::Option { elem, .. }) => Some(*elem),
+                other => other,
+            }
         };
 
         let mut roots = Vec::new();

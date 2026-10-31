@@ -82,6 +82,10 @@ impl<'a> Checker<'a> {
         if self.structs.contains_key(base) {
             return TypeShape::Struct(Some(base.to_string()));
         }
+        // User enums in package scope (T16 / HYB-E2006).
+        if self.enums.contains_key(base) {
+            return TypeShape::Enum(Some(base.to_string()));
+        }
         // User type aliases take precedence over predeclared types.
         if let Some(target) = self.type_aliases.get(base) {
             return self.shape_of_type_depth(target, depth + 1);
@@ -217,10 +221,19 @@ impl<'a> Checker<'a> {
 
     pub(crate) fn shape_of_expr(&self, st: &FnState, expr: &Expr) -> TypeShape {
         match expr {
-            Expr::Ident { name, .. } => self
-                .lookup_binding(st, name)
-                .map(|b| b.shape.clone())
-                .unwrap_or(TypeShape::Unknown),
+            Expr::Ident { name, .. } => {
+                if let Some(b) = self.lookup_binding(st, name) {
+                    return b.shape.clone();
+                }
+                if let Some((ename, _)) = self
+                    .enums
+                    .iter()
+                    .find(|(_, vs)| vs.iter().any(|v| v == name.as_str()))
+                {
+                    return TypeShape::Enum(Some(ename.clone()));
+                }
+                TypeShape::Unknown
+            }
             Expr::Lit { kind, .. } => match kind {
                 hy_syntax::LitKind::Int(_)
                 | hy_syntax::LitKind::Float(_)
@@ -268,6 +281,15 @@ impl<'a> Checker<'a> {
                 _ => TypeShape::Unknown,
             },
             Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
+                    if self.lookup_binding(st, root).is_none() {
+                        if let Some(vs) = self.enums.get(root.as_str()) {
+                            if vs.iter().any(|v| v == name) {
+                                return TypeShape::Enum(Some(root.clone()));
+                            }
+                        }
+                    }
+                }
                 let base_shape = self.shape_of_expr(st, base);
                 self.field_shape(&base_shape, name)
             }
@@ -398,6 +420,13 @@ impl<'a> Checker<'a> {
                     }
                     _ => {
                         let head = Self::base_named_type_str(name);
+                        if let Some((ename, _)) = self
+                            .enums
+                            .iter()
+                            .find(|(_, vs)| vs.iter().any(|v| v == name.as_str()))
+                        {
+                            return TypeShape::Enum(Some(ename.clone()));
+                        }
                         self.fns
                             .get(name.as_str())
                             .or_else(|| self.fns.get(head))
@@ -417,6 +446,11 @@ impl<'a> Checker<'a> {
                 let head = Self::base_named_type_str(name);
                 if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
                     if self.lookup_binding(st, root).is_none() {
+                        if let Some(vs) = self.enums.get(root.as_str()) {
+                            if vs.iter().any(|v| v == name) {
+                                return TypeShape::Enum(Some(root.clone()));
+                            }
+                        }
                         let full = format!("{}.{}", root, head);
                         if let Some(f) = self.fns.get(full.as_str()) {
                             return f
