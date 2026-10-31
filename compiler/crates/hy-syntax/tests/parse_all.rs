@@ -126,3 +126,7 @@ fn stretch_examples_04_to_10_parse() {
         }
     }
 }
+#[test]
+fn fn_type_result_does_not_swallow_next_line_727() {
+    parse_file("t.hy", "fn main() {\n    total := 0\n    var cb fn() int\n    total = 7\n}").unwrap();
+}
