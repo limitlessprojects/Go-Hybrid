@@ -439,6 +439,13 @@ Primitives are value types: assignment copies them; they are always sendable
 first use (Go rules); thereafter every conversion is explicit `T(x)`
 (§11). One-line example under X4.
 
+A typed `int` value is never assignable to a `float64` target (nor the
+reverse), on any surface: plain and compound assignment, struct field and
+map value writes, `let` initializers, array elements, `append` arguments,
+and comparison operands. hy-check rejects such programs at check time
+(HYB-E1002, "value kind mismatch") instead of leaving the failure to the
+Go build (issue #1112).
+
 ### 2.2 Strings — UTF-8 semantics
 
 **T3 — Strings are immutable UTF-8 byte sequences.** `len(s)` is the byte

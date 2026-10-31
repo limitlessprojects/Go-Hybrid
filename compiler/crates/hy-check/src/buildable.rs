@@ -149,15 +149,15 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         (Interface, _) | (_, Interface) => false,
         // No value is involved; a count check owns that case.
         (Void, _) | (_, Void) => false,
-        // An untyped int constant is assignable to a float target
-        // (`var f float64 = 1` builds). The kind model cannot tell an untyped
-        // constant from an `int` variable, so this direction must stay allowed
-        // or the check would reject buildable programs.
-        // An untyped int constant is assignable to a float result
-        // (`fn f() float64 { return 1 }` builds). The kind model cannot tell
-        // an untyped constant from an `int` variable, so this direction must
-        // stay allowed or the check would reject buildable programs.
-        (Float, Int) => false,
+        // NOTE: `(Float, Int)` used to be blanket-allowed here because the
+        // kind model cannot tell an untyped int constant (`var f float64 = 1`
+        // builds) from an `int` VARIABLE (`var f float64 = i` does NOT build).
+        // The excuse now lives in `kinds_conflict_value`, which sees the value
+        // expression's provenance; bare relation calls reject the pair, and
+        // every value-bearing site must route through the wrapper. Sites that
+        // cannot see a value (equality via `equality_kinds_conflict`'s numeric
+        // early-out, pointer-receiver prechecks) stay permissive by their own
+        // arms.
         // A struct whose name did not resolve is not evidence of a mismatch.
         (Struct(None), _) | (_, Struct(None)) => false,
         (a, b) if a == b => false,
@@ -212,6 +212,46 @@ fn is_definitely_single_value(e: &Expr) -> bool {
 /// in Go comparisons (`1 == 1.0` builds), so numeric families do not
 /// conflict. Across different families (e.g. numeric vs string/bool,
 /// pointer vs scalar), Go never permits comparison.
+/// `kinds_conflict` with value provenance for the ONE direction the kind
+/// model cannot see: an untyped int constant is assignable to a float target
+/// (`var f float64 = 1`, `x f64 = kk`), and Go converts it silently. The bare
+/// relation must stay permissive (an `int` VARIABLE never converts), so every
+/// value-bearing site routes through this wrapper, which excuses
+/// `(Float, Int)` only when the value expression is provably an untyped
+/// constant: a literal, or a file-level const declared without a type.
+/// Fail-open by design: a value we cannot prove untyped keeps the bare
+/// relation's verdict.
+fn kinds_conflict_value(want: &OpKind, got: &OpKind, value: &Expr, c: &Collector) -> bool {
+    if !kinds_conflict(want, got) {
+        return false;
+    }
+    if matches!((want, got), (OpKind::Float, OpKind::Int))
+        && is_untyped_int_expr(value, c)
+    {
+        return false;
+    }
+    true
+}
+
+/// Is this expression an untyped constant whose kind is int? Literals are
+/// untyped by definition; a file-level `const` with no type ascription
+/// inherits its (constant) initializer's untypedness. Parens and unary minus
+/// preserve constantness. Anything else — a variable, a call, a const with an
+/// `int` ascription — is TYPED and Go refuses to convert it to float64.
+fn is_untyped_int_expr(e: &Expr, c: &Collector) -> bool {
+    match e {
+        Expr::Lit {
+            kind: LitKind::Int(_),
+            ..
+        } => true,
+        Expr::Ident { name, .. } => c.file_untyped_int_consts.contains(name),
+        Expr::Paren { inner, .. } | Expr::Unary { operand: inner, .. } => {
+            is_untyped_int_expr(inner, c)
+        }
+        _ => false,
+    }
+}
+
 fn equality_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
     if a.is_numeric() && b.is_numeric() {
         return false;
@@ -367,6 +407,13 @@ struct Collector<'a> {
     kind_scopes: Vec<HashMap<String, OpKind>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
+    /// File-level `const` names declared WITHOUT a type ascription. Their
+    /// value is an untyped constant, so Go's implicit conversion rules let an
+    /// untyped int constant initialize a float (and a float constant an int,
+    /// when it has no fractional part). The kind model has no "untyped"
+    /// notion, so the (Float, Int) excuse in `kinds_conflict` must be gated on
+    /// this set (see `kinds_conflict_value`).
+    file_untyped_int_consts: HashSet<String>,
     /// Result kinds of the function whose body is currently being walked
     /// (#577 C9/C10). Empty for a fn declared with no results — which is also
     /// the state outside any body, so `Stmt::Return` can only ever see it
@@ -384,6 +431,10 @@ struct Collector<'a> {
     loop_depth: usize,
     /// Lexical nesting depth within `select` statements.
     select_depth: usize,
+    /// Lexical nesting depth within `managed` blocks (O6.1 hatch): while
+    /// inside one, the #1112 chan-send element check is suppressed — the
+    /// `managed` hatch deliberately relaxes sendability there.
+    managed_depth: usize,
     defines: Vec<Define>,
     /// Every identifier mentioned in the file plus every dotted type root —
     /// the import-usage set (the emitter's declared-import header needs it).
@@ -402,11 +453,13 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
             file_consts: HashMap::new(),
+            file_untyped_int_consts: HashSet::new(),
             fn_results: Vec::new(),
             fn_results_all_named: false,
             fn_results_error_tail: false,
             loop_depth: 0,
             select_depth: 0,
+            managed_depth: 0,
             defines: Vec::new(),
             roots: HashSet::new(),
             diags: Vec::new(),
@@ -420,6 +473,9 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
                     .map(|t| c.kind_of_ty(t, 0))
                     .unwrap_or_else(|| c.kind_of_expr(&cd.value));
                 c.file_consts.insert(cd.name.clone(), k);
+                if cd.ty.is_none() && c.kind_of_expr(&cd.value) == OpKind::Int {
+                    c.file_untyped_int_consts.insert(cd.name.clone());
+                }
             }
         }
         for d in &file.decls {
@@ -857,7 +913,7 @@ impl<'a> Collector<'a> {
             let want = self.kind_of_ty(t, 0);
             if l.values.len() == 1 && l.names.len() == 1 {
                 let vk = self.kind_of_expr(&l.values[0]);
-                if kinds_conflict(&want, &vk) {
+                if kinds_conflict_value(&want, &vk, &l.values[0], self) {
                     self.emit_e1002(
                         l.span,
                         format!(
@@ -873,7 +929,7 @@ impl<'a> Collector<'a> {
             } else if l.values.len() > 1 && l.values.len() == l.names.len() {
                 for (name, v) in l.names.iter().zip(l.values.iter()) {
                     let vk = self.kind_of_expr(v);
-                    if kinds_conflict(&want, &vk) {
+                    if kinds_conflict_value(&want, &vk, v, self) {
                         self.emit_e1002(
                             l.span,
                             format!(
@@ -1023,6 +1079,7 @@ impl<'a> Collector<'a> {
                 // `ch <- noop()` / `ch <- pair()`, which Go rejects.
                 self.check_single_value_position(value, "a channel send", false);
                 self.expr(value);
+                self.check_send_elem(chan, value);
             }
             Stmt::If {
                 init,
@@ -1109,7 +1166,11 @@ impl<'a> Collector<'a> {
                     _ => {}
                 }
             }
-            Stmt::Managed { body, .. } => self.block_scoped(body),
+            Stmt::Managed { body, .. } => {
+                self.managed_depth += 1;
+                self.block_scoped(body);
+                self.managed_depth -= 1;
+            }
             Stmt::Match { subject, arms, .. } => {
                 self.expr(subject);
                 for arm in arms {
@@ -1181,6 +1242,7 @@ impl<'a> Collector<'a> {
                     self.check_single_value_position(value, "a channel send", false);
                             self.expr(chan);
                             self.expr(value);
+                            self.check_send_elem(chan, value);
                         }
                         SelectArmKind::Recv { names, chan } => {
                             self.check_repeated_bindings(names, chan.span());
@@ -2175,7 +2237,7 @@ impl<'a> Collector<'a> {
                 Some((_, fty)) => {
                     let want = self.kind_of_ty_with_subst(fty, &subst, 0);
                     let got = self.kind_of_expr(&f.value);
-                    if kinds_conflict(&want, &got) {
+                    if kinds_conflict_value(&want, &got, &f.value, self) {
                         self.emit_e1002(
                             f.value.span(),
                             format!(
@@ -2521,7 +2583,7 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            if kinds_conflict_value(&want, &got, &a.value, self) {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -2561,7 +2623,7 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            if kinds_conflict_value(&want, &got, &a.value, self) {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -2592,7 +2654,9 @@ impl<'a> Collector<'a> {
                 if let Some(res) = self.call_result_kinds(callee, args) {
                     if res.len() == want.len() {
                         for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(r, w, values[0].span());
+                            // A call result is always typed — no untyped
+                            // provenance to excuse (Float, Int).
+                            self.report_return_conflict(r, w, values[0].span(), None);
                         }
                         return;
                     }
@@ -2601,7 +2665,7 @@ impl<'a> Collector<'a> {
                         && res.len() + 1 == want.len()
                     {
                         for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(r, w, values[0].span());
+                            self.report_return_conflict(r, w, values[0].span(), None);
                         }
                         return;
                     }
@@ -2648,7 +2712,7 @@ impl<'a> Collector<'a> {
             if short_ok {
                 for (v, w) in values.iter().zip(want.iter()) {
                     let got = self.kind_of_expr(v);
-                    self.report_return_conflict(&got, w, v.span());
+                    self.report_return_conflict(&got, w, v.span(), Some(v));
                 }
                 return;
             }
@@ -2676,12 +2740,22 @@ impl<'a> Collector<'a> {
         }
         for (v, w) in values.iter().zip(want.iter()) {
             let got = self.kind_of_expr(v);
-            self.report_return_conflict(&got, w, v.span());
+            self.report_return_conflict(&got, w, v.span(), Some(v));
         }
     }
 
-    fn report_return_conflict(&mut self, got: &OpKind, want: &OpKind, span: Span) {
-        if !kinds_conflict(want, got) {
+    fn report_return_conflict(
+        &mut self,
+        got: &OpKind,
+        want: &OpKind,
+        span: Span,
+        value: Option<&Expr>,
+    ) {
+        let conflict = match value {
+            Some(v) => kinds_conflict_value(want, got, v, self),
+            None => kinds_conflict(want, got),
+        };
+        if !conflict {
             return;
         }
         self.emit_e1002(
@@ -2749,7 +2823,7 @@ impl<'a> Collector<'a> {
                 continue;
             }
             let got = self.kind_of_expr(&extra.value);
-            if kinds_conflict(&elem, &got) {
+            if kinds_conflict_value(&elem, &got, &extra.value, self) {
                 self.emit_e1002(
                     extra.value.span(),
                     format!(
@@ -3108,6 +3182,34 @@ impl<'a> Collector<'a> {
     }
 
     /// Family B6 (#425): `s++`, `s--`, and compound assignment operand checks.
+    // #1112-family: a send (statement or select arm) must carry a value
+    // assignable to the channel's element type — go build refuses
+    // `cannot use ... as <elem> value in send`. Fail open when the channel's
+    // element type is unknown.
+    fn check_send_elem(&mut self, chan: &Expr, value: &Expr) {
+        // O6.1: inside a `managed` block the sendability check is hatched
+        // (the block's contract already accepts unchecked sharing).
+        if self.managed_depth > 0 {
+            return;
+        }
+        let ck = self.kind_of_expr(chan);
+        let vk = self.kind_of_expr(value);
+        if let OpKind::Chan(elem) = ck {
+            if kinds_conflict_value(&*elem, &vk, value, self) {
+                self.emit_e1002(
+                    value.span(),
+                    format!(
+                        "cannot send a value of type `{}` on a `chan {}` — Go refuses `cannot use ... as {} value in send` (HYB-E1002)",
+                        vk.label(),
+                        elem.label(),
+                        elem.label()
+                    ),
+                    "a channel's element type is fixed at make(); write an explicit conversion when a conversion is intended",
+                );
+            }
+        }
+    }
+
     fn check_assign_operands(
         &mut self,
         targets: &[Place],
@@ -3150,7 +3252,7 @@ impl<'a> Collector<'a> {
                     let is_loan_shape = as_addr_of(&values[0])
                         .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }));
                     let vk = self.kind_of_expr(&values[0]);
-                    if !is_loan_shape && kinds_conflict(&tk, &vk) {
+                    if !is_loan_shape && kinds_conflict_value(&tk, &vk, &values[0], self) {
                         self.emit_e1002(
                             span,
                             format!(
@@ -3188,7 +3290,7 @@ impl<'a> Collector<'a> {
                         }
                         let tpk = self.kind_of_place(t);
                         let vk = self.kind_of_expr(v);
-                        if kinds_conflict(&tpk, &vk) {
+                        if kinds_conflict_value(&tpk, &vk, v, self) {
                             self.emit_e1002(
                                 v.span(),
                                 format!(
@@ -3242,7 +3344,7 @@ impl<'a> Collector<'a> {
                 let mismatch = tk != OpKind::Unknown
                     && vk != OpKind::Unknown
                     && tk.is_numeric() != vk.is_numeric();
-                if !t_ok || !v_ok || mismatch || kinds_conflict(&tk, &vk) {
+                if !t_ok || !v_ok || mismatch || kinds_conflict_value(&tk, &vk, val, self) {
                     self.emit_e1002(
                         span,
                         format!(
@@ -3266,7 +3368,7 @@ impl<'a> Collector<'a> {
                 };
                 if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float)
-                    || kinds_conflict(&tk, &vk)
+                    || kinds_conflict_value(&tk, &vk, val, self)
                 {
                     self.emit_e1002(
                         span,
@@ -3348,7 +3450,7 @@ impl<'a> Collector<'a> {
         if let OpKind::Map(key_kind, _) = bk {
             if **key_kind != OpKind::Unknown
                 && *ik != OpKind::Unknown
-                && kinds_conflict(key_kind, ik)
+                && kinds_conflict_value(key_kind, &ik, index, self)
             {
                 self.emit_e1002(
                     index.span(),
@@ -3774,7 +3876,7 @@ impl<'a> Collector<'a> {
                     && !(exp_val == OpKind::Float
                         && vk == OpKind::Int
                         && crate::const_overflow::const_int_value(v).is_some())
-                    && kinds_conflict(&exp_val, &vk)
+                    && kinds_conflict_value(&exp_val, &vk, v, self)
                 {
                     self.emit_e1002(
                         v.span(),
@@ -4386,7 +4488,7 @@ impl<'a> Collector<'a> {
 
                 match (&dk, &sk) {
                     (OpKind::Slice(dst_elem), OpKind::Slice(src_elem)) => {
-                        if kinds_conflict(dst_elem, src_elem) {
+                        if kinds_conflict_value(dst_elem, src_elem, src_arg, self) {
                             self.emit_e1002(
                                 span,
                                 format!(
