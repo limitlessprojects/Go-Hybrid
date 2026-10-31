@@ -265,3 +265,361 @@ fn main() {
         cs
     );
 }
+
+#[test]
+fn test_single_iteration_control_0_to_01_legacy_octal_is_accepted() {
+    let src = "\
+package main
+
+fn wm(x map[string]int, done chan int) {
+    done <- 1
+}
+
+fn main() {
+    done := make(chan int, 2)
+    keep := map[string]int{}
+    nxt := map[string]int{}
+    for i in 0..01 {
+        t := nxt
+        nxt = map[string]int{}
+        task wm(move t, done)
+        keep[\"race\"] = i
+        keep = nxt
+    }
+    <-done
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.is_empty(),
+        "expected 0 diagnostics for sound 0..01 legacy octal loop control, got: {:?}",
+        cs
+    );
+}
+
+#[test]
+fn test_single_iteration_control_0_to_0o1_modern_octal_is_accepted() {
+    let src = "\
+package main
+
+fn wm(x map[string]int, done chan int) {
+    done <- 1
+}
+
+fn main() {
+    done := make(chan int, 2)
+    keep := map[string]int{}
+    nxt := map[string]int{}
+    for i in 0..0o1 {
+        t := nxt
+        nxt = map[string]int{}
+        task wm(move t, done)
+        keep[\"race\"] = i
+        keep = nxt
+    }
+    <-done
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.is_empty(),
+        "expected 0 diagnostics for sound 0..0o1 modern octal loop control, got: {:?}",
+        cs
+    );
+}
+
+#[test]
+fn test_single_iteration_control_0x0_to_0x1_hex_is_accepted() {
+    let src = "\
+package main
+
+fn wm(x map[string]int, done chan int) {
+    done <- 1
+}
+
+fn main() {
+    done := make(chan int, 2)
+    keep := map[string]int{}
+    nxt := map[string]int{}
+    for i in 0x0..0x1 {
+        t := nxt
+        nxt = map[string]int{}
+        task wm(move t, done)
+        keep[\"race\"] = i
+        keep = nxt
+    }
+    <-done
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.is_empty(),
+        "expected 0 diagnostics for sound 0x0..0x1 hex loop control, got: {:?}",
+        cs
+    );
+}
+
+#[test]
+fn test_empty_range_control_1_to_0_is_accepted() {
+    let src = "\
+package main
+
+fn wm(x map[string]int, done chan int) {
+    done <- 1
+}
+
+fn main() {
+    done := make(chan int, 2)
+    keep := map[string]int{}
+    nxt := map[string]int{}
+    for i in 1..0 {
+        t := nxt
+        nxt = map[string]int{}
+        task wm(move t, done)
+        keep[\"race\"] = i
+        keep = nxt
+    }
+    <-done
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.is_empty(),
+        "expected 0 diagnostics for sound 1..0 empty range loop control, got: {:?}",
+        cs
+    );
+}
+
+#[test]
+fn test_multi_iteration_octal_and_binary_is_rejected_e3003() {
+    let src_octal = "\
+package main
+
+fn wm(x map[string]int, done chan int) {
+    done <- 1
+}
+
+fn main() {
+    done := make(chan int, 2)
+    keep := map[string]int{}
+    nxt := map[string]int{}
+    for i in 0..0o2 {
+        t := nxt
+        nxt = map[string]int{}
+        task wm(move t, done)
+        keep[\"race\"] = i
+        keep = nxt
+    }
+    <-done
+}
+";
+    let r = check(src_octal);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 for multi-iteration 0..0o2 octal loop, got: {:?}",
+        cs
+    );
+
+    let src_bin = "\
+package main
+
+fn wm(x map[string]int, done chan int) {
+    done <- 1
+}
+
+fn main() {
+    done := make(chan int, 2)
+    keep := map[string]int{}
+    nxt := map[string]int{}
+    for i in 0b0..0b10 {
+        t := nxt
+        nxt = map[string]int{}
+        task wm(move t, done)
+        keep[\"race\"] = i
+        keep = nxt
+    }
+    <-done
+}
+";
+    let r_bin = check(src_bin);
+    let cs_bin = error_codes(&r_bin);
+    assert!(
+        cs_bin.iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 for multi-iteration 0b0..0b10 binary loop, got: {:?}",
+        cs_bin
+    );
+}
+
+#[test]
+fn test_octal_multi_iteration_range_010_to_11_is_rejected_e3003() {
+    // In Go / Go-Hybrid legacy octal, 010 is octal 8, while 11 is decimal 11.
+    // Range 8..11 iterates 3 times (8, 9, 10). Loop-carried alias freeze must reject!
+    let src = "\
+package main
+
+fn wm(x map[string]int, done chan int) {
+    done <- 1
+}
+
+fn main() {
+    done := make(chan int, 2)
+    keep := map[string]int{}
+    nxt := map[string]int{}
+    for i in 010..11 {
+        t := nxt
+        nxt = map[string]int{}
+        task wm(move t, done)
+        keep[\"race\"] = i
+        keep = nxt
+    }
+    <-done
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 for multi-iteration 010..11 octal range, got: {:?}",
+        cs
+    );
+}
+
+#[test]
+fn test_mutated_induction_var_direct_assign_is_rejected_e3003() {
+    let src = "\
+package main
+
+fn wm(x map[string]int, done chan int) {
+    done <- 1
+}
+
+fn main() {
+    done := make(chan int, 2)
+    keep := map[string]int{}
+    nxt := map[string]int{}
+    for i in 0..1 {
+        t := nxt
+        nxt = map[string]int{}
+        task wm(move t, done)
+        keep[\"race\"] = i
+        keep = nxt
+        i = -1
+    }
+    <-done
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 when loop induction var is reassigned (i = -1), got: {:?}",
+        cs
+    );
+}
+
+#[test]
+fn test_mutated_induction_var_sub_assign_is_rejected_e3003() {
+    let src = "\
+package main
+
+fn wm(x map[string]int, done chan int) {
+    done <- 1
+}
+
+fn main() {
+    done := make(chan int, 2)
+    keep := map[string]int{}
+    nxt := map[string]int{}
+    for i in 0..1 {
+        t := nxt
+        nxt = map[string]int{}
+        task wm(move t, done)
+        keep[\"race\"] = i
+        keep = nxt
+        i -= 1
+    }
+    <-done
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 when loop induction var is decremented (i -= 1), got: {:?}",
+        cs
+    );
+}
+
+#[test]
+fn test_mutated_induction_var_dec_op_is_rejected_e3003() {
+    let src = "\
+package main
+
+fn wm(x map[string]int, done chan int) {
+    done <- 1
+}
+
+fn main() {
+    done := make(chan int, 2)
+    keep := map[string]int{}
+    nxt := map[string]int{}
+    for i in 0..1 {
+        t := nxt
+        nxt = map[string]int{}
+        task wm(move t, done)
+        keep[\"race\"] = i
+        keep = nxt
+        i--
+    }
+    <-done
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 when loop induction var is decremented (i--), got: {:?}",
+        cs
+    );
+}
+
+#[test]
+fn test_mutated_induction_var_closure_capture_is_rejected_e3003() {
+    let src = "\
+package main
+
+fn wm(x map[string]int, done chan int) {
+    done <- 1
+}
+
+fn main() {
+    done := make(chan int, 2)
+    keep := map[string]int{}
+    nxt := map[string]int{}
+    for i in 0..1 {
+        t := nxt
+        nxt = map[string]int{}
+        task wm(move t, done)
+        keep[\"race\"] = i
+        keep = nxt
+        cb := fn() {
+            i = -1
+        }
+        cb()
+    }
+    <-done
+}
+";
+    let r = check(src);
+    let cs = error_codes(&r);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E3003"),
+        "expected HYB-E3003 when loop induction var is mutated inside a closure, got: {:?}",
+        cs
+    );
+}
