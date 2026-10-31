@@ -4326,13 +4326,9 @@ impl<'a> Collector<'a> {
                 }
             }
             "append" => {
-                if args.is_empty() {
-                    self.emit_e2005(
-                        span,
-                        "`append` requires at least 1 argument (slice[, elems...]) (HYB-E2005)"
-                            .to_string(),
-                        "pass a slice as the first argument to `append(xs, elem)`",
-                    );
+                // #1673: arity is enforced in builtins.rs (`append` needs
+                // `slice, elements...`), matching the `copy` arm below.
+                if args.len() < 2 {
                     return;
                 }
                 let slice_arg = &args[0].value;

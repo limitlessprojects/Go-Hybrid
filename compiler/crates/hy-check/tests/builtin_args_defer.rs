@@ -89,6 +89,26 @@ fn make_slice_len_cap_variables_accepted() {
 }
 
 #[test]
+fn append_single_argument_rejected() {
+    // #1673: append needs (slice, elements...). `append(s)` passed `hyb check`
+    // and then failed `go build` with "not enough arguments in call to append".
+    let r = check("fn main() {\n    s := []int{1, 2}\n    x := append(s)\n    _ = x\n}\n");
+    assert_has(&r, "HYB-E2005");
+}
+
+#[test]
+fn append_no_arguments_rejected() {
+    let r = check("fn main() {\n    y := append()\n    _ = y\n}\n");
+    assert_has(&r, "HYB-E2005");
+}
+
+#[test]
+fn append_two_arguments_accepted() {
+    let r = check("fn main() {\n    s := []int{1, 2}\n    s = append(s, 3)\n    _ = s\n}\n");
+    assert_lacks(&r, "HYB-E2005");
+}
+
+#[test]
 fn make_chan_three_args_rejected() {
     // The 3-argument form is slice-only: the same arity on a channel stays E2005.
     let r = check("fn main() {\n    c := make(chan int, 1, 2)\n}\n");
