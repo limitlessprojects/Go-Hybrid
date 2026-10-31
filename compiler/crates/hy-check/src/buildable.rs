@@ -602,6 +602,50 @@ impl<'a> Collector<'a> {
         );
     }
 
+    /// #2358: a bare package root in a value position cannot build.
+    /// Go refuses `use of package X not in selector` (Row 13 BUILDABLE).
+    fn check_package_name_in_value_position(&mut self, name: &str, span: Span) {
+        // A binding in any enclosing lexical scope shadows the package root.
+        if self
+            .scopes
+            .iter()
+            .rev()
+            .any(|layer| layer.contains_key(name))
+        {
+            return;
+        }
+        // A file-level const shadows the package root.
+        if self.ck.consts.contains_key(name) {
+            return;
+        }
+        // A top-level fn shadows the package root.
+        let head = Checker::base_named_type_str(name);
+        if self.ck.fns.contains_key(name) || self.ck.fns.contains_key(head) {
+            return;
+        }
+        // Declared types shadow the package root (handled as a type).
+        if self.ck.structs.contains_key(name)
+            || self.ck.struct_type_params.contains_key(head)
+            || self.ck.enums.contains_key(name)
+            || self.ck.type_aliases.contains_key(name)
+        {
+            return;
+        }
+
+        let is_package = self.ck.packages.contains(name)
+            || crate::foreign::BUILTIN_PACKAGES.contains(&name)
+            || crate::foreign::is_curated_package_root(name);
+        if !is_package {
+            return;
+        }
+
+        self.emit_e1002(
+            span,
+            format!("use of package `{}` not in selector (HYB-E1002)", name),
+            "a package identifier can only appear as a qualifier before a selector (`pkg.Member`), not as a standalone value",
+        );
+    }
+
     fn write(&mut self, name: &str) {
         for layer in self.scopes.iter().rev() {
             if let Some(entry) = layer.get(name) {
@@ -1000,6 +1044,7 @@ impl<'a> Collector<'a> {
                     // expression`). Same class as #778, one position over.
                     if let PlaceKind::Ident(name) = &t.kind {
                         self.check_type_name_in_value_position(name, t.span);
+                        self.check_package_name_in_value_position(name, t.span);
                     }
                     self.place(t, *op);
                 }
@@ -1307,6 +1352,8 @@ impl<'a> Collector<'a> {
                 self.read(name);
                 // #778: a value position, so a type name here cannot build.
                 self.check_type_name_in_value_position(name, *span);
+                // #2358: a bare package root in value position cannot build.
+                self.check_package_name_in_value_position(name, *span);
             }
             Expr::Lit { .. } => {}
             Expr::Interp { parts, .. } => {
