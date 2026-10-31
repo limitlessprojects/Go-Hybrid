@@ -1,0 +1,2379 @@
+{
+  "total_programs": 139,
+  "total_lines": 7146,
+  "feature_totals": {
+    "fn_decl": 263,
+    "task_spawn": 129,
+    "move_arg": 143,
+    "managed_block": 3,
+    "range_loop": 43,
+    "iter_loop": 24,
+    "try_op": 4,
+    "string_interp": 132
+  },
+  "programs": [
+    {
+      "kind": "corpus",
+      "name": "01-shared-map-across-tasks.hy",
+      "lines": 85,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 2,
+        "move_arg": 2,
+        "managed_block": 0,
+        "range_loop": 2,
+        "iter_loop": 1,
+        "try_op": 0,
+        "string_interp": 2
+      },
+      "total_divergences": 12
+    },
+    {
+      "kind": "corpus",
+      "name": "02-shared-map-managed.hy",
+      "lines": 87,
+      "verdict": "ACCEPT-MANAGED",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 2,
+        "move_arg": 2,
+        "managed_block": 1,
+        "range_loop": 2,
+        "iter_loop": 1,
+        "try_op": 0,
+        "string_interp": 2
+      },
+      "total_divergences": 13
+    },
+    {
+      "kind": "corpus",
+      "name": "03-pool-shared-struct-unguarded.hy",
+      "lines": 93,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 2,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 2,
+        "iter_loop": 1,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 9
+    },
+    {
+      "kind": "corpus",
+      "name": "04-pool-shared-struct-mutex.hy",
+      "lines": 106,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 2,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 2,
+        "iter_loop": 1,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 9
+    },
+    {
+      "kind": "corpus",
+      "name": "05-sender-uses-after-move-send.hy",
+      "lines": 76,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 8,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 1,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 14
+    },
+    {
+      "kind": "corpus",
+      "name": "06-borrow-returned-from-fn.hy",
+      "lines": 71,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 3
+    },
+    {
+      "kind": "corpus",
+      "name": "07-a2-mutate-during-handle-loan.hy",
+      "lines": 51,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 2,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 3
+    },
+    {
+      "kind": "corpus",
+      "name": "08-a3-map-slot-invalidated.hy",
+      "lines": 70,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 0,
+        "move_arg": 2,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 5
+    },
+    {
+      "kind": "corpus",
+      "name": "09-a3-map-slot-valid.hy",
+      "lines": 67,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 3
+    },
+    {
+      "kind": "corpus",
+      "name": "10-a5-http-handler-capture.hy",
+      "lines": 72,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 1,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 2
+      },
+      "total_divergences": 4
+    },
+    {
+      "kind": "corpus",
+      "name": "11-a6-borrow-in-struct-field.hy",
+      "lines": 65,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 1,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 4
+    },
+    {
+      "kind": "corpus",
+      "name": "12-a7-borrow-by-default.hy",
+      "lines": 69,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 1,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 4
+    },
+    {
+      "kind": "corpus",
+      "name": "13-a7-own-transfer-at-return.hy",
+      "lines": 67,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 1,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 3
+    },
+    {
+      "kind": "corpus",
+      "name": "14-a7-use-after-consuming.hy",
+      "lines": 63,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 1,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 3
+    },
+    {
+      "kind": "corpus",
+      "name": "15-fanin-per-task-state.hy",
+      "lines": 83,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 2,
+        "move_arg": 6,
+        "managed_block": 0,
+        "range_loop": 2,
+        "iter_loop": 1,
+        "try_op": 0,
+        "string_interp": 2
+      },
+      "total_divergences": 16
+    },
+    {
+      "kind": "corpus",
+      "name": "16-move-send-clean.hy",
+      "lines": 84,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 4,
+        "task_spawn": 2,
+        "move_arg": 3,
+        "managed_block": 0,
+        "range_loop": 3,
+        "iter_loop": 2,
+        "try_op": 0,
+        "string_interp": 2
+      },
+      "total_divergences": 16
+    },
+    {
+      "kind": "corpus",
+      "name": "17-atomic-channel-immutable.hy",
+      "lines": 91,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 2,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 3,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 9
+    },
+    {
+      "kind": "corpus",
+      "name": "18-pool-shared-struct-managed.hy",
+      "lines": 99,
+      "verdict": "ACCEPT-MANAGED",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 2,
+        "move_arg": 0,
+        "managed_block": 1,
+        "range_loop": 2,
+        "iter_loop": 1,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 10
+    },
+    {
+      "kind": "corpus",
+      "name": "19-freeze-read-through-moved-binding.hy",
+      "lines": 85,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 3,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 1,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 9
+    },
+    {
+      "kind": "corpus",
+      "name": "20-freeze-alias-write.hy",
+      "lines": 79,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 3,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 1,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 9
+    },
+    {
+      "kind": "corpus",
+      "name": "21-let-shared-map-reject.hy",
+      "lines": 46,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 1,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 2,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 5
+    },
+    {
+      "kind": "corpus",
+      "name": "22-a1c-mapslot-loan-at-spawn.hy",
+      "lines": 98,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 1,
+        "string_interp": 1
+      },
+      "total_divergences": 6
+    },
+    {
+      "kind": "corpus",
+      "name": "23-a1c-mapslot-copy-at-spawn.hy",
+      "lines": 84,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 5
+    },
+    {
+      "kind": "corpus",
+      "name": "24-shadow-scope-map-reject.hy",
+      "lines": 51,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 2,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 6
+    },
+    {
+      "kind": "corpus",
+      "name": "25-o40-spawn-callee-proof.hy",
+      "lines": 52,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 8,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 10
+    },
+    {
+      "kind": "corpus",
+      "name": "26-call-return-alias-freeze.hy",
+      "lines": 69,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 2,
+        "move_arg": 3,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 9
+    },
+    {
+      "kind": "corpus",
+      "name": "27-const-write-reject.hy",
+      "lines": 55,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 2,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 6
+    },
+    {
+      "kind": "corpus",
+      "name": "28-composite-nil-reject.hy",
+      "lines": 44,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 0,
+        "managed_block": 1,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 5
+    },
+    {
+      "kind": "corpus",
+      "name": "29-struct-param-share-move-reject.hy",
+      "lines": 67,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 2,
+        "move_arg": 5,
+        "managed_block": 0,
+        "range_loop": 2,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 12
+    },
+    {
+      "kind": "corpus",
+      "name": "30-array-param-share-move-reject.hy",
+      "lines": 57,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 2,
+        "move_arg": 4,
+        "managed_block": 0,
+        "range_loop": 2,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 11
+    },
+    {
+      "kind": "corpus",
+      "name": "31-generic-call-return-alias-freeze.hy",
+      "lines": 84,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 2,
+        "move_arg": 3,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 9
+    },
+    {
+      "kind": "corpus",
+      "name": "32-select-send-shared-map.hy",
+      "lines": 17,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 1
+    },
+    {
+      "kind": "corpus",
+      "name": "33-select-send-safe-values.hy",
+      "lines": 19,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 1,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "34-select-send-unproven-name.hy",
+      "lines": 16,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 1
+    },
+    {
+      "kind": "corpus",
+      "name": "35-default-fallback.hy",
+      "lines": 17,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 1
+    },
+    {
+      "kind": "corpus",
+      "name": "36-closure-capture-move.hy",
+      "lines": 48,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 1,
+        "move_arg": 6,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 10
+    },
+    {
+      "kind": "corpus",
+      "name": "37-a3-interproc-window.hy",
+      "lines": 53,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "38-const-closure-alias-write-reject.hy",
+      "lines": 70,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 1,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 3
+    },
+    {
+      "kind": "corpus",
+      "name": "39-closure-local-alias-move-reject.hy",
+      "lines": 41,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 1,
+        "move_arg": 3,
+        "managed_block": 0,
+        "range_loop": 1,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 7
+    },
+    {
+      "kind": "corpus",
+      "name": "40-wrapper-alias-freeze.hy",
+      "lines": 79,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 2,
+        "move_arg": 5,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 11
+    },
+    {
+      "kind": "corpus",
+      "name": "41-wrapper-alias-own-move-control.hy",
+      "lines": 55,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 2,
+        "move_arg": 2,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 2
+      },
+      "total_divergences": 9
+    },
+    {
+      "kind": "corpus",
+      "name": "42-a3-assign-map-slot-invalidated.hy",
+      "lines": 50,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 3
+    },
+    {
+      "kind": "corpus",
+      "name": "43-copy-ref-element-alias-freeze.hy",
+      "lines": 57,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 3,
+        "move_arg": 3,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 8
+    },
+    {
+      "kind": "corpus",
+      "name": "44-copy-primitive-element-control.hy",
+      "lines": 49,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 2,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 6
+    },
+    {
+      "kind": "corpus",
+      "name": "45-composite-literal-embeds-shared-map.hy",
+      "lines": 97,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 4,
+        "move_arg": 1,
+        "managed_block": 0,
+        "range_loop": 2,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 9
+    },
+    {
+      "kind": "corpus",
+      "name": "46-unused-define-reject.hy",
+      "lines": 12,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 1
+    },
+    {
+      "kind": "corpus",
+      "name": "47-unused-import-reject.hy",
+      "lines": 12,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 1
+    },
+    {
+      "kind": "corpus",
+      "name": "48-repeated-define-name-reject.hy",
+      "lines": 10,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 1
+    },
+    {
+      "kind": "corpus",
+      "name": "49-blank-define-reject.hy",
+      "lines": 11,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 1
+    },
+    {
+      "kind": "corpus",
+      "name": "50-move-closure-container-reject.hy",
+      "lines": 44,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 1,
+        "move_arg": 4,
+        "managed_block": 0,
+        "range_loop": 2,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 10
+    },
+    {
+      "kind": "corpus",
+      "name": "51-make-slice-cap.hy",
+      "lines": 35,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "52-shadow-predeclared-struct-reject.hy",
+      "lines": 38,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 4
+    },
+    {
+      "kind": "corpus",
+      "name": "53-array-slice-backing-freeze.hy",
+      "lines": 35,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 2,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 6
+    },
+    {
+      "kind": "corpus",
+      "name": "54-field-store-alias-at-spawn.hy",
+      "lines": 49,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 4,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 8
+    },
+    {
+      "kind": "corpus",
+      "name": "55-field-store-fresh-at-spawn.hy",
+      "lines": 46,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 5,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 9
+    },
+    {
+      "kind": "corpus",
+      "name": "56-defer-live-reference-at-spawn.hy",
+      "lines": 49,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 3,
+        "move_arg": 3,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 9
+    },
+    {
+      "kind": "corpus",
+      "name": "57-defer-live-reference-at-send.hy",
+      "lines": 39,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 0,
+        "move_arg": 4,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 6
+    },
+    {
+      "kind": "corpus",
+      "name": "58-defer-live-reference-via-alias.hy",
+      "lines": 43,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 3,
+        "move_arg": 3,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 9
+    },
+    {
+      "kind": "corpus",
+      "name": "59-rebind-forgets-defer-capture.hy",
+      "lines": 50,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 2,
+        "move_arg": 3,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 8
+    },
+    {
+      "kind": "corpus",
+      "name": "60-rebind-without-defer-control.hy",
+      "lines": 32,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "61-string-escape-fail-closed.hy",
+      "lines": 34,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 3
+      },
+      "total_divergences": 4
+    },
+    {
+      "kind": "corpus",
+      "name": "62-shadowing-binder-last-use.hy",
+      "lines": 86,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 4,
+        "move_arg": 8,
+        "managed_block": 0,
+        "range_loop": 3,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 17
+    },
+    {
+      "kind": "corpus",
+      "name": "63-shadowing-binders-at-spawn.hy",
+      "lines": 71,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 3,
+        "move_arg": 5,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 10
+    },
+    {
+      "kind": "corpus",
+      "name": "64-send-composite-literal-embeds-shared-map.hy",
+      "lines": 71,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 1,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "65-addr-of-call-alias-at-spawn.hy",
+      "lines": 50,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 2,
+        "move_arg": 4,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 9
+    },
+    {
+      "kind": "corpus",
+      "name": "66-addr-of-call-read-control.hy",
+      "lines": 47,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 2,
+        "move_arg": 3,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 9
+    },
+    {
+      "kind": "corpus",
+      "name": "67-adversarial-race-spawn.hy",
+      "lines": 42,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 4,
+        "move_arg": 1,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 2
+      },
+      "total_divergences": 8
+    },
+    {
+      "kind": "corpus",
+      "name": "78-shadowed-unused-import-reject.hy",
+      "lines": 12,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 1
+    },
+    {
+      "kind": "corpus",
+      "name": "any-arithmetic-reject.hy",
+      "lines": 34,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "any-call-reject.hy",
+      "lines": 34,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "any-erasure-primitive-control.hy",
+      "lines": 36,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 4
+    },
+    {
+      "kind": "corpus",
+      "name": "any-erasure-shared-map-at-spawn.hy",
+      "lines": 44,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 4
+    },
+    {
+      "kind": "corpus",
+      "name": "any-field-access-reject.hy",
+      "lines": 37,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "any-index-reject.hy",
+      "lines": 34,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "any-operations-controls-accept.hy",
+      "lines": 92,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 4,
+        "task_spawn": 2,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 7
+      },
+      "total_divergences": 13
+    },
+    {
+      "kind": "corpus",
+      "name": "append-element-type-reject.hy",
+      "lines": 34,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "append-spare-capacity-backing-alias.hy",
+      "lines": 46,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 3,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 7
+    },
+    {
+      "kind": "corpus",
+      "name": "array-const-index-assign-reject.hy",
+      "lines": 43,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 1
+    },
+    {
+      "kind": "corpus",
+      "name": "array-const-index-past-length-reject.hy",
+      "lines": 44,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 1
+    },
+    {
+      "kind": "corpus",
+      "name": "atomic-pointer-fail-closed-reject.hy",
+      "lines": 76,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 3,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 1,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 6
+    },
+    {
+      "kind": "corpus",
+      "name": "call-and-return-controls-accept.hy",
+      "lines": 106,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 9,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 7
+      },
+      "total_divergences": 16
+    },
+    {
+      "kind": "corpus",
+      "name": "call-arity-mismatch-reject.hy",
+      "lines": 40,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 3
+    },
+    {
+      "kind": "corpus",
+      "name": "chan-map-aliased-at-send.hy",
+      "lines": 42,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 1,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 4
+    },
+    {
+      "kind": "corpus",
+      "name": "chan-of-closure-at-send.hy",
+      "lines": 41,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 1,
+        "string_interp": 0
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "chan-slice-aliased-at-send.hy",
+      "lines": 47,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 1,
+        "move_arg": 1,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 5
+    },
+    {
+      "kind": "corpus",
+      "name": "chan-slice-fresh-control.hy",
+      "lines": 38,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 1,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 4
+    },
+    {
+      "kind": "corpus",
+      "name": "const-zero-divisor-const-forms-reject.hy",
+      "lines": 42,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 1
+    },
+    {
+      "kind": "corpus",
+      "name": "control-composite-literal-in-range.hy",
+      "lines": 28,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "control-const-expr-within-range.hy",
+      "lines": 23,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "control-int8-boundaries.hy",
+      "lines": 24,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "control-large-array-length.hy",
+      "lines": 23,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "control-negate-variable-wraps.hy",
+      "lines": 24,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "control-slice-index-past-length.hy",
+      "lines": 50,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "control-uint8-max.hy",
+      "lines": 23,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "conversion-arity-reject.hy",
+      "lines": 35,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "deep-composite-move-fresh-control.hy",
+      "lines": 43,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 3,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 8
+    },
+    {
+      "kind": "corpus",
+      "name": "deep-composite-move-shared-at-spawn.hy",
+      "lines": 57,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 3,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 8
+    },
+    {
+      "kind": "corpus",
+      "name": "defer-arity-reject.hy",
+      "lines": 36,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 3
+    },
+    {
+      "kind": "corpus",
+      "name": "field-assign-wrong-type-reject.hy",
+      "lines": 39,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "local-composite-chan-recv-accept.hy",
+      "lines": 34,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 1
+    },
+    {
+      "kind": "corpus",
+      "name": "local-composite-chan-recv-reject-e2008.hy",
+      "lines": 24,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 1
+    },
+    {
+      "kind": "corpus",
+      "name": "map-elem-fresh-map-control.hy",
+      "lines": 48,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 3,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 7
+    },
+    {
+      "kind": "corpus",
+      "name": "map-elem-map-alias-at-spawn.hy",
+      "lines": 59,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 6,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 10
+    },
+    {
+      "kind": "corpus",
+      "name": "map-slot-borrow-callarg-reject.hy",
+      "lines": 68,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 4
+    },
+    {
+      "kind": "corpus",
+      "name": "map-slot-borrow-paths-accept.hy",
+      "lines": 71,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 2
+      },
+      "total_divergences": 5
+    },
+    {
+      "kind": "corpus",
+      "name": "member-defer-and-append-controls-accept.hy",
+      "lines": 115,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 4,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 6
+      },
+      "total_divergences": 10
+    },
+    {
+      "kind": "corpus",
+      "name": "multivalue-and-void-controls-accept.hy",
+      "lines": 89,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 6,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 7
+      },
+      "total_divergences": 13
+    },
+    {
+      "kind": "corpus",
+      "name": "multivalue-arg-arity-reject.hy",
+      "lines": 47,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 4
+    },
+    {
+      "kind": "corpus",
+      "name": "multivalue-bind-source-count-reject.hy",
+      "lines": 52,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 1
+    },
+    {
+      "kind": "corpus",
+      "name": "multivalue-in-single-value-reject.hy",
+      "lines": 46,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 3
+    },
+    {
+      "kind": "corpus",
+      "name": "n5-zero-map-first-write.hy",
+      "lines": 77,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "parallel-bind-count-and-decl-type-reject.hy",
+      "lines": 54,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 1
+    },
+    {
+      "kind": "corpus",
+      "name": "ptr-to-map-at-spawn.hy",
+      "lines": 47,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 1,
+        "string_interp": 0
+      },
+      "total_divergences": 5
+    },
+    {
+      "kind": "corpus",
+      "name": "range-bound-type-forms-reject.hy",
+      "lines": 44,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 3,
+        "iter_loop": 2,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 6
+    },
+    {
+      "kind": "corpus",
+      "name": "return-type-mismatch-reject.hy",
+      "lines": 47,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 3
+    },
+    {
+      "kind": "corpus",
+      "name": "return-value-count-reject.hy",
+      "lines": 42,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 3
+    },
+    {
+      "kind": "corpus",
+      "name": "select-two-recv-define-arms-accept.hy",
+      "lines": 34,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 1
+    },
+    {
+      "kind": "corpus",
+      "name": "slice-elem-map-alias-at-spawn.hy",
+      "lines": 43,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 3,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 7
+    },
+    {
+      "kind": "corpus",
+      "name": "struct-and-conversion-controls-accept.hy",
+      "lines": 83,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 7
+      },
+      "total_divergences": 9
+    },
+    {
+      "kind": "corpus",
+      "name": "struct-field-slice-elem-alias.hy",
+      "lines": 47,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 2,
+        "move_arg": 4,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 8
+    },
+    {
+      "kind": "corpus",
+      "name": "struct-literal-unknown-field-reject.hy",
+      "lines": 39,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "type-name-in-value-position-controls-accept.hy",
+      "lines": 65,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 4
+      },
+      "total_divergences": 5
+    },
+    {
+      "kind": "corpus",
+      "name": "type-name-in-value-position-reject.hy",
+      "lines": 64,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 4
+      },
+      "total_divergences": 7
+    },
+    {
+      "kind": "corpus",
+      "name": "typed-const-assign-overflow-reject.hy",
+      "lines": 49,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 1
+    },
+    {
+      "kind": "corpus",
+      "name": "typed-const-expression-controls-accept.hy",
+      "lines": 63,
+      "verdict": "ACCEPT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 6
+      },
+      "total_divergences": 7
+    },
+    {
+      "kind": "corpus",
+      "name": "typed-const-expression-overflow-reject.hy",
+      "lines": 44,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "undefined-member-call-reject.hy",
+      "lines": 44,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "corpus",
+      "name": "untyped-nil-decl-reject.hy",
+      "lines": 43,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 1
+    },
+    {
+      "kind": "corpus",
+      "name": "void-as-value-reject.hy",
+      "lines": 45,
+      "verdict": "REJECT",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 3
+    },
+    {
+      "kind": "example",
+      "name": "01-hello",
+      "lines": 16,
+      "verdict": "EXAMPLE",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 2
+      },
+      "total_divergences": 3
+    },
+    {
+      "kind": "example",
+      "name": "02-cli-cat",
+      "lines": 17,
+      "verdict": "EXAMPLE",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 1
+    },
+    {
+      "kind": "example",
+      "name": "03-worker-pool",
+      "lines": 45,
+      "verdict": "EXAMPLE",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 1,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 1,
+        "iter_loop": 1,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 5
+    },
+    {
+      "kind": "example",
+      "name": "04-pipeline-backpressure",
+      "lines": 38,
+      "verdict": "EXAMPLE",
+      "counts": {
+        "fn_decl": 3,
+        "task_spawn": 2,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 1,
+        "try_op": 0,
+        "string_interp": 1
+      },
+      "total_divergences": 7
+    },
+    {
+      "kind": "example",
+      "name": "05-json-transform",
+      "lines": 32,
+      "verdict": "EXAMPLE",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 2,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 4
+    },
+    {
+      "kind": "example",
+      "name": "06-http-server",
+      "lines": 33,
+      "verdict": "EXAMPLE",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 3
+      },
+      "total_divergences": 5
+    },
+    {
+      "kind": "example",
+      "name": "07-lru-generics",
+      "lines": 58,
+      "verdict": "EXAMPLE",
+      "counts": {
+        "fn_decl": 2,
+        "task_spawn": 0,
+        "move_arg": 1,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 0,
+        "string_interp": 2
+      },
+      "total_divergences": 5
+    },
+    {
+      "kind": "example",
+      "name": "08-graph-ownership",
+      "lines": 58,
+      "verdict": "EXAMPLE",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 1,
+        "try_op": 0,
+        "string_interp": 0
+      },
+      "total_divergences": 2
+    },
+    {
+      "kind": "example",
+      "name": "09-go-imports-hybrid",
+      "lines": 24,
+      "verdict": "EXAMPLE",
+      "counts": {
+        "fn_decl": 0,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 0,
+        "try_op": 1,
+        "string_interp": 0
+      },
+      "total_divergences": 1
+    },
+    {
+      "kind": "example",
+      "name": "10-rust-crate-import",
+      "lines": 27,
+      "verdict": "EXAMPLE",
+      "counts": {
+        "fn_decl": 1,
+        "task_spawn": 0,
+        "move_arg": 0,
+        "managed_block": 0,
+        "range_loop": 0,
+        "iter_loop": 1,
+        "try_op": 0,
+        "string_interp": 2
+      },
+      "total_divergences": 4
+    }
+  ]
+}
