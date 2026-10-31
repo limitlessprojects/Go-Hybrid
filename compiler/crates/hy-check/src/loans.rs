@@ -1548,7 +1548,10 @@ impl<'a> Checker<'a> {
                 reads_self: bool,
                 shadowed_origin: Option<String>,
                 prior_alias: Option<String>,
+                prior_children: Vec<String>,
                 prior_shares: Vec<String>,
+                prior_shadow_links: HashSet<(String, usize)>,
+                outer_depth: Option<usize>,
             }
             let resolved: Vec<MultiDefInfo> = l
                 .names
@@ -1587,6 +1590,14 @@ impl<'a> Checker<'a> {
                     } else {
                         None
                     };
+                    let prior_children: Vec<String> = if reads_self {
+                        st.aliases
+                            .iter()
+                            .filter_map(|(k, v)| if v == name && k != name { Some(k.clone()) } else { None })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     let prior_shares: Vec<String> = if reads_self {
                         st.may_share
                             .get(name)
@@ -1595,6 +1606,20 @@ impl<'a> Checker<'a> {
                     } else {
                         Vec::new()
                     };
+                    let prior_shadow_links = if reads_self {
+                        st.shadow_links.get(name).cloned().unwrap_or_default()
+                    } else {
+                        HashSet::new()
+                    };
+                    let outer_depth = if st
+                        .scopes
+                        .last()
+                        .is_some_and(|top| !top.contains_key(name))
+                    {
+                        st.lookup_depth(name)
+                    } else {
+                        None
+                    };
                     MultiDefInfo {
                         name: name.clone(),
                         shape,
@@ -1602,7 +1627,10 @@ impl<'a> Checker<'a> {
                         reads_self,
                         shadowed_origin,
                         prior_alias,
+                        prior_children,
                         prior_shares,
+                        prior_shadow_links,
+                        outer_depth,
                     }
                 })
                 .collect();
@@ -1617,8 +1645,25 @@ impl<'a> Checker<'a> {
                     self.extend_call_loans_to_view(st, &l.values[0], &info.name, idx);
                 }
                 if info.reads_self {
+                    if !info.prior_shadow_links.is_empty() {
+                        st.shadow_links
+                            .entry(info.name.clone())
+                            .or_default()
+                            .extend(info.prior_shadow_links);
+                    }
+                    if let Some(depth) = info.outer_depth {
+                        st.shadow_links
+                            .entry(info.name.clone())
+                            .or_default()
+                            .insert((info.name.clone(), depth));
+                    }
                     if let Some(pa) = info.prior_alias {
                         st.aliases.insert(info.name.clone(), pa);
+                    }
+                    for child in info.prior_children {
+                        if child != info.name {
+                            st.aliases.insert(child, info.name.clone());
+                        }
                     }
                     for peer in info.prior_shares {
                         st.share_edge(&info.name, &peer);
@@ -5482,6 +5527,34 @@ impl<'a> Checker<'a> {
             }
         }
 
+        let reads_self = self.value_reads_storage_of(st, subject, name)
+            || roots.iter().any(|r| {
+                r == name
+                    || crate::freeze::resolve_alias(st, r) == name
+                    || st.share_group(r).contains(name)
+            });
+        let prior_children: Vec<String> = if reads_self {
+            st.aliases
+                .iter()
+                .filter_map(|(k, v)| if v == name && k != name { Some(k.clone()) } else { None })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let prior_shadow_links = if reads_self {
+            st.shadow_links.get(name).cloned().unwrap_or_default()
+        } else {
+            HashSet::new()
+        };
+        let outer_depth = if st
+            .scopes
+            .last()
+            .is_some_and(|top| !top.contains_key(name))
+        {
+            st.lookup_depth(name)
+        } else {
+            None
+        };
         let self_shadows_const = pre_const_root.as_deref() == Some(name);
         self.define_binding(
             st,
@@ -5492,6 +5565,25 @@ impl<'a> Checker<'a> {
             managed || pre_tainted,
             false,
         );
+        if reads_self {
+            if !prior_shadow_links.is_empty() {
+                st.shadow_links
+                    .entry(name.to_string())
+                    .or_default()
+                    .extend(prior_shadow_links);
+            }
+            if let Some(depth) = outer_depth {
+                st.shadow_links
+                    .entry(name.to_string())
+                    .or_default()
+                    .insert((name.to_string(), depth));
+            }
+            for child in prior_children {
+                if child != name {
+                    st.aliases.insert(child, name.to_string());
+                }
+            }
+        }
 
         self.record_may_share(st, name, subject);
         self.record_alias(st, name, subject);
