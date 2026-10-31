@@ -254,7 +254,14 @@ fn stmt_reads(s: &Stmt, target: &str) -> bool {
                         MatchPattern::Path { segments, .. } if segments == &["none"]
                     ) || matches!(&a.pattern, MatchPattern::Wildcard)
                 });
-            if is_option_match {
+            let simple_none_wild = arms.iter().all(|a| {
+                matches!(&a.pattern, MatchPattern::Path { segments, binding: Some(_) } if segments == &["some"])
+                    || a.guard.is_none()
+            }) && arms.iter().filter(|a| matches!(&a.pattern, MatchPattern::Path { segments, .. } if segments == &["none"])).count() <= 1
+                && arms.iter().filter(|a| matches!(&a.pattern, MatchPattern::Wildcard)).count() <= 1
+                && arms.iter().position(|a| matches!(&a.pattern, MatchPattern::Wildcard))
+                    .is_none_or(|wi| wi + 1 == arms.len());
+            if is_option_match && simple_none_wild {
                 let mut some_arms: Vec<(&str, &hy_syntax::MatchArm)> = Vec::new();
                 let mut none_arm: Option<&hy_syntax::MatchArm> = None;
                 let mut wildcard_arm: Option<&hy_syntax::MatchArm> = None;
