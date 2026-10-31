@@ -3053,3 +3053,15 @@ fn main() {}
     assert!(go6.contains("func read_url() int {"));
     assert!(go6.contains("func read_u_r_l() int {"));
 }
+
+#[test]
+fn zero_try_parens_select_header_try_addrof_parens_and_map_key_elided_struct_lower() {
+    let go = emit(
+        "import \"rust/serde_json\"\n\nstruct point {\n    x int\n}\n\nfn get_ch() (chan int, error) {\n    return make(chan int, 1), nil\n}\n\nfn get_val() (int, error) {\n    return 7, nil\n}\n\nfn main() {\n    doc := serde_json.parse(`{\"a\":1}`)?\n    (doc.set(\"a\", true)?)\n    (doc.set(\"b\", true))?\n    pt := point{x: 1}\n    p := &(pt)\n    m := map[point]int{{x: 2}: 9}\n    select {\n        get_ch()? <- get_val()?: {\n            fmt.println(p.x, m)\n        }\n        default: {\n        }\n    }\n}\n",
+    );
+    assert!(go.contains("doc.Set(\"a\", true)"), "expected zero-result try under parens, got:\n{}", go);
+    assert!(go.contains("doc.Set(\"b\", true)"), "expected zero-result try on parenthesized call, got:\n{}", go);
+    assert!(go.contains("p := &pt"), "expected p := &pt without parens around pt, got:\n{}", go);
+    assert!(go.contains("map[point]int{point{x: 2}: 9}"), "expected elided map key struct to lower, got:\n{}", go);
+    assert!(go.contains("get_ch()") && go.contains("get_val()"), "expected select header tries to hoist, got:\n{}", go);
+}

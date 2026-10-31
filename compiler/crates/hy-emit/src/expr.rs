@@ -146,7 +146,12 @@ impl Emitter {
             }
 
             Expr::Unary { op, operand, .. } => {
-                let o = self.emit_expr(operand, ATOM)?;
+                let target = if matches!(op, UnOp::Addr) {
+                    Self::unwrap_parens(operand)
+                } else {
+                    operand
+                };
+                let o = self.emit_expr(target, ATOM)?;
                 if matches!(op, UnOp::Neg) && o.starts_with('-') {
                     Ok(format!("-({})", o))
                 } else {
@@ -155,7 +160,7 @@ impl Emitter {
             }
 
             Expr::AddrOf { operand, .. } => {
-                let o = self.emit_expr(operand, ATOM)?;
+                let o = self.emit_expr(Self::unwrap_parens(operand), ATOM)?;
                 Ok(format!("&{}", o))
             }
 
@@ -266,7 +271,7 @@ impl Emitter {
                 let head = format!("map[{}]{}", self.type_text(key), self.type_text(value));
                 let mut parts = Vec::new();
                 for (k, v) in entries {
-                    let kt = self.emit_expr(k, 0)?;
+                    let kt = self.emit_expr_exp(k, 0, Some(key))?;
                     // Elided struct values inherit the map's VALUE type
                     // (Batch I, corpus 09: `map[string]service{"k": {…}}`).
                     let vt = self.emit_expr_exp(v, 0, Some(value))?;

@@ -22,8 +22,8 @@ impl Emitter {
                 // the hoist emits the call + propagation — no value temp, so
                 // there is nothing left to emit afterwards.
                 let zero_try = matches!(
-                    expr,
-                    Expr::Try { operand, .. } if self.call_results(operand) == Some((0, true))
+                    Self::peel_parens(expr),
+                    Expr::Try { operand, .. } if self.call_results(Self::peel_parens(operand)) == Some((0, true))
                 );
                 // E3 expression form: hoist nested `?` first (Batch G).
                 self.hoist_tries_expr(expr)?;
@@ -177,6 +177,22 @@ impl Emitter {
             }
             Stmt::Match { subject, arms, .. } => self.emit_match(subject, arms),
             Stmt::Select { arms, .. } => {
+                for arm in arms {
+                    match &arm.kind {
+                        SelectArmKind::Recv { chan, .. } => {
+                            self.hoist_tries_expr(chan)?;
+                        }
+                        SelectArmKind::Send { chan, value, .. } => {
+                            if Self::expr_has_hoistable_try(value) {
+                                self.hoist_order_before_try(chan)?;
+                            } else {
+                                self.hoist_tries_expr(chan)?;
+                            }
+                            self.hoist_tries_expr(value)?;
+                        }
+                        SelectArmKind::Default => {}
+                    }
+                }
                 // Go select, 1:1 — Hybrid's arm spelling
                 // (`v, ok := <-sq:` / `<-deadline:` / `ch <- v:`) lowers to
                 // Go's case clauses.
@@ -809,6 +825,7 @@ impl Emitter {
     /// binding methods, user-fn declarations, and the default rust-call
     /// convention (1, true). None = unknown → callers keep today's shape.
     fn call_results(&self, e: &Expr) -> Option<(usize, bool)> {
+        let e = Self::peel_parens(e);
         let callee = match e {
             Expr::Try { operand, .. } => match operand.as_ref() {
                 Expr::Call { callee, .. } => callee.as_ref(),
