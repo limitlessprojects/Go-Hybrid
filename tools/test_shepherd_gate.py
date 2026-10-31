@@ -117,5 +117,122 @@ class ProbeParser(unittest.TestCase):
         self.assertFalse(any("removed line" in ln for ln in added))
 
 
+
+
+class StateLabelReconciliation(unittest.TestCase):
+    """#986: bot:conflict / bot:stale-base / bot:land-candidate must be
+    reconciled so a PR that resolves its conflict loses stale bucket labels."""
+
+    def test_label_plan_removes_stale_conflict_when_now_land_candidate(self):
+        add, remove = sh.label_plan(
+            "LAND-CANDIDATE",
+            ["bot:conflict", "bot:stale-base", "bot:verified"],
+        )
+        self.assertEqual(add, ["bot:land-candidate"])
+        self.assertEqual(remove, ["bot:conflict", "bot:stale-base"])
+
+    def test_label_plan_noop_when_already_matching(self):
+        add, remove = sh.label_plan(
+            "LAND-CANDIDATE",
+            ["bot:land-candidate", "bot:ready-to-land"],
+        )
+        self.assertEqual(add, [])
+        self.assertEqual(remove, [])
+
+    def test_label_plan_without_existing_labels_posts_want(self):
+        add, remove = sh.label_plan("CONFLICTS", None)
+        self.assertEqual(add, ["bot:conflict"])
+        self.assertEqual(remove, [])
+
+
+class TriageCollectQuotaTests(unittest.TestCase):
+    """#1103: collect() skips compare when base.sha == main_sha and caches
+    merge_base -> main_paths across PRs sharing the same merge_base."""
+
+    def test_collect_skips_up_to_date_compare_and_caches_merge_base(self):
+        import types
+        import triage_bot as tb
+
+        calls = []
+
+        class FakeGh:
+            repo = "limitlessprojects/Go-Hybrid"
+
+            def paginate(self, path):
+                calls.append(("PAGINATE", path))
+                if path.startswith("/repos/limitlessprojects/Go-Hybrid/pulls?"):
+                    return [
+                        {
+                            "number": 101,
+                            "title": "PR up to date with main",
+                            "user": {"login": "alice"},
+                            "created_at": "2026-10-25T00:00:00Z",
+                            "updated_at": "2026-10-25T01:00:00Z",
+                            "draft": False,
+                            "head": {"sha": "aaaa1111aaaa1111"},
+                            "base": {"sha": "mainsha1234567890"},
+                            "labels": [{"name": "bot:conflict"}],
+                        },
+                        {
+                            "number": 102,
+                            "title": "PR behind main #1",
+                            "user": {"login": "bob"},
+                            "created_at": "2026-10-25T00:00:00Z",
+                            "updated_at": "2026-10-25T01:00:00Z",
+                            "draft": False,
+                            "head": {"sha": "bbbb2222bbbb2222"},
+                            "base": {"sha": "oldbase000000000"},
+                            "labels": [],
+                        },
+                        {
+                            "number": 103,
+                            "title": "PR behind main #2 sharing merge_base",
+                            "user": {"login": "carol"},
+                            "created_at": "2026-10-25T00:00:00Z",
+                            "updated_at": "2026-10-25T01:00:00Z",
+                            "draft": False,
+                            "head": {"sha": "cccc3333cccc3333"},
+                            "base": {"sha": "oldbase000000000"},
+                            "labels": [],
+                        },
+                    ]
+                if "/files?" in path:
+                    return [{"filename": "tools/shepherd.py", "additions": 5, "deletions": 1}]
+                return []
+
+            def get(self, path):
+                calls.append(("GET", path))
+                if path.endswith("/commits/main"):
+                    return {"sha": "mainsha1234567890"}
+                if "/pulls/" in path:
+                    num = int(path.rsplit("/", 1)[-1])
+                    return {
+                        "number": num,
+                        "mergeable": True,
+                        "mergeable_state": "clean",
+                        "labels": [{"name": "bot:conflict"}] if num == 101 else [],
+                    }
+                if "compare/mainsha1234567890..." in path:
+                    return {
+                        "behind_by": 12,
+                        "merge_base_commit": {"sha": "sharedmb999999"},
+                    }
+                if "compare/sharedmb999999...mainsha1234567890" in path:
+                    return {"files": [{"filename": "tools/shepherd.py"}]}
+                return {}
+
+        args = types.SimpleNamespace(jobs=1)
+        items, main_sha = tb.collect({}, FakeGh(), args)
+        self.assertEqual(main_sha, "mainsha1234567890")
+        by_num = {it["number"]: it for it in items}
+        self.assertEqual(by_num[101]["behind_by"], 0)
+        self.assertEqual(by_num[101]["existing_labels"], ["bot:conflict"])
+        # PR #101 must NOT trigger compare/mainsha...aaaa1111
+        self.assertFalse(any("aaaa1111" in p for _, p in calls))
+        # Shared merge_base compare must be fetched only ONCE across PR #102 and #103
+        mb_compares = [p for _, p in calls if "compare/sharedmb999999...mainsha1234567890" in p]
+        self.assertEqual(len(mb_compares), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

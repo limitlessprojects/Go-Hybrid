@@ -184,6 +184,19 @@ def collect(cfg, gh, args):
     # the actionable rebase window; a PR 600 commits behind is a stale-base
     # close-candidate regardless of overlap.
     overlap_window = 100
+    import threading
+    mb_cache = {}
+    mb_lock = threading.Lock()
+
+    def get_main_paths(merge_base):
+        with mb_lock:
+            cached = mb_cache.get(merge_base)
+        if cached is not None:
+            return cached
+        cmp2 = gh.get("/repos/%s/compare/%s...%s?per_page=250" % (gh.repo, merge_base, main_sha))
+        paths = {f["filename"] for f in (cmp2 or {}).get("files", [])}
+        with mb_lock:
+            return mb_cache.setdefault(merge_base, paths)
 
     def one(pr):
         n = pr["number"]
@@ -195,17 +208,23 @@ def collect(cfg, gh, args):
         dels = sum(f.get("deletions", 0) or 0 for f in files)
 
         behind_by, overlap_paths, merge_base = 0, set(), None
-        cmp1 = gh.get("/repos/%s/compare/%s...%s" % (gh.repo, main_sha, pr["head"]["sha"]))
-        if cmp1:
-            behind_by = cmp1.get("behind_by", 0) or 0
-            merge_base = (cmp1.get("merge_base_commit") or {}).get("sha")
-            if 0 < behind_by <= overlap_window and merge_base:
-                cmp2 = gh.get("/repos/%s/compare/%s...%s?per_page=250" % (gh.repo, merge_base, main_sha))
-                main_paths = {f["filename"] for f in (cmp2 or {}).get("files", [])}
-                overlap_paths = pset & main_paths
+        base_sha = (pr.get("base") or {}).get("sha") or (full.get("base") or {}).get("sha")
+        if base_sha == main_sha:
+            behind_by = 0
+            merge_base = main_sha
+        else:
+            cmp1 = gh.get("/repos/%s/compare/%s...%s" % (gh.repo, main_sha, pr["head"]["sha"]))
+            if cmp1:
+                behind_by = cmp1.get("behind_by", 0) or 0
+                merge_base = (cmp1.get("merge_base_commit") or {}).get("sha")
+                if 0 < behind_by <= overlap_window and merge_base:
+                    main_paths = get_main_paths(merge_base)
+                    overlap_paths = pset & main_paths
+        raw_labels = full.get("labels") if isinstance(full.get("labels"), list) else pr.get("labels", [])
         return {
             "number": n,
             "title": pr["title"][:90],
+            "existing_labels": [l["name"] for l in raw_labels if isinstance(l, dict) and "name" in l],
             "author": (pr.get("user") or {}).get("login", "unknown"),
             "created_at": pr["created_at"],
             "updated_at": pr["updated_at"],

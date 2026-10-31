@@ -144,28 +144,62 @@ def cmd_labels(args):
     tb.log("bot palette ensured (%d calls)" % gh.calls)
 
 
+BUCKET_LABEL_MAPPING = {
+    "LAND-CANDIDATE": "bot:land-candidate",
+    "CONFLICTS": "bot:conflict",
+    "STALE-BASE": "bot:stale-base",
+}
+
+
+def label_plan(bucket, current_labels, mapping=None):
+    """Pure state-label reconciliation plan for #986.
+    Returns (add, remove) where `add` contains the bucket's managed label if
+    missing from `current_labels` (or when `current_labels` is None/unknown),
+    and `remove` contains any other managed bucket labels present."""
+    mapping = mapping or BUCKET_LABEL_MAPPING
+    want = mapping.get(bucket)
+    if not want:
+        return [], []
+    managed = set(mapping.values())
+    if current_labels is None:
+        return [want], []
+    cur = set(current_labels)
+    add = [] if want in cur else [want]
+    remove = sorted((cur & managed) - {want})
+    return add, remove
+
+
 def cmd_sync_labels(args):
     """Structural bot:* labels, straight from classify()'s buckets (plan §2:
-    state lives in labels; the board is a view). Idempotent POST per PR."""
+    state lives in labels; the board is a view). Reconciles stale bucket labels."""
     cfg = load_cfg()
     gh = tb.Gh(cfg["repo"], tb.load_token(args))
     ensure_palette(gh, cfg)
     items = json.loads(Path(args.from_scan).read_text())["items"]
-    mapping = {"LAND-CANDIDATE": "bot:land-candidate",
-               "CONFLICTS": "bot:conflict",
-               "STALE-BASE": "bot:stale-base"}
+    mapping = dict(BUCKET_LABEL_MAPPING)
     n = 0
     for it in items:
-        want = mapping.get(it["bucket"])
-        if not want or it.get("wildcard_hold") or it.get("draft_parked"):
+        if it.get("wildcard_hold") or it.get("draft_parked"):
+            continue
+        cur_labels = it.get("existing_labels")
+        add, remove = label_plan(it.get("bucket"), cur_labels, mapping)
+        if not add and not remove:
             continue
         n += 1
         if args.dry:
-            tb.log("  #%d -> %s" % (it["number"], want))
+            tb.log("  #%d -> +%s -%s" % (it["number"], add, remove))
             continue
         try:
-            gh.post("/repos/%s/issues/%d/labels" % (gh.repo, it["number"]),
-                    {"labels": [want]})
+            for stale in remove:
+                try:
+                    gh.req("DELETE", "/repos/%s/issues/%d/labels/%s"
+                           % (gh.repo, it["number"], stale))
+                except RuntimeError as de:
+                    if "404" not in str(de):
+                        raise
+            if add:
+                gh.post("/repos/%s/issues/%d/labels" % (gh.repo, it["number"]),
+                        {"labels": add})
         except (RuntimeError, tb.RateGuard) as e:
             tb.log("  FAIL #%d: %s" % (it["number"], e))
             if isinstance(e, tb.RateGuard):
