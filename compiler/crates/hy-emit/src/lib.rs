@@ -199,11 +199,79 @@ pub fn emit_go_package(
 /// call prefix — the emitter only emits `<root>.` for KNOWN crates, so the
 /// scan is exact, never heuristic.
 pub fn used_binding_roots(go_src: &str) -> Vec<&'static str> {
+    // Issue #1616: a plain-Go string (`"jsonbinding.Parse"`) is user data,
+    // not a call. Mask literals and comments before the substring scan so
+    // only code positions can select the Rust/cgo bridge.
+    let code = mask_go_noncode(go_src);
     shapes::RUST_CRATES
         .iter()
-        .filter(|c| go_src.contains(&format!("{}.", c.binding_root)))
+        .filter(|c| code.contains(&format!("{}.", c.binding_root)))
         .map(|c| c.binding_root)
         .collect()
+}
+
+/// Replace Go string/rune literals and comments with blanks, preserving
+/// newlines. Not a parser: just enough to keep data out of identifier scans.
+fn mask_go_noncode(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut chars = src.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' | '\'' => {
+                out.push(' ');
+                while let Some(n) = chars.next() {
+                    if n == '\\' {
+                        chars.next();
+                        out.push(' ');
+                    } else if n == c {
+                        break;
+                    } else if n == '\n' {
+                        // Unterminated (invalid Go) — keep scanning sanely.
+                        out.push('\n');
+                        break;
+                    } else {
+                        out.push(' ');
+                    }
+                }
+                out.push(' ');
+            }
+            '`' => {
+                out.push(' ');
+                while let Some(n) = chars.next() {
+                    if n == '`' {
+                        break;
+                    }
+                    out.push(if n == '\n' { '\n' } else { ' ' });
+                }
+                out.push(' ');
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                out.push(' ');
+                while let Some(n) = chars.next() {
+                    if n == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                out.push(' ');
+                let mut prev = '\0';
+                for n in chars.by_ref() {
+                    if prev == '*' && n == '/' {
+                        break;
+                    }
+                    if n == '\n' {
+                        out.push('\n');
+                    }
+                    prev = n;
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -298,7 +366,11 @@ fn go_initialism(seg: &str) -> Option<&'static str> {
         "rfc1123z" => "RFC1123Z",
         "rfc3339" => "RFC3339",
         "rhs" => "RHS",
+        "rlock" => "RLock",
         "rpc" => "RPC",
+        "runlock" => "RUnlock",
+        "rw" => "RW",
+        "rwmutex" => "RWMutex",
         "sha1" => "SHA1",
         "sha256" => "SHA256",
         "sha384" => "SHA384",
@@ -349,6 +421,20 @@ pub(crate) fn to_go_name(name: &str) -> String {
 /// The base NAMED type of a TypeExpr, if any (`*atomic.int64` →
 /// "atomic.int64", `env` → "env", `map[string]int` → None). Batch I's
 /// receiver tables key on this.
+/// (Go value-result count, ends in `error`) for a declared result list: a
+/// trailing `error` is the error slot, not a value (#726).
+pub(crate) fn result_shape(results: &[FnResult]) -> (usize, bool) {
+    let err = matches!(
+        results.last(),
+        Some(FnResult {
+            ty: TypeExpr::Named { name, .. },
+            ..
+        }) if name == "error"
+    );
+    let n = if err { results.len() - 1 } else { results.len() };
+    (n, err)
+}
+
 pub(crate) fn base_ty_name(t: &TypeExpr) -> Option<String> {
     match t {
         TypeExpr::Named { name, .. } => Some(name.clone()),
@@ -526,6 +612,9 @@ pub struct Emitter {
     /// normalizes like any rust-call — and the pointer-param auto-address
     /// at call sites (09: `scale_then_register(e, …)` with `e *env`).
     fn_shapes: BTreeMap<String, FnShape>,
+    /// Result shapes of closures bound by name in the current fn
+    /// (`f := fn() error { … }`), so `f()?` knows its Go result count.
+    closure_shapes: BTreeMap<String, (usize, bool)>,
     /// User-struct field types (Batch I): struct → (field, declared hy type
     /// name — dotted for shape-known fields, "" otherwise). Receiver typing
     /// for `stats.mu.lock()` (18).
@@ -583,6 +672,7 @@ impl Emitter {
             export_pub: false,
             cur_fn_error_returns: None,
             fn_shapes: BTreeMap::new(),
+            closure_shapes: BTreeMap::new(),
             struct_fields: BTreeMap::new(),
             var_struct: BTreeMap::new(),
             var_ty: BTreeMap::new(),
@@ -737,7 +827,12 @@ impl Emitter {
                         _ => None,
                     })
                     .collect::<Vec<_>>();
-                (f.name.clone(), (f.results.len(), err, kind, ptr_params))
+                // E3: a trailing error result is the error slot, not a value.
+                // `fn step() error` has ONE Go result; counting it as a value
+                // made the ? hoister emit `hyT0, hyErr1 := step()` against a
+                // `func ... error` (assignment mismatch, accepted-then-fails-go-build).
+                let value_count = if err { f.results.len() - 1 } else { f.results.len() };
+                (f.name.clone(), (value_count, err, kind, ptr_params))
             })
             .collect();
 
@@ -1202,6 +1297,7 @@ impl Emitter {
     fn emit_fn(&mut self, f: &FnDecl) -> Result<(), EmitError> {
         self.bindings.clear();
         self.var_struct.clear();
+        self.closure_shapes.clear();
         self.var_ty.clear();
         self.pointer_vars.clear();
         self.local_vars.clear();
@@ -1664,7 +1760,7 @@ impl Emitter {
                             || self.block_has_try(&a.body)
                     })
             }
-            Stmt::Select { arms, .. } => arms.iter().any(|a| self.block_has_try(&a.body)),
+            Stmt::Select { arms, .. } => arms.iter().any(|a| match &a.kind { SelectArmKind::Recv { chan, .. } => self.expr_has_try(chan), SelectArmKind::Send { chan, value, .. } => self.expr_has_try(chan) || self.expr_has_try(value), SelectArmKind::Default => false } || self.block_has_try(&a.body)),
             Stmt::Break { .. } | Stmt::Continue { .. } => false,
         }
     }

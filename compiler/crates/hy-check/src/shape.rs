@@ -86,6 +86,15 @@ impl<'a> Checker<'a> {
         if let Some(target) = self.type_aliases.get(base) {
             return self.shape_of_type_depth(target, depth + 1);
         }
+        // #884: the T9 prelude's `set[T]` lowers to a struct wrapping a Go
+        // map (`type set[t comparable] struct { m map[t]struct{} }`), so a
+        // shallow copy shares that map exactly like any other map-carrying
+        // struct. Without this arm `set[int]` resolved to `Unknown` and
+        // `shape_may_share` said no, which let O5.2/O5.4/T22 be bypassed by
+        // copying first and moving the original.
+        if base == "set" {
+            return TypeShape::Struct(Some(base.to_string()));
+        }
         match name {
             "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
             | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "usize"
@@ -129,6 +138,11 @@ impl<'a> Checker<'a> {
         }
         match shape {
             TypeShape::Array(elem) => self.shape_may_share_at(elem, depth + 1),
+            // #884: `set[T]` is a prelude struct over a Go map, but it has no
+            // entry in `self.structs` (the prelude is emitted, not declared),
+            // so the field walk below returned false for it. A shallow copy of
+            // a set shares the underlying map; say so.
+            TypeShape::Struct(Some(name)) if name == "set" => true,
             TypeShape::Struct(Some(name)) => self
                 .structs
                 .get(name)
@@ -1247,9 +1261,7 @@ pub(crate) fn receiver_type_name(shape: &TypeShape) -> Option<String> {
             Some(t.clone())
         }
         TypeShape::Atomic => Some("atomic.int".to_string()),
-        TypeShape::Pointer(inner) if matches!(**inner, TypeShape::Atomic) => {
-            Some("atomic.int".to_string())
-        }
+        TypeShape::Pointer(inner) => receiver_type_name(inner),
         _ => None,
     }
 }

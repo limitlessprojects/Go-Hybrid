@@ -889,6 +889,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 lbody,
                 &pre_moved,
                 &mut reported_backedge,
+                &|idx| flat.in_managed(idx),
             );
         }
     }
@@ -938,6 +939,38 @@ impl<'a> Checker<'a> {
                         .to_string(),
                 ]),
             );
+        }
+        // #1917: the reason and tickets are interpolated into a single-line
+        // `// managed` comment by the emitter. A newline or carriage return
+        // would escape the comment and inject Go code into the output.
+        if reason.contains('\n') || reason.contains('\r') {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E0003",
+                    self.path.clone(),
+                    span,
+                    "managed reason must be a single line — a newline would escape the `// managed` comment and inject Go code (HYB-E0003)",
+                )
+                .with_notes(vec![
+                    "write the reason on one line; separate points with `;` or `,`".to_string(),
+                ]),
+            );
+        }
+        for ticket in tickets {
+            if ticket.trim().is_empty() || ticket.contains('\n') || ticket.contains('\r') {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E0003",
+                        self.path.clone(),
+                        span,
+                        "managed ticket must be a non-empty single-line string (HYB-E0003)",
+                    )
+                    .with_notes(vec![
+                        "a blank or multi-line ticket would inject blank lines or code into the `// managed` comment".to_string(),
+                    ]),
+                );
+                break;
+            }
         }
         if category.is_empty() {
             self.diags.push(

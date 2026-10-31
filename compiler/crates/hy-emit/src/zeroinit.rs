@@ -97,7 +97,14 @@ impl Emitter {
     /// or as an empty type-as-value literal (`new(map[string]int)`).
     pub(crate) fn n5_new(&mut self, args: &[CallArg]) -> Option<String> {
         let [arg] = args else { return None };
-        let ty = match &arg.value {
+        // Issue #1615: hy-check peels parentheses on the `new` type operand
+        // (`new((bag))`), so the emitter must peel them too or the map-field
+        // allocation silently falls back to raw Go `new`.
+        let mut value = &arg.value;
+        while let Expr::Paren { inner, .. } = value {
+            value = inner.as_ref();
+        }
+        let ty = match value {
             Expr::Ident { name, span } => TypeExpr::Named {
                 name: name.clone(),
                 span: *span,
