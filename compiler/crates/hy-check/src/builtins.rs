@@ -643,29 +643,10 @@ impl<'a> Checker<'a> {
     ///      binding that is not declared inside that literal (a capture).
     /// A site inside `managed(...)` is the declared escape hatch and is allowed.
     fn check_escape_site(&mut self, callee: &Expr, args: &[hy_syntax::CallArg], span: Span) {
-        if self.in_managed() {
+        if self.in_managed_at(span.start) || !self.is_foreign_escape_callee(callee, span.start, 0) {
             return;
         }
-        let is_foreign = match unwrap_parens(callee) {
-            Expr::Field { base, .. } => match unwrap_parens(base) {
-                Expr::Ident { name, .. } => self.packages.contains(name.as_str()),
-                _ => false,
-            },
-            _ => false,
-        };
-        if !is_foreign {
-            return;
-        }
-        let mut captured: Option<String> = None;
-        for a in args {
-            if let Expr::FnLit { params, body, .. } = unwrap_parens(&a.value) {
-                if let Some(name) = closure_writes_captured(params, body) {
-                    captured = Some(name);
-                    break;
-                }
-            }
-        }
-        let Some(name) = captured else {
+        let Some(name) = args.iter().find_map(|a| self.arg_captured_write(&a.value, span.start, 0)) else {
             return;
         };
         self.diags.push(
@@ -688,179 +669,354 @@ impl<'a> Checker<'a> {
 
     /// Is this call lexically inside a `managed(...)` block? `managed` is the
     /// declared escape hatch, so an escape site there is permitted.
-    fn in_managed(&self) -> bool {
+    fn in_managed_at(&self, pos: hy_diag::Pos) -> bool {
         self.managed_depth > 0
+            || self.file.decls.iter().any(|d| match d {
+                hy_syntax::Decl::Fn(f) if pos_in_span(f.span, pos) => {
+                    f.body.as_ref().is_some_and(|b| b.stmts.iter().any(|s| stmt_has_managed(s, pos)))
+                }
+                _ => false,
+            })
     }
-}
 
-/// W-016 M3 — does this closure body write a binding it captures?
-///
-/// Returns the first captured name written (a place root that is not bound
-/// inside the closure). Bindings declared by the closure's own parameters or
-/// by any local/`:=`/loop/match/select binder in its body are NOT captures.
-fn closure_writes_captured(
-    params: &[hy_syntax::Param],
-    body: &hy_syntax::Block,
-) -> Option<String> {
-    let mut locals: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
-    collect_block_binders(body, &mut locals);
-    let mut hit: Option<String> = None;
-    walk_block_writes(body, &locals, &mut hit);
-    hit
-}
+    fn is_foreign_escape_callee(&self, callee: &Expr, pos: hy_diag::Pos, depth: usize) -> bool {
+        let Expr::Field { base, .. } = unwrap_parens(callee) else { return false };
+        depth <= 8 && match unwrap_parens(base) {
+            Expr::Ident { name, .. } => match self.resolve_local_at(name, pos) {
+                LocalLookup::ForeignTyped => true,
+                LocalLookup::Bound(Some(v)) => self.is_foreign_origin(v, v.span().start, depth + 1),
+                LocalLookup::Bound(None) => false,
+                LocalLookup::Unbound => {
+                    !self.fns.contains_key(name.as_str())
+                        && !self.consts.contains_key(name.as_str())
+                        && self.packages.contains(name.as_str())
+                }
+            },
+            other => self.is_foreign_origin(other, pos, depth + 1),
+        }
+    }
 
-/// Collect every name the closure body binds, so a write to one of them is not
-/// treated as a capture. Nested closure bodies are not descended into (their
-/// own binders belong to them; a write there is caught when *that* literal is
-/// itself an argument at a foreign call).
-fn collect_block_binders(body: &hy_syntax::Block, out: &mut HashSet<String>) {
-    for stmt in &body.stmts {
+    fn is_foreign_origin(&self, expr: &Expr, pos: hy_diag::Pos, depth: usize) -> bool {
+        depth <= 8 && match unwrap_parens(expr) {
+            Expr::Call { callee, .. } => self.is_foreign_escape_callee(callee, pos, depth + 1),
+            Expr::Try { operand, .. } | Expr::AddrOf { operand, .. } | Expr::Unary { operand, .. } => {
+                self.is_foreign_origin(operand, pos, depth + 1)
+            }
+            Expr::StructLit { ty, .. } => ty.as_ref().is_some_and(|t| self.ty_is_foreign(t)),
+            Expr::Ident { name, .. } => match self.resolve_local_at(name, pos) {
+                LocalLookup::ForeignTyped => true,
+                LocalLookup::Bound(Some(v)) => self.is_foreign_origin(v, v.span().start, depth + 1),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn ty_is_foreign(&self, ty: &hy_syntax::TypeExpr) -> bool {
+        match ty {
+            hy_syntax::TypeExpr::Named { name, .. } => name.split_once('.').is_some_and(|(p, _)| self.packages.contains(p)),
+            hy_syntax::TypeExpr::Pointer { to, .. } => self.ty_is_foreign(to),
+            _ => false,
+        }
+    }
+
+    fn resolve_local_at(&self, target: &str, pos: hy_diag::Pos) -> LocalLookup<'a> {
+        for decl in &self.file.decls {
+            let hy_syntax::Decl::Fn(f) = decl else { continue };
+            if !pos_in_span(f.span, pos) { continue; }
+            let mut cur = LocalLookup::Unbound;
+            let sig = f.receiver.iter().map(|r| (r.name.as_str(), &r.ty))
+                .chain(f.params.iter().map(|p| (p.name.as_str(), &p.ty)))
+                .chain(f.results.iter().filter_map(|r| Some((r.name.as_deref()?, &r.ty))));
+            for (n, ty) in sig {
+                if n == target {
+                    cur = if self.ty_is_foreign(ty) { LocalLookup::ForeignTyped } else { LocalLookup::Bound(None) };
+                }
+            }
+            if let Some(body) = &f.body { self.scan_stmts_local(&body.stmts, target, pos, &mut cur); }
+            return cur;
+        }
+        LocalLookup::Unbound
+    }
+
+    fn scan_stmts_local(&self, stmts: &'a [Stmt], target: &str, pos: hy_diag::Pos, cur: &mut LocalLookup<'a>) {
+        stmts.iter().take_while(|s| !pos_before(pos, s.span().start)).for_each(|s| self.scan_one_local(s, target, pos, cur));
+    }
+
+    fn scan_one_local(&self, stmt: &'a Stmt, target: &str, pos: hy_diag::Pos, cur: &mut LocalLookup<'a>) {
+        match stmt {
+            Stmt::Local(l) if pos_before(l.span.start, pos) => {
+                let foreign = l.ty.as_ref().is_some_and(|t| self.ty_is_foreign(t));
+                for (i, n) in l.names.iter().enumerate() {
+                    if n == target {
+                        *cur = if foreign { LocalLookup::ForeignTyped } else { LocalLookup::Bound((l.values.len() == l.names.len()).then(|| &l.values[i])) };
+                    }
+                }
+            }
+            Stmt::Assign { targets, op: hy_syntax::AssignOp::Assign, values, span } if pos_before(span.start, pos) && targets.len() == values.len() => {
+                for (t, v) in targets.iter().zip(values.iter()) {
+                    if matches!(&t.kind, PlaceKind::Ident(n) if n == target) { *cur = LocalLookup::Bound(Some(v)); }
+                }
+            }
+            Stmt::If { init, then, otherwise, span, .. } if pos_in_span(*span, pos) => {
+                if let Some(i) = init { self.scan_one_local(i, target, pos, cur); }
+                if pos_in_span(then.span, pos) {
+                    self.scan_stmts_local(&then.stmts, target, pos, cur);
+                } else if let Some(o) = otherwise.as_deref().filter(|o| pos_in_span(o.span(), pos)) {
+                    self.scan_one_local(o, target, pos, cur);
+                }
+            }
+            Stmt::For { kind, body, .. } if pos_in_span(body.span, pos) => {
+                if matches!(kind, ForKind::Range { var, .. } if var == target)
+                    || matches!(kind, ForKind::Iterate { vars, .. } if vars.iter().any(|v| v == target))
+                {
+                    *cur = LocalLookup::Bound(None);
+                }
+                self.scan_stmts_local(&body.stmts, target, pos, cur);
+            }
+            Stmt::Match { arms, span, .. } if pos_in_span(*span, pos) => {
+                for a in arms.iter().filter(|a| pos_in_span(a.body.span, pos)) {
+                    if matches!(&a.pattern, hy_syntax::MatchPattern::Path { binding: Some(b), .. } if b == target) { *cur = LocalLookup::Bound(None); }
+                    self.scan_stmts_local(&a.body.stmts, target, pos, cur);
+                }
+            }
+            Stmt::Select { arms, span, .. } if pos_in_span(*span, pos) => {
+                for a in arms.iter().filter(|a| pos_in_span(a.body.span, pos)) {
+                    if matches!(&a.kind, SelectArmKind::Recv { names, .. } if names.iter().any(|n| n == target)) { *cur = LocalLookup::Bound(None); }
+                    self.scan_stmts_local(&a.body.stmts, target, pos, cur);
+                }
+            }
+            Stmt::Managed { body, span, .. } | Stmt::Block { block: body, span } if pos_in_span(*span, pos) => {
+                self.scan_stmts_local(&body.stmts, target, pos, cur);
+            }
+            _ => {}
+        }
+    }
+
+    /// W-016 M3 — does this closure argument (literal or bound local) write a
+    /// binding it captures?
+    fn arg_captured_write(&self, arg: &Expr, pos: hy_diag::Pos, depth: usize) -> Option<String> {
+        if depth > 8 { return None; }
+        match unwrap_parens(arg) {
+            Expr::FnLit { params, results, body, .. } => {
+                let (mut scopes, mut hit) = (vec![fn_sig_names(params, results)], None);
+                self.walk_block_writes(body, &mut scopes, &mut hit);
+                hit
+            }
+            Expr::Ident { name, .. } => match self.resolve_local_at(name, pos) {
+                LocalLookup::Bound(Some(v)) => self.arg_captured_write(v, v.span().start, depth + 1),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Writes include `Stmt::Assign` (the compound `x++` form included) and
+    /// unshadowed mutating builtins (`delete`, `clear`, `copy` dst). Any target
+    /// root not currently in `scopes` at the point of use is a capture write.
+    fn walk_block_writes(&self, body: &hy_syntax::Block, scopes: &mut Vec<HashSet<String>>, hit: &mut Option<String>) {
+        if hit.is_none() {
+            scopes.push(HashSet::new());
+            for stmt in &body.stmts {
+                self.walk_stmt_writes(stmt, scopes, hit);
+                if hit.is_some() { break; }
+            }
+            scopes.pop();
+        }
+    }
+
+    fn walk_stmt_writes(&self, stmt: &Stmt, scopes: &mut Vec<HashSet<String>>, hit: &mut Option<String>) {
+        if hit.is_some() { return; }
         match stmt {
             Stmt::Local(l) => {
-                for n in &l.names {
-                    out.insert(n.clone());
+                l.values.iter().for_each(|v| self.walk_expr_writes(v, scopes, hit));
+                if let Some(top) = scopes.last_mut() {
+                    top.extend(l.names.iter().filter(|n| !n.is_empty() && n.as_str() != "_").cloned());
                 }
             }
-            Stmt::If {
-                init,
-                then,
-                otherwise,
-                ..
-            } => {
-                if let Some(i) = init {
-                    collect_stmt_binders(i, out);
+            Stmt::Assign { targets, values, .. } => {
+                for t in targets {
+                    if let Some(root) = place_root(t).filter(|r| *r != "_" && !in_scopes(scopes, r)) {
+                        *hit = Some(root.to_string());
+                        return;
+                    }
+                    self.walk_place_writes(t, scopes, hit);
                 }
-                collect_block_binders(then, out);
+                values.iter().for_each(|v| self.walk_expr_writes(v, scopes, hit));
+            }
+            Stmt::Expr { expr, .. } | Stmt::Defer { call: expr, .. } => self.walk_expr_writes(expr, scopes, hit),
+            Stmt::Send { chan, value, .. } => {
+                self.walk_expr_writes(chan, scopes, hit);
+                self.walk_expr_writes(value, scopes, hit);
+            }
+            Stmt::Return { values, .. } => values.iter().for_each(|v| self.walk_expr_writes(v, scopes, hit)),
+            Stmt::Task { callee, args, .. } => {
+                self.walk_expr_writes(callee, scopes, hit);
+                args.iter().for_each(|a| self.walk_expr_writes(&a.value, scopes, hit));
+            }
+            Stmt::If { init, cond, then, otherwise, .. } => {
+                scopes.push(HashSet::new());
+                if let Some(i) = init { self.walk_stmt_writes(i, scopes, hit); }
+                self.walk_expr_writes(cond, scopes, hit);
+                self.walk_block_writes(then, scopes, hit);
                 if let Some(o) = otherwise {
-                    collect_stmt_binders(o, out);
+                    scopes.push(HashSet::new());
+                    self.walk_stmt_writes(o, scopes, hit);
+                    scopes.pop();
                 }
+                scopes.pop();
             }
             Stmt::For { kind, body, .. } => {
+                let mut ls = HashSet::new();
                 match kind {
-                    ForKind::Range { var, .. } => {
-                        out.insert(var.clone());
+                    ForKind::Range { var, lo, hi, .. } => {
+                        self.walk_expr_writes(lo, scopes, hit);
+                        self.walk_expr_writes(hi, scopes, hit);
+                        let _ = (var != "_").then(|| ls.insert(var.clone()));
                     }
-                    ForKind::Iterate { vars, .. } => {
-                        for v in vars {
-                            out.insert(v.clone());
-                        }
+                    ForKind::Iterate { vars, expr } => {
+                        self.walk_expr_writes(expr, scopes, hit);
+                        ls.extend(vars.iter().filter(|v| v.as_str() != "_").cloned());
                     }
-                    ForKind::While { .. } | ForKind::Infinite => {}
+                    ForKind::While { cond } => self.walk_expr_writes(cond, scopes, hit),
+                    ForKind::Infinite => {}
                 }
-                collect_block_binders(body, out);
+                scopes.push(ls);
+                self.walk_block_writes(body, scopes, hit);
+                scopes.pop();
             }
-            Stmt::Match { arms, .. } => {
+            Stmt::Match { subject, arms, .. } => {
+                self.walk_expr_writes(subject, scopes, hit);
                 for arm in arms {
-                    if let hy_syntax::MatchPattern::Path {
-                        binding: Some(b), ..
-                    } = &arm.pattern
-                    {
-                        out.insert(b.clone());
+                    let mut s = HashSet::new();
+                    if let hy_syntax::MatchPattern::Path { binding: Some(b), .. } = &arm.pattern {
+                        let _ = (b != "_").then(|| s.insert(b.clone()));
                     }
-                    collect_block_binders(&arm.body, out);
+                    scopes.push(s);
+                    arm.guard.iter().for_each(|g| self.walk_expr_writes(g, scopes, hit));
+                    self.walk_block_writes(&arm.body, scopes, hit);
+                    scopes.pop();
                 }
             }
             Stmt::Select { arms, .. } => {
                 for arm in arms {
-                    if let SelectArmKind::Recv { names, .. } = &arm.kind {
-                        for n in names {
-                            out.insert(n.clone());
+                    let mut s = HashSet::new();
+                    match &arm.kind {
+                        SelectArmKind::Send { chan, value, .. } => {
+                            self.walk_expr_writes(chan, scopes, hit);
+                            self.walk_expr_writes(value, scopes, hit);
+                        }
+                        SelectArmKind::Recv { names, chan, .. } => {
+                            self.walk_expr_writes(chan, scopes, hit);
+                            s.extend(names.iter().filter(|n| n.as_str() != "_").cloned());
+                        }
+                        SelectArmKind::Default => {}
+                    }
+                    scopes.push(s);
+                    self.walk_block_writes(&arm.body, scopes, hit);
+                    scopes.pop();
+                }
+            }
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => self.walk_block_writes(body, scopes, hit),
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        }
+    }
+
+    fn walk_place_writes(&self, place: &Place, scopes: &mut Vec<HashSet<String>>, hit: &mut Option<String>) {
+        match &place.kind {
+            PlaceKind::Index { base, index } => {
+                self.walk_place_writes(base, scopes, hit);
+                self.walk_expr_writes(index, scopes, hit);
+            }
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => self.walk_place_writes(base, scopes, hit),
+            PlaceKind::Ident(_) => {}
+        }
+    }
+
+    fn walk_expr_writes(&self, expr: &Expr, scopes: &mut Vec<HashSet<String>>, hit: &mut Option<String>) {
+        if hit.is_some() { return; }
+        match unwrap_parens(expr) {
+            Expr::Call { callee, args, .. } => {
+                match unwrap_parens(callee) {
+                    Expr::Ident { name, .. }
+                        if matches!(name.as_str(), "delete" | "clear" | "copy")
+                            && !in_scopes(scopes, name)
+                            && !self.fns.contains_key(name.as_str()) =>
+                    {
+                        if let Some(r) = args.first().and_then(|a| mutated_arg_root(&a.value)).filter(|r| !in_scopes(scopes, r)) {
+                            *hit = Some(r.to_string());
+                            return;
                         }
                     }
-                    collect_block_binders(&arm.body, out);
-                }
-            }
-            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
-                collect_block_binders(body, out);
-            }
-            Stmt::Assign { .. }
-            | Stmt::Expr { .. }
-            | Stmt::Send { .. }
-            | Stmt::Return { .. }
-            | Stmt::Task { .. }
-            | Stmt::Defer { .. }
-            | Stmt::Break { .. }
-            | Stmt::Continue { .. } => {}
-        }
-    }
-}
-
-fn collect_stmt_binders(stmt: &Stmt, out: &mut HashSet<String>) {
-    if let Stmt::Local(l) = stmt {
-        for n in &l.names {
-            out.insert(n.clone());
-        }
-    }
-}
-
-/// Writes are `Stmt::Assign` (the compound `x++` form included). Any place root
-/// that is not a closure-local is a capture write.
-fn walk_block_writes(body: &hy_syntax::Block, locals: &HashSet<String>, hit: &mut Option<String>) {
-    if hit.is_some() {
-        return;
-    }
-    for stmt in &body.stmts {
-        walk_stmt_writes(stmt, locals, hit);
-        if hit.is_some() {
-            return;
-        }
-    }
-}
-
-fn walk_stmt_writes(stmt: &Stmt, locals: &HashSet<String>, hit: &mut Option<String>) {
-    match stmt {
-        Stmt::Assign { targets, .. } => {
-            for t in targets {
-                if let Some(root) = place_root(t) {
-                    if !locals.contains(root) {
-                        *hit = Some(root.to_string());
-                        return;
+                    Expr::FnLit { params, results, body, .. } => {
+                        scopes.push(fn_sig_names(params, results));
+                        self.walk_block_writes(body, scopes, hit);
+                        scopes.pop();
                     }
+                    other => self.walk_expr_writes(other, scopes, hit),
                 }
+                args.iter().for_each(|a| self.walk_expr_writes(&a.value, scopes, hit));
             }
-        }
-        Stmt::If {
-            init,
-            then,
-            otherwise,
-            ..
-        } => {
-            if let Some(i) = init {
-                walk_stmt_writes(i, locals, hit);
+            Expr::Binary { lhs, rhs, .. } | Expr::Index { base: lhs, index: rhs, .. } => {
+                self.walk_expr_writes(lhs, scopes, hit);
+                self.walk_expr_writes(rhs, scopes, hit);
             }
-            walk_block_writes(then, locals, hit);
-            if let Some(o) = otherwise {
-                walk_stmt_writes(o, locals, hit);
+            Expr::Unary { operand, .. } | Expr::AddrOf { operand, .. } | Expr::Move { operand, .. }
+            | Expr::Try { operand, .. } | Expr::Field { base: operand, .. } | Expr::Receive { chan: operand, .. } => {
+                self.walk_expr_writes(operand, scopes, hit)
             }
-        }
-        Stmt::For { body, .. } => walk_block_writes(body, locals, hit),
-        Stmt::Match { arms, .. } => {
-            for arm in arms {
-                walk_block_writes(&arm.body, locals, hit);
-                if hit.is_some() {
-                    return;
-                }
+            Expr::Slice { base, lo, hi, .. } => {
+                self.walk_expr_writes(base, scopes, hit);
+                lo.iter().chain(hi.iter()).for_each(|e| self.walk_expr_writes(e, scopes, hit));
             }
+            Expr::SliceLit { items, .. } => items.iter().for_each(|e| self.walk_expr_writes(e, scopes, hit)),
+            Expr::MapLit { entries, .. } => entries.iter().for_each(|(k, v)| {
+                self.walk_expr_writes(k, scopes, hit);
+                self.walk_expr_writes(v, scopes, hit);
+            }),
+            Expr::StructLit { fields, .. } => fields.iter().for_each(|f| self.walk_expr_writes(&f.value, scopes, hit)),
+            Expr::Interp { parts, .. } => parts.iter().for_each(|p| {
+                if let hy_syntax::InterpPart::Expr(e) = p { self.walk_expr_writes(e, scopes, hit); }
+            }),
+            Expr::Lit { .. } | Expr::Ident { .. } | Expr::FnLit { .. } | Expr::Paren { .. } => {}
         }
-        Stmt::Select { arms, .. } => {
-            for arm in arms {
-                walk_block_writes(&arm.body, locals, hit);
-                if hit.is_some() {
-                    return;
-                }
-            }
+    }
+}
+
+enum LocalLookup<'a> { Unbound, ForeignTyped, Bound(Option<&'a Expr>) }
+
+fn pos_before(a: hy_diag::Pos, b: hy_diag::Pos) -> bool { (a.line, a.col) < (b.line, b.col) }
+
+fn pos_in_span(span: Span, pos: hy_diag::Pos) -> bool {
+    (span.start.line, span.start.col) <= (pos.line, pos.col) && (pos.line, pos.col) <= (span.end.line, span.end.col)
+}
+
+fn stmt_has_managed(stmt: &Stmt, pos: hy_diag::Pos) -> bool {
+    pos_in_span(stmt.span(), pos) && match stmt {
+        Stmt::Managed { .. } => true,
+        Stmt::Block { block, .. } | Stmt::For { body: block, .. } => block.stmts.iter().any(|s| stmt_has_managed(s, pos)),
+        Stmt::If { then, otherwise, .. } => {
+            (pos_in_span(then.span, pos) && then.stmts.iter().any(|s| stmt_has_managed(s, pos)))
+                || otherwise.as_deref().is_some_and(|o| stmt_has_managed(o, pos))
         }
-        Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
-            walk_block_writes(body, locals, hit)
-        }
-        Stmt::Local(_)
-        | Stmt::Expr { .. }
-        | Stmt::Send { .. }
-        | Stmt::Return { .. }
-        | Stmt::Task { .. }
-        | Stmt::Defer { .. }
-        | Stmt::Break { .. }
-        | Stmt::Continue { .. } => {}
+        Stmt::Match { arms, .. } => arms.iter().any(|a| pos_in_span(a.body.span, pos) && a.body.stmts.iter().any(|s| stmt_has_managed(s, pos))),
+        Stmt::Select { arms, .. } => arms.iter().any(|a| pos_in_span(a.body.span, pos) && a.body.stmts.iter().any(|s| stmt_has_managed(s, pos))),
+        _ => false,
+    }
+}
+
+fn fn_sig_names(params: &[hy_syntax::Param], results: &[hy_syntax::FnResult]) -> HashSet<String> {
+    params.iter().map(|p| p.name.as_str()).chain(results.iter().filter_map(|r| r.name.as_deref()))
+        .filter(|n| !n.is_empty() && *n != "_").map(str::to_string).collect()
+}
+
+fn in_scopes(scopes: &[HashSet<String>], name: &str) -> bool { scopes.iter().any(|s| s.contains(name)) }
+
+fn mutated_arg_root(expr: &Expr) -> Option<&str> {
+    match unwrap_parens(expr) {
+        Expr::Ident { name, .. } if !name.is_empty() && name != "_" => Some(name.as_str()),
+        Expr::Field { base, .. } | Expr::Index { base, .. } | Expr::Slice { base, .. } => mutated_arg_root(base),
+        _ => None,
     }
 }
 
