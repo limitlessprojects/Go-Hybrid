@@ -3061,10 +3061,5 @@ fn slice_pop_prelude_panics_with_hy_panic_on_empty() {
     // Go's raw `index out of range [-1]`.
     let go = emit("fn f(s []int) int {\n    return s.pop()\n}\n");
     assert!(go.contains("if n == 0 {"), "pop prelude must guard empty:\n{}", go);
-    assert!(go.contains("panic(\"HY-PANIC/pop-empty\")"), "pop prelu
-
-
-
-
-
-
+    assert!(go.contains("panic(\"HY-PANIC/pop-empty\")"), "pop prelude panic text:\n{}", go);
+}
