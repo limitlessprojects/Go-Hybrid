@@ -380,6 +380,8 @@ struct Collector<'a> {
     scopes: Vec<HashMap<String, Option<usize>>>,
     /// Parallel lexical scope stack tracking resolved operand kinds (#425).
     kind_scopes: Vec<HashMap<String, OpKind>>,
+    /// Parallel lexical scope stack tracking declared slice element type names.
+    slice_elem_scopes: Vec<HashMap<String, String>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
     file_untyped_consts: HashSet<String>,
@@ -423,6 +425,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             ck,
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
+            slice_elem_scopes: Vec::new(),
             file_consts: HashMap::new(),
             file_untyped_consts: HashSet::new(),
             fn_results: Vec::new(),
@@ -485,11 +488,13 @@ impl<'a> Collector<'a> {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.kind_scopes.push(HashMap::new());
+        self.slice_elem_scopes.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.kind_scopes.pop();
+        self.slice_elem_scopes.pop();
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -506,6 +511,52 @@ impl<'a> Collector<'a> {
             if let Some(top) = self.kind_scopes.last_mut() {
                 top.insert(name.to_string(), kind);
             }
+        }
+    }
+
+    fn bind_slice_elem(&mut self, name: &str, elem: String) {
+        if name != "_" {
+            if let Some(top) = self.slice_elem_scopes.last_mut() {
+                top.insert(name.to_string(), elem);
+            }
+        }
+    }
+
+    fn lookup_slice_elem(&self, name: &str) -> Option<String> {
+        for layer in self.slice_elem_scopes.iter().rev() {
+            if let Some(elem) = layer.get(name) {
+                return Some(elem.clone());
+            }
+        }
+        None
+    }
+
+    fn slice_elem_of_expr(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.lookup_slice_elem(name),
+            Expr::SliceLit { elem: Some(t), .. } => Some(t.render()),
+            Expr::Call { callee, args, .. } => {
+                let bare = unwrap_parens(callee);
+                if let Expr::Ident { name, .. } = bare {
+                    if name == "make" && !args.is_empty() {
+                        if let Expr::SliceLit { elem: Some(t), items, .. } = unwrap_parens(&args[0].value) {
+                            if items.is_empty() {
+                                return Some(t.render());
+                            }
+                        }
+                    }
+                    if let Some(rest) = name.strip_prefix("[]") {
+                        return Some(rest.to_string());
+                    }
+                }
+                if let Expr::SliceLit { elem: Some(t), items, .. } = bare {
+                    if items.is_empty() {
+                        return Some(t.render());
+                    }
+                }
+                None
+            }
+            _ => None,
         }
     }
 
@@ -768,17 +819,26 @@ impl<'a> Collector<'a> {
                 rk
             };
             self.bind_kind(&r.name, rk);
+            if let TypeExpr::Slice { elem, .. } = &r.ty {
+                self.bind_slice_elem(&r.name, elem.render());
+            }
         }
         for p in &f.params {
             self.exempt(&p.name);
             let pk = self.kind_of_ty(&p.ty, 0);
             self.bind_kind(&p.name, pk);
+            if let TypeExpr::Slice { elem, .. } = &p.ty {
+                self.bind_slice_elem(&p.name, elem.render());
+            }
         }
         for r in &f.results {
             if let Some(rname) = &r.name {
                 self.exempt(rname);
                 let rk = self.kind_of_ty(&r.ty, 0);
                 self.bind_kind(rname, rk);
+                if let TypeExpr::Slice { elem, .. } = &r.ty {
+                    self.bind_slice_elem(rname, elem.render());
+                }
             }
         }
         for r in &f.results {
@@ -929,6 +989,22 @@ impl<'a> Collector<'a> {
         let kinds = self.infer_local_kinds(l);
         for (name, kind) in l.names.iter().zip(kinds) {
             self.bind_kind(name, kind);
+        }
+        if let Some(ty) = &l.ty {
+            if let TypeExpr::Slice { elem, .. } = ty {
+                let el = elem.render();
+                for name in &l.names {
+                    self.bind_slice_elem(name, el.clone());
+                }
+            }
+        } else if l.names.len() == l.values.len() {
+            for (name, val) in l.names.iter().zip(l.values.iter()) {
+                if let Some(el) = self.slice_elem_of_expr(val) {
+                    self.bind_slice_elem(name, el);
+                }
+            }
+        }
+        for name in &l.names {
             if !track_read {
                 self.exempt(name);
                 continue;
@@ -1539,12 +1615,18 @@ impl<'a> Collector<'a> {
                     self.exempt(&p.name);
                     let pk = self.kind_of_ty(&p.ty, 0);
                     self.bind_kind(&p.name, pk);
+                    if let TypeExpr::Slice { elem, .. } = &p.ty {
+                        self.bind_slice_elem(&p.name, elem.render());
+                    }
                 }
                 for r in results {
                     if let Some(rname) = &r.name {
                         self.exempt(rname);
                         let rk = self.kind_of_ty(&r.ty, 0);
                         self.bind_kind(rname, rk);
+                        if let TypeExpr::Slice { elem, .. } = &r.ty {
+                            self.bind_slice_elem(rname, elem.render());
+                        }
                     }
                 }
                 for r in results {
@@ -4939,12 +5021,21 @@ impl<'a> Collector<'a> {
                         }
                     }
                     (OpKind::Slice(dst_elem), OpKind::Str) => {
-                        if !matches!(**dst_elem, OpKind::Unknown | OpKind::Int) {
+                        let elem_name = self.slice_elem_of_expr(dst_arg);
+                        let is_byte = elem_name
+                            .as_deref()
+                            .is_some_and(|s| matches!(s, "byte" | "uint8" | "u8"));
+                        let is_known_non_byte = elem_name
+                            .as_deref()
+                            .is_some_and(|s| !matches!(s, "byte" | "uint8" | "u8"));
+                        if is_known_non_byte
+                            || (!is_byte && !matches!(**dst_elem, OpKind::Unknown | OpKind::Int))
+                        {
+                            let label = elem_name.unwrap_or_else(|| dst_elem.label());
                             self.emit_e1002(
                                 span,
                                 format!(
-                                    "cannot copy string into slice with element type `{}` (HYB-E1002)",
-                                    dst_elem.label()
+                                    "cannot copy string into slice with element type `{label}` (HYB-E1002)"
                                 ),
                                 "copying from a string requires a byte slice destination (`[]byte`)",
                             );

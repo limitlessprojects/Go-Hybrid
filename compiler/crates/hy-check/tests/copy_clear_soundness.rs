@@ -73,6 +73,33 @@ fn main() {
 }
 
 #[test]
+fn copy_string_to_int_slice_rejects_e1002() {
+    let src = "\
+fn main() {
+    var dst []int = []int{1, 2, 3, 4}
+    var src string = \"test\"
+    copy(dst, src)
+}
+";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn copy_string_to_rune_slice_rejects_e1002() {
+    let src = "\
+fn main() {
+    dst := []rune{1, 2}
+    copy(dst, \"test\")
+}
+";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
 fn copy_return_type_mismatch_rejects_e1002() {
     let src = "\
 fn f(dst []int, src []int) string {
