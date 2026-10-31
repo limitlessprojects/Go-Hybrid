@@ -86,6 +86,29 @@ fn call_to_undefined_member_on_a_struct_is_rejected() {
 }
 
 #[test]
+fn call_to_undefined_pop_on_struct_or_pointer_is_rejected() {
+    assert_code(
+        "struct point {\n    x int\n    y int\n}\n\nfn main() {\n    var pt point\n    _ = pt.pop()\n}\n",
+        "HYB-E1002",
+    );
+    assert_code(
+        "struct point {\n    x int\n    y int\n}\n\nfn main() {\n    var pt point\n    var ptr *point = &pt\n    _ = ptr.pop()\n}\n",
+        "HYB-E1002",
+    );
+    assert_code(
+        "fn main() {\n    var a any\n    _ = a.pop()\n}\n",
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn user_declared_pop_method_stays_accepted() {
+    assert_ok(
+        "struct stack {\n    items []int\n}\n\nfn (s *stack) pop() int {\n    return 42\n}\n\nfn main() {\n    var s stack\n    v := s.pop()\n    fmt.println(\"{v}\")\n}\n",
+    );
+}
+
+#[test]
 fn real_members_stay_accepted() {
     // A declared method.
     assert_ok(
