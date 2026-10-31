@@ -386,6 +386,12 @@ struct Collector<'a> {
     /// the state outside any body, so `Stmt::Return` can only ever see it
     /// while a body is open. `FnLit` bodies swap it like `fn_decl` does.
     fn_results: Vec<OpKind>,
+    /// Type-parameter names of the function whose body is currently walked
+    /// (`fn new[k comparable, v any]` → {k, v}). A composite literal inside a
+    /// generic signature may spell those parameters (`map[k]v{}`, zero-value
+    /// instantiations) — Go compiles them; bare `k` must NOT hit the
+    /// value-position undeclared-type net. Swapped per body like `fn_results`.
+    fn_type_params: HashSet<String>,
     /// Whether every result of the enclosing signature is named, so Go's
     /// naked `return` is legal (corpus 63).
     fn_results_all_named: bool,
@@ -417,6 +423,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             kind_scopes: Vec::new(),
             file_consts: HashMap::new(),
             fn_results: Vec::new(),
+            fn_type_params: HashSet::new(),
             fn_results_all_named: false,
             fn_results_error_tail: false,
             loop_depth: 0,
@@ -775,6 +782,10 @@ impl<'a> Collector<'a> {
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
+        let outer_tp = std::mem::replace(
+            &mut self.fn_type_params,
+            f.type_params.iter().map(|p| p.name.clone()).collect(),
+        );
         let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
         let outer_select = std::mem::replace(&mut self.select_depth, 0);
         self.block_stmts(body);
@@ -783,6 +794,7 @@ impl<'a> Collector<'a> {
         self.fn_results = outer;
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
+        self.fn_type_params = outer_tp;
         self.pop_scope();
     }
 
@@ -1451,6 +1463,7 @@ impl<'a> Collector<'a> {
             Expr::StructLit { ty, fields, span } => {
                 if let Some(t) = ty {
                     self.ty(t);
+                    self.check_value_position_type_name(t);
                 }
                 for f in fields {
                     self.expr(&f.value);
@@ -1460,6 +1473,7 @@ impl<'a> Collector<'a> {
             Expr::SliceLit { elem, items, .. } => {
                 if let Some(t) = elem {
                     self.ty(t);
+                    self.check_value_position_type_name(t);
                 }
                 for i in items {
                     self.expr(i);
@@ -1478,6 +1492,8 @@ impl<'a> Collector<'a> {
             } => {
                 self.ty(key);
                 self.ty(value);
+                self.check_value_position_type_name(key);
+                self.check_value_position_type_name(value);
                 for (k, v) in entries {
                     self.expr(k);
                     self.expr(v);
@@ -2307,6 +2323,56 @@ impl<'a> Collector<'a> {
     /// Fail-open everywhere the kind model cannot prove a mismatch: an
     /// unresolved struct name, an `Unknown` value kind, and an `Unknown`
     /// field type all stay silent.
+    /// Value-position type names in composite literals (`b := Undeclared{}`,
+    /// `xs := []Undeclared{...}`, `m := map[K]Undeclared{...}`). The literal's
+    /// own `ty` routes through `self.ty()` — the `Expr::` side of the
+    /// checker — which resolves arity/instantiation but NOT whether the
+    /// named type exists. A name nothing declares passes `hyb check` with 0
+    /// diagnostics, the emitter prints the literal verbatim, and `go build`
+    /// fails with `undefined: <name>` — Row 13 BUILDABLE. Fail closed with
+    /// the existing BUILDABLE code. Deliberately fail-open for Go predeclared
+    /// / conversion-target names (`int{}`-style scalar literals) and dotted
+    /// foreign/shapes types: those live on a different root (scalar/interface
+    /// composite literals) and their members are emitted verbatim by design.
+    fn check_value_position_type_name(&mut self, ty: &TypeExpr) {
+        let TypeExpr::Named { name, span, .. } = ty else { return };
+        let name = name.trim();
+        if name.is_empty() || name.contains('.') || name != Checker::base_named_type_str(name) {
+            return;
+        }
+        if crate::const_init::is_conversion_type_name(name)
+            || crate::resolve::is_predeclared_type_name(name)
+        {
+            return;
+        }
+        // Prelude types (both a literal-typed element and the prelude carriers)
+        if name == "option" || name == "set" {
+            return;
+        }
+        if self.ck.structs.contains_key(name)
+            || self.ck.enums.contains_key(name)
+            || self.ck.type_aliases.contains_key(name)
+            // Zero-field structs (`struct svc {}`) are recorded as
+            // package-scope names, not in `structs` — same carve-out the
+            // declaration-site checker uses.
+            || self.ck.pkg_names.get(name) == Some(&"struct")
+            // Type parameters of the enclosing generic signature are legal
+            // composite-literal spellings inside it (`fn new[k, v any]` →
+            // `map[k]v{}`; Go generic signatures scope those names locally).
+            || self.fn_type_params.contains(name)
+        {
+            return;
+        }
+        self.emit_e1002(
+            *span,
+            format!(
+                "type `{}` is not declared — Go refuses `undefined: {}` in the emitted composite literal (HYB-E1002)",
+                name, name
+            ),
+            "value-position type names must resolve: declare the struct/enum/alias, or use its declared spelling",
+        );
+    }
+
     fn check_struct_literal(
         &mut self,
         ty: Option<&TypeExpr>,

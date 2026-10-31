@@ -57,6 +57,23 @@ const PREDECLARED: &[&str] = &[
     "_",
 ];
 
+/// True for names Go/the SPEC predeclare at file scope (builtins, predeclared
+/// types, SPEC spellings, `some`/`none`/`_`). Used by value-position type-name
+/// checks (composite literals, issue #1593 reserve) to stay fail-open on names
+/// the resolver itself accepts as file-scope values.
+pub(crate) fn is_predeclared_type_name(name: &str) -> bool {
+    PREDECLARED.iter().any(|p| *p == name)
+}
+
+/// Which names the current walk records.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Record every name this function declares (defines pass).
+    Collect,
+    /// Report every value-position ident outside the allowed set (check pass).
+    Check,
+}
+
 struct Scan<'a> {
     path: &'a str,
     packages: &'a HashSet<String>,
