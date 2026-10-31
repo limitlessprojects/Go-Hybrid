@@ -1,0 +1,3 @@
+clean build runs (s): [18.05, 17.78, 17.83] median 17.83
+generation runs (s): [6.11, 6.06, 6.22] median 6.11
+generation / clean build = 34.2%

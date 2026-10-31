@@ -1,0 +1,37 @@
+Re-verification of #610 spike on main @ 1f0ff97 — 2026-10-25
+branch: spike/ffi-cert-610 (rebased, b07421f)
+rustc: rustc 1.99.0 (b940084d7 2026-09-28) | host: Linux x86_64
+
+--- artifact (RUSTC_BOOTSTRAP=1 RUSTFLAGS='-Z emit-stack-sizes -C debuginfo=2')
+sha256: d8dbd1824be4c86c5fc21905b09d6daebd996d65a9a534379fd02942f0a2352c
+published artifact sha256: d8dbd1824be4c86c5fc21905b09d6daebd996d65a9a534379fd02942f0a2352c
+
+--- extract
+contract_sha256 on this base: f84a58533c6a8cdbb427732b38f9a5384e608b8ab9b2890d4d9436009810eceb
+  (digest covers artifact.base_commit; normalized to 78e04dc -> eb8888981e5950248fd476ce8404ef36551c4e099d068e8847728e878bf13292, the published value)
+three consecutive extracts byte-identical: 1 distinct digest(s) over 3 files
+symbols: 21 | functions_with_frames: 1992
+
+--- verify
+exit: 1 | coverage: exports 21, exports_with_signature 21, consumed_by_go 19, consumed_with_signature 21, call_sites 36
+diagnostics: 16 | gaps: 0
+identical to evidence/g1-verify.json: yes
+
+--- fixtures
+passed: 6/6
+identical to evidence/fixtures.json: yes
+
+--- report table
+identical to evidence/table.md: yes
+--- closure analysis
+identical to evidence/closure-analysis.txt: yes
+--- unit tests
+python3 -m unittest spikes/ffi-cert-610/test_hy_ffi_cert.py -> Ran 14 tests ... OK
+
+--- G4, Go bridge in the CI-shaped module (module hybrid.program, go 1.26, libhyrt.a in lib/)
+go vet ./... -> clean ; go build ./... -> ok ; go test ./... -> ok in hybridge, jsonbinding, regexbinding, sha3binding, hybench, overheadbench
+go test -run TestDeepNesting -v ./jsonbinding -> PASS TestDeepNestingParsesViaDeepPath, PASS TestDeepNestingOnConstrainedStack
+gofmt -l runtime/go -> no output (clean)
+
+--- cost, single-run spot check (published: 34.2% from medians of 3)
+clean build of runtime/rust/hyrt: 17 s ; extract: 6 s -> 6/17 = 35%
