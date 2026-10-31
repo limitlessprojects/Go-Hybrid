@@ -761,6 +761,14 @@ impl<'a> Checker<'a> {
                     let head = Self::base_named_type_str(name);
                     if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
                         if self.lookup_binding(st, root).is_none() {
+                            if let Some(vs) = self.enums.get(root.as_str()) {
+                                if vs.iter().any(|v| v == name) {
+                                    return Some(TypeExpr::Named {
+                                        name: root.clone(),
+                                        span: *span,
+                                    });
+                                }
+                            }
                             let full = format!("{}.{}", root, head);
                             if let Some(f) = self.fns.get(full.as_str()) {
                                 return f.results.first().map(|r| r.ty.clone());

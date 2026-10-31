@@ -688,6 +688,8 @@ pub(crate) struct Checker<'a> {
     pub enums: HashMap<String, Vec<String>>,
     /// enum name -> whether the first variant is payload-free (N3 HYB-E4002).
     pub enum_has_zero_value: HashMap<String, bool>,
+    /// enum name -> whether all variants are payload-free (T16 SPEC §2.5).
+    pub enum_is_unit_only: HashMap<String, bool>,
     /// type alias name -> target TypeExpr.
     pub type_aliases: HashMap<String, TypeExpr>,
     /// fn name -> decl (return-type inference for single-value defines).
@@ -752,6 +754,7 @@ impl<'a> Checker<'a> {
             struct_type_params: HashMap::new(),
             enums: HashMap::new(),
             enum_has_zero_value: HashMap::new(),
+            enum_is_unit_only: HashMap::new(),
             type_aliases: HashMap::new(),
             fns: HashMap::new(),
             zd_defined: std::collections::HashSet::new(),

@@ -276,6 +276,10 @@ fn build_tables(ck: &mut Checker<'_>) {
                     e.name.clone(),
                     e.variants.first().is_some_and(|v| v.payload.is_none()),
                 );
+                ck.enum_is_unit_only.insert(
+                    e.name.clone(),
+                    e.variants.iter().all(|v| v.payload.is_none()),
+                );
                 ck.enums.insert(
                     e.name.clone(),
                     e.variants.iter().map(|v| v.name.clone()).collect(),

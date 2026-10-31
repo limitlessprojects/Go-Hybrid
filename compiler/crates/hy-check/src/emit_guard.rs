@@ -722,12 +722,86 @@ impl<'a> Checker<'a> {
     // A — equality on an incomparable type (HYB-E2006)
     // ------------------------------------------------------------------
 
+    fn is_data_carrying_enum_expr(&self, st: &FnState, e: &Expr) -> bool {
+        if let Some(t) = self.ty_of_expr(st, e) {
+            let resolved = self.resolve_type_alias(&t);
+            if let Some(name) = Self::base_named_type(&resolved) {
+                if self.enum_is_unit_only.get(&name) == Some(&false) {
+                    return true;
+                }
+            }
+        }
+        match crate::model::unwrap_parens(e) {
+            Expr::Call { callee, .. } => {
+                if let Expr::Field { base, name, .. } = crate::model::unwrap_parens(callee) {
+                    if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
+                        if let Some(vs) = self.enums.get(root.as_str()) {
+                            if vs.iter().any(|v| v == name)
+                                && self.enum_is_unit_only.get(root.as_str()) == Some(&false)
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
+                    if let Some(vs) = self.enums.get(root.as_str()) {
+                        if vs.iter().any(|v| v == name)
+                            && self.enum_is_unit_only.get(root.as_str()) == Some(&false)
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            Expr::Ident { name, .. } => {
+                if let Some(b) = self.lookup_binding(st, name) {
+                    if let Some(ty) = &b.ty {
+                        let resolved = self.resolve_type_alias(ty);
+                        if let Some(ename) = Self::base_named_type(&resolved) {
+                            if self.enum_is_unit_only.get(&ename) == Some(&false) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
     fn check_equality(&mut self, st: &FnState, lhs: &Expr, rhs: &Expr, span: Span) {
         // `x == nil` is the nil-comparison surface (E4001/N1 own its
         // validity) — every nilable type is comparable to nil in Go.
         if Checker::is_nil_literal(lhs) || Checker::is_nil_literal(rhs) {
             return;
         }
+
+        // T16 (SPEC §2.5): ==/!= are defined only for unit-only enums.
+        // Data-carrying enums compare via match.
+        if self.is_data_carrying_enum_expr(st, lhs) || self.is_data_carrying_enum_expr(st, rhs) {
+            let bad = if self.is_data_carrying_enum_expr(st, lhs) {
+                lhs
+            } else {
+                rhs
+            };
+            let msg = format!(
+                "`{}` compares values of incomparable type (data-carrying enum) — Go rejects this at compile time (HYB-E2006)",
+                bad.render()
+            );
+            let notes = vec![
+                "why: a data-carrying enum value has no `==` in Go (SPEC T16: payload equality is deep-equality policy that MVP does not need and must not guess) — an accepted Hybrid program would emit unbuildable Go (issue #2444)".to_string(),
+                "fix: data-carrying enums cannot be compared via `==` / `!=` (SPEC T16) — use `match` to inspect variants and compare payloads individually".to_string(),
+            ];
+            self.diags.push(
+                Diagnostic::error("HYB-E2006", self.path.clone(), span, msg).with_notes(notes),
+            );
+            return;
+        }
+
         let l = self.equality_shape(st, lhs);
         let r = self.equality_shape(st, rhs);
         let (bad, noun) = if let Some(n) = self.incomparable_noun(&l) {
@@ -751,6 +825,7 @@ impl<'a> Checker<'a> {
                     "set" => "struct containing map cannot be compared",
                     "slice" => "slice can only be compared to nil",
                     "function value" => "func can only be compared to nil",
+                    "data-carrying enum" => "cannot be compared; compare via match (SPEC T16)",
                     _ => "cannot be compared",
                 }
             ),
@@ -759,6 +834,7 @@ impl<'a> Checker<'a> {
                 "set" => "fix: compare membership (`a.has(x)`) or length (`len(a) == len(b)`) instead of whole-set equality".to_string(),
                 "slice" => "fix: compare lengths or elements pairwise — whole-slice equality has no Go meaning".to_string(),
                 "function value" => "fix: a function value is only comparable to `nil` — compare behaviour (call both) instead".to_string(),
+                "data-carrying enum" => "fix: data-carrying enums cannot be compared via `==` / `!=` (SPEC T16) — use `match` to inspect variants and compare payloads individually".to_string(),
                 _ => "fix: compare the comparable fields individually — the struct carries an incomparable field".to_string(),
             },
         ];
@@ -806,6 +882,11 @@ impl<'a> Checker<'a> {
                 seen.push(name.clone());
                 let fields = self.structs.get(name)?;
                 for (_, ft) in fields {
+                    if let Some(ename) = Self::base_named_type(ft) {
+                        if self.enum_is_unit_only.get(&ename) == Some(&false) {
+                            return Some("data-carrying enum");
+                        }
+                    }
                     let fs = self.shape_of_type(ft);
                     if let Some(n) = self.incomparable_rec(&fs, seen) {
                         return Some(n);
