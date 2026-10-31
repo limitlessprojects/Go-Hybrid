@@ -6,6 +6,7 @@ use super::{to_go_name, BindingKind, EmitError, Emitter};
 
 use super::expr::ATOM;
 use super::shapes::lookup_conversion;
+use std::collections::BTreeSet;
 
 impl Emitter {
     pub fn emit_stmt(&mut self, s: &Stmt) -> Result<(), EmitError> {
@@ -2456,6 +2457,7 @@ impl Emitter {
                 Expr::Lit { .. } => false,
                 Expr::Ident { name, .. } => {
                     name == loan_var
+                        || self.closure_written.contains(name)
                         || rest.iter().any(|s| Self::stmt_modifies_ident(s, name))
                 }
                 _ => true,
@@ -3076,6 +3078,170 @@ impl Emitter {
                 InterpPart::Lit(_) => false,
                 InterpPart::Expr(x) => Self::expr_mentions_ident(x, target),
             }),
+        }
+    }
+
+    /// Collect every name assigned inside a closure literal (any depth) of
+    /// `b` into `out`. `in_closure` is true once inside a `fn` literal body.
+    /// Fresh bindings (`k := …` in the closure) shadow rather than write, so
+    /// only assignment targets count; a superset only costs a key temp.
+    pub(crate) fn collect_closure_writes_block(
+        b: &Block,
+        in_closure: bool,
+        out: &mut BTreeSet<String>,
+    ) {
+        for s in &b.stmts {
+            Self::collect_closure_writes_stmt(s, in_closure, out);
+        }
+    }
+
+    fn collect_closure_writes_stmt(s: &Stmt, in_closure: bool, out: &mut BTreeSet<String>) {
+        let ex = |e: &Expr, out: &mut BTreeSet<String>| {
+            Self::collect_closure_writes_expr(e, in_closure, out)
+        };
+        match s {
+            Stmt::Local(l) => l.values.iter().for_each(|v| ex(v, out)),
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                for t in targets {
+                    if in_closure {
+                        out.insert(t.root().to_string());
+                    }
+                    Self::collect_closure_writes_place(t, in_closure, out);
+                }
+                values.iter().for_each(|v| ex(v, out));
+            }
+            Stmt::Expr { expr, .. } | Stmt::Defer { call: expr, .. } => ex(expr, out),
+            Stmt::Send { chan, value, .. } => {
+                ex(chan, out);
+                ex(value, out);
+            }
+            Stmt::If {
+                init,
+                cond,
+                then,
+                otherwise,
+                ..
+            } => {
+                if let Some(i) = init {
+                    Self::collect_closure_writes_stmt(i, in_closure, out);
+                }
+                ex(cond, out);
+                Self::collect_closure_writes_block(then, in_closure, out);
+                if let Some(o) = otherwise {
+                    Self::collect_closure_writes_stmt(o, in_closure, out);
+                }
+            }
+            Stmt::For { kind, body, .. } => {
+                match kind {
+                    ForKind::While { cond } => ex(cond, out),
+                    ForKind::Range { lo, hi, .. } => {
+                        ex(lo, out);
+                        ex(hi, out);
+                    }
+                    ForKind::Iterate { expr, .. } => ex(expr, out),
+                    ForKind::Infinite => {}
+                }
+                Self::collect_closure_writes_block(body, in_closure, out);
+            }
+            Stmt::Return { values, .. } => values.iter().for_each(|v| ex(v, out)),
+            Stmt::Task { callee, args, .. } => {
+                ex(callee, out);
+                args.iter().for_each(|a| ex(&a.value, out));
+            }
+            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+                Self::collect_closure_writes_block(body, in_closure, out)
+            }
+            Stmt::Match { subject, arms, .. } => {
+                ex(subject, out);
+                for a in arms {
+                    if let Some(g) = &a.guard {
+                        ex(g, out);
+                    }
+                    Self::collect_closure_writes_block(&a.body, in_closure, out);
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                for a in arms {
+                    match &a.kind {
+                        SelectArmKind::Send { chan, value, .. } => {
+                            ex(chan, out);
+                            ex(value, out);
+                        }
+                        SelectArmKind::Recv { chan, .. } => ex(chan, out),
+                        SelectArmKind::Default => {}
+                    }
+                    Self::collect_closure_writes_block(&a.body, in_closure, out);
+                }
+            }
+            Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        }
+    }
+
+    fn collect_closure_writes_place(p: &Place, in_closure: bool, out: &mut BTreeSet<String>) {
+        match &p.kind {
+            PlaceKind::Ident(_) => {}
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                Self::collect_closure_writes_place(base, in_closure, out)
+            }
+            PlaceKind::Index { base, index } => {
+                Self::collect_closure_writes_place(base, in_closure, out);
+                Self::collect_closure_writes_expr(index, in_closure, out);
+            }
+        }
+    }
+
+    fn collect_closure_writes_expr(e: &Expr, in_closure: bool, out: &mut BTreeSet<String>) {
+        let ex = |e: &Expr, out: &mut BTreeSet<String>| {
+            Self::collect_closure_writes_expr(e, in_closure, out)
+        };
+        match e {
+            Expr::Ident { .. } | Expr::Lit { .. } => {}
+            Expr::FnLit { body, .. } => Self::collect_closure_writes_block(body, true, out),
+            Expr::Interp { parts, .. } => {
+                for p in parts {
+                    if let InterpPart::Expr(x) = p {
+                        ex(x, out);
+                    }
+                }
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                ex(lhs, out);
+                ex(rhs, out);
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Receive { chan: operand, .. }
+            | Expr::Field { base: operand, .. }
+            | Expr::Paren { inner: operand, .. } => ex(operand, out),
+            Expr::Index { base, index, .. } => {
+                ex(base, out);
+                ex(index, out);
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                ex(base, out);
+                if let Some(l) = lo {
+                    ex(l, out);
+                }
+                if let Some(h) = hi {
+                    ex(h, out);
+                }
+            }
+            Expr::Call { callee, args, .. } => {
+                ex(callee, out);
+                args.iter().for_each(|a| ex(&a.value, out));
+            }
+            Expr::StructLit { fields, .. } => fields.iter().for_each(|f| ex(&f.value, out)),
+            Expr::SliceLit { items, .. } => items.iter().for_each(|i| ex(i, out)),
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    ex(k, out);
+                    ex(v, out);
+                }
+            }
         }
     }
 
