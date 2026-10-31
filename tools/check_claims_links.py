@@ -22,6 +22,8 @@ import re
 import sys
 from pathlib import Path
 
+from corpus_harness import read_expected
+
 TABLE_HEADING = "## The claims table"
 ROW_RE = re.compile(r"^\|\s*(\d+)\s*\|")
 LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
@@ -65,11 +67,10 @@ def is_checkable(target):
 
 def verdict_of(path):
     try:
-        head = path.read_text(encoding="utf-8", errors="replace")[:4000]
-    except OSError:
+        expected = read_expected(path)
+    except (OSError, ValueError):
         return None
-    match = VERDICT_RE.search(head)
-    return match.group(1).upper() if match else None
+    return expected[0] if expected else None
 
 
 def marker_matches(marker, verdict):
@@ -91,7 +92,7 @@ def check(root):
     links = 0
     refs = 0
     if not claims_file.is_file():
-        return {"ok": False, "rows": 0, "links": 0,
+        return {"ok": False, "rows": 0, "links": 0, "refs": 0,
                 "issues": [{"row": 0, "kind": "missing-claims-file", "target": str(claims_file)}]}
     text = claims_file.read_text(encoding="utf-8", errors="replace")
     for row_number, evidence in table_rows(text):
@@ -108,15 +109,15 @@ def check(root):
                 continue
             if resolved.suffix.lower() != ".hy":
                 continue
+            verdict = verdict_of(resolved)
+            if verdict is None:
+                issues.append({"row": row_number, "kind": "no-verdict-header", "target": path})
+                continue
             follow = evidence[match.end():]
             marker_match = MARKER_RE.match(follow)
             if not marker_match:
                 continue
             marker = marker_match.group(1).lower()
-            verdict = verdict_of(resolved)
-            if verdict is None:
-                issues.append({"row": row_number, "kind": "no-verdict-header", "target": path})
-                continue
             if not marker_matches(marker, verdict):
                 issues.append({
                     "row": row_number,
@@ -146,8 +147,10 @@ def check(root):
                 continue
             numbers_seen.add(number)
             refs += 1
-            if corpus_dir.is_dir() and not list(corpus_dir.glob("%02d-*.hy" % int(number))):
+            if not list(corpus_dir.glob("%02d-*.hy" % int(number))):
                 issues.append({"row": row_number, "kind": "missing-corpus-number", "target": number})
+    if rows == 0:
+        issues.append({"row": 0, "kind": "no-claims-rows", "target": "GUARANTEES.md"})
     return {"ok": not issues, "rows": rows, "links": links, "refs": refs, "issues": issues}
 
 
