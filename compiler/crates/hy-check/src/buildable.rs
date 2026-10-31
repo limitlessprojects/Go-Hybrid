@@ -4431,6 +4431,69 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
+            "real" | "imag" => {
+                if args.len() != 1 {
+                    return; // arity handled by builtins.rs
+                }
+                let op = &args[0].value;
+                let ak = self.kind_of_expr(op);
+                if matches!(ak, OpKind::Unknown | OpKind::Void) {
+                    return;
+                }
+                if !matches!(ak, OpKind::Int | OpKind::Float) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "invalid argument `{}` (type `{}`) for `{name}`: argument must be complex or numeric (HYB-E2005)",
+                            op.render(),
+                            ak.label()
+                        ),
+                        "the argument to `real` and `imag` must be of complex or numeric type",
+                    );
+                }
+            }
+            "complex" => {
+                if args.len() != 2 {
+                    return; // arity handled by builtins.rs
+                }
+                let real_arg = &args[0].value;
+                let imag_arg = &args[1].value;
+                let rk = self.kind_of_expr(real_arg);
+                let ik = self.kind_of_expr(imag_arg);
+
+                for (arg, k, role) in [(real_arg, &rk, "real"), (imag_arg, &ik, "imaginary")] {
+                    if matches!(k, OpKind::Unknown | OpKind::Void) {
+                        continue;
+                    }
+                    if !matches!(k, OpKind::Int | OpKind::Float) {
+                        self.emit_e2005(
+                            span,
+                            format!(
+                                "invalid argument `{}` (type `{}`) for `complex`: {role} part must be floating-point or numeric (HYB-E2005)",
+                                arg.render(),
+                                k.label()
+                            ),
+                            "arguments to `complex` must be floating-point numbers or untyped numeric constants",
+                        );
+                        return;
+                    }
+                }
+
+                if rk != OpKind::Unknown
+                    && ik != OpKind::Unknown
+                    && (kinds_conflict(&rk, &ik) || kinds_conflict(&ik, &rk))
+                {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "mismatched types `{}` and `{}` in `complex` (HYB-E1002)",
+                            rk.label(),
+                            ik.label()
+                        ),
+                        "arguments to `complex` must have matching floating-point types",
+                    );
+                }
+            }
             _ => {}
         }
     }
