@@ -1,0 +1,7 @@
+{
+  "expected": ["REJECT", "<unclassified-error>"],
+  "summary": {"verdict": "reject", "errors": 1, "warnings": 0},
+  "diagnostics": [{"severity": "error", "tier0_rule": "", "code": "HYB-E1002"}],
+  "classified_rule": "<unclassified-error>",
+  "agree": false
+}

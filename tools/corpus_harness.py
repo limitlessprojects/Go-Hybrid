@@ -55,8 +55,11 @@ TRIPWIRE_PCT = 25.0  # ~25%, recorded tunable (SPEC §9.7)
 
 def read_expected(path):
     """Return (verdict, rule_id) or None if no EXPECTED-VERDICT line."""
-    with open(path, encoding="utf-8") as f:
-        src = f.read()
+    try:
+        with open(path, encoding="utf-8") as f:
+            src = f.read()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"corpus error: {path}: cannot read corpus file: {exc}") from exc
     headers = VERDICT_HEADER_RE.findall(src)
     if not headers:
         return None
@@ -79,8 +82,11 @@ def read_expected_diagnostic(path, expected):
     Only REJECT fixtures may declare this header. Existing fixtures without
     it keep their verdict/rule-only contract; read_expected's API is unchanged.
     """
-    with open(path, encoding="utf-8") as f:
-        headers = DIAGNOSTIC_HEADER_RE.findall(f.read())
+    try:
+        with open(path, encoding="utf-8") as f:
+            headers = DIAGNOSTIC_HEADER_RE.findall(f.read())
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"corpus error: {path}: cannot read corpus file: {exc}") from exc
     if not headers:
         return None
     if len(headers) != 1:
@@ -202,7 +208,15 @@ def classify_got(summary, diags):
     verdict = summary.get("verdict", "?")
     # Parser/type errors need not carry a Tier-0 rule. None must mean no
     # errors, otherwise an inconsistent accept summary can pass the corpus.
-    first_rule = (errors[0].get("tier0_rule") or "<unclassified-error>") if errors else None
+    if errors:
+        raw_rule = errors[0].get("tier0_rule")
+        first_rule = (
+            raw_rule.strip()
+            if isinstance(raw_rule, str) and raw_rule.strip()
+            else "<unclassified-error>"
+        )
+    else:
+        first_rule = None
     return verdict, first_rule, managed_lint
 
 
@@ -217,7 +231,12 @@ def agree(expected, got):
             "expected accept + managed lint"
         )
     if ev == "REJECT":
-        if gv != "reject" or gr is None:
+        if (
+            gv != "reject"
+            or not isinstance(gr, str)
+            or not gr.strip()
+            or gr == "<unclassified-error>"
+        ):
             return False, f"expected reject {er}, got {gv} with rule {gr}"
         return gr == er, f"expected reject {er}, got reject {gr}"
     return False, "unknown expected verdict"
@@ -243,8 +262,13 @@ def main():
     # FileNotFoundError when PATH carries no such binary at all.
     args.bin = os.path.abspath(args.bin)
 
+    try:
+        entries = os.listdir(args.corpus)
+    except OSError as exc:
+        print(f"error: corpus directory not readable: {args.corpus}: {exc}", file=sys.stderr)
+        return 2
     files = sorted(
-        f for f in os.listdir(args.corpus) if f.endswith(".hy")
+        f for f in entries if f.endswith(".hy")
     )
     if not files:
         print(f"error: no .hy files in {args.corpus}", file=sys.stderr)
