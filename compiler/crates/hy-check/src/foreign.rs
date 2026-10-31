@@ -423,6 +423,23 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
     }
 }
 
+/// The observable field surface of a foreign handle type, or `None` when
+/// `recv_type` is not a handle this module models.
+///
+/// Returns the observable fields of each handle — for `serde_json.value`,
+/// `sync.mutex`, `sync.rwmutex`, `flate2.writer`, and scalar atomics, this
+/// is the empty set: none of these handles expose exported fields.
+pub(crate) fn foreign_field_surface(recv_type: &str) -> Option<&'static [&'static str]> {
+    match recv_type {
+        "sync.mutex" => Some(&[]),
+        "sync.rwmutex" => Some(&[]),
+        "serde_json.value" => Some(&[]),
+        "flate2.writer" => Some(&[]),
+        _ if recv_type == "atomic.int" || is_scalar_atomic(recv_type) => Some(&[]),
+        _ => None,
+    }
+}
+
 /// Human-readable M5 curated package allowlist string for HYB-E1001 diagnostics (#658).
 pub(crate) const CURATED_ALLOWLIST_DISPLAY: &str = "fmt, os, io, time, sort, strings, strconv, errors, sync, sync/atomic, bufio, net, net/http, net/http/httptest, net/url, encoding/json, encoding/hex, path, path/filepath, rust/serde_json, rust/sha3, rust/regex";
 
