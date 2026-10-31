@@ -65,12 +65,12 @@ fn receive_and_aliased_map_bindings_reject_invalid_range_bounds_and_send_only_it
 #[test]
 fn receive_slice_and_aliased_map_bindings_preserve_fn_tuple_arity() {
     let e2002_cases = [
-        "fn run(ch chan fn(a int, b int) int int) {\n    cb := <-ch\n    p := cb(3, 9)\n    _ = p\n}\nfn main() {}\n",
-        "type fn_chan = chan fn(a int, b int) int int\nconst _anchor = 0\nfn main() {\n    ch := make(fn_chan, 1)\n    cb, ok := <-ch\n    if ok {\n        p := cb(3, 9)\n        _ = p\n    }\n}\n",
-        "fn run(ch chan fn(a int, b int) int int) {\n    p := (<-ch)(3, 9)\n    _ = p\n}\nfn main() {}\n",
-        "type fn_map = map[string]fn(a int, b int) int int\nfn run(m fn_map) {\n    cb, ok := m[\"k\"]\n    if ok {\n        p := cb(3, 9)\n        _ = p\n    }\n}\nfn main() {}\n",
-        "fn run(xs []fn(a int, b int) int int) {\n    sub := xs[0:1]\n    p := sub[0](3, 9)\n    _ = p\n}\nfn main() {}\n",
-        "fn minmax(a int, b int) (int, int) { return a, b }\nfn main() {\n    arr := [2]fn(a int, b int) int int{minmax, minmax}\n    pa := &arr\n    sub := pa[0:1]\n    p := sub[0](3, 9)\n    _ = p\n}\n",
+        "fn run(ch chan fn(a int, b int) (int, int)) {\n    cb := <-ch\n    p := cb(3, 9)\n    _ = p\n}\nfn main() {}\n",
+        "type fn_chan = chan fn(a int, b int) (int, int)\nconst _anchor = 0\nfn main() {\n    ch := make(fn_chan, 1)\n    cb, ok := <-ch\n    if ok {\n        p := cb(3, 9)\n        _ = p\n    }\n}\n",
+        "fn run(ch chan fn(a int, b int) (int, int)) {\n    p := (<-ch)(3, 9)\n    _ = p\n}\nfn main() {}\n",
+        "type fn_map = map[string]fn(a int, b int) (int, int)\nfn run(m fn_map) {\n    cb, ok := m[\"k\"]\n    if ok {\n        p := cb(3, 9)\n        _ = p\n    }\n}\nfn main() {}\n",
+        "fn run(xs []fn(a int, b int) (int, int)) {\n    sub := xs[0:1]\n    p := sub[0](3, 9)\n    _ = p\n}\nfn main() {}\n",
+        "fn minmax(a int, b int) (int, int) { return a, b }\nfn main() {\n    arr := [2]fn(a int, b int) (int, int){minmax, minmax}\n    pa := &arr\n    sub := pa[0:1]\n    p := sub[0](3, 9)\n    _ = p\n}\n",
     ];
     for src in e2002_cases {
         let (verdict, codes) = check(src);
@@ -89,7 +89,7 @@ fn receive_slice_and_aliased_map_bindings_preserve_fn_tuple_arity() {
 
 #[test]
 fn valid_receive_slice_and_aliased_map_operations_accept() {
-    let src = "type byte_chan = chan uint8\ntype byte_map = map[string]uint8\ntype fn_chan = chan fn(a int, b int) int int\nconst _anchor = 0\nfn run(m byte_map, outer chan chan int, xs []fn(a int, b int) int int) int {\n    bch := make(byte_chan, 1)\n    v1 := <-bch\n    v1 = 200\n    v2, ok2 := <-bch\n    if ok2 {\n        v2 = 100\n        for i in v2..120 {\n            _ = i\n        }\n    }\n    v3, ok3 := m[\"k\"]\n    if ok3 {\n        v3 = 255\n    }\n    inner, ok_ch := <-outer\n    if ok_ch {\n        for x in inner {\n            _ = x\n        }\n    }\n    fch := make(fn_chan, 1)\n    cb, ok_fn := <-fch\n    if ok_fn {\n        a, b := cb(1, 2)\n        _ = a + b\n    }\n    sub := xs[0:1]\n    x, y := sub[0](3, 4)\n    return int(v1) + int(v2) + int(v3) + x + y\n}\nfn main() {}\n";
+    let src = "type byte_chan = chan uint8\ntype byte_map = map[string]uint8\ntype fn_chan = chan fn(a int, b int) (int, int)\nconst _anchor = 0\nfn run(m byte_map, outer chan chan int, xs []fn(a int, b int) (int, int)) int {\n    bch := make(byte_chan, 1)\n    v1 := <-bch\n    v1 = 200\n    v2, ok2 := <-bch\n    if ok2 {\n        v2 = 100\n        for i in v2..120 {\n            _ = i\n        }\n    }\n    v3, ok3 := m[\"k\"]\n    if ok3 {\n        v3 = 255\n    }\n    inner, ok_ch := <-outer\n    if ok_ch {\n        for x in inner {\n            _ = x\n        }\n    }\n    fch := make(fn_chan, 1)\n    cb, ok_fn := <-fch\n    if ok_fn {\n        a, b := cb(1, 2)\n        _ = a + b\n    }\n    sub := xs[0:1]\n    x, y := sub[0](3, 4)\n    return int(v1) + int(v2) + int(v3) + x + y\n}\nfn main() {}\n";
     let (verdict, codes) = check(src);
     assert_eq!(verdict, Verdict::Accept, "expected Accept, got {codes:?}");
 }
