@@ -88,8 +88,8 @@ def scan_file(path):
         # An unterminated `<<<<<<<` is still a marker that must not ship.
         if open_start is not None:
             hits.append(open_start)
-    except (UnicodeDecodeError, OSError):
-        return []
+    except (UnicodeDecodeError, OSError) as error:
+        raise OSError(f"{path}: {error}") from error
     return hits
 
 
@@ -121,8 +121,8 @@ def scan_workflow_file(path):
                 if TOP_LEVEL_KEY_RE.match(stripped):
                     continue
                 hits.append((n, stripped))
-    except (UnicodeDecodeError, OSError):
-        return []
+    except (UnicodeDecodeError, OSError) as error:
+        raise OSError(f"{path}: {error}") from error
     return hits
 
 
@@ -159,7 +159,11 @@ def main():
     if not os.path.isdir(args.root):
         print(f"usage error: {args.root} is not a directory", file=sys.stderr)
         return 2
-    found = list(scan(args.root))
+    try:
+        found = list(scan(args.root))
+    except OSError as error:
+        print(f"scan error: {error}", file=sys.stderr)
+        return 2
     if not found:
         print("conflict markers: none")
         return 0
