@@ -467,6 +467,59 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
 }
 
 impl<'a> Collector<'a> {
+    fn is_untyped_numeric_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit { kind, .. } => matches!(kind, LitKind::Int(_) | LitKind::Float(_)),
+            Expr::Ident { name, .. } => {
+                if let Some(d) = self.ck.file.decls.iter().find_map(|d| match d {
+                    Decl::Const(cd) if &cd.name == name => Some(cd),
+                    _ => None,
+                }) {
+                    return d.ty.is_none() && self.is_untyped_numeric_const(&d.value);
+                }
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        let def = &self.defines[*id];
+                        if def.kind == LocalKind::Const {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnOp::Neg) && self.is_untyped_numeric_const(operand)
+            }
+            Expr::Binary { op, lhs, rhs, .. } => {
+                matches!(
+                    op,
+                    BinOp::Add
+                        | BinOp::Sub
+                        | BinOp::Mul
+                        | BinOp::Div
+                        | BinOp::Mod
+                        | BinOp::BitAnd
+                        | BinOp::BitOr
+                        | BinOp::BitXor
+                        | BinOp::Shl
+                        | BinOp::Shr
+                ) && self.is_untyped_numeric_const(lhs)
+                    && self.is_untyped_numeric_const(rhs)
+            }
+            _ => false,
+        }
+    }
+
+    fn expr_kinds_conflict(&self, want: &OpKind, expr: &Expr, got: &OpKind) -> bool {
+        if kinds_conflict(want, got) {
+            return true;
+        }
+        if *want == OpKind::Float && *got == OpKind::Int && !self.is_untyped_numeric_const(expr) {
+            return true;
+        }
+        false
+    }
+
     // -- scope bookkeeping ---------------------------------------------------
 
     fn push_scope(&mut self) {
@@ -2358,7 +2411,7 @@ impl<'a> Collector<'a> {
                 Some((_, fty)) => {
                     let want = self.kind_of_ty_with_subst(fty, &subst, 0);
                     let got = self.kind_of_expr(&f.value);
-                    if kinds_conflict(&want, &got) {
+                    if self.expr_kinds_conflict(&want, &f.value, &got) {
                         self.emit_e1002(
                             f.value.span(),
                             format!(
@@ -2704,7 +2757,7 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            if self.expr_kinds_conflict(&want, &a.value, &got) {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -2744,7 +2797,7 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            if self.expr_kinds_conflict(&want, &a.value, &got) {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -2775,7 +2828,7 @@ impl<'a> Collector<'a> {
                 if let Some(res) = self.call_result_kinds(callee, args) {
                     if res.len() == want.len() {
                         for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(r, w, values[0].span());
+                            self.report_return_conflict(r, w, values[0].span(), None);
                         }
                         return;
                     }
@@ -2784,7 +2837,7 @@ impl<'a> Collector<'a> {
                         && res.len() + 1 == want.len()
                     {
                         for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(r, w, values[0].span());
+                            self.report_return_conflict(r, w, values[0].span(), None);
                         }
                         return;
                     }
@@ -2831,7 +2884,7 @@ impl<'a> Collector<'a> {
             if short_ok {
                 for (v, w) in values.iter().zip(want.iter()) {
                     let got = self.kind_of_expr(v);
-                    self.report_return_conflict(&got, w, v.span());
+                    self.report_return_conflict(&got, w, v.span(), Some(v));
                 }
                 return;
             }
@@ -2859,12 +2912,16 @@ impl<'a> Collector<'a> {
         }
         for (v, w) in values.iter().zip(want.iter()) {
             let got = self.kind_of_expr(v);
-            self.report_return_conflict(&got, w, v.span());
+            self.report_return_conflict(&got, w, v.span(), Some(v));
         }
     }
 
-    fn report_return_conflict(&mut self, got: &OpKind, want: &OpKind, span: Span) {
-        if !kinds_conflict(want, got) {
+    fn report_return_conflict(&mut self, got: &OpKind, want: &OpKind, span: Span, expr: Option<&Expr>) {
+        if let Some(e) = expr {
+            if !self.expr_kinds_conflict(want, e, got) {
+                return;
+            }
+        } else if !kinds_conflict(want, got) {
             return;
         }
         self.emit_e1002(
