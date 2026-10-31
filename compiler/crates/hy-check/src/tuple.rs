@@ -17,7 +17,6 @@
 //! foreign package calls. `?`-unwrapped calls stay permissive (unwrapping the
 //! error produces a single value).
 
-use crate::buildable::OpKind;
 use crate::foreign;
 use crate::model::{unwrap_parens, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};

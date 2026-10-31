@@ -467,6 +467,59 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
 }
 
 impl<'a> Collector<'a> {
+    fn is_untyped_numeric_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit { kind, .. } => matches!(kind, LitKind::Int(_) | LitKind::Float(_)),
+            Expr::Ident { name, .. } => {
+                if let Some(d) = self.ck.file.decls.iter().find_map(|d| match d {
+                    Decl::Const(cd) if &cd.name == name => Some(cd),
+                    _ => None,
+                }) {
+                    return d.ty.is_none() && self.is_untyped_numeric_const(&d.value);
+                }
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        let def = &self.defines[*id];
+                        if def.kind == LocalKind::Const {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnOp::Neg) && self.is_untyped_numeric_const(operand)
+            }
+            Expr::Binary { op, lhs, rhs, .. } => {
+                matches!(
+                    op,
+                    BinOp::Add
+                        | BinOp::Sub
+                        | BinOp::Mul
+                        | BinOp::Div
+                        | BinOp::Mod
+                        | BinOp::BitAnd
+                        | BinOp::BitOr
+                        | BinOp::BitXor
+                        | BinOp::Shl
+                        | BinOp::Shr
+                ) && self.is_untyped_numeric_const(lhs)
+                    && self.is_untyped_numeric_const(rhs)
+            }
+            _ => false,
+        }
+    }
+
+    fn expr_kinds_conflict(&self, want: &OpKind, expr: &Expr, got: &OpKind) -> bool {
+        if kinds_conflict(want, got) {
+            return true;
+        }
+        if *want == OpKind::Float && *got == OpKind::Int && !self.is_untyped_numeric_const(expr) {
+            return true;
+        }
+        false
+    }
+
     // -- scope bookkeeping ---------------------------------------------------
 
     fn push_scope(&mut self) {
@@ -4513,10 +4566,7 @@ impl<'a> Collector<'a> {
                     OpKind::Unknown => {}
                     OpKind::Map(k_expected, _) => {
                         let kk = self.kind_of_expr(key_arg);
-                        if **k_expected != OpKind::Unknown
-                            && kk != OpKind::Unknown
-                            && kk != **k_expected
-                        {
+                        if self.expr_kinds_conflict(k_expected, key_arg, &kk) {
                             self.emit_e2005(
                                 span,
                                 format!(
