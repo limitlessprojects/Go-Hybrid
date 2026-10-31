@@ -105,3 +105,44 @@ fn valid_byte_and_rune_slice_conversions_accept() {
     let r = check(src);
     assert_eq!(r.verdict, Verdict::Accept, "expected accept, got diagnostics: {:?}", r.diagnostics);
 }
+
+#[test]
+fn pointer_conversion_to_int_rejects_e1002() {
+    // #1813: pointer cannot convert to numeric int
+    let src = "fn main() {\n    x := 42\n    p := &x\n    _ = int(p)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+    assert!(r.diagnostics.iter().any(|d| d.message.contains("cannot convert `p`") && d.message.contains("to type `int`")));
+}
+
+#[test]
+fn pointer_conversion_to_string_rejects_e1002() {
+    // #1813: pointer cannot convert to string
+    let src = "fn main() {\n    x := 42\n    p := &x\n    _ = string(p)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+    assert!(r.diagnostics.iter().any(|d| d.message.contains("cannot convert `p`") && d.message.contains("to type `string`")));
+}
+
+#[test]
+fn array_conversion_to_int_rejects_e1002() {
+    // #1813: fixed array cannot convert to numeric int
+    let src = "fn main() {\n    var arr: [4]int\n    _ = int(arr)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+    assert!(r.diagnostics.iter().any(|d| d.message.contains("cannot convert `arr`") && d.message.contains("to type `int`")));
+}
+
+#[test]
+fn array_conversion_to_string_rejects_e1002() {
+    // #1813: fixed array cannot convert to string
+    let src = "fn main() {\n    var arr: [4]int\n    _ = string(arr)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+    assert!(r.diagnostics.iter().any(|d| d.message.contains("cannot convert `arr`") && d.message.contains("to type `string`")));
+}
+
