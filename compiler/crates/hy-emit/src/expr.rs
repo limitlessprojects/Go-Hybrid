@@ -76,6 +76,11 @@ impl Emitter {
                 Expr::StructLit {
                     ty: None, fields, ..
                 } => {
+                    if let TypeExpr::Pointer { to, .. } = exp {
+                        let body = self.struct_lit_body(to, fields)?;
+                        let s = format!("&{}{{{}}}", self.type_text(to), body);
+                        return Ok(if min_prec > 50 { format!("({})", s) } else { s });
+                    }
                     let head = self.type_text(exp);
                     let body = self.struct_lit_body(exp, fields)?;
                     return Ok(format!("{}{{{}}}", head, body)); // atomic head
@@ -266,7 +271,7 @@ impl Emitter {
                 let head = format!("map[{}]{}", self.type_text(key), self.type_text(value));
                 let mut parts = Vec::new();
                 for (k, v) in entries {
-                    let kt = self.emit_expr(k, 0)?;
+                    let kt = self.emit_expr_exp(k, 0, Some(key))?;
                     // Elided struct values inherit the map's VALUE type
                     // (Batch I, corpus 09: `map[string]service{"k": {…}}`).
                     let vt = self.emit_expr_exp(v, 0, Some(value))?;
