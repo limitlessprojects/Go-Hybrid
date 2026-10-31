@@ -1,17 +1,17 @@
-//! buildable.rs — issue #134: an accepted program must emit buildable Go.
+﻿//! buildable.rs â€” issue #134: an accepted program must emit buildable Go.
 //!
 //! Go's front-end rejects four declaration shapes that `hyb check` used to
 //! accept with 0 diagnostics, so the emitted module could never build:
 //!
-//!   1. an unused `:=` binding — `x := 5` with no read of `x` is
+//!   1. an unused `:=` binding â€” `x := 5` with no read of `x` is
 //!      `declared and not used`; `_ := 5` (and `_, _ := ...`) declares no
 //!      new variable at all (`no new variables on left side of :=`);
-//!   2. an unused import — the emitter carries every declared Go import
+//!   2. an unused import â€” the emitter carries every declared Go import
 //!      into the header, and Go rejects `imported and not used`;
-//!   3. a repeated name on the left of one `:=` — `x, x := 1, 2` is
+//!   3. a repeated name on the left of one `:=` â€” `x, x := 1, 2` is
 //!      `x repeated on left side of :=`;
 //!   4. unused function-local `var` or `const` variables emitted as
-//!      Go locals — rejected with `declared and not used`.
+//!      Go locals â€” rejected with `declared and not used`.
 //!
 //! All four reject fail-closed as HYB-E1002 (registry rule `BUILDABLE`):
 //! what the checker accepts must survive `go build`.
@@ -32,8 +32,8 @@
 //!
 //! The read-set is deliberately Go-faithful, not conservative-in-the-wrong-
 //! direction: a name is "read" when Go's own unused-variable check counts it
-//! — any mention in the function, including inside closure bodies, and
-//! including `x++`, `x += 1`, `x[k] = v`, `x.f = v` and `&x` — while a bare
+//! â€” any mention in the function, including inside closure bodies, and
+//! including `x++`, `x += 1`, `x[k] = v`, `x.f = v` and `&x` â€” while a bare
 //! `x = v` store is NOT a read (gc reports `declared and not used` for a
 //! write-only local). The same-scope re-define (`x, y := 1, 2` after
 //! `x := 0`) keeps the existing variable, exactly as Go's `:=` does.
@@ -63,7 +63,7 @@ use crate::model::{as_addr_of, unwrap_parens, Checker};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OpKind {
     Unknown,
-    /// A known interface type (`any`) — #682 U9-U12.
+    /// A known interface type (`any`) â€” #682 U9-U12.
     ///
     /// Deliberately NOT `Unknown`. `Unknown` means "the checker could not
     /// resolve this" and stays fail-open everywhere. `any` is a *resolved* type
@@ -128,7 +128,7 @@ impl OpKind {
 /// fine".
 ///
 /// NOTE: open PR #620 introduces this same helper for return-statement
-/// checking. Whichever of the two lands second should drop one copy — the two
+/// checking. Whichever of the two lands second should drop one copy â€” the two
 /// are textually identical on purpose.
 fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
     use OpKind::*;
@@ -179,9 +179,9 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
 /// class)?
 ///
 /// Conservative: `true` only for shapes that cannot yield two values in
-/// any context. Calls, receives, and index expressions are excluded —
+/// any context. Calls, receives, and index expressions are excluded â€”
 /// their counts are owned by the source-count rules (tuple.rs T23 and the
-/// #926 void-position rule) — and an unresolved shape fails open.
+/// #926 void-position rule) â€” and an unresolved shape fails open.
 fn is_definitely_single_value(e: &Expr) -> bool {
     match unwrap_parens(e) {
         Expr::Lit { .. }
@@ -196,7 +196,7 @@ fn is_definitely_single_value(e: &Expr) -> bool {
         | Expr::SliceLit { .. }
         | Expr::MapLit { .. }
         | Expr::FnLit { .. } => true,
-        // NOTE: `Expr::Try` is deliberately NOT here — `f()?` on a
+        // NOTE: `Expr::Try` is deliberately NOT here â€” `f()?` on a
         // (T1, T2, error) call yields TWO values after the unwrap (the
         // accept-corpus program 10-a5-http-handler-capture pins
         // `code, body := httptest.get(...)?` as legal), so a Try is a
@@ -291,7 +291,7 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
 /// A "has no field or method" claim is only sound when the checker actually
 /// knows the type. `*atomic.int64` resolves to `Pointer(Unknown)` because
 /// `sync/atomic`'s generic type is foreign to the kind model, and `hits.add(1)`
-/// on it is perfectly good Go — so the field/method check must stay silent
+/// on it is perfectly good Go â€” so the field/method check must stay silent
 /// whenever an `Unknown` appears anywhere in the shape.
 fn is_fully_resolved(k: &OpKind) -> bool {
     // Patterns are written fully qualified on purpose. With `use OpKind::*`, an
@@ -302,7 +302,7 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         OpKind::Unknown => false,
         // An `any` is resolved as a TYPE, but its members are invisible to the
         // kind model (it may hold anything), so a member lookup on it cannot
-        // claim absence — same fail-open as `kinds_conflict`'s Interface arm.
+        // claim absence â€” same fail-open as `kinds_conflict`'s Interface arm.
         OpKind::Interface => false,
         OpKind::Int | OpKind::Float | OpKind::Bool | OpKind::Str => true,
         OpKind::Void => false,
@@ -335,7 +335,7 @@ const LOWERED_METHOD_INTRINSICS: &[&str] = &["pop"];
 
 /// Mirror an assignment-target place back into expression form so the shared
 /// index/slice checks can resolve declared lengths of the base (issue #999).
-/// `None` means "cannot mirror" (address-of bases) — every caller stays
+/// `None` means "cannot mirror" (address-of bases) â€” every caller stays
 /// fail-open exactly as before the mirror existed.
 fn place_as_expr(p: &Place) -> Option<Expr> {
     Some(match &p.kind {
@@ -359,7 +359,7 @@ fn place_as_expr(p: &Place) -> Option<Expr> {
 
 /// One function-local binding that Go requires to be read: `:=`/`let`
 /// (checked since #185), `var`/`const` (PR #475), and the elidable
-/// `for`/`select` bindings (PR #536 — only diagnosed when written).
+/// `for`/`select` bindings (PR #536 â€” only diagnosed when written).
 /// Tracked for both reads and writes.
 struct Define {
     name: String,
@@ -384,7 +384,7 @@ struct Collector<'a> {
     file_consts: HashMap<String, OpKind>,
     file_untyped_consts: HashSet<String>,
     /// Result kinds of the function whose body is currently being walked
-    /// (#577 C9/C10). Empty for a fn declared with no results — which is also
+    /// (#577 C9/C10). Empty for a fn declared with no results â€” which is also
     /// the state outside any body, so `Stmt::Return` can only ever see it
     /// while a body is open. `FnLit` bodies swap it like `fn_decl` does.
     fn_results: Vec<OpKind>,
@@ -398,7 +398,7 @@ struct Collector<'a> {
     /// naked `return` is legal (corpus 63).
     fn_results_all_named: bool,
     /// Whether the enclosing signature's last result is `error`, which the
-    /// emitter zero-fills — a short return is then lowered to the full arity
+    /// emitter zero-fills â€” a short return is then lowered to the full arity
     /// (`return v` in a `(value, error)` fn emits `return v, nil`, the E3
     /// sugar; corpus 13).
     fn_results_error_tail: bool,
@@ -407,7 +407,7 @@ struct Collector<'a> {
     /// Lexical nesting depth within `select` statements.
     select_depth: usize,
     defines: Vec<Define>,
-    /// Every identifier mentioned in the file plus every dotted type root —
+    /// Every identifier mentioned in the file plus every dotted type root â€”
     /// the import-usage set (the emitter's declared-import header needs it).
     roots: HashSet<String>,
     diags: Vec<Diagnostic>,
@@ -560,7 +560,7 @@ impl<'a> Collector<'a> {
 
     /// A read of `name`: marks the innermost checked define it resolves to.
     /// A read inside a closure resolves through the closure's scope layers
-    /// to the captured outer define — exactly what Go's check counts.
+    /// to the captured outer define â€” exactly what Go's check counts.
     fn read(&mut self, name: &str) {
         for layer in self.scopes.iter().rev() {
             if let Some(entry) = layer.get(name) {
@@ -573,7 +573,7 @@ impl<'a> Collector<'a> {
         self.mention(name);
     }
 
-    /// #778 — a TYPE NAME used where a VALUE is required.
+    /// #778 â€” a TYPE NAME used where a VALUE is required.
     ///
     /// `struct holder { n int }` followed by `x := holder` passes `hyb check`
     /// and the emitter prints the identifier verbatim, so `go build` fails with
@@ -607,7 +607,7 @@ impl<'a> Collector<'a> {
         if self.ck.fns.contains_key(name) || self.ck.fns.contains_key(head) {
             return;
         }
-        // The name must actually resolve to a declared type — a struct, an
+        // The name must actually resolve to a declared type â€” a struct, an
         // enum, a type alias, or a built-in conversion target. Anything else
         // stays fail-open.
         let is_declared_type = self.ck.structs.contains_key(name)
@@ -623,7 +623,7 @@ impl<'a> Collector<'a> {
         self.emit_e1002(
             span,
             format!(
-                "`{}` is a type, not a value — Go refuses `{} (type) is not an expression` (HYB-E1002)",
+                "`{}` is a type, not a value â€” Go refuses `{} (type) is not an expression` (HYB-E1002)",
                 name, name
             ),
             "a type name can only be used in a type position or as a conversion callee (`T(x)`)",
@@ -652,7 +652,7 @@ impl<'a> Collector<'a> {
                         self.path.clone(),
                         span,
                         format!(
-                            "`{}` is repeated on the left of one `:=` — Go refuses `{} := ...` (repeated on left side of :=) (HYB-E1002)",
+                            "`{}` is repeated on the left of one `:=` â€” Go refuses `{} := ...` (repeated on left side of :=) (HYB-E1002)",
                             name,
                             names.join(", ")
                         ),
@@ -687,7 +687,7 @@ impl<'a> Collector<'a> {
                         self.path.clone(),
                         name_span,
                         format!(
-                            "function signature declares `{name}` more than once — Go refuses `{name} redeclared in this block` (HYB-E1002)"
+                            "function signature declares `{name}` more than once â€” Go refuses `{name} redeclared in this block` (HYB-E1002)"
                         ),
                     )
                     .with_notes(vec![
@@ -709,7 +709,7 @@ impl<'a> Collector<'a> {
                         "HYB-E1002",
                         self.path.clone(),
                         f.span,
-                        "`fn main` must have no parameters — Go requires `func main` to have no arguments and no return values (HYB-E1002)".to_string(),
+                        "`fn main` must have no parameters â€” Go requires `func main` to have no arguments and no return values (HYB-E1002)".to_string(),
                     )
                     .with_notes(vec![
                         "remove parameters from `fn main()`, or read CLI arguments via `os.args()`".to_string(),
@@ -723,7 +723,7 @@ impl<'a> Collector<'a> {
                         "HYB-E1002",
                         self.path.clone(),
                         f.span,
-                        "`fn init` must have no parameters and no return values — Go requires `func init` to have no arguments and no return values (HYB-E1002)".to_string(),
+                        "`fn init` must have no parameters and no return values â€” Go requires `func init` to have no arguments and no return values (HYB-E1002)".to_string(),
                     )
                     .with_notes(vec![
                         "declare `fn init() { ... }` without parameters or return types".to_string(),
@@ -815,11 +815,11 @@ impl<'a> Collector<'a> {
             LocalKind::Define | LocalKind::Let | LocalKind::Var | LocalKind::Const
         );
         if short_define {
-            // Form 3: `x, x := 1, 2` — `x repeated on left side of :=`.
+            // Form 3: `x, x := 1, 2` â€” `x repeated on left side of :=`.
             self.check_repeated_bindings(&l.names, l.span);
             // Form 1 (the `_` half): `:=` needs at least one NEW variable.
             // `_ := 5`, `_, _ := ...` and a same-scope re-define declare
-            // none — Go's `no new variables on left side of :=`.
+            // none â€” Go's `no new variables on left side of :=`.
             let fresh = l.names.iter().any(|n| {
                 n != "_"
                     && !self
@@ -834,12 +834,12 @@ impl<'a> Collector<'a> {
                         self.path.clone(),
                         l.span,
                         format!(
-                            "`{} := ...` declares no new variable — Go refuses it (no new variables on left side of :=) (HYB-E1002)",
+                            "`{} := ...` declares no new variable â€” Go refuses it (no new variables on left side of :=) (HYB-E1002)",
                             l.names.join(", ")
                         ),
                     )
                     .with_notes(vec![
-                        "`_` is not a variable: `_ := 5` can never build — write `_ = 5` to discard the value, or bind a real name".to_string(),
+                        "`_` is not a variable: `_ := 5` can never build â€” write `_ = 5` to discard the value, or bind a real name".to_string(),
                         "a name already declared in this same scope is not new either".to_string(),
                     ]),
                 );
@@ -857,6 +857,12 @@ impl<'a> Collector<'a> {
         // multi-value binding and is handled by `infer_local_kinds`.
         if l.names.len() == 1 && l.values.len() == 1 {
             self.check_single_value_position(&l.values[0], "a binding", /*binding_position=*/ true);
+        } else if l.values.len() > 1 {
+            // `x, y := 1, void_fn()`: each parallel RHS is still its own
+            // single-value slot, and no E2002 path covers it (#1922).
+            for v in &l.values {
+                self.check_single_value_position(v, "a parallel binding", /*binding_position=*/ true);
+            }
         }
         // Binding-count guards: a declaration whose value count cannot
         // match its names fails go build with `assignment mismatch`.
@@ -884,7 +890,7 @@ impl<'a> Collector<'a> {
                 "call, receive, and index sources are checked by the source-count rules; a provably single value binds one name",
             );
         }
-        // A typed declaration must accept its initializers — Go refuses
+        // A typed declaration must accept its initializers â€” Go refuses
         // `cannot use ... as ... value in variable declaration`.
         if let Some(t) = &l.ty {
             let want = self.kind_of_ty(t, 0);
@@ -894,7 +900,7 @@ impl<'a> Collector<'a> {
                     self.emit_e1002(
                         l.span,
                         format!(
-                            "cannot initialize `{}` (type `{}`) with a value of type `{}` — Go refuses `cannot use ... as {} value in variable declaration` (HYB-E1002)",
+                            "cannot initialize `{}` (type `{}`) with a value of type `{}` â€” Go refuses `cannot use ... as {} value in variable declaration` (HYB-E1002)",
                             l.names[0],
                             want.label(),
                             vk.label(),
@@ -910,7 +916,7 @@ impl<'a> Collector<'a> {
                         self.emit_e1002(
                             l.span,
                             format!(
-                                "cannot initialize `{}` (type `{}`) with a value of type `{}` — Go refuses `cannot use ... as {} value in variable declaration` (HYB-E1002)",
+                                "cannot initialize `{}` (type `{}`) with a value of type `{}` â€” Go refuses `cannot use ... as {} value in variable declaration` (HYB-E1002)",
                                 name,
                                 want.label(),
                                 vk.label(),
@@ -1046,6 +1052,12 @@ impl<'a> Collector<'a> {
                 // checked here.
                 if targets.len() == 1 && values.len() == 1 {
                     self.check_single_value_position(&values[0], "an assignment", /*binding_position=*/ true);
+                } else if values.len() > 1 {
+                    // `x, y = 1, void_fn()` â€” the parallel form needs one value
+                    // per RHS slot just like the single form (#1922).
+                    for v in values {
+                        self.check_single_value_position(v, "a parallel assignment", /*binding_position=*/ false);
+                    }
                 }
                 self.check_assign_operands(targets, *op, values, *span);
             }
@@ -1292,7 +1304,7 @@ impl<'a> Collector<'a> {
                     self.emit_e1002(
                         p.span,
                         format!(
-                            "cannot assign to string index `{}` — strings are immutable (HYB-E1002)",
+                            "cannot assign to string index `{}` â€” strings are immutable (HYB-E1002)",
                             p.render()
                         ),
                         "strings in Go are immutable; string elements cannot be assigned or updated",
@@ -1313,7 +1325,7 @@ impl<'a> Collector<'a> {
                 self.path.clone(),
                 span,
                 format!(
-                    "cannot assign to `{}` — it is a `let` binding (immutable binding, T22) (HYB-E3006)",
+                    "cannot assign to `{}` â€” it is a `let` binding (immutable binding, T22) (HYB-E3006)",
                     name
                 ),
             )
@@ -1334,7 +1346,7 @@ impl<'a> Collector<'a> {
                 let ik = self.kind_of_expr(index);
                 // Issue #999: pass the base as an expression so the constant
                 // index-bounds rule (fixed-size arrays, constant strings) can
-                // resolve the base's declared length on assignment places —
+                // resolve the base's declared length on assignment places â€”
                 // the read path (`a[i]` in expression position) already does;
                 // the `None` here silently disabled the array-length lookup
                 // for `a[300] = 1` on a var-declared array.
@@ -1408,14 +1420,14 @@ impl<'a> Collector<'a> {
             // #682 U10: Go refuses `a.nope` where `a` is `any`
             // (`a.nope undefined (type any has no field or method nope)`).
             // The struct-field lookup below cannot catch it, because an
-            // interface is not a struct — so reject the base explicitly.
+            // interface is not a struct â€” so reject the base explicitly.
             Expr::Field { base, name, span } => {
                 self.check_pointer_method_receiver(base, name, *span);
                 if matches!(self.kind_of_expr(base), OpKind::Interface) {
                     self.emit_e1002(
                         *span,
                         format!(
-                            "cannot select field `{}` on a value of type `any` — Go refuses `{}.{} undefined (type any has no field or method {})` (HYB-E1002)",
+                            "cannot select field `{}` on a value of type `any` â€” Go refuses `{}.{} undefined (type any has no field or method {})` (HYB-E1002)",
                             name,
                             base.render(),
                             name,
@@ -1427,8 +1439,8 @@ impl<'a> Collector<'a> {
                 // #778: a Field BASE is a QUALIFIER position, not a value
                 // position, so the type-name check must not fire on it. Two
                 // legal spellings put a type name there:
-                //   * `color.red`      — an enum variant
-                //   * `greeting.build` — a method call on the type
+                //   * `color.red`      â€” an enum variant
+                //   * `greeting.build` â€” a method call on the type
                 // (and `fmt.println` is a package root, which is not a type
                 // and never reached this check anyway). A bare `x := colour`
                 // IS a value position and still rejects, pinned in the
@@ -1443,7 +1455,7 @@ impl<'a> Collector<'a> {
                 callee, args, span, ..
             } => {
                 // #778: a plain identifier CALLEE is a call position, not a
-                // value position — `holder(x)` is a legal conversion and
+                // value position â€” `holder(x)` is a legal conversion and
                 // `int(3.7)` is a legal built-in one, so the type-name check
                 // must not fire there. `read` still runs, because an unused
                 // local closure called as `f()` has been read.
@@ -1453,7 +1465,7 @@ impl<'a> Collector<'a> {
                 }
                 // `new(T)` and `make(T, len, cap)` take a TYPE as their FIRST
                 // argument, so that position is a type position and the
-                // #778 value-position check must not fire there — `new(bag)`
+                // #778 value-position check must not fire there â€” `new(bag)`
                 // and `make(map[string]int)` are both legal. The remaining
                 // `make` arguments (len, cap) ARE values and still walk.
                 let type_first_arg = matches!(
@@ -1832,7 +1844,7 @@ impl<'a> Collector<'a> {
                 self.emit_e1002(
                     span,
                     format!(
-                        "`{}` is not a generic type — cannot instantiate `{}` with type arguments (HYB-E1002)",
+                        "`{}` is not a generic type â€” cannot instantiate `{}` with type arguments (HYB-E1002)",
                         head, name
                     ),
                     "remove the `[...]` type arguments or declare type parameters on the struct",
@@ -1842,7 +1854,7 @@ impl<'a> Collector<'a> {
                 self.emit_e1002(
                     span,
                     format!(
-                        "cannot use generic struct `{}` without type arguments (expected {}) — Go refuses `cannot use generic type {} without instantiation` (HYB-E1002)",
+                        "cannot use generic struct `{}` without type arguments (expected {}) â€” Go refuses `cannot use generic type {} without instantiation` (HYB-E1002)",
                         head, n, head
                     ),
                     "instantiate the generic struct with explicit type arguments (e.g. `box[int]`)",
@@ -1992,7 +2004,7 @@ impl<'a> Collector<'a> {
                     .map(|r| self.kind_of_ty_with_subst(r, subst, depth + 1))
                     .collect(),
                 // A bare fn TYPE does not carry a call signature the kind model
-                // can trust a count from — keep the arity unknown.
+                // can trust a count from â€” keep the arity unknown.
                 None,
             ),
         }
@@ -2359,7 +2371,7 @@ impl<'a> Collector<'a> {
         );
     }
 
-    /// #682 U14/U15 — a struct literal may only name fields the struct
+    /// #682 U14/U15 â€” a struct literal may only name fields the struct
     /// declares, once each, with a value assignable to the field's type. Go
     /// refuses the emitted literal otherwise (`unknown field`, `duplicate
     /// field name`, `cannot use ... as ... value in struct literal`).
@@ -2446,7 +2458,7 @@ impl<'a> Collector<'a> {
                 self.emit_e1002(
                     f.span,
                     format!(
-                        "duplicate field `{}` in `{}` literal — Go refuses `duplicate field name {} in struct literal` (HYB-E1002)",
+                        "duplicate field `{}` in `{}` literal â€” Go refuses `duplicate field name {} in struct literal` (HYB-E1002)",
                         f.name, full_name, f.name
                     ),
                     "each field may be set at most once in one struct literal",
@@ -2460,7 +2472,7 @@ impl<'a> Collector<'a> {
                 None => self.emit_e1002(
                     f.span,
                     format!(
-                        "unknown field `{}` in `{}` literal — Go refuses `unknown field {} in struct literal of type {}` (HYB-E1002)",
+                        "unknown field `{}` in `{}` literal â€” Go refuses `unknown field {} in struct literal of type {}` (HYB-E1002)",
                         f.name, full_name, f.name, full_name
                     ),
                     "a struct literal may only name fields the struct declares",
@@ -2477,7 +2489,7 @@ impl<'a> Collector<'a> {
                         self.emit_e1002(
                             f.value.span(),
                             format!(
-                                "cannot use a value of type `{}` for field `{}` of `{}` (declared `{}`) — Go refuses `cannot use ... as {} value in struct literal` (HYB-E1002)",
+                                "cannot use a value of type `{}` for field `{}` of `{}` (declared `{}`) â€” Go refuses `cannot use ... as {} value in struct literal` (HYB-E1002)",
                                 got.label(),
                                 f.name,
                                 full_name,
@@ -2493,7 +2505,7 @@ impl<'a> Collector<'a> {
         let _ = span;
     }
 
-    /// #682 U13 — a type conversion takes exactly one argument. Go refuses
+    /// #682 U13 â€” a type conversion takes exactly one argument. Go refuses
     /// `int(1, 2)` with `too many arguments in conversion to int`.
     ///
     /// Only fires for a bare identifier that resolves to a KNOWN type. That
@@ -2510,7 +2522,7 @@ impl<'a> Collector<'a> {
             self.emit_e1002(
                 span,
                 format!(
-                    "a conversion to `{}` takes exactly 1 argument, found {} — Go refuses `too many arguments in conversion to {}` (HYB-E1002)",
+                    "a conversion to `{}` takes exactly 1 argument, found {} â€” Go refuses `too many arguments in conversion to {}` (HYB-E1002)",
                     name,
                     args.len(),
                     name
@@ -2541,7 +2553,7 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// #682 U6/U8 — the number of values a call expression produces, when it is
+    /// #682 U6/U8 â€” the number of values a call expression produces, when it is
     /// knowable and is NOT exactly one.
     ///
     /// `Some(0)` is a call that produces no value (`fn v()`), which Go refuses
@@ -2549,7 +2561,7 @@ impl<'a> Collector<'a> {
     /// multi-value call, which Go refuses in any single-value position with
     /// `multiple-value f() (value of type (T, U)) in single-value context`.
     ///
-    /// `None` means "one value, or unknown" — the caller must stay permissive.
+    /// `None` means "one value, or unknown" â€” the caller must stay permissive.
     /// This is the single place the multi-value shape is derived, so the
     /// distinction is not re-guessed at each call site.
     fn non_single_value_count(&self, e: &Expr) -> Option<usize> {
@@ -2605,8 +2617,8 @@ impl<'a> Collector<'a> {
     /// Reject a call used where exactly one value is required (#682 U6/U8).
     ///
     /// `binding_position` says whether the surrounding position is a binding or
-    /// assignment target. **HYB-E2002 (T23, SPEC-LANGUAGE §2.8) already owns
-    /// the multi-value case there** — `p := minmax(3, 9)` is E2002's own
+    /// assignment target. **HYB-E2002 (T23, SPEC-LANGUAGE Â§2.8) already owns
+    /// the multi-value case there** â€” `p := minmax(3, 9)` is E2002's own
     /// spec-cited claim, and `multi_value_tuple.rs` asserts that shape yields
     /// exactly one diagnostic. So in a binding position this rule reports only
     /// the VOID case, which E2002 does not cover, and leaves multi-value to
@@ -2617,7 +2629,7 @@ impl<'a> Collector<'a> {
             Some(0) => self.emit_e1002(
                 e.span(),
                 format!(
-                    "`{}` produces no value and cannot be used as one in {context} — Go refuses `{} (no value) used as value` (HYB-E1002)",
+                    "`{}` produces no value and cannot be used as one in {context} â€” Go refuses `{} (no value) used as value` (HYB-E1002)",
                     e.render(),
                     e.render()
                 ),
@@ -2631,7 +2643,7 @@ impl<'a> Collector<'a> {
                 self.emit_e1002(
                     e.span(),
                     format!(
-                        "`{}` produces {n} values and cannot be used as one in {context} — Go refuses `multiple-value ... in single-value context` (HYB-E1002)",
+                        "`{}` produces {n} values and cannot be used as one in {context} â€” Go refuses `multiple-value ... in single-value context` (HYB-E1002)",
                         e.render()
                     ),
                     "bind the results first (`a, b := f()`) or select the one you need",
@@ -2641,7 +2653,7 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// #682 U7 — a multi-value call as the whole argument list is legal Go when
+    /// #682 U7 â€” a multi-value call as the whole argument list is legal Go when
     /// the callee takes exactly that many parameters (`g(two())` for a 2-param
     /// `g`), so the arity rule has to accept that case rather than treat it as
     /// one argument.
@@ -2655,12 +2667,12 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// #577 C9 — a closure or `fn`-typed value whose declared parameter count
+    /// #577 C9 â€” a closure or `fn`-typed value whose declared parameter count
     /// is known (`f := fn(x int) int {...}; f(1, 2)`).
     fn report_local_arity(&mut self, name: &str, want: usize, got: usize, span: Span) {
         let msg = if got < want {
             format!(
-                "`{}` takes {} argument{} but is called with {} — Go refuses `not enough arguments in call to {}` (HYB-E1002)",
+                "`{}` takes {} argument{} but is called with {} â€” Go refuses `not enough arguments in call to {}` (HYB-E1002)",
                 name,
                 want,
                 if want == 1 { "" } else { "s" },
@@ -2669,7 +2681,7 @@ impl<'a> Collector<'a> {
             )
         } else {
             format!(
-                "`{}` takes {} argument{} but is called with {} — Go refuses `too many arguments in call to {}` (HYB-E1002)",
+                "`{}` takes {} argument{} but is called with {} â€” Go refuses `too many arguments in call to {}` (HYB-E1002)",
                 name,
                 want,
                 if want == 1 { "" } else { "s" },
@@ -2684,14 +2696,14 @@ impl<'a> Collector<'a> {
         );
     }
 
-    /// #577 C9 — a call to a top-level `fn` must pass exactly as many
+    /// #577 C9 â€” a call to a top-level `fn` must pass exactly as many
     /// arguments as the declaration has parameters. Go refuses the emitted
     /// call otherwise (`not enough arguments` / `too many arguments`), so an
     /// accepted program would not build (Row 13).
     ///
     /// Only fires for a bare identifier that resolves to a declared `fn`.
     /// A name bound to a local (including a fn-typed variable or closure) is
-    /// skipped by the caller — the local's arity is not tracked here — and a
+    /// skipped by the caller â€” the local's arity is not tracked here â€” and a
     /// builtin never reaches this point because builtins are not in `fns`.
     fn check_user_fn_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
         let head = Checker::base_named_type_str(name);
@@ -2717,7 +2729,7 @@ impl<'a> Collector<'a> {
         }
         let msg = if got < want {
             format!(
-                "`{}` takes {} argument{} but is called with {} — Go refuses `not enough arguments in call to {}` (HYB-E1002)",
+                "`{}` takes {} argument{} but is called with {} â€” Go refuses `not enough arguments in call to {}` (HYB-E1002)",
                 name,
                 want,
                 if want == 1 { "" } else { "s" },
@@ -2726,7 +2738,7 @@ impl<'a> Collector<'a> {
             )
         } else {
             format!(
-                "`{}` takes {} argument{} but is called with {} — Go refuses `too many arguments in call to {}` (HYB-E1002)",
+                "`{}` takes {} argument{} but is called with {} â€” Go refuses `too many arguments in call to {}` (HYB-E1002)",
                 name,
                 want,
                 if want == 1 { "" } else { "s" },
@@ -2741,14 +2753,14 @@ impl<'a> Collector<'a> {
         );
     }
 
-    /// #577 C9 — method calls (`x.bump(k)`) declare their receiver
+    /// #577 C9 â€” method calls (`x.bump(k)`) declare their receiver
     /// separately, so the parameter count is the declared one.
     fn check_method_arity(&mut self, bk: &OpKind, name: &str, args: &[CallArg], span: Span) {
         // #880: a generic receiver carries its type arguments (`cache[int]`,
         // `*lru_cache[k, v]`) while `method_decls` is keyed by the *base*
         // name, so the bare `struct_name` lookup missed every instantiated
         // receiver, early-returned, and exempted all of their method calls
-        // from C9 — the checker accepted calls the emitted Go cannot build
+        // from C9 â€” the checker accepted calls the emitted Go cannot build
         // (`not enough arguments in call to c.set`). Fold through
         // `struct_base_name`, exactly like the `has_method` and C10
         // (`call_result_kinds`) lookups a few lines above; `sn` is then the
@@ -2769,7 +2781,7 @@ impl<'a> Collector<'a> {
         }
         let msg = if got < want {
             format!(
-                "method `{}` on `{}` takes {} argument{} but is called with {} — Go refuses `not enough arguments in call to {}.{}` (HYB-E1002)",
+                "method `{}` on `{}` takes {} argument{} but is called with {} â€” Go refuses `not enough arguments in call to {}.{}` (HYB-E1002)",
                 name,
                 sn,
                 want,
@@ -2780,7 +2792,7 @@ impl<'a> Collector<'a> {
             )
         } else {
             format!(
-                "method `{}` on `{}` takes {} argument{} but is called with {} — Go refuses `too many arguments in call to {}.{}` (HYB-E1002)",
+                "method `{}` on `{}` takes {} argument{} but is called with {} â€” Go refuses `too many arguments in call to {}.{}` (HYB-E1002)",
                 name,
                 sn,
                 want,
@@ -2826,7 +2838,7 @@ impl<'a> Collector<'a> {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
-                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
+                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` â€” Go refuses mismatched argument types (HYB-E1002)",
                         a.value.render(),
                         got.label(),
                         want.label(),
@@ -2869,7 +2881,7 @@ impl<'a> Collector<'a> {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
-                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}.{}` — Go refuses mismatched argument types (HYB-E1002)",
+                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}.{}` â€” Go refuses mismatched argument types (HYB-E1002)",
                         a.value.render(),
                         got.label(),
                         want.label(),
@@ -2882,7 +2894,7 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// #577 C10 — a `return` must supply the enclosing function's result
+    /// #577 C10 â€” a `return` must supply the enclosing function's result
     /// list: the same number of values, each assignable to its result type.
     /// Go refuses the emitted statement otherwise (Row 13).
     fn check_return(&mut self, values: &[Expr], span: Span) {
@@ -2912,18 +2924,18 @@ impl<'a> Collector<'a> {
                     let (nr, nw) = (res.len(), want.len());
                     let msg = match (nw, nr) {
                         (0, _) => format!(
-                            "`return` supplies `{}` with {nr} result{} in a function that declares no results — Go refuses `too many return values` (HYB-E1002)",
+                            "`return` supplies `{}` with {nr} result{} in a function that declares no results â€” Go refuses `too many return values` (HYB-E1002)",
                             callee.render(),
                             if nr == 1 { "" } else { "s" }
                         ),
                         (_, 0) => format!(
-                            "`return` supplies `{}` which returns no value (void) but the signature declares {nw} result{} — Go refuses `{} (no value) used as value in return statement` (HYB-E1002)",
+                            "`return` supplies `{}` which returns no value (void) but the signature declares {nw} result{} â€” Go refuses `{} (no value) used as value in return statement` (HYB-E1002)",
                             callee.render(),
                             if nw == 1 { "" } else { "s" },
                             callee.render()
                         ),
                         _ => format!(
-                            "`return` supplies `{}` with {nr} result{} but the signature declares {nw} result{} — Go refuses `{} return values` (HYB-E1002)",
+                            "`return` supplies `{}` with {nr} result{} but the signature declares {nw} result{} â€” Go refuses `{} return values` (HYB-E1002)",
                             callee.render(),
                             if nr == 1 { "" } else { "s" },
                             if nw == 1 { "" } else { "s" },
@@ -2943,8 +2955,8 @@ impl<'a> Collector<'a> {
             let (nv, nw) = (values.len(), want.len());
             // Fewer values than results is legal in exactly two shapes, and
             // both are lowered to a full-arity Go return:
-            //   * every result is named — Go's naked `return` (corpus 63);
-            //   * the last result is `error` — the emitter's E3 zero-fill
+            //   * every result is named â€” Go's naked `return` (corpus 63);
+            //   * the last result is `error` â€” the emitter's E3 zero-fill
             //     turns `return v` into `return v, nil` (corpus 13).
             // Anything else is a genuine arity error.
             let short_ok = nv < nw
@@ -2958,15 +2970,15 @@ impl<'a> Collector<'a> {
             }
             let msg = match (nw, nv) {
                 (0, _) => format!(
-                    "`return` with {nv} value{} in a function that declares no results — Go refuses `too many return values` (HYB-E1002)",
+                    "`return` with {nv} value{} in a function that declares no results â€” Go refuses `too many return values` (HYB-E1002)",
                     if nv == 1 { "" } else { "s" }
                 ),
                 (_, 0) => format!(
-                    "`return` without a value in a function that declares {nw} result{} — Go refuses `not enough return values` (HYB-E1002)",
+                    "`return` without a value in a function that declares {nw} result{} â€” Go refuses `not enough return values` (HYB-E1002)",
                     if nw == 1 { "" } else { "s" }
                 ),
                 _ => format!(
-                    "`return` supplies {nv} value{} but the signature declares {nw} result{} — Go refuses `not enough return values` / `too many return values` (HYB-E1002)",
+                    "`return` supplies {nv} value{} but the signature declares {nw} result{} â€” Go refuses `not enough return values` / `too many return values` (HYB-E1002)",
                     if nv == 1 { "" } else { "s" },
                     if nw == 1 { "" } else { "s" }
                 ),
@@ -2996,7 +3008,7 @@ impl<'a> Collector<'a> {
         self.emit_e1002(
             span,
             format!(
-                "cannot return a value of type `{}` from a function declaring `{}` — Go refuses `cannot use ... as {} value in return statement` (HYB-E1002)",
+                "cannot return a value of type `{}` from a function declaring `{}` â€” Go refuses `cannot use ... as {} value in return statement` (HYB-E1002)",
                 got.label(),
                 want.label(),
                 want.label()
@@ -3005,7 +3017,7 @@ impl<'a> Collector<'a> {
         );
     }
 
-    /// #682 U7 — a lone multi-value call as the whole argument list is legal
+    /// #682 U7 â€” a lone multi-value call as the whole argument list is legal
     /// only when the callee takes exactly that many parameters.
     fn check_multi_value_arg_arity(&mut self, callee: &Expr, args: &[CallArg], span: Span) {
         let Some(n) = self.multi_value_arg_count(args) else {
@@ -3025,7 +3037,7 @@ impl<'a> Collector<'a> {
         self.emit_e1002(
             span,
             format!(
-                "`{}` takes {want} argument{} but its argument list expands to {n} value{} — Go refuses `{} arguments in call to {}` (HYB-E1002)",
+                "`{}` takes {want} argument{} but its argument list expands to {n} value{} â€” Go refuses `{} arguments in call to {}` (HYB-E1002)",
                 name,
                 if want == 1 { "" } else { "s" },
                 if n == 1 { "" } else { "s" },
@@ -3036,7 +3048,7 @@ impl<'a> Collector<'a> {
         );
     }
 
-    /// #682 U5 — `append`'s appended values must be assignable to the slice's
+    /// #682 U5 â€” `append`'s appended values must be assignable to the slice's
     /// element type. Go refuses `append([]int{1}, "str")` with
     /// `cannot use "str" (untyped string constant) as int value in argument to
     /// append`.
@@ -3050,7 +3062,7 @@ impl<'a> Collector<'a> {
             _ => return,
         };
         for extra in &args[1..] {
-            // `append(a, b...)` — a variadic spread passes the whole slice, so
+            // `append(a, b...)` â€” a variadic spread passes the whole slice, so
             // the argument's kind is the SLICE type, not an element. Go accepts
             // it (for a matching element type), so it must not be compared
             // against the element kind.
@@ -3065,7 +3077,7 @@ impl<'a> Collector<'a> {
                 self.emit_e1002(
                     extra.value.span(),
                     format!(
-                        "cannot append a value of type `{}` to a `{}` — Go refuses `cannot use ... as {} value in argument to append` (HYB-E1002)",
+                        "cannot append a value of type `{}` to a `{}` â€” Go refuses `cannot use ... as {} value in argument to append` (HYB-E1002)",
                         got.label(),
                         self.kind_of_expr(&first.value).label(),
                         elem.label()
@@ -3076,7 +3088,7 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// #682 U4 — `defer` requires a call, and that call's arguments must
+    /// #682 U4 â€” `defer` requires a call, and that call's arguments must
     /// satisfy the callee's arity. Go refuses `defer g()` for a 1-param `g`
     /// with `not enough arguments in call to g`.
     ///
@@ -3107,7 +3119,7 @@ impl<'a> Collector<'a> {
         self.emit_e1002(
             span,
             format!(
-                "`defer {}()` passes {got} argument{} but `{}` takes {want} — Go refuses `{} arguments in call to {}` (HYB-E1002)",
+                "`defer {}()` passes {got} argument{} but `{}` takes {want} â€” Go refuses `{} arguments in call to {}` (HYB-E1002)",
                 name,
                 if got == 1 { "" } else { "s" },
                 name,
@@ -3125,7 +3137,7 @@ impl<'a> Collector<'a> {
             self.emit_e1002(
                 cond.span(),
                 format!(
-                    "non-boolean condition `{}` (type `{}`) in `{}` statement — Go requires a `bool` condition (HYB-E1002)",
+                    "non-boolean condition `{}` (type `{}`) in `{}` statement â€” Go requires a `bool` condition (HYB-E1002)",
                     cond.render(),
                     k.label(),
                     construct
@@ -3169,7 +3181,7 @@ impl<'a> Collector<'a> {
                     self.emit_e1002(
                         span,
                         format!(
-                            "operator `!` not defined on `{}` (type `{}`) — `!` requires a `bool` operand (HYB-E1002)",
+                            "operator `!` not defined on `{}` (type `{}`) â€” `!` requires a `bool` operand (HYB-E1002)",
                             operand.render(),
                             k.label()
                         ),
@@ -3182,7 +3194,7 @@ impl<'a> Collector<'a> {
                     self.emit_e1002(
                         span,
                         format!(
-                            "operator `-` not defined on `{}` (type `{}`) — unary `-` requires a numeric operand (HYB-E1002)",
+                            "operator `-` not defined on `{}` (type `{}`) â€” unary `-` requires a numeric operand (HYB-E1002)",
                             operand.render(),
                             k.label()
                         ),
@@ -3196,7 +3208,7 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// Go spec §Address operators: operand must be addressable or a composite literal.
+    /// Go spec Â§Address operators: operand must be addressable or a composite literal.
     fn check_addr_of_operand(&mut self, operand: &Expr, span: Span) {
         if !self.is_addressable_expr(operand) {
             self.emit_e1002(
@@ -3549,7 +3561,7 @@ impl<'a> Collector<'a> {
             AssignOp::Assign => {
                 if targets.len() == 1 && values.len() == 1 {
                     // O8 slot-loan (adapted during integration): `q = &m["a"]`
-                    // on a value-typed `q` does NOT emit `q = &m["a"]` — the
+                    // on a value-typed `q` does NOT emit `q = &m["a"]` â€” the
                     // emitter lowers the loan to `q = m["a"]` plus a store-back
                     // into the slot, so a `Struct` target receiving a
                     // `Pointer` value here is legal Hybrid, not a mismatch
@@ -3571,7 +3583,7 @@ impl<'a> Collector<'a> {
                         self.emit_e1002(
                             span,
                             format!(
-                                "cannot assign a value of type `{}` to `{}` (type `{}`) — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
+                                "cannot assign a value of type `{}` to `{}` (type `{}`) â€” Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
                                 vk.label(),
                                 target.render(),
                                 tk.label(),
@@ -3582,7 +3594,7 @@ impl<'a> Collector<'a> {
                     }
                 } else if values.len() > 1 && values.len() != targets.len() {
                     // Binding-count guards: a parallel assignment is
-                    // positional — a count mismatch fails go build with
+                    // positional â€” a count mismatch fails go build with
                     // `assignment mismatch`.
                     self.emit_e1002(
                         span,
@@ -3614,7 +3626,7 @@ impl<'a> Collector<'a> {
                             self.emit_e1002(
                                 v.span(),
                                 format!(
-                                    "cannot assign a value of type `{}` to `{}` (type `{}`) in parallel assignment — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
+                                    "cannot assign a value of type `{}` to `{}` (type `{}`) in parallel assignment â€” Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
                                     vk.label(),
                                     t.render(),
                                     tpk.label(),
@@ -3625,7 +3637,7 @@ impl<'a> Collector<'a> {
                         }
                     }
                 } else if targets.len() > 1 && values.len() == 1 {
-                    // One provably-single value bound to several targets —
+                    // One provably-single value bound to several targets â€”
                     // go build refuses with `assignment mismatch`. Call,
                     // receive, and index sources are owned by the
                     // source-count rules.
@@ -3822,7 +3834,7 @@ impl<'a> Collector<'a> {
             self.emit_e1002(
                 span,
                 format!(
-                    "cannot index `{}` (type `{}`) — indexing requires a slice, array, map, or string (HYB-E1002)",
+                    "cannot index `{}` (type `{}`) â€” indexing requires a slice, array, map, or string (HYB-E1002)",
                     base_str,
                     bk.label()
                 ),
@@ -3941,7 +3953,7 @@ impl<'a> Collector<'a> {
             self.emit_e1002(
                 span,
                 format!(
-                    "cannot slice `{}` (type `{}`) — slicing requires a slice, array, or string (HYB-E1002)",
+                    "cannot slice `{}` (type `{}`) â€” slicing requires a slice, array, or string (HYB-E1002)",
                     base.render(),
                     bk.label()
                 ),
@@ -4031,7 +4043,7 @@ impl<'a> Collector<'a> {
                 self.emit_e1002(
                     span,
                     format!(
-                        "invalid slice indices: `{}` > `{}` (`{} > {}`) — Go rejects inverted constant slice bounds at compile time (HYB-E1002)",
+                        "invalid slice indices: `{}` > `{}` (`{} > {}`) â€” Go rejects inverted constant slice bounds at compile time (HYB-E1002)",
                         lo_expr.render(),
                         hi_expr.render(),
                         lo_v,
@@ -4348,7 +4360,7 @@ impl<'a> Collector<'a> {
                         self.emit_e1002(
                             span,
                             format!(
-                                "a conversion to `{}` takes exactly 1 argument, found {} — Go refuses `too many arguments in conversion to {}` (HYB-E1002)",
+                                "a conversion to `{}` takes exactly 1 argument, found {} â€” Go refuses `too many arguments in conversion to {}` (HYB-E1002)",
                                 target_str,
                                 args.len(),
                                 target_str
@@ -4380,7 +4392,7 @@ impl<'a> Collector<'a> {
                     self.emit_e1002(
                         span,
                         format!(
-                            "a conversion to `{}` takes exactly 1 argument, found {} — Go refuses `too many arguments in conversion to {}` (HYB-E1002)",
+                            "a conversion to `{}` takes exactly 1 argument, found {} â€” Go refuses `too many arguments in conversion to {}` (HYB-E1002)",
                             target_str,
                             args.len(),
                             target_str
@@ -4484,7 +4496,7 @@ impl<'a> Collector<'a> {
                 // `bump` is not a struct field (#577 C9).
                 // pr-678: normalize through `struct_base_name` so a generic
                 // instantiation (`cache[int]`, `*lru_cache[k, v]`) resolves to
-                // the base-name key `method_decls` is indexed by — the same
+                // the base-name key `method_decls` is indexed by â€” the same
                 // fold `base_named_type` applies for method receivers.
                 let has_method = self
                     .struct_base_name(&bk)
@@ -4502,7 +4514,7 @@ impl<'a> Collector<'a> {
                             "only function-typed struct fields or declared methods can be called",
                         );
                     }
-                    // `u.cb(1, 2)` where `cb fn(x int) int` — the field type
+                    // `u.cb(1, 2)` where `cb fn(x int) int` â€” the field type
                     // states the count.
                     if !has_method {
                         if let OpKind::Fn(_, Some(want)) = fk {
@@ -4547,7 +4559,7 @@ impl<'a> Collector<'a> {
                         self.emit_e1002(
                             span,
                             format!(
-                                "`{}` has no field or method `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                                "`{}` has no field or method `{}` (type `{}`) â€” Go refuses `{}.{} undefined` (HYB-E1002)",
                                 base.render(),
                                 name,
                                 bk.label(),
@@ -4602,7 +4614,7 @@ impl<'a> Collector<'a> {
             self.emit_e1002(
                 span,
                 format!(
-                    "`{}` is not a generic function — cannot instantiate `{}` with type arguments (HYB-E1002)",
+                    "`{}` is not a generic function â€” cannot instantiate `{}` with type arguments (HYB-E1002)",
                     base_key, raw_callee
                 ),
                 "remove the `[...]` type arguments or declare type parameters on the function",
@@ -4654,7 +4666,7 @@ impl<'a> Collector<'a> {
                     self.emit_e1002(
                         span,
                         format!(
-                            "cannot select pointer method `{}` on `{}` (non-addressable `{}` value) — Go refuses taking the address of `{}` (HYB-E1002)",
+                            "cannot select pointer method `{}` on `{}` (non-addressable `{}` value) â€” Go refuses taking the address of `{}` (HYB-E1002)",
                             name,
                             base.render(),
                             sn,
@@ -4712,7 +4724,7 @@ impl<'a> Collector<'a> {
                     self.emit_e1002(
                         span,
                         format!(
-                            "cannot call `.pop()` on non-addressable slice expression `{}` — `.pop()` mutates the slice header in place (HYB-E1002)",
+                            "cannot call `.pop()` on non-addressable slice expression `{}` â€” `.pop()` mutates the slice header in place (HYB-E1002)",
                             base.render()
                         ),
                         "bind the slice to a local variable first (`s := ...; x := s.pop()`)",
@@ -4729,7 +4741,7 @@ impl<'a> Collector<'a> {
                 self.emit_e1002(
                     span,
                     format!(
-                        "cannot call `.pop()` on `{}` (type `{}`) — `.pop()` is only defined on slices `[]T` (HYB-E1002)",
+                        "cannot call `.pop()` on `{}` (type `{}`) â€” `.pop()` is only defined on slices `[]T` (HYB-E1002)",
                         base.render(),
                         bk.label()
                     ),
@@ -4739,7 +4751,7 @@ impl<'a> Collector<'a> {
             _ => {}
         }
     }
-    /// Family E1–E5 (#425): extend `HYB-E2005` (`BUILTIN-ARGS`) from literals
+    /// Family E1â€“E5 (#425): extend `HYB-E2005` (`BUILTIN-ARGS`) from literals
     /// (`builtins.rs`) to resolved binding shapes.
     fn check_builtin_operand_kinds(&mut self, name: &str, args: &[CallArg], span: Span) {
         match name {
@@ -4800,7 +4812,7 @@ impl<'a> Collector<'a> {
                             op.render(),
                             ak.label()
                         ),
-                        "`cap` accepts a slice, array, or channel — maps and strings have no capacity",
+                        "`cap` accepts a slice, array, or channel â€” maps and strings have no capacity",
                     );
                 }
             }
@@ -4979,7 +4991,7 @@ impl<'a> Collector<'a> {
 
     /// Form 2: a declared Go import whose root is never mentioned anywhere
     /// in the file is carried into the emitted header and never builds.
-    /// `rust/` imports are skipped — the emitter never writes them.
+    /// `rust/` imports are skipped â€” the emitter never writes them.
     fn check_imports(&mut self, file: &File) {
         for d in &file.decls {
             let Decl::Import { path, span } = d else {
@@ -4996,12 +5008,12 @@ impl<'a> Collector<'a> {
                         self.path.clone(),
                         *span,
                         format!(
-                            "import `{}` is never used — the emitted Go carries it into the header and Go refuses `imported and not used` (HYB-E1002)",
+                            "import `{}` is never used â€” the emitted Go carries it into the header and Go refuses `imported and not used` (HYB-E1002)",
                             root
                         ),
                     )
                     .with_notes(vec![
-                        "drop the import, or use it — any mention of the package root counts"
+                        "drop the import, or use it â€” any mention of the package root counts"
                             .to_string(),
                     ]),
                 );
@@ -5023,7 +5035,7 @@ impl<'a> Collector<'a> {
                         self.path.clone(),
                         d.span,
                         format!(
-                            "`{}` is declared and never used — Go refuses to build the emitted `{}` (declared and not used) (HYB-E1002)",
+                            "`{}` is declared and never used â€” Go refuses to build the emitted `{}` (declared and not used) (HYB-E1002)",
                             d.name, emitted
                         ),
                     )
