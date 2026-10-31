@@ -105,3 +105,64 @@ fn valid_byte_and_rune_slice_conversions_accept() {
     let r = check(src);
     assert_eq!(r.verdict, Verdict::Accept, "expected accept, got diagnostics: {:?}", r.diagnostics);
 }
+
+
+// Tests for #1838: check_call_operands slice conversion element compatibility
+#[test]
+fn slice_conversion_incompatible_element_type_rejects_e1002() {
+    let src = "fn main() {\n    s := []string{\"alpha\", \"beta\"}\n    _ = []int(s)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+    assert!(r.diagnostics.iter().any(|d| d.message.contains("incompatible element types `string` and `int`")));
+}
+
+#[test]
+fn slice_conversion_int_to_byte_slice_rejects_e1002() {
+    let src = "fn main() {\n    s := []int{1, 2}\n    _ = []byte(s)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+// Tests for #1840: conversion_kinds_conflict recursive container compatibility
+#[test]
+fn named_slice_conversion_incompatible_element_rejects_e1002() {
+    let src = "type MySlice []string\nfn main() {\n    s := []int{1, 2, 3}\n    _ = MySlice(s)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn named_map_conversion_incompatible_key_val_rejects_e1002() {
+    let src = "type MyMap map[string]int\nfn main() {\n    var m map[int]string\n    _ = MyMap(m)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn named_chan_conversion_incompatible_elem_rejects_e1002() {
+    let src = "type MyChan chan string\nfn main() {\n    var c chan int\n    _ = MyChan(c)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+// Tests for #1839: copy(dst, str) accepts only byte slices
+#[test]
+fn copy_string_into_int_slice_rejects_e1002() {
+    let src = "fn main() {\n    var dst []int = []int{1, 2, 3, 4}\n    var src string = \"test\"\n    copy(dst, src)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+    assert!(r.diagnostics.iter().any(|d| d.message.contains("cannot copy string into slice with element type `int`")));
+}
+
+#[test]
+fn copy_string_into_byte_slice_accepts() {
+    let src = "fn main() {\n    var dst []byte = []byte{1, 2, 3, 4}\n    var src string = \"test\"\n    copy(dst, src)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Accept, "expected accept, got: {:?}", r.diagnostics);
+}
