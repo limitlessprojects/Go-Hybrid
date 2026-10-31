@@ -1082,6 +1082,30 @@ impl<'a> Collector<'a> {
     /// A read inside a closure resolves through the closure's scope layers
     /// to the captured outer define — exactly what Go's check counts.
     fn read(&mut self, name: &str) {
+        if let Some((head, rest)) = name.split_once('[') {
+            self.read(head);
+            if let Some(inside) = rest.strip_suffix(']') {
+                if let Ok(toks) = hy_syntax::lex("<callee>", inside) {
+                    let mut prev_is_dot = false;
+                    for t in &toks {
+                        match &t.tok {
+                            hy_syntax::Tok::Punct(".") => prev_is_dot = true,
+                            hy_syntax::Tok::Ident(id) => {
+                                if !prev_is_dot {
+                                    self.read(id);
+                                }
+                                prev_is_dot = false;
+                            }
+                            hy_syntax::Tok::Punct(_) | hy_syntax::Tok::Kw(_) => {
+                                prev_is_dot = false;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            return;
+        }
         for layer in self.scopes.iter().rev() {
             if let Some(entry) = layer.get(name) {
                 if let Some(id) = entry {

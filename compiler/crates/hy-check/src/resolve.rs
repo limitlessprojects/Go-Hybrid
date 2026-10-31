@@ -96,26 +96,38 @@ impl<'a> Scan<'a> {
             return;
         }
         // `parser.rs` (`fold_type_args`) folds bracketed type arguments (and
-        // single-ident index expressions before `(`) into `Expr::Ident`
+        // single-ident/nested index expressions before `(`) into `Expr::Ident`
         // (`id[int](42)` -> `Ident("id[int]")`, `m[k](42)` -> `Ident("m[k]")`).
         if let Some((head, rest)) = name.split_once('[') {
             let head_ok = self.allowed.contains(head);
             if head_ok {
                 if !self.file_decls.contains(head) {
                     if let Some(inside) = rest.strip_suffix(']') {
-                        let trimmed = inside.trim();
-                        if !trimmed.is_empty()
-                            && trimmed
-                                .chars()
-                                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-                            && !trimmed.chars().next().unwrap().is_ascii_digit()
-                        {
-                            self.ident(trimmed, span);
+                        if let Ok(toks) = hy_syntax::lex(self.path, inside) {
+                            let mut prev_is_dot = false;
+                            for t in &toks {
+                                match &t.tok {
+                                    hy_syntax::Tok::Punct(".") => prev_is_dot = true,
+                                    hy_syntax::Tok::Ident(id) => {
+                                        if !prev_is_dot {
+                                            self.ident(id, span);
+                                        }
+                                        prev_is_dot = false;
+                                    }
+                                    hy_syntax::Tok::Punct(_) | hy_syntax::Tok::Kw(_) => {
+                                        prev_is_dot = false;
+                                    }
+                                    _ => {}
+                                }
+                            }
                         }
                     }
                 }
                 return;
             }
+        }
+        if self.allowed.contains(name) {
+            return;
         }
         let msg = format!(
             "`{}` is not available here — nothing declares this name in the file or this scope \
@@ -389,8 +401,7 @@ impl<'a> Scan<'a> {
                 }
             }
             Expr::Field { base, name, span } => {
-                let unwrapped = crate::model::unwrap_parens(base);
-                if let Expr::Ident { name: root, .. } = unwrapped {
+                if let Expr::Ident { name: root, .. } = base.as_ref() {
                     if !self.local_decls.contains(root) {
                         if self.uncurated_imports.contains(root)
                             || crate::foreign::is_uncurated_go_stdlib_root(root)
