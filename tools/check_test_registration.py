@@ -22,6 +22,7 @@ Only explicit single-line Python invocations count. Comments, echoed text,
 step names, interpreter flags, chained later commands, and paths passed as
 arguments to other scripts register nothing. This is not a general
 shell/YAML interpreter.
+Background commands do not count: their failures need not fail the shell.
 
 Usage: python3 tools/check_test_registration.py [--workflow PATH] [--root DIR]
 Exit:  0 = every test file is registered; 1 = unregistered file(s); 2 = guard misuse.
@@ -69,6 +70,11 @@ def python_commands(workflow_text):
             # -p flag must never become another unittest discovery pattern.
             end = next((i for i, token in enumerate(tokens)
                         if token and all(c in ";&|<>()" for c in token)), len(tokens))
+            # `cmd &` returns success without propagating cmd's exit status.
+            # A later `wait` needs shell dataflow to validate, outside this
+            # guard's explicit foreground-invocation contract. Fail closed.
+            if end < len(tokens) and tokens[end] == "&":
+                continue
             arguments = tokens[1:end]
             while arguments:
                 option = arguments[0]

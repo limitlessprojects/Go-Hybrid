@@ -12,6 +12,8 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,6 +26,30 @@ SPEC.loader.exec_module(guard)
 
 
 class PatternExtractionTests(unittest.TestCase):
+    def test_background_discovery_does_not_register_a_gating_test(self):
+        for suffix in (" &", "&", " & wait", " & echo done"):
+            with self.subTest(suffix=suffix):
+                self.assertEqual(guard.registered_patterns(
+                    "python3 -m unittest discover -s tools -p test_disabled.py"
+                    + suffix), [])
+
+    def test_background_direct_script_is_not_registered(self):
+        for command in (
+            "python3 tests/test_disabled.py &",
+            "run: python3 tests/test_disabled.py & wait",
+            'run: "python3 tests/test_disabled.py & wait"',
+        ):
+            with self.subTest(command=command):
+                self.assertFalse(guard.is_registered_direct(
+                    "tests/test_disabled.py", command))
+
+    def test_foreground_first_command_keeps_its_registration(self):
+        for suffix in (" && echo done", "; echo done &", " # &"):
+            with self.subTest(suffix=suffix):
+                self.assertEqual(guard.registered_patterns(
+                    "python3 -m unittest discover -s tools -p test_live.py"
+                    + suffix), ["test_live.py"])
+
     def test_quoted_and_bare_patterns_are_both_read(self):
         workflow = (
             "          python3 -m unittest discover -s tools/fuzz -p 'test_hyfuzz.py'\n"
@@ -105,7 +131,44 @@ class PatternExtractionTests(unittest.TestCase):
             ["test_live.py"])
 
 
+def find_working_bash():
+    candidate = shutil.which("bash")
+    if candidate:
+        try:
+            r = subprocess.run([candidate, "-c", "exit 0"], capture_output=True, timeout=2)
+            if r.returncode == 0:
+                return candidate
+        except Exception:
+            pass
+    for path in (r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files\Git\usr\bin\bash.exe"):
+        if os.path.exists(path):
+            return path
+    return None
+
+
+BASH_BIN = find_working_bash()
+
+
 class RegistrationTests(unittest.TestCase):
+    @unittest.skipUnless(BASH_BIN, "requires bash for shell exit-status reproduction")
+    def test_background_failure_can_pass_shell_but_must_fail_registration(self):
+        for direct in (False, True):
+            with self.subTest(direct=direct):
+                rel = "tests/test_broken.py" if direct else "tools/test_broken.py"
+                entry = rel if direct else "-m unittest discover -s tools -p test_broken.py"
+                command = shlex.quote(sys.executable) + " " + entry + " & wait"
+                root, text = self.build(command, [rel])
+                (root / rel).write_text(
+                    "import unittest\n"
+                    "class Broken(unittest.TestCase):\n"
+                    "    def test_failure(self): self.fail('background failure')\n"
+                    "if __name__ == '__main__': unittest.main()\n", encoding="utf-8")
+                result = subprocess.run([BASH_BIN, "-e", "-c", command],
+                                        cwd=root, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("FAILED", result.stderr)
+                self.assertEqual([path for path, _ in guard.unregistered(root, text)], [rel])
+
     def build(self, workflow, suites):
         """Write a temp root with `suites` and return (root, workflow_text)."""
         temporary = tempfile.TemporaryDirectory(prefix="hybrid-registration-")
