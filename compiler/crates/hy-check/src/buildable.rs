@@ -2386,6 +2386,23 @@ impl<'a> Collector<'a> {
         );
     }
 
+    /// Validate a function value's known parameter count, including tuple
+    /// forwarding, independently of the syntax used to obtain the callee.
+    fn check_function_value_arity(
+        &mut self,
+        name: &str,
+        want: usize,
+        args: &[CallArg],
+        span: Span,
+    ) {
+        // A lone multi-result call supplies one argument per result, just as
+        // for declared functions. Counting syntax nodes rejects valid f(pair()).
+        let got = self.multi_value_arg_count(args).unwrap_or(args.len());
+        if want != got {
+            self.report_local_arity(name, want, got, span);
+        }
+    }
+
     /// #577 C9 — a call to a top-level `fn` must pass exactly as many
     /// arguments as the declaration has parameters. Go refuses the emitted
     /// call otherwise (`not enough arguments` / `too many arguments`), so an
@@ -3888,8 +3905,8 @@ impl<'a> Collector<'a> {
                         // A local bound to a closure or fn-typed value carries
                         // its declared parameter count, so the call's arity is
                         // checkable (#577 C9).
-                        OpKind::Fn(_, Some(want)) if want != args.len() => {
-                            self.report_local_arity(name, want, args.len(), span)
+                        OpKind::Fn(_, Some(want)) => {
+                            self.check_function_value_arity(name, want, args, span)
                         }
                         OpKind::Fn(..) | OpKind::Unknown => {}
                         _ => self.emit_e1002(
@@ -3966,9 +3983,7 @@ impl<'a> Collector<'a> {
                     // states the count.
                     if !has_method {
                         if let OpKind::Fn(_, Some(want)) = fk {
-                            if want != args.len() {
-                                self.report_local_arity(&callee.render(), want, args.len(), span);
-                            }
+                            self.check_function_value_arity(&callee.render(), want, args, span);
                         }
                     }
                 } else if name == "pop" {
@@ -4025,6 +4040,9 @@ impl<'a> Collector<'a> {
             }
             _ => {
                 let ck = self.kind_of_expr(bare);
+                if let OpKind::Fn(_, Some(want)) = &ck {
+                    self.check_function_value_arity(&callee.render(), *want, args, span);
+                }
                 if !matches!(ck, OpKind::Unknown | OpKind::Fn(..)) {
                     self.emit_e1002(
                         span,
