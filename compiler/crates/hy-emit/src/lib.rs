@@ -939,6 +939,56 @@ impl Emitter {
             || body.contains(".contains(")
             || body.contains(".insert(");
         let needs_pop = body.contains("hy_pop(");
+        // The prelude declares `some`, `option`, `set` and `hy_pop` at the top
+        // level of the emitted package (#777). A user declaration of the same
+        // name lands in the same package, and Go rejects the pair —
+        // `some redeclared in this block`, `cannot use generic type option[v
+        // any] without instantiation`. `hyb check` passes either way, so this
+        // is an accepted program that emits unbuildable Go (rule BUILDABLE).
+        // Fail loudly here instead of printing a file that cannot compile; a
+        // check-time diagnostic would be nicer, but this at least cannot be
+        // silently wrong.
+        //
+        // The trigger is `needs_option` / `needs_set` / `needs_pop` — i.e.
+        // "the prelude is about to be emitted", which is the only case in
+        // which the collision can occur. It is deliberately NOT narrowed to
+        // `body.contains("option[")`: `needs_option` also fires on a bare
+        // `some(` call, and that is not a false positive here. A program with
+        // its own `fn some` that *calls* it still gets the option prelude
+        // injected (the injection predicate cannot tell the two `some`s
+        // apart), so it still collides — I verified that shape emits
+        // `some redeclared in this block` today. Narrowing the trigger would
+        // have hidden that case rather than fixed it.
+        //
+        // The clash test runs before the prelude is pushed, so the prelude's
+        // own `func some[v any]` / `type option[v any]` are not yet in `body`
+        // and cannot be mistaken for a user declaration.
+        let prelude_clash = |n: &str| {
+            body.contains(&format!("func {}(", n)) || body.contains(&format!("type {} ", n))
+        };
+        let mut clash: Option<&str> = None;
+        if needs_option {
+            for &n in &["some", "option"] {
+                if prelude_clash(n) {
+                    clash = Some(n);
+                    break;
+                }
+            }
+        }
+        if clash.is_none() && needs_set && prelude_clash("set") {
+            clash = Some("set");
+        }
+        if clash.is_none() && needs_pop && prelude_clash("hy_pop") {
+            clash = Some("hy_pop");
+        }
+        if let Some(n) = clash {
+            return Err(EmitError::unsupported(format!(
+                "user declaration of `{}` collides with the injected Hybrid prelude \
+                 (the prelude declares `{}` at the top level of the emitted package, and \
+                 Go rejects the duplicate) — rename it: #777",
+                n, n
+            )));
+        }
         if needs_option || needs_set || needs_pop {
             out.push('\n');
             if needs_option {

@@ -1253,6 +1253,107 @@ fn set_insert_uses_prelude() {
     assert!(go.contains("return seen.insert(3)"), ":\n{}", go);
 }
 
+// #777: a user declaration that would collide with the injected Hybrid
+// prelude (option / set / hy_pop / their `some`) makes the program accepted
+// by `hyb check` and unbuildable by Go. Fail loudly at emit time so the
+// user gets a precise message instead of a `redeclared in this block` from
+// the Go compiler. The three "collides" cases are each pinned; the
+// "prelude is fine" cases (an `option[T]` constructor or a `set[T]` literal,
+// and a program that uses neither) pin that the guard does not over-reject.
+
+#[test]
+fn user_fn_some_rejected_when_option_prelude_injected() {
+    // A `fn some` declaration collides with the prelude's generic `some` as
+    // soon as the prelude is emitted. Reproduction is the original #777 a1.
+    let msg = emit_err(
+        "fn some(x int) int {\n    return x + 1\n}\n\nfn has(o option[int]) bool {\n    return o.is_some()\n}\n\nfn main() {\n    n := some(1)\n    fmt.println(\"{n}\")\n}\n",
+    );
+    assert!(
+        msg.contains("user declaration of `some`") && msg.contains("#777"),
+        "expected clash on `some` (#777), got: {}",
+        msg
+    );
+}
+
+#[test]
+fn user_type_option_rejected_when_option_prelude_injected() {
+    // Reproduction is the original #777 a3. A user `struct option` lands in
+    // the same package as the prelude's `type option[v any] struct`, and Go
+    // rejects the redeclaration (and the generic `option[v any]` then cannot
+    // be used without instantiation, since it is no longer the type
+    // intended for `option[int]`).
+    let msg = emit_err(
+        "struct option { n int }\n\nfn has(o option[int]) bool {\n    return o.is_some()\n}\n\nfn main() {\n    v := option{n: 1}\n    fmt.println(\"{v.n}\")\n}\n",
+    );
+    assert!(
+        msg.contains("user declaration of `option`") && msg.contains("#777"),
+        "expected clash on `option` (#777), got: {}",
+        msg
+    );
+}
+
+#[test]
+fn user_fn_some_rejected_when_calling_user_some_even_without_option_type() {
+    // A subtler path I found while testing: the option prelude is injected
+    // not only when the program references `option[T]`, but also when it
+    // contains a bare `some(` call (that is the existing `needs_option`
+    // predicate). So a program with its own `fn some` that *calls* it — with
+    // no `option[T]` anywhere in sight — still gets the prelude, still
+    // collides, and today emits `some redeclared in this block`. The guard
+    // fires on `needs_option` exactly because the prelude is about to be
+    // emitted; narrowing the trigger to `body.contains("option[")` would
+    // hide this case rather than fix it.
+    let msg = emit_err(
+        "fn some(x int) int {\n    return x + 1\n}\n\nfn main() {\n    n := some(1)\n    fmt.println(\"{n}\")\n}\n",
+    );
+    assert!(
+        msg.contains("user declaration of `some`") && msg.contains("#777"),
+        "expected clash on `some` even without `option[T]` (#777), got: {}",
+        msg
+    );
+}
+
+#[test]
+fn option_constructor_still_works_under_prelude_guard() {
+    // Pin that the guard does not over-reject: a program that legitimately
+    // uses the `option` prelude (no user `some` or `option` declaration)
+    // must still emit and run.
+    let go = emit("fn main() {\n    o := some(1)\n    fmt.println(\"{o.is_some()}\")\n}\n");
+    assert!(
+        go.contains("func some[v any](val v) option[v]"),
+        "option prelude:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("collides") && !go.contains("#777"),
+        "guard should not fire on a clean program:\n{}",
+        go
+    );
+}
+
+#[test]
+fn user_fn_some_is_rejected_even_when_only_declared() {
+    // Pin the current reach of the guard, and the reason it is this wide.
+    // `needs_option` is `body.contains("option[") || body.contains("some(")`,
+    // and a *declaration* of `fn some` is itself a `func some(` in the emitted
+    // text — so the option prelude is injected for a program that never
+    // mentions `option[T]` and never calls `some`, which then collides with
+    // the user's own function. That means `fn some` is unusable today, and
+    // this test records that rather than pretending it works.
+    //
+    // The real fix for that half is an AST-level "does this program use
+    // `option`" signal instead of the substring test; this guard only stops
+    // the collision from reaching the Go compiler as a redeclaration error.
+    let msg = emit_err(
+        "fn some(x int) int {\n    return x + 1\n}\n\nfn main() {\n    fmt.println(\"ok\")\n}\n",
+    );
+    assert!(
+        msg.contains("user declaration of `some`") && msg.contains("#777"),
+        "expected clash on `some` (#777), got: {}",
+        msg
+    );
+}
+
 #[test]
 fn slice_pop_uses_prelude_helper() {
     let go =
