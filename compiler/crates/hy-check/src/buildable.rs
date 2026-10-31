@@ -3021,6 +3021,31 @@ impl<'a> Collector<'a> {
             // are rejected here under HYB-E1002 (rule `BUILDABLE`).
             BinOp::Eq | BinOp::Ne => {
                 let op_str = if matches!(op, BinOp::Eq) { "==" } else { "!=" };
+                // #1567: Go has no nil for scalars, strings, structs or arrays.
+                let other = match (Checker::is_nil_literal(lhs), Checker::is_nil_literal(rhs)) {
+                    (true, false) => &rk,
+                    (false, true) => &lk,
+                    _ => &OpKind::Unknown,
+                };
+                if matches!(
+                    other,
+                    OpKind::Int
+                        | OpKind::Float
+                        | OpKind::Bool
+                        | OpKind::Str
+                        | OpKind::Struct(_)
+                        | OpKind::Array(_)
+                ) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid operation `{}`: mismatched types `{}` and untyped nil (HYB-E1002)",
+                            span_expr_label(lhs, op_str, rhs),
+                            other.label()
+                        ),
+                        "only pointers, slices, maps, channels, functions and interfaces compare to `nil`",
+                    );
+                }
                 if !Checker::is_nil_literal(lhs)
                     && !Checker::is_nil_literal(rhs)
                     && equality_kinds_conflict(&lk, &rk)
