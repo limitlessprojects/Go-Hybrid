@@ -939,10 +939,11 @@ impl<'a> Checker<'a> {
             .iter_mut()
             .chain(iter_st.scopes.iter_mut().flat_map(|s| s.iter_mut()))
         {
-            if b.moved.is_some() {
+            if let Some(mv) = &b.moved {
                 let root = resolve_alias(&popped_st, name);
                 if pre_moved.contains(name)
                     || reported_backedge.contains(&root)
+                    || !Self::move_span_can_reach_backedge(loop_body, mv.span)
                 {
                     b.moved = None;
                 } else {
