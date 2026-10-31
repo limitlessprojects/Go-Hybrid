@@ -386,7 +386,7 @@ def main() -> int:
             if not p.is_file() or p.read_text(encoding="utf-8") != content:
                 drift.append(rel)
         else:
-            p.write_text(content, encoding="utf-8")
+            p.write_text(content, encoding="utf-8", newline="\n")
             print(f"wrote {rel}")
     if check:
         if drift:
