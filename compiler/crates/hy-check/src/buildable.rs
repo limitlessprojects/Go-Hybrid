@@ -279,6 +279,25 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
 /// `sync/atomic`'s generic type is foreign to the kind model, and `hits.add(1)`
 /// on it is perfectly good Go — so the field/method check must stay silent
 /// whenever an `Unknown` appears anywhere in the shape.
+/// Arity of a prelude method on the builtin `set[T]` / `option[T]` types, which
+/// live in the emitted prelude rather than in `method_decls`. Returns `None`
+/// for an unknown name, so a typo can be reported by the caller.
+fn prelude_method_arity(base: &str, name: &str) -> Option<usize> {
+    match base {
+        "set" => match name {
+            "insert" | "remove" | "contains" => Some(1),
+            "len" => Some(0),
+            _ => None,
+        },
+        "option" => match name {
+            "unwrap" | "is_some" | "is_none" => Some(0),
+            "or" => Some(1),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn is_fully_resolved(k: &OpKind) -> bool {
     // Patterns are written fully qualified on purpose. With `use OpKind::*`, an
     // arm naming a variant that does NOT exist silently becomes an irrefutable
@@ -1669,7 +1688,7 @@ impl<'a> Collector<'a> {
             TypeExpr::Chan { elem, .. } => {
                 OpKind::Chan(Box::new(self.kind_of_ty(elem, depth + 1)))
             }
-            TypeExpr::Option { .. } => OpKind::Unknown,
+            TypeExpr::Option { .. } => OpKind::Struct(Some("option".to_string())),
             TypeExpr::Fn { params, results, .. } => OpKind::Fn(
                 results
                     .iter()
@@ -1691,6 +1710,14 @@ impl<'a> Collector<'a> {
         }
         if let Some(target) = self.ck.type_aliases.get(base) {
             return self.kind_of_ty(target, depth + 1);
+        }
+        // Builtin prelude generics: `set[T]` and `option[T]` lower to a named
+        // Go type with real methods, so classify them as named types. Without
+        // this they resolved to `Unknown` and every member lookup failed open,
+        // so `s.bogus()` / `o.bogus()` passed `hyb check` and then `go build`
+        // refused the call.
+        if base == "set" || base == "option" {
+            return OpKind::Struct(Some(name.to_string()));
         }
         match name {
             // #682 U9-U12: `any` is a resolved interface type, not an
@@ -1765,7 +1792,7 @@ impl<'a> Collector<'a> {
             TypeExpr::Chan { elem, .. } => {
                 OpKind::Chan(Box::new(self.kind_of_ty_with_subst(elem, subst, depth + 1)))
             }
-            TypeExpr::Option { .. } => OpKind::Unknown,
+            TypeExpr::Option { .. } => OpKind::Struct(Some("option".to_string())),
             TypeExpr::Fn { results, .. } => OpKind::Fn(
                 results
                     .iter()
@@ -1854,6 +1881,12 @@ impl<'a> Collector<'a> {
                 }
                 if name == "true" || name == "false" {
                     return OpKind::Bool;
+                }
+                // The bare `none` constructor has the option type, so member
+                // lookup on a `none`-initialised binding resolves the same as
+                // on `some(...)`.
+                if name == "none" {
+                    return OpKind::Struct(Some("option".to_string()));
                 }
                 let head = Checker::base_named_type_str(name);
                 if let Some(f) = self.ck.fns.get(name.as_str()).or_else(|| self.ck.fns.get(head)) {
@@ -2039,6 +2072,9 @@ impl<'a> Collector<'a> {
                     "new" => return Some(vec![OpKind::Pointer(Box::new(OpKind::Unknown))]),
                     "delete" | "close" | "clear" | "panic" => return Some(Vec::new()),
                     "recover" => return Some(vec![OpKind::Interface]),
+                    "some" => {
+                        return Some(vec![OpKind::Struct(Some("option".to_string()))])
+                    }
                     _ => {}
                 }
                 let conv = self.kind_of_named(name, 0);
@@ -2204,6 +2240,15 @@ impl<'a> Collector<'a> {
     /// resolves to `Unknown`, so builtins keep their own arity rules
     /// (`builtins.rs`, `HYB-E2005`) and user functions keep `check_user_fn_arity`.
     fn check_conversion_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
+        // A declared function wins over a same-named prelude type: `set(dst, v)`
+        // calls a user `fn set`, it is not a conversion to the `set[T]` type.
+        // The `set`/`option` prelude types are now resolved named types, so
+        // without this guard every multi-arg call to a user `fn set`/`fn option`
+        // was misread as an over-arity conversion.
+        let head = Checker::base_named_type_str(name);
+        if self.ck.fns.contains_key(name) || self.ck.fns.contains_key(head) {
+            return;
+        }
         let k = self.kind_of_named(name, 0);
         if matches!(k, OpKind::Unknown) {
             return;
@@ -3946,9 +3991,14 @@ impl<'a> Collector<'a> {
                 // instantiation (`cache[int]`, `*lru_cache[k, v]`) resolves to
                 // the base-name key `method_decls` is indexed by — the same
                 // fold `base_named_type` applies for method receivers.
-                let has_method = self
-                    .struct_base_name(&bk)
-                    .is_some_and(|sn| self.ck.method_decls.contains_key(&(sn, name.clone())));
+                let method_base = self.struct_base_name(&bk);
+                let declared_method = method_base
+                    .as_ref()
+                    .is_some_and(|sn| self.ck.method_decls.contains_key(&(sn.clone(), name.clone())));
+                let prelude_arity = method_base
+                    .as_deref()
+                    .and_then(|sn| prelude_method_arity(sn, name));
+                let has_method = declared_method || prelude_arity.is_some();
                 if let Some(fk) = self.struct_field_kind(&bk, name) {
                     if !has_method && !matches!(fk, OpKind::Unknown | OpKind::Fn(..)) {
                         self.emit_e1002(
@@ -4018,9 +4068,13 @@ impl<'a> Collector<'a> {
                         );
                     }
                 }
-                if has_method {
+                if declared_method {
                     self.check_method_arity(&bk, name, args, span);
                     self.check_method_arg_types(&bk, name, args);
+                } else if let Some(want) = prelude_arity {
+                    if want != args.len() {
+                        self.report_local_arity(&callee.render(), want, args.len(), span);
+                    }
                 }
             }
             _ => {
