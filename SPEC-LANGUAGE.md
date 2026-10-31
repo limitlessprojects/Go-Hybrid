@@ -1361,6 +1361,82 @@ triple found (program 10,
 `hits++` → `mux.handle`), example 06 yields 0 triples. 1/127 ≈ 0.8%, well
 under the 25% adoption-cost tripwire. D5 adoption cost accepted.
 
+### 8.6 Structured Task Scopes & Affine Cancellation Tokens (Wildcard #1669)
+
+**C10 — `scope { ... }` blocks provide lexically-bounded structured concurrency.**
+Every `task` spawned inside a `scope` yields an affine `JoinHandle[T]` in state
+`UNJOINED`. A `scope` block cannot exit until all child handles are joined,
+cancelled, or drained. This transforms GUARANTEES.md Row 12 from "no claim about
+cancellation semantics" into a provable compile-time invariant: **Zero Orphan
+Tasks, Zero Goroutine Leaks, Complete Structured Concurrency** in the checked subset.
+
+**Surface syntax:**
+
+```hy
+scope {
+    h1 := task worker_a()      // spawns task, binds affine handle h1 in state UNJOINED
+    h2 := task worker_b()      // spawns task, binds affine handle h2 in state UNJOINED
+    // ... do work ...
+    join(move h1)              // consumes h1, transitions to state CONSUMED
+    cancel(move h2)            // consumes h2, transitions to state CONSUMED
+}                              // scope exits: all handles must be CONSUMED
+```
+
+**Affine handle lifecycle:**
+
+| State | Transition | Trigger |
+|---|---|---|
+| `UNJOINED` | → `CONSUMED` | `join(move h)`, `cancel(move h)`, or `drain(move h)` |
+| `CONSUMED` | (terminal) | Any further use triggers `HYB-E3502` |
+
+**Diagnostics:**
+
+| Code | Condition | Meaning |
+|---|---|---|
+| `HYB-E3501` | Scope exits with any handle in state `UNJOINED` | Unjoined task escape — goroutine leak |
+| `HYB-E3502` | Consuming an already-`CONSUMED` handle | Use-after-join of affine handle |
+| `HYB-E3503` | Spawning inside foreign Go callback without `managed(..., "foreign_callback")` | Unmanaged foreign callback spawn |
+
+**Lowering:** Verified scopes lower to one `sync.WaitGroup` plus one
+goroutine per task:
+
+```go
+var __hy_wg sync.WaitGroup
+__hy_wg.Add(1)
+go func() { defer __hy_wg.Done(); worker_a() }()
+__hy_wg.Add(1)
+go func() { defer __hy_wg.Done(); worker_b() }()
+__hy_wg.Wait()
+```
+
+This lowering is **leak-free, not allocation-free**. Escape analysis on the
+shape above (`go build -gcflags=-m`, Go 1.26.9) reports `moved to heap:
+__hy_wg` — the goroutine closure captures the handle, so one `WaitGroup`
+per scope is heap-allocated. What the lowering genuinely avoids is
+per-handle bookkeeping: no `Vec`/`HashMap` of handles survives into the
+generated code, so the cost is O(1) allocation per scope rather than O(tasks).
+Any wording stronger than that is a claim this spec does not make.
+
+**Foreign callback boundary:** Tasks spawned inside foreign Go callbacks
+(`http.HandleFunc`, `rpc.RegisterHandler`, `grpc.StreamHandler`, `events.Listen`,
+`time.AfterFunc`) cannot be statically enclosed by a Hybrid `scope`. Such spawns
+require an explicit `managed("description", "foreign_callback")` permit, which
+acts as an escape hatch acknowledged at the check-site.
+
+**Adversarial corpus (M2):** 25 canonical leaky Go patterns must be rejected with
+100% precision. The corpus covers:
+- L1-L5: Basic unjoined escapes
+- L6-L10: Early exit leaks (return, break, continue, panic, select timeout)
+- L11-L15: Branch partial joins
+- L16-L20: Double consumption violations
+- L21-L25: Foreign callback boundary violations
+
+All 25 patterns are rejected with appropriate diagnostic codes (HYB-E3501/E3502/E3503).
+See `spikes/w1669-structured-task-scopes/` for the reference implementation and test suite.
+
+**Status:** Spike complete (M1 + M2 delivered). Integration into Rust checker
+(`hy-check`) is future work.
+
 ## 9. Ownership, borrowing, and the safe/unsafe boundary — TIER 0
 
 The deepest chapter in this spec. It encodes the Tier-0 model confirmed by
