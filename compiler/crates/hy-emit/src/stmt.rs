@@ -2082,15 +2082,30 @@ impl Emitter {
         // `return v, nil`) — Go demands the full arity. An EMPTY slot is
         // the error result (propagate_error fills it at propagation time);
         // a short explicit return means nil.
-        if let Some(zeros) = &self.cur_fn_error_returns {
-            while vs.len() < zeros.len() {
-                let i = vs.len();
-                let z = &zeros[i];
-                vs.push(if z.is_empty() {
-                    "nil".to_string()
+        let is_exact_multi_call = if values.len() == 1 {
+            if let Some((n, _)) = self.call_results(&values[0]) {
+                if let Some(zeros) = &self.cur_fn_error_returns {
+                    n == zeros.len()
                 } else {
-                    z.clone()
-                });
+                    n > 1
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if !is_exact_multi_call {
+            if let Some(zeros) = &self.cur_fn_error_returns {
+                while vs.len() < zeros.len() {
+                    let i = vs.len();
+                    let z = &zeros[i];
+                    vs.push(if z.is_empty() {
+                        "nil".to_string()
+                    } else {
+                        z.clone()
+                    });
+                }
             }
         }
         if vs.is_empty() {
