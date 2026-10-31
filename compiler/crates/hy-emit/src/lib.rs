@@ -107,6 +107,10 @@ const SET_PRELUDE: &str = concat!(
     "}\n",
 );
 
+/// N5 for `make([]T, n[, c])` (zeroinit.rs): every slot up to the capacity
+/// gets an allocated zero value, so a reslice inside the capacity meets N5 values too.
+const N5_MAKE_PRELUDE: &str = "// ---- Hybrid prelude: N5 slice allocation (auto-generated; do not edit) ----\nfunc hy_n5_make[t any](zero func() t, n int, c ...int) []t {\n\tcapacity := n\n\tif len(c) > 0 {\n\t\tcapacity = c[0]\n\t}\n\ts := make([]t, capacity)\n\tfor i := range s {\n\t\ts[i] = zero()\n\t}\n\treturn s[:n]\n}\n";
+
 const POP_PRELUDE: &str = concat!(
     "// ---- Hybrid prelude: slice pop (auto-generated; do not edit) ----\n",
     "func hy_pop[t any](s *[]t) t {\n",
@@ -943,7 +947,8 @@ impl Emitter {
             || body.contains(".contains(")
             || body.contains(".insert(");
         let needs_pop = body.contains("hy_pop(");
-        if needs_option || needs_set || needs_pop {
+        let needs_n5_make = body.contains("hy_n5_make(");
+        if needs_option || needs_set || needs_pop || needs_n5_make {
             out.push('\n');
             if needs_option {
                 out.push_str(OPTION_PRELUDE);
@@ -955,6 +960,10 @@ impl Emitter {
             }
             if needs_pop {
                 out.push_str(POP_PRELUDE);
+                out.push('\n');
+            }
+            if needs_n5_make {
+                out.push_str(N5_MAKE_PRELUDE);
                 out.push('\n');
             }
         }

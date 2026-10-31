@@ -734,7 +734,7 @@ impl Parser {
                 let params = self.parse_params()?;
                 self.expect_punct(")")?;
                 let mut results = Vec::new();
-                while self.is_type_start() {
+                while self.is_type_start() && self.same_line_as_prev() {
                     results.push(self.parse_type()?);
                 }
                 TypeExpr::Fn {
