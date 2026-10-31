@@ -128,3 +128,33 @@ fn main() {
     );
     assert!(go.contains("b := box[int]{}"), ":\n{go}");
 }
+
+
+#[test]
+fn n5_var_and_struct_zero_set_allocates_at_declaration() {
+    let go = emit_src(
+        r#"
+struct holder {
+    seen set[int]
+}
+
+fn main() {
+    var s set[string]
+    lit := set[int]{}
+    var h holder
+    h_lit := holder{}
+    p := new(set[int])
+    fmt.println(len(s) + len(lit) + len(h.seen) + len(h_lit.seen) + p.len())
+}
+"#,
+    );
+    for want in [
+        "var s set[string] = set[string]{m: map[string]struct{}{}}",
+        "lit := set[int]{m: map[int]struct{}{}}",
+        "var h holder = holder{seen: set[int]{m: map[int]struct{}{}}}",
+        "h_lit := holder{seen: set[int]{m: map[int]struct{}{}}}",
+        "p := &set[int]{m: map[int]struct{}{}}",
+    ] {
+        assert!(go.contains(want), "missing {want:?} in:\n{go}");
+    }
+}

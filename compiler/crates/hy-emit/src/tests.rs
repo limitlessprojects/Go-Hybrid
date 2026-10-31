@@ -1249,7 +1249,7 @@ fn set_insert_uses_prelude() {
         "set prelude:\n{}",
         go
     );
-    assert!(go.contains("seen := set[node_id]{}"), ":\n{}", go);
+    assert!(go.contains("seen := set[node_id]{m: map[node_id]struct{}{}}"), ":\n{}", go);
     assert!(go.contains("return seen.insert(3)"), ":\n{}", go);
 }
 
@@ -3052,4 +3052,31 @@ fn main() {}
     let go6 = emit(src6);
     assert!(go6.contains("func read_url() int {"));
     assert!(go6.contains("func read_u_r_l() int {"));
+}
+
+
+#[test]
+fn test_issue_2216_set_empty_eager_allocation() {
+    let go = emit(
+        r#"
+fn add(s set[int], v int) {
+    s.insert(v)
+}
+fn main() {
+    a := set[int]{}
+    add(a, 1)
+    var b set[string]
+    d := a
+    d.insert(2)
+}
+"#,
+    );
+    assert!(
+        go.contains("a := set[int]{m: map[int]struct{}{}}"),
+        "set[int]{{}} must eagerly initialize m:\n{go}"
+    );
+    assert!(
+        go.contains("var b set[string] = set[string]{m: map[string]struct{}{}}"),
+        "var b set[string] must eagerly initialize m:\n{go}"
+    );
 }

@@ -48,6 +48,10 @@ impl Emitter {
         match self.n5_resolve_alias(ty) {
             TypeExpr::Map { .. } => Some(format!("{}{{}}", self.type_text(ty))),
             TypeExpr::Named { name, .. } => {
+                if let Some(inner) = name.strip_prefix("set[").and_then(|s| s.strip_suffix(']')) {
+                    let go_elem = self.go_type_name(inner.trim());
+                    return Some(format!("set[{go_elem}]{{m: map[{go_elem}]struct{{}}{{}}}}"));
+                }
                 let fields = self.n5_structs.get(&name)?.clone();
                 let extra = self.n5_missing_fields_at(&fields, &BTreeSet::new(), depth + 1);
                 if extra.is_empty() {
@@ -67,6 +71,13 @@ impl Emitter {
         let TypeExpr::Named { name, .. } = self.n5_resolve_alias(ty) else {
             return Vec::new();
         };
+        if let Some(inner) = name.strip_prefix("set[").and_then(|s| s.strip_suffix(']')) {
+            if given.iter().any(|f| f.name == "m") {
+                return Vec::new();
+            }
+            let go_elem = self.go_type_name(inner.trim());
+            return vec![format!("m: map[{go_elem}]struct{{}}{{}}")];
+        }
         let Some(fields) = self.n5_structs.get(&name).cloned() else {
             return Vec::new();
         };
