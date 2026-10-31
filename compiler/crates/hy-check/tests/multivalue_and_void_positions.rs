@@ -114,6 +114,23 @@ fn multi_value_call_for_a_smaller_callee_is_rejected() {
         &format!("{TWO}fn g(a int, b int, c int) {{\n    fmt.println(\"{{a}} {{b}} {{c}}\")\n}}\n\nfn main() {{\n    g(two())\n}}\n"),
         "HYB-E1002",
     );
+    // Two results into a 1-param method, closure, fn-field, builtin, or task.
+    assert_code(
+        &format!("{TWO}struct sink {{}}\nfn (s sink) g(a int) {{\n    fmt.println(\"{{a}}\")\n}}\n\nfn main() {{\n    s := sink{{}}\n    s.g(two())\n}}\n"),
+        "HYB-E1002",
+    );
+    assert_code(
+        &format!("{TWO}fn main() {{\n    cb := fn(a int) {{\n        fmt.println(\"{{a}}\")\n    }}\n    cb(two())\n}}\n"),
+        "HYB-E1002",
+    );
+    assert_code(
+        &format!("{TWO}fn g(a int) {{\n    fmt.println(\"{{a}}\")\n}}\n\nfn main() {{\n    task g(two())\n}}\n"),
+        "HYB-E1002",
+    );
+    assert_code(
+        "fn two_strs() (string, string) {\n    return \"a\", \"b\"\n}\n\nfn main() {\n    fmt.println(len(two_strs()))\n}\n",
+        "HYB-E1002",
+    );
 }
 
 #[test]
@@ -121,6 +138,9 @@ fn multi_value_call_for_a_matching_callee_is_accepted() {
     // This is legal Go: the lone multi-value call IS the whole argument list.
     assert_ok(
         &format!("{TWO}fn g(a int, b int) {{\n    fmt.println(\"{{a}} {{b}}\")\n}}\n\nfn main() {{\n    g(two())\n}}\n"),
+    );
+    assert_ok(
+        &format!("{TWO}struct sink {{}}\nfn (s sink) g(a int, b int) {{\n    fmt.println(\"{{a}} {{b}}\")\n}}\n\nfn main() {{\n    s := sink{{}}\n    s.g(two())\n    cb := fn(a int, b int) {{ fmt.println(\"{{a}} {{b}}\") }}\n    cb(two())\n}}\n"),
     );
 }
 

@@ -833,11 +833,11 @@ impl<'a> Collector<'a> {
         for v in &l.values {
             self.expr(v);
         }
-        // #682 U8: `a := v()` where `v` produces no value. Only the
-        // single-name/single-value shape is checked; `a, b := f()` is a legal
-        // multi-value binding and is handled by `infer_local_kinds`.
-        if l.names.len() == 1 && l.values.len() == 1 {
-            self.check_single_value_position(&l.values[0], "a binding", /*binding_position=*/ true);
+        // #682 U8: `a := v()` (or `a, b := v()`, `a, b := v(), 1`) where `v`
+        // produces no value. `binding_position = true` reports only the void
+        // case here and leaves multi-value bindings to `tuple.rs` (HYB-E2002).
+        for v in &l.values {
+            self.check_single_value_position(v, "a binding", /*binding_position=*/ true);
         }
         // Binding-count guards: a declaration whose value count cannot
         // match its names fails go build with `assignment mismatch`.
@@ -1020,23 +1020,23 @@ impl<'a> Collector<'a> {
                 for v in values {
                     self.expr(v);
                 }
-                // #682 U8: `a = v()` where `v` produces no value. The
-                // multi-name form (`a, b = f()`) is a legal multi-value
-                // assignment, so only the single-target/single-value shape is
-                // checked here.
-                if targets.len() == 1 && values.len() == 1 {
-                    self.check_single_value_position(&values[0], "an assignment", /*binding_position=*/ true);
+                // #682 U8: `a = v()` (or `a, b = v()`, `a, b = v(), 1`, `a += v()`)
+                // where `v` produces no value. `binding_position = true` leaves
+                // multi-value bindings to `tuple.rs` (HYB-E2002).
+                for v in values {
+                    self.check_single_value_position(v, "an assignment", /*binding_position=*/ true);
                 }
                 self.check_assign_operands(targets, *op, values, *span);
             }
             Stmt::Expr { expr, .. } => self.expr(expr),
             Stmt::Send { chan, value, .. } => {
                 self.expr(chan);
+                self.expr(value);
+                self.check_single_value_position(chan, "a channel send", false);
                 // #887: the sent value is a single-value position. A void call
                 // or a multi-value call here passed the checker and emitted
                 // `ch <- noop()` / `ch <- pair()`, which Go rejects.
                 self.check_single_value_position(value, "a channel send", false);
-                self.expr(value);
             }
             Stmt::If {
                 init,
@@ -1051,6 +1051,7 @@ impl<'a> Collector<'a> {
                     self.stmt(i);
                 }
                 self.expr(cond);
+                self.check_single_value_position(cond, "an `if` condition", false);
                 self.check_bool_condition(cond, "if");
                 self.block_scoped(then);
                 if let Some(o) = otherwise {
@@ -1066,11 +1067,14 @@ impl<'a> Collector<'a> {
                 match kind {
                     ForKind::While { cond } => {
                         self.expr(cond);
+                        self.check_single_value_position(cond, "a `for` condition", false);
                         self.check_bool_condition(cond, "for");
                     }
                     ForKind::Range { var, lo, hi, .. } => {
                         self.expr(lo);
                         self.expr(hi);
+                        self.check_single_value_position(lo, "a range bound", false);
+                        self.check_single_value_position(hi, "a range bound", false);
                         // The loop head always reads the counter.
                         self.exempt(var);
                         self.bind_kind(var, OpKind::Int);
@@ -1078,6 +1082,7 @@ impl<'a> Collector<'a> {
                     ForKind::Iterate { vars, expr } => {
                         self.check_repeated_bindings(vars, *span);
                         self.expr(expr);
+                        self.check_single_value_position(expr, "a `for ... in` iterable", false);
                         let iter_kinds = self.iterate_var_kinds(expr, vars.len());
                         // Unread iterate bindings are lowered to `_` at
                         // emission (issue #139); write-only ones still
@@ -1102,30 +1107,23 @@ impl<'a> Collector<'a> {
             Stmt::Task { callee, args, span } => {
                 self.expr(callee);
                 for a in args {
-                    // #887: a spawn argument sits in a single-value position
-                    // exactly like a call argument does. Without this,
-                    // `task worker(noop())` (void call) and
-                    // `task worker(pair())` (two values) passed the checker
-                    // and emitted Go that cannot build.
-                    self.check_single_value_position(&a.value, "a spawn argument", false);
                     self.expr(&a.value);
                 }
-                match unwrap_parens(callee) {
-                    Expr::Ident { name, .. } => {
-                        self.check_user_fn_arity(name, args, *span);
-                        self.check_user_fn_arg_types(name, args);
+                if self.multi_value_arg_count(args).is_none() {
+                    for a in args {
+                        // #887: a spawn argument sits in a single-value position
+                        // unless a lone multi-value call forwards to a matching callee.
+                        self.check_single_value_position(&a.value, "a spawn argument", false);
                     }
-                    Expr::Field { base, name, .. } => {
-                        let bk = self.kind_of_expr(base);
-                        self.check_method_arity(&bk, name, args, *span);
-                        self.check_method_arg_types(&bk, name, args);
-                    }
-                    _ => {}
+                } else {
+                    self.check_multi_value_arg_arity(callee, args, *span);
                 }
+                self.check_call_operands(callee, args, *span);
             }
             Stmt::Managed { body, .. } => self.block_scoped(body),
             Stmt::Match { subject, arms, .. } => {
                 self.expr(subject);
+                self.check_single_value_position(subject, "a `match` subject", false);
                 for arm in arms {
                     self.push_scope();
                     if let MatchPattern::Path { segments, binding } = &arm.pattern {
@@ -1139,6 +1137,7 @@ impl<'a> Collector<'a> {
                     }
                     if let Some(g) = &arm.guard {
                         self.expr(g);
+                        self.check_single_value_position(g, "a `match` guard", false);
                         self.check_bool_condition(g, "match guard");
                     }
                     self.block_scoped(&arm.body);
@@ -1190,15 +1189,17 @@ impl<'a> Collector<'a> {
                     self.push_scope();
                     match &arm.kind {
                         SelectArmKind::Send { chan, value, .. } => {
-                    // #887: a channel send in a select arm is also a single-value
-                    // position.
-                    self.check_single_value_position(value, "a channel send", false);
                             self.expr(chan);
                             self.expr(value);
+                            self.check_single_value_position(chan, "a channel send", false);
+                            // #887: a channel send in a select arm is also a single-value
+                            // position.
+                            self.check_single_value_position(value, "a channel send", false);
                         }
                         SelectArmKind::Recv { names, chan } => {
                             self.check_repeated_bindings(names, chan.span());
                             self.expr(chan);
+                            self.check_single_value_position(chan, "a channel receive", false);
                             let elem = match self.kind_of_expr(chan) {
                                 OpKind::Chan(e) => *e,
                                 _ => OpKind::Unknown,
@@ -1327,6 +1328,7 @@ impl<'a> Collector<'a> {
                 for p in parts {
                     if let InterpPart::Expr(x) = p {
                         self.expr(x);
+                        self.check_single_value_position(x, "string interpolation", false);
                     }
                 }
             }
@@ -1349,7 +1351,10 @@ impl<'a> Collector<'a> {
             }
             Expr::Move { operand, .. } => self.expr(operand),
             Expr::Try { operand, .. } => self.expr(operand),
-            Expr::Receive { chan, .. } => self.expr(chan),
+            Expr::Receive { chan, .. } => {
+                self.expr(chan);
+                self.check_single_value_position(chan, "a channel receive", false);
+            }
             Expr::Index {
                 base, index, span, ..
             } => {
@@ -1403,7 +1408,10 @@ impl<'a> Collector<'a> {
                 // deeper base (a call result, an index) recurses normally.
                 match unwrap_parens(base) {
                     Expr::Ident { name, .. } => self.read(name),
-                    other => self.expr(other),
+                    other => {
+                        self.expr(other);
+                        self.check_single_value_position(other, "a field selection", false);
+                    }
                 }
             }
             Expr::Call {
@@ -1454,6 +1462,7 @@ impl<'a> Collector<'a> {
                 }
                 for f in fields {
                     self.expr(&f.value);
+                    self.check_single_value_position(&f.value, "a struct literal field", false);
                 }
                 self.check_struct_literal(ty.as_ref(), fields, *span);
             }
@@ -1463,6 +1472,7 @@ impl<'a> Collector<'a> {
                 }
                 for i in items {
                     self.expr(i);
+                    self.check_single_value_position(i, "a composite literal element", false);
                 }
                 if let Some((_, inner_elem, _)) = e.as_array_lit() {
                     self.check_array_lit_items(inner_elem, items);
@@ -1481,6 +1491,8 @@ impl<'a> Collector<'a> {
                 for (k, v) in entries {
                     self.expr(k);
                     self.expr(v);
+                    self.check_single_value_position(k, "a map literal key", false);
+                    self.check_single_value_position(v, "a map literal value", false);
                 }
                 self.check_map_lit_entries(key, value, entries);
             }
@@ -2531,7 +2543,7 @@ impl<'a> Collector<'a> {
     /// `g`), so the arity rule has to accept that case rather than treat it as
     /// one argument.
     fn multi_value_arg_count(&self, args: &[CallArg]) -> Option<usize> {
-        if args.len() != 1 {
+        if args.len() != 1 || args[0].spread {
             return None;
         }
         match self.non_single_value_count(&args[0].value) {
@@ -2646,6 +2658,9 @@ impl<'a> Collector<'a> {
             return;
         };
         if !m.type_params.is_empty() {
+            return;
+        }
+        if self.multi_value_arg_count(args).is_some() {
             return;
         }
         let (want, got) = (m.params.len(), args.len());
@@ -2830,6 +2845,7 @@ impl<'a> Collector<'a> {
                 && ((nv == 0 && self.fn_results_all_named) || self.fn_results_error_tail);
             if short_ok {
                 for (v, w) in values.iter().zip(want.iter()) {
+                    self.check_single_value_position(v, "a return statement", false);
                     let got = self.kind_of_expr(v);
                     self.report_return_conflict(&got, w, v.span());
                 }
@@ -2858,6 +2874,7 @@ impl<'a> Collector<'a> {
             return;
         }
         for (v, w) in values.iter().zip(want.iter()) {
+            self.check_single_value_position(v, "a return statement", false);
             let got = self.kind_of_expr(v);
             self.report_return_conflict(&got, w, v.span());
         }
@@ -2885,14 +2902,78 @@ impl<'a> Collector<'a> {
         let Some(n) = self.multi_value_arg_count(args) else {
             return;
         };
-        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+        let target: Option<(String, usize)> = match unwrap_parens(callee) {
+            Expr::Ident { name, .. } => {
+                if let Some(k) = self.lookup_kind(name) {
+                    match k {
+                        OpKind::Fn(_, Some(want)) => Some((name.clone(), want)),
+                        _ => None,
+                    }
+                } else {
+                    match name.as_str() {
+                        "recover" => Some((name.clone(), 0)),
+                        "len" | "cap" | "close" | "clear" | "panic" | "new" | "some" => {
+                            Some((name.clone(), 1))
+                        }
+                        "delete" | "copy" => Some((name.clone(), 2)),
+                        _ => {
+                            let head = Checker::base_named_type_str(name);
+                            self.ck
+                                .fns
+                                .get(name)
+                                .or_else(|| self.ck.fns.get(head))
+                                .filter(|f| f.type_params.is_empty())
+                                .map(|f| (name.clone(), f.params.len()))
+                        }
+                    }
+                }
+            }
+            Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none() {
+                        if pkg == "errors" && name == "wrap" {
+                            Some(("errors.wrap".to_string(), 2))
+                        } else {
+                            let head = Checker::base_named_type_str(name);
+                            let full = format!("{pkg}.{head}");
+                            self.ck
+                                .fns
+                                .get(full.as_str())
+                                .filter(|f| f.type_params.is_empty())
+                                .map(|f| (format!("{pkg}.{name}"), f.params.len()))
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+                .or_else(|| {
+                    let bk = self.kind_of_expr(base);
+                    let head = Checker::base_named_type_str(name);
+                    if let Some(sn) = self.struct_base_name(&bk) {
+                        if let Some(m) = self.ck.method_decls.get(&(sn.clone(), head.to_string())) {
+                            if m.type_params.is_empty() {
+                                return Some((format!("{sn}.{name}"), m.params.len()));
+                            }
+                            return None;
+                        }
+                    }
+                    if let Some(OpKind::Fn(_, Some(want))) = self.struct_field_kind(&bk, name) {
+                        return Some((callee.render(), want));
+                    }
+                    None
+                })
+            }
+            Expr::FnLit { params, .. } => Some(("fn literal".to_string(), params.len())),
+            _ => match self.kind_of_expr(callee) {
+                OpKind::Fn(_, Some(want)) => Some((callee.render(), want)),
+                _ => None,
+            },
+        };
+        let Some((name, want)) = target else {
             return;
         };
-        let head = Checker::base_named_type_str(name);
-        let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
-            return;
-        };
-        let want = f.params.len();
         if want == n {
             return;
         }
@@ -2970,7 +3051,10 @@ impl<'a> Collector<'a> {
         let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
             return;
         };
-        if !f.type_params.is_empty() || f.params.len() == args.len() {
+        if !f.type_params.is_empty()
+            || self.multi_value_arg_count(args).is_some()
+            || f.params.len() == args.len()
+        {
             return;
         }
         let want = f.params.len();
@@ -2992,7 +3076,7 @@ impl<'a> Collector<'a> {
     /// Family A (#425): `if cond` and `for cond` require a boolean condition.
     fn check_bool_condition(&mut self, cond: &Expr, construct: &str) {
         let k = self.kind_of_expr(cond);
-        if !matches!(k, OpKind::Unknown | OpKind::Bool) {
+        if !matches!(k, OpKind::Unknown | OpKind::Bool | OpKind::Void) {
             self.emit_e1002(
                 cond.span(),
                 format!(
@@ -3017,7 +3101,7 @@ impl<'a> Collector<'a> {
         let k = self.kind_of_expr(operand);
         match op {
             UnOp::Not => {
-                if !matches!(k, OpKind::Unknown | OpKind::Bool) {
+                if !matches!(k, OpKind::Unknown | OpKind::Bool | OpKind::Void) {
                     self.emit_e1002(
                         span,
                         format!(
@@ -3030,7 +3114,7 @@ impl<'a> Collector<'a> {
                 }
             }
             UnOp::Neg => {
-                if !matches!(k, OpKind::Unknown | OpKind::Int | OpKind::Float) {
+                if !matches!(k, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Void) {
                     self.emit_e1002(
                         span,
                         format!(
@@ -3454,10 +3538,10 @@ impl<'a> Collector<'a> {
             AssignOp::AddAssign => {
                 let Some(val) = values.first() else { return };
                 let vk = self.kind_of_expr(val);
-                let t_ok = matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
-                let v_ok = matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
-                let mismatch = tk != OpKind::Unknown
-                    && vk != OpKind::Unknown
+                let t_ok = matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str | OpKind::Void);
+                let v_ok = matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str | OpKind::Void);
+                let mismatch = !matches!(tk, OpKind::Unknown | OpKind::Void)
+                    && !matches!(vk, OpKind::Unknown | OpKind::Void)
                     && tk.is_numeric() != vk.is_numeric();
                 if !t_ok || !v_ok || mismatch || kinds_conflict(&tk, &vk) {
                     self.emit_e1002(
@@ -3481,8 +3565,8 @@ impl<'a> Collector<'a> {
                     AssignOp::MulAssign => "*=",
                     _ => "/=",
                 };
-                if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float)
-                    || !matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float)
+                if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Void)
+                    || !matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Void)
                     || kinds_conflict(&tk, &vk)
                 {
                     self.emit_e1002(
@@ -3507,8 +3591,8 @@ impl<'a> Collector<'a> {
             | AssignOp::ShrAssign => {
                 let Some(val) = values.first() else { return };
                 let vk = self.kind_of_expr(val);
-                if !matches!(tk, OpKind::Unknown | OpKind::Int)
-                    || !matches!(vk, OpKind::Unknown | OpKind::Int)
+                if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Void)
+                    || !matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Void)
                 {
                     self.emit_e1002(
                         span,
@@ -4105,7 +4189,10 @@ impl<'a> Collector<'a> {
                         // A local bound to a closure or fn-typed value carries
                         // its declared parameter count, so the call's arity is
                         // checkable (#577 C9).
-                        OpKind::Fn(_, Some(want)) if want != args.len() => {
+                        OpKind::Fn(_, Some(want))
+                            if self.multi_value_arg_count(args).is_none()
+                                && want != args.len() =>
+                        {
                             self.report_local_arity(name, want, args.len(), span)
                         }
                         OpKind::Fn(..) | OpKind::Unknown => {}
@@ -4138,6 +4225,7 @@ impl<'a> Collector<'a> {
                     if pkg == "errors"
                         && name == "wrap"
                         && self.lookup_kind(pkg).is_none()
+                        && self.multi_value_arg_count(args).is_none()
                         && args.len() != 2
                     {
                         self.emit_e1002(
@@ -4181,7 +4269,7 @@ impl<'a> Collector<'a> {
                     }
                     // `u.cb(1, 2)` where `cb fn(x int) int` — the field type
                     // states the count.
-                    if !has_method {
+                    if !has_method && self.multi_value_arg_count(args).is_none() {
                         if let OpKind::Fn(_, Some(want)) = fk {
                             if want != args.len() {
                                 self.report_local_arity(&callee.render(), want, args.len(), span);
@@ -4253,6 +4341,15 @@ impl<'a> Collector<'a> {
                         ),
                         "only functions, methods, closures, and type conversions can be called",
                     );
+                } else if let OpKind::Fn(_, Some(want)) = ck {
+                    if self.multi_value_arg_count(args).is_none() && want != args.len() {
+                        let label = if matches!(bare, Expr::FnLit { .. }) {
+                            "fn literal".to_string()
+                        } else {
+                            callee.render()
+                        };
+                        self.report_local_arity(&label, want, args.len(), span);
+                    }
                 }
             }
         }
@@ -4419,6 +4516,9 @@ impl<'a> Collector<'a> {
     /// Family E1–E5 (#425): extend `HYB-E2005` (`BUILTIN-ARGS`) from literals
     /// (`builtins.rs`) to resolved binding shapes.
     fn check_builtin_operand_kinds(&mut self, name: &str, args: &[CallArg], span: Span) {
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
         match name {
             "len" => {
                 if args.len() != 1 {
@@ -4432,6 +4532,7 @@ impl<'a> Collector<'a> {
                 let ok = matches!(
                     ak,
                     OpKind::Unknown
+                        | OpKind::Void
                         | OpKind::Str
                         | OpKind::Slice(_)
                         | OpKind::Array(_)
@@ -4464,7 +4565,11 @@ impl<'a> Collector<'a> {
                 let ak = self.kind_of_expr(op);
                 let ok = matches!(
                     ak,
-                    OpKind::Unknown | OpKind::Slice(_) | OpKind::Array(_) | OpKind::Chan(_)
+                    OpKind::Unknown
+                        | OpKind::Void
+                        | OpKind::Slice(_)
+                        | OpKind::Array(_)
+                        | OpKind::Chan(_)
                 ) || matches!(
                     &ak,
                     OpKind::Pointer(inner) if matches!(**inner, OpKind::Unknown | OpKind::Array(_))
@@ -4490,7 +4595,7 @@ impl<'a> Collector<'a> {
                     return;
                 }
                 let ak = self.kind_of_expr(op);
-                if !matches!(ak, OpKind::Unknown | OpKind::Chan(_)) {
+                if !matches!(ak, OpKind::Unknown | OpKind::Void | OpKind::Chan(_)) {
                     self.emit_e2005(
                         span,
                         format!(
@@ -4510,11 +4615,11 @@ impl<'a> Collector<'a> {
                 let key_arg = &args[1].value;
                 let mk = self.kind_of_expr(map_arg);
                 match &mk {
-                    OpKind::Unknown => {}
+                    OpKind::Unknown | OpKind::Void => {}
                     OpKind::Map(k_expected, _) => {
                         let kk = self.kind_of_expr(key_arg);
                         if **k_expected != OpKind::Unknown
-                            && kk != OpKind::Unknown
+                            && !matches!(kk, OpKind::Unknown | OpKind::Void)
                             && kk != **k_expected
                         {
                             self.emit_e2005(
@@ -4554,7 +4659,7 @@ impl<'a> Collector<'a> {
                 }
                 let slice_arg = &args[0].value;
                 let sk = self.kind_of_expr(slice_arg);
-                if !matches!(sk, OpKind::Unknown | OpKind::Slice(_)) {
+                if !matches!(sk, OpKind::Unknown | OpKind::Void | OpKind::Slice(_)) {
                     self.emit_e2005(
                         span,
                         format!(
@@ -4575,7 +4680,7 @@ impl<'a> Collector<'a> {
                 let dk = self.kind_of_expr(dst_arg);
                 let sk = self.kind_of_expr(src_arg);
 
-                if !matches!(dk, OpKind::Unknown | OpKind::Slice(_)) {
+                if !matches!(dk, OpKind::Unknown | OpKind::Void | OpKind::Slice(_)) {
                     self.emit_e2005(
                         span,
                         format!(
@@ -4588,7 +4693,7 @@ impl<'a> Collector<'a> {
                     return;
                 }
 
-                if !matches!(sk, OpKind::Unknown | OpKind::Slice(_) | OpKind::Str) {
+                if !matches!(sk, OpKind::Unknown | OpKind::Void | OpKind::Slice(_) | OpKind::Str) {
                     self.emit_e2005(
                         span,
                         format!(
@@ -4636,7 +4741,7 @@ impl<'a> Collector<'a> {
                 }
                 let op = &args[0].value;
                 let ak = self.kind_of_expr(op);
-                if !matches!(ak, OpKind::Unknown | OpKind::Slice(_) | OpKind::Map(_, _)) {
+                if !matches!(ak, OpKind::Unknown | OpKind::Void | OpKind::Slice(_) | OpKind::Map(_, _)) {
                     self.emit_e2005(
                         span,
                         format!(
@@ -5151,6 +5256,71 @@ fn main() {
 }
 ";
         let r = check(src);
+        assert_eq!(
+            r.verdict,
+            Verdict::Accept,
+            "unexpected diagnostics: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn rejects_void_calls_and_multivalue_arg_mismatches_across_all_positions() {
+        let bad_cases = [
+            // Void call in parallel binding / assignment / return
+            "fn v() {}\nfn main() {\n    a, b := v(), 1\n    fmt.println(a, b)\n}\n",
+            "fn v() {}\nfn main() {\n    var a int\n    var b int\n    a, b = v(), 1\n    fmt.println(a, b)\n}\n",
+            "fn v() {}\nfn f() (int, int) {\n    return v(), 1\n}\nfn main() {\n    a, b := f()\n    fmt.println(a, b)\n}\n",
+            // Void call in composite literals, interpolation, send, loop, match, task
+            "struct box { x int }\nfn v() {}\nfn main() {\n    b := box{ x: v() }\n    fmt.println(b.x)\n}\n",
+            "fn v() {}\nfn main() {\n    xs := []int{ v() }\n    fmt.println(xs)\n}\n",
+            "fn v() {}\nfn main() {\n    m := map[string]int{ \"k\": v() }\n    fmt.println(m)\n}\n",
+            "fn v() {}\nfn main() {\n    s := \"val={v()}\"\n    fmt.println(s)\n}\n",
+            "fn v() {}\nfn main() {\n    ch := make(chan int, 1)\n    ch <- v()\n}\n",
+            "fn v() {}\nfn main() {\n    for i in 0..v() {\n        fmt.println(i)\n    }\n}\n",
+            "fn v() {}\nfn main() {\n    for x in v() {\n        fmt.println(x)\n    }\n}\n",
+            "fn v() {}\nfn main() {\n    match v() {\n        _ => {}\n    }\n}\n",
+            "fn v() {}\nfn g(x int) { fmt.println(x) }\nfn main() {\n    task g(v())\n}\n",
+            // Multi-value call passed to 1-param method, closure, fn-field, inline fn, builtin, or task
+            "struct sink {}\nfn (s sink) one(x int) { fmt.println(x) }\nfn two() (int, int) { return 1, 2 }\nfn main() {\n    s := sink{}\n    s.one(two())\n}\n",
+            "fn two() (int, int) { return 1, 2 }\nfn main() {\n    cb := fn(x int) { fmt.println(x) }\n    cb(two())\n}\n",
+            "struct holder { cb fn(x int) }\nfn two() (int, int) { return 1, 2 }\nfn take(x int) { fmt.println(x) }\nfn main() {\n    h := holder{ cb: take }\n    h.cb(two())\n}\n",
+            "fn two() (int, int) { return 1, 2 }\nfn main() {\n    (fn(x int) { fmt.println(x) })(two())\n}\n",
+            "fn two_strs() (string, string) { return \"a\", \"b\" }\nfn main() {\n    fmt.println(len(two_strs()))\n}\n",
+            "fn two() (int, int) { return 1, 2 }\nfn main() {\n    panic(two())\n}\n",
+            "fn two() (int, int) { return 1, 2 }\nfn g(x int) { fmt.println(x) }\nfn main() {\n    task g(two())\n}\n",
+        ];
+        for src in bad_cases {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                error_codes(&r).contains(&"HYB-E1002".to_string()),
+                "expected HYB-E1002, got {:?} for:\n{src}",
+                error_codes(&r)
+            );
+        }
+
+        // Positive controls: matching 2-parameter method, closure, fn-field, inline fn, task, and defer
+        let ok_src = "\
+struct sink {}
+fn (s sink) pair(a int, b int) { fmt.println(a, b) }
+struct holder { cb fn(a int, b int) }
+fn two() (int, int) { return 1, 2 }
+fn consume_pair(a int, b int) { fmt.println(a, b) }
+
+fn main() {
+    s := sink{}
+    s.pair(two())
+    cb := fn(a int, b int) { fmt.println(a, b) }
+    cb(two())
+    h := holder{ cb: consume_pair }
+    h.cb(two())
+    (fn(a int, b int) { fmt.println(a, b) })(two())
+    task consume_pair(two())
+    defer consume_pair(two())
+}
+";
+        let r = check(ok_src);
         assert_eq!(
             r.verdict,
             Verdict::Accept,
