@@ -125,3 +125,108 @@ fn valid_interface_conversion_accepts() {
     let r = check(src);
     assert_eq!(r.verdict, Verdict::Accept, "expected accept, got diagnostics: {:?}", r.diagnostics);
 }
+
+#[test]
+fn int_conversion_from_pointer_var_rejects_e1002() {
+    let src = "fn main() {\n    x := 42\n    p := &x\n    _ = int(p)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn float_conversion_from_pointer_var_rejects_e1002() {
+    let src = "fn main() {\n    x := 42\n    p := &x\n    _ = float64(p)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn string_conversion_from_pointer_var_rejects_e1002() {
+    let src = "fn main() {\n    x := 42\n    p := &x\n    _ = string(p)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn int_conversion_from_array_var_rejects_e1002() {
+    let src = "fn main() {\n    var arr [4]int\n    _ = int(arr)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn float_conversion_from_array_var_rejects_e1002() {
+    let src = "fn main() {\n    var arr [4]int\n    _ = float64(arr)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn string_conversion_from_array_var_rejects_e1002() {
+    let src = "fn main() {\n    var arr [4]byte\n    _ = string(arr)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn pointer_conversion_from_int_var_rejects_e1002() {
+    let src = "type ptr_t = *int\nfn main() {\n    x := 42\n    _ = ptr_t(x)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn pointer_conversion_from_array_var_rejects_e1002() {
+    let src = "type ptr_t = *int\nfn main() {\n    var arr [4]int\n    _ = ptr_t(arr)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn pointer_conversion_from_string_var_rejects_e1002() {
+    let src = "type ptr_t = *int\nfn main() {\n    s := \"bad\"\n    _ = ptr_t(s)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn array_conversion_from_int_var_rejects_e1002() {
+    let src = "type arr_t = [4]int\nfn main() {\n    x := 42\n    _ = arr_t(x)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn array_conversion_from_pointer_var_rejects_e1002() {
+    let src = "type arr_t = [4]int\nfn main() {\n    x := 42\n    p := &x\n    _ = arr_t(p)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn pointer_conversion_from_slice_to_non_array_pointer_rejects_e1002() {
+    let src = "type ptr_t = *int\nfn main() {\n    s := []int{1, 2}\n    _ = ptr_t(s)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn valid_pointer_to_pointer_conversion_accepts() {
+    let src = "type ptr_t = *int\nfn main() {\n    x := 42\n    p := &x\n    _ = ptr_t(p)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Accept, "expected accept, got diagnostics: {:?}", r.diagnostics);
+}
+
+
