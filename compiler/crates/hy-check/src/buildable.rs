@@ -2054,6 +2054,14 @@ impl<'a> Collector<'a> {
                             .collect(),
                     );
                 }
+                // Issue #2004: a struct type conversion (`box(o)`) names a
+                // declared struct, not a function — the conversion produces a
+                // value of that struct kind. Returning `None` here made the
+                // result `OpKind::Unknown`, and `is_addressable_expr` fails
+                // open on `Unknown`, so `&(box(o).v)` slipped through.
+                if matches!(conv, OpKind::Struct(_)) {
+                    return Some(vec![conv]);
+                }
                 None
             }
             Expr::Field { base, name, .. } => {
@@ -2077,9 +2085,32 @@ impl<'a> Collector<'a> {
                 if let Some(OpKind::Fn(res, _)) = self.struct_field_kind(&bk, name) {
                     return Some(res);
                 }
+                // Issue #2004: associated function call `box.make()` — the
+                // declaration is stored in `ck.fns` under the qualified name
+                // `box.make`; without this the result kind was `Unknown` and
+                // `&(box.make().v)` failed open as addressable.
+                if let Expr::Ident { name: root, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(root).is_none() {
+                        let full = format!("{root}.{head}");
+                        if let Some(f) = self.ck.fns.get(full.as_str()) {
+                            return Some(
+                                f.results
+                                    .iter()
+                                    .map(|r| self.kind_of_ty(&r.ty, 0))
+                                    .collect(),
+                            );
+                        }
+                    }
+                }
                 None
             }
-            _ => None,
+            // Issue #2004: an indirect call on a non-ident callee
+            // (`fns[0]()`) has its result kinds through the callee expression
+            // itself — a function value resolves to its result kinds.
+            _ => match self.kind_of_expr(bare) {
+                OpKind::Fn(res, _) => Some(res),
+                _ => None,
+            },
         }
     }
 
@@ -2867,6 +2898,16 @@ impl<'a> Collector<'a> {
 
     /// Go spec §Address operators: operand must be addressable or a composite literal.
     fn check_addr_of_operand(&mut self, operand: &Expr, span: Span) {
+        // Issue #2004: a composite literal is addressable ONLY as the direct
+        // (possibly parenthesized) operand of `&`; a PROJECTION of a literal
+        // (`&(box{v: 1}.v)`, `&([2]int{1, 2}[0])`) is still not addressable
+        // in Go (`cannot take address of …`).
+        if matches!(
+            unwrap_parens(operand),
+            Expr::StructLit { .. } | Expr::SliceLit { .. } | Expr::MapLit { .. }
+        ) {
+            return;
+        }
         if !self.is_addressable_expr(operand) {
             self.emit_e1002(
                 span,
@@ -2893,7 +2934,11 @@ impl<'a> Collector<'a> {
 
     fn is_addressable_expr(&self, e: &Expr) -> bool {
         match unwrap_parens(e) {
-            Expr::StructLit { .. } | Expr::SliceLit { .. } | Expr::MapLit { .. } => true,
+            // Issue #2004: composite literals are not addressable places —
+            // `&box{..}` is legal only because §Address operators exempts a
+            // literal that is the DIRECT operand of `&` (checked in
+            // `check_addr_of_operand`); a projection of one is not.
+            Expr::StructLit { .. } | Expr::SliceLit { .. } | Expr::MapLit { .. } => false,
             Expr::Ident { name, .. } => {
                 if name == "_" {
                     return false;
