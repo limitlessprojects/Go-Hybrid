@@ -457,6 +457,57 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                if let Some((elem_ty, through_ptr)) = self
+                    .ty_of_expr(st, base)
+                    .and_then(|t| self.peel_option_receiver_ty(&t))
+                {
+                    let recv_payload_shape = || {
+                        if through_ptr {
+                            match &recv {
+                                TypeShape::Pointer(inner) => (**inner).clone(),
+                                _ => TypeShape::Unknown,
+                            }
+                        } else {
+                            recv.clone()
+                        }
+                    };
+                    match name.as_str() {
+                        "unwrap" if args.is_empty() => {
+                            let s = self.shape_of_type(&elem_ty);
+                            return if matches!(s, TypeShape::Unknown) {
+                                recv_payload_shape()
+                            } else {
+                                s
+                            };
+                        }
+                        "or" if args.len() == 1 => {
+                            let s = self.shape_of_type(&elem_ty);
+                            if !matches!(s, TypeShape::Unknown) {
+                                return s;
+                            }
+                            let rs = recv_payload_shape();
+                            if !matches!(rs, TypeShape::Unknown) {
+                                return rs;
+                            }
+                            return self.shape_of_expr(st, &args[0].value);
+                        }
+                        "is_some" | "is_none" if args.is_empty() => {
+                            return TypeShape::Primitive;
+                        }
+                        _ => {}
+                    }
+                }
+                if self.is_prelude_set_receiver(&recv) {
+                    match name.as_str() {
+                        "insert" | "contains" if args.len() == 1 => {
+                            return TypeShape::Primitive;
+                        }
+                        "len" if args.is_empty() => {
+                            return TypeShape::Primitive;
+                        }
+                        _ => {}
+                    }
+                }
                 let recv = self.shape_of_expr(st, base);
                 if let Some(t) = receiver_type_name(&recv) {
                     return foreign::method_result(&t, name);
@@ -591,6 +642,33 @@ impl<'a> Checker<'a> {
             break;
         }
         cur
+    }
+
+    fn peel_option_receiver_ty(&self, ty: &TypeExpr) -> Option<(TypeExpr, bool)> {
+        if self.structs.contains_key("option") {
+            return None;
+        }
+        let mut cur = self.resolve_type_alias(ty);
+        let mut through_ptr = false;
+        if let TypeExpr::Pointer { to, .. } = cur {
+            through_ptr = true;
+            cur = self.resolve_type_alias(&to);
+        }
+        match cur {
+            TypeExpr::Option { elem, .. } => Some((*elem, through_ptr)),
+            _ => None,
+        }
+    }
+
+    fn is_prelude_set_receiver(&self, recv: &TypeShape) -> bool {
+        if self.structs.contains_key("set") {
+            return false;
+        }
+        let inner = match recv {
+            TypeShape::Pointer(inner) => &**inner,
+            other => other,
+        };
+        matches!(inner, TypeShape::Struct(Some(s)) if s == "set" || s.starts_with("set["))
     }
 
     /// The as-written type of an initializer, when directly available
@@ -791,6 +869,53 @@ impl<'a> Checker<'a> {
                             .map(|r| r.ty.clone())
                         {
                             return Some(ret);
+                        }
+                    }
+                    if let Some((elem_ty, _)) = self
+                        .ty_of_expr(st, base)
+                        .and_then(|t| self.peel_option_receiver_ty(&t))
+                    {
+                        let is_any =
+                            matches!(&elem_ty, TypeExpr::Named { name: n, .. } if n == "any");
+                        match name.as_str() {
+                            "unwrap" if args.is_empty() => {
+                                if !is_any {
+                                    return Some(elem_ty);
+                                }
+                            }
+                            "or" if args.len() == 1 => {
+                                if !is_any {
+                                    return Some(elem_ty);
+                                }
+                                if let Some(arg_ty) = self.ty_of_expr(st, &args[0].value) {
+                                    return Some(arg_ty);
+                                }
+                            }
+                            "is_some" | "is_none" if args.is_empty() => {
+                                return Some(TypeExpr::Named {
+                                    name: "bool".to_string(),
+                                    span: *span,
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                    let recv_shape = self.shape_of_expr(st, base);
+                    if self.is_prelude_set_receiver(&recv_shape) {
+                        match name.as_str() {
+                            "insert" | "contains" if args.len() == 1 => {
+                                return Some(TypeExpr::Named {
+                                    name: "bool".to_string(),
+                                    span: *span,
+                                });
+                            }
+                            "len" if args.is_empty() => {
+                                return Some(TypeExpr::Named {
+                                    name: "int".to_string(),
+                                    span: *span,
+                                });
+                            }
+                            _ => {}
                         }
                     }
                     let callee_ty = self.ty_of_expr(st, callee)?;
