@@ -692,15 +692,11 @@ impl Emitter {
             }
         }
 
+        let peeled_callee = Self::unwrap_parens(callee);
+
         // --- package-qualified calls ---
-        if let Expr::Field { base, name, .. } = callee {
+        if let Expr::Field { base, name, .. } = peeled_callee {
             if let Expr::Ident { name: pkg, .. } = Self::unwrap_parens(base.as_ref()) {
-                // Known to the checker, unshipped by the runtime (the
-                // audit's flate2 row): the honest refusal must come BEFORE
-                // the package-root gate — an unbound crate is not a Go
-                // package root, so its call used to fall through this whole
-                // block, emit verbatim, and die in the toolchain with
-                // `undefined: flate2`.
                 if !self.local_vars.contains(pkg) && lookup_unbound_crate(pkg).is_some() {
                     return Err(EmitError::unbound_crate(pkg));
                 }
@@ -711,10 +707,7 @@ impl Emitter {
         }
 
         // --- method calls on foreign bindings normalize (M4 + shapes) ---
-        // Shape-table first (Batch E): a typed chain resolves
-        // field-vs-method exactly (`r.url.query.get("a")` →
-        // `r.URL.Query().Get("a")`); generic Foreign falls back to M4.
-        if let Expr::Field { base, name, .. } = callee {
+        if let Expr::Field { base, name, .. } = peeled_callee {
             let base = Self::selector_base(base);
             if let Some(bt) = self.type_of_expr(base) {
                 if let Some(m) = lookup_member(bt, name) {
@@ -726,9 +719,6 @@ impl Emitter {
                         }
                         return Ok(format!("{}.{}({})", b, m.go, parts.join(", ")));
                     }
-                    // MethodZero called WITH args (or a Field called) is a
-                    // surface error — fall through; Go rejects Field(args)
-                    // — a clean failure, never a wrong emission.
                 }
             }
             if let Expr::Ident { name: root, .. } = base {
@@ -744,7 +734,7 @@ impl Emitter {
         }
 
         // --- slice `.pop()` → prelude helper (example 08's stack shape) ---
-        if let Expr::Field { base, name, .. } = callee {
+        if let Expr::Field { base, name, .. } = peeled_callee {
             if name == "pop" && args.is_empty() && !self.is_user_struct_expr(base) {
                 let peeled = Self::unwrap_parens(base);
                 if matches!(
@@ -760,12 +750,24 @@ impl Emitter {
             }
         }
 
-        // --- associated-fn calls: `lru_cache.new[string, int](2)` →
+        // --- associated-fn calls: `lru_cache.new[string, int](2)` or `(box.new[int])(v)` →
         //     `lru_cache_new[string, int](2)` (Go has no dotted idents) ---
-        if let Expr::Field { base, name, .. } = callee {
-            if let Expr::Ident { name: root, .. } = Self::unwrap_parens(base.as_ref()) {
+        let assoc_target: Option<(&Expr, String)> = match peeled_callee {
+            Expr::Field { base, name, .. } => Some((base.as_ref(), name.clone())),
+            Expr::Index { base, index, .. } => {
+                if let Expr::Field { base: fbase, name, .. } = Self::unwrap_parens(base.as_ref()) {
+                    let idx_text = self.expr_text_static(index);
+                    Some((fbase.as_ref(), format!("{}[{}]", name, idx_text)))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some((base, name)) = assoc_target {
+            if let Expr::Ident { name: root, .. } = Self::unwrap_parens(base) {
                 if !self.is_unshadowed_pkg_root(root) && !self.bindings.contains_key(root) {
-                    let (head, type_args) = split_type_args(name);
+                    let (head, type_args) = split_type_args(&name);
                     let full = format!("{}.{}", root, head);
                     if self.assoc_fns.contains(&full) {
                         let translated_ta = type_args

@@ -3053,3 +3053,17 @@ fn main() {}
     assert!(go6.contains("func read_url() int {"));
     assert!(go6.contains("func read_u_r_l() int {"));
 }
+
+#[test]
+fn parenthesized_field_callees_pkg_foreign_pop_assoc_and_unbound_lower_soundly() {
+    let go = emit(
+        "struct box[t any] {\n    v t\n}\n\nfn box.new[t any](v t) box[t] {\n    return box[t]{v: v}\n}\n\nstruct pool {\n    mu sync.mutex\n}\n\nfn main() {\n    p := pool{}\n    (p.mu.lock)()\n    (p.mu.unlock)()\n    xs := []int{1, 2}\n    v := (xs.pop)()\n    b := (box.new[int])(v)\n    (fmt.println)(b.v)\n}\n",
+    );
+    assert!(go.contains("p.mu.Lock()"), "expected p.mu.Lock(), got:\n{}", go);
+    assert!(go.contains("hy_pop(&xs)"), "expected hy_pop(&xs), got:\n{}", go);
+    assert!(go.contains("box_new[int](v)"), "expected box_new[int](v), got:\n{}", go);
+    assert!(go.contains("fmt.Println(b.v)"), "expected fmt.Println(b.v), got:\n{}", go);
+
+    let err = emit_err("fn main() {\n    enc := (flate2.new_writer)(6)?\n    fmt.println(enc)\n}\n");
+    assert!(err.contains("flate2"), "expected unbound crate refusal for (flate2.new_writer), got: {}", err);
+}
