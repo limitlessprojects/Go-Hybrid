@@ -402,6 +402,7 @@ pub enum AssignOp {
     Dec,         // -- (values empty)
     BitOrAssign,   // |=
     BitAndAssign,  // &=
+    BitAndNotAssign, // &^=
     BitXorAssign,  // ^=
     ShlAssign,     // <<=
     ShrAssign,     // >>=
@@ -635,6 +636,8 @@ pub enum BinOp {
     BitOr,
     BitXor,
     BitAnd,
+    /// `&^` — Go's AND NOT (bit clear).
+    BitAndNot,
     Shl,
     Shr,
 }
@@ -860,6 +863,7 @@ impl BinOp {
             BinOp::BitOr => "|",
             BinOp::BitXor => "^",
             BinOp::BitAnd => "&",
+            BinOp::BitAndNot => "&^",
             BinOp::Shl => "<<",
             BinOp::Shr => ">>",
         }

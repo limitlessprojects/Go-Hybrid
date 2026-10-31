@@ -726,6 +726,7 @@ impl<'a> Lexer<'a> {
         const MULTI: &[&str] = &[
             "...", "..=", "=>", ":=", "==", "!=", "<=", ">=", "&&", "||", "<-", "<<=", ">>=",
             "<<", ">>", "++", "--", "+=", "-=", "*=", "/=", "%=", "|=", "&=", "^=", "..",
+            "&^=", "&^",
         ];
         for m in MULTI {
             if rest.starts_with(m) {
@@ -1351,6 +1352,15 @@ mod tests {
         assert!(t.contains(&Tok::Punct("--")));
         assert!(t.contains(&Tok::Punct("+=")));
         assert!(t.contains(&Tok::Punct("...")));
+    }
+
+    #[test]
+    fn bitclear_lexes_as_one_punct_issue_1672() {
+        // `&^` (AND NOT) must lex as a single punct, not `&` then `^`.
+        let t = toks("a &^ b c &^= d");
+        assert!(t.contains(&Tok::Punct("&^")));
+        assert!(t.contains(&Tok::Punct("&^=")));
+        assert!(!t.contains(&Tok::Punct("^")));
     }
 
     #[test]

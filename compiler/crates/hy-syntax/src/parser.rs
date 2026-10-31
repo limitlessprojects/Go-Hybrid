@@ -1184,6 +1184,7 @@ impl Parser {
             Tok::Punct("%=") => Some(AssignOp::ModAssign),
             Tok::Punct("|=") => Some(AssignOp::BitOrAssign),
             Tok::Punct("&=") => Some(AssignOp::BitAndAssign),
+            Tok::Punct("&^=") => Some(AssignOp::BitAndNotAssign),
             Tok::Punct("^=") => Some(AssignOp::BitXorAssign),
             Tok::Punct("<<=") => Some(AssignOp::ShlAssign),
             Tok::Punct(">>=") => Some(AssignOp::ShrAssign),
@@ -2442,6 +2443,7 @@ fn bin_op(t: &Tok) -> Option<(BinOp, u8)> {
         Tok::Punct("%") => Some((BinOp::Mod, 5)),
         // MulOp continues with `&` and the shifts (SPEC-LANGUAGE 1.4).
         Tok::Punct("&") => Some((BinOp::BitAnd, 5)),
+        Tok::Punct("&^") => Some((BinOp::BitAndNot, 5)),
         Tok::Punct("<<") => Some((BinOp::Shl, 5)),
         Tok::Punct(">>") => Some((BinOp::Shr, 5)),
         _ => None,
