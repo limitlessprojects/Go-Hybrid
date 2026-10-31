@@ -474,7 +474,6 @@ impl<'a> Checker<'a> {
                         {
                             return TypeShape::Enum(Some(ename.clone()));
                         }
-                        }
                         self.fns
                             .get(name.as_str())
                             .or_else(|| self.fns.get(head))
