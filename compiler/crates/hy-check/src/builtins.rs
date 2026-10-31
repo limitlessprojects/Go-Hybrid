@@ -9,7 +9,8 @@
 //! Literal-only scope mirrors the landed #149 / #148 const-arith checks:
 //! variable operands stay a run-time concern, matching Go.
 
-use crate::model::{unwrap_parens, Checker};
+use crate::const_overflow::{const_int_fold_with, ConstFold};
+use crate::model::{unwrap_parens, Checker, FnState};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{ChanDir, Expr, ForKind, LitKind, Place, PlaceKind, SelectArmKind, Stmt, UnOp};
 use std::collections::HashSet;
@@ -18,9 +19,15 @@ impl<'a> Checker<'a> {
     /// Pass-B entry: HYB-E2001 on `defer` + HYB-E2005 on builtin calls.
     /// Nested block bodies are NOT recursed — `walk::flatten` already lists
     /// those statements (same discipline as `arith.rs`).
-    pub(crate) fn check_stmt_builtins(&mut self, stmt: &Stmt) {
+    pub(crate) fn check_stmt_builtins(&mut self, st: &FnState, stmt: &Stmt) {
         self.check_stmt_defer_call(stmt);
+        self.zd_defined.clear();
+        self.zd_defined.extend(st.env.keys().cloned());
+        for sc in &st.scopes {
+            self.zd_defined.extend(sc.keys().cloned());
+        }
         self.check_stmt_builtin_args_inner(stmt, /*deep=*/ false);
+        self.zd_defined.clear();
     }
 
     pub(crate) fn check_stmt_defer_call(&mut self, stmt: &Stmt) {
@@ -265,11 +272,12 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expr::FnLit { body, .. } => {
-                // Closure bodies are not flattened into Pass B — deep-walk.
+            Expr::FnLit { params, body, .. } => {
+                self.push_closure_bound(params, body);
                 for stmt in &body.stmts {
                     self.check_stmt_builtin_args_inner(stmt, /*deep=*/ true);
                 }
+                self.pop_closure_bound();
             }
             Expr::Ident { .. } | Expr::Lit { .. } => {}
         }
@@ -557,13 +565,20 @@ impl<'a> Checker<'a> {
         }
         let mut evaluated_sizes = Vec::new();
         for arg in args.iter().skip(1) {
-            match classify_make_size(&arg.value) {
+            match self.classify_make_size(&arg.value) {
                 MakeSize::Ok(v) => evaluated_sizes.push(Some(v)),
                 MakeSize::NonLiteral => evaluated_sizes.push(None),
                 MakeSize::Negative => {
                     self.emit_builtin(
                         span,
                         "`make` size must not be a negative constant (HYB-E2005)".to_string(),
+                    );
+                    evaluated_sizes.push(None);
+                }
+                MakeSize::Overflow => {
+                    self.emit_builtin(
+                        span,
+                        "`make` size constant overflows `int` (HYB-E2005)".to_string(),
                     );
                     evaluated_sizes.push(None);
                 }
@@ -886,14 +901,17 @@ enum MakeSize {
     Ok(i128),
     NonLiteral,
     Negative,
+    Overflow,
     BadLiteral(&'static str),
 }
 
-fn classify_make_size(e: &Expr) -> MakeSize {
+impl<'a> Checker<'a> {
+fn classify_make_size(&self, e: &Expr) -> MakeSize {
     let bare = unwrap_parens(e);
     match bare {
         Expr::Lit { kind, .. } => match kind {
             LitKind::Int(_) => match crate::const_overflow::const_int_value(bare) {
+                Some(n) if n > i64::MAX as i128 => MakeSize::Overflow,
                 Some(n) if n >= 0 => MakeSize::Ok(n),
                 Some(_) => MakeSize::Negative,
                 None => MakeSize::BadLiteral("integer"),
@@ -918,11 +936,35 @@ fn classify_make_size(e: &Expr) -> MakeSize {
         {
             MakeSize::BadLiteral("float")
         }
-        _ => match crate::const_overflow::const_int_value(bare) {
-            Some(n) if n >= 0 => MakeSize::Ok(n),
-            Some(_) => MakeSize::Negative,
-            None => MakeSize::NonLiteral,
+        _ if expr_mentions_bound(bare, &self.zd_defined, &self.closure_bound) => {
+            MakeSize::NonLiteral
+        }
+        _ => match const_int_fold_with(bare, &self.const_values, 0, None) {
+            ConstFold::Val(n) if n < 0 => MakeSize::Negative,
+            ConstFold::Val(n) if n > i64::MAX as i128 => MakeSize::Overflow,
+            ConstFold::Val(n) => MakeSize::Ok(n),
+            ConstFold::TooBig => MakeSize::Overflow,
+            ConstFold::NotConst => MakeSize::NonLiteral,
         },
+    }
+}
+}
+
+fn expr_mentions_bound(
+    e: &Expr,
+    fn_bound: &std::collections::HashSet<String>,
+    closure_sets: &[std::collections::HashSet<String>],
+) -> bool {
+    match unwrap_parens(e) {
+        Expr::Ident { name, .. } => {
+            fn_bound.contains(name) || closure_sets.iter().any(|s| s.contains(name))
+        }
+        Expr::Unary { operand, .. } => expr_mentions_bound(operand, fn_bound, closure_sets),
+        Expr::Binary { lhs, rhs, .. } => {
+            expr_mentions_bound(lhs, fn_bound, closure_sets)
+                || expr_mentions_bound(rhs, fn_bound, closure_sets)
+        }
+        _ => false,
     }
 }
 
