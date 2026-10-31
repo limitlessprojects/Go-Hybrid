@@ -99,6 +99,18 @@ class PatternExtractionTests(unittest.TestCase):
         self.assertFalse(guard.is_registered_direct(
             "tests/test_live.py", "python3 -c 'print(1)' tests/test_live.py\n"))
 
+
+    def test_malformed_option_values_and_default_pattern_1333(self):
+        self.assertEqual(guard.registered_discoveries(
+            "python3 -m unittest discover -s -p test_foo.py\n"
+            "python3 -m unittest discover -s tools -p -v\n"), [])
+        self.assertEqual(guard.registered_discoveries(
+            "python3 -m unittest discover -s tools\n"), [("tools", "test*.py")])
+        self.assertFalse(guard.is_registered_direct(
+            "tests/test_live.py", "python3 -W -u tests/test_live.py\n"))
+        self.assertTrue(guard.is_registered_direct(
+            "tests/test_install_runtime.py", "python3 tests/./test_install_runtime.py\n"))
+
     def test_repeated_pattern_uses_the_last_value_like_unittest(self):
         self.assertEqual(guard.registered_patterns(
             "python3 -m unittest discover -s tools -p test_disabled.py -p test_live.py\n"),
