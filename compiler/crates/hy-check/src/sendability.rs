@@ -2312,7 +2312,7 @@ impl<'a> Checker<'a> {
         cur
     }
 
-    fn struct_fields_for_type(
+    pub(crate) fn struct_fields_for_type(
         &self,
         ty: &hy_syntax::TypeExpr,
     ) -> Option<Vec<(String, hy_syntax::TypeExpr)>> {
@@ -2748,21 +2748,33 @@ impl<'a> Checker<'a> {
                     }
                     let base_ty = self.dir_ty_of_expr(base, env)?;
                     let recv_base = Self::base_named_type(&self.resolve_type_alias(&base_ty))
-                        .or_else(|| Self::base_named_type(&base_ty))?;
-                    let m = self
-                        .method_decls
-                        .get(&(recv_base, head.to_string()))
-                        .or_else(|| {
-                            Self::base_named_type(&base_ty)
-                                .and_then(|raw| self.method_decls.get(&(raw, head.to_string())))
-                        })?;
-                    let subst = self.fn_subst_for_call(m, name, Some(&base_ty), args, env, true);
-                    Some(
-                        m.results
-                            .iter()
-                            .map(|r| Self::substitute_type_params(&r.ty, &subst))
-                            .collect(),
-                    )
+                        .or_else(|| Self::base_named_type(&base_ty));
+                    if let Some(recv_base) = recv_base {
+                        let m = self
+                            .method_decls
+                            .get(&(recv_base, head.to_string()))
+                            .or_else(|| {
+                                Self::base_named_type(&base_ty)
+                                    .and_then(|raw| self.method_decls.get(&(raw, head.to_string())))
+                            });
+                        if let Some(m) = m {
+                            let subst = self.fn_subst_for_call(m, name, Some(&base_ty), args, env, true);
+                            return Some(
+                                m.results
+                                    .iter()
+                                    .map(|r| Self::substitute_type_params(&r.ty, &subst))
+                                    .collect(),
+                            );
+                        }
+                    }
+                    if let Some(fields) = self.struct_fields_for_type(&base_ty) {
+                        if let Some((_, fty)) = fields.iter().find(|(n, _)| n == name) {
+                            if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(fty) {
+                                return Some(results);
+                            }
+                        }
+                    }
+                    None
                 }
                 other => {
                     let callee_ty = self.dir_ty_of_expr(other, env)?;

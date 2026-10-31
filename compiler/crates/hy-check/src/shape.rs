@@ -1156,12 +1156,31 @@ impl<'a> Checker<'a> {
                             _ => None,
                         },
                         _ => None,
-                    })?;
-                self.method_decls
-                    .get(&(recv_base, head.to_string()))
-                    .map(|f| f.results.iter().map(|r| r.ty.clone()).collect())
+                    });
+                if let Some(recv_base) = recv_base {
+                    if let Some(f) = self.method_decls.get(&(recv_base, head.to_string())) {
+                        return Some(f.results.iter().map(|r| r.ty.clone()).collect());
+                    }
+                }
+                if let Some(base_ty) = self.ty_of_expr(st, base) {
+                    if let Some(fields) = self.struct_fields_for_type(&base_ty) {
+                        if let Some((_, fty)) = fields.iter().find(|(n, _)| n == name) {
+                            if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(fty) {
+                                return Some(results.clone());
+                            }
+                        }
+                    }
+                }
+                None
             }
-            _ => None,
+            other => {
+                if let Some(callee_ty) = self.ty_of_expr(st, other) {
+                    if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&callee_ty) {
+                        return Some(results.clone());
+                    }
+                }
+                None
+            }
         }
     }
 
