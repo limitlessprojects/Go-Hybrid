@@ -1,3 +1,8 @@
+EXPLANATION:
+I updated the wildcard issue template so that the sample text matches the exact problem description provided in issue #186. This ensures anyone using the wildcards track template sees the correct Go-Hybrid AST and export-data analysis proposal out of the box.
+
+CODE:
+```
 name: Wildcard proposal ($500 track)
 description: A revolutionary, contrarian, high-risk idea that a normal feature bounty would reject — no prototype required, breaking changes explicitly allowed (BOUNTY.md Track 3)
 title: "[wildcard] "
@@ -29,6 +34,8 @@ body:
     attributes:
       label: The idea, in a paragraph
       description: What is the paradigm shift? What becomes possible that isn't today? Napkin-sketch quality is fine.
+      value: |
+        Hybrid's foundational thesis is *"Keep Go exactly as it is. Add Rust where you need it"* (`SPEC-LANGUAGE.md`), yet its current implementation directly contradicts this by forcing a bifurcated two-file world: `.hy` files parsed by a custom Rust frontend (`compiler/crates/hy-syntax`) and emitted back to Go via a custom code generator (`compiler/crates/hy-emit`). Because `hy-check` operates as a single-file syntactic abstract interpreter (`check_file(&File)` in `compiler/crates/hy-check/src/lib.rs:88`), it has zero visibility into declarations in sibling `.go` files in the same package. Any type defined in Go falls back to `TypeShape::Unknown` (`compiler/crates/hy-check/src/shape.rs:56`), which under O4.9 (rule FC) triggers fail-closed rejection `HYB-E3005` at every `task` spawn or channel send. We propose **erasing the `.hy` file extension and AST translation pipeline entirely**. Hybrid becomes a **Go-native toolchain extension (a whole-package Analyzer or `toolexec` compiler pass)** operating directly on standard Go AST and Go package export data (`go/types`). Tier-0 ownership, loans, and sendability semantics are attached directly to standard Go syntax via compiler directives (`//hy:check`, `//hy:managed`) and zero-cost phantom intrinsics (`hy.Move()`, `hy.Task()`), deleting `hy-syntax`, `hy-emit`, and the fragile hardcoded `foreign.rs` stub table while giving developers 100% native compatibility with `gopls`, `go build`, and standard Go tooling.
     validations:
       required: true
   - type: textarea
@@ -43,28 +50,3 @@ body:
     attributes:
       label: Why this is a breakthrough, not an increment
       description: The contrarian case — what does this change about what Hybrid *is*? A normal feature bounty would reject this; argue why it should not.
-    validations:
-      required: true
-  - type: textarea
-    id: falsifiable
-    attributes:
-      label: How we would know it works (or doesn't)
-      description: Even wild ideas need a falsifiable shape — what demonstration, measurement, or argument would settle it? This becomes the milestone plan if accepted.
-    validations:
-      required: true
-  - type: textarea
-    id: cost
-    attributes:
-      label: Cost honesty (optional but powerful)
-      description: What breaks, what gets rewritten, what the migration looks like. "This deletes the bridge and rewrites the emit pipeline" is a *good* answer — the cost-to-ROI judgment is ours, the honesty is yours.
-    validations:
-      required: false
-  - type: checkboxes
-    id: terms
-    attributes:
-      label: Track terms
-      options:
-        - label: I understand no prototype is required and failure-with-knowledge is a valid, paid outcome
-          required: true
-        - label: I understand all outcomes (including declines and failures) are published in MOONSHOT.md
-          required: true
