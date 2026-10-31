@@ -1027,6 +1027,11 @@ fn huge_int_as_f64(s: &str) -> f64 {
             if let Ok(v) = u128::from_str_radix(rest, radix) {
                 return v as f64;
             }
+            if !rest.is_empty() && rest.chars().all(|c| c.is_digit(radix)) {
+                return rest.chars().fold(0.0_f64, |acc, c| {
+                    acc * (radix as f64) + (c.to_digit(radix).unwrap_or(0) as f64)
+                });
+            }
         }
     }
     f64::INFINITY
@@ -1420,16 +1425,11 @@ pub(crate) fn const_float_fold_with(
         Expr::Lit {
             kind: LitKind::Int(s),
             ..
-        } => {
-            let clean: String = s.chars().filter(|c| *c != '_').collect();
-            if let Some(ConstInt::Value(v)) = parse_int_lit(s) {
-                Some(v as f64)
-            } else if let Ok(f) = clean.parse::<f64>() {
-                Some(f)
-            } else {
-                None
-            }
-        }
+        } => match parse_int_lit(s) {
+            Some(ConstInt::Value(v)) => Some(v as f64),
+            Some(ConstInt::PosOverflow | ConstInt::NegOverflow) => Some(huge_int_as_f64(s)),
+            None => s.replace('_', "").parse::<f64>().ok(),
+        },
         Expr::Lit {
             kind: LitKind::Char(c),
             ..
