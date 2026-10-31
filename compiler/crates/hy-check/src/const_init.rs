@@ -1,5 +1,5 @@
 //! const_init.rs — `const` initializers that are not constant expressions
-//! (issue #205).
+//! (issue #205, #1587).
 //!
 //! `const c = get_val()` passes `hyb check` with 0 diagnostics today, then
 //! fails `go build` with `get_val() (value of type int) is not constant`.
@@ -65,16 +65,39 @@ impl<'a> Checker<'a> {
         }
         match unwrap_parens(e) {
             Expr::Lit { kind, .. } => !matches!(kind, LitKind::Nil),
-            Expr::Unary {
-                op: UnOp::Neg | UnOp::Not,
-                operand,
-                ..
-            } => self.expr_is_constant_inner(operand, st, visiting, ref_depth),
-            Expr::Unary { op: UnOp::Addr, .. } => false,
-            Expr::Binary { lhs, rhs, .. } => {
-                self.expr_is_constant_inner(lhs, st, visiting, ref_depth)
-                    && self.expr_is_constant_inner(rhs, st, visiting, ref_depth)
-            }
+            Expr::Unary { op, operand, .. } => match op {
+                UnOp::Neg => self.is_const_numeric_expr(operand, st, visiting, ref_depth + 1),
+                UnOp::Not => self.is_const_bool_expr(operand, st, visiting, ref_depth + 1),
+                UnOp::Addr => false,
+            },
+            Expr::Binary { op, lhs, rhs, .. } => match op {
+                BinOp::Add => {
+                    (self.is_const_string_expr(lhs, st, visiting, ref_depth + 1)
+                        && self.is_const_string_expr(rhs, st, visiting, ref_depth + 1))
+                        || (self.is_const_numeric_expr(lhs, st, visiting, ref_depth + 1)
+                            && self.is_const_numeric_expr(rhs, st, visiting, ref_depth + 1))
+                }
+                BinOp::Sub
+                | BinOp::Mul
+                | BinOp::Div
+                | BinOp::Mod
+                | BinOp::BitAnd
+                | BinOp::BitOr
+                | BinOp::BitXor
+                | BinOp::Shl
+                | BinOp::Shr => {
+                    self.is_const_numeric_expr(lhs, st, visiting, ref_depth + 1)
+                        && self.is_const_numeric_expr(rhs, st, visiting, ref_depth + 1)
+                }
+                BinOp::And | BinOp::Or => {
+                    self.is_const_bool_expr(lhs, st, visiting, ref_depth + 1)
+                        && self.is_const_bool_expr(rhs, st, visiting, ref_depth + 1)
+                }
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                    self.expr_is_constant_inner(lhs, st, visiting, ref_depth + 1)
+                        && self.expr_is_constant_inner(rhs, st, visiting, ref_depth + 1)
+                }
+            },
             Expr::Ident { name, .. } => {
                 self.ident_is_constant(name, st, visiting, ref_depth + 1)
             }
@@ -88,7 +111,10 @@ impl<'a> Checker<'a> {
                 if st.is_some_and(|s| s.env_lookup(ty_name).is_some()) {
                     return false;
                 }
-                if self.fns.contains_key(ty_name) || self.structs.contains_key(ty_name) || self.consts.contains_key(ty_name) {
+                if self.fns.contains_key(ty_name)
+                    || self.structs.contains_key(ty_name)
+                    || self.consts.contains_key(ty_name)
+                {
                     return false;
                 }
                 // #1803: complex, real and imag are compile-time builtins when
@@ -100,8 +126,8 @@ impl<'a> Checker<'a> {
                     return args.len() == 2
                         && !args[0].spread
                         && !args[1].spread
-                        && self.expr_is_constant_inner(&args[0].value, st, visiting, ref_depth)
-                        && self.expr_is_constant_inner(&args[1].value, st, visiting, ref_depth);
+                        && self.is_const_numeric_expr(&args[0].value, st, visiting, ref_depth + 1)
+                        && self.is_const_numeric_expr(&args[1].value, st, visiting, ref_depth + 1);
                 }
                 if ty_name == "real" || ty_name == "imag" {
                     if self.type_aliases.contains_key(ty_name) {
@@ -109,7 +135,7 @@ impl<'a> Checker<'a> {
                     }
                     return args.len() == 1
                         && !args[0].spread
-                        && self.expr_is_constant_inner(&args[0].value, st, visiting, ref_depth);
+                        && self.is_const_numeric_expr(&args[0].value, st, visiting, ref_depth + 1);
                 }
                 if args.len() != 1 || args[0].spread {
                     return false;
@@ -118,31 +144,24 @@ impl<'a> Checker<'a> {
                     if self.type_aliases.contains_key("len") {
                         return false;
                     }
-                    return self.expr_is_constant_inner(&args[0].value, st, visiting, ref_depth)
-                        && self.is_const_string_expr(&args[0].value, st, ref_depth);
+                    return self.is_const_string_expr(&args[0].value, st, visiting, ref_depth + 1);
                 }
-                if !self.is_const_conversion_target(ty_name) {
-                    return false;
+                if self.is_const_string_conversion_target(ty_name, st) {
+                    return self.is_const_string_expr(&args[0].value, st, visiting, ref_depth + 1);
                 }
-                self.expr_is_constant_inner(&args[0].value, st, visiting, ref_depth)
+                if self.is_const_bool_conversion_target(ty_name, st) {
+                    return self.is_const_bool_expr(&args[0].value, st, visiting, ref_depth + 1);
+                }
+                if self.is_const_numeric_conversion_target(ty_name, st) {
+                    return self.is_const_numeric_expr(&args[0].value, st, visiting, ref_depth + 1);
+                }
+                false
             }
             // Everything else (field calls, index, receive, try, interp,
             // move, addr-of, composites nested under non-composite forms…)
             // is run-time.
             _ => false,
         }
-    }
-
-    fn is_const_conversion_target(&self, name: &str) -> bool {
-        if let Some(ty) = self.type_aliases.get(name) {
-            let resolved = self.resolve_type_alias(ty);
-            if let hy_syntax::TypeExpr::Named { name: target, .. } = resolved {
-                return !self.structs.contains_key(target.as_str())
-                    && is_conversion_type_name(&target);
-            }
-            return false;
-        }
-        is_conversion_type_name(name)
     }
 
     fn is_const_string_conversion_target(&self, name: &str, st: Option<&FnState>) -> bool {
@@ -163,7 +182,50 @@ impl<'a> Checker<'a> {
         name == "string"
     }
 
-    fn is_const_string_expr(&self, e: &Expr, st: Option<&FnState>, ref_depth: usize) -> bool {
+    fn is_const_bool_conversion_target(&self, name: &str, st: Option<&FnState>) -> bool {
+        if st.is_some_and(|s| s.env_lookup(name).is_some())
+            || self.fns.contains_key(name)
+            || self.structs.contains_key(name)
+        {
+            return false;
+        }
+        if let Some(ty) = self.type_aliases.get(name) {
+            let resolved = self.resolve_type_alias(ty);
+            return matches!(
+                resolved,
+                hy_syntax::TypeExpr::Named { name: target, .. }
+                    if target == "bool" && !self.structs.contains_key("bool")
+            );
+        }
+        name == "bool"
+    }
+
+    fn is_const_numeric_conversion_target(&self, name: &str, st: Option<&FnState>) -> bool {
+        if st.is_some_and(|s| s.env_lookup(name).is_some())
+            || self.fns.contains_key(name)
+            || self.structs.contains_key(name)
+        {
+            return false;
+        }
+        if let Some(ty) = self.type_aliases.get(name) {
+            let resolved = self.resolve_type_alias(ty);
+            return matches!(
+                resolved,
+                hy_syntax::TypeExpr::Named { name: target, .. }
+                    if is_numeric_conversion_type_name(&target)
+                        && !self.structs.contains_key(target.as_str())
+            );
+        }
+        is_numeric_conversion_type_name(name)
+    }
+
+    fn is_const_string_expr(
+        &self,
+        e: &Expr,
+        st: Option<&FnState>,
+        visiting: &mut Vec<String>,
+        ref_depth: usize,
+    ) -> bool {
         if ref_depth > 32 {
             return false;
         }
@@ -178,8 +240,8 @@ impl<'a> Checker<'a> {
                 rhs,
                 ..
             } => {
-                self.is_const_string_expr(lhs, st, ref_depth)
-                    && self.is_const_string_expr(rhs, st, ref_depth)
+                self.is_const_string_expr(lhs, st, visiting, ref_depth + 1)
+                    && self.is_const_string_expr(rhs, st, visiting, ref_depth + 1)
             }
             Expr::Ident { name, .. } => {
                 if let Some(st) = st {
@@ -187,13 +249,19 @@ impl<'a> Checker<'a> {
                         return b.immutable && matches!(b.shape, TypeShape::Str);
                     }
                 }
+                if visiting.iter().any(|v| v == name) {
+                    return false;
+                }
                 if let Some(cdecl) = self.file_const_decl(name) {
                     if let Some(ty) = &cdecl.ty {
                         if !matches!(self.shape_of_type(ty), TypeShape::Str) {
                             return false;
                         }
                     }
-                    return self.is_const_string_expr(&cdecl.value, None, ref_depth + 1);
+                    visiting.push(name.to_string());
+                    let ok = self.is_const_string_expr(&cdecl.value, None, visiting, ref_depth + 1);
+                    visiting.pop();
+                    return ok;
                 }
                 false
             }
@@ -204,6 +272,218 @@ impl<'a> Checker<'a> {
                 self.is_const_string_conversion_target(ty_name, st)
                     && args.len() == 1
                     && !args[0].spread
+                    && self.is_const_string_expr(&args[0].value, st, visiting, ref_depth + 1)
+            }
+            _ => false,
+        }
+    }
+
+    fn is_const_bool_expr(
+        &self,
+        e: &Expr,
+        st: Option<&FnState>,
+        visiting: &mut Vec<String>,
+        ref_depth: usize,
+    ) -> bool {
+        if ref_depth > 32 {
+            return false;
+        }
+        match unwrap_parens(e) {
+            Expr::Lit {
+                kind: LitKind::Bool(_),
+                ..
+            } => true,
+            Expr::Unary {
+                op: UnOp::Not,
+                operand,
+                ..
+            } => self.is_const_bool_expr(operand, st, visiting, ref_depth + 1),
+            Expr::Binary {
+                op: BinOp::And | BinOp::Or,
+                lhs,
+                rhs,
+                ..
+            } => {
+                self.is_const_bool_expr(lhs, st, visiting, ref_depth + 1)
+                    && self.is_const_bool_expr(rhs, st, visiting, ref_depth + 1)
+            }
+            Expr::Binary {
+                op: BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge,
+                lhs,
+                rhs,
+                ..
+            } => {
+                self.expr_is_constant_inner(lhs, st, visiting, ref_depth + 1)
+                    && self.expr_is_constant_inner(rhs, st, visiting, ref_depth + 1)
+            }
+            Expr::Ident { name, .. } => {
+                if name == "true" || name == "false" {
+                    return true;
+                }
+                if let Some(st) = st {
+                    if let Some(b) = st.env_lookup(name) {
+                        if !b.immutable || !matches!(b.shape, TypeShape::Primitive) {
+                            return false;
+                        }
+                        if let Some(ty) = &b.ty {
+                            let resolved = self.resolve_type_alias(ty);
+                            if !matches!(resolved, hy_syntax::TypeExpr::Named { name: ref n, .. } if n == "bool") {
+                                return false;
+                            }
+                        }
+                        return true;
+                    }
+                }
+                if visiting.iter().any(|v| v == name) {
+                    return false;
+                }
+                if let Some(cdecl) = self.file_const_decl(name) {
+                    if let Some(ty) = &cdecl.ty {
+                        let resolved = self.resolve_type_alias(ty);
+                        if !matches!(resolved, hy_syntax::TypeExpr::Named { name: ref n, .. } if n == "bool") {
+                            return false;
+                        }
+                    }
+                    visiting.push(name.to_string());
+                    let ok = self.is_const_bool_expr(&cdecl.value, None, visiting, ref_depth + 1);
+                    visiting.pop();
+                    return ok;
+                }
+                false
+            }
+            Expr::Call { callee, args, .. } => {
+                let Some(ty_name) = conversion_callee_name(callee) else {
+                    return false;
+                };
+                self.is_const_bool_conversion_target(ty_name, st)
+                    && args.len() == 1
+                    && !args[0].spread
+                    && self.is_const_bool_expr(&args[0].value, st, visiting, ref_depth + 1)
+            }
+            _ => false,
+        }
+    }
+
+    fn is_const_numeric_expr(
+        &self,
+        e: &Expr,
+        st: Option<&FnState>,
+        visiting: &mut Vec<String>,
+        ref_depth: usize,
+    ) -> bool {
+        if ref_depth > 32 {
+            return false;
+        }
+        match unwrap_parens(e) {
+            Expr::Lit { kind, .. } => {
+                matches!(kind, LitKind::Int(_) | LitKind::Float(_) | LitKind::Char(_))
+            }
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => self.is_const_numeric_expr(operand, st, visiting, ref_depth + 1),
+            Expr::Binary {
+                op: BinOp::Add,
+                lhs,
+                rhs,
+                ..
+            } => {
+                !self.is_const_string_expr(lhs, st, visiting, ref_depth + 1)
+                    && self.is_const_numeric_expr(lhs, st, visiting, ref_depth + 1)
+                    && self.is_const_numeric_expr(rhs, st, visiting, ref_depth + 1)
+            }
+            Expr::Binary {
+                op:
+                    BinOp::Sub
+                    | BinOp::Mul
+                    | BinOp::Div
+                    | BinOp::Mod
+                    | BinOp::BitAnd
+                    | BinOp::BitOr
+                    | BinOp::BitXor
+                    | BinOp::Shl
+                    | BinOp::Shr,
+                lhs,
+                rhs,
+                ..
+            } => {
+                self.is_const_numeric_expr(lhs, st, visiting, ref_depth + 1)
+                    && self.is_const_numeric_expr(rhs, st, visiting, ref_depth + 1)
+            }
+            Expr::Ident { name, .. } => {
+                if name == "iota" {
+                    return true;
+                }
+                if let Some(st) = st {
+                    if let Some(b) = st.env_lookup(name) {
+                        if !b.immutable || !matches!(b.shape, TypeShape::Primitive) {
+                            return false;
+                        }
+                        if let Some(ty) = &b.ty {
+                            let resolved = self.resolve_type_alias(ty);
+                            if let hy_syntax::TypeExpr::Named { name: ref n, .. } = resolved {
+                                if !is_numeric_conversion_type_name(n) {
+                                    return false;
+                                }
+                            }
+                        }
+                        return true;
+                    }
+                }
+                if visiting.iter().any(|v| v == name) {
+                    return false;
+                }
+                if let Some(cdecl) = self.file_const_decl(name) {
+                    if let Some(ty) = &cdecl.ty {
+                        let resolved = self.resolve_type_alias(ty);
+                        if let hy_syntax::TypeExpr::Named { name: ref n, .. } = resolved {
+                            if !is_numeric_conversion_type_name(n) {
+                                return false;
+                            }
+                        }
+                    }
+                    visiting.push(name.to_string());
+                    let ok = self.is_const_numeric_expr(&cdecl.value, None, visiting, ref_depth + 1);
+                    visiting.pop();
+                    return ok;
+                }
+                false
+            }
+            Expr::Call { callee, args, .. } => {
+                let Some(ty_name) = conversion_callee_name(callee) else {
+                    return false;
+                };
+                if ty_name == "len" {
+                    if self.type_aliases.contains_key("len") {
+                        return false;
+                    }
+                    return args.len() == 1
+                        && !args[0].spread
+                        && self.is_const_string_expr(&args[0].value, st, visiting, ref_depth + 1);
+                }
+                if ty_name == "complex" {
+                    if self.type_aliases.contains_key("complex") {
+                        return false;
+                    }
+                    return args.len() == 2
+                        && !args[0].spread
+                        && !args[1].spread
+                        && self.is_const_numeric_expr(&args[0].value, st, visiting, ref_depth + 1)
+                        && self.is_const_numeric_expr(&args[1].value, st, visiting, ref_depth + 1);
+                }
+                if ty_name == "real" || ty_name == "imag" {
+                    if self.type_aliases.contains_key(ty_name) {
+                        return false;
+                    }
+                    return args.len() == 1
+                        && !args[0].spread
+                        && self.is_const_numeric_expr(&args[0].value, st, visiting, ref_depth + 1);
+                }
+                self.is_const_numeric_conversion_target(ty_name, st)
+                    && args.len() == 1
+                    && !args[0].spread
+                    && self.is_const_numeric_expr(&args[0].value, st, visiting, ref_depth + 1)
             }
             _ => false,
         }
@@ -226,12 +506,20 @@ impl<'a> Checker<'a> {
         if ref_depth > 32 {
             return false;
         }
+        if name == "true" || name == "false" || name == "iota" {
+            return true;
+        }
         // Local bindings and parameters shadow file-level constants.
         if let Some(st) = st {
             if let Some(b) = st.env_lookup(name) {
                 // Only scalar/string `const` bindings are Go compile-time
                 // constants; composite `const`s lower to Go `var`.
-                return b.immutable && matches!(b.shape, TypeShape::Primitive | TypeShape::Str) && !matches!(b.ty.as_ref().map(|t| self.resolve_type_alias(t)), Some(hy_syntax::TypeExpr::Option { .. }));
+                return b.immutable
+                    && matches!(b.shape, TypeShape::Primitive | TypeShape::Str)
+                    && !matches!(
+                        b.ty.as_ref().map(|t| self.resolve_type_alias(t)),
+                        Some(hy_syntax::TypeExpr::Option { .. })
+                    );
             }
         }
         if visiting.iter().any(|v| v == name) {
@@ -269,14 +557,11 @@ fn conversion_callee_name(callee: &Expr) -> Option<&str> {
     }
 }
 
-/// Type names Hybrid spells that Go accepts as conversion targets in a
-/// `const` initializer (`const x = int8(42)`).
-pub(crate) fn is_conversion_type_name(name: &str) -> bool {
+/// Type names Hybrid spells that are numeric conversion targets in a `const` initializer.
+pub(crate) fn is_numeric_conversion_type_name(name: &str) -> bool {
     matches!(
         name,
-        "bool"
-            | "string"
-            | "byte"
+        "byte"
             | "rune"
             | "char"
             | "int"
@@ -307,6 +592,12 @@ pub(crate) fn is_conversion_type_name(name: &str) -> bool {
             | "isize"
             | "usize"
     )
+}
+
+/// Type names Hybrid spells that Go accepts as conversion targets in a
+/// `const` initializer (`const x = int8(42)`).
+pub(crate) fn is_conversion_type_name(name: &str) -> bool {
+    name == "bool" || name == "string" || is_numeric_conversion_type_name(name)
 }
 
 fn span_hint(span: Span) -> String {
