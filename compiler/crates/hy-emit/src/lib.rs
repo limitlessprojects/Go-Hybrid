@@ -1090,9 +1090,14 @@ impl Emitter {
             }
             TypeExpr::Pointer { to, .. } => Self::collect_comparable_in_ty(to, param_names, out),
             TypeExpr::Slice { elem, .. }
-            | TypeExpr::Array { elem, .. }
             | TypeExpr::Chan { elem, .. }
             | TypeExpr::Option { elem, .. } => {
+                Self::collect_comparable_in_ty(elem, param_names, out);
+            }
+            TypeExpr::Array { len, elem, .. } => {
+                if let Some(l) = len {
+                    Self::collect_comparable_in_expr(l, param_names, out);
+                }
                 Self::collect_comparable_in_ty(elem, param_names, out);
             }
             TypeExpr::Fn {
@@ -1118,6 +1123,23 @@ impl Emitter {
         }
     }
 
+    fn collect_comparable_in_place(
+        p: &Place,
+        param_names: &BTreeSet<String>,
+        out: &mut BTreeSet<String>,
+    ) {
+        match &p.kind {
+            PlaceKind::Ident(_) => {}
+            PlaceKind::Index { base, index } => {
+                Self::collect_comparable_in_place(base, param_names, out);
+                Self::collect_comparable_in_expr(index, param_names, out);
+            }
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                Self::collect_comparable_in_place(base, param_names, out);
+            }
+        }
+    }
+
     fn collect_comparable_in_stmt(
         s: &Stmt,
         param_names: &BTreeSet<String>,
@@ -1132,7 +1154,15 @@ impl Emitter {
                     Self::collect_comparable_in_expr(v, param_names, out);
                 }
             }
-            Stmt::Assign { values, .. } | Stmt::Return { values, .. } => {
+            Stmt::Assign { targets, values, .. } => {
+                for t in targets {
+                    Self::collect_comparable_in_place(t, param_names, out);
+                }
+                for v in values {
+                    Self::collect_comparable_in_expr(v, param_names, out);
+                }
+            }
+            Stmt::Return { values, .. } => {
                 for v in values {
                     Self::collect_comparable_in_expr(v, param_names, out);
                 }
@@ -1196,6 +1226,16 @@ impl Emitter {
             }
             Stmt::Select { arms, .. } => {
                 for a in arms {
+                    match &a.kind {
+                        SelectArmKind::Send { chan, value, .. } => {
+                            Self::collect_comparable_in_expr(chan, param_names, out);
+                            Self::collect_comparable_in_expr(value, param_names, out);
+                        }
+                        SelectArmKind::Recv { chan, .. } => {
+                            Self::collect_comparable_in_expr(chan, param_names, out);
+                        }
+                        SelectArmKind::Default => {}
+                    }
                     Self::collect_comparable_in_block(&a.body, param_names, out);
                 }
             }
