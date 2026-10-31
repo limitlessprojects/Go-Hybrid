@@ -244,22 +244,26 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         (other, Bool) if !matches!(other, Unknown | Bool | Interface) => true,
 
         // Numeric targets (Int, Float): can convert between Int and Float.
-        // Cannot convert Str, Slice, Map, Chan, Struct to numeric.
-        (Int | Float, Str | Slice(_) | Map(_, _) | Chan(_) | Struct(_)) => true,
+        // Cannot convert Str, Slice, Map, Chan, Struct, Pointer to numeric.
+        (Int | Float, Str | Slice(_) | Map(_, _) | Chan(_) | Struct(_) | Pointer(_)) => true,
 
         // String target: can convert from Int (rune/byte code point) or Slice (byte/rune slice) or Str.
-        // Cannot convert from Float, Bool, Map, Chan, Struct.
-        (Str, Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
+        // Cannot convert from Float, Bool, Map, Chan, Struct, Pointer.
+        (Str, Float | Bool | Map(_, _) | Chan(_) | Struct(_) | Pointer(_)) => true,
 
         // Slice target: can convert from Str (to []byte/[]rune), or Slice/Array.
-        // Cannot convert from Int, Float, Bool, Map, Chan, Struct.
-        (Slice(_), Int | Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
+        // Cannot convert from Int, Float, Bool, Map, Chan, Struct, Pointer.
+        (Slice(_), Int | Float | Bool | Map(_, _) | Chan(_) | Struct(_) | Pointer(_)) => true,
 
-        // Map target: cannot convert from Int, Float, Bool, Str, Slice, Chan, Struct.
-        (Map(_, _), Int | Float | Bool | Str | Slice(_) | Chan(_) | Struct(_)) => true,
+        // Map target: cannot convert from Int, Float, Bool, Str, Slice, Chan, Struct, Pointer.
+        (Map(_, _), Int | Float | Bool | Str | Slice(_) | Chan(_) | Struct(_) | Pointer(_)) => true,
 
-        // Chan target: cannot convert from Int, Float, Bool, Str, Slice, Map, Struct.
-        (Chan(_), Int | Float | Bool | Str | Slice(_) | Map(_, _) | Struct(_)) => true,
+        // Chan target: cannot convert from Int, Float, Bool, Str, Slice, Map, Struct, Pointer.
+        (Chan(_), Int | Float | Bool | Str | Slice(_) | Map(_, _) | Struct(_) | Pointer(_)) => true,
+
+        // Pointer target: cannot convert from scalars or non-slice containers.
+        (Pointer(_), Int | Float | Bool | Str | Map(_, _) | Chan(_) | Struct(_)) => true,
+        (Pointer(inner), Slice(_)) if !matches!(**inner, Array(_) | Unknown) => true,
 
         // Pointer targets and arguments: Go only converts between pointers.
         // A pointer cannot convert to or from any non-pointer type; the one
@@ -4940,5 +4944,23 @@ fn main() {
             "unexpected diagnostics: {:?}",
             r.diagnostics
         );
+    }
+
+    #[test]
+    fn rejects_invalid_pointer_conversion_kinds_1976() {
+        for src in [
+            "fn main() {\n    x := 42\n    p := &x\n    val := int(p)\n    fmt.println(val)\n}\n",
+            "fn main() {\n    x := 42\n    p := &x\n    val := float64(p)\n    fmt.println(val)\n}\n",
+            "fn main() {\n    x := 42\n    p := &x\n    val := string(p)\n    fmt.println(val)\n}\n",
+            "fn main() {\n    x := 42\n    p := &x\n    val := []byte(p)\n    fmt.println(val)\n}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                error_codes(&r).contains(&"HYB-E1002".to_string()),
+                "expected HYB-E1002, got {:?} for:\n{src}",
+                error_codes(&r)
+            );
+        }
     }
 }
