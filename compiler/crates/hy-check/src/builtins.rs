@@ -406,6 +406,16 @@ impl<'a> Checker<'a> {
                         span,
                         "`min` requires at least 1 argument, found 0 (HYB-E2005)".to_string(),
                     );
+                    return;
+                }
+                for arg in args {
+                    if is_disallowed_min_max_operand(&arg.value) {
+                        self.emit_builtin(
+                            span,
+                            "`min` arguments must be ordered types (numbers or strings); boolean, nil, and composite literals are not ordered (HYB-E2005)".to_string(),
+                        );
+                        break;
+                    }
                 }
             }
             "max" => {
@@ -414,6 +424,16 @@ impl<'a> Checker<'a> {
                         span,
                         "`max` requires at least 1 argument, found 0 (HYB-E2005)".to_string(),
                     );
+                    return;
+                }
+                for arg in args {
+                    if is_disallowed_min_max_operand(&arg.value) {
+                        self.emit_builtin(
+                            span,
+                            "`max` arguments must be ordered types (numbers or strings); boolean, nil, and composite literals are not ordered (HYB-E2005)".to_string(),
+                        );
+                        break;
+                    }
                 }
             }
             "real" => {
@@ -617,10 +637,32 @@ impl<'a> Checker<'a> {
             );
             return;
         }
+        if matches!(unwrap_parens(op), Expr::Lit { kind: LitKind::Nil, .. }) {
+            self.emit_builtin(
+                span,
+                format!("use of untyped nil in built-in `{name}` (HYB-E2005)"),
+            );
+            return;
+        }
+        if is_struct_literal(op) {
+            self.emit_builtin(
+                span,
+                format!("`{name}` does not accept a struct literal operand (HYB-E2005)"),
+            );
+            return;
+        }
         if is_cap && is_string_literal(op) {
             self.emit_builtin(
                 span,
                 "`cap` does not accept a string literal — strings have length, not capacity (HYB-E2005)"
+                    .to_string(),
+            );
+            return;
+        }
+        if is_cap && is_map_literal(op) {
+            self.emit_builtin(
+                span,
+                "`cap` does not accept a map literal — maps have length, not capacity (HYB-E2005)"
                     .to_string(),
             );
         }
@@ -973,3 +1015,20 @@ fn is_string_literal(e: &Expr) -> bool {
         }
     )
 }
+
+fn is_disallowed_min_max_operand(e: &Expr) -> bool {
+    match unwrap_parens(e) {
+        Expr::Lit { kind, .. } => matches!(kind, LitKind::Bool(_) | LitKind::Nil),
+        Expr::StructLit { .. } | Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::FnLit { .. } => true,
+        _ => false,
+    }
+}
+
+fn is_struct_literal(e: &Expr) -> bool {
+    matches!(unwrap_parens(e), Expr::StructLit { .. })
+}
+
+fn is_map_literal(e: &Expr) -> bool {
+    matches!(unwrap_parens(e), Expr::MapLit { .. })
+}
+
