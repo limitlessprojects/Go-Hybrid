@@ -14,9 +14,10 @@
 //! map (N3).
 //!
 //!   * `var m map[k]v`            → `var m map[k]v = map[k]v{}`
-//!   * `var b bag` (bag has a map field, directly or through a nested
+//!   * `var s set[T]`             → `var s set[T] = set[T]{m: map[T]struct{}{}}`
+//!   * `var b bag` (bag has a map or set field, directly or through a nested
 //!     struct field)              → `var b bag = bag{counts: map[string]int{}}`
-//!   * `bag{}` / `bag{name: "x"}` → the unkeyed map fields are added
+//!   * `bag{}` / `bag{name: "x"}` → the unkeyed map or set fields are added
 //!   * `new(bag)`                 → `&bag{counts: map[string]int{}}`
 //!
 //! Generic structs (`box[t]{}`) keep Go's zero value: their field types
@@ -48,6 +49,10 @@ impl Emitter {
         match self.n5_resolve_alias(ty) {
             TypeExpr::Map { .. } => Some(format!("{}{{}}", self.type_text(ty))),
             TypeExpr::Named { name, .. } => {
+                if let Some(elem) = name.strip_prefix("set[").and_then(|s| s.strip_suffix(']')) {
+                    let go_elem = self.go_type_name(elem.trim());
+                    return Some(format!("set[{}]{{m: map[{}]struct{{}}{{}}}}", go_elem, go_elem));
+                }
                 let fields = self.n5_structs.get(&name)?.clone();
                 let extra = self.n5_missing_fields_at(&fields, &BTreeSet::new(), depth + 1);
                 if extra.is_empty() {
@@ -67,6 +72,14 @@ impl Emitter {
         let TypeExpr::Named { name, .. } = self.n5_resolve_alias(ty) else {
             return Vec::new();
         };
+        if let Some(elem) = name.strip_prefix("set[").and_then(|s| s.strip_suffix(']')) {
+            let given: BTreeSet<String> = given.iter().map(|f| f.name.clone()).collect();
+            if !given.contains("m") {
+                let go_elem = self.go_type_name(elem.trim());
+                return vec![format!("m: map[{}]struct{{}}{{}}", go_elem)];
+            }
+            return Vec::new();
+        }
         let Some(fields) = self.n5_structs.get(&name).cloned() else {
             return Vec::new();
         };
