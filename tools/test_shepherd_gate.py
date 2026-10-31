@@ -117,5 +117,86 @@ class ProbeParser(unittest.TestCase):
         self.assertFalse(any("removed line" in ln for ln in added))
 
 
+import contextlib
+from datetime import datetime, timedelta, timezone
+import io
+from unittest.mock import patch
+import queue_sweeper
+
+
+class QueueSweeperLimitsTests(unittest.TestCase):
+    def run_cli(self, args, default_age=5, fresh=False):
+        calls = []
+
+        def api(path, method="GET", body=None):
+            calls.append((path, method, body))
+            if method == "PATCH":
+                return 200, {}
+            if method == "POST":
+                return 201, {}
+            if "/pulls?" in path:
+                return 200, [
+                    {
+                        "number": n,
+                        "created_at": (
+                            (datetime.now(timezone.utc) - timedelta(hours=1))
+                            .isoformat()
+                            .replace("+00:00", "Z")
+                            if fresh
+                            else "2020-01-01T00:00:00Z"
+                        ),
+                        "labels": [],
+                        "user": {"login": "fixture"},
+                        "title": "fixture",
+                    }
+                    for n in (1, 2, 3)
+                ]
+            return 200, {}
+
+        with patch.object(queue_sweeper, "api", side_effect=api), \
+             patch.object(queue_sweeper, "TOK", "offline-fixture"), \
+             patch.object(queue_sweeper, "MIN_AGE", default_age), \
+             patch.object(queue_sweeper, "config_protected_numbers", return_value=set()), \
+             patch.object(queue_sweeper.time, "sleep"), \
+             patch("sys.argv", ["queue_sweeper.py", *args]), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            try:
+                queue_sweeper.main()
+                status = 0
+            except SystemExit as e:
+                status = e.code
+        return status, calls
+
+    def test_negative_limits_abort_before_any_api_call(self):
+        for args in (["--max", "-1"], ["--max", "-200"], ["--min-age", "-1"]):
+            with self.subTest(args=args):
+                status, calls = self.run_cli(args, fresh=(args[0] == "--min-age"))
+                self.assertEqual(status, 2)
+                self.assertEqual(calls, [])
+
+    def test_negative_environment_default_is_also_rejected(self):
+        status, calls = self.run_cli([], default_age=-1, fresh=True)
+        self.assertEqual(status, 2)
+        self.assertEqual(calls, [])
+
+    def test_zero_max_makes_no_provider_mutations(self):
+        status, calls = self.run_cli(["--max", "0"])
+        self.assertEqual(status, 0)
+        self.assertFalse(any(method != "GET" for _, method, _ in calls))
+
+    def test_positive_max_limits_number_of_closures(self):
+        status, calls = self.run_cli(["--max", "1"])
+        self.assertEqual(status, 0)
+        self.assertEqual(sum(method == "PATCH" for _, method, _ in calls), 1)
+        self.assertEqual(sum(method == "POST" for _, method, _ in calls), 1)
+
+    def test_explicit_zero_age_remains_supported(self):
+        status, calls = self.run_cli(["--min-age", "0", "--max", "1"])
+        self.assertEqual(status, 0)
+        self.assertEqual(sum(method == "PATCH" for _, method, _ in calls), 1)
+
+
 if __name__ == "__main__":
+
     unittest.main()

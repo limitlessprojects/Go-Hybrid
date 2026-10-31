@@ -85,6 +85,8 @@ def main():
     ap.add_argument("--max", type=int, default=200)
     ap.add_argument("--min-age", type=int, default=MIN_AGE)
     args = ap.parse_args()
+    if args.max < 0 or args.min_age < 0:
+        ap.error("--max and --min-age must be nonnegative")
     if not TOK:
         print("GITHUB_TOKEN not set"); sys.exit(1)
 
