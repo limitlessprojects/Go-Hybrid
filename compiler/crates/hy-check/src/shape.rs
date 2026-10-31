@@ -712,6 +712,13 @@ impl<'a> Checker<'a> {
             Expr::Move { operand, .. }
             | Expr::Try { operand, .. }
             | Expr::Paren { inner: operand, .. } => self.ty_of_expr(st, operand),
+            Expr::Receive { chan, .. } => {
+                let chan_ty = self.ty_of_expr(st, chan)?;
+                match self.resolve_type_alias(&chan_ty) {
+                    TypeExpr::Chan { elem, .. } => Some(*elem),
+                    _ => None,
+                }
+            }
             Expr::Call { callee, args, span } => match crate::model::unwrap_parens(callee) {
                 Expr::FnLit { results, .. } => results.first().map(|r| r.ty.clone()),
                 Expr::Ident { name, .. } => {
