@@ -2521,7 +2521,12 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            let is_untyped_int_to_float = want == OpKind::Float
+                && got == OpKind::Int
+                && crate::const_overflow::const_int_value(&a.value).is_some();
+            let conflict = (want == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float)
+                || kinds_conflict(&want, &got);
+            if conflict {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -2561,7 +2566,12 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            let is_untyped_int_to_float = want == OpKind::Float
+                && got == OpKind::Int
+                && crate::const_overflow::const_int_value(&a.value).is_some();
+            let conflict = (want == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float)
+                || kinds_conflict(&want, &got);
+            if conflict {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -2749,7 +2759,12 @@ impl<'a> Collector<'a> {
                 continue;
             }
             let got = self.kind_of_expr(&extra.value);
-            if kinds_conflict(&elem, &got) {
+            let is_untyped_int_to_float = elem == OpKind::Float
+                && got == OpKind::Int
+                && crate::const_overflow::const_int_value(&extra.value).is_some();
+            let conflict = (elem == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float)
+                || kinds_conflict(&elem, &got);
+            if conflict {
                 self.emit_e1002(
                     extra.value.span(),
                     format!(
