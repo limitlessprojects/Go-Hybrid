@@ -1172,6 +1172,7 @@ impl<'a> Collector<'a> {
             Stmt::Block { block, .. } => self.block_scoped(block),
             Stmt::Select { arms, .. } => {
                 self.select_depth += 1;
+                let mut default_seen = false;
                 for arm in arms {
                     self.push_scope();
                     match &arm.kind {
@@ -1194,7 +1195,17 @@ impl<'a> Collector<'a> {
                                 self.bind_kind(n, if i == 0 { elem.clone() } else { OpKind::Bool });
                             }
                         }
-                        SelectArmKind::Default => {}
+                        SelectArmKind::Default => {
+                            if default_seen {
+                                self.emit_e1002(
+                                    arm.body.span,
+                                    "multiple defaults in select (HYB-E1002)".to_string(),
+                                    "only one default clause is allowed in a select statement",
+                                );
+                            } else {
+                                default_seen = true;
+                            }
+                        }
                     }
                     self.block_scoped(&arm.body);
                     self.pop_scope();
