@@ -82,6 +82,7 @@ pub(crate) enum OpKind {
     Slice(Box<OpKind>),
     Array(Box<OpKind>),
     Map(Box<OpKind>, Box<OpKind>),
+    Set(Box<OpKind>),
     Chan(Box<OpKind>),
     Struct(Option<String>),
     Pointer(Box<OpKind>),
@@ -109,6 +110,7 @@ impl OpKind {
             OpKind::Slice(e) => format!("[]{}", e.label()),
             OpKind::Array(e) => format!("[N]{}", e.label()),
             OpKind::Map(k, v) => format!("map[{}]{}", k.label(), v.label()),
+            OpKind::Set(e) => format!("set[{}]", e.label()),
             OpKind::Chan(e) => format!("chan {}", e.label()),
             OpKind::Struct(Some(n)) => format!("struct {}", n),
             OpKind::Struct(None) => "struct".to_string(),
@@ -162,7 +164,7 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         (Struct(None), _) | (_, Struct(None)) => false,
         (a, b) if a == b => false,
         // Same container shape: recurse into the element kinds.
-        (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) => {
+        (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) | (Set(a), Set(b)) => {
             kinds_conflict(a, b)
         }
         (Map(k1, v1), Map(k2, v2)) => kinds_conflict(k1, k2) || kinds_conflict(v1, v2),
@@ -295,7 +297,7 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         // A struct whose NAME did not resolve cannot have its members looked up.
         OpKind::Struct(None) => false,
         OpKind::Struct(Some(_)) => true,
-        OpKind::Slice(e) | OpKind::Array(e) | OpKind::Chan(e) | OpKind::Pointer(e) => {
+        OpKind::Slice(e) | OpKind::Array(e) | OpKind::Chan(e) | OpKind::Pointer(e) | OpKind::Set(e) => {
             is_fully_resolved(e)
         }
         OpKind::Map(k, v) => is_fully_resolved(k) && is_fully_resolved(v),
@@ -1220,6 +1222,7 @@ impl<'a> Collector<'a> {
                     vec![*v]
                 }
             }
+            OpKind::Set(e) => vec![*e; n_vars.max(1)],
             OpKind::Str => vec![OpKind::Int; n_vars.max(1)],
             _ => vec![OpKind::Unknown; n_vars.max(1)],
         }
@@ -1685,6 +1688,10 @@ impl<'a> Collector<'a> {
             return OpKind::Unknown;
         }
         let name = name.trim();
+        if let Some(inner) = name.strip_prefix("set[").and_then(|s| s.strip_suffix(']')) {
+            let elem_kind = self.kind_of_type_str(inner, depth + 1);
+            return OpKind::Set(Box::new(elem_kind));
+        }
         let base = Checker::base_named_type_str(name);
         if self.ck.structs.contains_key(base) || self.ck.struct_type_params.contains_key(base) {
             return OpKind::Struct(Some(name.to_string()));
@@ -1746,6 +1753,14 @@ impl<'a> Collector<'a> {
             TypeExpr::Named { name, .. } => {
                 if let Some(arg) = subst.get(name.as_str()) {
                     return self.kind_of_type_str(arg, depth + 1);
+                }
+                if let Some(inner) = name.strip_prefix("set[").and_then(|s| s.strip_suffix(']')) {
+                    let elem = if let Some(arg) = subst.get(inner.trim()) {
+                        self.kind_of_type_str(arg, depth + 1)
+                    } else {
+                        self.kind_of_type_str(inner, depth + 1)
+                    };
+                    return OpKind::Set(Box::new(elem));
                 }
                 self.kind_of_named(name, depth)
             }
@@ -1833,6 +1848,14 @@ impl<'a> Collector<'a> {
     fn struct_base_name(&self, k: &OpKind) -> Option<String> {
         self.struct_name(k)
             .map(|s| Checker::base_named_type_str(&s).to_string())
+    }
+
+    fn set_elem_kind<'k>(&self, k: &'k OpKind) -> Option<&'k OpKind> {
+        match k {
+            OpKind::Set(elem) => Some(elem.as_ref()),
+            OpKind::Pointer(inner) => self.set_elem_kind(inner),
+            _ => None,
+        }
     }
 
     fn struct_field_kind(&self, k: &OpKind, field: &str) -> Option<OpKind> {
@@ -2061,6 +2084,14 @@ impl<'a> Collector<'a> {
                 if name == "pop" && args.is_empty() {
                     if let OpKind::Slice(elem) = bk {
                         return Some(vec![*elem]);
+                    }
+                }
+                if self.set_elem_kind(&bk).is_some() {
+                    match name.as_str() {
+                        "insert" | "contains" => return Some(vec![OpKind::Bool]),
+                        "remove" => return Some(Vec::new()),
+                        "len" => return Some(vec![OpKind::Int]),
+                        _ => {}
                     }
                 }
                 let head = Checker::base_named_type_str(name);
@@ -3988,6 +4019,8 @@ impl<'a> Collector<'a> {
                             "a struct or pointer supports `.pop()` only when it declares a `pop` method; `pop` is a built-in only on slices",
                         );
                     }
+                } else if let Some(elem_kind) = self.set_elem_kind(&bk).cloned() {
+                    self.check_set_method_operands(base, &elem_kind, name, args, span, callee);
                 } else if !has_method {
                     // #682 U2/U3: neither a declared method nor a field exists
                     // on the base. Go refuses the call with `<base>.<name>
@@ -4154,6 +4187,62 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_set_method_operands(
+        &mut self,
+        base: &Expr,
+        elem_kind: &OpKind,
+        name: &str,
+        args: &[CallArg],
+        span: Span,
+        callee: &Expr,
+    ) {
+        match name {
+            "insert" | "contains" | "remove" => {
+                if args.len() != 1 {
+                    self.report_local_arity(&callee.render(), 1, args.len(), span);
+                    return;
+                }
+                let arg = &args[0].value;
+                let ak = self.kind_of_expr(arg);
+                if *elem_kind != OpKind::Unknown
+                    && ak != OpKind::Unknown
+                    && kinds_conflict(elem_kind, &ak)
+                {
+                    self.emit_e1002(
+                        arg.span(),
+                        format!(
+                            "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
+                            arg.render(),
+                            ak.label(),
+                            elem_kind.label(),
+                            callee.render()
+                        ),
+                        "argument types must match declared parameter types",
+                    );
+                }
+            }
+            "len" => {
+                if !args.is_empty() {
+                    self.report_local_arity(&callee.render(), 0, args.len(), span);
+                }
+            }
+            _ => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`{}` has no field or method `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                        base.render(),
+                        name,
+                        self.kind_of_expr(base).label(),
+                        base.render(),
+                        name
+                    ),
+                    "a set supports `.insert(v)`, `.contains(v)`, `.remove(v)`, and `.len()`",
+                );
+            }
+        }
+    }
+
     fn check_slice_pop_operands(&mut self, base: &Expr, bk: &OpKind, args: &[CallArg], span: Span) {
         match bk {
             OpKind::Slice(_) => {
@@ -4185,6 +4274,7 @@ impl<'a> Collector<'a> {
             | OpKind::Str
             | OpKind::Array(_)
             | OpKind::Map(_, _)
+            | OpKind::Set(_)
             | OpKind::Chan(_) => {
                 self.emit_e1002(
                     span,
@@ -4220,9 +4310,10 @@ impl<'a> Collector<'a> {
                         | OpKind::Array(_)
                         | OpKind::Map(_, _)
                         | OpKind::Chan(_)
+                        | OpKind::Set(_)
                 ) || matches!(
                     &ak,
-                    OpKind::Pointer(inner) if matches!(**inner, OpKind::Unknown | OpKind::Array(_))
+                    OpKind::Pointer(inner) if matches!(**inner, OpKind::Unknown | OpKind::Array(_) | OpKind::Set(_))
                 );
                 if !ok {
                     self.emit_e2005(
@@ -4298,7 +4389,7 @@ impl<'a> Collector<'a> {
                         let kk = self.kind_of_expr(key_arg);
                         if **k_expected != OpKind::Unknown
                             && kk != OpKind::Unknown
-                            && kk != **k_expected
+                            && kinds_conflict(k_expected, &kk)
                         {
                             self.emit_e2005(
                                 span,
@@ -4312,15 +4403,34 @@ impl<'a> Collector<'a> {
                             );
                         }
                     }
+                    _ if self.set_elem_kind(&mk).is_some() => {
+                        let elem_expected = self.set_elem_kind(&mk).unwrap();
+                        let kk = self.kind_of_expr(key_arg);
+                        if *elem_expected != OpKind::Unknown
+                            && kk != OpKind::Unknown
+                            && kinds_conflict(elem_expected, &kk)
+                        {
+                            self.emit_e2005(
+                                span,
+                                format!(
+                                    "cannot use `{}` (type `{}`) as element type `{}` in `delete` (HYB-E2005)",
+                                    key_arg.render(),
+                                    kk.label(),
+                                    elem_expected.label()
+                                ),
+                                "the second argument to `delete(s, v)` must match the set's element type",
+                            );
+                        }
+                    }
                     _ => {
                         self.emit_e2005(
                             span,
                             format!(
-                                "invalid argument `{}` (type `{}`) is not a map in `delete` (HYB-E2005)",
+                                "invalid argument `{}` (type `{}`) is not a map or set in `delete` (HYB-E2005)",
                                 map_arg.render(),
                                 mk.label()
                             ),
-                            "`delete(m, k)` requires a map as its first argument",
+                            "`delete(s, v)` requires a map or set as its first argument",
                         );
                     }
                 }
