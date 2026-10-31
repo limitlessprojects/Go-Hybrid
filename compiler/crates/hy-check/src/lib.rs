@@ -5217,5 +5217,29 @@ mod tests {
             .count();
         assert_eq!(e3006_count, 2, "{:?}", r.diagnostics);
     }
-}
 
+    #[test]
+    fn composite_literal_n1_checks_map_keys_paren_arrays_generics_move_and_some() {
+        let cases = [
+            // 1. Map literal nil key
+            "fn main() {\n    m := map[*int]int{nil: 1}\n    fmt.println(m)\n}\n",
+            // 2. Parenthesized array literal with nil element
+            "fn main() {\n    a := ([1][]int{nil})\n    fmt.println(a)\n}\n",
+            // 3. Generic struct literal instantiation with nil field
+            "struct box[t] { v t }\nfn main() {\n    b := box[[]int]{v: nil}\n    fmt.println(b)\n}\n",
+            // 4. move-wrapped composite literal with nil element
+            "fn main() {\n    ch := make(chan [][]int, 1)\n    ch <- move [][]int{nil}\n}\n",
+            // 5. some-wrapped composite literal with nil field
+            "struct job { p []int }\nfn main() {\n    o := some(job{p: nil})\n    fmt.println(o)\n}\n",
+        ];
+        for (idx, code) in cases.iter().enumerate() {
+            let r = check(code);
+            assert!(
+                r.diagnostics.iter().any(|d| d.code == "HYB-E4001"),
+                "case {} expected HYB-E4001, got {:?}",
+                idx + 1,
+                r.diagnostics
+            );
+        }
+    }
+}

@@ -983,68 +983,86 @@ impl<'a> Checker<'a> {
     /// element type), so a `nil` whose slot resolves to a non-nilable shape
     /// is a type error right there — boundary or not.
     pub(crate) fn check_composite_nils(&mut self, st: &FnState, value: &Expr) {
-        match unwrap_parens(value) {
+        let unwrapped = unwrap_parens(value);
+        match unwrapped {
+            Expr::Move { operand, .. } => {
+                self.check_composite_nils(st, operand);
+            }
+            Expr::Call { callee, args, .. }
+                if matches!(
+                    unwrap_parens(callee),
+                    Expr::Ident { name, .. } if name == "some" && self.lookup_binding(st, name).is_none()
+                ) =>
+            {
+                for a in args {
+                    self.check_composite_nils(st, &a.value);
+                }
+            }
             Expr::StructLit { ty, fields, .. } => {
-                // the literal's own ascription wins; else infer from the env
-                // (an ascribed define `var j jobT = jobT{...}` names the
-                // struct twice — same answer)
-                let sname = ty.as_ref().and_then(|t| match t {
-                    hy_syntax::TypeExpr::Named { name, .. } => Some(name.clone()),
-                    _ => None,
-                });
-                // A struct literal spelled through a type alias (`type
-                // holder_alias = holder; h := holder_alias{m: nil}`) names the
-                // ALIAS here, but `self.structs` is keyed by the real
-                // declaration name — the raw lookup missed, and the nil-field
-                // sweep silently skipped every field of an alias-spelled
-                // literal while the same literal spelled directly rejected
-                // (#385, live probe 2026-10-18). Follow the alias chain to its
-                // root before the lookup; non-struct aliases resolve to a name
-                // that is simply absent from `structs`, same as before.
-                let sname = sname.map(|n| {
-                    let mut cur = n;
-                    for _ in 0..8 {
-                        match self.type_aliases.get(cur.as_str()) {
-                            Some(hy_syntax::TypeExpr::Named { name, .. }) if name != &cur => {
-                                cur = name.clone();
+                let resolved_def = ty
+                    .as_ref()
+                    .and_then(|t| {
+                        let fields_def = self.struct_fields_for_type(t)?;
+                        let peeled = self.peel_pointer_and_alias(t);
+                        let sname = match &peeled {
+                            hy_syntax::TypeExpr::Named { name, .. } => {
+                                Self::base_named_type_str(name).to_string()
                             }
-                            _ => break,
+                            _ => t.render(),
+                        };
+                        Some((sname, fields_def))
+                    })
+                    .or_else(|| {
+                        let shape = self.shape_of_expr(st, unwrapped);
+                        match shape {
+                            TypeShape::Struct(Some(n)) => {
+                                let base = Self::base_named_type_str(&n).to_string();
+                                let def = self.structs.get(&base)?.clone();
+                                Some((base, def))
+                            }
+                            _ => None,
                         }
-                    }
-                    cur
-                });
-                if let Some(sname) = sname.or_else(|| {
-                    let shape = self.shape_of_expr(st, value);
-                    match shape {
-                        TypeShape::Struct(Some(n)) => Some(n),
-                        _ => None,
-                    }
-                }) {
-                    if let Some(def) = self.structs.get(&sname).cloned() {
-                        for f in fields {
-                            if let Some((_, fty)) = def.iter().find(|(n, _)| n == &f.name) {
-                                if Checker::is_nil_literal(&f.value) {
-                                    let fshape = self.shape_of_type(fty);
-                                    if !Checker::is_nilable_shape(&fshape) {
-                                        self.emit_nil_type_error_text(
-                                            &fshape,
-                                            fty.render(),
-                                            f.value.span(),
-                                            &format!("the field `{}.{}`", sname, f.name),
-                                        );
-                                    }
-                                    continue;
+                    });
+                if let Some((sname, def)) = resolved_def {
+                    for f in fields {
+                        if let Some((_, fty)) = def.iter().find(|(n, _)| n == &f.name) {
+                            if Checker::is_nil_literal(&f.value) {
+                                let fshape = self.shape_of_type(fty);
+                                if !Checker::is_nilable_shape(&fshape) {
+                                    self.emit_nil_type_error_text(
+                                        &fshape,
+                                        fty.render(),
+                                        f.value.span(),
+                                        &format!("the field `{}.{}`", sname, f.name),
+                                    );
                                 }
-                                self.check_composite_nils(st, &f.value);
+                                continue;
                             }
                         }
+                        self.check_composite_nils(st, &f.value);
+                    }
+                } else {
+                    for f in fields {
+                        self.check_composite_nils(st, &f.value);
                     }
                 }
             }
-            Expr::MapLit { value: vty, entries, .. } => {
+            Expr::MapLit { key: kty, value: vty, entries, .. } => {
+                let kshape = self.shape_of_type(kty);
+                let kty_text = kty.render();
                 let vshape = self.shape_of_type(vty);
                 let vty_text = vty.render();
                 for (k, v) in entries {
+                    if Checker::is_nil_literal(k) && !Checker::is_nilable_shape(&kshape) {
+                        self.emit_nil_type_error_text(
+                            &kshape,
+                            kty_text.clone(),
+                            k.span(),
+                            &format!("the map key slot `{}`", kty_text),
+                        );
+                    } else {
+                        self.check_composite_nils(st, k);
+                    }
                     if Checker::is_nil_literal(v) && !Checker::is_nilable_shape(&vshape) {
                         self.emit_nil_type_error_text(
                             &vshape,
@@ -1052,14 +1070,13 @@ impl<'a> Checker<'a> {
                             v.span(),
                             &format!("the map value slot `{}`", vty_text),
                         );
-                        continue;
+                    } else {
+                        self.check_composite_nils(st, v);
                     }
-                    self.check_composite_nils(st, v);
-                    self.check_composite_nils(st, k);
                 }
             }
             Expr::SliceLit { elem, items, .. } => {
-                let elem_ty = value
+                let elem_ty = unwrapped
                     .as_array_lit()
                     .map(|(_, inner_elem, _)| inner_elem)
                     .or(elem.as_deref());
