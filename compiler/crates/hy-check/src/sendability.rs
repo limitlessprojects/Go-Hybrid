@@ -168,7 +168,7 @@ impl<'a> Checker<'a> {
                     return false;
                 }
                 seen.push(sname.clone());
-                let Some(fields) = self.structs.get(sname) else {
+                let Some(fields) = self.struct_fields_with_args(sname) else {
                     return false;
                 };
                 fields
@@ -200,7 +200,7 @@ impl<'a> Checker<'a> {
                     return false;
                 }
                 seen.push(sname.clone());
-                let Some(fields) = self.structs.get(sname) else {
+                let Some(fields) = self.struct_fields_with_args(sname) else {
                     return false;
                 };
                 fields
@@ -227,7 +227,7 @@ impl<'a> Checker<'a> {
                     return false;
                 }
                 seen.push(sname.clone());
-                let Some(fields) = self.structs.get(sname) else {
+                let Some(fields) = self.struct_fields_with_args(sname) else {
                     return false;
                 };
                 fields
@@ -1020,7 +1020,7 @@ impl<'a> Checker<'a> {
                         _ => None,
                     }
                 }) {
-                    if let Some(def) = self.structs.get(&sname).cloned() {
+                    if let Some(def) = self.struct_fields_with_args(&sname) {
                         for f in fields {
                             if let Some((_, fty)) = def.iter().find(|(n, _)| n == &f.name) {
                                 if Checker::is_nil_literal(&f.value) {
@@ -2216,7 +2216,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn parse_generic_type_args(name: &str) -> Option<(&str, Vec<hy_syntax::TypeExpr>)> {
+    pub(crate) fn parse_generic_type_args(name: &str) -> Option<(&str, Vec<hy_syntax::TypeExpr>)> {
         let open = name.find('[')?;
         if !name.ends_with(']') || open == 0 {
             return None;
@@ -2257,7 +2257,7 @@ impl<'a> Checker<'a> {
         Some((base, parsed))
     }
 
-    fn substitute_type_params(
+    pub(crate) fn substitute_type_params(
         ty: &hy_syntax::TypeExpr,
         subst: &std::collections::HashMap<String, hy_syntax::TypeExpr>,
     ) -> hy_syntax::TypeExpr {
@@ -2348,28 +2348,7 @@ impl<'a> Checker<'a> {
         let hy_syntax::TypeExpr::Named { name, .. } = &peeled else {
             return None;
         };
-        let sname = Self::base_named_type_str(name);
-        let fields = self.structs.get(sname)?.clone();
-        if let Some((_, type_args)) = Self::parse_generic_type_args(name) {
-            if let Some(sdecl) = self.file.decls.iter().find_map(|d| match d {
-                hy_syntax::Decl::Struct(s) if s.name == sname => Some(s),
-                _ => None,
-            }) {
-                let mut subst = std::collections::HashMap::new();
-                for (tp, arg) in sdecl.type_params.iter().zip(type_args.iter()) {
-                    subst.insert(tp.name.clone(), arg.clone());
-                }
-                if !subst.is_empty() {
-                    return Some(
-                        fields
-                            .into_iter()
-                            .map(|(n, fty)| (n, Self::substitute_type_params(&fty, &subst)))
-                            .collect(),
-                    );
-                }
-            }
-        }
-        Some(fields)
+        self.struct_fields_with_args(name)
     }
 
     fn infer_type_param_bindings(
