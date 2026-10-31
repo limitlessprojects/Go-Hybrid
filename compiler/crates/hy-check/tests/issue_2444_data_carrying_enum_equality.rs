@@ -155,4 +155,25 @@ fn compare_config(c1 config, c2 config) bool {
 }
 "#;
     accepts_without(UNIT_ONLY, "HYB-E2006");
+
+    // Match-arm payload binding comparison must not inherit enum shape (feedback on #2448)
+    const MATCH_ARM_PAYLOAD_EQ: &str = r#"
+enum shape {
+    circle(int)
+    point
+}
+
+fn main() {
+    a := shape.circle(2)
+    match a {
+        circle(r): {
+            if r == 2 {
+            }
+        }
+        point: {
+        }
+    }
+}
+"#;
+    accepts_without(MATCH_ARM_PAYLOAD_EQ, "HYB-E2006");
 }
