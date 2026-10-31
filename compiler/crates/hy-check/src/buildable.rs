@@ -80,7 +80,7 @@ pub(crate) enum OpKind {
     Bool,
     Str,
     Slice(Box<OpKind>),
-    Array(Box<OpKind>),
+    Array(Box<OpKind>, Option<i128>),
     Map(Box<OpKind>, Box<OpKind>),
     Chan(Box<OpKind>),
     Struct(Option<String>),
@@ -107,7 +107,8 @@ impl OpKind {
             OpKind::Bool => "bool".to_string(),
             OpKind::Str => "string".to_string(),
             OpKind::Slice(e) => format!("[]{}", e.label()),
-            OpKind::Array(e) => format!("[N]{}", e.label()),
+            OpKind::Array(e, Some(n)) => format!("[{}]{}", n, e.label()),
+            OpKind::Array(e, None) => format!("[N]{}", e.label()),
             OpKind::Map(k, v) => format!("map[{}]{}", k.label(), v.label()),
             OpKind::Chan(e) => format!("chan {}", e.label()),
             OpKind::Struct(Some(n)) => format!("struct {}", n),
@@ -162,7 +163,13 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         (Struct(None), _) | (_, Struct(None)) => false,
         (a, b) if a == b => false,
         // Same container shape: recurse into the element kinds.
-        (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) => {
+        (Slice(a), Slice(b)) | (Chan(a), Chan(b)) => kinds_conflict(a, b),
+        (Array(a, len_a), Array(b, len_b)) => {
+            if let (Some(la), Some(lb)) = (len_a, len_b) {
+                if la != lb {
+                    return true;
+                }
+            }
             kinds_conflict(a, b)
         }
         (Map(k1, v1), Map(k2, v2)) => kinds_conflict(k1, k2) || kinds_conflict(v1, v2),
@@ -295,7 +302,7 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         // A struct whose NAME did not resolve cannot have its members looked up.
         OpKind::Struct(None) => false,
         OpKind::Struct(Some(_)) => true,
-        OpKind::Slice(e) | OpKind::Array(e) | OpKind::Chan(e) | OpKind::Pointer(e) => {
+        OpKind::Slice(e) | OpKind::Array(e, _) | OpKind::Chan(e) | OpKind::Pointer(e) => {
             is_fully_resolved(e)
         }
         OpKind::Map(k, v) => is_fully_resolved(k) && is_fully_resolved(v),
@@ -1206,7 +1213,7 @@ impl<'a> Collector<'a> {
 
     fn iterate_var_kinds(&self, expr: &Expr, n_vars: usize) -> Vec<OpKind> {
         match self.kind_of_expr(expr) {
-            OpKind::Slice(e) | OpKind::Array(e) | OpKind::Chan(e) => {
+            OpKind::Slice(e) | OpKind::Array(e, _) | OpKind::Chan(e) => {
                 if n_vars >= 2 {
                     vec![OpKind::Int, *e]
                 } else {
@@ -1660,7 +1667,8 @@ impl<'a> Collector<'a> {
                 OpKind::Slice(Box::new(self.kind_of_ty(elem, depth + 1)))
             }
             TypeExpr::Array { elem, .. } => {
-                OpKind::Array(Box::new(self.kind_of_ty(elem, depth + 1)))
+                let array_len = self.ck.array_len_of_ty(ty);
+                OpKind::Array(Box::new(self.kind_of_ty(elem, depth + 1)), array_len)
             }
             TypeExpr::Map { key, value, .. } => OpKind::Map(
                 Box::new(self.kind_of_ty(key, depth + 1)),
@@ -1717,8 +1725,15 @@ impl<'a> Collector<'a> {
         if let Some(rest) = s.strip_prefix("[]") {
             return OpKind::Slice(Box::new(self.kind_of_type_str(rest, depth + 1)));
         }
-        if let Some(rest) = s.strip_prefix("[...]") {
-            return OpKind::Array(Box::new(self.kind_of_type_str(rest, depth + 1)));
+        if let Some(after_bracket) = s.strip_prefix('[') {
+            if let Some((len_str, rest)) = after_bracket.split_once(']') {
+                let len = if len_str == "..." {
+                    None
+                } else {
+                    len_str.trim().parse::<i128>().ok()
+                };
+                return OpKind::Array(Box::new(self.kind_of_type_str(rest, depth + 1)), len);
+            }
         }
         if let Some(rest) = s
             .strip_prefix("<-chan ")
@@ -1756,7 +1771,8 @@ impl<'a> Collector<'a> {
                 OpKind::Slice(Box::new(self.kind_of_ty_with_subst(elem, subst, depth + 1)))
             }
             TypeExpr::Array { elem, .. } => {
-                OpKind::Array(Box::new(self.kind_of_ty_with_subst(elem, subst, depth + 1)))
+                let array_len = self.ck.array_len_of_ty(ty);
+                OpKind::Array(Box::new(self.kind_of_ty_with_subst(elem, subst, depth + 1)), array_len)
             }
             TypeExpr::Map { key, value, .. } => OpKind::Map(
                 Box::new(self.kind_of_ty_with_subst(key, subst, depth + 1)),
@@ -1805,11 +1821,11 @@ impl<'a> Collector<'a> {
         match &p.kind {
             PlaceKind::Ident(n) => self.lookup_kind(n).unwrap_or(OpKind::Unknown),
             PlaceKind::Index { base, .. } => match self.kind_of_place(base) {
-                OpKind::Slice(e) | OpKind::Array(e) => *e,
+                OpKind::Slice(e) | OpKind::Array(e, _) => *e,
                 OpKind::Map(_, v) => *v,
                 OpKind::Str => OpKind::Int,
                 OpKind::Pointer(inner) => match *inner {
-                    OpKind::Array(e) => *e,
+                    OpKind::Array(e, _) => *e,
                     _ => OpKind::Unknown,
                 },
                 _ => OpKind::Unknown,
@@ -1945,20 +1961,20 @@ impl<'a> Collector<'a> {
                 _ => OpKind::Unknown,
             },
             Expr::Index { base, .. } => match self.kind_of_expr(base) {
-                OpKind::Slice(e) | OpKind::Array(e) => *e,
+                OpKind::Slice(e) | OpKind::Array(e, _) => *e,
                 OpKind::Map(_, v) => *v,
                 OpKind::Str => OpKind::Int,
                 OpKind::Pointer(inner) => match *inner {
-                    OpKind::Array(e) => *e,
+                    OpKind::Array(e, _) => *e,
                     _ => OpKind::Unknown,
                 },
                 _ => OpKind::Unknown,
             },
             Expr::Slice { base, .. } => match self.kind_of_expr(base) {
-                OpKind::Slice(e) | OpKind::Array(e) => OpKind::Slice(e),
+                OpKind::Slice(e) | OpKind::Array(e, _) => OpKind::Slice(e),
                 OpKind::Str => OpKind::Str,
                 OpKind::Pointer(inner) => match *inner {
-                    OpKind::Array(e) => OpKind::Slice(e),
+                    OpKind::Array(e, _) => OpKind::Slice(e),
                     _ => OpKind::Unknown,
                 },
                 _ => OpKind::Unknown,
@@ -1972,8 +1988,11 @@ impl<'a> Collector<'a> {
                 .map(|t| self.kind_of_ty(t, 0))
                 .unwrap_or(OpKind::Struct(None)),
             Expr::SliceLit { elem, items, .. } => {
-                if let Some((_, inner_elem, _)) = e.as_array_lit() {
-                    return OpKind::Array(Box::new(self.kind_of_ty(inner_elem, 0)));
+                if let Some((len_expr, inner_elem, _)) = e.as_array_lit() {
+                    let lit_len = len_expr
+                        .and_then(|l| self.ck.const_int_value_at(l, l.span().start, 0))
+                        .or_else(|| Some(items.len() as i128));
+                    return OpKind::Array(Box::new(self.kind_of_ty(inner_elem, 0)), lit_len);
                 }
                 let ek = elem
                     .as_ref()
@@ -2923,8 +2942,8 @@ impl<'a> Collector<'a> {
                     OpKind::Str => false,
                     OpKind::Map(_, _) => true,
                     OpKind::Slice(_) => true,
-                    OpKind::Array(_) => self.is_addressable_expr(base),
-                    OpKind::Pointer(inner) if matches!(*inner, OpKind::Array(_) | OpKind::Slice(_)) => true,
+                    OpKind::Array(..) => self.is_addressable_expr(base),
+                    OpKind::Pointer(inner) if matches!(*inner, OpKind::Array(..) | OpKind::Slice(_)) => true,
                     OpKind::Unknown => true,
                     _ => false,
                 }
@@ -3324,12 +3343,12 @@ impl<'a> Collector<'a> {
             bk,
             OpKind::Unknown
                 | OpKind::Slice(_)
-                | OpKind::Array(_)
+                | OpKind::Array(..)
                 | OpKind::Map(_, _)
                 | OpKind::Str
         ) || matches!(
             bk,
-            OpKind::Pointer(inner) if matches!(**inner, OpKind::Unknown | OpKind::Array(_))
+            OpKind::Pointer(inner) if matches!(**inner, OpKind::Unknown | OpKind::Array(..))
         );
         if !indexable {
             self.emit_e1002(
@@ -3365,12 +3384,12 @@ impl<'a> Collector<'a> {
             return;
         }
         // For slices, arrays, and strings, the index must be an integer.
-        let needs_int_idx = matches!(bk, OpKind::Slice(_) | OpKind::Array(_) | OpKind::Str)
-            || matches!(bk, OpKind::Pointer(inner) if matches!(**inner, OpKind::Array(_)));
+        let needs_int_idx = matches!(bk, OpKind::Slice(_) | OpKind::Array(..) | OpKind::Str)
+            || matches!(bk, OpKind::Pointer(inner) if matches!(**inner, OpKind::Array(..)));
         // A fixed-size array carries its length in the type, so a constant index
         // past that length is a compile-time error in Go ([3] on [2]int).
-        let is_array = matches!(bk, OpKind::Array(_))
-            || matches!(bk, OpKind::Pointer(inner) if matches!(**inner, OpKind::Array(_)));
+        let is_array = matches!(bk, OpKind::Array(..))
+            || matches!(bk, OpKind::Pointer(inner) if matches!(**inner, OpKind::Array(..)));
         if needs_int_idx && !matches!(ik, OpKind::Unknown | OpKind::Int | OpKind::Void) {
             self.emit_e1002(
                 index.span(),
@@ -3445,10 +3464,10 @@ impl<'a> Collector<'a> {
     ) {
         let sliceable = matches!(
             bk,
-            OpKind::Unknown | OpKind::Slice(_) | OpKind::Array(_) | OpKind::Str
+            OpKind::Unknown | OpKind::Slice(_) | OpKind::Array(..) | OpKind::Str
         ) || matches!(
             bk,
-            OpKind::Pointer(inner) if matches!(**inner, OpKind::Unknown | OpKind::Array(_))
+            OpKind::Pointer(inner) if matches!(**inner, OpKind::Unknown | OpKind::Array(..))
         );
         if !sliceable {
             self.emit_e1002(
@@ -3467,8 +3486,8 @@ impl<'a> Collector<'a> {
         } else {
             None
         };
-        let is_array = matches!(bk, OpKind::Array(_))
-            || matches!(bk, OpKind::Pointer(inner) if matches!(**inner, OpKind::Array(_)));
+        let is_array = matches!(bk, OpKind::Array(..))
+            || matches!(bk, OpKind::Pointer(inner) if matches!(**inner, OpKind::Array(..)));
         let const_arr_len = if is_array {
             self.eval_const_array_len_at(base, span.start)
         } else {
@@ -3638,7 +3657,7 @@ impl<'a> Collector<'a> {
                     || (fields.is_empty()
                         && matches!(
                             expected,
-                            OpKind::Array(_) | OpKind::Slice(_) | OpKind::Map(_, _)
+                            OpKind::Array(..) | OpKind::Slice(_) | OpKind::Map(_, _)
                         ))
                 {
                     continue;
@@ -3699,7 +3718,7 @@ impl<'a> Collector<'a> {
                     || (fields.is_empty()
                         && matches!(
                             expected,
-                            OpKind::Array(_) | OpKind::Slice(_) | OpKind::Map(_, _)
+                            OpKind::Array(..) | OpKind::Slice(_) | OpKind::Map(_, _)
                         ))
                 {
                     continue;
@@ -3820,7 +3839,7 @@ impl<'a> Collector<'a> {
                     let arg = &args[0].value;
                     self.check_single_value_position(arg, "a type conversion", false);
                     let ak = self.kind_of_expr(arg);
-                    if !matches!(ak, OpKind::Unknown | OpKind::Slice(_) | OpKind::Array(_)) {
+                    if !matches!(ak, OpKind::Unknown | OpKind::Slice(_) | OpKind::Array(..)) {
                         self.emit_e1002(
                             arg.span(),
                             format!(
@@ -4088,8 +4107,8 @@ impl<'a> Collector<'a> {
             }
             Expr::Index { base, .. } => match self.kind_of_expr(base) {
                 OpKind::Slice(_) => true,
-                OpKind::Array(_) => self.is_addressable_slice_pop_base(base),
-                OpKind::Pointer(inner) if matches!(*inner, OpKind::Array(_)) => true,
+                OpKind::Array(..) => self.is_addressable_slice_pop_base(base),
+                OpKind::Pointer(inner) if matches!(*inner, OpKind::Array(..)) => true,
                 OpKind::Unknown => self.is_addressable_slice_pop_base(base),
                 _ => false,
             },
@@ -4141,9 +4160,9 @@ impl<'a> Collector<'a> {
                 OpKind::Map(_, _) | OpKind::Str => false,
                 OpKind::Slice(_) | OpKind::Unknown => true,
                 OpKind::Pointer(inner) => {
-                    matches!(*inner, OpKind::Array(_) | OpKind::Slice(_) | OpKind::Unknown)
+                    matches!(*inner, OpKind::Array(..) | OpKind::Slice(_) | OpKind::Unknown)
                 }
-                OpKind::Array(_) => self.is_addressable_value_receiver(base),
+                OpKind::Array(..) => self.is_addressable_value_receiver(base),
                 _ => false,
             },
             Expr::Field { base, .. } => match self.kind_of_expr(base) {
@@ -4183,7 +4202,7 @@ impl<'a> Collector<'a> {
             | OpKind::Float
             | OpKind::Bool
             | OpKind::Str
-            | OpKind::Array(_)
+            | OpKind::Array(..)
             | OpKind::Map(_, _)
             | OpKind::Chan(_) => {
                 self.emit_e1002(
@@ -4217,12 +4236,12 @@ impl<'a> Collector<'a> {
                     OpKind::Unknown
                         | OpKind::Str
                         | OpKind::Slice(_)
-                        | OpKind::Array(_)
+                        | OpKind::Array(..)
                         | OpKind::Map(_, _)
                         | OpKind::Chan(_)
                 ) || matches!(
                     &ak,
-                    OpKind::Pointer(inner) if matches!(**inner, OpKind::Unknown | OpKind::Array(_))
+                    OpKind::Pointer(inner) if matches!(**inner, OpKind::Unknown | OpKind::Array(..))
                 );
                 if !ok {
                     self.emit_e2005(
@@ -4247,10 +4266,10 @@ impl<'a> Collector<'a> {
                 let ak = self.kind_of_expr(op);
                 let ok = matches!(
                     ak,
-                    OpKind::Unknown | OpKind::Slice(_) | OpKind::Array(_) | OpKind::Chan(_)
+                    OpKind::Unknown | OpKind::Slice(_) | OpKind::Array(..) | OpKind::Chan(_)
                 ) || matches!(
                     &ak,
-                    OpKind::Pointer(inner) if matches!(**inner, OpKind::Unknown | OpKind::Array(_))
+                    OpKind::Pointer(inner) if matches!(**inner, OpKind::Unknown | OpKind::Array(..))
                 );
                 if !ok {
                     self.emit_e2005(

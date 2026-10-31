@@ -1612,7 +1612,7 @@ impl<'a> Checker<'a> {
     /// `None` when the type is not a fixed-size array or its length is not an
     /// integer constant. A pointer to an array indexes the same elements, so the
     /// length survives `*`.
-    fn array_len_of_ty(&self, ty: &TypeExpr) -> Option<i128> {
+    pub(crate) fn array_len_of_ty(&self, ty: &TypeExpr) -> Option<i128> {
         match self.resolve_type_alias(ty) {
             TypeExpr::Array {
                 len: Some(len), ..
