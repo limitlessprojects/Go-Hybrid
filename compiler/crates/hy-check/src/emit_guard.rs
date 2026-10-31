@@ -25,8 +25,8 @@ use crate::const_overflow::{
 use crate::model::{as_addr_of, unwrap_parens, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
-    AssignOp, BinOp, CallArg, Expr, FnDecl, ForKind, InterpPart, LitKind, Place, PlaceKind,
-    SelectArmKind, Stmt, TypeExpr, UnOp,
+    AssignOp, BinOp, Block, CallArg, Decl, Expr, File, FnDecl, ForKind, InterpPart, LitKind,
+    Place, PlaceKind, SelectArmKind, Stmt, TypeExpr, UnOp,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -81,6 +81,122 @@ impl<'b> BindingSight<'b> {
     }
 }
 
+pub(crate) const RESERVED_GO_PRIMITIVES: &[(&str, &str)] = &[
+    ("uint8", "u8"),
+    ("uint16", "u16"),
+    ("uint32", "u32"),
+    ("uint64", "u64"),
+    ("int8", "i8"),
+    ("int16", "i16"),
+    ("int32", "i32"),
+    ("int64", "i64"),
+    ("float32", "f32"),
+    ("float64", "f64"),
+    ("uintptr", "uintptr"),
+    ("complex64", "complex64"),
+    ("complex128", "complex128"),
+];
+
+pub(crate) fn reserved_go_primitive_spec_name(name: &str) -> Option<&'static str> {
+    RESERVED_GO_PRIMITIVES
+        .iter()
+        .find(|(go_type, _)| *go_type == name)
+        .map(|(_, spec_name)| *spec_name)
+}
+
+fn expr_has_try(e: &Expr) -> bool {
+    match e {
+        Expr::Try { .. } => true,
+        Expr::Binary { lhs, rhs, .. } => expr_has_try(lhs) || expr_has_try(rhs),
+        Expr::Unary { operand, .. }
+        | Expr::AddrOf { operand, .. }
+        | Expr::Move { operand, .. } => expr_has_try(operand),
+        Expr::Receive { chan, .. } => expr_has_try(chan),
+        Expr::Index { base, index, .. } => expr_has_try(base) || expr_has_try(index),
+        Expr::Slice { base, lo, hi, .. } => {
+            expr_has_try(base)
+                || lo.as_ref().map(|x| expr_has_try(x)).unwrap_or(false)
+                || hi.as_ref().map(|x| expr_has_try(x)).unwrap_or(false)
+        }
+        Expr::Field { base, .. } => expr_has_try(base),
+        Expr::Call { callee, args, .. } => {
+            expr_has_try(callee) || args.iter().any(|a| expr_has_try(&a.value))
+        }
+        Expr::StructLit { fields, .. } => fields.iter().any(|f| expr_has_try(&f.value)),
+        Expr::SliceLit { items, .. } => items.iter().any(expr_has_try),
+        Expr::MapLit { entries, .. } => {
+            entries.iter().any(|(k, v)| expr_has_try(k) || expr_has_try(v))
+        }
+        Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
+            InterpPart::Expr(x) => expr_has_try(x),
+            InterpPart::Lit(_) => false,
+        }),
+        Expr::FnLit { body, .. } => block_has_try(body),
+        Expr::Paren { inner, .. } => expr_has_try(inner),
+        _ => false,
+    }
+}
+
+fn block_has_try(b: &Block) -> bool {
+    b.stmts.iter().any(stmt_has_try)
+}
+
+fn stmt_has_try(s: &Stmt) -> bool {
+    match s {
+        Stmt::Local(l) => l.values.iter().any(expr_has_try),
+        Stmt::Assign { values, .. } => values.iter().any(expr_has_try),
+        Stmt::Expr { expr, .. } => expr_has_try(expr),
+        Stmt::Send { chan, value, .. } => expr_has_try(chan) || expr_has_try(value),
+        Stmt::If {
+            init,
+            cond,
+            then,
+            otherwise,
+            ..
+        } => {
+            init.as_deref().is_some_and(stmt_has_try)
+                || expr_has_try(cond)
+                || block_has_try(then)
+                || otherwise.as_deref().is_some_and(stmt_has_try)
+        }
+        Stmt::For { kind, body, .. } => {
+            let kind_try = match kind {
+                ForKind::While { cond } => expr_has_try(cond),
+                ForKind::Range { lo, hi, .. } => expr_has_try(lo) || expr_has_try(hi),
+                ForKind::Iterate { expr, .. } => expr_has_try(expr),
+                ForKind::Infinite => false,
+            };
+            kind_try || block_has_try(body)
+        }
+        Stmt::Block { block, .. } => block_has_try(block),
+        Stmt::Managed { body, .. } => block_has_try(body),
+        Stmt::Match { subject, arms, .. } => {
+            expr_has_try(subject)
+                || arms.iter().any(|a| {
+                    a.guard.as_ref().is_some_and(expr_has_try) || block_has_try(&a.body)
+                })
+        }
+        Stmt::Select { arms, .. } => arms.iter().any(|a| block_has_try(&a.body)),
+        Stmt::Return { values, .. } => values.iter().any(expr_has_try),
+        Stmt::Task { callee, args, .. } => {
+            expr_has_try(callee) || args.iter().any(|a| expr_has_try(&a.value))
+        }
+        Stmt::Defer { call, .. } => expr_has_try(call),
+        Stmt::Break { .. } | Stmt::Continue { .. } => false,
+    }
+}
+
+pub(crate) fn file_main_has_e6(file: &File) -> bool {
+    file.decls.iter().any(|d| {
+        if let Decl::Fn(f) = d {
+            f.name == "main"
+                && f.receiver.is_none()
+                && (!f.results.is_empty() || f.body.as_ref().is_some_and(block_has_try))
+        } else {
+            false
+        }
+    })
+}
 impl<'a> Checker<'a> {
     /// Pass-B entry: mirror `arith::check_stmt_const_zero_divisor`.
     pub(crate) fn check_stmt_emit_guard(&mut self, st: &FnState, stmt: &Stmt) {
@@ -842,11 +958,93 @@ impl<'a> Checker<'a> {
     // C — package-scope redeclarations (HYB-E1003)
     // ------------------------------------------------------------------
 
+    pub(crate) fn file_main_has_e6(&self) -> bool {
+        file_main_has_e6(self.file)
+    }
+
     /// Record a package-level name (fn / const / struct / enum / type).
     /// Go keeps ONE package block: a second declaration of the same name,
     /// in any of those kinds, is `X redeclared in this block` — the
     /// emitted module would not build (issue #201-C).
     pub(crate) fn declare_pkg_name(&mut self, name: &str, kind: &'static str, span: Span) {
+        if let Some(spec) = reserved_go_primitive_spec_name(name) {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E1002",
+                    self.path.clone(),
+                    span,
+                    format!(
+                        "`{name}` cannot be used as a package-level {kind} — it is a Go primitive type name reserved for compiler lowering (HYB-E1002)"
+                    ),
+                )
+                .with_notes(vec![
+                    format!(
+                        "why: Hybrid lowers `{spec}` to Go `{name}` — declaring a package-level {kind} named `{name}` shadows the Go type and causes unbuildable or corrupted emitted Go (issue #728)"
+                    ),
+                    format!("fix: choose a different {kind} name"),
+                ]),
+            );
+            return;
+        }
+
+        if name == "hy_pop" {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E1002",
+                    self.path.clone(),
+                    span,
+                    format!(
+                        "`hy_pop` cannot be used as a package-level {kind} — it is reserved for the compiler's slice pop runtime helper (HYB-E1002)"
+                    ),
+                )
+                .with_notes(vec![
+                    "why: Hybrid lowers `.pop()` on slices to the runtime helper `hy_pop` — declaring `hy_pop` causes emitted Go compilation failure (issue #728)".to_string(),
+                    format!("fix: choose a different {kind} name"),
+                ]),
+            );
+            return;
+        }
+
+        if (name == "os" || name == "filepath" || name == "fmt") && self.file_main_has_e6() {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E1002",
+                    self.path.clone(),
+                    span,
+                    format!(
+                        "`{name}` collides with the `{name}` package injected by main's error handling (HYB-E1002)"
+                    ),
+                )
+                .with_notes(vec![
+                    format!(
+                        "why: main's error return or `?` error handling requires the compiler to import `{name}` — declaring a package-level {kind} named `{name}` causes emitted Go compilation failure (issue #728)"
+                    ),
+                    format!("fix: choose a different {kind} name"),
+                ]),
+            );
+            return;
+        }
+
+        if self.packages.contains(name) {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E1002",
+                    self.path.clone(),
+                    span,
+                    format!(
+                        "`{name}` collides with imported package `{name}` (HYB-E1002)"
+                    ),
+                )
+                .with_notes(vec![
+                    format!(
+                        "why: Go keeps a single package block for imports and package-level declarations — declaring a {kind} named `{name}` causes emitted Go compilation failure (issue #728)"
+                    ),
+                    format!("fix: rename the {kind} or alias the import"),
+                ]),
+            );
+            return;
+        }
+
         if let Some(prev) = self.pkg_names.get(name) {
             let msg = format!(
                 "`{name}` redeclared in this block — first declared as a {prev}, now as a {kind} (HYB-E1003)",
