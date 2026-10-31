@@ -42,6 +42,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # as execution.
 PYTHON_RE = re.compile(r"(?:.*/)?python(?:3(?:\.\d+)?)?\Z")
 PYTHON_FLAGS_RE = re.compile(r"-[bBdEIOPqRsSuvx]+\Z")
+VALID_MODULE_RE = re.compile(r"[_a-zA-Z]\w*\.py\Z")
 
 
 def shell_words(line):
@@ -133,7 +134,7 @@ def is_reached_discover(root, relpath, start, pattern):
     start_dir = (root_dir / start).resolve()
     if not start_dir.is_dir() or not start_dir.is_relative_to(root_dir) or not target.is_relative_to(start_dir):
         return False
-    if not is_registered_discover(target.name, [pattern]):
+    if not VALID_MODULE_RE.fullmatch(target.name) or not is_registered_discover(target.name, [pattern]):
         return False
     # unittest visits files in the start directory directly, but only
     # recurses into subdirectories that are regular Python packages.
