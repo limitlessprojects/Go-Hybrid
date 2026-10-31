@@ -155,6 +155,40 @@ class CheckVersionsTests(unittest.TestCase):
         self.assertNotIn("installed go", result.stdout)
         self.assertNotIn("installed rustc", result.stdout)
 
+    def test_readme_docker_quickstart_runs_output_inside_container(self):
+        # Issue #1831: the `## Docker (CI)` one-liner must pass `&& /work/out`
+        # inside the container command (`sh -c '...'`) instead of chaining
+        # `/work/out` on the host shell after `docker run` exits.
+        readme = (self.root / "README.md").read_text(encoding="utf-8")
+        section = readme.split("## Docker (CI)", 1)[1].split("## ", 1)[0]
+        block = section.split("```bash\n", 1)[1].split("\n```", 1)[0].strip()
+        bindir = self.root / "docker-bin"
+        bindir.mkdir(exist_ok=True)
+        args_file = self.root / "docker-args.txt"
+        docker_stub = bindir / "docker"
+        docker_stub.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"$@\" > '{args_file}'\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        docker_stub.chmod(0o755)
+        result = subprocess.run(
+            ["/bin/sh", "-c", block],
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            env={"PATH": f"{bindir}:/usr/bin:/bin", "PWD": str(self.root)},
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        recorded = args_file.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(
+            recorded[-3:],
+            ["sh", "-c", "hyb build ./program.hy -o /work/out && /work/out"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
