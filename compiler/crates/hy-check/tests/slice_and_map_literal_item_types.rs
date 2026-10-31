@@ -96,3 +96,84 @@ fn main() {
 "#;
     assert_ok(src, "valid slice and map composite literals");
 }
+
+#[test]
+fn type_elided_struct_literals_checked_for_unknown_and_duplicate_fields_issue_2098() {
+    // 1. Unknown field in slice elided struct
+    let src1 = r#"
+struct item {
+    count int
+    label string
+}
+fn main() {
+    s := []item{
+        {unknown_field: 1},
+    }
+    _ = s
+}
+"#;
+    assert_rejects_e1002(&check(src1), "unknown field in slice elided struct");
+
+    // 2. Duplicate field in slice elided struct
+    let src2 = r#"
+struct item {
+    count int
+    label string
+}
+fn main() {
+    s := []item{
+        {count: 1, count: 2},
+    }
+    _ = s
+}
+"#;
+    assert_rejects_e1002(&check(src2), "duplicate field in slice elided struct");
+
+    // 3. Field type mismatch in slice elided struct
+    let src3 = r#"
+struct item {
+    count int
+    label string
+}
+fn main() {
+    s := []item{
+        {count: "wrong_type"},
+    }
+    _ = s
+}
+"#;
+    assert_rejects_e1002(&check(src3), "field type mismatch in slice elided struct");
+
+    // 4. Elided struct in scalar slice
+    let src4 = r#"
+fn main() {
+    s := []int{{x: 1}}
+    _ = s
+}
+"#;
+    assert_rejects_e1002(&check(src4), "elided struct in scalar slice");
+
+    // 5. Elided struct in scalar map value
+    let src5 = r#"
+fn main() {
+    m := map[string]int{"k": {x: 1}}
+    _ = m
+}
+"#;
+    assert_rejects_e1002(&check(src5), "elided struct in scalar map value");
+
+    // 6. Valid elided struct literals pass cleanly
+    let src_ok = r#"
+struct item {
+    count int
+    label string
+}
+fn main() {
+    s := []item{
+        {count: 1, label: "ok"},
+    }
+    _ = s
+}
+"#;
+    assert_ok(src_ok, "valid elided struct literals in slice");
+}
