@@ -608,6 +608,62 @@ impl Parser {
         Ok(params)
     }
 
+    /// Parameter list inside a `fn(...)` type expression: parameters may be
+    /// unnamed (`fn(int, *string) bool`) or named (`fn(a int, b string) bool`).
+    fn parse_fn_type_params(&mut self) -> PResult<Vec<Param>> {
+        let mut params = Vec::new();
+        while !self.at_punct(")") && !self.at_eof() {
+            let pstart = self.pos;
+            let param = if matches!(self.cur(), Tok::Ident(_)) {
+                let saved_pos = self.pos;
+                let saved_diags = self.diags.len();
+                let unnamed = if let Ok(ty) = self.parse_type() {
+                    if self.at_punct(",") || self.at_punct(")") {
+                        Some(Param {
+                            name: String::new(),
+                            ty,
+                            span: self.span_from(pstart),
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                match unnamed {
+                    Some(p) => p,
+                    None => {
+                        self.pos = saved_pos;
+                        self.diags.truncate(saved_diags);
+                        let name = self.expect_ident()?;
+                        let ty = self.parse_type()?;
+                        Param {
+                            name,
+                            ty,
+                            span: self.span_from(pstart),
+                        }
+                    }
+                }
+            } else {
+                let ty = self.parse_type()?;
+                Param {
+                    name: String::new(),
+                    ty,
+                    span: self.span_from(pstart),
+                }
+            };
+            params.push(param);
+            if !self.at_punct(",") && !self.at_punct(")") {
+                return self.err(format!(
+                    "expected ',' or ')' in parameter list, found {}",
+                    self.describe_cur()
+                ));
+            }
+            self.eat_punct(",");
+        }
+        Ok(params)
+    }
+
     /// Result: bare type, or parenthesized list with optional names
     /// (`(total int, err error)` / `(int, error)` / `(code int)`).
     fn parse_results(&mut self) -> PResult<Vec<FnResult>> {
@@ -615,19 +671,36 @@ impl Parser {
             self.bump();
             let mut results = Vec::new();
             while !self.at_punct(")") && !self.at_eof() {
-                let named =
-                    matches!(self.cur(), Tok::Ident(_)) && matches!(self.nth(1), Tok::Ident(_));
-                if named {
-                    let name = self.expect_ident()?;
-                    let ty = self.parse_type()?;
-                    results.push(FnResult {
-                        name: Some(name),
-                        ty,
-                    });
+                let result = if matches!(self.cur(), Tok::Ident(_)) {
+                    let saved_pos = self.pos;
+                    let saved_diags = self.diags.len();
+                    let unnamed = if let Ok(ty) = self.parse_type() {
+                        if self.at_punct(",") || self.at_punct(")") {
+                            Some(FnResult { name: None, ty })
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    match unnamed {
+                        Some(r) => r,
+                        None => {
+                            self.pos = saved_pos;
+                            self.diags.truncate(saved_diags);
+                            let name = self.expect_ident()?;
+                            let ty = self.parse_type()?;
+                            FnResult {
+                                name: Some(name),
+                                ty,
+                            }
+                        }
+                    }
                 } else {
                     let ty = self.parse_type()?;
-                    results.push(FnResult { name: None, ty });
-                }
+                    FnResult { name: None, ty }
+                };
+                results.push(result);
                 if !self.at_punct(",") && !self.at_punct(")") {
                     return self.err("expected ',' or ')' in result list");
                 }
@@ -731,11 +804,17 @@ impl Parser {
             Tok::Kw("fn") => {
                 self.bump();
                 self.expect_punct("(")?;
-                let params = self.parse_params()?;
+                let params = self.parse_fn_type_params()?;
                 self.expect_punct(")")?;
                 let mut results = Vec::new();
-                while self.is_type_start() {
-                    results.push(self.parse_type()?);
+                if self.same_line_as_prev() && self.at_punct("(") {
+                    for r in self.parse_results()? {
+                        results.push(r.ty);
+                    }
+                } else {
+                    while self.same_line_as_prev() && self.is_type_start() {
+                        results.push(self.parse_type()?);
+                    }
                 }
                 TypeExpr::Fn {
                     params,
@@ -4381,6 +4460,133 @@ fn main() {
         let src = "fn main() {\n    x := 1\n    .foo\n}";
         let r = parse_file("t.hy", src);
         assert!(r.is_err(), "leading dot on new line must not fold into statement");
+    }
+
+    #[test]
+    fn fn_type_does_not_absorb_following_line_as_result_type_issue_727() {
+        let src = r#"
+package main
+
+import "fmt"
+
+struct handler {
+    on_event fn(int) bool
+    name string
+}
+
+fn main() {
+    var cb fn() int
+    fmt.println(cb == nil)
+    var f fn(int) int
+    f(1)
+    var void_cb fn()
+    x := 1
+    _ = x
+}
+"#;
+        let f = parse_src(src);
+        let st = f
+            .decls
+            .iter()
+            .find_map(|d| match d {
+                Decl::Struct(s) if s.name == "handler" => Some(s),
+                _ => None,
+            })
+            .expect("handler struct");
+        assert_eq!(
+            st.fields.len(),
+            2,
+            "struct fields after fn-typed field must not be absorbed: {:?}",
+            st.fields
+        );
+        assert_eq!(st.fields[0].name, "on_event");
+        assert_eq!(st.fields[1].name, "name");
+        match &st.fields[0].ty {
+            TypeExpr::Fn {
+                params, results, ..
+            } => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].name, "");
+                assert_eq!(params[0].ty.render(), "int");
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].render(), "bool");
+            }
+            other => panic!("expected TypeExpr::Fn, got {:?}", other),
+        }
+
+        let main_fn = f
+            .decls
+            .iter()
+            .find_map(|d| match d {
+                Decl::Fn(fn_decl) if fn_decl.name == "main" => Some(fn_decl),
+                _ => None,
+            })
+            .expect("main fn");
+        let body = main_fn.body.as_ref().expect("main body");
+        assert_eq!(
+            body.stmts.len(),
+            7,
+            "statements following var fn(...) must not be swallowed: {:?}",
+            body.stmts
+        );
+        match &body.stmts[0] {
+            Stmt::Local(LocalDecl {
+                ty: Some(TypeExpr::Fn { results, .. }),
+                ..
+            }) => {
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].render(), "int");
+            }
+            other => panic!("expected var cb fn() int, got {:?}", other),
+        }
+        assert!(matches!(
+            &body.stmts[1],
+            Stmt::Expr {
+                expr: Expr::Call { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            &body.stmts[3],
+            Stmt::Expr {
+                expr: Expr::Call { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn fn_type_supports_unnamed_complex_params_and_parenthesized_results_issue_727() {
+        let src = r#"
+package main
+
+fn main() {
+    var f fn(*int, []string, map[string]int) (int, error)
+    _ = f
+}
+"#;
+        let f = parse_src(src);
+        let main_fn = f.fns().next().expect("main");
+        let body = main_fn.body.as_ref().expect("body");
+        match &body.stmts[0] {
+            Stmt::Local(LocalDecl {
+                ty:
+                    Some(TypeExpr::Fn {
+                        params, results, ..
+                    }),
+                ..
+            }) => {
+                assert_eq!(params.len(), 3);
+                assert!(params.iter().all(|p| p.name.is_empty()));
+                assert_eq!(params[0].ty.render(), "*int");
+                assert_eq!(params[1].ty.render(), "[]string");
+                assert_eq!(params[2].ty.render(), "map[string]int");
+                assert_eq!(results.len(), 2);
+                assert_eq!(results[0].render(), "int");
+                assert_eq!(results[1].render(), "error");
+            }
+            other => panic!("expected fn type local, got {:?}", other),
+        }
     }
 
 }

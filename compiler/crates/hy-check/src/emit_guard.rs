@@ -640,8 +640,12 @@ impl<'a> Checker<'a> {
                         decl.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect()
                     })
                 } else if let Some(b) = self.lookup_binding(st, name) {
-                    if let Some(TypeExpr::Fn { params, .. }) = &b.ty {
-                        Some(params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect())
+                    if let Some(ty) = &b.ty {
+                        if let TypeExpr::Fn { params, .. } = self.resolve_type_alias(ty) {
+                            Some(params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect())
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }
@@ -678,15 +682,30 @@ impl<'a> Checker<'a> {
                         },
                         _ => None,
                     };
-                    let decl = if let Some(s) = recv_struct {
-                        self.method_decls.get(&(s, method_name.clone())).copied()
+                    let decl = if let Some(ref s) = recv_struct {
+                        self.method_decls.get(&(s.clone(), method_name.clone())).copied()
                     } else {
                         self.method_decls
                             .iter()
                             .find(|((_, m), _)| m == method_name)
                             .map(|(_, d)| *d)
                     };
-                    decl.map(|d| d.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect())
+                    if let Some(d) = decl {
+                        Some(d.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect())
+                    } else {
+                        recv_struct
+                            .and_then(|s| self.structs.get(&s))
+                            .and_then(|fs| fs.iter().find(|(n, _)| n == method_name))
+                            .and_then(|(_, fty)| match self.resolve_type_alias(fty) {
+                                TypeExpr::Fn { params, .. } => Some(
+                                    params
+                                        .iter()
+                                        .map(|p| (p.name.clone(), p.ty.clone()))
+                                        .collect(),
+                                ),
+                                _ => None,
+                            })
+                    }
                 }
             }
             Expr::FnLit { params, .. } => {
@@ -707,8 +726,13 @@ impl<'a> Checker<'a> {
                 };
                 if let Some((p_name, p_ty)) = target {
                     let resolved_ty = self.resolve_type_alias(p_ty);
+                    let label = if p_name.is_empty() {
+                        format!("parameter #{}", i + 1)
+                    } else {
+                        format!("parameter `{}`", p_name)
+                    };
                     self.check_const_overflow_init(
-                        &format!("parameter `{}`", p_name),
+                        &label,
                         &resolved_ty,
                         &a.value,
                         None,
