@@ -4326,14 +4326,8 @@ impl<'a> Collector<'a> {
                 }
             }
             "append" => {
-                if args.is_empty() {
-                    self.emit_e2005(
-                        span,
-                        "`append` requires at least 1 argument (slice[, elems...]) (HYB-E2005)"
-                            .to_string(),
-                        "pass a slice as the first argument to `append(xs, elem)`",
-                    );
-                    return;
+                if args.len() < 2 {
+                    return; // arity handled by builtins.rs
                 }
                 let slice_arg = &args[0].value;
                 let sk = self.kind_of_expr(slice_arg);

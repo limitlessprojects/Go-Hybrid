@@ -84,6 +84,17 @@ fn real_and_imag_bad_arity_rejects_e2005() {
 }
 
 #[test]
+fn append_zero_or_one_arg_rejects_e2005() {
+    let r0 = check("fn main() {\n    x := append()\n    _ = x\n}\n");
+    assert_eq!(r0.verdict, Verdict::Reject);
+    assert!(error_codes(&r0).contains(&"HYB-E2005".to_string()));
+
+    let r1 = check("fn main() {\n    s := []int{1, 2}\n    x := append(s)\n    _ = x\n}\n");
+    assert_eq!(r1.verdict, Verdict::Reject);
+    assert!(error_codes(&r1).contains(&"HYB-E2005".to_string()));
+}
+
+#[test]
 fn closure_panic_bad_arity_rejects_e2005() {
     let src = "fn main() {\n    f := fn() {\n        panic()\n    }\n    _ = f\n}\n";
     let r = check(src);
@@ -103,7 +114,12 @@ fn main() {
     c := complex(1.0, 2.0)
     re := real(c)
     im := imag(c)
+    s := []int{1, 2}
+    s2 := append(s, 3)
+    s3 := append(s, 4, 5)
     _ = r
+    _ = s2
+    _ = s3
     _ = m1
     _ = m2
     _ = m3
@@ -115,4 +131,64 @@ fn main() {
     let r = check(src);
     assert_eq!(r.verdict, Verdict::Accept);
     assert!(error_codes(&r).is_empty(), "expected 0 errors, got {:?}", r.diagnostics);
+}
+
+#[test]
+fn min_max_nil_literal_rejects_e2005() {
+    let r_min = check("fn main() {\n    _ = min(nil)\n}\n");
+    assert_eq!(r_min.verdict, Verdict::Reject);
+    assert!(error_codes(&r_min).contains(&"HYB-E2005".to_string()));
+
+    let r_max = check("fn main() {\n    _ = max(nil)\n}\n");
+    assert_eq!(r_max.verdict, Verdict::Reject);
+    assert!(error_codes(&r_max).contains(&"HYB-E2005".to_string()));
+}
+
+#[test]
+fn real_imag_invalid_literal_rejects_e2005() {
+    let r1 = check("fn main() {\n    _ = real(\"bad\")\n}\n");
+    assert_eq!(r1.verdict, Verdict::Reject);
+    assert!(error_codes(&r1).contains(&"HYB-E2005".to_string()));
+
+    let r2 = check("fn main() {\n    _ = real(nil)\n}\n");
+    assert_eq!(r2.verdict, Verdict::Reject);
+    assert!(error_codes(&r2).contains(&"HYB-E2005".to_string()));
+
+    let r3 = check("fn main() {\n    _ = imag(true)\n}\n");
+    assert_eq!(r3.verdict, Verdict::Reject);
+    assert!(error_codes(&r3).contains(&"HYB-E2005".to_string()));
+
+    let r4 = check("fn main() {\n    _ = imag(nil)\n}\n");
+    assert_eq!(r4.verdict, Verdict::Reject);
+    assert!(error_codes(&r4).contains(&"HYB-E2005".to_string()));
+}
+
+#[test]
+fn complex_invalid_literal_rejects_e2005() {
+    let r1 = check("fn main() {\n    _ = complex(\"x\", \"y\")\n}\n");
+    assert_eq!(r1.verdict, Verdict::Reject);
+    assert!(error_codes(&r1).contains(&"HYB-E2005".to_string()));
+
+    let r2 = check("fn main() {\n    _ = complex(nil, nil)\n}\n");
+    assert_eq!(r2.verdict, Verdict::Reject);
+    assert!(error_codes(&r2).contains(&"HYB-E2005".to_string()));
+
+    let r3 = check("fn main() {\n    _ = complex(true, false)\n}\n");
+    assert_eq!(r3.verdict, Verdict::Reject);
+    assert!(error_codes(&r3).contains(&"HYB-E2005".to_string()));
+}
+
+#[test]
+fn complex_type_conversion_invalid_literal_rejects() {
+    let r1 = check("fn main() {\n    _ = complex128(\"invalid\")\n}\n");
+    assert_eq!(r1.verdict, Verdict::Reject);
+
+    let r2 = check("fn main() {\n    _ = complex128(true)\n}\n");
+    assert_eq!(r2.verdict, Verdict::Reject);
+
+    let r3 = check("fn main() {\n    _ = complex128(nil)\n}\n");
+    assert_eq!(r3.verdict, Verdict::Reject);
+
+    let r4 = check("fn main() {\n    _ = complex64(nil)\n}\n");
+    assert_eq!(r4.verdict, Verdict::Reject);
 }

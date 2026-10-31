@@ -846,6 +846,13 @@ impl<'a> Checker<'a> {
                 }
                 ConvConst::Int(_) | ConvConst::Char(_) => {}
             },
+            "complex64" | "complex128" | "c64" | "c128" => match c {
+                ConvConst::Int(_) | ConvConst::Float(_) | ConvConst::Char(_) => {}
+                ConvConst::Str | ConvConst::Bool | ConvConst::Nil => {
+                    self.emit_conv_kind_error(target, c, arg, span)
+                }
+                ConvConst::Huge { .. } => {}
+            },
             "string" => match c {
                 ConvConst::Str
                 | ConvConst::Int(_)
@@ -1035,7 +1042,18 @@ fn huge_int_as_f64(s: &str) -> f64 {
 /// True when `name` is a built-in conversion target of `Type(const)` calls.
 fn is_conversion_target(name: &str) -> bool {
     fixed_width_int_range(name).is_some()
-        || matches!(name, "f32" | "f64" | "float32" | "float64" | "string")
+        || matches!(
+            name,
+            "f32"
+                | "f64"
+                | "float32"
+                | "float64"
+                | "string"
+                | "complex64"
+                | "complex128"
+                | "c64"
+                | "c128"
+        )
 }
 
 /// Targets the emitter's SPEC X4 fold skips (`bits >= 64`) — constants here
