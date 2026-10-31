@@ -3709,13 +3709,11 @@ impl<'a> Collector<'a> {
             if ik == OpKind::Unknown || ik == expected {
                 continue;
             }
-            if expected == OpKind::Float
-                && ik == OpKind::Int
-                && crate::const_overflow::const_int_value(item).is_some()
-            {
-                continue;
-            }
-            if !kinds_conflict(&expected, &ik) {
+            if expected == OpKind::Float && ik == OpKind::Int {
+                if crate::const_overflow::const_int_value(item).is_some() {
+                    continue;
+                }
+            } else if !kinds_conflict(&expected, &ik) {
                 continue;
             }
             self.emit_e1002(
@@ -3746,10 +3744,11 @@ impl<'a> Collector<'a> {
                 let kk = self.kind_of_expr(k);
                 if kk != OpKind::Unknown
                     && kk != exp_key
-                    && !(exp_key == OpKind::Float
-                        && kk == OpKind::Int
-                        && crate::const_overflow::const_int_value(k).is_some())
-                    && kinds_conflict(&exp_key, &kk)
+                    && if exp_key == OpKind::Float && kk == OpKind::Int {
+                        crate::const_overflow::const_int_value(k).is_none()
+                    } else {
+                        kinds_conflict(&exp_key, &kk)
+                    }
                 {
                     self.emit_e1002(
                         k.span(),
@@ -3771,10 +3770,11 @@ impl<'a> Collector<'a> {
                 let vk = self.kind_of_expr(v);
                 if vk != OpKind::Unknown
                     && vk != exp_val
-                    && !(exp_val == OpKind::Float
-                        && vk == OpKind::Int
-                        && crate::const_overflow::const_int_value(v).is_some())
-                    && kinds_conflict(&exp_val, &vk)
+                    && if exp_val == OpKind::Float && vk == OpKind::Int {
+                        crate::const_overflow::const_int_value(v).is_none()
+                    } else {
+                        kinds_conflict(&exp_val, &vk)
+                    }
                 {
                     self.emit_e1002(
                         v.span(),
@@ -4940,5 +4940,31 @@ fn main() {
             "unexpected diagnostics: {:?}",
             r.diagnostics
         );
+    }
+
+    #[test]
+    fn rejects_int_vars_in_float_slice_and_map_literals_1980() {
+        for src in [
+            "fn main() {\n    i := 10\n    s := []float64{i}\n    fmt.println(s)\n}\n",
+            "fn main() {\n    i := 10\n    m := map[float64]string{i: \"hello\"}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    i := 10\n    m := map[string]float64{\"pi\": i}\n    fmt.println(m)\n}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                error_codes(&r).contains(&"HYB-E1002".to_string()),
+                "expected HYB-E1002, got {:?} for:\n{src}",
+                error_codes(&r)
+            );
+        }
+
+        for src in [
+            "fn main() {\n    s := []float64{10}\n    fmt.println(s)\n}\n",
+            "fn main() {\n    m := map[float64]string{10: \"hello\"}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[string]float64{\"pi\": 10}\n    fmt.println(m)\n}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Accept, "expected accept for:\n{src}");
+        }
     }
 }
