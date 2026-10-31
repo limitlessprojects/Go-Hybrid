@@ -209,6 +209,27 @@ fn example02_try_desugar_and_defer() {
     );
 }
 
+#[test]
+fn bare_error_fn_under_try_emits_zero_value_temps() {
+    // #726: `fn step() error` returns ONE Go value. The fn shape used to count
+    // the trailing error as a value too, so `step()?` emitted
+    // `hyT0, hyErr1 := step()` against `func step() error` — go build failed
+    // with "assignment mismatch: 2 variables but step returns 1 value".
+    let go = emit(
+        &"fn step() error {\n    return nil\n}\n\nfn run() error {\n    step()?\n    return nil\n}",
+    );
+    assert!(
+        go.contains("hyErr0 := step()"),
+        "bare-error try must emit a single error temp, got:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("hyT0, hyErr0 := step()"),
+        "no value temp may be declared for a bare-error result:\n{}",
+        go
+    );
+}
+
     #[test]
     fn defer_call_argument_try_hoists_before_the_defer() {
         // P1 (§7): a deferred call's arguments are evaluated at defer time, so a
@@ -3031,4 +3052,19 @@ fn main() {}
     let go6 = emit(src6);
     assert!(go6.contains("func read_url() int {"));
     assert!(go6.contains("func read_u_r_l() int {"));
+}
+
+#[test]
+fn utf8_byte_escapes_emit_exact_utf8_strings_issue_1199() {
+    let src = "fn main() {\n    value := 7\n    s1 := \"\\xc3\\xa9\"\n    s2 := \"\\303\\251\"\n    s3 := \"\\xe4\\xb8\\xad\"\n    s4 := \"\\xf0\\x9f\\x99\\x82\"\n    s5 := \"prefix:\\xc3\\xa9:{value}\"\n    c1 := '\\xe9'\n    c2 := '\\u{e9}'\n    fmt.println(len(s1), s1 == \"é\", s2 == \"é\", s3 == \"中\", s4 == \"🙂\", s5 == \"prefix:é:7\", c1 == c2)\n}\n";
+    let go = emit(src);
+    assert!(go.contains("s1 := \"é\""), "expected s1 := \"é\", got:\n{}", go);
+    assert!(go.contains("s2 := \"é\""), "expected s2 := \"é\", got:\n{}", go);
+    assert!(go.contains("s3 := \"中\""), "expected s3 := \"中\", got:\n{}", go);
+    assert!(go.contains("s4 := \"🙂\""), "expected s4 := \"🙂\", got:\n{}", go);
+    assert!(
+        go.contains("fmt.Sprintf(\"prefix:é:%v\", value)"),
+        "expected interpolated prefix:é:%v, got:\n{}",
+        go
+    );
 }

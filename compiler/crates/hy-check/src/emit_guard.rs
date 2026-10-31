@@ -748,6 +748,7 @@ impl<'a> Checker<'a> {
                 noun,
                 match noun {
                     "map" => "map can only be compared to nil",
+                    "set" => "struct containing map cannot be compared",
                     "slice" => "slice can only be compared to nil",
                     "function value" => "func can only be compared to nil",
                     _ => "cannot be compared",
@@ -755,6 +756,7 @@ impl<'a> Checker<'a> {
             ),
             match noun {
                 "map" => "fix: compare membership or length (`len(a) == len(b)`), or a specific entry (`a[k] == b[k]`), instead of whole-map equality".to_string(),
+                "set" => "fix: compare membership (`a.has(x)`) or length (`len(a) == len(b)`) instead of whole-set equality".to_string(),
                 "slice" => "fix: compare lengths or elements pairwise — whole-slice equality has no Go meaning".to_string(),
                 "function value" => "fix: a function value is only comparable to `nil` — compare behaviour (call both) instead".to_string(),
                 _ => "fix: compare the comparable fields individually — the struct carries an incomparable field".to_string(),
@@ -795,6 +797,9 @@ impl<'a> Checker<'a> {
             // `[N]T` is comparable exactly when `T` is.
             TypeShape::Array(elem) => self.incomparable_rec(elem, seen),
             TypeShape::Struct(Some(name)) => {
+                if name == "set" && !self.structs.contains_key("set") {
+                    return Some("set");
+                }
                 if seen.iter().any(|n| n == name) {
                     return None; // value cycle — Go rejects the type itself elsewhere
                 }
@@ -1164,6 +1169,12 @@ impl<'a> Checker<'a> {
                 len,
             );
         }
+        // #2102: an invalid builtin call inside an array length (`[len(1)]int`,
+        // `[cap(1)+1]int`, `[len()]int`) is the same Go build error as in a
+        // value position. `check_type_ref_array_lens` already walks every
+        // TypeRef, so running the builtin-argument check here covers struct
+        // fields, aliases, local annotations, literals and conversions.
+        self.check_expr_builtin_args(len);
         // 1) A constant integer expression: must be non-negative.
         let direct_or_folded = const_int_value(len).or_else(|| {
             if matches!(unwrap_parens(len), Expr::Ident { .. }) {
@@ -2056,7 +2067,33 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        None
+        // #1915: nested expressions over typed constants. Go folds the whole
+        // constant expression and range-checks the result, so the operand's
+        // fixed-width type propagates through unary negation, shifts and
+        // binary operations with an untyped constant on the other side.
+        match e {
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => self.fixed_width_int_ty_of(st, operand),
+            Expr::Binary {
+                op: BinOp::Shl | BinOp::Shr,
+                lhs,
+                ..
+            } => self.fixed_width_int_ty_of(st, lhs),
+            Expr::Binary { lhs, rhs, .. } => {
+                let lt = self.fixed_width_int_ty_of(st, lhs);
+                let rt = self.fixed_width_int_ty_of(st, rhs);
+                match (lt, rt) {
+                    (Some(a), Some(b)) if a.0 == b.0 => Some(a),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     /// #725 — the folded result of a TYPED constant expression must stay
@@ -2501,7 +2538,9 @@ fn is_non_int_array_len_expr(expr: &Expr) -> bool {
             kind:
                 hy_syntax::LitKind::Bool(_)
                 | hy_syntax::LitKind::Str(_)
-                | hy_syntax::LitKind::RawStr(_),
+                | hy_syntax::LitKind::RawStr(_)
+                // #1810: nil is a non-integer constant.
+                | hy_syntax::LitKind::Nil,
             ..
         } => true,
         Expr::Unary {
@@ -2529,7 +2568,18 @@ fn is_non_int_array_len_expr(expr: &Expr) -> bool {
         Expr::Call { callee, .. } => matches!(
             unwrap_parens(callee),
             Expr::Ident { name, .. }
-                if matches!(name.as_str(), "bool" | "string" | "float32" | "float64")
+                // #1810: complex64/complex128 conversions and the complex
+                // builtin produce non-integer constants.
+                if matches!(
+                    name.as_str(),
+                    "bool"
+                        | "string"
+                        | "float32"
+                        | "float64"
+                        | "complex64"
+                        | "complex128"
+                        | "complex"
+                )
         ),
         _ => false,
     }

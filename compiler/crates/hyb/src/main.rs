@@ -722,29 +722,87 @@ fn render_build_error(e: &BuildError) -> String {
 }
 
 fn cmd_build(args: &[String]) -> ExitCode {
-    // The .hy file: the first arg ending in .hy (flag values never do).
-    let file = args.iter().find(|a| a.ends_with(".hy")).cloned();
-    let Some(file) = file else {
-        eprintln!("usage: hyb build <file.hy> -o <bin-path> [--emit-go] | --package <name> --out-dir <dir> [--binding-prefix <path>]");
-        return ExitCode::from(2);
-    };
-    let out_idx = args.iter().position(|a| a == "-o");
-    let out_path = out_idx
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-        .unwrap_or_else(|| "a.out".to_string());
-    let emit_go_only = args.iter().any(|a| a == "--emit-go");
+    const USAGE: &str = "usage: hyb build <file.hy> -o <bin-path> [--emit-go] [--deny-managed] | --package <name> --out-dir <dir> [--binding-prefix <path>]";
+    // Validate the entire invocation before touching the filesystem or the
+    // toolchain, mirroring cmd_check/cmd_generate: a mistyped option or a
+    // missing value must not fall back to a default and build something else.
+    let mut file: Option<String> = None;
+    let mut out_path: Option<String> = None;
+    let mut emit_go_only = false;
+    let mut deny_managed = false;
     // Package mode (example 09): emit an importable Go package + the
     // runtime pieces, instead of building a binary.
-    let pkg_idx = args.iter().position(|a| a == "--package");
-    let pkg_name = pkg_idx.and_then(|i| args.get(i + 1)).cloned();
-    let outdir_idx = args.iter().position(|a| a == "--out-dir");
-    let out_dir = outdir_idx.and_then(|i| args.get(i + 1)).cloned();
-    let bprefix_idx = args.iter().position(|a| a == "--binding-prefix");
-    let binding_prefix = bprefix_idx
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-        .unwrap_or_else(|| "hybrid.program".to_string());
+    let mut pkg_name: Option<String> = None;
+    let mut out_dir: Option<String> = None;
+    let mut binding_prefix: Option<String> = None;
+    let mut end_of_options = false;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if !end_of_options {
+            match arg.as_str() {
+                "--" => {
+                    end_of_options = true;
+                    i += 1;
+                    continue;
+                }
+                "--emit-go" => {
+                    emit_go_only = true;
+                    i += 1;
+                    continue;
+                }
+                "--deny-managed" => {
+                    deny_managed = true;
+                    i += 1;
+                    continue;
+                }
+                "-o" | "--package" | "--out-dir" | "--binding-prefix" => {
+                    let Some(value) = args.get(i + 1) else {
+                        eprintln!("error: {arg} requires a value\n{USAGE}");
+                        return ExitCode::from(2);
+                    };
+                    if value.is_empty() || value.starts_with('-') {
+                        eprintln!("error: {arg} requires a value, not an option\n{USAGE}");
+                        return ExitCode::from(2);
+                    }
+                    match arg.as_str() {
+                        "-o" => out_path = Some(value.clone()),
+                        "--package" => pkg_name = Some(value.clone()),
+                        "--out-dir" => out_dir = Some(value.clone()),
+                        "--binding-prefix" => binding_prefix = Some(value.clone()),
+                        _ => unreachable!(),
+                    }
+                    i += 2;
+                    continue;
+                }
+                value if value.starts_with('-') => {
+                    eprintln!("error: unknown build option: {value}\n{USAGE}");
+                    return ExitCode::from(2);
+                }
+                _ => {}
+            }
+        }
+        if file.is_some() {
+            eprintln!("build expects exactly one input file; unexpected argument: {arg}\n{USAGE}");
+            return ExitCode::from(2);
+        }
+        file = Some(arg.clone());
+        i += 1;
+    }
+    let Some(file) = file else {
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    };
+    if !file.ends_with(".hy") {
+        eprintln!("error: build expects a .hy input, got: {file}\n{USAGE}");
+        return ExitCode::from(2);
+    }
+    if pkg_name.is_some() != out_dir.is_some() {
+        eprintln!("error: --package and --out-dir must be supplied together\n{USAGE}");
+        return ExitCode::from(2);
+    }
+    let out_path = out_path.unwrap_or_else(|| "a.out".to_string());
+    let binding_prefix = binding_prefix.unwrap_or_else(|| "hybrid.program".to_string());
 
     // --- 1. Toolchain pin enforcement (HYB-E9001) ---
     // The walking skeleton's reproducibility guard (DX study: ~30 lines).
@@ -812,6 +870,17 @@ fn cmd_build(args: &[String]) -> ExitCode {
         for d in &result.diagnostics {
             println!("{}", d.render_head());
         }
+        return ExitCode::FAILURE;
+    }
+
+    // CI policy gate (--deny-managed): any managed block fails the build
+    // before emitting or compiling, matching `hyb check --deny-managed`.
+    if deny_managed && result.managed.managed_blocks > 0 {
+        println!(
+            "deny-managed: {} managed block(s) present — build failed by policy (--deny-managed); \
+             audit the block(s) or remove them",
+            result.managed.managed_blocks
+        );
         return ExitCode::FAILURE;
     }
 

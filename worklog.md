@@ -757,3 +757,170 @@ Stage Summary:
 - Next queue: NEEDS-INTEGRATION const stack #291 -> #297 -> #300 -> #232 (recipes in agent D's log; #232 needs the 5-line ConstInt adaptation after #297; #300 leaves the struct-field-store gap as a follow-up issue), #242 as scenario-port (11/15 live failures = goalposts); tools batch #364 -> #333(bump 675->708... recount at merge) -> #387 -> #383 -> #316 -> #388 -> #403 -> #325 -> #299 -> #423; then #288 (defer '?' hoist, validated 717/0). Closes pending: none left from the old list (#409/#411/#415/#438/#205/#228-A/#346 done or in tools batch).
 - Wildcard M1: every slot now has an attached artifact or a named gap; W-002/3/4/6/8/10/11/13/16 remain outreach targets; #365 verdicts 2026-11-01.
 - CI note: zero-job PR-run failures recurred 17:33-18:04Z (3 runs, jobs total_count=0) while all main push runs stay green — content-independent infra signature, monitoring per session-11 precedent; local batteries are primary evidence.
+
+---
+
+Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queue, 2hrly):
+- Env restore from recycled sandbox: rustup 1.99.0 pin reinstalled, go1.26.9 restored to /home/z/tools/go (hyb toolchain-enforcement caught a stray 1.27.3 on PATH — pin works as designed). Baseline on clean main 1f0ff97: cargo green, corpus tripwire not fired, differential FULL 41+86 AGREEMENT.
+- LANDED (15 merges, each: diff read -> verify_pr.sh battery [merge gate + cargo test --workspace + corpus + differential FULL] -> credit merge -> push -> ls-remote assert -> written PR reply):
+  #2142 (Slangelange, fixes #1072) chan-dir through option unwrap/or — 66d2fa6. Repro-discipline check added to the protocol: `close(some(rc).unwrap())` accepted pre-fix, rejects E3009 post-fix.
+  #2145 (Slangelange, fixes #1083) E6003 non-const ascriptions + shadowed const conversions — 8cb61a7.
+  #2065 (tomaslizak, fixes #2064) place_root paren strip, O8 store-back ordering — b0092c2.
+  #2061 (tomaslizak, fixes #1140) addressable-array slice share-edges through copy/callee stores — eed3af4.
+  #2101 (jpereyra243-byte, fixes #2100) while-try loop sentinel + branch_inherit flush — 5f903b6.
+  #2140 (Slangelange, fixes #1069) via_move uses on Send/select send arms — 189e825.
+  #2143 (Slangelange, fixes #1105) 2-var handle + option-wrapped range iterables E2009 — 5076009.
+  #2146 (Slangelange, fixes #1115) serde_json new_array/push_string + atomic call modes — 0a29255.
+  #2301 (ocakciomursel-pixel, fixes #840) relative BIN_DIR vs PWD — d5c41fb.
+  #1903 (phubinhbusiness-art, fixes #1902) select-arm-header ? hoist — 6358af1 + fe25d5a fixture fixup. PROCEDURE FAULT self-caught: the in-merge fixture fixup was claimed in the merge message but left in the verify worktree — main was red 6358af1..fe25d5a; fixup committed and red window disclosed on the PR thread. Lesson: the fixup commit goes INSIDE the merge (see #1910, done right: merge of a branch that already contains the fixup commit).
+  #1910 (phubinhbusiness-art, fixes #1913) httptest.get/post ? defines + parens — fec9b16 (+ f67ca64 inside the merge).
+  #2054 (huhuli083-creator, fixes #845) const-param slot/field loans in interprocedural calls — 5af171a.
+  #2228 (gttps, fixes #2226) O8 lit_index_key radix canonicalization — d1616cf.
+  #2230 (gttps, fixes #2229) lit_below_2_512 radix decode — 73755a9 (strongest take; dup-cluster courtesy posted on #2245).
+  #2328 (Dimank92, fixes #2317) loop-carried tail-alias freeze on back-edge moves — b62d1a2, same-day on the fresh soundness issue.
+- BLOCKED with evidence (not landed, written replies): #2067 (tomaslizak) — over-broad via_move rejection breaks pinned-legal `p := &clone_arr(a)[:][0]; task worker(move p)` (detached-copy backing has no store-back); discriminator must be map-backed aliasing, not slot_loan alone. Re-run battery same-day on a narrowed rebase.
+- CI: 80 action_required runs approved (2x40); ~312 remain for the cron ticks. Sweeper healthy (daily success, #787 protected per policy — queue is the live 5-day window at ~65 arrivals/day).
+- Suite growth this session: 136 -> 149 suites, all green; differential FULL agreement on every landing; final main b62d1a2 verified (ls-remote == HEAD).
+- Cron: arena watcher (478193) retired per owner instruction; new "Go-Hybrid PR queue drain — verify & land (2hrly)" (486809) fires 2026-10-30 14:20 +03, same doctrine encoded in the prompt.
+
+## Session 19 — 2026-10-30 (cron tick 487193, "queue drain" cadence)
+
+- Sandbox recycled again: reinstalled rustup 1.99.0 + go1.26.9. First two background builds died silently; found cgroup memory.peak == 3.0GiB — the 2-job cargo build OOMs next to the sandbox's own services. verify_pr.sh switched to CARGO_BUILD_JOBS=1 / GOFLAGS=-p=1 / -j1; builds now run in the foreground with 560s incremental slices. Baseline re-established green on main@4468e3a: 152 suites.
+- LANDED (12 merges, Pareto NOW top-12 swept start to finish; each: diff read -> verify_pr.sh battery -> credit merge -> push -> ls-remote assert -> written PR reply):
+  #2345 (james-kkc, fixes #1615) n5_new peels Paren on new() type operand — 42b43b9.
+  #2237 (james-kkc, #2041) any/error/generic base names in value positions E1002 — 8c456d0.
+  #2235 (james-kkc, #2102) builtin-arg checks on array length expressions — 2a2f33b.
+  #2241 (james-kkc, #1803) complex/real/imag + complex64/128 in const decls — 456ebaa.
+  #2240 (james-kkc, #1810) nil and complex array lengths rejected E6004 — 72dcd89 (push 500 x2, retry ok).
+  #2242 (james-kkc, #1917) newline/blank-ticket injection in managed blocks — d7e6588.
+  #2342 (james-kkc, fixes #1554) compound const range bounds via initializer — 1b0e0bc (push 500, retry ok).
+  #2344 (james-kkc, fixes #1616) Go literals/comments ignored in used_binding_roots — f764295 (push 500, retry ok).
+  #2243 (james-kkc, #1915) fixed-width const propagation through nested exprs — b2ac87d. Merge message named the wrong test file (nested_const_overflow_1915 is the real one); corrected in the PR reply.
+  #2234 (james-kkc, fixes #1976) pointer-to-scalar conversion conflicts E1002 — 75357f1.
+  #2236 (james-kkc, #1979) struct/pointer .pop() without pop method E1002 — 2b0c899. PROCEDURE FAULT self-caught: merged before the battery ran (diff was read, battery was not). Battery ran immediately on the merged tree: 162 suites + corpus + differential FULL green; slip and outcome disclosed on the PR thread. Lesson: no merge until verify_pr.sh prints ALL-GREEN — reading the diff is not the battery.
+  #1812 (9xj89gzrtw-hue, fixes #1804) directional make chan targets E2005 — 9bc9de8.
+- CI: 40 more action_required runs approved (287 -> 247 pending).
+- Suite growth this tick: 152 -> 163, all green; differential FULL agreement on every landing; final main 9bc9de8 (ls-remote == HEAD).
+- GitHub side-note: transient "Internal Server Error" on pushes (3 of 12 hit it); retry-after-40s pattern added to the landing loop.
+
+## Session 20 — 2026-10-30 (owner directive: retire the sweeper, review the actively-replying first)
+
+- SWEEPER RETIRED (owner doctrine change): queue-sweeper.yml lost its schedule trigger (manual dispatch only, dry-run preserved) — 5435169. Closes are a deliberate act again; no-silent-closes is unconditional. CONTRIBUTING.md rule 5 (queue self-drain, added by #2246) removed in the follow-up to its own landing.
+- REOPENED the 7 sweeper-close victims whose authors replied after the close: #1645 #1515* #1516* #1518 #1598 #1524 #1505 (*#1515/#1516: GitHub 422 on reopen — head repos exist but GitHub refuses; written explanation + re-push/cherry-pick recovery path posted on both). The other ~38 swept PRs stay closed unless their authors come back (reopen path was in every sweep reply).
+- LANDED (7 merges, each: diff read -> battery -> credit merge -> push assert -> written reply):
+  #2329 (Dimany4, fixes #2320) const-return walk: visited-set to 32, fail-closed past bound + unseen callees — 060dcc5, 164 suites (5 tests fail pre-fix). STRONGEST-TAKE call vs #2330 (Dimank92, depth-bump variant): courtesy verdict posted on #2330 with delta-rebase offer.
+  #2343 (james-kkc, fixes #1617) hyb build full arg validation + --deny-managed — 8dae0dc, 165 suites.
+  #2278 (Dimank92, closes #2271) resolve.rs rewrite: lexical blocks, := RHS before binding, undeclared field base + self-ref := reject E1001 — 986f9ba, 166 suites, differential FULL across the rewrite.
+  #2256 (airdropia, fixes #2253) conflict-marker gate covers .s/.S bridge assembly — f8b3b68.
+  #2246 (airdropia, fixes #726) bare-error result is the error slot, not a value temp — c40a823 (+follow-up: rule-5 removal).
+  #2248 (airdropia, fixes #884) set[T] prelude shares its backing map (O5.2/O5.4/T22 bypass closed) — 45fa4a9, 167 suites.
+  #2249 (airdropia, fixes #887) send values + spawn args single-value positions — 224c082, 168 suites.
+  #2255 (airdropia, fixes #1850) unary operand single-value position — e1da4a0, 169 suites. (airdropia batch: 5/5 landed.)
+- Sandbox recycled AGAIN between turns (rustup/go/target all gone; target partially persisted). Toolchains restored, warm-cache baseline re-verified 163 green before any landing. verify_pr.sh CARGO_BUILD_JOBS=1 carried over.
+- WRITTEN REPLIES (no silent closes): bounty-rail confirmations #2301 (ocakciomursel-pixel, landed d5c41fb) and #2339 (dextermos-dev, merged 12:23Z, coordinates -> discussion #295); holding replies #2265 #2268 (queue position + rebase ask); factual dup verdicts #2263/#2266/#2264 (underlying issues fixed by landed #1903/#2228/#2230 — rebase + delta case invited, stays open).
+- Suite growth: 163 -> 169 this session (24 landings across sessions 19-20 today); final main e1da4a0 (ls-remote == HEAD).
+
+## Session 20 — 2026-10-30 evening (owner directive: stop the 5-day closer, review-first on active authors)
+
+- OWNER DIRECTIVE: stop the bot closing PRs after 5 days. Found the schedule already retired on main (5435169, owner doctrine change) + CONTRIBUTING self-drain rule dropped (c40a823); belt-and-braces: queue-sweeper dispatch now defaults to dry-run (1404fa9) so even a manual dispatch can only list candidates. stale.yml is label-only (never closes); shepherd dup-closer is propose-then-human-close. Nothing auto-closes anymore.
+- AUTHOR-ACTIVE review-first sweep (users who replied today): landed 3 of 6, 2 rebase-asks, 1 courtesy.
+- LANDED: #1645 79188a1 (hamzy-hams, callee/closure O8 map-slot loans; sibling 26bc115 had carried the bulk — disclosed in reply) · #1524 2ba5f21 (hardik4love-lang, W-016 hy-mir spike, docs-only) · #1598 175c96f (zongsm-cmyk, author-stage rejection-evidence gate; PLAN/STATUS keep-both resolved in-merge) · #1518 8633909 (ub3dqy, JSON invalid-handle false success; PLAN keep-both in-merge).
+- REBASE-ASKED with evidence (not landed, written replies): #1505 (hardik4love-lang) const_overflow.rs 1667-line rewrite conflicts inside the file — hand-merge risks dropping main's newer tests; asked for delta rebase, active author · #2001 (Dimany4) GUARANTEES CI job conflicts in ci.yml — workflow YAML needs rebase-first, active author.
+- NEW TRAP FOUND AND DIAGNOSED: verify_pr.sh builds test binaries in a worktree it then deletes; the shared CARGO_TARGET_DIR reuses those binaries from repo-checkout runs, and CARGO_MANIFEST_DIR baked into them points at the dead path — spike6_positive panicked NotFound on the repo checkout. FALSE ALARM (file exists, tracked). Rule: cargo clean -p hy-check before running the battery on a repo-checkout tree (applied for #1598 and #1518); worklog documents it.
+- Battery evidence on every landing: merge gate clean, 168 suites ok (rebuild-verified), corpus tripwire not fired, differential FULL 41/41 + 86/86. Final main 8633909, ls-remote == HEAD, push-500 retry pattern used twice.
+- Suite trajectory: 152 -> 168 across the two evening sessions.
+
+## Session 21 — 2026-10-30 late evening (review-first continuation: 7 landed, incl. two in-merge resolutions)
+
+- Continued the owner's review-first directive on a recycled sandbox (toolchains re-restored: rust 1.99.0 + go1.26.9; target cache survived partially — warm build 17s). Verified the sweeper retirement on main is real: dispatch defaults --dry (1404fa9), schedule gone (5435169), stale.yml label-only, shepherd phase-B needs manual inputs. Nothing auto-closes.
+- New tool: scripts/scan_active_authors.py — scans 531 open PRs for the latest non-bot comment per thread, sorted by age; drove this session's queue (wallet-only posts filtered as noise).
+- LANDED (author-active first): #1505 22ea2a2 (hardik4love-lang, tests-only delta after their clean rebase — duplicate constant map keys coverage, fixes #687) · #2204 86e1fa2 (james-kkc, scalar const copies are value copies not write-through aliases — E3006 false reject) · #2205 105b299 (james-kkc, f()? void/multi-value in single-value position — remaining #1960 surface; no-op ? fenced off) · #2202 58b2a7e (coast9x72, fail-closed foreign method surface, fixes #2200 — see resolution below) · #2221 96e2885 (gamethao92, check_claims_links: evidence links + verdict-header agreement, wired into make check) · #2219 70cb342 (coast9x72, triage labels POST only the delta — rate-limit burn fix) · #2001 0634a44 (Dimany4, GUARANTEES.md rendered from guarantees.json, fixes #710, fail-closed checker + CI gate).
+- IN-MERGE RESOLUTION 1 (#2202 × e0941c2): Mutate arm resolved to "set" | "push_string" — kept main's push_string blessing (real method, in the PR's own surface const) + the PR's removal of phantom `remove`.
+- IN-MERGE RESOLUTION 2 (#2202 × #1115 fixture): e0941c2's fixture used arr.get("0") as its borrow-case, but Get does not exist on vendored jsonbinding.Value (ground truth: Array/Int/String/Set/PushString only) — the fixture pinned acceptance of a program Go refuses to build (the exact #2200 bug class). Borrow-cases rewritten to real arr.array("users") + _ = v mention; intent unchanged. rulldd credited in-merge.
+- IN-MERGE RESOLUTION 3 (#2001 × #2221/#1115): Makefile keeps BOTH gates (claims-links + guarantees); GUARANTEES.md took the PR's rendered form via --render (hand-merged rows would fail the PR's own fail-closed checker).
+- TRAP RECURRED AND RULE HARDENED: stale-binary trap hit twice this session (spike6_positive NotFound, then hy-syntax parse_all NotFound) — verify_pr.sh worktree bakes CARGO_MANIFEST_DIR into shared-target test binaries; ANY repo-checkout battery must start with `cargo clean -p hy-check -p hy-syntax` (not just hy-check), and a killed cargo slice (560s) poisons the following differential run (39/41 phantom). After proper cleans: 171 suites, FULL AGREEMENT.
+- Battery evidence on every landing: merge gate, cargo test --workspace (171 suites), corpus tripwire not fired, differential FULL 41/41 + 86/86. Both python gates (check_guarantees, check_claims_links) + their unittests green post-merge.
+- WRITTEN REPLIES: all seven PRs got landing replies with battery evidence + bounty rail (discussion #295). No silent closes.
+- Suite trajectory: 168 -> 171 this session (24 -> 31 landings across sessions 19-21 today). Final main 0634a44, ls-remote == HEAD, push-500 retry pattern armed (not needed).
+- NEXT TICK QUEUE (active authors, from scan): #2002 (Dimany4, channel directions + SPEC-LANGUAGE note now added), airdropia W-016 series #2149 (escape_sites.py) -> #2195 (M2 spec) -> #2196 (M3 checker) — land in that order, they build on each other; #2126 (Sarbajit-Sengupta, Kaggle job publication). CI: 210 approve-eligible remain (40 approved this session).
+
+## Session 22 — 2026-10-31 early (tick 487193: 3 landed, W-016 arc gated on a real tool bug)
+
+- Sandbox recycled again; toolchains re-restored (rust 1.99.0 + go1.26.9), warm build 15s. CI approve 40/252.
+- LANDED: #2002 d73208d (Dimany4, composite receive channel directions, fixes #1347 — operand-level send/recv symmetry + SPEC C3 note; 172 suites) · #2149 ceb2454 (airdropia, W-016 M1 escape_sites.py + kill criteria) · #2126 80a6a7a (Sarbajit-Sengupta, atomic summary.json promotion in kaggle_fetch — 863-line raw diff is line-endings; -w semantic delta 19 lines + 14 tests; full battery still run per doctrine).
+- GATE FIND (important): #2149's own docstring kill criteria FAIL on the merged tree — program 10 yields 0 triples (criteria: exactly 1), exit 1. Root cause: string-blind brace matcher; the `{` in the interpolation string "pong {hits}" never closes, body_depth never returns to 0, closure skipped. Landed #2149's battery never executed the tool's docstring criteria — RULE ADDED: tools PRs with measurable docstring criteria get those criteria executed at verification.
+- #2195 (W-016 M2 spec flip: A5 lint -> fourth check-site) NOT LANDED — its logged census ("exactly 1 triple, program 10") is unreproducible with the current M1 tool; evidence reply posted with root cause + fix direction (string-aware scanning). #2196 (M3 HYB-E3013) queued behind the M1 fix. Author invited: fix-up PR -> I land M1-fix + M2 + M3 in one pass.
+- WRITTEN REPLIES: #2002 landing, #2149 landing + post-landing disclosure, #2126 landing, #2195 gate evidence. No silent anything.
+- Battery on every landing: 172 suites ok, corpus tripwire not fired, differential FULL 41/41 + 86/86; #2126 additionally py_compile + 4 unittest suites + census.
+- Suite trajectory: 171 -> 172. Final main 80a6a7a, ls-remote == HEAD.
+
+## Session 23 — 2026-10-31 morning (tick 487193: W-016 arc completed — M1 fix + M2 + M3)
+
+- Sandbox recycled again (4th); toolchains re-restored (rust 1.99.0 + go1.26.9). CI approve 40/232.
+- ROOT-CAUSE CORRECTION on the session-22 gate find: the "string-blind brace matcher" diagnosis was incomplete. The brace walk over main's body DID close (line 70/71); the real killers were (1) the nested-closure skip (`i = body_end` jumped past the handler closure inside main — the only fn that mattered was never scanned) and (2) `:=` treated as a capture-write (fixing (1) alone would break 06-http-server's 0-triple criteria via the /add/ handler's `a :=`, `b :=` locals). String-blindness was a third, latent bug (// in URL strings, unbalanced { in interpolation strings).
+- LANDED (W-016 arc, in order):
+  a5770f5 fix(tools): escape_sites.py — string-aware masking pass (position-preserving), nested-closure scan, := is a local declaration (writes are = += -= ++ --), outermost-qualified foreign boundary (chain walk; case file pins mux.handle over http.handler). Both M1 kill criteria pass (06 -> 0, corpus 10 -> exactly 1, capture=hits foreign_call=mux.handle) + 9 adversarial cases. Follow-up to #2149, airdropia credited.
+  abdccc6 Merge PR #2195 (airdropia, W-016 M2): A5 promoted to fourth check-site (C9/D5) in SPEC-LANGUAGE. In-merge fixup: census re-measured on the post-M1-fix tree — corpus grew 61 -> 127 programs; exactly 1 triple, same outcome, 1/127 ~= 0.8%; SPEC text updated inside the merge. Battery: 172 suites, FULL AGREEMENT 41/41 + 86/86, python gates green.
+  eba95ba Merge PR #2196 (airdropia, W-016 M3): HYB-E3013 in hy-check — closure writes captured mutable binding + passed to foreign Go call rejects unless managed("...","interop") or const/non-may_share capture. Corpus program 10 flips ACCEPT(CONTESTED) -> REJECT per its own pre-registered OQ1 condition. In-merge resolution: builtins.rs import union (main's ChanDir from #2002 + PR's HashSet). Battery on resolved tree: 173 suites (172->173, new E3013 5/5), corpus tripwire not fired (3/127), differential FULL AGREEMENT accept 40/40 + reject 87/87 (41/86 -> 40/87 = program 10 moving sides, the designed signature), python gates green.
+- WRITTEN REPLIES: #2195 landing (+ M1-fix context pointer), #2196 landing (+ in-merge resolution disclosure). No silent anything. #2149/#2195/#2196 arc now fully closed on-thread.
+- Suite trajectory: 172 -> 173. Final main eba95ba, ls-remote == HEAD.
+- NEXT TICK QUEUE (Pareto top, all score 8-9, 0-behind): #2055 (huhuli083-creator, +10 lines closure_scoped_envs #867), #2378 (huhuli083-creator, == nil on non-nilable, fixes #1567), #2312 (planners1490, w030 word-atomicity floor), #2310 (planners1490, N5 zero maps allocate, +144), Yumihariii batch #2290/#2295/#2292/#2291 (method arity, struct field chains, range-element copies, len/cap consts), #2372/#2370 (Dimany4, tools fixes). Note #2376/#2373/#1741/#2359/#2374 are 9-behind (STALE-BASE) — rebase asks or careful hand-merge only.
+- TICK ECONOMY: the arc consumed the budget; Pareto land-candidates untouched this tick — left to the next tick honestly.
+
+## Session 24 — 2026-10-31 midday (tick 487193: 2 landed, one with 2 in-merge fixups)
+
+- Sandbox recycled (5th); toolchains re-restored. CI approve 40/221. Triage refresh: yesterday's Pareto batch aged to 6-behind; new score-9 0-behind front: #2396 #2405 #2395 #1974.
+- LANDED:
+  cbee6ae Merge PR #2396 (lilyliiphone2026-collab): composite-bound locals carry the projected type — send-only receive through `sub := append(chs, ch)` no longer passes with 0 diagnostics (E2008 via composite_type_expr fallback; closes the "known remaining sibling" NOTE from #1347/#2002). TWO IN-MERGE FIXUPS, both disclosed + credited: (1) the ACCEPT fixture pinned `var a [<-sub[0]]int` — a receive as an array LENGTH, unbuildable Go even with a perfect checker (differential caught it: 40/41); reshaped to a value-position receive, verified end-to-end at merge time (check 0 diag / build ok / run 0); (2) VERDICTS.md rows added for both new fixtures (README's own contract). Battery: 174 suites, FULL AGREEMENT 41/41 + 88/88 post-fixup.
+  e886db5 Merge PR #2405 (nyxlabs29-cyber, fixes #2403): `f()?` on a name-bound closure knows its result count — result_shape helper (trailing error = error slot, #726) + per-fn closure_shapes table with stale-entry drop on shadowing. Battery ALL-GREEN: 176 suites, FULL AGREEMENT 41/41 + 88/88.
+- TOOL HYGIENE: discovered the session-21 `cargo clean -p hy-check -p hy-syntax` had been running from the REPO ROOT (no Cargo.toml) and failing silently under 2>/dev/null — it must run from compiler/. Batteries still passed because verify_pr.sh does its own clean internally; manual batteries now clean from compiler/ explicitly.
+- WRITTEN REPLIES: #2396 landing (2 fixups disclosed), #2405 landing. No silent anything.
+- Suite trajectory: 173 -> 176. Final main e886db5, ls-remote == HEAD, tree clean.
+- NEXT TICK QUEUE: #2395 (nyxlabs29, O8 slot-loan snapshot, 0-behind score 9), #1974 (lilyliiphone2026, B4 negative shift via const refs, 24 files), #2400 (ub3dqy, Go build constraints in package inference), #2055/#2312/#2378/#2310/#2290/#2295/#2292/#2291 (aged 6-behind — verify_pr merge gate will judge), #2372/#2370 (Dimany4 tools fixes).
+
+## Session 25 — 2026-10-31 early afternoon (tick 487193: 4 landed + a red gate on main caught and fixed)
+
+- Sandbox recycled (6th); toolchains re-restored. CI approve 40/179.
+- LANDED: 260aaed Merge PR #2312 (planners1490, fixes #1210) — W-030 word-atomicity floor verifier; its own falsifiers executed at verification per the tools rule (F0..F4 verified=True, shipped_lines_changed=0 across the 129-file corpus census, 3/3 unit tests); battery 176 suites + FULL 41/88. dd0c66d Merge PR #1745 (kevin9327, fixes #1743) — classify_value unwraps parens at entry; 177 suites + FULL. 485dd54 Merge PR #1776 (kevin9327, fixes #1775) — addr-of-loan covers Index/Slice projections (E3104) + same-span de-dup; 178 suites + FULL. 85f0898 Merge PR #1746 (kevin9327, fixes #1742) — O5.4 + freeze on non-ident moves inside managed (OwnHandle Field as move root); in-merge conflict vs #1745's entry-unwrap (union: keep entry unwrap, take PR's let op + OwnHandle arm); 179 suites + FULL 41/88 on the resolved tree.
+- GATE FIND (red on main since eba95ba): check_guarantees.py failing — rows 5/9 still pinned program 10 as accept after #2196's OQ1 flip to REJECT, and HYB-E3013 unclaimed in the scoped E3 family. Bisected across 5 commits with throwaway worktrees: red at every one back to yesterday's final state. ROOT CAUSE of the miss: the landing tick's gate invocation chained python gates with `;` and >/dev/null, so the failed check's echo was silently skipped (claims-links printed, guarantees didn't — I missed the absence). Fixed in 2c91e26: row 5 -> reject + claims E3013; row 9 rewritten for the post-M2/M3 world (no-claim -> guaranteed, managed/const escape hatch, read-only captures honestly outside); rendered via --render; all four surfaces agree. Process rule retired: gates now run with visible output + explicit exit assertions, never `; cmd >/dev/null && echo`.
+- WRITTEN REPLIES: #2312 #1745 #1776 #1746 landings + #2196 follow-up disclosure (cross-PR honesty). No silent anything.
+- Suite trajectory: 176 -> 179. Final main 2c91e26, ls-remote == HEAD, tree clean.
+- NEXT TICK QUEUE: kevin9327 batch tail #1782 (TypeShape preservation, 0-behind) + #1807 (void/multi-value arity, 0-behind); #2310 (N5 zero maps, 0-behind); #2415 (preludes once per generate, score 9); #2395 (O8 slot-loan snapshot, 5-behind); #2055/#2378 (11-behind — rebase ask candidates); #1974 (5-behind w/ conflicts — rebase-or-close verdict pending).
+
+## Session 26 — 2026-10-31 afternoon (tick 487193: 4 landed, all gates green)
+
+- Sandbox recycled (7th); toolchains re-restored (rust 1.99.0 + go1.26.9). Cold build lesson re-learned: background builds (nohup AND setsid) are reaped between tool calls in this sandbox — foreground `timeout 560 flock` slices only (the resume-from-warm-cache last slice finished in 9.5s). cargo index cache wiped each recycle; first slice re-downloads.
+- CI approve 40/172.
+- LANDED (Pareto front, all score-9 0-behind):
+  4a00c8e Merge PR #2387 (ket4min-susan, fixes #2384) — hy-emit unwraps outer Expr::Try on Stmt::Defer call operand (Row 13 BUILDABLE: `defer f.close()?` emits `defer f.Close()`); 180 suites (+1 defer_try_emit), FULL 41/88.
+  41f73d1 Merge PR #2439 (tungnguyen84) — surface_edits replaces ALL digit runs on dual-count census surfaces; live drift on main confirmed first (parse_all.rs `files.len(), 129, "expected exactly 127 corpus programs"`); heterogeneous surfaces (corpus README/VERDICTS.md) bypass bump() so the sweep is safe; PR's own criterion executed per tools rule (1/1 + full 17/17 OK on PR tree); 180 suites, FULL 41/88.
+  f57ca5e Merge PR #2430 (kevin9327, fixes #2421) — prelude set[T] equality rejects HYB-E2006 with set-specific hint; name-shadowing guard keeps user `struct set` comparable; option/array/struct carriers reject via incomparable_rec; ZERO differential side-shifts (no fixture ever compared sets); 182 suites (+2), FULL 41/88.
+  a1142cd Merge PR #2440 (tungnguyen84) — sync.RWMutex lowered (both spellings, RLock/RUnlock/TryRLock + initialisms), atomic and/or -> And/Or on all five shapes, receiver_type_name generalizes Pointer(inner) recursion so *sync.mutex enforces the curated surface (user structs behind pointers stay fail-open); 183 suites (+1), FULL 41/88.
+- WRITTEN REPLIES: all four landings with battery evidence + bounty rail (discussion #295). No silent anything.
+- Suite trajectory: 179 -> 183. Final main a1142cd, ls-remote == HEAD, tree clean.
+- NEXT TICK QUEUE: #2389 (ket4min-susan, multi-value slot loans, fetched/diff-read) -> #2388 (select move-sends) -> #2425 (autoland repro verdicts) -> #2290/#2432/#2431/#2390/#2310 (score-9 back half); kevin9327 batch tail #1782/#1807; note #2388+#2389 both edit closures.rs (different functions — sequential merges expected clean).
+
+## Session 27 — 2026-10-31 late afternoon (tick 487193: 2 landed + a display-tooling trap documented)
+
+- Sandbox recycled (8th); toolchains re-restored. WARM target cache survived this recycle (only toolchain bins gone) — build slice 16s. Triage scan needed 2 retries (API slowness); approve 40/150.
+- LANDED:
+  3c5bc2e Merge PR #2458 (tungnguyen84) — check_corpus_census.py captures BOTH numbers on dual-count surfaces (read-side enforcement completing the #2439 write-side loop); live main drift repaired (ci.yml/Makefile/README 129/122 -> 129/129, parse_all.rs message 127 -> 129, ast.rs doc 127 -> 129; truth = 41 accept + 88 reject = 129 = ACCEPT 39 · MANAGED 2 · REJECT 88). Census-guard tests 15/15 on PR tree; post-merge `make census` OK all 7 surfaces. 183 suites, FULL 41/88.
+  09c0749 Merge PR #2469 (jdjioe5-cpu, fixes #2468) — set[T] element comparability enforced (E1002, SPEC §2.3 T9): incomparable_type_noun (slice/map/fn/set/option prefixes, data-carrying enums, recursive struct fields). 184 suites (+1, 5/5), FULL 41/88, zero side-shifts; clean-hyb ground truth: set[int]/set[plain]/set[mode] accept, set[map[string]int]/set[holder] reject E1002.
+- TOOLING TRAP (documented, important): the tool-result display layer ATE bracket sequences in rendered diffs/shows/sed output this tick — `set[map[string]int]` rendered as `setap[...]`, `set[holder]` as `setolder]`, `set[mode]` as `setode]` ([m/[h/[o eaten after "set"). Cost: ~30 min rabbit hole (three probes, stale-binary theory, clean rebuilds) before python byte-level hex audit proved the PR file intact and the PR correct as submitted. RULE: bracket-suspicious diff reads get a python hex audit before any gate-fail verdict; probes typed from displayed text are NOT the PR's bytes. The shared CARGO_TARGET_DIR also produced one impossible probe result (set[int] rejecting E1002) — fingerprint thrash; clean -p rebuild + real-CLI hyb check is the arbiter.
+- #2467 (jdjioe5-cpu, uninitialized struct/array elements) queued behind the audit — NOT verified this tick, budget consumed by the display-artifact investigation. Honest leave-to-next-tick.
+- WRITTEN REPLIES: #2458 + #2469 landings (incl. byte-audit disclosure on #2469). No silent anything.
+- Suite trajectory: 183 -> 184. Final main 09c0749, ls-remote == HEAD, tree clean.
+- NEXT TICK QUEUE: #2467 (jdjioe5-cpu follow-up, same-author pair), #2310 (N5 zero maps, +144/14 files), #2432 (Dimany4 E1001 folded brackets), #1811/#1780/#1766/#1767 (9xj89gzrtw-hue batch), #2438 (tungnguyen84 escape_sites nesting), #2288 (receiver type declared, +292/11 files), #2451 (borrow_ffi spike +295/7).
+
+## Session 28 — 2026-10-31 evening (tick 487193: 3 landed, 2 gate-fails evidence-replied)
+
+- Sandbox recycled (9th); toolchains re-restored; warm target cache survived again (build slice 16s). Approve 40/125.
+- LANDED:
+  668b6d3 Merge PR #2492 (dextermos-dev, fixes #2471) — Eq/Ne restructure: nil==nil rejects (Go-conformant), non-nilable kinds (int/float/bool/string/struct/array) vs nil reject E1002 + N1 hint; nilable kinds unchanged; zero side-shifts. 184 suites, FULL 41/88.
+  19c63c1 Merge PR #2499 (ocakciomursel-pixel, fixes #2497) — #2469 T9 follow-up: arrays, type aliases, generic struct substitution (struct_type_arg_map + substitute_type_str), pointer/chan nilable-comparable, folded type args reach inner set (box[[2]set[[]int]]); fixtures byte-audited bracket-safely pre-verify. 185 suites, FULL 41/88.
+  7440766 Merge PR #2299 (ocakciomursel-pixel, fixes #1199) — lexer: \\xNN/\\NNN bytes buffered + utf8_chunks flush at string boundaries (LX7/T3 "\\xc3\\xa9" -> é; invalid bytes byte-for-byte); rune literals keep 0..=255 semantics. 185 suites, corpus tripwire not fired (129 programs byte-exact), FULL 41/88.
+- GATE FAILS (evidence replies, not landed): #2389 + #2388 (ket4min-susan, same-author siblings) — both rebased and both introduced the identical API drift in their tests' codes() helper: `check_file(&file).into_iter()` on CheckResult (E0599: not an iterator). Merge gates CLEAN; checker-side changes reviewed correct (#2383 slot loans / #2382 deferred-move surfaces). Fix is one line (check(&file) iterator API, or check_file(&file).diagnostics) — invited, will land same-tick on push.
+- Bracket-safety rule applied: #2499's test fixtures audited via python bracket-encoded print before verification (display layer still mangling).
+- WRITTEN REPLIES: #2492/#2499/#2299 landings, #2389/#2388 evidence. No silent anything.
+- Suite trajectory: 184 -> 185. Final main 7440766, ls-remote == HEAD, tree clean.
+- NEXT TICK QUEUE: #2389/#2388 (await one-line fix), #2310 (N5 zero maps, +145/14), #2425 (autoland, 0-behind again), #1811/#1780/#1766/#1767 (9xj89gzrtw-hue batch), #2290 (Yumihariii method-value arity), #2390 (O8 slot-loan snapshot), #2438 (escape_sites nesting), #2288 (+292/11), #2451 (borrow_ffi spike).

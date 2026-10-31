@@ -219,6 +219,20 @@ fn equality_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
     kinds_conflict(a, b) && kinds_conflict(b, a)
 }
 
+/// Non-nilable types in Go and Hybrid cannot be compared to untyped nil (SPEC §3.1 N1).
+/// Nilable types: pointer, interface, slice, map, channel, function.
+fn is_non_nilable(k: &OpKind) -> bool {
+    matches!(
+        k,
+        OpKind::Int
+            | OpKind::Float
+            | OpKind::Bool
+            | OpKind::Str
+            | OpKind::Struct(_)
+            | OpKind::Array(_)
+    )
+}
+
 /// Does a type conversion `target(arg)` fail because the two types are incompatible in Go?
 ///
 /// In Go, type conversions `T(x)` require compatible types:
@@ -260,6 +274,13 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
 
         // Chan target: cannot convert from Int, Float, Bool, Str, Slice, Map, Struct.
         (Chan(_), Int | Float | Bool | Str | Slice(_) | Map(_, _) | Struct(_)) => true,
+
+        // Pointer targets and arguments: Go only converts between pointers.
+        // A pointer cannot convert to or from any non-pointer type; the one
+        // exception is an interface target (`any(p)`), handled above.
+        (Pointer(_), Pointer(_)) => false,
+        (Pointer(_), Interface) => false,
+        (Pointer(_), _) | (_, Pointer(_)) => true,
 
         _ => false,
     }
@@ -576,8 +597,11 @@ impl<'a> Collector<'a> {
         // enum, a type alias, or a built-in conversion target. Anything else
         // stays fail-open.
         let is_declared_type = self.ck.structs.contains_key(name)
+            || self.ck.struct_type_params.contains_key(head)
             || self.ck.enums.contains_key(name)
             || self.ck.type_aliases.contains_key(name)
+            || name == "any"
+            || name == "error"
             || crate::const_init::is_conversion_type_name(name);
         if !is_declared_type {
             return;
@@ -983,6 +1007,14 @@ impl<'a> Collector<'a> {
                 span,
             } => {
                 for t in targets {
+                    // #2199: a store whose target is a TYPE NAME cannot build.
+                    // The annotated-store spelling `n T = v` parses as the
+                    // expression statement `n` followed by a store to `T`, and
+                    // Go refuses the second line (`T (type) is not an
+                    // expression`). Same class as #778, one position over.
+                    if let PlaceKind::Ident(name) = &t.kind {
+                        self.check_type_name_in_value_position(name, t.span);
+                    }
                     self.place(t, *op);
                 }
                 for v in values {
@@ -1000,6 +1032,10 @@ impl<'a> Collector<'a> {
             Stmt::Expr { expr, .. } => self.expr(expr),
             Stmt::Send { chan, value, .. } => {
                 self.expr(chan);
+                // #887: the sent value is a single-value position. A void call
+                // or a multi-value call here passed the checker and emitted
+                // `ch <- noop()` / `ch <- pair()`, which Go rejects.
+                self.check_single_value_position(value, "a channel send", false);
                 self.expr(value);
             }
             Stmt::If {
@@ -1066,6 +1102,12 @@ impl<'a> Collector<'a> {
             Stmt::Task { callee, args, span } => {
                 self.expr(callee);
                 for a in args {
+                    // #887: a spawn argument sits in a single-value position
+                    // exactly like a call argument does. Without this,
+                    // `task worker(noop())` (void call) and
+                    // `task worker(pair())` (two values) passed the checker
+                    // and emitted Go that cannot build.
+                    self.check_single_value_position(&a.value, "a spawn argument", false);
                     self.expr(&a.value);
                 }
                 match unwrap_parens(callee) {
@@ -1148,6 +1190,9 @@ impl<'a> Collector<'a> {
                     self.push_scope();
                     match &arm.kind {
                         SelectArmKind::Send { chan, value, .. } => {
+                    // #887: a channel send in a select arm is also a single-value
+                    // position.
+                    self.check_single_value_position(value, "a channel send", false);
                             self.expr(chan);
                             self.expr(value);
                         }
@@ -1547,6 +1592,139 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn strip_leading_bracket_group(s: &str) -> Option<(&str, &str)> {
+        if !s.starts_with('[') {
+            return None;
+        }
+        let mut depth = 0usize;
+        for (i, ch) in s.char_indices() {
+            match ch {
+                '[' => depth += 1,
+                ']' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some((&s[1..i], &s[i + 1..]));
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn substitute_type_str(s: &str, subst: &HashMap<String, String>) -> String {
+        let s = s.trim();
+        if let Some(repl) = subst.get(s) {
+            return repl.clone();
+        }
+        if let Some(rest) = s.strip_prefix('*') {
+            return format!("*{}", Self::substitute_type_str(rest, subst));
+        }
+        if let Some(rest) = s.strip_prefix("[]") {
+            return format!("[]{}", Self::substitute_type_str(rest, subst));
+        }
+        for pfx in ["<-chan ", "chan<- ", "chan "] {
+            if let Some(rest) = s.strip_prefix(pfx) {
+                return format!("{}{}", pfx, Self::substitute_type_str(rest, subst));
+            }
+        }
+        if s.starts_with('[') {
+            if let Some((inside, rest)) = Self::strip_leading_bracket_group(s) {
+                if !rest.trim().is_empty() {
+                    return format!("[{}]{}", inside, Self::substitute_type_str(rest, subst));
+                }
+            }
+        }
+        if let Some(after_map) = s.strip_prefix("map") {
+            if let Some((k, v)) = Self::strip_leading_bracket_group(after_map) {
+                if !v.trim().is_empty() {
+                    return format!(
+                        "map[{}]{}",
+                        Self::substitute_type_str(k, subst),
+                        Self::substitute_type_str(v, subst)
+                    );
+                }
+            }
+        }
+        if let Some(open) = s.find('[') {
+            if s.ends_with(']') {
+                let head = &s[..open];
+                let inner = &s[open + 1..s.len() - 1];
+                let args: Vec<String> = split_top_level_type_args(inner)
+                    .into_iter()
+                    .map(|a| Self::substitute_type_str(a, subst))
+                    .collect();
+                return format!("{}[{}]", head, args.join(", "));
+            }
+        }
+        s.to_string()
+    }
+
+    fn incomparable_type_noun(&self, ty_str: &str) -> Option<&'static str> {
+        self.incomparable_type_noun_depth(ty_str, 0)
+    }
+
+    fn incomparable_type_noun_depth(&self, ty_str: &str, depth: usize) -> Option<&'static str> {
+        if depth > 16 {
+            return None;
+        }
+        let trimmed = ty_str.trim();
+        if trimmed.starts_with('*')
+            || trimmed.starts_with("chan ")
+            || trimmed.starts_with("<-chan ")
+            || trimmed.starts_with("chan<- ")
+        {
+            return None;
+        }
+        if trimmed.starts_with("[]") {
+            return Some("slice");
+        }
+        if trimmed.starts_with('[') {
+            if let Some((inside, rest)) = Self::strip_leading_bracket_group(trimmed) {
+                if !inside.is_empty() && !rest.trim().is_empty() {
+                    return self.incomparable_type_noun_depth(rest, depth + 1);
+                }
+            }
+        }
+        if trimmed.starts_with("map[") {
+            return Some("map");
+        }
+        if trimmed.starts_with("func(") || trimmed.starts_with("fn(") {
+            return Some("function");
+        }
+        if trimmed.starts_with("set[") || trimmed == "set" {
+            return Some("set");
+        }
+        if trimmed.starts_with("option[") || trimmed == "option" {
+            return Some("option");
+        }
+        if let Some(alias_ty) = self.ck.type_aliases.get(trimmed) {
+            return self.incomparable_type_noun_depth(&alias_ty.render(), depth + 1);
+        }
+        for d in &self.ck.file.decls {
+            if let hy_syntax::Decl::Enum(e) = d {
+                if e.name == trimmed && e.variants.iter().any(|v| v.payload.is_some()) {
+                    return Some("data-carrying enum");
+                }
+            }
+        }
+        let base = Checker::base_named_type_str(trimmed);
+        if let Some(fields) = self.ck.structs.get(base) {
+            let subst = self.struct_type_arg_map(trimmed);
+            for (_, fty) in fields {
+                let render = if subst.is_empty() {
+                    fty.render()
+                } else {
+                    Self::substitute_type_str(&fty.render(), &subst)
+                };
+                if let Some(n) = self.incomparable_type_noun_depth(&render, depth + 1) {
+                    return Some(n);
+                }
+            }
+        }
+        None
+    }
+
     fn check_named_type_instantiation(&mut self, name: &str, span: Span) {
         let name = name.trim();
         if let Some(rest) = name
@@ -1560,6 +1738,23 @@ impl<'a> Collector<'a> {
             self.check_named_type_instantiation(rest, span);
             return;
         }
+        if name.starts_with('[') {
+            if let Some((inside, rest)) = Self::strip_leading_bracket_group(name) {
+                if !inside.is_empty() && !rest.trim().is_empty() {
+                    self.check_named_type_instantiation(rest, span);
+                    return;
+                }
+            }
+        }
+        if let Some(after_map) = name.strip_prefix("map") {
+            if let Some((k, v)) = Self::strip_leading_bracket_group(after_map) {
+                if !v.trim().is_empty() {
+                    self.check_named_type_instantiation(k, span);
+                    self.check_named_type_instantiation(v, span);
+                    return;
+                }
+            }
+        }
         let (head, inner_opt) = match name.find('[') {
             Some(i) if name.ends_with(']') => (&name[..i], Some(&name[i + 1..name.len() - 1])),
             _ => (name, None),
@@ -1569,7 +1764,26 @@ impl<'a> Collector<'a> {
                 self.check_named_type_instantiation(arg, span);
             }
         }
-        if head == "set" || head == "option" || head == "map" {
+        if head == "set" {
+            if let Some(inner) = inner_opt {
+                let args = split_top_level_type_args(inner);
+                if args.len() == 1 {
+                    let elem_ty = args[0].trim();
+                    if let Some(noun) = self.incomparable_type_noun(elem_ty) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "invalid set element type `{}`: {} is not comparable — `set[T]` requires comparable `T` (SPEC §2.3 T9) (HYB-E1002)",
+                                elem_ty, noun
+                            ),
+                            "set element types must be comparable (primitives, pointers, or structs without slice/map fields)",
+                        );
+                    }
+                }
+            }
+            return;
+        }
+        if head == "option" || head == "map" {
             return;
         }
         let Some(tparams) = self.ck.struct_type_params.get(head) else {
@@ -2233,6 +2447,42 @@ impl<'a> Collector<'a> {
                     Some(res.len())
                 }
             }
+            // `f()?` unwraps the trailing `error` result. A void fallible
+            // function therefore yields no value and a multi-value one still
+            // yields its remaining N-1 values; both are illegal in a
+            // single-value position. A `(T, error)` call unwraps to exactly
+            // one value and stays legal.
+            Expr::Try { operand, .. } => {
+                let Expr::Call { callee, args, .. } = unwrap_parens(operand) else {
+                    return None;
+                };
+                // `f()?` unwraps a trailing `error`. Only a local fn or a
+                // closure has a declared result list; a boundary or handle
+                // method (`doc.array("users")?`) is fail-open.
+                let results: &[FnResult] = match unwrap_parens(callee) {
+                    Expr::Ident { name, .. } => match self.ck.fns.get(name.as_str()) {
+                        Some(f) => &f.results,
+                        None => return None,
+                    },
+                    Expr::FnLit { results, .. } => results,
+                    _ => return None,
+                };
+                // A `?` on a non-error result is an accepted Hybrid no-op; do
+                // not reinterpret it as a void unwrap.
+                if !matches!(
+                    results.last().map(|r| &r.ty),
+                    Some(TypeExpr::Named { name, .. }) if name == "error"
+                ) {
+                    return None;
+                }
+                let res = self.call_result_kinds(callee, args)?;
+                let effective = res.len().saturating_sub(1);
+                if effective == 1 {
+                    None
+                } else {
+                    Some(effective)
+                }
+            }
             _ => None,
         }
     }
@@ -2758,6 +3008,12 @@ impl<'a> Collector<'a> {
 
     /// Family B1/B2 (#425): unary `!` requires `bool`, unary `-` requires a numeric operand.
     fn check_unary_operand(&mut self, op: UnOp, operand: &Expr, span: Span) {
+        // #1850: a unary operand is a single-value position. A void call or a
+        // multi-value call here passed the checker and emitted
+        // `!two_bools()` / `-two_ints()`, which Go rejects with
+        // "multiple-value ... in single-value context" / "(no value) used as
+        // value". Same check a binary operand already runs.
+        self.check_single_value_position(operand, "a unary operand", /*binding_position=*/ false);
         let k = self.kind_of_expr(operand);
         match op {
             UnOp::Not => {
@@ -2891,23 +3147,57 @@ impl<'a> Collector<'a> {
         match op {
             // `==` / `!=`: incomparable shapes (slice, map, func) are rejected
             // by `emit_guard.rs` (HYB-E2006). Mismatched concrete operand types
-            // are rejected here under HYB-E1002 (rule `BUILDABLE`).
+            // and comparisons between non-nilable types and nil are rejected
+            // here under HYB-E1002 (rule `BUILDABLE` / SPEC §3.1 N1).
             BinOp::Eq | BinOp::Ne => {
                 let op_str = if matches!(op, BinOp::Eq) { "==" } else { "!=" };
-                if !Checker::is_nil_literal(lhs)
-                    && !Checker::is_nil_literal(rhs)
-                    && equality_kinds_conflict(&lk, &rk)
-                {
+                let lhs_is_nil = Checker::is_nil_literal(lhs);
+                let rhs_is_nil = Checker::is_nil_literal(rhs);
+                if lhs_is_nil && rhs_is_nil {
                     self.emit_e1002(
                         span,
                         format!(
-                            "invalid operation `{}`: operator `{}` requires comparable operands of matching type, found `{}` and `{}` (HYB-E1002)",
+                            "invalid operation `{}`: operator `{}` not defined on untyped nil (HYB-E1002)",
+                            span_expr_label(lhs, op_str, rhs),
+                            op_str
+                        ),
+                        "untyped nil cannot be compared with untyped nil",
+                    );
+                } else if !lhs_is_nil && !rhs_is_nil {
+                    if equality_kinds_conflict(&lk, &rk) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "invalid operation `{}`: operator `{}` requires comparable operands of matching type, found `{}` and `{}` (HYB-E1002)",
+                                span_expr_label(lhs, op_str, rhs),
+                                op_str,
+                                lk.label(),
+                                rk.label()
+                            ),
+                            "equality operators (`==`, `!=`) require operands of matching type",
+                        );
+                    }
+                } else if lhs_is_nil && is_non_nilable(&rk) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid operation `{}`: operator `{}` not defined between untyped nil and `{}` (HYB-E1002)",
                             span_expr_label(lhs, op_str, rhs),
                             op_str,
-                            lk.label(),
                             rk.label()
                         ),
-                        "equality operators (`==`, `!=`) require operands of matching type",
+                        "operator `==` and `!=` cannot compare untyped nil to non-nilable types (SPEC §3.1 N1)",
+                    );
+                } else if rhs_is_nil && is_non_nilable(&lk) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid operation `{}`: operator `{}` not defined between `{}` and untyped nil (HYB-E1002)",
+                            span_expr_label(lhs, op_str, rhs),
+                            op_str,
+                            lk.label()
+                        ),
+                        "operator `==` and `!=` cannot compare untyped nil to non-nilable types (SPEC §3.1 N1)",
                     );
                 }
             }
@@ -3900,6 +4190,21 @@ impl<'a> Collector<'a> {
                     }
                 } else if name == "pop" {
                     self.check_slice_pop_operands(base, &bk, args, span);
+                    // `pop` is also a built-in slice operation, so this branch
+                    // is entered before the missing-member check below. A
+                    // struct or pointer only has `.pop()` if it declares the
+                    // method; without one Go refuses the call with
+                    // "<base>.pop undefined (type ... has no field or method pop)".
+                    if !has_method && matches!(bk, OpKind::Struct(_) | OpKind::Pointer(_)) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`{}` has no field or method `pop` (HYB-E1002)",
+                                base.render()
+                            ),
+                            "a struct or pointer supports `.pop()` only when it declares a `pop` method; `pop` is a built-in only on slices",
+                        );
+                    }
                 } else if !has_method {
                     // #682 U2/U3: neither a declared method nor a field exists
                     // on the base. Go refuses the call with `<base>.<name>
