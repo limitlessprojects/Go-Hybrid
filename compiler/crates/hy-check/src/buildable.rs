@@ -212,6 +212,19 @@ fn is_definitely_single_value(e: &Expr) -> bool {
 /// in Go comparisons (`1 == 1.0` builds), so numeric families do not
 /// conflict. Across different families (e.g. numeric vs string/bool,
 /// pointer vs scalar), Go never permits comparison.
+fn is_non_nilable_kind(k: &OpKind) -> bool {
+    matches!(
+        k,
+        OpKind::Int
+            | OpKind::Float
+            | OpKind::Bool
+            | OpKind::Str
+            | OpKind::Array(_)
+            | OpKind::Struct(_)
+            | OpKind::Void
+    )
+}
+
 fn equality_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
     if a.is_numeric() && b.is_numeric() {
         return false;
@@ -2964,13 +2977,37 @@ impl<'a> Collector<'a> {
         match op {
             // `==` / `!=`: incomparable shapes (slice, map, func) are rejected
             // by `emit_guard.rs` (HYB-E2006). Mismatched concrete operand types
-            // are rejected here under HYB-E1002 (rule `BUILDABLE`).
+            // and non-nilable operands compared to untyped nil are rejected here
+            // under HYB-E1002 (SPEC §3.1 Rule N1 and Row 13 `BUILDABLE`).
             BinOp::Eq | BinOp::Ne => {
                 let op_str = if matches!(op, BinOp::Eq) { "==" } else { "!=" };
-                if !Checker::is_nil_literal(lhs)
-                    && !Checker::is_nil_literal(rhs)
-                    && equality_kinds_conflict(&lk, &rk)
-                {
+                let l_nil = Checker::is_nil_literal(lhs);
+                let r_nil = Checker::is_nil_literal(rhs);
+                if l_nil && r_nil {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid operation `{}`: operator `{}` not defined on untyped `nil` (HYB-E1002)",
+                            span_expr_label(lhs, op_str, rhs),
+                            op_str
+                        ),
+                        "`nil` cannot be compared to `nil` directly",
+                    );
+                } else if l_nil || r_nil {
+                    let non_nil_kind = if l_nil { &rk } else { &lk };
+                    if is_non_nilable_kind(non_nil_kind) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "invalid operation `{}`: operator `{}` not defined between `{}` and untyped `nil` (HYB-E1002)",
+                                span_expr_label(lhs, op_str, rhs),
+                                op_str,
+                                non_nil_kind.label()
+                            ),
+                            "equality with `nil` is only valid for pointers, interfaces, slices, maps, channels, or functions",
+                        );
+                    }
+                } else if equality_kinds_conflict(&lk, &rk) {
                     self.emit_e1002(
                         span,
                         format!(
