@@ -270,7 +270,32 @@ impl Emitter {
         self.emit_local_in_seq(l, &[])
     }
 
+    /// Record (or forget) the result shape of each name this declaration
+    /// binds: `f := fn() error {…}` makes `f()?` a bare-error call; any
+    /// other initializer drops a stale entry for a reused name.
+    fn note_closure_shapes(&mut self, l: &LocalDecl) {
+        for (i, name) in l.names.iter().enumerate() {
+            let fnlit = if l.names.len() == l.values.len() {
+                match l.values.get(i).map(Self::peel_parens) {
+                    Some(Expr::FnLit { results, .. }) => Some(super::result_shape(results)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            match fnlit {
+                Some(shape) => {
+                    self.closure_shapes.insert(name.clone(), shape);
+                }
+                None => {
+                    self.closure_shapes.remove(name);
+                }
+            }
+        }
+    }
+
     fn emit_local_in_seq(&mut self, l: &LocalDecl, rest: &[Stmt]) -> Result<(), EmitError> {
+        self.note_closure_shapes(l);
         match l.kind {
             LocalKind::Var => {
                 let ty = l.ty.as_ref().map(|t| self.type_text(t));
@@ -843,6 +868,10 @@ impl Emitter {
                     }
                 }
                 None
+            }
+            // A closure bound by name in this fn (`f := fn() error {…}`).
+            Expr::Ident { name, .. } if self.closure_shapes.contains_key(name.as_str()) => {
+                self.closure_shapes.get(name.as_str()).copied()
             }
             // User fns: the eagerly collected declared shape.
             Expr::Ident { name, .. } => self

@@ -91,6 +91,26 @@ impl<'a> Checker<'a> {
                 if self.fns.contains_key(ty_name) || self.structs.contains_key(ty_name) || self.consts.contains_key(ty_name) {
                     return false;
                 }
+                // #1803: complex, real and imag are compile-time builtins when
+                // their arguments are constant (Go spec, constant expressions).
+                if ty_name == "complex" {
+                    if self.type_aliases.contains_key("complex") {
+                        return false;
+                    }
+                    return args.len() == 2
+                        && !args[0].spread
+                        && !args[1].spread
+                        && self.expr_is_constant_inner(&args[0].value, st, visiting, ref_depth)
+                        && self.expr_is_constant_inner(&args[1].value, st, visiting, ref_depth);
+                }
+                if ty_name == "real" || ty_name == "imag" {
+                    if self.type_aliases.contains_key(ty_name) {
+                        return false;
+                    }
+                    return args.len() == 1
+                        && !args[0].spread
+                        && self.expr_is_constant_inner(&args[0].value, st, visiting, ref_depth);
+                }
                 if args.len() != 1 || args[0].spread {
                     return false;
                 }
@@ -272,6 +292,8 @@ pub(crate) fn is_conversion_type_name(name: &str) -> bool {
             | "uintptr"
             | "float32"
             | "float64"
+            | "complex64"
+            | "complex128"
             | "f32"
             | "f64"
             | "i8"

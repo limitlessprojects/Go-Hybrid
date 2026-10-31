@@ -725,6 +725,10 @@ pub(crate) struct Checker<'a> {
     /// Names each enclosing closure body rebinds, innermost last — the
     /// emit-guard deep walk skips them (addressable.rs).
     pub closure_bound: Vec<HashSet<String>>,
+    /// W-016 M3: nesting depth of `managed(...)` blocks currently being walked.
+    /// An A5 escape site (`HYB-E3013`) inside `managed` is the declared escape
+    /// hatch and is permitted, so the check reads this counter.
+    pub managed_depth: usize,
 }
 
 /// Row 14 (discussion #4): the CLOSED category set — the invariant a
@@ -763,6 +767,7 @@ impl<'a> Checker<'a> {
             total_sites: 0,
             managed_audit: Vec::new(),
             closure_bound: Vec::new(),
+            managed_depth: 0,
         }
     }
 
@@ -804,6 +809,16 @@ pub(crate) fn unwrap_parens(mut e: &Expr) -> &Expr {
         e = inner;
     }
     e
+}
+
+/// Strip enclosing parentheses and move-expressions.
+pub(crate) fn unwrap_parens_and_move(mut e: &Expr) -> &Expr {
+    loop {
+        match e {
+            Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } => e = inner,
+            _ => return e,
+        }
+    }
 }
 
 /// The direct operand of a `move x` (or `move (x)`) when it is a plain binding.

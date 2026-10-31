@@ -261,6 +261,13 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         // Chan target: cannot convert from Int, Float, Bool, Str, Slice, Map, Struct.
         (Chan(_), Int | Float | Bool | Str | Slice(_) | Map(_, _) | Struct(_)) => true,
 
+        // Pointer targets and arguments: Go only converts between pointers.
+        // A pointer cannot convert to or from any non-pointer type; the one
+        // exception is an interface target (`any(p)`), handled above.
+        (Pointer(_), Pointer(_)) => false,
+        (Pointer(_), Interface) => false,
+        (Pointer(_), _) | (_, Pointer(_)) => true,
+
         _ => false,
     }
 }
@@ -576,8 +583,11 @@ impl<'a> Collector<'a> {
         // enum, a type alias, or a built-in conversion target. Anything else
         // stays fail-open.
         let is_declared_type = self.ck.structs.contains_key(name)
+            || self.ck.struct_type_params.contains_key(head)
             || self.ck.enums.contains_key(name)
             || self.ck.type_aliases.contains_key(name)
+            || name == "any"
+            || name == "error"
             || crate::const_init::is_conversion_type_name(name);
         if !is_declared_type {
             return;
@@ -983,6 +993,14 @@ impl<'a> Collector<'a> {
                 span,
             } => {
                 for t in targets {
+                    // #2199: a store whose target is a TYPE NAME cannot build.
+                    // The annotated-store spelling `n T = v` parses as the
+                    // expression statement `n` followed by a store to `T`, and
+                    // Go refuses the second line (`T (type) is not an
+                    // expression`). Same class as #778, one position over.
+                    if let PlaceKind::Ident(name) = &t.kind {
+                        self.check_type_name_in_value_position(name, t.span);
+                    }
                     self.place(t, *op);
                 }
                 for v in values {
@@ -1000,6 +1018,10 @@ impl<'a> Collector<'a> {
             Stmt::Expr { expr, .. } => self.expr(expr),
             Stmt::Send { chan, value, .. } => {
                 self.expr(chan);
+                // #887: the sent value is a single-value position. A void call
+                // or a multi-value call here passed the checker and emitted
+                // `ch <- noop()` / `ch <- pair()`, which Go rejects.
+                self.check_single_value_position(value, "a channel send", false);
                 self.expr(value);
             }
             Stmt::If {
@@ -1066,6 +1088,12 @@ impl<'a> Collector<'a> {
             Stmt::Task { callee, args, span } => {
                 self.expr(callee);
                 for a in args {
+                    // #887: a spawn argument sits in a single-value position
+                    // exactly like a call argument does. Without this,
+                    // `task worker(noop())` (void call) and
+                    // `task worker(pair())` (two values) passed the checker
+                    // and emitted Go that cannot build.
+                    self.check_single_value_position(&a.value, "a spawn argument", false);
                     self.expr(&a.value);
                 }
                 match unwrap_parens(callee) {
@@ -1148,6 +1176,9 @@ impl<'a> Collector<'a> {
                     self.push_scope();
                     match &arm.kind {
                         SelectArmKind::Send { chan, value, .. } => {
+                    // #887: a channel send in a select arm is also a single-value
+                    // position.
+                    self.check_single_value_position(value, "a channel send", false);
                             self.expr(chan);
                             self.expr(value);
                         }
@@ -2284,6 +2315,42 @@ impl<'a> Collector<'a> {
                     Some(res.len())
                 }
             }
+            // `f()?` unwraps the trailing `error` result. A void fallible
+            // function therefore yields no value and a multi-value one still
+            // yields its remaining N-1 values; both are illegal in a
+            // single-value position. A `(T, error)` call unwraps to exactly
+            // one value and stays legal.
+            Expr::Try { operand, .. } => {
+                let Expr::Call { callee, args, .. } = unwrap_parens(operand) else {
+                    return None;
+                };
+                // `f()?` unwraps a trailing `error`. Only a local fn or a
+                // closure has a declared result list; a boundary or handle
+                // method (`doc.array("users")?`) is fail-open.
+                let results: &[FnResult] = match unwrap_parens(callee) {
+                    Expr::Ident { name, .. } => match self.ck.fns.get(name.as_str()) {
+                        Some(f) => &f.results,
+                        None => return None,
+                    },
+                    Expr::FnLit { results, .. } => results,
+                    _ => return None,
+                };
+                // A `?` on a non-error result is an accepted Hybrid no-op; do
+                // not reinterpret it as a void unwrap.
+                if !matches!(
+                    results.last().map(|r| &r.ty),
+                    Some(TypeExpr::Named { name, .. }) if name == "error"
+                ) {
+                    return None;
+                }
+                let res = self.call_result_kinds(callee, args)?;
+                let effective = res.len().saturating_sub(1);
+                if effective == 1 {
+                    None
+                } else {
+                    Some(effective)
+                }
+            }
             _ => None,
         }
     }
@@ -2809,6 +2876,12 @@ impl<'a> Collector<'a> {
 
     /// Family B1/B2 (#425): unary `!` requires `bool`, unary `-` requires a numeric operand.
     fn check_unary_operand(&mut self, op: UnOp, operand: &Expr, span: Span) {
+        // #1850: a unary operand is a single-value position. A void call or a
+        // multi-value call here passed the checker and emitted
+        // `!two_bools()` / `-two_ints()`, which Go rejects with
+        // "multiple-value ... in single-value context" / "(no value) used as
+        // value". Same check a binary operand already runs.
+        self.check_single_value_position(operand, "a unary operand", /*binding_position=*/ false);
         let k = self.kind_of_expr(operand);
         match op {
             UnOp::Not => {
@@ -3951,6 +4024,21 @@ impl<'a> Collector<'a> {
                     }
                 } else if name == "pop" {
                     self.check_slice_pop_operands(base, &bk, args, span);
+                    // `pop` is also a built-in slice operation, so this branch
+                    // is entered before the missing-member check below. A
+                    // struct or pointer only has `.pop()` if it declares the
+                    // method; without one Go refuses the call with
+                    // "<base>.pop undefined (type ... has no field or method pop)".
+                    if !has_method && matches!(bk, OpKind::Struct(_) | OpKind::Pointer(_)) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "`{}` has no field or method `pop` (HYB-E1002)",
+                                base.render()
+                            ),
+                            "a struct or pointer supports `.pop()` only when it declares a `pop` method; `pop` is a built-in only on slices",
+                        );
+                    }
                 } else if !has_method {
                     // #682 U2/U3: neither a declared method nor a field exists
                     // on the base. Go refuses the call with `<base>.<name>

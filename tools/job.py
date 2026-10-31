@@ -270,9 +270,24 @@ def kaggle_fetch(jobdir, slug=None):
         except (OSError, ValueError) as error:
             sys.exit("REFUSING to promote fetched summary: {}".format(error))
         dst = os.path.join(jobdir, "result", "summary.json")
-        shutil.copyfile(source, dst)
+        # A full disk or interrupted copy must not truncate reviewed evidence.
+        # Publish a complete sibling file, just as actions_fetch does for ZIPs.
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=os.path.dirname(dst),
+                                             prefix=".summary-", delete=False) as f:
+                temporary = f.name
+                with open(source, "rb") as source_file:
+                    shutil.copyfileobj(source_file, f)
+            os.replace(temporary, dst)
+        except OSError as error:
+            print("REFUSING to promote fetched summary: {}".format(error), file=sys.stderr)
+            return 1
+        finally:
+            if temporary is not None and os.path.exists(temporary):
+                os.remove(temporary)
         print("summary.json -> " + dst)
-        with open(dst) as f:
+        with open(dst, encoding="utf-8") as f:
             print(json.dumps(json.load(f), indent=2)[:3000])
         return 0
     # No summary.json is a hard failure for a fetch: nothing was retrieved to

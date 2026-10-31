@@ -1164,6 +1164,12 @@ impl<'a> Checker<'a> {
                 len,
             );
         }
+        // #2102: an invalid builtin call inside an array length (`[len(1)]int`,
+        // `[cap(1)+1]int`, `[len()]int`) is the same Go build error as in a
+        // value position. `check_type_ref_array_lens` already walks every
+        // TypeRef, so running the builtin-argument check here covers struct
+        // fields, aliases, local annotations, literals and conversions.
+        self.check_expr_builtin_args(len);
         // 1) A constant integer expression: must be non-negative.
         let direct_or_folded = const_int_value(len).or_else(|| {
             if matches!(unwrap_parens(len), Expr::Ident { .. }) {
@@ -2056,7 +2062,33 @@ impl<'a> Checker<'a> {
                 }
             }
         }
-        None
+        // #1915: nested expressions over typed constants. Go folds the whole
+        // constant expression and range-checks the result, so the operand's
+        // fixed-width type propagates through unary negation, shifts and
+        // binary operations with an untyped constant on the other side.
+        match e {
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => self.fixed_width_int_ty_of(st, operand),
+            Expr::Binary {
+                op: BinOp::Shl | BinOp::Shr,
+                lhs,
+                ..
+            } => self.fixed_width_int_ty_of(st, lhs),
+            Expr::Binary { lhs, rhs, .. } => {
+                let lt = self.fixed_width_int_ty_of(st, lhs);
+                let rt = self.fixed_width_int_ty_of(st, rhs);
+                match (lt, rt) {
+                    (Some(a), Some(b)) if a.0 == b.0 => Some(a),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     /// #725 — the folded result of a TYPED constant expression must stay
@@ -2501,7 +2533,9 @@ fn is_non_int_array_len_expr(expr: &Expr) -> bool {
             kind:
                 hy_syntax::LitKind::Bool(_)
                 | hy_syntax::LitKind::Str(_)
-                | hy_syntax::LitKind::RawStr(_),
+                | hy_syntax::LitKind::RawStr(_)
+                // #1810: nil is a non-integer constant.
+                | hy_syntax::LitKind::Nil,
             ..
         } => true,
         Expr::Unary {
@@ -2529,7 +2563,18 @@ fn is_non_int_array_len_expr(expr: &Expr) -> bool {
         Expr::Call { callee, .. } => matches!(
             unwrap_parens(callee),
             Expr::Ident { name, .. }
-                if matches!(name.as_str(), "bool" | "string" | "float32" | "float64")
+                // #1810: complex64/complex128 conversions and the complex
+                // builtin produce non-integer constants.
+                if matches!(
+                    name.as_str(),
+                    "bool"
+                        | "string"
+                        | "float32"
+                        | "float64"
+                        | "complex64"
+                        | "complex128"
+                        | "complex"
+                )
         ),
         _ => false,
     }

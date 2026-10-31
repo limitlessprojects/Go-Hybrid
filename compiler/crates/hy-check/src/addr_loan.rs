@@ -371,7 +371,7 @@ impl<'a> Checker<'a> {
                         self.emit_addr_of_loan_diag(name, *id_span);
                     }
                 }
-                Expr::Field { .. } => {
+                Expr::Field { .. } | Expr::Index { .. } | Expr::Slice { .. } => {
                     if let Some(root) = operand.root_ident() {
                         if self.lookup_binding(st, root).is_some_and(|b| b.slot_loan) {
                             self.emit_addr_of_loan_diag(root, *span);
@@ -450,6 +450,13 @@ impl<'a> Checker<'a> {
     }
 
     fn emit_addr_of_loan_diag(&mut self, name: &str, span: Span) {
+        if self
+            .diags
+            .iter()
+            .any(|d| d.severity == hy_diag::Severity::Error && d.span == span)
+        {
+            return;
+        }
         let msg = format!(
             "`&{}` takes the address of a loan: a map-slot loan is not an addressable value (T24)",
             name
