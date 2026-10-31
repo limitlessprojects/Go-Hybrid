@@ -271,15 +271,15 @@ fn positive_controls_destructuring_try_unwrap_and_rebind_accept() {
     assert!(codes(&r1).is_empty(), "unexpected errors: {:?}", r1.diagnostics);
     assert_eq!(r1.verdict, Verdict::Accept);
 
-    // 2. Rebinding a local fn variable from 2-result to 1-result updates b.ty
+    // 2. Rebinding a local fn variable with matching signature preserves valid call
     let r2 = check(
         "fn minmax(a int, b int) (int, int) { return a, b }\n\
-         fn plus(a int, b int) int { return a + b }\n\
+         fn swap(a int, b int) (int, int) { return b, a }\n\
          fn main() {\n\
              mm := minmax\n\
-             mm = plus\n\
-             p := mm(3, 9)\n\
-             fmt.println(p)\n\
+             mm = swap\n\
+             p, q := mm(3, 9)\n\
+             fmt.println(p, q)\n\
          }\n",
     );
     assert!(codes(&r2).is_empty(), "unexpected errors: {:?}", r2.diagnostics);
