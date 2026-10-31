@@ -483,8 +483,9 @@ def cmd_approve(args):
     todo, seen = [], set()
     for r in runs:
         sha = r.get("head_sha", "")
-        if sha in heads and sha not in seen:
-            seen.add(sha)
+        if sha in heads and r["id"] not in seen:
+            # Each workflow has its own approval, even on the same commit.
+            seen.add(r["id"])
             todo.append((r["id"], heads[sha], r["name"]))
     log("action_required runs for open PR heads: %d (cap %s)" % (len(todo), args.max))
     ok = 0
