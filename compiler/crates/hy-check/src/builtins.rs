@@ -19,14 +19,19 @@ impl<'a> Checker<'a> {
     /// Pass-B entry: HYB-E2001 on `defer` + HYB-E2005 on builtin calls.
     /// Nested block bodies are NOT recursed — `walk::flatten` already lists
     /// those statements (same discipline as `arith.rs`).
-    pub(crate) fn check_stmt_builtins(&mut self, st: &FnState, stmt: &Stmt) {
+    pub(crate) fn check_stmt_builtins(&mut self, st: &FnState, stmt: &Stmt, managed: bool) {
         self.check_stmt_defer_call(stmt);
         self.zd_defined.clear();
         self.zd_defined.extend(st.env.keys().cloned());
         for sc in &st.scopes {
             self.zd_defined.extend(sc.keys().cloned());
         }
+        let old_managed = self.managed_depth;
+        if managed {
+            self.managed_depth += 1;
+        }
         self.check_stmt_builtin_args_inner(stmt, /*deep=*/ false);
+        self.managed_depth = old_managed;
         self.zd_defined.clear();
     }
 
@@ -59,6 +64,9 @@ impl<'a> Checker<'a> {
     fn check_stmt_builtin_args_inner(&mut self, stmt: &Stmt, deep: bool) {
         match stmt {
             Stmt::Local(l) => {
+                for (name, val) in l.names.iter().zip(l.values.iter()) {
+                    self.record_e3013_binding(name, val);
+                }
                 for v in &l.values {
                     self.check_expr_builtin_args(v);
                 }
@@ -66,6 +74,17 @@ impl<'a> Checker<'a> {
             Stmt::Assign {
                 targets, values, ..
             } => {
+                for (t, v) in targets.iter().zip(values.iter()) {
+                    if let PlaceKind::Ident(target_name) = &t.kind {
+                        self.record_e3013_binding(target_name, v);
+                    } else if let PlaceKind::Index { base, .. } = &t.kind {
+                        if let PlaceKind::Ident(base_name) = &base.kind {
+                            if let Some(c) = self.inspect_escape_arg(v) {
+                                self.e3013_closure_captures.insert(base_name.clone(), c);
+                            }
+                        }
+                    }
+                }
                 for t in targets {
                     self.check_place_builtin_args(t);
                 }
@@ -107,7 +126,14 @@ impl<'a> Checker<'a> {
                         self.check_expr_builtin_args(lo);
                         self.check_expr_builtin_args(hi);
                     }
-                    ForKind::Iterate { expr, .. } => self.check_expr_builtin_args(expr),
+                    ForKind::Iterate { expr, vars } => {
+                        if let Some(c) = self.inspect_escape_arg(expr) {
+                            for v in vars {
+                                self.e3013_closure_captures.insert(v.clone(), c.clone());
+                            }
+                        }
+                        self.check_expr_builtin_args(expr);
+                    }
                     ForKind::Infinite => {}
                 }
                 if deep {
@@ -673,11 +699,9 @@ impl<'a> Checker<'a> {
         }
         let mut captured: Option<String> = None;
         for a in args {
-            if let Expr::FnLit { params, body, .. } = unwrap_parens(&a.value) {
-                if let Some(name) = closure_writes_captured(params, body) {
-                    captured = Some(name);
-                    break;
-                }
+            if let Some(name) = self.inspect_escape_arg(&a.value) {
+                captured = Some(name);
+                break;
             }
         }
         let Some(name) = captured else {
@@ -699,6 +723,64 @@ impl<'a> Checker<'a> {
                     .to_string(),
             ]),
         );
+    }
+
+    fn record_e3013_binding(&mut self, name: &str, expr: &Expr) {
+        if let Some(captured) = self.inspect_escape_arg(expr) {
+            self.e3013_closure_captures.insert(name.to_string(), captured);
+        }
+    }
+
+    fn inspect_escape_arg(&self, expr: &Expr) -> Option<String> {
+        match unwrap_parens(expr) {
+            Expr::FnLit { params, body, .. } => closure_writes_captured(params, body),
+            Expr::Ident { name, .. } => self.e3013_closure_captures.get(name).cloned(),
+            Expr::Index { base, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(base) {
+                    self.e3013_closure_captures.get(name).cloned()
+                } else {
+                    self.inspect_escape_arg(base)
+                }
+            }
+            Expr::SliceLit { items, .. } => {
+                for it in items {
+                    if let Some(c) = self.inspect_escape_arg(it) {
+                        return Some(c);
+                    }
+                }
+                None
+            }
+            Expr::StructLit { fields, .. } => {
+                for f in fields {
+                    if let Some(c) = self.inspect_escape_arg(&f.value) {
+                        return Some(c);
+                    }
+                }
+                None
+            }
+            Expr::MapLit { entries, .. } => {
+                for (_, v) in entries {
+                    if let Some(c) = self.inspect_escape_arg(v) {
+                        return Some(c);
+                    }
+                }
+                None
+            }
+            Expr::Call { args, .. } => {
+                for a in args {
+                    if let Some(c) = self.inspect_escape_arg(&a.value) {
+                        return Some(c);
+                    }
+                }
+                None
+            }
+            Expr::AddrOf { operand, .. }
+            | Expr::Unary { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Paren { inner: operand, .. } => self.inspect_escape_arg(operand),
+            _ => None,
+        }
     }
 
     /// Is this call lexically inside a `managed(...)` block? `managed` is the
@@ -883,7 +965,7 @@ fn walk_stmt_writes(stmt: &Stmt, locals: &HashSet<String>, hit: &mut Option<Stri
 fn place_root(place: &Place) -> Option<&str> {
     // `Place::root()` walks Index/Field/AddrOf down to the root binding name.
     let root = place.root();
-    if root.is_empty() {
+    if root.is_empty() || root == "_" {
         None
     } else {
         Some(root)
