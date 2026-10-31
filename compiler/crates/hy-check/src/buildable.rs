@@ -235,6 +235,12 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         (Interface, _) => false,
         (a, b) if a == b => false,
 
+        // Same container shape: recurse into the element kinds.
+        (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) => {
+            kinds_conflict(a, b)
+        }
+        (Map(k1, v1), Map(k2, v2)) => kinds_conflict(k1, k2) || kinds_conflict(v1, v2),
+
         // Struct targets: Go forbids converting non-structs to structs.
         (Struct(_), other) if !matches!(other, Unknown | Struct(_)) => true,
 
