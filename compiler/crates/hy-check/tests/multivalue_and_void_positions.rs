@@ -194,3 +194,34 @@ fn single_value_calls_stay_accepted() {
         "fn one() int {\n    return 1\n}\n\nfn g(a int) {\n    fmt.println(\"{a}\")\n}\n\nfn main() {\n    g(one())\n}\n",
     );
 }
+
+#[test]
+fn multi_value_call_as_if_condition_is_rejected() {
+    let src = "fn two_bools() (bool, bool) {\n    return true, false\n}\n\nfn main() {\n    if two_bools() {\n        fmt.println(\"ok\")\n    }\n}\n";
+    let cs = codes(src);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E1002"),
+        "expected HYB-E1002 for multi-value call in if condition, got {cs:?}"
+    );
+}
+
+#[test]
+fn multi_value_call_as_for_condition_is_rejected() {
+    let src = "fn two_bools() (bool, bool) {\n    return true, false\n}\n\nfn main() {\n    for two_bools() {\n        break\n    }\n}\n";
+    let cs = codes(src);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E1002"),
+        "expected HYB-E1002 for multi-value call in for condition, got {cs:?}"
+    );
+}
+
+#[test]
+fn void_call_as_if_condition_is_rejected() {
+    let src = "fn v() {}\n\nfn main() {\n    if v() {\n        fmt.println(\"ok\")\n    }\n}\n";
+    let cs = codes(src);
+    assert!(
+        cs.iter().any(|c| c == "HYB-E1002"),
+        "expected HYB-E1002 for void call in if condition, got {cs:?}"
+    );
+}
+
