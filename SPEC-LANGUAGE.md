@@ -316,6 +316,17 @@ index/element for slices/arrays/strings, key/value for maps; `for v in ch`
 yields received values. Two-variable channel receive is the comma-ok
 clause inside `select` (`v, ok := <-sq:`).
 
+Integer range bounds are compared by their *emitted Go integer type*, not by
+the spelling the author used. The SPEC spellings (`u8`, `i16`, `u32`, …) and
+the Go builtins `byte` and `rune` denote the same types Go gives them
+(`uint8`, `int16`, `uint32`, `int32`, …), so a range whose two bounds are
+spelled differently but resolve to one Go type is legal: `for i in a..b` with
+`a u8` and `b uint8` is accepted. Spellings that Go keeps distinct stay
+distinct — `int`/`int64` and `uint`/`uintptr` never collapse, and the
+`usize`/`isize` names are undefined by SPEC-LANGUAGE (§402) and are left
+untouched. Untyped-bound defaulting and the constant-overflow checks are
+unchanged. (Issue #1165.)
+
 **LX13a — the iterable is TYPE-checked (HYB-E2009/E3005).** LX13's iterable
 set is a closed contract: since issue #411, the checker rejects `for x in e`
 when `e` resolves to a concrete non-iterable shape (an int, bool, struct, a
@@ -1212,6 +1223,15 @@ channels. Zero value: the zero channel (N3). Channels are
 **safe-by-type**: sharing a channel across tasks is exactly what channels
 are for (O4 class 2) — a channel passed to a spawn needs no `move`.
 
+The producer/consumer roles are checked on the **operand**, not only on a bare
+identifier: a channel reached through a composite expression is resolved to the
+channel it denotes, so `<-chs[0]`, `<-chs[i:]`, `<-append(chs, ch)[0]` and
+`<-outer[0][0]` are all judged by the direction of the channel they produce.
+A receive from a send-only channel is rejected wherever it appears
+(HYB-E2008); an operand whose direction cannot be resolved from its shape
+stays fail-closed (HYB-E3005). The send side resolves the same projections,
+so the two directions agree.
+
 ```hy
 // fragment:
 jobs := make(chan job, 16)
@@ -1302,37 +1322,44 @@ generated Go `init()`.
 surface post-MVP; when it lands, atomic-typed values become O4 class 2
 (sendable safe-by-type). No Hybrid-level `atomic` keyword is planned.
 
-### 8.5 A5 — the Go-API escape perimeter (decided: scoped claim + lint)
+### 8.5 A5 — the Go-API escape perimeter (decided: fourth check-site class)
 
-**C9 — Values passed to foreign Go APIs are NOT check-sites.** This
-resolves Spike-6 ambiguity **A5**: a value handed to `net/http`
-(`mux.handle("/hello", handler)`) escapes into Go code that may run it on
-other goroutines, and Tier 0's spawn/send checks never see it.
+**C9 — Values passed to foreign Go APIs ARE check-sites (fourth class).**
+A closure that writes to a captured mutable binding and is passed as an
+argument to a foreign (package-qualified) Go call must take
+`managed("...", "interop")` at the call site, or the capture must be
+`const` (immutable-by-type), or the capture must be non-`may_share`.
+Failure rejects with `HYB-Exxxx`. No curated Go API database is consulted;
+the check is decidable from Hybrid source alone: (1) closure body writes
+a captured binding, (2) closure is passed to a foreign call.
 
-**Decision: scoped claim, not a fourth check-site class.**
+**Decision: fourth check-site class (D5 promoted, W-016 M2).**
 
-- The safety claim (§9.2) states Go-API escapes explicitly: they follow
-  Go's DRF-SC memory model with `go test -race` as the backstop — the same
-  contract Go programs already live under.
-- A *lint* (`hy-lint/go-escape-mut-shared`, off by default, curated API
-  list: `net/http`, `time.after_func`, anything registering callbacks)
-  warns when a Hybrid value that is mutably shared across Hybrid tasks is
-  also passed to a concurrent-flagged Go API. It is diagnostic-only: no
-  hard error, ever, in MVP.
+This resolves Spike-6 ambiguity **A5** by promoting the
+`hy-lint/go-escape-mut-shared` lint from diagnostic-only to a hard checker
+check-site. The closed-world rule needs no curated API database: flagging
+"concurrent" Go APIs required a per-package curated list that would always
+lag Go's ecosystem — a compatibility treadmill. The closed-world rule
+needs no API knowledge, expressing the check purely over Hybrid syntax.
 
-**Why scoped-claim over a fourth check-site:** (1) the Go side does not
+**Why fourth check-site over scoped-claim:** (1) The Go side does not
 cooperate — freezing sender aliases cannot stop *Go* code from mutating a
-shared value, so a hard check would promise race-freedom the runtime cannot
-deliver (an honesty failure, Q1 addition 6); (2) flagging "concurrent" Go
-APIs requires a curated per-package database that will always lag Go's
-ecosystem — a compatibility treadmill; (3) example 06 (the pinned case) is
-race-free and must compile unmodified, which it does under both options,
-so the cheaper one wins (SPEC §9 rule 3: lower risk to MVP first).
-**Reversal:** the lint's curated list is the seed of a fourth check-site
-class; promoting it to a hard check is a logged decision away if the
-adversarial corpus shows silent Go-escape races dominating real bug
-reports. [decided: honesty + risk; tagged open D5, pinned by example 06 +
-Phase-3 `-race` legs]
+shared value, so a hard check would promise race-freedom the runtime
+cannot deliver. The check does not promise race-freedom; it promises an
+*auditable escape*: the call site must take `managed` or prove the capture
+is non-shared/immutable. (2) The crawler treadmill argument is
+structurally absent — no API knowledge is in the rule. (3) Example 06
+(the pinned case) is race-free and compiles unmodified under both options
+(its closures capture `next` but never write), so the stricter one wins
+without breaking the must-compile constraint. [decided: D5 promoted;
+logged by W-016 M2, PR #2195]
+
+**Census measurement (W-016 M2):** `tools/escape_sites.py` (M1, PR #2149)
+re-measured at merge time against the current 127-program checker corpus
+plus all 10 examples (137 files, post-M1-fix tree, 2026-10-31): exactly 1
+triple found (program 10,
+`hits++` → `mux.handle`), example 06 yields 0 triples. 1/127 ≈ 0.8%, well
+under the 25% adoption-cost tripwire. D5 adoption cost accepted.
 
 ## 9. Ownership, borrowing, and the safe/unsafe boundary — TIER 0
 
@@ -1621,6 +1648,24 @@ mux.handle("/x", http.handler(fn(w http.response_writer) {
   tagged open (D17): it is exactly the ergonomics question the adversarial
   corpus's idiomatic-pattern cases and the repeated-rejection tripwire
   (§9.7) exist to answer.
+- **O5.6 — Returned `const`s are traced interprocedurally; an untraceable
+  callee fails closed (issue #2320).** O5.1's exclusivity proof follows a
+  call's `return` positions, so a `const` that flows back through a chain of
+  wrappers is still the `const` storage: moving such a value is `HYB-E3004`
+  and writing through it is `HYB-E3006` (T22), exactly as for the direct
+  call. Two boundaries are **fail-closed** (rule FC, O4.9) rather than
+  silent: a chain deeper than the checker's interprocedural walk bound, and
+  a callee whose body this file cannot see — a function value held in a
+  binding (`cb := leaf; m := cb()`), a computed callee, or a struct field
+  holding a function. Past either boundary the checker reports **every**
+  may-share file-level `const` as a possible return root, so such a value is
+  never moved or mutated as if it were freshly allocated. The report is limited
+  to results that may **share** (or whose shape did not resolve): a result the
+  checker types as a plain value — a chain returning `int`, say — cannot alias
+  a `const` and keeps its previous verdict. The price is a
+  rejection, never silence. A call into another package or a builtin is
+  excluded deliberately: `const`s are file-level, so another file's function
+  cannot return one of ours, and builtins return fresh values.
 
 ```hy
 counter := map[string]int{}
@@ -2173,7 +2218,7 @@ cannot be.
 | D2 | `task` of a closure literal: capture semantics at spawn | §8.1 | checker corpus closure-spawn program |
 | D3 | foreign-Go nil dereference: lint → hard error? | §3.1 N2 | examples 02/06 + differential corpus nil-panic cases |
 | D4 | curated Go surface: `sync` (WaitGroup), `sync/atomic` | §10 M5 | example 03 (counting join is the pinned MVP shape); any corpus atomics program |
-| D5 | A5 perimeter: promote the go-escape lint to a fourth check-site? | §8.5 | example 06 + Phase-3 `-race` legs + corpus go-escape races |
+| D5 | A5 perimeter: promote the go-escape lint to a fourth check-site? | §8.5 | example 06 + Phase-3 `-race` legs + corpus go-escape races → **PROMOTED (W-016 M2, PR #2195)** |
 | D6 | `result[T, E]` as a library enum post-MVP | §2.11 | positioning evidence (r/rust audience); no MVP pin by design |
 | D7 | monomorphize marked hot generic instantiations | §4 G2 | example 07 macro-benchmark (Phase 4) |
 | D8 | import alias syntax for Go-name normalization collisions | §10 M4 | first real collision in the curated surface |

@@ -78,6 +78,39 @@ fn main() {
 }
 
 #[test]
+fn n5_new_peels_parenthesized_type_operands() {
+    // Issue #1615: hy-check accepts `new((bag))`; the emitter matched the
+    // operand without peeling Paren and emitted raw Go `new`, leaving map
+    // fields nil (panic on first write).
+    let go = emit_src(
+        "\
+type str_map = map[string]int
+
+struct bag {
+    counts map[string]int
+}
+
+fn main() {
+    p := new((bag))
+    q := new(((bag)))
+    m := new((str_map))
+    _ = m
+    fmt.println(len(p.counts) + len(q.counts))
+}
+",
+    );
+    assert!(
+        go.contains("p := &bag{counts: map[string]int{}}"),
+        ":\n{go}"
+    );
+    assert!(
+        go.contains("q := &bag{counts: map[string]int{}}"),
+        ":\n{go}"
+    );
+    assert!(go.contains("m := &str_map{}"), ":\n{go}");
+}
+
+#[test]
 fn n5_leaves_generic_structs_alone() {
     // Generic struct fields need the literal's type arguments substituted;
     // they keep Go's zero value (a documented limit of this lowering).

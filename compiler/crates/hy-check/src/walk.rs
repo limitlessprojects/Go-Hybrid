@@ -311,9 +311,9 @@ pub(crate) fn own_uses_with_results(stmt: &Stmt, named_results: &[String], out: 
             }
         }
         Stmt::Expr { expr, .. } => expr_uses(expr, out),
-        Stmt::Send { chan, value, .. } => {
+        Stmt::Send { chan, value, is_move, .. } => {
             expr_uses(chan, out);
-            expr_uses(value, out);
+            if *is_move { expr_uses(&Expr::Move { operand: Box::new(value.clone()), span: value.span() }, out); } else { expr_uses(value, out); }
         }
         Stmt::If { cond, .. } => expr_uses(cond, out),
         Stmt::For { kind, .. } => match kind {
@@ -375,9 +375,9 @@ pub(crate) fn own_uses_with_results(stmt: &Stmt, named_results: &[String], out: 
         Stmt::Select { arms, .. } => {
             for arm in arms {
                 match &arm.kind {
-                    SelectArmKind::Send { chan, value, .. } => {
+                    SelectArmKind::Send { chan, value, is_move } => {
                         expr_uses(chan, out);
-                        expr_uses(value, out);
+                        if *is_move { expr_uses(&Expr::Move { operand: Box::new(value.clone()), span: value.span() }, out); } else { expr_uses(value, out); }
                     }
                     SelectArmKind::Recv { chan, .. } => expr_uses(chan, out),
                     SelectArmKind::Default => {}
@@ -865,6 +865,9 @@ pub(crate) fn place_field_store_slot(place: &Place) -> Option<(String, Option<St
 }
 
 fn lit_index_key(index: &Expr) -> Option<String> {
+    if let Some(v) = crate::const_overflow::const_int_value(index) {
+        return Some(v.to_string());
+    }
     match crate::model::unwrap_parens(index) {
         e @ Expr::Lit { .. } => Some(e.render()),
         _ => None,

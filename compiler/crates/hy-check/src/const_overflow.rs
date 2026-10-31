@@ -997,9 +997,14 @@ const TWO_POW_512: &str = "13407807929942597099574024998205846127479365820592393
 
 fn lit_below_2_512(s: &str) -> bool {
     let t = s.replace('_', "");
+    let t = t.strip_prefix('-').unwrap_or(&t);
+    for (p, max, hi) in [("0x", 129, b'1'), ("0X", 129, b'1'), ("0b", 513, b'1'), ("0B", 513, b'1'), ("0o", 171, b'4'), ("0O", 171, b'4')] {
+        if let Some(d) = t.strip_prefix(p).map(|d| d.trim_start_matches('0')) {
+            return (d.len(), d.as_bytes().first().copied().unwrap_or(0)) < (max, hi);
+        }
+    }
     let t = t.trim_start_matches('0');
     let t = if t.is_empty() { "0" } else { t };
-    let t = t.strip_prefix('-').unwrap_or(t);
     match t.len().cmp(&TWO_POW_512.len()) {
         std::cmp::Ordering::Less => true,
         std::cmp::Ordering::Greater => false,
@@ -1104,6 +1109,31 @@ pub(crate) fn fixed_width_int_range(name: &str) -> Option<(i128, i128)> {
         "uint" | "usize" | "uintptr" => target_uint_range(),
         _ => return None,
     })
+}
+
+/// Canonical Go type name for a Hybrid integer spelling (issue #1165).
+///
+/// Only the aliases that Go itself treats as *one type* collapse: `byte` and
+/// `rune` are Go builtins that alias `uint8`/`int32`, and `u8`/`i8`/`u16`/…
+/// are the SPEC-LANGUAGE spellings that `hy_emit::shapes::go_primitive_name`
+/// emits as `uint8`/`int8`/`uint16`/…. Everything else keeps its own identity:
+/// `int`/`uint` stay word-sized (Go gives them their own type — `int` is not
+/// `int64`), and `uintptr` is deliberately not folded into `uint` even though
+/// `fixed_width_int_range` groups their *ranges*, because Go keeps them
+/// distinct. `usize`/`isize` are absent by design (SPEC-LANGUAGE §402: the
+/// language does not define them) and are left untouched here.
+pub(crate) fn canonical_int_type_name(name: &str) -> &str {
+    match name {
+        "u8" | "byte" => "uint8",
+        "i8" => "int8",
+        "u16" => "uint16",
+        "i16" => "int16",
+        "u32" => "uint32",
+        "i32" | "rune" => "int32",
+        "u64" => "uint64",
+        "i64" => "int64",
+        other => other,
+    }
 }
 
 /// Parsed integer literal, retaining the fact that a syntactically valid
@@ -1546,5 +1576,51 @@ mod unit {
         );
         assert_eq!(target_int_range(), (i64::MIN as i128, i64::MAX as i128));
         assert_eq!(target_uint_range(), (0, u64::MAX as i128));
+    }
+}
+
+#[cfg(test)]
+mod map_lit_duplicate_tests {
+    use crate::{check_file, Verdict};
+    use hy_syntax::parse_file;
+
+    fn check(src: &str) -> crate::CheckResult {
+        let ast = parse_file("test.hy", src).expect("test snippet must parse");
+        check_file(&ast)
+    }
+
+    #[test]
+    fn map_lit_duplicate_constant_keys_rejected() {
+        let cases = [
+            "fn main() {\n    m := map[int]string{1: \"a\", 1: \"b\"}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[string]int{\"a\": 1, \"a\": 2}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[string]int{\"a\" + \"b\": 1, \"ab\": 2}\n    fmt.println(m)\n}\n",
+            "const k = 1\nfn main() {\n    m := map[int]string{k: \"a\", 1: \"b\"}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[bool]int{true: 1, true: 2}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[int]int{1 + 1: 0, 2: 0}\n    fmt.println(m)\n}\n",
+        ];
+        for src in cases {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                r.diagnostics.iter().any(|d| d.code == "HYB-E1002" && d.message.contains("duplicate key")),
+                "expected HYB-E1002 duplicate key diagnostic, got {:?} for:\n{src}",
+                r.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn map_lit_distinct_constant_keys_accepted() {
+        let cases = [
+            "fn main() {\n    m := map[int]string{1: \"a\", 2: \"b\"}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[string]int{\"a\": 1, \"b\": 2}\n    fmt.println(m)\n}\n",
+            "const k = 1\nfn main() {\n    m := map[int]string{k: \"a\", 2: \"b\"}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[bool]int{true: 1, false: 2}\n    fmt.println(m)\n}\n",
+        ];
+        for src in cases {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Accept, "expected accept for:\n{src}");
+        }
     }
 }
