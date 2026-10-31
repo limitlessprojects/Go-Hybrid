@@ -67,6 +67,7 @@ struct NestedClosure<'a> {
     saved_scopes: Vec<std::collections::HashMap<String, Binding>>,
     saved_aliases: std::collections::HashMap<String, String>,
     saved_share: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    saved_slot_loans: std::collections::HashSet<String>,
     overwritten: std::collections::HashSet<(usize, String)>,
 }
 
@@ -84,6 +85,7 @@ fn push_nested_closure<'a>(
         saved_scopes: st.scopes.clone(),
         saved_aliases: st.aliases.clone(),
         saved_share: st.may_share.clone(),
+        saved_slot_loans: st.env.iter().filter_map(|(k, b)| b.slot_loan.then(|| k.clone())).collect(),
         overwritten: std::collections::HashSet::new(),
     });
 }
@@ -118,9 +120,15 @@ fn sync_nested_moves(st: &FnState, nested: &mut [NestedClosure<'_>]) {
                             if sb.moved.is_none() && b.moved.is_some() {
                                 sb.moved = b.moved.clone();
                             }
+                            sb.slot_loan |= b.slot_loan;
                         }
                     }
                 }
+            }
+        }
+        for (k, b) in &st.env {
+            if b.slot_loan && !nc.overwritten.contains(&(0, k.clone())) {
+                nc.saved_slot_loans.insert(k.clone());
             }
         }
         for (k, v) in &st.aliases {
@@ -216,6 +224,11 @@ fn check_one_closure(
         may_share: st.may_share.clone(),
         ..FnState::default()
     };
+    for (k, b) in &cst.env {
+        if b.slot_loan {
+            cst.borrow_bindings.insert(k.clone());
+        }
+    }
     for (k, b) in cst.env.iter_mut() {
         if b.non_owned_origin.is_none() {
             b.non_owned_origin = Some(format!(
@@ -226,6 +239,7 @@ fn check_one_closure(
     }
     for p in params {
         let shape = ck.shape_of_type(&p.ty);
+        cst.borrow_bindings.remove(&p.name);
         cst.env.insert(
             p.name.clone(),
             Binding {
@@ -247,6 +261,7 @@ fn check_one_closure(
         let shape = ck.shape_of_type(&r.ty);
         if let Some(name) = &r.name {
             if name != "_" {
+                cst.borrow_bindings.remove(name);
                 cst.env.insert(
                     name.clone(),
                     Binding {
@@ -279,6 +294,11 @@ fn check_one_closure(
         // uses for the enclosing closure's result names).
         snap.named_results = Vec::new();
         snap.result_shapes = Vec::new();
+        for sl in nc.saved_slot_loans {
+            if let Some(b) = snap.env.get_mut(&sl) {
+                b.slot_loan = true;
+            }
+        }
         for (k, v) in nc.saved_aliases {
             snap.aliases.insert(k, v);
         }
@@ -669,6 +689,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     }
                 }
                 ck.record_local_borrow_aliases(st, l);
+                ck.mark_slot_loans_local(st, l);
             } else {
                 // multi-name define from one value (`v, ok := m[k]`, `a, b := f()`)
                 let moved_non_owned = l
@@ -1138,6 +1159,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             sync_nested_moves(st, nested);
             collect_stmt_direct_fnlits(stmt, st, nested);
             ck.process_closure_assign(st, targets, *op, values);
+            ck.mark_slot_loans_assign(st, targets, *op, values);
             sync_nested_moves(st, nested);
             if targets.len() == values.len() {
                 for (t, v) in targets.iter().zip(values.iter()) {

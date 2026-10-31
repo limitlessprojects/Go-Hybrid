@@ -48,6 +48,7 @@ impl<'a> Checker<'a> {
         }
         for (name, val) in l.names.iter().zip(l.values.iter()) {
             if is_slot_loan_expr(val) {
+                st.borrow_bindings.insert(name.clone());
                 if let Some(b) = st.env_lookup_mut(name) {
                     b.slot_loan = true;
                 }
@@ -76,6 +77,9 @@ impl<'a> Checker<'a> {
         for (t, v) in targets.iter().zip(values.iter()) {
             if let PlaceKind::Ident(name) = &t.kind {
                 let is_loan = is_slot_loan_expr(v);
+                if is_loan {
+                    st.borrow_bindings.insert(name.clone());
+                }
                 if let Some(b) = st.env_lookup_mut(name) {
                     b.slot_loan |= is_loan;
                 }
@@ -371,11 +375,9 @@ impl<'a> Checker<'a> {
                         self.emit_addr_of_loan_diag(name, *id_span);
                     }
                 }
-                Expr::Field { .. } => {
-                    if let Some(root) = operand.root_ident() {
-                        if self.lookup_binding(st, root).is_some_and(|b| b.slot_loan) {
-                            self.emit_addr_of_loan_diag(root, *span);
-                        }
+                Expr::Field { .. } | Expr::Index { .. } => {
+                    if let Some(root) = self.inline_slot_loan_root(st, operand) {
+                        self.emit_addr_of_loan_diag(root, *span);
                     }
                 }
                 _ => {}
@@ -446,6 +448,67 @@ impl<'a> Checker<'a> {
             // Closure bodies are entered by emit_guard.rs with their own
             // scoped FnState and `include_direct_ident = true`.
             Expr::FnLit { .. } | Expr::Ident { .. } | Expr::Lit { .. } => {}
+        }
+    }
+
+    /// Returns `Some(root)` when `expr` is an inline field or fixed-array index
+    /// projection rooted directly at a live map-slot loan binding (`b.slot_loan`).
+    /// Indexing a slice or map field (`&n.arr[0]`) or dereferencing a pointer field
+    /// (`&n.ptr.x`) addresses heap backing storage rather than the temporary map-slot
+    /// value copy and is not a T24 violation. Note: `hy_syntax::UnOp` only has
+    /// `Not` (`!`), `Neg` (`-`), and `Addr` (`&`) — Hybrid has no unary `*expr`
+    /// dereference operator in the grammar/AST (pointers auto-dereference on `.`
+    /// and `[]`), so `Ident`, `Field`, and `Index` exhaust all projection forms.
+    fn inline_slot_loan_root<'b>(&self, st: &FnState, expr: &'b Expr) -> Option<&'b str> {
+        let is_loan_ident = |e: &Expr| {
+            matches!(
+                unwrap_parens(e),
+                Expr::Ident { name, .. } if self.lookup_binding(st, name).is_some_and(|b| b.slot_loan)
+            )
+        };
+        match unwrap_parens(expr) {
+            Expr::Ident { name, .. } => self
+                .lookup_binding(st, name)
+                .is_some_and(|b| b.slot_loan)
+                .then_some(name.as_str()),
+            Expr::Field { base, .. } => {
+                let base_shape = self.shape_of_expr(st, base);
+                if matches!(
+                    &base_shape,
+                    TypeShape::Pointer(inner) if matches!(inner.as_ref(), TypeShape::Pointer(_))
+                        || (!is_loan_ident(base) && matches!(&base_shape, TypeShape::Pointer(_)))
+                ) {
+                    None
+                } else {
+                    self.inline_slot_loan_root(st, base)
+                }
+            }
+            Expr::Index { base, .. } => {
+                let base_shape = self.shape_of_expr(st, base);
+                let is_array_or_loan_array = matches!(&base_shape, TypeShape::Array(_))
+                    || (matches!(&base_shape, TypeShape::Unknown) && self.ty_of_expr(st, base).is_none())
+                    || (is_loan_ident(base)
+                        && matches!(&base_shape, TypeShape::Pointer(inner) if matches!(inner.as_ref(), TypeShape::Array(_))))
+                    || self
+                        .ty_of_expr(st, base)
+                        .map(|t| self.resolve_type_alias(&t))
+                        .is_some_and(|t| match t {
+                            hy_syntax::TypeExpr::Array { .. } => true,
+                            hy_syntax::TypeExpr::Pointer { to, .. } if is_loan_ident(base) => {
+                                matches!(
+                                    self.resolve_type_alias(&to),
+                                    hy_syntax::TypeExpr::Array { .. }
+                                )
+                            }
+                            _ => false,
+                        });
+                if is_array_or_loan_array {
+                    self.inline_slot_loan_root(st, base)
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 
