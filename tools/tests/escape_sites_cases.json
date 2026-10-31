@@ -5,13 +5,57 @@
       "name": "example_06_http_server_zero_triples",
       "file": "examples/06-http-server/program.hy",
       "expected_count": 0,
-      "description": "Handler closures capture `next` but only call it — no capture writes → 0 triples"
+      "description": "Handler closures capture `next` but only call it — no capture writes -> 0 triples"
     },
     {
       "name": "corpus_10_a5_http_handler_one_triple",
       "file": "tests/checker-corpus/10-a5-http-handler-capture.hy",
       "expected_count": 1,
-      "description": "Closure writes `hits++` and passes to `mux.handle(...)` → 1 triple (capture=hits, foreign_call=mux.handle)"
+      "expected_triples": [
+        {
+          "capture": "hits",
+          "closure_line": 68,
+          "foreign_call": "mux.handle"
+        }
+      ],
+      "description": "Closure writes `hits++` and passes to `mux.handle(...)` -> 1 triple (capture=hits, foreign_call=mux.handle)"
+    },
+    {
+      "name": "return_typed_closure_capture_write_detected",
+      "source": "fn main() {\n    hits := 0\n    sort.slice(items, fn(i int, j int) bool {\n        hits += 1\n        return i < j\n    })\n}\n",
+      "expected_count": 1,
+      "expected_triples": [
+        {
+          "capture": "hits",
+          "closure_line": 3,
+          "foreign_call": "sort.slice"
+        }
+      ],
+      "description": "Closures with explicit return types (`fn(...) bool`, `fn(...) (int, error)`) must not be skipped"
+    },
+    {
+      "name": "closure_params_and_local_declarations_ignored",
+      "source": "fn main() {\n    mux.handle(\"/ok\", http.handler(fn(w http.ResponseWriter, count int) {\n        local_a := 0\n        local_a += 1\n        local_a++\n        var local_b int = 1\n        local_b = 2\n        count += local_b\n    }))\n}\n",
+      "expected_count": 0,
+      "description": "Writes to closure parameters (`count`) and closure-local bindings (`:=`, `var`) are not outer capture writes"
+    },
+    {
+      "name": "nested_non_escaping_closure_and_field_index_writes",
+      "source": "fn main() {\n    state := Stats{}\n    counts := map[string]int{}\n    mux.handle(\"/m\", http.handler(fn(w http.ResponseWriter, r *http.Request) {\n        helper := fn() {\n            inner_only := 0\n            inner_only++\n        }\n        helper()\n        state.hits++\n        counts[\"m\"] *= 2\n    }))\n}\n",
+      "expected_count": 2,
+      "expected_triples": [
+        {
+          "capture": "counts",
+          "closure_line": 4,
+          "foreign_call": "mux.handle"
+        },
+        {
+          "capture": "state",
+          "closure_line": 4,
+          "foreign_call": "mux.handle"
+        }
+      ],
+      "description": "Field/index mutations attribute to the captured root (`state`, `counts`) while nested closure local writes do not leak"
     }
   ]
 }
