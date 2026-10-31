@@ -730,7 +730,12 @@ impl<'a> Checker<'a> {
         }
         let l = self.equality_shape(st, lhs);
         let r = self.equality_shape(st, rhs);
-        let (bad, noun) = if let Some(n) = self.incomparable_noun(&l) {
+        // SPEC §2.5 T20: No == on option in MVP (T16's rule applied to the builtin).
+        let (bad, noun) = if self.is_option_expr(st, lhs) {
+            (lhs, "option")
+        } else if self.is_option_expr(st, rhs) {
+            (rhs, "option")
+        } else if let Some(n) = self.incomparable_noun(&l) {
             (lhs, n)
         } else if let Some(n) = self.incomparable_noun(&r) {
             (rhs, n)
@@ -751,6 +756,7 @@ impl<'a> Checker<'a> {
                     "slice" => "slice can only be compared to nil",
                     "function value" => "func can only be compared to nil",
                     "data-carrying enum" => "data-carrying enums compare via match (SPEC §2.5 T16)",
+                    "option" => "option values compare via match (SPEC §2.5 T20)",
                     _ => "cannot be compared",
                 }
             ),
@@ -759,6 +765,7 @@ impl<'a> Checker<'a> {
                 "slice" => "fix: compare lengths or elements pairwise — whole-slice equality has no Go meaning".to_string(),
                 "function value" => "fix: a function value is only comparable to `nil` — compare behaviour (call both) instead".to_string(),
                 "data-carrying enum" => "fix: use a match statement to inspect and compare data-carrying enum variants (SPEC §2.5 T16)".to_string(),
+                "option" => "fix: use a match statement or `.unwrap()` / `.or()` to inspect and compare option values (SPEC §2.5 T20)".to_string(),
                 _ => "fix: compare the comparable fields individually — the struct carries an incomparable field".to_string(),
             },
         ];
@@ -769,6 +776,35 @@ impl<'a> Checker<'a> {
     /// Shape of an equality operand, treating a bare top-level fn name as
     /// a function VALUE (Go: `helper == helper` compares funcs —
     /// `shape_of_expr` only models fn names in call position).
+    fn is_option_expr(&self, st: &FnState, e: &Expr) -> bool {
+        let u = unwrap_parens(e);
+        if let Expr::Call { callee, .. } = u {
+            if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                if name == "some" && self.lookup_binding(st, name).is_none() {
+                    return true;
+                }
+            }
+        }
+        if let Expr::Ident { name, .. } = u {
+            if name == "none" && self.lookup_binding(st, name).is_none() {
+                return true;
+            }
+            if let Some(b) = self.lookup_binding(st, name) {
+                if let Some(ty) = &b.ty {
+                    if matches!(self.resolve_type_alias(ty), TypeExpr::Option { .. }) {
+                        return true;
+                    }
+                }
+            }
+        }
+        if let Some(ty) = self.ty_of_expr(st, u) {
+            if matches!(self.resolve_type_alias(&ty), TypeExpr::Option { .. }) {
+                return true;
+            }
+        }
+        false
+    }
+
     fn equality_shape(&self, st: &FnState, e: &Expr) -> TypeShape {
         if let Expr::Ident { name, .. } = unwrap_parens(e) {
             if !name.is_empty()
