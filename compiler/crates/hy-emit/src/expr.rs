@@ -816,7 +816,7 @@ impl Emitter {
         //     as an executable test-claim (§ "Examples are tests"), but the
         //     name used to fall through to the verbatim emission below and
         //     die in Go as `undefined: u8`. Issue #147. ---
-        if let Expr::Ident { name, .. } = callee {
+        if let Expr::Ident { name, .. } = bare_callee {
             if let Some(go) = super::shapes::go_primitive_name(name) {
                 if args.len() != 1 {
                     return Err(EmitError::unsupported(format!(
@@ -830,11 +830,23 @@ impl Emitter {
                 // SPEC-LANGUAGE line 1991 asserts `u8(300) == 44` as an
                 // executable test-claim. The fold computes that same
                 // two's-complement truncation at emit time.
-                if let Some(folded) = super::constconv::fold_constant(&args[0].value, name) {
+                if let Some(folded) = self.fold_const_conversion(&args[0].value, name) {
                     return Ok(format!("{}({})", go, folded));
                 }
                 let a = self.emit_call_arg(&args[0])?;
                 return Ok(format!("{}({})", go, a));
+            }
+            if args.len() == 1
+                && !args[0].spread
+                && !self.local_vars.contains(name)
+                && !self.fn_shapes.contains_key(name)
+            {
+                let resolved = self.resolve_alias_primitive(name);
+                if super::constconv::width_of(resolved).is_some() {
+                    if let Some(folded) = self.fold_const_conversion(&args[0].value, resolved) {
+                        return Ok(format!("{}({})", name, folded));
+                    }
+                }
             }
             if name == "len" && args.len() == 1 && self.is_set_expr(&args[0].value) {
                 let a = self.emit_call_arg(&args[0])?;
@@ -858,9 +870,9 @@ impl Emitter {
             elem: Some(t),
             items,
             ..
-        } = callee
+        } = bare_callee
         {
-            if items.is_empty() && callee.as_array_lit().is_none() {
+            if items.is_empty() && bare_callee.as_array_lit().is_none() {
                 let mut parts = Vec::new();
                 for a in args {
                     parts.push(self.emit_call_arg(a)?);
@@ -879,7 +891,7 @@ impl Emitter {
         // own method-receiver auto-address precedent, pinned by the
         // pre-registered corpus).
         let mut ptr_params: Vec<bool> = Vec::new();
-        if let Expr::Ident { name, .. } = callee {
+        if let Expr::Ident { name, .. } = bare_callee {
             let (fn_head, _) = split_type_args(name);
             if let Some((_, _, _, params)) = self.fn_shapes.get(fn_head) {
                 ptr_params = params.iter().map(|p| p.is_some()).collect();
