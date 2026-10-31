@@ -583,10 +583,14 @@ impl Emitter {
     fn hoist_tries_call(&mut self, callee: &Expr, args: &[CallArg]) -> Result<(), EmitError> {
         let any_arg_has_try = args.iter().any(|a| Self::expr_has_hoistable_try(&a.value));
         if any_arg_has_try {
-            match callee {
+            let mut inner = callee;
+            while let Expr::Paren { inner: p, .. } = inner { inner = p; }
+            match inner {
                 Expr::Field { base, .. } => self.hoist_order_before_try(base)?,
-                Expr::Call { .. } => self.hoist_order_before_try(callee)?,
-                _ => self.hoist_tries_expr(callee)?,
+                Expr::Ident { .. } | Expr::Lit { .. } | Expr::FnLit { .. } => {
+                    self.hoist_tries_expr(callee)?
+                }
+                _ => self.hoist_order_before_try(callee)?,
             }
         } else {
             self.hoist_tries_expr(callee)?;
