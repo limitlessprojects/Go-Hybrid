@@ -214,3 +214,13 @@ fn controls_untouched() {
         "struct pair { n int } fn main() { p := pair{ n: 1 } x := int8(p.n) _ = x }",
     );
 }
+
+#[test]
+fn array_conversion_rejects_constant_operands() {
+    rejects_with_e6006("fn main() { x := [4]byte{}(\"text\") _ = x }");
+    rejects_with_e6006("fn main() { x := [4]int{}(nil) _ = x }");
+    rejects_with_e6006("fn main() { x := [4]int{}(123) _ = x }");
+    rejects_with_e6006("fn main() { x := [4]int{}(true) _ = x }");
+    rejects_with_e6006("fn main() { x := [4]int{}(1.5) _ = x }");
+}
+
