@@ -3607,6 +3607,9 @@ impl<'a> Collector<'a> {
     }
 
     fn check_array_lit_items(&mut self, elem_ty: &TypeExpr, items: &[Expr]) {
+        for item in items {
+            self.check_single_value_position(item, "an array literal element", /*binding_position=*/ false);
+        }
         let resolved_ty = self.ck.resolve_type_alias(elem_ty);
         let expected = self.kind_of_ty(&resolved_ty, 0);
         if expected == OpKind::Unknown {
@@ -3668,6 +3671,9 @@ impl<'a> Collector<'a> {
     }
 
     fn check_slice_lit_items(&mut self, elem_ty: &TypeExpr, items: &[Expr]) {
+        for item in items {
+            self.check_single_value_position(item, "a slice literal element", /*binding_position=*/ false);
+        }
         let resolved_ty = self.ck.resolve_type_alias(elem_ty);
         let expected = self.kind_of_ty(&resolved_ty, 0);
         if expected == OpKind::Unknown {
@@ -3737,6 +3743,10 @@ impl<'a> Collector<'a> {
         val_ty: &TypeExpr,
         entries: &[(Expr, Expr)],
     ) {
+        for (k, v) in entries {
+            self.check_single_value_position(k, "a map literal key", /*binding_position=*/ false);
+            self.check_single_value_position(v, "a map literal value", /*binding_position=*/ false);
+        }
         let resolved_key = self.ck.resolve_type_alias(key_ty);
         let exp_key = self.kind_of_ty(&resolved_key, 0);
         let resolved_val = self.ck.resolve_type_alias(val_ty);
