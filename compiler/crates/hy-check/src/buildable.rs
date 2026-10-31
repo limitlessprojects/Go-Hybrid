@@ -1112,16 +1112,56 @@ impl<'a> Collector<'a> {
             Stmt::Managed { body, .. } => self.block_scoped(body),
             Stmt::Match { subject, arms, .. } => {
                 self.expr(subject);
+                self.check_single_value_position(
+                    subject,
+                    "a match subject",
+                    /*binding_position=*/ false,
+                );
+                let subj_kind = self.kind_of_expr(subject);
                 for arm in arms {
                     self.push_scope();
-                    if let MatchPattern::Path { segments, binding } = &arm.pattern {
-                        if let Some(root) = segments.first() {
-                            self.mention(root);
+                    match &arm.pattern {
+                        MatchPattern::Path { segments, binding } => {
+                            if let Some(root) = segments.first() {
+                                self.mention(root);
+                            }
+                            if let Some(b) = binding {
+                                self.define_elidable(b, subject.span());
+                                self.bind_kind(b, OpKind::Unknown);
+                            }
                         }
-                        if let Some(b) = binding {
-                            self.define_elidable(b, subject.span());
-                            self.bind_kind(b, OpKind::Unknown);
+                        MatchPattern::Lit(lit) => {
+                            let lit_kind = match lit {
+                                LitKind::Int(_) | LitKind::Char(_) => OpKind::Int,
+                                LitKind::Float(_) => OpKind::Float,
+                                LitKind::Bool(_) => OpKind::Bool,
+                                LitKind::Str(_) | LitKind::RawStr(_) => OpKind::Str,
+                                LitKind::Nil => OpKind::Unknown,
+                            };
+                            if !matches!(
+                                subj_kind,
+                                OpKind::Unknown | OpKind::Void | OpKind::Interface
+                            ) && lit_kind != OpKind::Unknown
+                                && kinds_conflict(&subj_kind, &lit_kind)
+                            {
+                                let lit_expr = Expr::Lit {
+                                    kind: lit.clone(),
+                                    span: arm.body.span,
+                                };
+                                self.emit_e1002(
+                                    arm.body.span,
+                                    format!(
+                                        "match arm pattern `{}` (type `{}`) cannot match subject `{}` of type `{}` (HYB-E1002)",
+                                        lit_expr.render(),
+                                        lit_kind.label(),
+                                        subject.render(),
+                                        subj_kind.label()
+                                    ),
+                                    "match arm literal patterns must be comparable to the match subject's type",
+                                );
+                            }
                         }
+                        MatchPattern::Wildcard => {}
                     }
                     if let Some(g) = &arm.guard {
                         self.expr(g);
@@ -2808,8 +2848,13 @@ impl<'a> Collector<'a> {
 
     /// Family A (#425): `if cond` and `for cond` require a boolean condition.
     fn check_bool_condition(&mut self, cond: &Expr, construct: &str) {
+        self.check_single_value_position(
+            cond,
+            &format!("a `{construct}` condition"),
+            /*binding_position=*/ false,
+        );
         let k = self.kind_of_expr(cond);
-        if !matches!(k, OpKind::Unknown | OpKind::Bool) {
+        if !matches!(k, OpKind::Unknown | OpKind::Bool | OpKind::Void) {
             self.emit_e1002(
                 cond.span(),
                 format!(
