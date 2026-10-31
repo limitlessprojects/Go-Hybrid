@@ -382,6 +382,27 @@ impl Emitter {
                         .unwrap_or_else(|| w.to_string());
                     self.handler_writer = Some(name);
                 }
+                // E4: a closure's `?` binds to the closure's OWN results,
+                // never the enclosing fn's — not main's wrapper `hyErr` (an
+                // assignment to it from here returned from the closure only
+                // and let main keep running), not the outer fn's zero-value
+                // return list (the wrong arity for this literal).
+                let saved_main_closure = std::mem::replace(&mut self.in_main_closure, false);
+                let closure_err_returns = if matches!(
+                    results.last().map(|r| &r.ty),
+                    Some(TypeExpr::Named { name, .. }) if name == "error"
+                ) {
+                    let mut texts: Vec<String> = results[..results.len() - 1]
+                        .iter()
+                        .map(|r| self.zero_value(&r.ty))
+                        .collect();
+                    texts.push(String::new()); // filled by propagate_error
+                    Some(texts)
+                } else {
+                    None
+                };
+                let saved_err_returns =
+                    std::mem::replace(&mut self.cur_fn_error_returns, closure_err_returns);
                 self.fnlit_depth += 1;
                 // Labels do not cross func boundaries: a labeled break/continue
                 // must find its loop INSIDE the literal — reset the depth so
@@ -412,6 +433,8 @@ impl Emitter {
                 let closure_body = std::mem::take(&mut self.body);
                 self.body = main_body;
                 self.fnlit_depth -= 1;
+                self.in_main_closure = saved_main_closure;
+                self.cur_fn_error_returns = saved_err_returns;
                 self.for_depth = saved_for_depth;
                 self.handler_writer = saved_writer;
                 self.restore_scope(saved_scope);

@@ -63,6 +63,7 @@ mod walk;
 mod builtins;
 mod range_iter;
 mod recv;
+mod try_context;
 
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
 
@@ -113,6 +114,10 @@ pub fn check_file(file: &File) -> CheckResult {
     // declaration-signature expressions (array lengths) at file level; each
     // function body inside check_fn below.
     ck.check_file_undefined_names();
+
+    // E4 (HYB-E2011): `?` lands only in an error-result fn/closure, `main`,
+    // or an E11 handler closure — lexical, like `return`.
+    try_context::check_try_contexts(&mut ck, file);
 
     let fns: Vec<&FnDecl> = file.fns().collect();
     for f in fns {
@@ -1909,14 +1914,16 @@ mod tests {
     #[test]
     fn a7_borrow_by_default_and_return_transfer_accept() {
         // 12-shape: two borrow calls then a mutate — windows non-lexical.
+        // `count` declares an `error` result exactly like corpus 12's
+        // count_active: its `?` sites need one to land in (E4, HYB-E2011).
         let r = check(
             "import \"rust/serde_json\"\n\
-             fn count(doc serde_json.value) int {\n\
+             fn count(doc serde_json.value) (int, error) {\n\
                n := 0\n\
                for u in doc.array(\"users\")? {\n\
                  n += u.int(\"logins\")?\n\
                }\n\
-               return n\n\
+               return n, nil\n\
              }\n\
              fn main() {\n\
                doc := serde_json.parse(`{}`)?\n\
@@ -2110,16 +2117,18 @@ mod tests {
     fn a7_own_transfer_at_return_accepts() {
         // 13-shape: `return v` transfers the own handle OUT; the caller
         // mutates the returned handle — the transfer made it the caller's.
+        // `summary` declares an `error` result exactly like corpus 13: its
+        // `?` sites need one to land in (E4, HYB-E2011).
         let r = check(
             "import \"rust/serde_json\"\n\
-             fn summary(doc serde_json.value) serde_json.value {\n\
+             fn summary(doc serde_json.value) (serde_json.value, error) {\n\
                v := serde_json.new_object()\n\
                for u in doc.array(\"users\")? {\n\
                  if u.int(\"logins\")? > 0 {\n\
                    v.set(\"active\", 1)\n\
                  }\n\
                }\n\
-               return v\n\
+               return v, nil\n\
              }\n\
              fn main() {\n\
                doc := serde_json.parse(`{}`)?\n\
