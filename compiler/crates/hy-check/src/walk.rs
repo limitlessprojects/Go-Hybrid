@@ -864,6 +864,31 @@ pub(crate) fn place_field_store_slot(place: &Place) -> Option<(String, Option<St
     }
 }
 
+/// Issue #970: does re-binding `target_path` invalidate a slot loan taken on
+/// `loan_path`? True when the target IS the loaned base, or a PREFIX of it —
+/// `f = folder{...}` replaces the whole struct, so it replaces `f.trail` too,
+/// and `p = q` replaces every field path through `p`. A SIBLING field
+/// (`f.name = ...` beside a loan on `f.trail`) shares no prefix beyond `f`, which
+/// is a pure copy in Go, so it cannot disturb the store-back and stays legal.
+/// Comparing whole segments keeps `fa` and `f` distinct.
+pub(crate) fn rebind_replaces_loan_base(loan_path: &str, target_path: &str) -> bool {
+    // The target replaces the loan base when the loan base IS the target or
+    // extends it: `f` covers `f.trail`, but `f.trail` does not cover `f.name`.
+    loan_path == target_path || loan_path.starts_with(&format!("{}.", target_path))
+}
+
+/// Issue #970: `xs = xs[:]` keeps the same pointer, length and capacity, so the
+/// store-back still names exactly the slot the loan was taken from. It is the
+/// one re-slice that cannot move the loan out from under its own store-back,
+/// and rejecting it would be a false positive on a legal no-op.
+pub(crate) fn is_identity_reslice(v: &Expr, loan_path: &str) -> bool {
+    matches!(
+        crate::model::unwrap_parens(v),
+        Expr::Slice { base, lo: None, hi: None, .. }
+            if expr_path(base).as_deref() == Some(loan_path)
+    )
+}
+
 fn lit_index_key(index: &Expr) -> Option<String> {
     if let Some(v) = crate::const_overflow::const_int_value(index) {
         return Some(v.to_string());
