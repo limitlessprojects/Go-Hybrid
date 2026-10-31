@@ -571,18 +571,26 @@ def cmd_board(args):
     if not args.post:
         print(md)
         return
-    _, srch = gh.req("GET", "/search/issues?q=%s" % quote(
-        'repo:%s is:issue is:open "%s" in:body' % (cfg["repo"], BOARD_MARKER)))
-    hits = (srch or {}).get("items", [])
-    if hits:
-        n = hits[0]["number"]
-        gh.patch("/repos/%s/issues/%d" % (cfg["repo"], n), {"body": md})
-        log("board updated on #%d (%d calls, %s remaining)" % (n, gh.calls, gh.remaining))
-    else:
-        iss = gh.post("/repos/%s/issues" % cfg["repo"],
-                      {"title": "Triage Board (auto-updated daily — pin me)",
-                       "body": md})
-        log("board created: %s (%d calls)" % (iss.get("html_url"), gh.calls))
+    try:
+        _, srch = gh.req("GET", "/search/issues?q=%s" % quote(
+            'repo:%s is:issue is:open "%s" in:body' % (cfg["repo"], BOARD_MARKER)))
+        hits = (srch or {}).get("items", [])
+        if hits:
+            n = hits[0]["number"]
+            gh.patch("/repos/%s/issues/%d" % (cfg["repo"], n), {"body": md})
+            log("board updated on #%d (%d calls, %s remaining)" % (n, gh.calls, gh.remaining))
+        else:
+            iss = gh.post("/repos/%s/issues" % cfg["repo"],
+                          {"title": "Triage Board (auto-updated daily — pin me)",
+                           "body": md})
+            log("board created: %s (%d calls)" % (iss.get("html_url"), gh.calls))
+    except (RuntimeError, RateGuard) as e:
+        err_s = str(e)
+        if "403" in err_s or "Resource not accessible by integration" in err_s or isinstance(e, RateGuard):
+            log("board NOT updated (read-only token, permission error, or rate limit: %s); rendered board follows" % e)
+            print(md)
+            return
+        raise
 
 
 # ---------------------------------------------------------------- main

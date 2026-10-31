@@ -117,5 +117,44 @@ class ProbeParser(unittest.TestCase):
         self.assertFalse(any("removed line" in ln for ln in added))
 
 
+class BoardResilience(unittest.TestCase):
+    """shepherd-board must degrade gracefully on 403 or RateGuard."""
+
+    def test_board_handles_readonly_403(self):
+        import argparse
+        import tempfile
+        import triage_bot as tb
+
+        class MockGh:
+            calls = 1
+            remaining = 1000
+
+            def req(self, method, path, body=None):
+                if method == "GET":
+                    return (200, {"items": [{"number": 940}]})
+                raise RuntimeError("PATCH /repos/limitlessprojects/Go-Hybrid/issues/940 -> 403 {\"message\":\"Resource not accessible by integration\"}")
+
+            def patch(self, path, body):
+                return self.req("PATCH", path, body)
+
+        with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".json") as f:
+            f.write('{"items": [], "clusters": [], "generated": "2026-10-28 00:00 UTC"}')
+            scan_path = f.name
+
+        orig_gh = tb.Gh
+        orig_load_token = tb.load_token
+        tb.Gh = lambda *a, **kw: MockGh()
+        tb.load_token = lambda a: "mock-token"
+        try:
+            args = argparse.Namespace(post=True, from_scan=scan_path, pareto=None, token_file=None, token_env=None)
+            # Must exit cleanly without raising RuntimeError
+            tb.cmd_board(args)
+        finally:
+            tb.Gh = orig_gh
+            tb.load_token = orig_load_token
+            Path(scan_path).unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     unittest.main()
+
