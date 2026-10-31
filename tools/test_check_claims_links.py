@@ -86,6 +86,39 @@ class CheckClaimsLinksTest(unittest.TestCase):
         kinds = [i["kind"] for i in report["issues"]]
         self.assertIn("missing-inline-corpus", kinds)
 
+    def test_three_digit_inline_corpus_is_counted(self):
+        for suffix in ("", ".hy"):
+            with self.subTest(suffix=suffix):
+                name = "127-inline-reference"
+                target = self.root / "tests" / "checker-corpus" / (name + ".hy")
+                target.write_text("// EXPECTED-VERDICT: REJECT\n", encoding="utf-8")
+                (self.root / "GUARANTEES.md").write_text(
+                    CLAIMS.replace("34-select-send-unproven-name", name + suffix),
+                    encoding="utf-8")
+                result = self.run_tool()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                report = json.loads(result.stdout)
+                self.assertTrue(report["ok"])
+                self.assertEqual(report["refs"], 2)
+                self.assertEqual(report["issues"], [])
+
+    def test_missing_three_digit_inline_corpus_is_reported(self):
+        for suffix in ("", ".hy"):
+            with self.subTest(suffix=suffix):
+                name = "127-missing-reference"
+                (self.root / "GUARANTEES.md").write_text(
+                    CLAIMS.replace("34-select-send-unproven-name", name + suffix),
+                    encoding="utf-8")
+                result = self.run_tool()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                report = json.loads(result.stdout)
+                self.assertFalse(report["ok"])
+                self.assertEqual(report["refs"], 2)
+                self.assertEqual(report["issues"], [{
+                    "row": 1, "kind": "missing-inline-corpus",
+                    "target": "tests/checker-corpus/" + name + ".hy",
+                }])
+
     def test_missing_corpus_number_is_reported(self):
         (self.root / "tests" / "checker-corpus" / "16-move.hy").unlink()
         result = self.run_tool()
