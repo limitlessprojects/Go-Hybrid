@@ -1945,6 +1945,9 @@ impl<'a> Checker<'a> {
                 // A later result can share storage even when result 0 is primitive.
                 let shares_storage = self.shape_may_share(&result)
                     || matches!(result, TypeShape::Unknown)
+                    || self
+                        .call_result_shapes(st, callee, args)
+                        .is_some_and(|results| results.iter().any(|sh| self.shape_may_share(sh)))
                     || self.call_result_tys(st, callee).is_some_and(|results| {
                         results.iter().any(|ty| self.shape_may_share(&self.shape_of_type(ty)))
                     });

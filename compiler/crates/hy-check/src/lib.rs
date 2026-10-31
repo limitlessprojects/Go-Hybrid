@@ -347,9 +347,15 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     // first segments stay exempt (resolve.rs Field arm).
     ck.check_fn_undefined_names(f);
 
-    // environment seed: receiver + params
+    // environment seed: receiver + params + active generic type parameters
     let mut st = FnState::default();
+    for tp in &f.type_params {
+        st.type_params.insert(tp.name.clone());
+    }
     if let Some(r) = &f.receiver {
+        for rtp in ck.receiver_type_params(&r.ty) {
+            st.type_params.insert(rtp);
+        }
         let base_shape = ck.shape_of_type(&r.ty);
         let (shape, ty) = if r.is_pointer {
             (
