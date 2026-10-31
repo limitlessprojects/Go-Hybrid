@@ -312,17 +312,20 @@ fn cmd_generate(args: &[String]) -> ExitCode {
                 prefix_seen = true;
             }
             "--" => {
-                paths.extend(arguments.filter(|p| !p.ends_with(".go")).cloned());
+                paths.extend(arguments.cloned());
                 break;
             }
             _ if arg.starts_with('-') => {
                 eprintln!("error: unknown generate option: {}", arg);
                 return ExitCode::from(2);
             }
-            _ if !arg.ends_with(".go") => paths.push(arg.clone()),
-            _ => {}
+            _ => paths.push(arg.clone()),
         }
     }
+    // Go-source arguments forwarded by go:generate are not Hybrid inputs,
+    // but a directory named e.g. `feature.go` is still an explicit root.
+    // Inspect path kinds only after validating the complete invocation.
+    paths.retain(|p| !p.ends_with(".go") || std::path::Path::new(p).is_dir());
     if paths.is_empty() {
         eprintln!("usage: hyb generate [--check] [--binding-prefix <path>] <file.hy | dir> ...");
         return ExitCode::from(2);
