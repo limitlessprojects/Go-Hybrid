@@ -93,11 +93,19 @@ class Gh:
                     pass
                 if e.code == 404:
                     return 404, None
-                # GitHub secondary rate limits surface as 403 with a "rate
+                # Primary installation quota exhaustion ("API rate limit exceeded")
+                # cannot recover inside a 30-60s sleep window (resets hourly); raise
+                # RateGuard immediately so collect() degrades instead of hanging 20 min.
+                low_body = body_txt.lower()
+                rem_hdr = e.headers.get("x-ratelimit-remaining") if getattr(e, "headers", None) else None
+                if e.code == 403 and ("api rate limit exceeded" in low_body or rem_hdr == "0"):
+                    self.remaining = 0
+                    raise RateGuard("installation rate limit exhausted: %s" % body_txt[:160])
+                # GitHub secondary rate limits surface as 403 with a "secondary rate
                 # limit" body, not 429 — retry those with a longer backoff
                 # (the window is typically 30-60s). Other 403s are permission
                 # errors: fail fast, retrying cannot help.
-                is_rate_403 = e.code == 403 and "rate limit" in body_txt.lower()
+                is_rate_403 = e.code == 403 and "secondary rate limit" in low_body
                 if (e.code in (429, 502, 503, 504) or is_rate_403) and attempt < 3:
                     time.sleep([2, 5, 10][attempt] if e.code != 403
                                else [5, 20, 45][attempt])
@@ -173,12 +181,94 @@ def age_days(iso, now):
 
 # ---------------------------------------------------------------- scan
 
+def _is_readonly_403(err):
+    s = str(err)
+    return "-> 403" in s and ("Resource not accessible by integration" in s or "Must have admin rights" in s or "permission" in s.lower() or "403" in s)
+
+
+def _fallback_item(pr, now, cached=None):
+    if cached is not None:
+        it = dict(cached)
+        it["age_days"] = age_days(pr["created_at"], now)
+        it["idle_days"] = age_days(pr["updated_at"], now)
+        it["draft"] = bool(pr.get("draft"))
+        it["title"] = pr["title"][:90]
+        return it
+    return {
+        "number": pr["number"],
+        "title": pr["title"][:90],
+        "author": (pr.get("user") or {}).get("login", "unknown"),
+        "created_at": pr["created_at"],
+        "updated_at": pr["updated_at"],
+        "age_days": age_days(pr["created_at"], now),
+        "idle_days": age_days(pr["updated_at"], now),
+        "draft": bool(pr.get("draft")),
+        "mergeable": None,
+        "mergeable_state": "unknown",
+        "head_sha": pr["head"]["sha"][:12],
+        "files": 0,
+        "paths_sample": [],
+        "additions": 0,
+        "deletions": 0,
+        "behind_by": 0,
+        "overlap_risk": [],
+        "tests_included": False,
+    }
+
+
+def _fork_pr_from_event():
+    """If running inside a GitHub Actions pull_request event from a fork (where
+    GITHUB_TOKEN is read-only and cannot write issue #940 or labels anyway),
+    return the triggering PR dict so scan only inspects that PR (3 API calls
+    instead of ~1,500 across all open PRs)."""
+    if os.environ.get("GITHUB_EVENT_NAME") != "pull_request":
+        return None
+    ev_path = os.environ.get("GITHUB_EVENT_PATH")
+    if not ev_path or not Path(ev_path).exists():
+        return None
+    try:
+        ev = json.loads(Path(ev_path).read_text())
+        pr = ev.get("pull_request") or {}
+        if ((pr.get("head") or {}).get("repo") or {}).get("fork") is True and pr.get("number"):
+            return pr
+    except Exception:
+        pass
+    return None
+
+
+def load_cache(cache_path):
+    if not cache_path:
+        return None, {}
+    p = Path(cache_path)
+    if not p.exists():
+        return None, {}
+    try:
+        data = json.loads(p.read_text())
+        by_num = {it["number"]: it for it in data.get("items", []) if "number" in it}
+        return data.get("main"), by_num
+    except Exception:
+        return None, {}
+
+
 def collect(cfg, gh, args):
     now = datetime.now(timezone.utc)
-    prs = gh.paginate("/repos/%s/pulls?state=open&sort=created&direction=desc" % gh.repo)
-    log("open PRs: %d" % len(prs))
-    main_sha = gh.get("/repos/%s/commits/main" % gh.repo)["sha"]
-    log("main: %s" % main_sha[:10])
+    cache_main, cache_items = load_cache(getattr(args, "cache", None))
+    max_calls = getattr(args, "max_calls", None)
+    fork_pr = _fork_pr_from_event()
+    try:
+        if fork_pr is not None:
+            prs = [fork_pr]
+            log("fork pull_request event (#%d): scoping scan to triggering PR to preserve shared installation quota"
+                % fork_pr["number"])
+        else:
+            prs = gh.paginate("/repos/%s/pulls?state=open&sort=created&direction=desc" % gh.repo)
+            log("open PRs: %d" % len(prs))
+        main_sha = gh.get("/repos/%s/commits/main" % gh.repo)["sha"]
+        log("main: %s" % main_sha[:10])
+    except (RateGuard, RuntimeError) as e:
+        log("collect: quota/API limit hit during PR list (%s) — falling back to cache (%d items)"
+            % (e, len(cache_items)))
+        return list(cache_items.values()), (cache_main or "unknown")
 
     # overlap detection via the main-side compare is only worth its cost inside
     # the actionable rebase window; a PR 600 commits behind is a stale-base
@@ -187,7 +277,17 @@ def collect(cfg, gh, args):
 
     def one(pr):
         n = pr["number"]
-        full = gh.get("/repos/%s/pulls/%d" % (gh.repo, n))
+        head12 = pr["head"]["sha"][:12]
+        cached = cache_items.get(n)
+        # Incremental cache reuse: if neither the PR nor main moved, reuse cached item (0 API calls)
+        if (cached and cache_main == main_sha
+                and cached.get("head_sha") == head12
+                and cached.get("updated_at") == pr.get("updated_at")
+                and cached.get("mergeable") is not None):
+            return _fallback_item(pr, now, cached)
+        if max_calls and gh.calls >= max_calls:
+            raise RateGuard("max_calls budget reached (%d)" % max_calls)
+        full = gh.get("/repos/%s/pulls/%d" % (gh.repo, n)) or {}
         files = gh.paginate("/repos/%s/pulls/%d/files?per_page=100" % (gh.repo, n))
         paths = [f["filename"] for f in files]
         pset = set(paths)
@@ -218,7 +318,7 @@ def collect(cfg, gh, args):
             "current_labels": [l["name"] for l in (pr.get("labels") or [])],
             "mergeable": full.get("mergeable"),
             "mergeable_state": full.get("mergeable_state"),
-            "head_sha": pr["head"]["sha"][:12],
+            "head_sha": head12,
             "files": len(paths),
             "paths_sample": sorted(paths)[:12],
             "additions": adds,
@@ -231,11 +331,20 @@ def collect(cfg, gh, args):
         }
 
     items = []
+    pr_by_num = {pr["number"]: pr for pr in prs}
     workers = getattr(args, "jobs", 6)
+    rate_guarded = False
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {ex.submit(one, pr): pr["number"] for pr in prs}
         for fut in as_completed(futs):
-            it = fut.result()
+            n = futs[fut]
+            try:
+                it = fut.result()
+            except (RateGuard, RuntimeError) as e:
+                if not rate_guarded:
+                    log("  collect: quota/rate guard hit on #%d (%s) — degrading remaining PRs to cached/list metadata" % (n, e))
+                    rate_guarded = True
+                it = _fallback_item(pr_by_num[n], now, cache_items.get(n))
             items.append(it)
             if len(items) % 20 == 0 or len(items) == len(prs):
                 log("  ... %d/%d scanned" % (len(items), len(prs)))
@@ -571,18 +680,25 @@ def cmd_board(args):
     if not args.post:
         print(md)
         return
-    _, srch = gh.req("GET", "/search/issues?q=%s" % quote(
-        'repo:%s is:issue is:open "%s" in:body' % (cfg["repo"], BOARD_MARKER)))
-    hits = (srch or {}).get("items", [])
-    if hits:
-        n = hits[0]["number"]
-        gh.patch("/repos/%s/issues/%d" % (cfg["repo"], n), {"body": md})
-        log("board updated on #%d (%d calls, %s remaining)" % (n, gh.calls, gh.remaining))
-    else:
-        iss = gh.post("/repos/%s/issues" % cfg["repo"],
-                      {"title": "Triage Board (auto-updated daily — pin me)",
-                       "body": md})
-        log("board created: %s (%d calls)" % (iss.get("html_url"), gh.calls))
+    try:
+        _, srch = gh.req("GET", "/search/issues?q=%s" % quote(
+            'repo:%s is:issue is:open "%s" in:body' % (cfg["repo"], BOARD_MARKER)))
+        hits = (srch or {}).get("items", [])
+        if hits:
+            n = hits[0]["number"]
+            gh.patch("/repos/%s/issues/%d" % (cfg["repo"], n), {"body": md})
+            log("board updated on #%d (%d calls, %s remaining)" % (n, gh.calls, gh.remaining))
+        else:
+            iss = gh.post("/repos/%s/issues" % cfg["repo"],
+                          {"title": "Triage Board (auto-updated daily — pin me)",
+                           "body": md})
+            log("board created: %s (%d calls)" % (iss.get("html_url"), gh.calls))
+    except (RuntimeError, RateGuard) as e:
+        if isinstance(e, RateGuard) or _is_readonly_403(e):
+            log("board NOT updated (read-only token or rate limit: %s); rendered board follows" % e)
+            print(md)
+            return
+        raise
 
 
 # ---------------------------------------------------------------- main
@@ -596,6 +712,8 @@ def main():
 
     p = sub.add_parser("scan", help="snapshot + classify + report")
     p.add_argument("--out", default="/tmp/triage")
+    p.add_argument("--cache", default=None, help="optional previous TRIAGE.json to reuse unchanged PR metadata")
+    p.add_argument("--max-calls", type=int, default=None, help="cap per-run GitHub API calls before degrading to cached/list metadata")
     p.add_argument("--verify", type=int, default=0, metavar="K",
                    help="run worktree merge gate on top-K land-candidates")
     p.add_argument("--jobs", type=int, default=6, help="parallel fetch workers")

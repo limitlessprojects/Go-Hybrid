@@ -122,7 +122,8 @@ def cmd_gate(args):
 # ------------------------------------------------------------------ labels
 
 def ensure_palette(gh, cfg, extra=None):
-    """Create any missing bot:* labels (422 = already exists, fine)."""
+    """Create any missing bot:* labels (422 = already exists, fine).
+    Returns False if token is read-only (403) or rate-limited."""
     labels = dict(cfg["bot_labels"])
     for name in (extra or []):
         labels.setdefault(name, {"color": "cccccc",
@@ -132,9 +133,13 @@ def ensure_palette(gh, cfg, extra=None):
             gh.post("/repos/%s/labels" % gh.repo,
                     {"name": name, "color": meta["color"],
                      "description": meta["description"]})
-        except RuntimeError as e:
+        except (RuntimeError, tb.RateGuard) as e:
+            if isinstance(e, tb.RateGuard) or tb._is_readonly_403(e):
+                tb.log("  palette skipped (read-only token or rate limit: %s)" % e)
+                return False
             if "422" not in str(e):
                 tb.log("  label %s: %s" % (name, e))
+    return True
 
 
 def cmd_labels(args):
@@ -149,7 +154,9 @@ def cmd_sync_labels(args):
     state lives in labels; the board is a view). Idempotent POST per PR."""
     cfg = load_cfg()
     gh = tb.Gh(cfg["repo"], tb.load_token(args))
-    ensure_palette(gh, cfg)
+    if not args.dry and not ensure_palette(gh, cfg):
+        tb.log("sync-labels skipped (read-only token or rate limit)")
+        return
     items = json.loads(Path(args.from_scan).read_text())["items"]
     mapping = {"LAND-CANDIDATE": "bot:land-candidate",
                "CONFLICTS": "bot:conflict",
@@ -168,7 +175,7 @@ def cmd_sync_labels(args):
                     {"labels": [want]})
         except (RuntimeError, tb.RateGuard) as e:
             tb.log("  FAIL #%d: %s" % (it["number"], e))
-            if isinstance(e, tb.RateGuard):
+            if isinstance(e, tb.RateGuard) or tb._is_readonly_403(e):
                 break
     tb.log("sync-labels: %d candidates, %d calls, %s remaining"
            % (n, gh.calls, gh.remaining))

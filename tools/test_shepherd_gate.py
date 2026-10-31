@@ -117,5 +117,138 @@ class ProbeParser(unittest.TestCase):
         self.assertFalse(any("removed line" in ln for ln in added))
 
 
+import argparse
+import json
+import tempfile
+import triage_bot as tb
+
+
+class FakeGh:
+    """Offline mock of triage_bot.Gh for testing 403 read-only tokens and RateGuard."""
+
+    def __init__(self, repo="limitlessprojects/Go-Hybrid", fail_writes_403=False,
+                 rate_guard_after=None, prs=None):
+        self.repo = repo
+        self.calls = 0
+        self.remaining = 4500
+        self.fail_writes_403 = fail_writes_403
+        self.rate_guard_after = rate_guard_after
+        self.prs = prs or []
+        self.patched = []
+        self.posted = []
+
+    def _tick(self, method, path):
+        self.calls += 1
+        if self.rate_guard_after is not None and self.calls > self.rate_guard_after:
+            raise tb.RateGuard("rate limit low: 100 remaining")
+        if self.fail_writes_403 and method in ("POST", "PATCH", "PUT"):
+            raise RuntimeError("%s %s -> 403 Resource not accessible by integration" % (method, path))
+
+    def req(self, method, path, body=None):
+        self._tick(method, path)
+        if path.startswith("/search/issues"):
+            return 200, {"items": [{"number": 940}]}
+        return 200, {}
+
+    def get(self, path):
+        self._tick("GET", path)
+        if path.endswith("/commits/main"):
+            return {"sha": "abcdef1234567890"}
+        if "/pulls/" in path:
+            return {"mergeable": True, "mergeable_state": "clean"}
+        if "/compare/" in path:
+            return {"behind_by": 0, "merge_base_commit": {"sha": "abcdef1234567890"}, "files": []}
+        return {}
+
+    def paginate(self, path, max_pages=20, key=None):
+        self._tick("GET", path)
+        if "/pulls?state=open" in path:
+            return list(self.prs)
+        if "/files" in path:
+            return [{"filename": "src/main.rs", "additions": 10, "deletions": 2}]
+        return []
+
+    def post(self, path, body):
+        self._tick("POST", path)
+        self.posted.append((path, body))
+        return {"html_url": "https://github.com/%s/issues/940" % self.repo}
+
+    def patch(self, path, body):
+        self._tick("PATCH", path)
+        self.patched.append((path, body))
+        return {}
+
+
+class ShepherdBoardResilience(unittest.TestCase):
+    """Issue #2057: shepherd-board must degrade gracefully on read-only fork tokens
+    (403) and shared installation quota exhaustion (RateGuard / incremental cache)."""
+
+    def _sample_pr(self, n):
+        return {
+            "number": n,
+            "title": "Fix bug #%d" % n,
+            "user": {"login": "contributor"},
+            "created_at": "2026-10-26T00:00:00Z",
+            "updated_at": "2026-10-26T01:00:00Z",
+            "draft": False,
+            "head": {"sha": "1111222233334444"},
+        }
+
+    def test_readonly_403_detector(self):
+        err = RuntimeError("PATCH /repos/x/y/issues/940 -> 403 Resource not accessible by integration")
+        self.assertTrue(tb._is_readonly_403(err))
+        err_500 = RuntimeError("PATCH /repos/x/y/issues/940 -> 500 Internal Error")
+        self.assertFalse(tb._is_readonly_403(err_500))
+
+    def test_ensure_palette_and_sync_labels_degrade_on_readonly_403(self):
+        cfg = sh.load_cfg()
+        gh = FakeGh(fail_writes_403=True)
+        ok = sh.ensure_palette(gh, cfg)
+        self.assertFalse(ok)
+
+    def test_collect_reuses_cache_and_degrades_on_rate_guard(self):
+        cfg = tb.load_cfg()
+        prs = [self._sample_pr(101), self._sample_pr(102), self._sample_pr(103)]
+        with tempfile.TemporaryDirectory() as td:
+            cache_file = Path(td) / "TRIAGE.json"
+            cached_item = {
+                "number": 101,
+                "title": "Fix bug #101",
+                "author": "contributor",
+                "created_at": "2026-10-26T00:00:00Z",
+                "updated_at": "2026-10-26T01:00:00Z",
+                "age_days": 1.0,
+                "idle_days": 1.0,
+                "draft": False,
+                "mergeable": True,
+                "mergeable_state": "clean",
+                "head_sha": "111122223333",
+                "files": 1,
+                "paths_sample": ["tests/foo_accept.hy"],
+                "additions": 15,
+                "deletions": 0,
+                "behind_by": 0,
+                "overlap_risk": [],
+                "tests_included": True,
+            }
+            cache_file.write_text(json.dumps({
+                "generated": "2026-10-26 01:00 UTC",
+                "main": "abcdef1234567890",
+                "clusters": [],
+                "items": [cached_item],
+            }))
+            # Trigger RateGuard after 4 calls (list PRs + main sha + 2 calls on PR #102)
+            gh = FakeGh(prs=prs, rate_guard_after=4)
+            args = argparse.Namespace(cache=str(cache_file), max_calls=None, jobs=1)
+            items, main_sha = tb.collect(cfg, gh, args)
+            self.assertEqual(main_sha, "abcdef1234567890")
+            self.assertEqual(len(items), 3)
+            by_num = {it["number"]: it for it in items}
+            # PR #101 came straight from cache with tests_included preserved
+            self.assertTrue(by_num[101]["tests_included"])
+            # PR #102/#103 degraded gracefully to fallback metadata instead of crashing scan
+            self.assertIn(by_num[103]["mergeable_state"], ("unknown", "clean"))
+
+
 if __name__ == "__main__":
     unittest.main()
