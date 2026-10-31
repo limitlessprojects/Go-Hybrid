@@ -2924,11 +2924,41 @@ impl<'a> Collector<'a> {
             _ => return,
         };
         for extra in &args[1..] {
-            // `append(a, b...)` — a variadic spread passes the whole slice, so
-            // the argument's kind is the SLICE type, not an element. Go accepts
-            // it (for a matching element type), so it must not be compared
-            // against the element kind.
+            // `append(a, b...)` — a variadic spread passes a slice (or string to []byte).
+            // Go accepts it only when the spread argument's element type matches the
+            // target slice's element type (or appending string to []byte).
             if extra.spread {
+                let got = self.kind_of_expr(&extra.value);
+                let conflict = match &got {
+                    OpKind::Slice(got_elem) => {
+                        // Slices in Go must have compatible element types.
+                        // Unlike scalar int->float literal promotion, Go never permits
+                        // appending []int to []float64 or vice versa.
+                        if matches!(
+                            (&elem, got_elem.as_ref()),
+                            (OpKind::Float, OpKind::Int) | (OpKind::Int, OpKind::Float)
+                        ) {
+                            true
+                        } else {
+                            kinds_conflict(&elem, got_elem)
+                        }
+                    }
+                    OpKind::Str => !matches!(elem, OpKind::Int),
+                    OpKind::Unknown => false,
+                    _ => true,
+                };
+                if conflict {
+                    self.emit_e1002(
+                        extra.value.span(),
+                        format!(
+                            "cannot append `{}` as `{}` in variadic append — Go refuses `cannot use ... as {} value in argument to append` (HYB-E1002)",
+                            got.label(),
+                            self.kind_of_expr(&first.value).label(),
+                            self.kind_of_expr(&first.value).label()
+                        ),
+                        "when appending a spread argument `xs...`, the argument must be a slice with compatible element type",
+                    );
+                }
                 continue;
             }
             let got = self.kind_of_expr(&extra.value);
