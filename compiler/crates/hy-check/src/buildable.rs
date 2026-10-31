@@ -235,6 +235,11 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         (Interface, _) => false,
         (a, b) if a == b => false,
 
+        // Interface argument: Go strictly forbids converting an interface (`any`)
+        // to any concrete type via a function conversion `T(x)`; a type assertion
+        // `x.(T)` is required instead.
+        (other, Interface) if !matches!(other, Unknown | Interface) => true,
+
         // Struct targets: Go forbids converting non-structs to structs.
         (Struct(_), other) if !matches!(other, Unknown | Struct(_)) => true,
 
@@ -265,7 +270,6 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         // A pointer cannot convert to or from any non-pointer type; the one
         // exception is an interface target (`any(p)`), handled above.
         (Pointer(_), Pointer(_)) => false,
-        (Pointer(_), Interface) => false,
         (Pointer(_), _) | (_, Pointer(_)) => true,
 
         _ => false,
