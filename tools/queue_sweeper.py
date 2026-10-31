@@ -120,24 +120,38 @@ def main():
         print("DRY RUN — nothing closed")
         return
 
-    n = fails = 0
+    n = fails = comment_fails = 0
     t0 = time.time()
     for p in due:
         age = (datetime.now(timezone.utc) -
                datetime.fromisoformat(p["created_at"].replace("Z", "+00:00"))).days
         st, _ = api(f"/repos/{REPO}/pulls/{p['number']}", "PATCH",
                     {"state": "closed", "state_reason": "not_planned"})
-        ok = st in (200, 422)
-        if ok:
-            cs, _ = api(f"/repos/{REPO}/issues/{p['number']}/comments", "POST",
-                        {"body": COMMENT.format(age=age)})
-            ok = cs in (201, 403, 422)
-        if ok: n += 1
-        else: fails += 1; print(f"  FAIL #{p['number']} st={st}", flush=True)
+        # Only a 200 means the PR actually transitioned to closed. 422 means
+        # the operation was rejected (validation/permission); counting it as a
+        # closure misreports rejected operations as closed=1 fails=0
+        # (issue #2107).
+        if st != 200:
+            fails += 1
+            print(f"  FAIL close #{p['number']} st={st}", flush=True)
+            time.sleep(0.3)
+            continue
+        n += 1
+        cs, _ = api(f"/repos/{REPO}/issues/{p['number']}/comments", "POST",
+                    {"body": COMMENT.format(age=age)})
+        # The closure itself stands on the 200 above, but a failed explanatory
+        # comment (403 permission, 422 rejected, anything non-201) must be
+        # reported, not silently folded into the success count.
+        if cs != 201:
+            comment_fails += 1
+            print(f"  WARN comment #{p['number']} st={cs} (closed, comment not delivered)",
+                  flush=True)
         if (n + fails) % 25 == 0:
-            print(f"  progress {n+fails}/{len(due)} closed={n} fails={fails} ({time.time()-t0:.0f}s)", flush=True)
+            print(f"  progress {n+fails}/{len(due)} closed={n} fails={fails} "
+                  f"comment_fails={comment_fails} ({time.time()-t0:.0f}s)", flush=True)
         time.sleep(0.3)
-    print(f"DONE: closed={n} fails={fails} elapsed={time.time()-t0:.0f}s")
+    print(f"DONE: closed={n} fails={fails} comment_fails={comment_fails} "
+          f"elapsed={time.time()-t0:.0f}s")
     st, repo = api(f"/repos/{REPO}")
     if st == 200:
         print(f"open issues+PRs now: {repo.get('open_issues_count')}")
