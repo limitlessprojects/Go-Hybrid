@@ -44,6 +44,14 @@ PYTHON_RE = re.compile(r"(?:.*/)?python(?:3(?:\.\d+)?)?\Z")
 PYTHON_FLAGS_RE = re.compile(r"-[bBdEIOPqRsSuvx]+\Z")
 
 
+class PythonInvocation(list):
+    """Command arguments after interpreter options, preserving post-'--' status."""
+
+    def __init__(self, iterable, is_script_operand=False):
+        super().__init__(iterable)
+        self.is_script_operand = is_script_operand
+
+
 def shell_words(line):
     lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|<>()")
     lexer.whitespace_split = True
@@ -70,6 +78,7 @@ def python_commands(workflow_text):
             end = next((i for i, token in enumerate(tokens)
                         if token and all(c in ";&|<>()" for c in token)), len(tokens))
             arguments = tokens[1:end]
+            is_script_operand = False
             while arguments:
                 option = arguments[0]
                 if PYTHON_FLAGS_RE.fullmatch(option):
@@ -80,10 +89,11 @@ def python_commands(workflow_text):
                     arguments = arguments[1:]
                 elif option == "--":
                     arguments = arguments[1:]
+                    is_script_operand = True
                     break
                 else:
                     break  # In particular, never interpret a -c string.
-            yield arguments
+            yield PythonInvocation(arguments, is_script_operand=is_script_operand)
 
 
 # Directories whose test files this guard covers, and how each is invoked.
@@ -100,6 +110,8 @@ def registered_discoveries(workflow_text):
     """
     discoveries = []
     for arguments in python_commands(workflow_text):
+        if getattr(arguments, "is_script_operand", False):
+            continue
         if arguments[:3] != ["-m", "unittest", "discover"]:
             continue
         start, pattern = ".", None

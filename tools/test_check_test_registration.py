@@ -317,5 +317,24 @@ class GuardMisuseTests(unittest.TestCase):
     def test_start_directory_escaping_repo_root_is_rejected(self):
         self.assertEqual(self.run_main("python3 -m unittest discover -s .. -p 'test_*.py'\n", ["tools/test_x.py"]), 1)
 
+    def test_end_of_options_separator_rejects_pseudo_module_discovery_issue_2322(self):
+        # python3 -- -m unittest discover treats -m as script operand, not discovery
+        pseudo_workflow = "python3 -- -m unittest discover -s tools -p test_sentinel.py\n"
+        self.assertEqual(guard.registered_patterns(pseudo_workflow), [])
+
+        workflow = (
+            "python3 -m unittest discover -s tools -p test_valid.py\n"
+            "python3 -- -m unittest discover -s tools -p test_sentinel.py\n"
+        )
+        self.assertEqual(
+            self.run_main(workflow, ["tools/test_valid.py", "tools/test_sentinel.py"]), 1)
+
+    def test_end_of_options_separator_preserves_valid_direct_script(self):
+        workflow = "python3 -- tests/test_direct.py\n"
+        self.assertTrue(guard.is_registered_direct("tests/test_direct.py", workflow))
+        self.assertEqual(
+            self.run_main(workflow, ["tests/test_direct.py"]), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
