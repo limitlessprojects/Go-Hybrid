@@ -3344,6 +3344,9 @@ impl<'a> Collector<'a> {
             return;
         }
         // For slices, arrays, and strings, the index must be an integer.
+        if let Some(b) = base_expr {
+            self.check_single_value_position(b, "an index operand", /*binding_position=*/ false);
+        }
         self.check_single_value_position(index, "an index expression", /*binding_position=*/ false);
         if let OpKind::Map(key_kind, _) = bk {
             if **key_kind != OpKind::Unknown
@@ -3462,6 +3465,7 @@ impl<'a> Collector<'a> {
             );
             return;
         }
+        self.check_single_value_position(base, "a slice operand", /*binding_position=*/ false);
         let const_str_len = if matches!(bk, OpKind::Str) {
             self.eval_const_string_len_at(base, span.start)
         } else {
