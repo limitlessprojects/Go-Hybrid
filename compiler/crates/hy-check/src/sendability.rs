@@ -581,9 +581,45 @@ impl<'a> Checker<'a> {
         matches!(t, TypeShape::ForeignOpaque(_))
     }
 
+    fn resolve_spawn_method_decl<'b>(
+        &self,
+        st: &FnState,
+        callee: &'b Expr,
+    ) -> Option<(&'b Expr, &'a hy_syntax::FnDecl)> {
+        let Expr::Field {
+            base,
+            name: method_name,
+            ..
+        } = unwrap_parens(callee)
+        else {
+            return None;
+        };
+        if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+            if self.lookup_binding(st, pkg).is_none() && self.known_package(pkg) {
+                return None;
+            }
+        }
+        let head = Self::base_named_type_str(method_name);
+        let recv_base = self
+            .ty_of_expr(st, base)
+            .map(|t| self.resolve_type_alias(&t))
+            .and_then(|t| Self::base_named_type(&t))
+            .or_else(|| match self.shape_of_expr(st, base) {
+                TypeShape::Struct(Some(s)) => Some(Self::base_named_type_str(&s).to_string()),
+                TypeShape::Pointer(inner) => match *inner {
+                    TypeShape::Struct(Some(s)) => Some(Self::base_named_type_str(&s).to_string()),
+                    _ => None,
+                },
+                _ => None,
+            })?;
+        let decl = self.method_decls.get(&(recv_base, head.to_string())).copied()?;
+        Some((base.as_ref(), decl))
+    }
+
     /// The spawn-callee proof (O4.0): a spawn is only proven when the callee
-    /// resolves to a declared top-level `fn` — a static call where nothing
-    /// but the arguments crosses. A closure callee shares its captured
+    /// resolves to a declared top-level `fn` (or a declared method whose
+    /// receiver is checked alongside the arguments) — a static call where
+    /// nothing unverified crosses. A closure callee shares its captured
     /// environment with the new task (A5 reject); an unresolvable callee is
     /// fail-closed unproven (O4.9). Local bindings shadow the fn table.
     fn spawn_callee_verdict(&self, st: &FnState, callee: &Expr) -> CalleeVerdict {
@@ -615,6 +651,18 @@ impl<'a> Checker<'a> {
                 CalleeVerdict::Unproven(format!(
                     "the spawn callee `{}` did not resolve to a declared top-level `fn` — the checker cannot prove what would run in the new task",
                     name
+                ))
+            }
+            Expr::Field { .. } => {
+                if matches!(self.shape_of_expr(st, callee), TypeShape::Closure) {
+                    return closure_reject(callee.render());
+                }
+                if self.resolve_spawn_method_decl(st, callee).is_some() {
+                    return CalleeVerdict::Proven;
+                }
+                CalleeVerdict::Unproven(format!(
+                    "the checker can only prove spawns of declared top-level `fn`s — `{}` is a method value or a computed callee, which the spawn-callee proof (O4.0) cannot verify",
+                    callee.render()
                 ))
             }
             _ => CalleeVerdict::Unproven(format!(
@@ -650,22 +698,8 @@ impl<'a> Checker<'a> {
                 }
                 Some(params.iter().map(|p| self.shape_of_type(&p.ty)).collect())
             }
-            Expr::Field {
-                base,
-                name: method_name,
-                ..
-            } => {
-                let recv_base = match self.shape_of_expr(st, base) {
-                    TypeShape::Struct(Some(s)) => Some(s),
-                    TypeShape::Pointer(inner) => match *inner {
-                        TypeShape::Struct(Some(s)) => Some(s),
-                        _ => None,
-                    },
-                    _ => None,
-                };
-                let f = recv_base.and_then(|rb| {
-                    self.method_decls.get(&(rb, method_name.clone())).copied()
-                })?;
+            Expr::Field { .. } => {
+                let (_, f) = self.resolve_spawn_method_decl(st, callee)?;
                 if f.params.len() != argc {
                     return None;
                 }
@@ -1138,9 +1172,39 @@ impl<'a> Checker<'a> {
 
         // The spawn-callee proof (O4.0): classify WHAT would run in the new
         // task before looking at the arguments.
+        let mut combined_values: Vec<&Expr> = Vec::new();
+        let mut combined_targets: Option<Vec<TypeShape>> = None;
         if let Some(callee) = spawn_callee {
             match self.spawn_callee_verdict(st, callee) {
-                CalleeVerdict::Proven => {}
+                CalleeVerdict::Proven => {
+                    if let Some((recv_expr, decl)) = self.resolve_spawn_method_decl(st, callee) {
+                        combined_values.push(recv_expr);
+                        combined_values.extend(values.iter().copied());
+                        let recv_shape = decl
+                            .receiver
+                            .as_ref()
+                            .map(|r| {
+                                let base_shape = self.shape_of_type(&r.ty);
+                                if r.is_pointer {
+                                    TypeShape::Pointer(Box::new(base_shape))
+                                } else {
+                                    base_shape
+                                }
+                            })
+                            .unwrap_or(TypeShape::Unknown);
+                        let mut ts = vec![recv_shape];
+                        if let Some(existing) = target_shapes {
+                            ts.extend_from_slice(existing);
+                        } else {
+                            ts.extend(
+                                decl.params
+                                    .iter()
+                                    .map(|p| self.shape_of_type(&p.ty)),
+                            );
+                        }
+                        combined_targets = Some(ts);
+                    }
+                }
                 CalleeVerdict::Closure(info) => rejects.push(info),
                 CalleeVerdict::Unproven(reason) => {
                     unprovens.push(UnprovenInfo {
@@ -1150,6 +1214,12 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        let values: &[&Expr] = if combined_values.is_empty() {
+            values
+        } else {
+            &combined_values
+        };
+        let target_shapes: Option<&[TypeShape]> = combined_targets.as_deref().or(target_shapes);
 
         for (vi, v) in values.iter().enumerate() {
             // N1 for composite literals: a literal that crosses the boundary
