@@ -1847,3 +1847,237 @@ fn assign_literal_overflow_still_rejected() {
     );
     assert_eq!(r.verdict, Verdict::Reject);
 }
+
+// ---------------------------------------------------------------------------
+// Issue #576 & #586: Constant-folding, type-alias, and slice/index/make bound
+// bypasses across HYB-E6001 / HYB-E6002 / HYB-E6004 / HYB-E6005 / HYB-E1002 /
+// HYB-E2005.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn map_index_and_delete_const_overflow_rejected() {
+    for src in [
+        "fn main() {\n    m := map[int8]int{}\n    m[300] = 1\n    _ = m\n}\n",
+        "fn main() {\n    m := map[int8]int{}\n    _ = m[300]\n}\n",
+        "fn main() {\n    m := map[int8]int{}\n    delete(m, 300)\n    _ = m\n}\n",
+    ] {
+        let r = check(src);
+        let cs = error_codes(&r);
+        assert!(
+            cs.iter().any(|c| c == "HYB-E6002"),
+            "expected HYB-E6002 for `{src}`, got {:?}",
+            cs
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+    }
+}
+
+#[test]
+fn explicit_conversion_and_binary_const_overflow_rejected() {
+    for src in [
+        "fn main() {\n    x := int8(300)\n    _ = x\n}\n",
+        "type narrow = uint8\nfn main() {\n    x := narrow(-1)\n    _ = x\n}\n",
+        "fn main() {\n    var x int8 = 1\n    y := x + 300\n    _ = y\n}\n",
+        "fn main() {\n    var x int8 = 1\n    b := x == 300\n    _ = b\n}\n",
+        "fn main() {\n    var x int8 = 1\n    y := -x + 300\n    _ = y\n}\n",
+    ] {
+        let r = check(src);
+        let cs = error_codes(&r);
+        assert!(
+            cs.iter().any(|c| c == "HYB-E6002"),
+            "expected HYB-E6002 for `{src}`, got {:?}",
+            cs
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+    }
+}
+
+#[test]
+fn aliased_assign_and_call_const_overflow_rejected() {
+    for src in [
+        "type narrow = int8\nfn main() {\n    var x narrow = 1\n    x = 300\n    _ = x\n}\n",
+        "type slice_b = []int8\nfn main() {\n    var xs slice_b = []int8{1}\n    xs[0] = 300\n    _ = xs\n}\n",
+        "fn run(f cb) {\n    f(300)\n}\ntype cb = fn(x int8)\n",
+    ] {
+        let r = check(src);
+        let cs = error_codes(&r);
+        assert!(
+            cs.iter().any(|c| c == "HYB-E6002"),
+            "expected HYB-E6002 for `{src}`, got {:?}",
+            cs
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+    }
+}
+
+#[test]
+fn named_and_local_const_folding_in_e6001_e6002_e6004_e6005() {
+    let cases = [
+        ("const z int = 0\nfn main() {\n    x := 10 / z\n    _ = x\n}\n", "HYB-E6001"),
+        ("fn main() {\n    const z = 1 - 1\n    x := 10 % z\n    _ = x\n}\n", "HYB-E6001"),
+        ("const big = 300\nfn main() {\n    var x int8 = big\n    _ = x\n}\n", "HYB-E6002"),
+        ("fn main() {\n    const big = 300\n    var x int8 = big\n    _ = x\n}\n", "HYB-E6002"),
+        ("const half = 1.5\nfn main() {\n    var x int = half + 1.0\n    _ = x\n}\n", "HYB-E6002"),
+        ("const neg = -1\nfn main() {\n    var a [neg]int\n    _ = a\n}\n", "HYB-E6004"),
+        ("fn main() {\n    var a [1 - 2]int\n    _ = a\n}\n", "HYB-E6004"),
+        ("const neg = -1\nfn main() {\n    x := 1 << neg\n    _ = x\n}\n", "HYB-E6005"),
+        ("fn main() {\n    x := 1 << (1 - 2)\n    _ = x\n}\n", "HYB-E6005"),
+    ];
+    for (src, expected) in cases {
+        let r = check(src);
+        let cs = error_codes(&r);
+        assert!(
+            cs.iter().any(|c| c == expected),
+            "expected {expected} for `{src}`, got {:?}",
+            cs
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+    }
+}
+
+#[test]
+fn make_folded_negative_and_inverted_len_cap_rejected() {
+    for src in [
+        "fn main() {\n    s := make([]int, 1 - 2)\n    _ = s\n}\n",
+        "const neg = -1\nfn main() {\n    s := make([]int, neg)\n    _ = s\n}\n",
+        "fn main() {\n    s := make([]int, 5, 2)\n    _ = s\n}\n",
+        "const l_val = 5\nconst c_val = 2\nfn main() {\n    s := make([]int, l_val, c_val)\n    _ = s\n}\n",
+    ] {
+        let r = check(src);
+        let cs = error_codes(&r);
+        assert!(
+            cs.iter().any(|c| c == "HYB-E2005"),
+            "expected HYB-E2005 for `{src}`, got {:?}",
+            cs
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+    }
+}
+
+#[test]
+fn negative_const_index_and_inverted_slice_bounds_rejected() {
+    for src in [
+        "fn main() {\n    xs := []int{1, 2, 3}\n    _ = xs[-1]\n}\n",
+        "const neg = -1\nfn main() {\n    xs := []int{1, 2, 3}\n    _ = xs[neg]\n}\n",
+        "fn main() {\n    xs := []int{1, 2, 3}\n    _ = xs[-1:2]\n}\n",
+        "fn main() {\n    xs := []int{1, 2, 3}\n    _ = xs[2:1]\n}\n",
+    ] {
+        let r = check(src);
+        let cs = error_codes(&r);
+        assert!(
+            cs.iter().any(|c| c == "HYB-E1002"),
+            "expected HYB-E1002 for `{src}`, got {:?}",
+            cs
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+    }
+}
+
+#[test]
+fn fixed_array_const_index_and_slice_out_of_bounds_rejected() {
+    for src in [
+        "fn main() {\n    var a [2]int\n    a[300] = 1\n    fmt.println(\"{a[0]}\")\n}\n",
+        "fn main() {\n    var a [2]int\n    _ = a[2]\n}\n",
+        "fn main() {\n    var a [2]int\n    _ = a[0:3]\n}\n",
+        "fn main() {\n    var a [2]int\n    _ = a[3:3]\n}\n",
+    ] {
+        let r = check(src);
+        let cs = error_codes(&r);
+        assert!(
+            cs.iter().any(|c| c == "HYB-E1002"),
+            "expected HYB-E1002 for fixed-array out-of-bounds `{src}`, got {:?}",
+            cs
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+    }
+
+    let ok = check("fn main() {\n    var a [2]int\n    _ = a[1]\n    _ = a[0:2]\n}\n");
+    assert!(
+        error_codes(&ok).is_empty(),
+        "expected valid array index/slice to accept, got {:?}",
+        error_codes(&ok)
+    );
+    assert_eq!(ok.verdict, Verdict::Accept);
+}
+
+#[test]
+fn untyped_int_const_overflow_default_int_rejected() {
+    for src in [
+        "fn main() {\n    n := 1 << 200\n    fmt.println(\"{n}\")\n}\n",
+        "fn main() {\n    n := 1 << 63\n    _ = n\n}\n",
+        "fn main() {\n    f := fn() {\n        n := 1 << 200\n        _ = n\n    }\n    f()\n}\n",
+    ] {
+        let r = check(src);
+        let cs = error_codes(&r);
+        assert!(
+            cs.iter().any(|c| c == "HYB-E6002"),
+            "expected HYB-E6002 for untyped int overflow `{src}`, got {:?}",
+            cs
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+    }
+
+    let ok = check("fn main() {\n    var n uint64 = 1 << 63\n    _ = n\n}\n");
+    assert!(
+        error_codes(&ok).is_empty(),
+        "expected explicit uint64 = 1 << 63 to accept, got {:?}",
+        error_codes(&ok)
+    );
+    assert_eq!(ok.verdict, Verdict::Accept);
+}
+
+#[test]
+fn oracle_negative_controls_accept() {
+    // 1. Slice constant index out of runtime len is a runtime panic in Go, not a compile error.
+    // 2. Runtime unary negation `var m int8 = -n` wraps at runtime in Go, not a constant overflow.
+    // 3. Array length `[300]int8` is typed `int` in Go, not the element type `int8`.
+    for src in [
+        "fn main() {\n    xs := []int{1, 2}\n    fmt.println(\"{xs[300]}\")\n}\n",
+        "fn main() {\n    var n int8 = -128\n    var m int8 = -n\n    fmt.println(\"{m}\")\n}\n",
+        "fn main() {\n    var a [300]int8\n    fmt.println(\"{len(a)}\")\n}\n",
+    ] {
+        let r = check(src);
+        assert!(
+            error_codes(&r).is_empty(),
+            "negative control `{src}` must accept without errors, got {:?}",
+            error_codes(&r)
+        );
+        assert_eq!(r.verdict, Verdict::Accept);
+    }
+}
+
+#[test]
+fn return_numeric_variable_type_mismatch_rejected_while_untyped_const_accepts() {
+    for src in [
+        "fn f() int {\n    var x int8 = 1\n    return x\n}\nfn main() {\n    fmt.println(\"{f()}\")\n}\n",
+        "fn f(x int8) int {\n    return x\n}\nfn main() {\n    fmt.println(\"{f(1)}\")\n}\n",
+        "fn f() float64 {\n    x := 1\n    return x\n}\nfn main() {\n    fmt.println(\"{f()}\")\n}\n",
+        "fn f(x int) float64 {\n    return x\n}\nfn main() {\n    fmt.println(\"{f(1)}\")\n}\n",
+        "fn f() int {\n    x := 1.5\n    return x\n}\nfn main() {\n    fmt.println(\"{f()}\")\n}\n",
+        "fn main() {\n    f := fn() float64 {\n        x := 1\n        return x\n    }\n    fmt.println(\"{f()}\")\n}\n",
+    ] {
+        let r = check(src);
+        let cs = error_codes(&r);
+        assert!(
+            cs.iter().any(|c| c == "HYB-E1002"),
+            "expected HYB-E1002 for return numeric mismatch `{src}`, got {:?}",
+            cs
+        );
+        assert_eq!(r.verdict, Verdict::Reject);
+    }
+
+    for ok_src in [
+        "fn f() float64 {\n    return 1\n}\nfn main() {\n    fmt.println(\"{f()}\")\n}\n",
+        "fn f() int8 {\n    return 1\n}\nfn main() {\n    fmt.println(\"{f()}\")\n}\n",
+        "fn f() uint8 {\n    var b byte = 1\n    return b\n}\nfn main() {\n    fmt.println(\"{f()}\")\n}\n",
+        "fn f() int32 {\n    var r rune = 'a'\n    return r\n}\nfn main() {\n    fmt.println(\"{f()}\")\n}\n",
+    ] {
+        let r = check(ok_src);
+        assert!(
+            error_codes(&r).is_empty(),
+            "positive control `{ok_src}` must accept without errors, got {:?}",
+            error_codes(&r)
+        );
+        assert_eq!(r.verdict, Verdict::Accept);
+    }
+}

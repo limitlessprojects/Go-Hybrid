@@ -300,6 +300,10 @@ pub(crate) struct FnState {
     /// time so call sites can analyze parameter/capture stores (`record_callee_param_stores`).
     pub closure_defs:
         HashMap<String, (Vec<hy_syntax::Param>, Vec<hy_syntax::FnResult>, hy_syntax::Block)>,
+    /// Function-local `const` initializer expressions at the current scope depth.
+    pub local_consts: HashMap<String, Expr>,
+    /// Saved `local_consts` per enclosing block scope.
+    pub local_const_scopes: Vec<HashMap<String, Expr>>,
 }
 
 impl FnState {
@@ -310,6 +314,7 @@ impl FnState {
         self.share_scopes.push(self.may_share.clone());
         self.shadow_link_scopes.push(self.shadow_links.clone());
         self.fnlit_scopes.push(Vec::new());
+        self.local_const_scopes.push(self.local_consts.clone());
     }
 
     /// Exit the innermost block scope (walk.rs's Pop events).
@@ -434,6 +439,9 @@ impl FnState {
             }
         }
         self.scopes.pop();
+        if let Some(outer_consts) = self.local_const_scopes.pop() {
+            self.local_consts = outer_consts;
+        }
         if let Some(outer_shadows) = self.shadow_link_scopes.pop() {
             self.shadow_links = outer_shadows;
         }
@@ -577,11 +585,26 @@ impl FnState {
     /// its own layer — the fix for issue #14 (a flat env let the inner
     /// define overwrite the outer map's shape and launder it past a spawn).
     pub(crate) fn env_define(&mut self, name: &str, b: Binding) {
+        if !b.immutable {
+            self.local_consts.remove(name);
+        }
         if let Some(top) = self.scopes.last_mut() {
             top.insert(name.to_string(), b);
         } else {
             self.env.insert(name.to_string(), b);
         }
+    }
+
+    /// Look up the initializer expression of an active function-local `const`
+    /// binding `name`, returning `None` if shadowed by a mutable binding.
+    pub(crate) fn local_const_expr(&self, name: &str) -> Option<&Expr> {
+        let e = self.local_consts.get(name)?;
+        if let Some(b) = self.env_lookup(name) {
+            if !b.immutable {
+                return None;
+            }
+        }
+        Some(e)
     }
 
     /// Record that `a` and `b` may share mutable GC storage (#27). Undirected:

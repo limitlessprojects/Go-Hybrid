@@ -301,7 +301,7 @@ fn build_tables(ck: &mut Checker<'_>) {
                 }
                 ck.check_expr_emit_guard(&FnState::default(), &c.value);
                 ck.check_composite_nils(&FnState::default(), &c.value);
-                ck.check_expr_builtin_args(&c.value);
+                ck.check_expr_builtin_args(&FnState::default(), &c.value);
                 let b = ck.const_binding(c);
                 ck.consts.insert(c.name.clone(), b);
                 ck.check_const_init_is_constant(&c.name, &c.value, None);
@@ -590,7 +590,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         // misuse of make/len/cap/delete/close/new (HYB-E2005).
         // After the call/loan walk so it does not collide with upstream
         // inserts around check_uses (const-zero-divisor / LX14).
-        ck.check_stmt_builtins(stmt);
+        ck.check_stmt_builtins(&st, stmt);
 
         // Issue #411: the iterable of `for x in e` must resolve to a
         // slice/array/string/map/chan (LX13) — HYB-E2009; fail-closed
