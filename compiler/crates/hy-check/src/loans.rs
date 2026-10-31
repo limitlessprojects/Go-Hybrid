@@ -4559,6 +4559,7 @@ impl<'a> Checker<'a> {
                         set
                     };
                 let flat = walk::flatten(body);
+                let mut defer_const_named_results: HashMap<String, HashSet<String>> = HashMap::new();
                 for (stmt, _) in &flat.stmts {
                     match stmt {
                         Stmt::Local(l) => {
@@ -4640,6 +4641,16 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         }
+                        Stmt::Defer { call, .. } => {
+                            for (target_name, val) in self.extract_defer_ident_assigns(call) {
+                                let cs = expr_const_origins(val, &aliases, &shadowed, walked);
+                                if !cs.is_empty() {
+                                    shadowed.remove(&target_name);
+                                    aliases.insert(target_name.clone(), cs.clone());
+                                    defer_const_named_results.insert(target_name, cs);
+                                }
+                            }
+                        }
                         Stmt::Return { values, .. } => {
                             if values.is_empty() {
                                 for (nr, _) in &typed_results {
@@ -4655,7 +4666,16 @@ impl<'a> Checker<'a> {
                                     }
                                 }
                             } else {
-                                for v in values {
+                                for (k, v) in values.iter().enumerate() {
+                                    if let Some((nr, _)) = typed_results.get(k) {
+                                        if let Some(cs) = defer_const_named_results.get(nr) {
+                                            for c in cs {
+                                                if !out.contains(c) {
+                                                    out.push(c.clone());
+                                                }
+                                            }
+                                        }
+                                    }
                                     for c in expr_const_origins(v, &aliases, &shadowed, walked) {
                                         if !out.contains(&c) {
                                             out.push(c);
@@ -4751,6 +4771,55 @@ impl<'a> Checker<'a> {
         }
     }
 
+    pub(crate) fn extract_defer_ident_assigns<'e>(
+        &self,
+        call: &'e Expr,
+    ) -> Vec<(String, &'e Expr)> {
+        let mut out = Vec::new();
+        let unwrapped = unwrap_parens(call);
+        let Expr::Call { callee, .. } = unwrapped else {
+            return out;
+        };
+        let Expr::FnLit { body, .. } = unwrap_parens(callee) else {
+            return out;
+        };
+        let flat = walk::flatten(body);
+        for (stmt, _) in &flat.stmts {
+            if let Stmt::Assign { targets, values, .. } = stmt {
+                if targets.len() == values.len() {
+                    for (t, v) in targets.iter().zip(values.iter()) {
+                        let root = t.root();
+                        if !root.is_empty() {
+                            out.push((root.to_string(), v));
+                        }
+                    }
+                } else if values.len() == 1 && targets.len() > 1 {
+                    for t in targets {
+                        let root = t.root();
+                        if !root.is_empty() {
+                            out.push((root.to_string(), &values[0]));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    pub(crate) fn record_defer_mutations(&self, st: &mut FnState, call: &Expr) {
+        for (name, val) in self.extract_defer_ident_assigns(call) {
+            if st.named_results.contains(&name) {
+                if as_addr_of(val).is_some()
+                    || contains_addr_of_in_literal(val)
+                    || self.expr_carries_borrow(st, val)
+                {
+                    st.borrow_bindings.insert(name.clone());
+                    st.defer_assigned_borrows.insert(name);
+                }
+            }
+        }
+    }
+
     /// Return-position pairs `(i, j)` whose values may share backing storage in
     /// a `return` of the called function, method, or closure (`return m, m`,
     /// `m2 := m; return m, m2`, `return s[0:1], s[1:2]`, `return box{m: m}, m`,
@@ -4801,6 +4870,7 @@ impl<'a> Checker<'a> {
 
         let flat = walk::flatten(body);
         let mut pairs: Vec<(usize, usize)> = Vec::new();
+        let mut defer_assigned_named_results: HashMap<String, HashSet<String>> = HashMap::new();
         for (stmt, idx) in flat.stmts.iter().copied() {
             let mut calls = Vec::new();
             walk::own_calls(stmt, &mut calls);
@@ -5061,6 +5131,19 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                Stmt::Defer { call, .. } => {
+                    for (target_name, val) in self.extract_defer_ident_assigns(call) {
+                        let mut os = HashSet::new();
+                        self.collect_sharing_origins_expr(
+                            &cst, val, &origins, &shadowed, &mut os,
+                        );
+                        if os.is_empty() {
+                            os.insert(format!("defer:{idx}:{target_name}"));
+                        }
+                        origins.insert(target_name.clone(), os.clone());
+                        defer_assigned_named_results.insert(target_name, os);
+                    }
+                }
                 Stmt::Return { values, .. } => {
                     let sets: Vec<HashSet<String>> = if values.is_empty() {
                         if typed_results.len() < 2 {
@@ -5082,7 +5165,13 @@ impl<'a> Checker<'a> {
                         }
                         values
                             .iter()
-                            .map(|v| {
+                            .enumerate()
+                            .map(|(k, v)| {
+                                if let Some((nr, _)) = typed_results.get(k) {
+                                    if let Some(defer_os) = defer_assigned_named_results.get(nr) {
+                                        return defer_os.clone();
+                                    }
+                                }
                                 if matches!(unwrap_parens(v), Expr::Move { .. }) {
                                     HashSet::new()
                                 } else {
@@ -7626,6 +7715,24 @@ impl<'a> Checker<'a> {
             }
             return;
         }
+
+        for name in &st.named_results {
+            if st.defer_assigned_borrows.contains(name) {
+                let msg = "a borrow cannot be returned from a function".to_string();
+                let notes = vec![
+                    format!(
+                        "`{}` holds a loan whose window ends when this function exits — Tier 0 keeps every loan function-local (O2): that is why there are no lifetime annotations to write",
+                        name
+                    ),
+                    "make the mutation a method on the owner so the loan stays in one frame, return the index and let the caller do the access, or return a copy (Go-heap reads are copies, O9)".to_string(),
+                    "a lifetime parameter is NOT offered on purpose: the language has none".to_string(),
+                ];
+                self.diags.push(
+                    Diagnostic::error("HYB-E3104", self.path.clone(), span, msg)
+                        .with_notes(notes),
+                );
+            }
+        }
         // N1: `return nil` under a non-nilable declared result is a compile
         // error (HYB-E4001). `error` results resolve to Unknown today, so
         // `return 0, nil` stays legal (the nil's target did not resolve).
@@ -7738,7 +7845,7 @@ fn collect_move_ident_sources(expr: &Expr, out: &mut Vec<String>) {
 
 /// Does this literal contain an address-of at its top level (field values,
 /// map entries, slice items — recursively through nested literals only)?
-fn contains_addr_of_in_literal(e: &Expr) -> bool {
+pub(crate) fn contains_addr_of_in_literal(e: &Expr) -> bool {
     if as_addr_of(e).is_some() {
         return true;
     }
