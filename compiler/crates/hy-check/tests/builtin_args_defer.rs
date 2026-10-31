@@ -295,3 +295,35 @@ fn make_array_lit_rejected_hyb_e2005() {
     assert_has(&r2, "HYB-E2005");
 }
 
+#[test]
+fn cap_map_literal_rejected_issue_1681() {
+    let r = check("fn main() {\n    x := cap(map[string]int{\"a\": 1})\n    fmt.println(x)\n}\n");
+    assert_has(&r, "HYB-E2005");
+    assert_eq!(error_codes(&r), vec!["HYB-E2005".to_string()]);
+}
+
+#[test]
+fn len_and_cap_nil_literal_rejected_issue_1681() {
+    let r_len = check("fn main() {\n    x := len(nil)\n    fmt.println(x)\n}\n");
+    assert_has(&r_len, "HYB-E2005");
+    assert_eq!(error_codes(&r_len), vec!["HYB-E2005".to_string()]);
+
+    let r_cap = check("fn main() {\n    x := cap(nil)\n    fmt.println(x)\n}\n");
+    assert_has(&r_cap, "HYB-E2005");
+    assert_eq!(error_codes(&r_cap), vec!["HYB-E2005".to_string()]);
+}
+
+#[test]
+fn delete_non_map_literal_rejected_issue_1681() {
+    for bad in [
+        "delete(123, \"key\")",
+        "delete(\"not_a_map\", \"key\")",
+        "delete(nil, \"key\")",
+        "delete([]int{1, 2}, 0)",
+    ] {
+        let src = format!("fn main() {{\n    {bad}\n}}\n");
+        let r = check(&src);
+        assert_has(&r, "HYB-E2005");
+        assert_eq!(error_codes(&r), vec!["HYB-E2005".to_string()], "for {bad}");
+    }
+}

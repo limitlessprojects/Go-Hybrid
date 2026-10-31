@@ -4290,6 +4290,9 @@ impl<'a> Collector<'a> {
                     return; // arity handled by builtins.rs
                 }
                 let map_arg = &args[0].value;
+                if crate::builtins::is_non_map_literal(map_arg) {
+                    return; // literal non-map handled by builtins.rs
+                }
                 let key_arg = &args[1].value;
                 let mk = self.kind_of_expr(map_arg);
                 match &mk {
@@ -4518,7 +4521,11 @@ fn builtins_already_flags_len_cap(e: &Expr, is_cap: bool) -> bool {
     let num_bool_char = match bare {
         Expr::Lit { kind, .. } => matches!(
             kind,
-            LitKind::Int(_) | LitKind::Float(_) | LitKind::Bool(_) | LitKind::Char(_)
+            LitKind::Int(_)
+                | LitKind::Float(_)
+                | LitKind::Bool(_)
+                | LitKind::Char(_)
+                | LitKind::Nil
         ),
         Expr::Unary {
             op: UnOp::Neg,
@@ -4542,7 +4549,7 @@ fn builtins_already_flags_len_cap(e: &Expr, is_cap: bool) -> bool {
             Expr::Lit {
                 kind: LitKind::Str(_) | LitKind::RawStr(_),
                 ..
-            }
+            } | Expr::MapLit { .. }
         )
 }
 

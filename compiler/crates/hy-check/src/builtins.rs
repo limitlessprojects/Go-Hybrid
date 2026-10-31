@@ -292,6 +292,14 @@ impl<'a> Checker<'a> {
                             args.len()
                         ),
                     );
+                    return;
+                }
+                if is_non_map_literal(&args[0].value) {
+                    self.emit_builtin(
+                        span,
+                        "`delete` first argument must be a map, not a scalar/string/slice/nil literal (HYB-E2005)"
+                            .to_string(),
+                    );
                 }
             }
             "copy" => {
@@ -617,10 +625,25 @@ impl<'a> Checker<'a> {
             );
             return;
         }
+        if matches!(unwrap_parens(op), Expr::Lit { kind: LitKind::Nil, .. }) {
+            self.emit_builtin(
+                span,
+                format!("`{name}` does not accept an untyped `nil` operand (HYB-E2005)"),
+            );
+            return;
+        }
         if is_cap && is_string_literal(op) {
             self.emit_builtin(
                 span,
                 "`cap` does not accept a string literal — strings have length, not capacity (HYB-E2005)"
+                    .to_string(),
+            );
+            return;
+        }
+        if is_cap && matches!(unwrap_parens(op), Expr::MapLit { .. }) {
+            self.emit_builtin(
+                span,
+                "`cap` does not accept a map literal — maps have length, not capacity (HYB-E2005)"
                     .to_string(),
             );
         }
@@ -924,6 +947,14 @@ fn classify_make_size(e: &Expr) -> MakeSize {
             None => MakeSize::NonLiteral,
         },
     }
+}
+
+pub(crate) fn is_non_map_literal(e: &Expr) -> bool {
+    is_value_literal(e)
+        || matches!(
+            unwrap_parens(e),
+            Expr::SliceLit { .. } | Expr::StructLit { .. } | Expr::FnLit { .. }
+        )
 }
 
 fn is_value_literal(e: &Expr) -> bool {
