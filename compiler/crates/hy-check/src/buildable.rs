@@ -2741,11 +2741,51 @@ impl<'a> Collector<'a> {
             _ => return,
         };
         for extra in &args[1..] {
-            // `append(a, b...)` — a variadic spread passes the whole slice, so
-            // the argument's kind is the SLICE type, not an element. Go accepts
-            // it (for a matching element type), so it must not be compared
-            // against the element kind.
+            // `append(a, b...)` — a variadic spread passes a slice (or string to []byte).
+            // Validate that the spread argument is compatible with the target slice.
             if extra.spread {
+                let got = self.kind_of_expr(&extra.value);
+                match &got {
+                    OpKind::Unknown => {}
+                    OpKind::Slice(other_elem) => {
+                        if kinds_conflict(&elem, other_elem) {
+                            self.emit_e1002(
+                                extra.value.span(),
+                                format!(
+                                    "cannot append a slice of type `{}` to a `{}` — Go refuses `cannot use ... as []{} value in argument to append` (HYB-E1002)",
+                                    got.label(),
+                                    self.kind_of_expr(&first.value).label(),
+                                    elem.label()
+                                ),
+                                "the appended slice's element type must match the target slice's element type",
+                            );
+                        }
+                    }
+                    OpKind::Str => {
+                        let is_byte_slice = matches!(elem, OpKind::Int | OpKind::Unknown);
+                        if !is_byte_slice {
+                            self.emit_e1002(
+                                extra.value.span(),
+                                format!(
+                                    "cannot append a `string` with `...` to a `{}` — Go only permits string spread when appending to `[]byte` (HYB-E1002)",
+                                    self.kind_of_expr(&first.value).label()
+                                ),
+                                "string spread `...` can only be appended to a byte slice `[]byte`",
+                            );
+                        }
+                    }
+                    _ => {
+                        self.emit_e1002(
+                            extra.value.span(),
+                            format!(
+                                "cannot use `...` with non-slice `{}` of type `{}` in argument to append (HYB-E1002)",
+                                extra.value.render(),
+                                got.label()
+                            ),
+                            "`append` with `...` requires a slice or string argument",
+                        );
+                    }
+                }
                 continue;
             }
             let got = self.kind_of_expr(&extra.value);

@@ -180,3 +180,50 @@ fn legal_append_stays_accepted() {
         "struct p {\n    n int\n}\n\nfn main() {\n    xs := []p{}\n    ys := append(xs, p{n: 1})\n    fmt.println(\"{len(ys)}\")\n}\n",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #1825: append variadic spread element compatibility
+// ---------------------------------------------------------------------------
+
+#[test]
+fn append_with_incompatible_spread_slice_is_rejected() {
+    assert_code(
+        "fn main() {\n    nums := []int{1, 2}\n    strs := []string{\"a\", \"b\"}\n    _ = append(nums, strs...)\n}\n",
+        "HYB-E1002",
+    );
+    assert_code(
+        "fn main() {\n    nums := []int{1, 2}\n    f := []float64{1.0, 2.0}\n    _ = append(nums, f...)\n}\n",
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn append_with_non_slice_spread_is_rejected() {
+    assert_code(
+        "fn main() {\n    nums := []int{1, 2}\n    x := 42\n    _ = append(nums, x...)\n}\n",
+        "HYB-E1002",
+    );
+    assert_code(
+        "fn main() {\n    nums := []int{1, 2}\n    _ = append(nums, true...)\n}\n",
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn append_string_spread_into_non_byte_slice_is_rejected() {
+    assert_code(
+        "fn main() {\n    f := []float64{1.0, 2.0}\n    _ = append(f, \"hello\"...)\n}\n",
+        "HYB-E1002",
+    );
+    assert_code(
+        "fn main() {\n    strs := []string{\"a\"}\n    _ = append(strs, \"hello\"...)\n}\n",
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn append_string_spread_into_byte_slice_is_accepted() {
+    assert_ok(
+        "fn main() {\n    var buf []byte\n    _ = append(buf, \"hello\"...)\n}\n",
+    );
+}
