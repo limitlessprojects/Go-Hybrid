@@ -1151,6 +1151,9 @@ impl<'a> Checker<'a> {
 
     fn check_array_len(&mut self, st: Option<&FnState>, len: &Expr) {
         let span = len.span();
+        // Issue #2102: invalid builtin calls in array lengths (e.g. `[len(1)]int`, `[cap(hi)]int`)
+        // must be rejected with HYB-E2005 to prevent invalid Go emission.
+        self.check_expr_builtin_args(len);
         // Issue #758: a constant zero divisor inside the length
         // expression is a Go compile error exactly like value position
         // (`invalid operation: division by zero` in the array type) —

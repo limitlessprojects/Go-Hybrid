@@ -295,3 +295,27 @@ fn make_array_lit_rejected_hyb_e2005() {
     assert_has(&r2, "HYB-E2005");
 }
 
+#[test]
+fn issue_2102_array_len_builtin_args_rejected_hyb_e2005() {
+    // 1. var a [len(1)]int
+    let r1 = check("fn main() {\n    var a [len(1)]int\n    _ = a\n}\n");
+    assert_has(&r1, "HYB-E2005");
+
+    // 2. b := [cap("hi") + 1]int{0}
+    let r2 = check("fn main() {\n    b := [cap(\"hi\") + 1]int{0}\n    _ = b\n}\n");
+    assert_has(&r2, "HYB-E2005");
+
+    // 3. type alias: type arr_alias = [len()]int
+    let r3 = check("type arr_alias = [len()]int\nfn main() {}\n");
+    assert_has(&r3, "HYB-E2005");
+
+    // 4. struct field: struct my_struct { a [min()]int }
+    let r4 = check("struct my_struct {\n    a [min()]int\n}\nfn main() {}\n");
+    assert_has(&r4, "HYB-E2005");
+
+    // 5. valid array length should pass without HYB-E2005
+    let r_ok = check("fn main() {\n    var a [4]int\n    _ = a\n}\n");
+    assert_lacks(&r_ok, "HYB-E2005");
+}
+
+
