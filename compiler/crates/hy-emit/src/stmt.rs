@@ -1322,6 +1322,7 @@ impl Emitter {
             AssignOp::ModAssign => "%=",
             AssignOp::BitOrAssign => "|=",
             AssignOp::BitAndAssign => "&=",
+            AssignOp::BitAndNotAssign => "&^=",
             AssignOp::BitXorAssign => "^=",
             AssignOp::ShlAssign => "<<=",
             AssignOp::ShrAssign => ">>=",
