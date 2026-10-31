@@ -755,6 +755,29 @@ impl<'a> Checker<'a> {
             crate::walk::own_uses_with_results(stmt, &replay_st.named_results, &mut uses);
             self.check_uses(&replay_st, &uses);
 
+            let mut stmt_consumes = Vec::new();
+            if let hy_syntax::Stmt::For {
+                kind: hy_syntax::ForKind::Iterate { expr, .. },
+                ..
+            } = stmt
+            {
+                let loop_end = loop_stmts.last().map(|(_, li)| *li).unwrap_or(idx);
+                let mut calls = Vec::new();
+                crate::walk::expr_calls(expr, &mut calls);
+                for cr in calls {
+                    self.process_call(&mut replay_st, &cr, idx, Some(loop_end), &mut stmt_consumes);
+                }
+            } else {
+                let mut calls = Vec::new();
+                crate::walk::own_calls(stmt, &mut calls);
+                for cr in calls {
+                    self.process_call(&mut replay_st, &cr, idx, None, &mut stmt_consumes);
+                }
+            }
+            if !stmt_consumes.is_empty() {
+                self.check_same_stmt_consumes(&replay_st, &uses, &stmt_consumes);
+            }
+
             match stmt {
                 hy_syntax::Stmt::Local(l) => {
                     self.process_local(&mut replay_st, l, idx, managed);
@@ -770,6 +793,9 @@ impl<'a> Checker<'a> {
                     self.process_assign(&mut replay_st, targets, *op, values, *span, idx);
                     self.record_assign_borrow_aliases(&mut replay_st, targets, *op, values);
                     self.mark_slot_loans_assign(&mut replay_st, targets, *op, values);
+                }
+                hy_syntax::Stmt::Return { values, span } => {
+                    self.process_return(&mut replay_st, values, *span);
                 }
                 hy_syntax::Stmt::Task { callee, args, span } => {
                     self.mark_move_in_value(
@@ -826,51 +852,157 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-                hy_syntax::Stmt::Select { arms, .. } => {
-                    for arm in arms {
-                        if let hy_syntax::SelectArmKind::Send {
-                            chan,
-                            value,
-                            is_move,
-                            ..
-                        } = &arm.kind
-                        {
-                            self.mark_move_in_value(
-                                &mut replay_st,
-                                chan,
-                                format!("the select-send target `{}`", chan.render()),
-                            );
-                            let span = chan.span().to(value.span());
-                            if self.check_send_target(&replay_st, chan, span) {
-                                let desc = if *is_move {
-                                    format!(
-                                        "the move-send `{} <- move {}`",
-                                        chan.render(),
-                                        value.render()
-                                    )
-                                } else {
-                                    format!(
-                                        "the select-send `{} <- {}`",
-                                        chan.render(),
-                                        value.render()
-                                    )
-                                };
-                                let vals: Vec<&hy_syntax::Expr> = vec![value];
-                                let targets = self.chan_elem_shape(&replay_st, chan);
-                                self.check_site(
-                                    &mut replay_st,
-                                    span,
-                                    "HYB-E3002",
-                                    &vals,
-                                    managed,
-                                    &desc,
-                                    *is_move,
-                                    None,
-                                    targets.as_ref().map(|v| &**v),
-                                );
+                hy_syntax::Stmt::For { kind, .. } => match kind {
+                    hy_syntax::ForKind::Iterate { vars, expr } => {
+                        self.mark_move_in_value(
+                            &mut replay_st,
+                            expr,
+                            format!("the loop header `{}`", expr.render()),
+                        );
+                        let is_chan = matches!(
+                            self.shape_of_expr(&replay_st, expr),
+                            crate::model::TypeShape::Chan(_)
+                        );
+                        let shapes = self.iterate_var_shapes(&replay_st, expr, vars.len());
+                        for (name, shape) in vars.iter().zip(shapes) {
+                            let is_ref = shape.is_reference_alias();
+                            let may_share = self.shape_may_share(&shape);
+                            self.define_binding(&mut replay_st, name, shape, None, false, managed, false);
+                            if !is_chan {
+                                if may_share {
+                                    self.record_may_share(&mut replay_st, name, expr);
+                                }
+                                if is_ref {
+                                    if let Some(root) = expr.root_ident() {
+                                        if self.lookup_binding(&replay_st, root).is_some() {
+                                            replay_st.aliases.insert(name.clone(), root.to_string());
+                                        }
+                                    }
+                                }
+                                if let Some(b) = replay_st.env_lookup_mut(name) {
+                                    b.non_owned_origin = Some(format!(
+                                        "range variable `{}` iterating `{}` (the collection still holds the element)",
+                                        name,
+                                        expr.render()
+                                    ));
+                                }
                             }
                         }
                     }
+                    hy_syntax::ForKind::Range { var, lo, hi, .. } => {
+                        self.mark_move_in_value(
+                            &mut replay_st,
+                            lo,
+                            format!("the range bound `{}`", lo.render()),
+                        );
+                        self.mark_move_in_value(
+                            &mut replay_st,
+                            hi,
+                            format!("the range bound `{}`", hi.render()),
+                        );
+                        self.define_binding(
+                            &mut replay_st,
+                            var,
+                            crate::model::TypeShape::Primitive,
+                            None,
+                            false,
+                            managed,
+                            false,
+                        );
+                    }
+                    hy_syntax::ForKind::While { cond } => {
+                        self.mark_move_in_value(
+                            &mut replay_st,
+                            cond,
+                            format!("the loop condition `{}`", cond.render()),
+                        );
+                    }
+                    hy_syntax::ForKind::Infinite => {}
+                },
+                hy_syntax::Stmt::Select { arms, .. } => {
+                    for arm in arms {
+                        match &arm.kind {
+                            hy_syntax::SelectArmKind::Send {
+                                chan,
+                                value,
+                                is_move,
+                                ..
+                            } => {
+                                self.mark_move_in_value(
+                                    &mut replay_st,
+                                    chan,
+                                    format!("the select-send target `{}`", chan.render()),
+                                );
+                                let span = chan.span().to(value.span());
+                                if self.check_send_target(&replay_st, chan, span) {
+                                    let desc = if *is_move {
+                                        format!(
+                                            "the move-send `{} <- move {}`",
+                                            chan.render(),
+                                            value.render()
+                                        )
+                                    } else {
+                                        format!(
+                                            "the select-send `{} <- {}`",
+                                            chan.render(),
+                                            value.render()
+                                        )
+                                    };
+                                    let vals: Vec<&hy_syntax::Expr> = vec![value];
+                                    let targets = self.chan_elem_shape(&replay_st, chan);
+                                    self.check_site(
+                                        &mut replay_st,
+                                        span,
+                                        "HYB-E3002",
+                                        &vals,
+                                        managed,
+                                        &desc,
+                                        *is_move,
+                                        None,
+                                        targets.as_ref().map(|v| &**v),
+                                    );
+                                }
+                            }
+                            hy_syntax::SelectArmKind::Recv { chan, .. } => {
+                                self.mark_move_in_value(
+                                    &mut replay_st,
+                                    chan,
+                                    format!("the select-recv `{}`", chan.render()),
+                                );
+                            }
+                            hy_syntax::SelectArmKind::Default => {}
+                        }
+                    }
+                }
+                hy_syntax::Stmt::Match { subject, arms, .. } => {
+                    self.mark_move_in_value(
+                        &mut replay_st,
+                        subject,
+                        format!("the match subject `{}`", subject.render()),
+                    );
+                    for arm in arms {
+                        if let Some(g) = &arm.guard {
+                            self.mark_move_in_value(
+                                &mut replay_st,
+                                g,
+                                format!("the match guard `{}`", g.render()),
+                            );
+                        }
+                    }
+                }
+                hy_syntax::Stmt::If { cond, .. } => {
+                    self.mark_move_in_value(
+                        &mut replay_st,
+                        cond,
+                        format!("the condition `{}`", cond.render()),
+                    );
+                }
+                hy_syntax::Stmt::Expr { expr, .. } => {
+                    self.mark_move_in_value(
+                        &mut replay_st,
+                        expr,
+                        format!("the expression `{}`", expr.render()),
+                    );
                 }
                 hy_syntax::Stmt::Defer { call, .. } => {
                     self.mark_move_in_value(
