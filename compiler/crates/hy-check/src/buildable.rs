@@ -365,6 +365,10 @@ struct Collector<'a> {
     scopes: Vec<HashMap<String, Option<usize>>>,
     /// Parallel lexical scope stack tracking resolved operand kinds (#425).
     kind_scopes: Vec<HashMap<String, OpKind>>,
+    /// `set[T]` bindings -> their element type text (`"int"`), scoped like
+    /// `kind_scopes`. `set[T]` has no OpKind (it lowers to a prelude
+    /// struct), so without this its element type was never checked (#2474).
+    set_elem_scopes: Vec<HashMap<String, Option<String>>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
     /// Result kinds of the function whose body is currently being walked
@@ -401,6 +405,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             ck,
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
+            set_elem_scopes: Vec::new(),
             file_consts: HashMap::new(),
             fn_results: Vec::new(),
             fn_results_all_named: false,
@@ -458,11 +463,13 @@ impl<'a> Collector<'a> {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.kind_scopes.push(HashMap::new());
+        self.set_elem_scopes.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.kind_scopes.pop();
+        self.set_elem_scopes.pop();
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -479,6 +486,88 @@ impl<'a> Collector<'a> {
             if let Some(top) = self.kind_scopes.last_mut() {
                 top.insert(name.to_string(), kind);
             }
+            // Every (re)binding shadows an outer set binding; callers that
+            // know the new binding is a set record it via bind_set_elem.
+            if let Some(top) = self.set_elem_scopes.last_mut() {
+                top.insert(name.to_string(), None);
+            }
+        }
+    }
+
+    fn bind_set_elem(&mut self, name: &str, elem: Option<String>) {
+        if name != "_" && elem.is_some() {
+            if let Some(top) = self.set_elem_scopes.last_mut() {
+                top.insert(name.to_string(), elem);
+            }
+        }
+    }
+
+    /// `set[int]` -> `"int"`.
+    fn set_elem_of_ty(ty: &TypeExpr) -> Option<String> {
+        if let TypeExpr::Named { name, .. } = ty {
+            return name
+                .strip_prefix("set[")
+                .and_then(|r| r.strip_suffix(']'))
+                .map(|t| t.to_string());
+        }
+        None
+    }
+
+    /// The element type text of a set-valued expression, when provable.
+    fn set_elem_of_expr(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                for layer in self.set_elem_scopes.iter().rev() {
+                    if let Some(v) = layer.get(name) {
+                        return v.clone();
+                    }
+                }
+                None
+            }
+            Expr::StructLit { ty: Some(t), .. } => Self::set_elem_of_ty(t),
+            // `mk()` where `fn mk() set[T]` — the declared single result.
+            Expr::Call { callee, .. } => match unwrap_parens(callee) {
+                Expr::Ident { name, .. } if self.lookup_kind(name).is_none() => self
+                    .ck
+                    .fns
+                    .get(name.as_str())
+                    .filter(|f| f.results.len() == 1)
+                    .and_then(|f| Self::set_elem_of_ty(&f.results[0].ty)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// #2474: `s.insert(v)` / `s.contains(v)` / `s.remove(v)` on a `set[T]`
+    /// need `v` of type `T`; the prelude's Go signature takes `T`, so a
+    /// mismatched argument passed `hyb check` and failed `go build`.
+    fn check_set_method_arg(&mut self, callee: &Expr, args: &[CallArg]) {
+        let Expr::Field { base, name, .. } = unwrap_parens(callee) else {
+            return;
+        };
+        if !matches!(name.as_str(), "insert" | "contains" | "remove") || args.len() != 1 {
+            return;
+        }
+        let Some(elem) = self.set_elem_of_expr(base) else {
+            return;
+        };
+        let want = self.kind_of_named(&elem, 0);
+        let got = self.kind_of_expr(&args[0].value);
+        if kinds_conflict(&want, &got) {
+            self.emit_e1002(
+                args[0].value.span(),
+                format!(
+                    "cannot use `{}` (type `{}`) as `{}` value in argument to `{}.{}` on `set[{}]` (HYB-E1002)",
+                    args[0].value.render(),
+                    got.label(),
+                    want.label(),
+                    base.render(),
+                    name,
+                    elem
+                ),
+                "a set's insert/contains/remove take a value of the set's element type",
+            );
         }
     }
 
@@ -745,6 +834,7 @@ impl<'a> Collector<'a> {
             self.exempt(&p.name);
             let pk = self.kind_of_ty(&p.ty, 0);
             self.bind_kind(&p.name, pk);
+            self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
         }
         for r in &f.results {
             if let Some(rname) = &r.name {
@@ -894,8 +984,16 @@ impl<'a> Collector<'a> {
         // tracking; #430's operand-kind inference runs for EVERY name so
         // `kind_of_expr` resolves binding-shaped operands (issue #425).
         let kinds = self.infer_local_kinds(l);
-        for (name, kind) in l.names.iter().zip(kinds) {
+        let set_elems: Vec<Option<String>> = (0..l.names.len())
+            .map(|i| match (&l.ty, l.values.len() == l.names.len()) {
+                (Some(t), _) => Self::set_elem_of_ty(t),
+                (None, true) => self.set_elem_of_expr(&l.values[i]),
+                _ => None,
+            })
+            .collect();
+        for ((name, kind), set_elem) in l.names.iter().zip(kinds).zip(set_elems) {
             self.bind_kind(name, kind);
+            self.bind_set_elem(name, set_elem);
             if !track_read {
                 self.exempt(name);
                 continue;
@@ -1433,6 +1531,7 @@ impl<'a> Collector<'a> {
                     self.check_multi_value_arg_arity(callee, args, *span);
                 }
                 self.check_call_operands(callee, args, *span);
+                self.check_set_method_arg(callee, args);
             }
             Expr::StructLit { ty, fields, span } => {
                 if let Some(t) = ty {
@@ -1488,6 +1587,7 @@ impl<'a> Collector<'a> {
                     self.exempt(&p.name);
                     let pk = self.kind_of_ty(&p.ty, 0);
                     self.bind_kind(&p.name, pk);
+                    self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
                 }
                 for r in results {
                     if let Some(rname) = &r.name {
@@ -4293,7 +4393,27 @@ impl<'a> Collector<'a> {
                 let key_arg = &args[1].value;
                 let mk = self.kind_of_expr(map_arg);
                 match &mk {
-                    OpKind::Unknown => {}
+                    // #2474: `delete(s, v)` on a `set[T]` (lowered to
+                    // `s.remove(v)`) needs `v` of type `T`.
+                    OpKind::Unknown => {
+                        if let Some(elem) = self.set_elem_of_expr(map_arg) {
+                            let want = self.kind_of_named(&elem, 0);
+                            let got = self.kind_of_expr(key_arg);
+                            if kinds_conflict(&want, &got) {
+                                self.emit_e2005(
+                                    span,
+                                    format!(
+                                        "cannot use `{}` (type `{}`) as element type `{}` in `delete` on `set[{}]` (HYB-E2005)",
+                                        key_arg.render(),
+                                        got.label(),
+                                        want.label(),
+                                        elem
+                                    ),
+                                    "the second argument to `delete(s, v)` must match the set's element type",
+                                );
+                            }
+                        }
+                    }
                     OpKind::Map(k_expected, _) => {
                         let kk = self.kind_of_expr(key_arg);
                         if **k_expected != OpKind::Unknown
