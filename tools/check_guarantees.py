@@ -53,6 +53,8 @@ import re
 import sys
 from pathlib import Path
 
+from corpus_harness import read_expected, read_expected_diagnostic
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 DEFAULT_TABLE = Path("guarantees.json")
@@ -61,10 +63,6 @@ END = "<!-- END GENERATED CLAIMS TABLE -->"
 HEADER = "| # | Surface | What the checker does | The claim | Evidence |"
 SEPARATOR = "|---|---------|----------------------|-----------|----------|"
 
-VERDICT_RE = re.compile(
-    r"^//[ \t]*EXPECTED-VERDICT:[ \t]*(ACCEPT-MANAGED|ACCEPT|REJECT)(?![-\w])", re.M
-)
-DIAGNOSTIC_RE = re.compile(r"^//[ \t]*EXPECTED-DIAGNOSTIC:[ \t]*(HYB-E\d+)", re.M)
 LINK_RE = re.compile(r"\]\(([^)\s]+)\)")
 CORPUS_PATH_RE = re.compile(r"tests/checker-corpus/[A-Za-z0-9._-]+\.hy")
 
@@ -110,10 +108,12 @@ def registry_codes(path: Path) -> dict[str, dict]:
 
 def fixture_verdict(path: Path) -> tuple[str | None, str | None]:
     """(registered verdict, pinned diagnostic code) — case-sensitive, like corpus_harness."""
-    text = path.read_text(encoding="utf-8")
-    verdict = VERDICT_RE.search(text)
-    pinned = DIAGNOSTIC_RE.search(text)
-    return (verdict.group(1) if verdict else None, pinned.group(1) if pinned else None)
+    expected = read_expected(path)
+    if expected is None:
+        return None, None
+    verdict, _ = expected
+    pinned = read_expected_diagnostic(path, expected)
+    return verdict, pinned
 
 
 def render_table(table: dict) -> str:
@@ -189,7 +189,11 @@ def check(root: Path, table_path: Path, doc_override: str | None = None) -> list
                 continue
             if not str(path_rel).startswith(corpus_rel):
                 problems.append(f"{where}: fixture {path_rel} is outside {corpus_rel}")
-            verdict, pinned = fixture_verdict(fixture)
+            try:
+                verdict, pinned = fixture_verdict(fixture)
+            except ValueError as exc:
+                problems.append(f"{where}: fixture {path_rel} has invalid corpus metadata: {exc}")
+                continue
             if verdict is None:
                 problems.append(f"{where}: fixture {path_rel} carries no `// EXPECTED-VERDICT:` line")
             elif verdict != EXPECT_DIRECTION[expect]:
