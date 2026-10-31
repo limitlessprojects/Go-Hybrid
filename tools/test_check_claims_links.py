@@ -51,6 +51,40 @@ class CheckClaimsLinksTest(unittest.TestCase):
         self.assertEqual(report["refs"], 2)
         self.assertEqual(report["issues"], [])
 
+    def test_empty_or_missing_claims_table_cannot_pass(self):
+        for text in ('# GUARANTEES\n', '## The claims table\n' + CLAIMS.split('| 1 |')[0].split('## The claims table')[-1]):
+            with self.subTest(text=text):
+                (self.root / 'GUARANTEES.md').write_text(text, encoding='utf-8')
+                result = self.run_tool()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(json.loads(result.stdout)['ok'])
+
+    def test_unmarked_corpus_link_still_requires_a_verdict(self):
+        (self.root / 'tests/checker-corpus/16-move.hy').write_text('fn main() {}\n', encoding='utf-8')
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('no-verdict-header', [i['kind'] for i in json.loads(result.stdout)['issues']])
+
+    def test_malformed_duplicate_and_quoted_headers_are_not_verdicts(self):
+        path = self.root / 'tests/checker-corpus/15-good.hy'
+        for source in ('// example EXPECTED-VERDICT: ACCEPT\n',
+                       '// EXPECTED-VERDICT: ACCEPTED\n',
+                       '// EXPECTED-VERDICT: ACCEPT\n// EXPECTED-VERDICT: REJECT FC\n'):
+            with self.subTest(source=source):
+                path.write_text(source, encoding='utf-8')
+                result = self.run_tool()
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('no-verdict-header', [i['kind'] for i in json.loads(result.stdout)['issues']])
+
+    def test_missing_corpus_directory_cannot_validate_a_number(self):
+        (self.root / 'GUARANTEES.md').write_text(
+            '## The claims table\n| 1 | x | x | x | corpus 16 |\n', encoding='utf-8')
+        corpus = self.root / 'tests/checker-corpus'
+        corpus.rename(self.root / 'detached-corpus')
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('missing-corpus-number', [i['kind'] for i in json.loads(result.stdout)['issues']])
+
     def test_missing_file_is_reported(self):
         (self.root / "tests" / "checker-corpus" / "15-good.hy").unlink()
         result = self.run_tool()
