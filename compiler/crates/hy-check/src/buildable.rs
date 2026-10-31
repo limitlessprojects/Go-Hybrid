@@ -175,6 +175,19 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
     }
 }
 
+fn is_nilable_kind(k: &OpKind) -> bool {
+    matches!(
+        k,
+        OpKind::Pointer(_)
+            | OpKind::Slice(_)
+            | OpKind::Map(_, _)
+            | OpKind::Chan(_)
+            | OpKind::Interface
+            | OpKind::Fn(..)
+            | OpKind::Unknown
+    )
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -3615,6 +3628,16 @@ impl<'a> Collector<'a> {
         for item in items {
             let bare = unwrap_parens(item);
             if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
+                if !is_nilable_kind(&expected) {
+                    self.emit_e1002(
+                        item.span(),
+                        format!(
+                            "cannot use `nil` as `{}` value in array literal (HYB-E1002)",
+                            elem_ty.render()
+                        ),
+                        "only pointers, slices, maps, channels, interfaces, and function types may be initialized with `nil`",
+                    );
+                }
                 continue;
             }
             if let Expr::SliceLit {
@@ -3676,6 +3699,16 @@ impl<'a> Collector<'a> {
         for item in items {
             let bare = unwrap_parens(item);
             if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
+                if !is_nilable_kind(&expected) {
+                    self.emit_e1002(
+                        item.span(),
+                        format!(
+                            "cannot use `nil` as `{}` value in slice literal (HYB-E1002)",
+                            elem_ty.render()
+                        ),
+                        "only pointers, slices, maps, channels, interfaces, and function types may be initialized with `nil`",
+                    );
+                }
                 continue;
             }
             if let Expr::SliceLit {
@@ -3743,29 +3776,53 @@ impl<'a> Collector<'a> {
         let exp_val = self.kind_of_ty(&resolved_val, 0);
         for (k, v) in entries {
             if exp_key != OpKind::Unknown {
-                let kk = self.kind_of_expr(k);
-                if kk != OpKind::Unknown
-                    && kk != exp_key
-                    && !(exp_key == OpKind::Float
-                        && kk == OpKind::Int
-                        && crate::const_overflow::const_int_value(k).is_some())
-                    && kinds_conflict(&exp_key, &kk)
-                {
-                    self.emit_e1002(
-                        k.span(),
-                        format!(
-                            "cannot use `{}` (type `{}`) as `{}` value in map key (HYB-E1002)",
-                            k.render(),
-                            kk.label(),
-                            key_ty.render()
-                        ),
-                        "every key of a map composite literal `map[K]V{...}` must be assignable to the key type `K`",
-                    );
+                let bare_k = unwrap_parens(k);
+                if matches!(bare_k, Expr::Lit { kind: LitKind::Nil, .. }) {
+                    if !is_nilable_kind(&exp_key) {
+                        self.emit_e1002(
+                            k.span(),
+                            format!(
+                                "cannot use `nil` as `{}` value in map key (HYB-E1002)",
+                                key_ty.render()
+                            ),
+                            "only pointers, slices, maps, channels, interfaces, and function types may be initialized with `nil`",
+                        );
+                    }
+                } else {
+                    let kk = self.kind_of_expr(k);
+                    if kk != OpKind::Unknown
+                        && kk != exp_key
+                        && !(exp_key == OpKind::Float
+                            && kk == OpKind::Int
+                            && crate::const_overflow::const_int_value(k).is_some())
+                        && kinds_conflict(&exp_key, &kk)
+                    {
+                        self.emit_e1002(
+                            k.span(),
+                            format!(
+                                "cannot use `{}` (type `{}`) as `{}` value in map key (HYB-E1002)",
+                                k.render(),
+                                kk.label(),
+                                key_ty.render()
+                            ),
+                            "every key of a map composite literal `map[K]V{...}` must be assignable to the key type `K`",
+                        );
+                    }
                 }
             }
             if exp_val != OpKind::Unknown {
                 let bare_v = unwrap_parens(v);
                 if matches!(bare_v, Expr::Lit { kind: LitKind::Nil, .. }) {
+                    if !is_nilable_kind(&exp_val) {
+                        self.emit_e1002(
+                            v.span(),
+                            format!(
+                                "cannot use `nil` as `{}` value in map value (HYB-E1002)",
+                                val_ty.render()
+                            ),
+                            "only pointers, slices, maps, channels, interfaces, and function types may be initialized with `nil`",
+                        );
+                    }
                     continue;
                 }
                 let vk = self.kind_of_expr(v);
@@ -4940,5 +4997,24 @@ fn main() {
             "unexpected diagnostics: {:?}",
             r.diagnostics
         );
+    }
+
+    #[test]
+    fn rejects_nil_in_non_nilable_composite_literals_2036() {
+        for src in [
+            "fn main() {\n    xs := []int{nil}\n    fmt.println(xs)\n}\n",
+            "fn main() {\n    arr := [2]string{nil, nil}\n    fmt.println(arr)\n}\n",
+            "fn main() {\n    b := []bool{nil}\n    fmt.println(b)\n}\n",
+            "fn main() {\n    m := map[string]int{\"a\": nil}\n    fmt.println(m)\n}\n",
+            "fn main() {\n    m := map[int]int{nil: 1}\n    fmt.println(m)\n}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                error_codes(&r).contains(&"HYB-E1002".to_string()),
+                "expected HYB-E1002, got {:?} for:\n{src}",
+                error_codes(&r)
+            );
+        }
     }
 }
