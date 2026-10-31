@@ -2,7 +2,7 @@
 
 use hy_syntax::*;
 
-use super::{to_go_name, BindingKind, EmitError, Emitter};
+use super::{mangle_ident, to_go_name, BindingKind, EmitError, Emitter};
 
 use super::expr::ATOM;
 use super::shapes::lookup_conversion;
@@ -208,7 +208,7 @@ impl Emitter {
                                     let read = names[0] != "_"
                                         && crate::rangebind::body_reads(&arm.body, &names[0]);
                                     if read {
-                                        format!("case {} := <-{}:", names[0], c)
+                                        format!("case {} := <-{}:", mangle_ident(&names[0]), c)
                                     } else {
                                         format!("case <-{}:", c)
                                     }
@@ -225,13 +225,13 @@ impl Emitter {
                                         && crate::rangebind::body_reads(&arm.body, &names[1]);
                                     match (a_read, b_read) {
                                         (true, true) => {
-                                            format!("case {}, {} := <-{}:", names[0], names[1], c)
+                                            format!("case {}, {} := <-{}:", mangle_ident(&names[0]), mangle_ident(&names[1]), c)
                                         }
                                         (true, false) => {
-                                            format!("case {}, _ := <-{}:", names[0], c)
+                                            format!("case {}, _ := <-{}:", mangle_ident(&names[0]), c)
                                         }
                                         (false, true) => {
-                                            format!("case _, {} := <-{}:", names[1], c)
+                                            format!("case _, {} := <-{}:", mangle_ident(&names[1]), c)
                                         }
                                         (false, false) => format!("case <-{}:", c),
                                     }
@@ -308,19 +308,25 @@ impl Emitter {
                     (Some(t), None) => match l.ty.as_ref().and_then(|ty| self.n5_zero_init(ty)) {
                         Some(init) => {
                             let inits = vec![init; l.names.len()].join(", ");
-                            self.push(&format!("var {} {} = {}", l.names.join(", "), t, inits))
+                            let names = l.names.iter().map(|n| if n == "_" { n.as_str() } else { mangle_ident(n) }).collect::<Vec<_>>().join(", ");
+                            self.push(&format!("var {} {} = {}", names, t, inits))
                         }
-                        None => self.push(&format!("var {} {}", l.names.join(", "), t)),
+                        None => {
+                            let names = l.names.iter().map(|n| if n == "_" { n.as_str() } else { mangle_ident(n) }).collect::<Vec<_>>().join(", ");
+                            self.push(&format!("var {} {}", names, t))
+                        }
                     },
                     (Some(t), Some(v)) => {
                         self.hoist_tries_expr(v)?;
                         let e = self.emit_expr(v, 0)?;
-                        self.push(&format!("var {} {} = {}", l.names.join(", "), t, e));
+                        let names = l.names.iter().map(|n| if n == "_" { n.as_str() } else { mangle_ident(n) }).collect::<Vec<_>>().join(", ");
+                        self.push(&format!("var {} {} = {}", names, t, e));
                     }
                     (None, Some(v)) => {
                         self.hoist_tries_expr(v)?;
                         let e = self.emit_expr(v, 0)?;
-                        self.push(&format!("var {} = {}", l.names.join(", "), e));
+                        let names = l.names.iter().map(|n| if n == "_" { n.as_str() } else { mangle_ident(n) }).collect::<Vec<_>>().join(", ");
+                        self.push(&format!("var {} = {}", names, e));
                     }
                     (None, None) => {
                         return Err(EmitError::unsupported(
@@ -363,7 +369,7 @@ impl Emitter {
                     Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
                 );
                 let kw = if composite { "var" } else { "const" };
-                let names = l.names.join(", ");
+                let names = l.names.iter().map(|n| if n == "_" { n.as_str() } else { mangle_ident(n) }).collect::<Vec<_>>().join(", ");
                 match &l.ty {
                     Some(t) => {
                         let ty = self.type_text(t);
@@ -434,9 +440,10 @@ impl Emitter {
                 self.bindings.insert(loan_name.clone(), BindingKind::Plain);
                 self.flush_loan_for_name(loan_name);
             }
+            let names = l.names.iter().map(|n| if n == "_" { n.as_str() } else { mangle_ident(n) }).collect::<Vec<_>>().join(", ");
             self.push(&format!(
                 "{} := {}",
-                l.names.join(", "),
+                names,
                 val_texts.join(", ")
             ));
             if let Some(frame) = self.loan_frames.last_mut() {
@@ -455,7 +462,7 @@ impl Emitter {
                 self.flush_loan_for_name(name);
             }
         }
-        let names = l.names.join(", ");
+        let names = l.names.iter().map(|n| if n == "_" { n.as_str() } else { mangle_ident(n) }).collect::<Vec<_>>().join(", ");
         self.push(&format!("{} := {}", names, values.join(", ")));
         // A struct-literal define carries the receiver's struct name
         // (Batch I): `stats := pool_stats{}` — field chains type through
@@ -1364,7 +1371,7 @@ impl Emitter {
     /// (M4); our own struct members stay verbatim.
     pub fn emit_place(&mut self, p: &Place) -> Result<String, EmitError> {
         match &p.kind {
-            PlaceKind::Ident(n) => Ok(n.clone()),
+            PlaceKind::Ident(n) => Ok(mangle_ident(n).to_string()),
             PlaceKind::Index { base, index } => {
                 let b = self.emit_place(base)?;
                 let i = self.emit_expr(index, 0)?;
@@ -1394,7 +1401,7 @@ impl Emitter {
         {
             return super::to_go_name(name);
         }
-        name.to_string()
+        mangle_ident(name).to_string()
     }
 
     /// Member-name normalization decision for a field/method access whose
@@ -1413,7 +1420,7 @@ impl Emitter {
                 return to_go_name(name);
             }
         }
-        name.to_string()
+        mangle_ident(name).to_string()
     }
 
     // -----------------------------------------------------------------------
@@ -1789,7 +1796,7 @@ impl Emitter {
                     self.next_temp("hyBlank")
                 } else {
                     self.shadow_local_name(var);
-                    var.clone()
+                    mangle_ident(var).to_string()
                 };
                 if *inclusive {
                     // Issue #322: `for v := lo; v <= hi; v++` wraps past the
@@ -1834,7 +1841,7 @@ impl Emitter {
                             if !read {
                                 format!("for range {}.m {{", e)
                             } else {
-                                format!("for {} := range {}.m {{", vars[0], e)
+                                format!("for {} := range {}.m {{", mangle_ident(&vars[0]), e)
                             }
                         } else if !read {
                             self.shadow_local_names(vars);
@@ -1847,7 +1854,7 @@ impl Emitter {
                             let over_chan = self.is_channel_expr(expr);
                             if over_chan {
                                 self.shadow_local_names(vars);
-                                format!("for {} := range {} {{", vars[0], e)
+                                format!("for {} := range {} {{", mangle_ident(&vars[0]), e)
                             } else {
                                 // A rust-handle slice (ForeignTy binding)
                                 // ranges value-elements of that handle type
@@ -1868,7 +1875,7 @@ impl Emitter {
                                     self.bindings
                                         .insert(vars[0].clone(), BindingKind::ForeignTy(t));
                                 }
-                                format!("for _, {} := range {} {{", vars[0], e)
+                                format!("for _, {} := range {} {{", mangle_ident(&vars[0]), e)
                             }
                         }
                     }
@@ -1892,12 +1899,12 @@ impl Emitter {
                         // Same lowering the one-variable form already uses.
                         // Issue #139.
                         let a = if crate::rangebind::body_reads(body, &vars[0]) {
-                            vars[0].clone()
+                            mangle_ident(&vars[0]).to_string()
                         } else {
                             "_".to_string()
                         };
                         let c = if crate::rangebind::body_reads(body, &vars[1]) {
-                            vars[1].clone()
+                            mangle_ident(&vars[1]).to_string()
                         } else {
                             "_".to_string()
                         };
@@ -2221,7 +2228,7 @@ impl Emitter {
                         .as_ref()
                         .is_some_and(|g| crate::rangebind::expr_reads(g, b0))
                 {
-                    self.push(&format!("{} := {}.val", b0, temp));
+                    self.push(&format!("{} := {}.val", mangle_ident(b0), temp));
                     prebound_guard_var = Some((*b0).clone());
                 }
             }
@@ -2240,7 +2247,7 @@ impl Emitter {
                                 && prebound_guard_var.as_deref() != Some(binding.as_str())
                                 && crate::rangebind::body_reads(&arm.body, binding)
                             {
-                                self.push(&format!("{} := {}.val", binding, temp));
+                                self.push(&format!("{} := {}.val", mangle_ident(binding), temp));
                             }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                             self.indent -= 1;
@@ -2256,7 +2263,7 @@ impl Emitter {
                                 && prebound_guard_var.as_deref() != Some(binding.as_str())
                                 && crate::rangebind::body_reads(&arm.body, binding)
                             {
-                                self.push(&format!("{} := {}.val", binding, temp));
+                                self.push(&format!("{} := {}.val", mangle_ident(binding), temp));
                             }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                             if chain_opened {
@@ -2312,7 +2319,7 @@ impl Emitter {
                             let guard_reads =
                                 *binding != "_" && crate::rangebind::expr_reads(g, binding);
                             if guard_reads {
-                                self.push(&format!("{} := {}.val", binding, temp));
+                                self.push(&format!("{} := {}.val", mangle_ident(binding), temp));
                             }
                             self.hoist_tries_expr(g)?;
                             let gt = self.emit_expr(g, 0)?;
@@ -2323,7 +2330,7 @@ impl Emitter {
                                 && !guard_reads
                                 && crate::rangebind::body_reads(&arm.body, binding)
                             {
-                                self.push(&format!("{} := {}.val", binding, temp));
+                                self.push(&format!("{} := {}.val", mangle_ident(binding), temp));
                             }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                             self.indent -= 1;
@@ -2331,7 +2338,7 @@ impl Emitter {
                         }
                         None => {
                             if *binding != "_" && crate::rangebind::body_reads(&arm.body, binding) {
-                                self.push(&format!("{} := {}.val", binding, temp));
+                                self.push(&format!("{} := {}.val", mangle_ident(binding), temp));
                             }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                         }
