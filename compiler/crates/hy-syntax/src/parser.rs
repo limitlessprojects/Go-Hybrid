@@ -2050,6 +2050,18 @@ impl Parser {
                             items: arr_items,
                             span: self.span_from(start),
                         });
+                    } else if self.at_punct("(") {
+                        let ty_span = self.span_from(start);
+                        let len_expr = items.pop().expect("single array length expr");
+                        return Ok(Expr::SliceLit {
+                            elem: Some(Box::new(TypeExpr::Array {
+                                len: Some(Box::new(len_expr)),
+                                elem: Box::new(inner_elem),
+                                span: ty_span,
+                            })),
+                            items: Vec::new(),
+                            span: self.span_from(start),
+                        });
                     }
                 }
                 self.pos = saved_pos;
