@@ -266,6 +266,10 @@ pub(crate) struct FnState {
     /// Per-scope list of `FnLit` start `(line, col)` positions declared in
     /// that scope (used to snapshot block state right before `scope_pop`).
     pub fnlit_scopes: Vec<Vec<(usize, usize)>>,
+    /// Per-closure set of binding names shadowed by a subsequent `env_define`
+    /// after the closure's lexical environment was snapshotted.
+    pub shadowed_closure_vars: HashMap<(usize, usize), HashSet<String>>,
+    pub shadowed_closure_var_scopes: Vec<HashMap<(usize, usize), HashSet<String>>>,
     /// #111 form 4: a local closure binding -> the base paths its body may
     /// MUTATE (map insert/delete targets, transitively via calls it makes).
     /// Captured roots only (the closure's own params are excluded — they
@@ -309,6 +313,8 @@ impl FnState {
         self.alias_scopes.push(self.aliases.clone());
         self.share_scopes.push(self.may_share.clone());
         self.shadow_link_scopes.push(self.shadow_links.clone());
+        self.shadowed_closure_var_scopes
+            .push(self.shadowed_closure_vars.clone());
         self.fnlit_scopes.push(Vec::new());
     }
 
@@ -436,6 +442,9 @@ impl FnState {
         self.scopes.pop();
         if let Some(outer_shadows) = self.shadow_link_scopes.pop() {
             self.shadow_links = outer_shadows;
+        }
+        if let Some(outer_scv) = self.shadowed_closure_var_scopes.pop() {
+            self.shadowed_closure_vars = outer_scv;
         }
         if let Some(outer_aliases) = self.alias_scopes.pop() {
             self.aliases = outer_aliases;
@@ -577,6 +586,12 @@ impl FnState {
     /// its own layer — the fix for issue #14 (a flat env let the inner
     /// define overwrite the outer map's shape and launder it past a spawn).
     pub(crate) fn env_define(&mut self, name: &str, b: Binding) {
+        for &pos in self.closure_scoped_envs.keys() {
+            self.shadowed_closure_vars
+                .entry(pos)
+                .or_default()
+                .insert(name.to_string());
+        }
         if let Some(top) = self.scopes.last_mut() {
             top.insert(name.to_string(), b);
         } else {
