@@ -871,7 +871,12 @@ impl<'a> Collector<'a> {
             let want = self.kind_of_ty(t, 0);
             if l.values.len() == 1 && l.names.len() == 1 {
                 let vk = self.kind_of_expr(&l.values[0]);
-                if kinds_conflict(&want, &vk) {
+                let is_untyped_int_to_float = want == OpKind::Float
+                    && vk == OpKind::Int
+                    && self.is_untyped_int_const(&l.values[0]);
+                let conflict = (want == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
+                    || kinds_conflict(&want, &vk);
+                if conflict {
                     self.emit_e1002(
                         l.span,
                         format!(
@@ -887,7 +892,12 @@ impl<'a> Collector<'a> {
             } else if l.values.len() > 1 && l.values.len() == l.names.len() {
                 for (name, v) in l.names.iter().zip(l.values.iter()) {
                     let vk = self.kind_of_expr(v);
-                    if kinds_conflict(&want, &vk) {
+                    let is_untyped_int_to_float = want == OpKind::Float
+                        && vk == OpKind::Int
+                        && self.is_untyped_int_const(v);
+                    let conflict = (want == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
+                        || kinds_conflict(&want, &vk);
+                    if conflict {
                         self.emit_e1002(
                             l.span,
                             format!(
@@ -2497,6 +2507,32 @@ impl<'a> Collector<'a> {
     /// the VOID case, which E2002 does not cover, and leaves multi-value to
     /// E2002. In every other position (operands, arguments) no rule covers
     /// either shape, so both are reported here.
+    fn is_untyped_int_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit { kind: LitKind::Int(_), .. } | Expr::Lit { kind: LitKind::Char(_), .. } => true,
+            Expr::Ident { name, .. } => {
+                if self.file_consts.contains_key(name.as_str()) {
+                    return true;
+                }
+                for scope in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = scope.get(name.as_str()) {
+                        return self.defines[*id].kind == LocalKind::Const;
+                    }
+                }
+                false
+            }
+            Expr::Unary { op: UnOp::Neg, operand, .. } => self.is_untyped_int_const(operand),
+            Expr::Binary { op, lhs, rhs, .. } => match op {
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
+                | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+                    self.is_untyped_int_const(lhs) && self.is_untyped_int_const(rhs)
+                }
+                _ => false,
+            },
+            _ => crate::const_overflow::const_int_value(expr).is_some(),
+        }
+    }
+
     fn check_single_value_position(&mut self, e: &Expr, context: &str, binding_position: bool) {
         match self.non_single_value_count(e) {
             Some(0) => self.emit_e1002(
@@ -3990,7 +4026,7 @@ impl<'a> Collector<'a> {
                     && vk != exp_val
                     && !(exp_val == OpKind::Float
                         && vk == OpKind::Int
-                        && crate::const_overflow::const_int_value(v).is_some())
+                        && self.is_untyped_int_const(v))
                     && kinds_conflict(&exp_val, &vk)
                 {
                     self.emit_e1002(
@@ -4603,7 +4639,11 @@ impl<'a> Collector<'a> {
 
                 match (&dk, &sk) {
                     (OpKind::Slice(dst_elem), OpKind::Slice(src_elem)) => {
-                        if kinds_conflict(dst_elem, src_elem) {
+                        let conflict = (**dst_elem != OpKind::Unknown
+                            && **src_elem != OpKind::Unknown
+                            && dst_elem != src_elem)
+                            || kinds_conflict(dst_elem, src_elem);
+                        if conflict {
                             self.emit_e1002(
                                 span,
                                 format!(
