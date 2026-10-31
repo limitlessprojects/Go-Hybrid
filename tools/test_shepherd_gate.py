@@ -117,5 +117,70 @@ class ProbeParser(unittest.TestCase):
         self.assertFalse(any("removed line" in ln for ln in added))
 
 
+import contextlib
+import io
+from unittest.mock import patch
+import queue_sweeper as qs
+
+
+class QueueSweeperStatus(unittest.TestCase):
+    """Accurate accounting of PATCH closure and comment delivery responses (fixes #2107)."""
+
+    def setUp(self):
+        self.sample_pr = {
+            "number": 101,
+            "created_at": "2020-01-01T00:00:00Z",
+            "labels": [],
+            "user": {"login": "test-contributor"},
+            "title": "Old PR",
+        }
+
+    def _run_sweeper(self, patch_status, comment_status, get_pr_state=None):
+        calls = []
+
+        def mock_api(path, method="GET", body=None):
+            calls.append({"path": path, "method": method, "body": body})
+            if "/pulls?" in path:
+                return 200, [self.sample_pr]
+            if method == "PATCH":
+                return patch_status, None
+            if method == "POST":
+                return comment_status, None
+            if method == "GET" and f"/pulls/{self.sample_pr['number']}" in path:
+                return 200, {"state": get_pr_state or "open"}
+            return 200, {"open_issues_count": 1}
+
+        out = io.StringIO()
+        with patch.object(qs, "TOK", "offline-mock-token"), \
+             patch.object(qs, "api", mock_api), \
+             patch.object(qs, "config_protected_numbers", return_value=set()), \
+             patch.object(qs.time, "sleep"), \
+             patch.object(sys, "argv", ["queue_sweeper.py"]), \
+             contextlib.redirect_stdout(out):
+            qs.main()
+
+        return out.getvalue(), calls
+
+    def test_successful_close_and_comment(self):
+        output, _ = self._run_sweeper(200, 201)
+        self.assertIn("closed=1 fails=0 comment_fails=0", output)
+
+    def test_rejected_patch_422_counted_as_fail_when_still_open(self):
+        output, _ = self._run_sweeper(422, 201, get_pr_state="open")
+        self.assertIn("closed=0 fails=1 comment_fails=0", output)
+
+    def test_patch_422_confirmed_closed_via_get(self):
+        output, _ = self._run_sweeper(422, 201, get_pr_state="closed")
+        self.assertIn("closed=1 fails=0 comment_fails=0", output)
+
+    def test_comment_failure_tracked_separately_without_failing_close(self):
+        output, _ = self._run_sweeper(200, 422)
+        self.assertIn("closed=1 fails=0 comment_fails=1", output)
+
+    def test_patch_server_error_500(self):
+        output, _ = self._run_sweeper(500, 201)
+        self.assertIn("closed=0 fails=1 comment_fails=0", output)
+
+
 if __name__ == "__main__":
     unittest.main()
