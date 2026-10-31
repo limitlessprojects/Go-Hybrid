@@ -680,15 +680,22 @@ impl Emitter {
         callee: &Expr,
         args: &[CallArg],
     ) -> Result<String, EmitError> {
+        let bare_top = Self::unwrap_parens(callee);
         // --- make(...): the first argument is a TYPE (bug-#2 fix) ---
-        if matches!(callee, Expr::Ident { name, .. } if name == "make") {
+        if matches!(bare_top, Expr::Ident { name, .. } if name == "make")
+            && !self.local_vars.contains("make")
+            && !self.fn_shapes.contains_key("make")
+        {
             return self.emit_make(args);
         }
         // --- new(T) whose zero value allocates maps (N5, issue #645) ---
-        let is_new = matches!(callee, Expr::Ident { name, .. } if name == "new");
+        let is_new = matches!(bare_top, Expr::Ident { name, .. } if name == "new");
         if is_new && !self.local_vars.contains("new") && !self.fn_shapes.contains_key("new") {
             if let Some(alloc) = self.n5_new(args) {
                 return Ok(alloc);
+            }
+            if args.len() == 1 {
+                return self.emit_new(&args[0]);
             }
         }
 
@@ -803,51 +810,40 @@ impl Emitter {
         //     as an executable test-claim (§ "Examples are tests"), but the
         //     name used to fall through to the verbatim emission below and
         //     die in Go as `undefined: u8`. Issue #147. ---
-        if let Expr::Ident { name, .. } = callee {
-            if let Some(go) = super::shapes::go_primitive_name(name) {
-                if args.len() != 1 {
-                    return Err(EmitError::unsupported(format!(
-                        "`{}` conversion takes exactly one argument",
-                        name
-                    )));
+        if let Expr::Ident { name, .. } = bare_callee {
+            if !self.local_vars.contains(name) && !self.fn_shapes.contains_key(name) {
+                if let Some(go) = super::shapes::go_primitive_name(name) {
+                    if args.len() != 1 {
+                        return Err(EmitError::unsupported(format!(
+                            "`{}` conversion takes exactly one argument",
+                            name
+                        )));
+                    }
+                    if let Some(folded) = super::constconv::fold_constant(&args[0].value, name) {
+                        return Ok(format!("{}({})", go, folded));
+                    }
+                    let a = self.emit_call_arg(&args[0])?;
+                    return Ok(format!("{}({})", go, a));
                 }
-                // A CONSTANT operand that does not fit the target has to
-                // be folded here: Go rejects `uint8(300)` outright (the
-                // truncation Go does is only for a variable operand), yet
-                // SPEC-LANGUAGE line 1991 asserts `u8(300) == 44` as an
-                // executable test-claim. The fold computes that same
-                // two's-complement truncation at emit time.
-                if let Some(folded) = super::constconv::fold_constant(&args[0].value, name) {
-                    return Ok(format!("{}({})", go, folded));
+                if name == "len" && args.len() == 1 && self.is_set_expr(&args[0].value) {
+                    let a = self.emit_call_arg(&args[0])?;
+                    return Ok(format!("{}.len()", a));
                 }
-                let a = self.emit_call_arg(&args[0])?;
-                return Ok(format!("{}({})", go, a));
-            }
-            if name == "len" && args.len() == 1 && self.is_set_expr(&args[0].value) {
-                let a = self.emit_call_arg(&args[0])?;
-                return Ok(format!("{}.len()", a));
-            }
-            if name == "delete" && args.len() == 2 && self.is_set_expr(&args[0].value) {
-                let s = self.emit_call_arg(&args[0])?;
-                let v = self.emit_call_arg(&args[1])?;
-                return Ok(format!("{}.remove({})", s, v));
+                if name == "delete" && args.len() == 2 && self.is_set_expr(&args[0].value) {
+                    let s = self.emit_call_arg(&args[0])?;
+                    let v = self.emit_call_arg(&args[1])?;
+                    return Ok(format!("{}.remove({})", s, v));
+                }
             }
         }
 
-        // --- a slice type-as-value CALLED = a conversion: `[]byte("abc")`
-        //     parses as SliceLit{elem, items: []} + a postfix call (the
-        //     standing type-as-value encoding) and used to fall into the
-        //     generic path below as `[]byte{}("abc")` — go:
-        //     `invalid operation: cannot call []byte{}` — so even the
-        //     legal Go conversion `[]byte(s)` never built (issue #228
-        //     family C). Emit the conversion form directly. ---
         if let Expr::SliceLit {
             elem: Some(t),
             items,
             ..
-        } = callee
+        } = bare_callee
         {
-            if items.is_empty() && callee.as_array_lit().is_none() {
+            if items.is_empty() && bare_callee.as_array_lit().is_none() {
                 let mut parts = Vec::new();
                 for a in args {
                     parts.push(self.emit_call_arg(a)?);
@@ -860,13 +856,8 @@ impl Emitter {
             }
         }
 
-        // --- everything else: callee(args...) ---
-        // An addressable argument auto-addresses at a pointer param (Batch
-        // I, corpus 09: `scale_then_register(e, …)` with `e *env` — Go's
-        // own method-receiver auto-address precedent, pinned by the
-        // pre-registered corpus).
         let mut ptr_params: Vec<bool> = Vec::new();
-        if let Expr::Ident { name, .. } = callee {
+        if let Expr::Ident { name, .. } = bare_callee {
             let (fn_head, _) = split_type_args(name);
             if let Some((_, _, _, params)) = self.fn_shapes.get(fn_head) {
                 ptr_params = params.iter().map(|p| p.is_some()).collect();
@@ -875,16 +866,18 @@ impl Emitter {
         let c = self.emit_expr(callee, ATOM)?;
         let mut parts = Vec::new();
         for (i, a) in args.iter().enumerate() {
-            let t = self.emit_call_arg(a)?;
+            let peeled_arg = Self::unwrap_parens(&a.value);
             let wants_ptr = ptr_params.get(i).copied().unwrap_or(false);
-            let already_ptr = self.expr_is_pointer(&a.value);
+            let already_ptr = self.expr_is_pointer(peeled_arg);
             let addressable = matches!(
-                a.value,
+                peeled_arg,
                 Expr::Ident { .. } | Expr::Field { .. } | Expr::Index { .. }
             );
             if wants_ptr && !already_ptr && addressable {
-                parts.push(format!("&{}", t));
+                let inner_t = self.emit_expr(peeled_arg, 0)?;
+                parts.push(format!("&{}", inner_t));
             } else {
+                let t = self.emit_call_arg(a)?;
                 parts.push(t);
             }
         }

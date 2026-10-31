@@ -3053,3 +3053,16 @@ fn main() {}
     assert!(go6.contains("func read_url() int {"));
     assert!(go6.contains("func read_u_r_l() int {"));
 }
+
+#[test]
+fn parenthesized_callee_and_autoaddr_args_lower_soundly() {
+    let go = emit(
+        "struct bag {\n    m map[string]int\n}\n\nfn touch(b *bag) {\n    b.m[\"k\"] = 1\n}\n\nfn main() {\n    p := (new)(bag)\n    x := (u8)(300)\n    bs := ([]byte)(\"hi\")\n    s := set[int]{}\n    s.insert(1)\n    n := (len)(s)\n    (delete)(s, 1)\n    var b bag\n    (touch)((b))\n    fmt.println(p, x, bs, n)\n}\n",
+    );
+    assert!(go.contains("&bag{m: map[string]int{}}"), "expected N5 alloc for (new)(bag), got:\n{}", go);
+    assert!(go.contains("uint8(44)"), "expected uint8(44) for (u8)(300), got:\n{}", go);
+    assert!(go.contains("[]byte(\"hi\")"), "expected []byte conversion, got:\n{}", go);
+    assert!(go.contains("s.len()"), "expected s.len() for (len)(s), got:\n{}", go);
+    assert!(go.contains("s.remove(1)"), "expected s.remove(1) for (delete)(s, 1), got:\n{}", go);
+    assert!(go.contains("(&b)"), "expected auto-addressed &b for (touch)((b)), got:\n{}", go);
+}
