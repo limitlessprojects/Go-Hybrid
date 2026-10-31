@@ -329,11 +329,8 @@ impl Emitter {
                     .values
                     .first()
                     .ok_or_else(|| EmitError::unsupported("`const` without an initializer"))?;
-                let value = self.emit_expr(first, 0)?;
-                let composite = matches!(
-                    Self::peel_parens(first),
-                    Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
-                );
+                let value = self.emit_expr_exp(first, 0, l.ty.as_ref())?;
+                let composite = Self::is_composite_const_init(first);
                 let kw = if composite { "var" } else { "const" };
                 let names = l.names.join(", ");
                 match &l.ty {
@@ -343,7 +340,7 @@ impl Emitter {
                     }
                     None => self.push(&format!("{} {} = {}", kw, names, value)),
                 }
-                self.shadow_local_names(&l.names);
+                self.register_const_binding(&l.names, &l.values, l.ty.as_ref());
                 return Ok(());
             }
             // `:=` and `let` both render as Go's short declaration —
@@ -1036,8 +1033,10 @@ impl Emitter {
             if kind != BindingKind::Plain {
                 self.bindings.insert(names[0].clone(), kind);
             }
-            if let Some(Expr::StructLit { ty: Some(t), .. }) = values.first() {
-                self.register_var_ty(&names[0], t);
+            if let Some(first) = values.first() {
+                if let Some(t) = Self::struct_lit_ty_of(first) {
+                    self.register_var_ty(&names[0], &t);
+                }
             }
         }
         for (name, is_ptr) in names.iter().zip(ptr_flags) {
@@ -1047,10 +1046,62 @@ impl Emitter {
         }
     }
 
+    pub(crate) fn is_composite_const_init(e: &Expr) -> bool {
+        match Self::peel_parens(e) {
+            Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. } => true,
+            Expr::AddrOf { operand, .. } => Self::is_composite_const_init(operand),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn struct_lit_ty_of(e: &Expr) -> Option<TypeExpr> {
+        match Self::peel_parens(e) {
+            Expr::StructLit { ty: Some(t), .. } => Some(t.clone()),
+            Expr::AddrOf { operand, .. } => match Self::peel_parens(operand) {
+                Expr::StructLit {
+                    ty: Some(t), span, ..
+                } => Some(TypeExpr::Pointer {
+                    to: Box::new(t.clone()),
+                    span: *span,
+                }),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    pub(crate) fn register_const_binding(
+        &mut self,
+        names: &[String],
+        values: &[Expr],
+        ty: Option<&TypeExpr>,
+    ) {
+        self.hint_from_values(names, values);
+        if let Some(t) = ty {
+            if matches!(t, TypeExpr::Pointer { .. }) {
+                for n in names {
+                    if n != "_" {
+                        self.pointer_vars.insert(n.clone());
+                    }
+                }
+            }
+            if let Some(kind) = self.binding_kind_of_ty(t) {
+                for n in names {
+                    if n != "_" {
+                        self.bindings.insert(n.clone(), kind);
+                    }
+                }
+            }
+            if names.len() == 1 && names[0] != "_" {
+                self.register_var_ty(&names[0], t);
+            }
+        }
+    }
+
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
         let e = Self::peel_parens(e);
-        if let Expr::StructLit { ty: Some(t), .. } = e {
-            if let Some(kind) = self.binding_kind_of_ty(t) {
+        if let Some(t) = Self::struct_lit_ty_of(e) {
+            if let Some(kind) = self.binding_kind_of_ty(&t) {
                 return kind;
             }
         }

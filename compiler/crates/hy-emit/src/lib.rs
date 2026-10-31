@@ -614,6 +614,7 @@ pub struct Emitter {
     /// and user type alias → its target, for zero values that allocate.
     n5_structs: BTreeMap<String, Vec<FieldDecl>>,
     n5_aliases: BTreeMap<String, TypeExpr>,
+    file_consts: Vec<ConstDecl>,
 }
 
 pub(crate) struct ScopeSnapshot {
@@ -660,6 +661,7 @@ impl Emitter {
             explicit_imports: BTreeMap::new(),
             n5_structs: BTreeMap::new(),
             n5_aliases: BTreeMap::new(),
+            file_consts: Vec::new(),
         }
     }
 
@@ -813,6 +815,15 @@ impl Emitter {
                 (f.name.clone(), (value_count, err, kind, ptr_params))
             })
             .collect();
+        self.file_consts = file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Const(c) => Some(c.clone()),
+                _ => None,
+            })
+            .collect();
+        self.seed_file_const_hints();
 
         // Pass 1: render every declaration into the body buffer, collecting
         // used packages as we go. Top-level decls separate with a blank line
@@ -941,16 +952,25 @@ impl Emitter {
         Ok(out)
     }
 
+    fn seed_file_const_hints(&mut self) {
+        let consts = self.file_consts.clone();
+        for c in &consts {
+            self.register_const_binding(
+                std::slice::from_ref(&c.name),
+                std::slice::from_ref(&c.value),
+                c.ty.as_ref(),
+            );
+        }
+    }
+
     fn emit_file_const(&mut self, c: &ConstDecl) -> Result<(), EmitError> {
-        let value = self.emit_expr(&c.value, 0)?;
+        let value = self.emit_expr_exp(&c.value, 0, c.ty.as_ref())?;
         // Go's `const` admits only bool/string/number literals. Composite
         // values (slices/maps/structs — 17's `const thresholds = [10, …]`,
-        // 18's seed_urls) lower to `var`: same identifier surface, the
-        // immutability contract is the checker's business, not Go's.
-        let composite = matches!(
-            Self::peel_parens(&c.value),
-            Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
-        );
+        // 18's seed_urls, or `&holder{}` in #2096) lower to `var`: same
+        // identifier surface, the immutability contract is the checker's
+        // business, not Go's.
+        let composite = Self::is_composite_const_init(&c.value);
         let kw = if composite { "var" } else { "const" };
         match &c.ty {
             Some(t) => {
@@ -1278,6 +1298,7 @@ impl Emitter {
         self.var_ty.clear();
         self.pointer_vars.clear();
         self.local_vars.clear();
+        self.seed_file_const_hints();
         self.temp_n = 0;
         self.try_temps.clear();
         self.loop_labels.clear();
