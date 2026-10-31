@@ -33,7 +33,9 @@ var (
 const abiWordExpected = 0x68795f61626931
 
 func init() {
-	if w := hybridge.Cross1(FnAbiWord, 0); w != abiWordExpected {
+	// SMALL class (guard 1024, row 4): the abi-word probe is a constant
+	// return — zero recursion, zero heap, a handful of bytes of frame.
+	if w := hybridge.Cross1S(FnAbiWord, 0); w != abiWordExpected {
 		panic("regexbinding: hyrt ABI handshake mismatch (rebuild the runtime)")
 	}
 }
