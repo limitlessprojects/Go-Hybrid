@@ -175,6 +175,15 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
     }
 }
 
+fn expr_kinds_conflict(want: &OpKind, expr: &Expr, got: &OpKind) -> bool {
+    if want == &OpKind::Float && got == &OpKind::Int {
+        // An untyped int constant is assignable to a float target in Go.
+        // A typed non-constant expression (variable, call, field) is not.
+        return crate::const_overflow::const_int_value(expr).is_none();
+    }
+    kinds_conflict(want, got)
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -857,7 +866,7 @@ impl<'a> Collector<'a> {
             let want = self.kind_of_ty(t, 0);
             if l.values.len() == 1 && l.names.len() == 1 {
                 let vk = self.kind_of_expr(&l.values[0]);
-                if kinds_conflict(&want, &vk) {
+                if expr_kinds_conflict(&want, &l.values[0], &vk) {
                     self.emit_e1002(
                         l.span,
                         format!(
@@ -873,7 +882,7 @@ impl<'a> Collector<'a> {
             } else if l.values.len() > 1 && l.values.len() == l.names.len() {
                 for (name, v) in l.names.iter().zip(l.values.iter()) {
                     let vk = self.kind_of_expr(v);
-                    if kinds_conflict(&want, &vk) {
+                    if expr_kinds_conflict(&want, v, &vk) {
                         self.emit_e1002(
                             l.span,
                             format!(
@@ -2175,7 +2184,7 @@ impl<'a> Collector<'a> {
                 Some((_, fty)) => {
                     let want = self.kind_of_ty_with_subst(fty, &subst, 0);
                     let got = self.kind_of_expr(&f.value);
-                    if kinds_conflict(&want, &got) {
+                    if expr_kinds_conflict(&want, &f.value, &got) {
                         self.emit_e1002(
                             f.value.span(),
                             format!(
@@ -2521,7 +2530,7 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            if expr_kinds_conflict(&want, &a.value, &got) {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -2561,7 +2570,7 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            if expr_kinds_conflict(&want, &a.value, &got) {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -2592,7 +2601,7 @@ impl<'a> Collector<'a> {
                 if let Some(res) = self.call_result_kinds(callee, args) {
                     if res.len() == want.len() {
                         for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(r, w, values[0].span());
+                            self.report_return_conflict(None, r, w, values[0].span());
                         }
                         return;
                     }
@@ -2601,7 +2610,7 @@ impl<'a> Collector<'a> {
                         && res.len() + 1 == want.len()
                     {
                         for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(r, w, values[0].span());
+                            self.report_return_conflict(None, r, w, values[0].span());
                         }
                         return;
                     }
@@ -2648,7 +2657,7 @@ impl<'a> Collector<'a> {
             if short_ok {
                 for (v, w) in values.iter().zip(want.iter()) {
                     let got = self.kind_of_expr(v);
-                    self.report_return_conflict(&got, w, v.span());
+                    self.report_return_conflict(Some(v), &got, w, v.span());
                 }
                 return;
             }
@@ -2676,12 +2685,23 @@ impl<'a> Collector<'a> {
         }
         for (v, w) in values.iter().zip(want.iter()) {
             let got = self.kind_of_expr(v);
-            self.report_return_conflict(&got, w, v.span());
+            self.report_return_conflict(Some(v), &got, w, v.span());
         }
     }
 
-    fn report_return_conflict(&mut self, got: &OpKind, want: &OpKind, span: Span) {
-        if !kinds_conflict(want, got) {
+    fn report_return_conflict(
+        &mut self,
+        expr: Option<&Expr>,
+        got: &OpKind,
+        want: &OpKind,
+        span: Span,
+    ) {
+        let conflict = if want == &OpKind::Float && got == &OpKind::Int {
+            expr.and_then(|e| crate::const_overflow::const_int_value(e)).is_none()
+        } else {
+            kinds_conflict(want, got)
+        };
+        if !conflict {
             return;
         }
         self.emit_e1002(
@@ -3150,7 +3170,7 @@ impl<'a> Collector<'a> {
                     let is_loan_shape = as_addr_of(&values[0])
                         .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }));
                     let vk = self.kind_of_expr(&values[0]);
-                    if !is_loan_shape && kinds_conflict(&tk, &vk) {
+                    if !is_loan_shape && expr_kinds_conflict(&tk, &values[0], &vk) {
                         self.emit_e1002(
                             span,
                             format!(
@@ -3709,13 +3729,7 @@ impl<'a> Collector<'a> {
             if ik == OpKind::Unknown || ik == expected {
                 continue;
             }
-            if expected == OpKind::Float
-                && ik == OpKind::Int
-                && crate::const_overflow::const_int_value(item).is_some()
-            {
-                continue;
-            }
-            if !kinds_conflict(&expected, &ik) {
+            if !expr_kinds_conflict(&expected, item, &ik) {
                 continue;
             }
             self.emit_e1002(
@@ -3746,10 +3760,7 @@ impl<'a> Collector<'a> {
                 let kk = self.kind_of_expr(k);
                 if kk != OpKind::Unknown
                     && kk != exp_key
-                    && !(exp_key == OpKind::Float
-                        && kk == OpKind::Int
-                        && crate::const_overflow::const_int_value(k).is_some())
-                    && kinds_conflict(&exp_key, &kk)
+                    && expr_kinds_conflict(&exp_key, k, &kk)
                 {
                     self.emit_e1002(
                         k.span(),
@@ -3771,10 +3782,7 @@ impl<'a> Collector<'a> {
                 let vk = self.kind_of_expr(v);
                 if vk != OpKind::Unknown
                     && vk != exp_val
-                    && !(exp_val == OpKind::Float
-                        && vk == OpKind::Int
-                        && crate::const_overflow::const_int_value(v).is_some())
-                    && kinds_conflict(&exp_val, &vk)
+                    && expr_kinds_conflict(&exp_val, v, &vk)
                 {
                     self.emit_e1002(
                         v.span(),
