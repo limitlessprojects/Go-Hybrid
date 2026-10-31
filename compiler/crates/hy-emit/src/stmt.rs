@@ -22,15 +22,19 @@ impl Emitter {
                 // the hoist emits the call + propagation — no value temp, so
                 // there is nothing left to emit afterwards.
                 let zero_try = matches!(
-                    expr,
-                    Expr::Try { operand, .. } if self.call_results(operand) == Some((0, true))
+                    Self::peel_parens(expr),
+                    Expr::Try { operand, .. }
+                        if self.call_results(Self::peel_parens(operand)) == Some((0, true))
                 );
                 // E3 expression form: hoist nested `?` first (Batch G).
                 self.hoist_tries_expr(expr)?;
                 if zero_try {
                     return Ok(());
                 }
-                let text = self.emit_expr(expr, 0)?;
+                // Statement position: grouping parentheses are redundant, and
+                // emitting them after a `?` hoist leaves `(hyT0)` instead of
+                // `hyT0` (#1993 cause 1 residue).
+                let text = self.emit_expr(Self::peel_parens(expr), 0)?;
                 self.push(&text);
                 Ok(())
             }
@@ -177,6 +181,28 @@ impl Emitter {
             }
             Stmt::Match { subject, arms, .. } => self.emit_match(subject, arms),
             Stmt::Select { arms, .. } => {
+                // A `?` in a case header (`get_ch()? <- get_val()?:`) has to be
+                // hoisted into statements BEFORE the `select {` line — emitting
+                // the header directly hits "`?` outside a binding position"
+                // (#1993 cause 2).
+                for arm in arms {
+                    match &arm.kind {
+                        SelectArmKind::Recv { chan, .. } => {
+                            if Self::expr_has_hoistable_try(chan) {
+                                self.hoist_tries_expr(chan)?;
+                            }
+                        }
+                        SelectArmKind::Default => {}
+                        SelectArmKind::Send { chan, value, .. } => {
+                            if Self::expr_has_hoistable_try(value) {
+                                self.hoist_order_before_try(chan)?;
+                            } else {
+                                self.hoist_tries_expr(chan)?;
+                            }
+                            self.hoist_tries_expr(value)?;
+                        }
+                    }
+                }
                 // Go select, 1:1 — Hybrid's arm spelling
                 // (`v, ok := <-sq:` / `<-deadline:` / `ch <- v:`) lowers to
                 // Go's case clauses.
