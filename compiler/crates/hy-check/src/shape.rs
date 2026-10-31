@@ -551,12 +551,17 @@ impl<'a> Checker<'a> {
                     vec![(**v).clone()]
                 }
             }
-            TypeShape::Struct(Some(n)) if n.starts_with("set[") => {
-                let elem_str = n
+            TypeShape::Struct(Some(n)) if n == "set" || n.starts_with("set[") => {
+                let elem_shape = n
                     .strip_prefix("set[")
                     .and_then(|s| s.strip_suffix(']'))
-                    .unwrap_or("any");
-                vec![self.named_shape(elem_str)]
+                    .and_then(|_| {
+                        Self::parse_generic_type_args(n).and_then(|(_, mut args)| args.pop())
+                    })
+                    .or_else(|| self.ty_of_expr(st, expr).and_then(|ty| self.set_elem_type(&ty)))
+                    .map(|elem_ty| self.shape_of_type(&elem_ty))
+                    .unwrap_or(TypeShape::Unknown);
+                vec![elem_shape]
             }
             _ => vec![TypeShape::Unknown; n_vars.max(1)],
         }
@@ -575,6 +580,19 @@ impl<'a> Checker<'a> {
             TypeExpr::Named { name, .. } => Some(Self::base_named_type_str(name).to_string()),
             TypeExpr::Pointer { to, .. } => Self::base_named_type(to),
             _ => None,
+        }
+    }
+
+    pub(crate) fn set_elem_type(&self, ty: &TypeExpr) -> Option<TypeExpr> {
+        let peeled = self.peel_pointer_and_alias(ty);
+        let TypeExpr::Named { name, .. } = &peeled else {
+            return None;
+        };
+        let (base, mut args) = Self::parse_generic_type_args(name)?;
+        if base == "set" && args.len() == 1 {
+            args.pop()
+        } else {
+            None
         }
     }
 
@@ -654,11 +672,9 @@ impl<'a> Checker<'a> {
                         });
                     }
                 }
-                let sname = Self::base_named_type(&resolved)?;
-                self.structs
-                    .get(&sname)
-                    .and_then(|fs| fs.iter().find(|(n, _)| n == name))
-                    .map(|(_, t)| t.clone())
+                self.struct_fields_for_type(&resolved)
+                    .and_then(|fs| fs.into_iter().find(|(n, _)| n == name))
+                    .map(|(_, t)| t)
             }
             Expr::Index { base, .. } => {
                 let base_ty = self.ty_of_expr(st, base)?;
