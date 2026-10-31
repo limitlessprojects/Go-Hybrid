@@ -1205,6 +1205,18 @@ impl<'a> Checker<'a> {
                     }
                 } else if !managed {
                     self.check_o54_non_ident_move(st, op, v.span());
+                } else if let Some(root) = op.root_ident() {
+                    // Inside `managed` the O5.4 rejection becomes an audited
+                    // escape (HYB-E8001), but the root is still frozen so the
+                    // sender cannot keep writing through the aliased field.
+                    if self.lookup_binding(st, root).is_some() {
+                        moves.push((root.to_string(), v.span()));
+                        rejects.push(RejectInfo {
+                            value: format!("move {}", op.render()),
+                            ty: self.shape_of_expr(st, op).render(),
+                            notes: Vec::new(),
+                        });
+                    }
                 }
                 if let Expr::Ident { name, .. } = op {
                     match self.classify_move_ident(st, name) {
@@ -1249,6 +1261,18 @@ impl<'a> Checker<'a> {
                     }
                 } else if !managed {
                     self.check_o54_non_ident_move(st, op, mspan);
+                } else if let Some(root) = op.root_ident() {
+                    // Inside `managed` the O5.4 rejection becomes an audited
+                    // escape (HYB-E8001), but the root is still frozen so the
+                    // sender cannot keep writing through the aliased field.
+                    if self.lookup_binding(st, root).is_some() {
+                        moves.push((root.to_string(), mspan));
+                        rejects.push(RejectInfo {
+                            value: format!("move {}", op.render()),
+                            ty: self.shape_of_expr(st, op).render(),
+                            notes: Vec::new(),
+                        });
+                    }
                 }
             }
 
