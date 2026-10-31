@@ -605,8 +605,62 @@ impl Emitter {
                 }
                 None
             }
+            Expr::Try { operand, .. } | Expr::Move { operand, .. } => self.type_of_expr(operand),
             // A zero-arg/method call's result type is the member's result.
-            Expr::Call { callee, .. } => self.type_of_expr(callee),
+            Expr::Call { callee, .. } => {
+                let bare_callee = Self::unwrap_parens(callee);
+                match bare_callee {
+                    Expr::Ident { name, .. } => {
+                        if let Some((_, _, Some(BindingKind::ForeignTy(t)), _)) =
+                            self.fn_shapes.get(name.as_str())
+                        {
+                            return Some(t);
+                        }
+                    }
+                    Expr::Field { base, name, .. } => {
+                        if let Expr::Ident { name: pkg, .. } = Self::unwrap_parens(base.as_ref()) {
+                            if self.is_unshadowed_pkg_root(pkg) {
+                                if pkg == "serde_json"
+                                    && matches!(name.as_str(), "parse" | "new_object" | "new_array")
+                                {
+                                    return Some("serde_json.value");
+                                }
+                                if pkg == "time" {
+                                    if matches!(
+                                        name.as_str(),
+                                        "since"
+                                            | "until"
+                                            | "hours"
+                                            | "minutes"
+                                            | "seconds"
+                                            | "milliseconds"
+                                            | "microseconds"
+                                            | "nanoseconds"
+                                    ) {
+                                        return Some("time.duration");
+                                    }
+                                    if name == "now" {
+                                        return Some("time.time");
+                                    }
+                                }
+                                if pkg == "http" {
+                                    if name == "new_request" {
+                                        return Some("http.request");
+                                    }
+                                    if name == "new_serve_mux" {
+                                        return Some("http.serve_mux");
+                                    }
+                                }
+                                if pkg == "url" && name == "parse" {
+                                    return Some("url.url");
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                self.type_of_expr(callee)
+            }
             _ => None,
         }
     }

@@ -1106,11 +1106,34 @@ impl Emitter {
                     // time.since/now return a KNOWN type — duration members
                     // resolve property-style through the shape table (10:
                     // `dt.milliseconds` → `dt.Milliseconds()`).
-                    if pkg == "time" && name == "since" {
-                        return BindingKind::ForeignTy("time.duration");
+                    if pkg == "time" {
+                        if matches!(
+                            name.as_str(),
+                            "since"
+                                | "until"
+                                | "hours"
+                                | "minutes"
+                                | "seconds"
+                                | "milliseconds"
+                                | "microseconds"
+                                | "nanoseconds"
+                        ) {
+                            return BindingKind::ForeignTy("time.duration");
+                        }
+                        if name == "now" {
+                            return BindingKind::ForeignTy("time.time");
+                        }
                     }
-                    if pkg == "time" && name == "now" {
-                        return BindingKind::ForeignTy("time.time");
+                    if pkg == "http" {
+                        if name == "new_request" {
+                            return BindingKind::ForeignTy("http.request");
+                        }
+                        if name == "new_serve_mux" {
+                            return BindingKind::ForeignTy("http.serve_mux");
+                        }
+                    }
+                    if pkg == "url" && name == "parse" {
+                        return BindingKind::ForeignTy("url.url");
                     }
                     return BindingKind::Foreign;
                 }
