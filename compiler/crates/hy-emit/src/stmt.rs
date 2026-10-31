@@ -189,6 +189,7 @@ impl Emitter {
                 self.indent += 1;
                 for arm in arms {
                     let saved_scope = self.save_scope();
+                    let mut wrap = false;
                     match &arm.kind {
                         SelectArmKind::Recv { names, chan } => {
                             let c = match self.emit_expr(chan, 0) {
@@ -246,6 +247,38 @@ impl Emitter {
                             };
                             self.shadow_local_names(names);
                             self.push(&head);
+                            // Go's case clause shares ONE lexical scope with
+                            // its bindings (`case v := <-ch:`); a body that
+                            // re-declares a case-bound name at its top level
+                            // (`v := v + 1`) compiles as `no new variables on
+                            // left side of :=`. When a name actually bound in
+                            // this clause is re-declared top-level, wrap the
+                            // arm body in an explicit block — legal Go (block
+                            // braces inside a case clause, verified against
+                            // go1.27.2) and preserves the Hybrid arm-scoped
+                            // shadow semantics. Same check-vs-emit shape
+                            // class as the match-arm lowering, on select's
+                            // separate lowering path; deliberately uses its
+                            // own helper name.
+                            let bound: Vec<&str> = if names.len() == 1 {
+                                if names[0] != "_"
+                                    && crate::rangebind::body_reads(&arm.body, &names[0])
+                                {
+                                    vec![names[0].as_str()]
+                                } else {
+                                    Vec::new()
+                                }
+                            } else {
+                                names
+                                    .iter()
+                                    .filter(|n| {
+                                        n.as_str() != "_"
+                                            && crate::rangebind::body_reads(&arm.body, n)
+                                    })
+                                    .map(|n| n.as_str())
+                                    .collect()
+                            };
+                            wrap = Self::case_body_redefines_binding(&arm.body.stmts, &bound);
                         }
                         SelectArmKind::Send { chan, value, .. } => {
                             let c = self.emit_expr(chan, 0)?;
@@ -254,7 +287,13 @@ impl Emitter {
                         }
                         SelectArmKind::Default => self.push("default:"),
                     }
+                    if wrap {
+                        self.push("{");
+                    }
                     let arm_res = self.emit_block_body(&arm.body.stmts);
+                    if wrap {
+                        self.push("}");
+                    }
                     self.restore_scope(saved_scope);
                     arm_res?;
                 }
@@ -1636,6 +1675,21 @@ impl Emitter {
         let r = self.emit_stmts_with_loans(stmts);
         self.branch_inherit = inherited;
         r
+    }
+
+    /// True when a select receive-arm body re-declares one of the names
+    /// actually bound by its case clause at the body's top level. Only the
+    /// flat top level matters: Go puts the case bindings and the body in the
+    /// same clause scope, while a `Stmt::Block` inside the body emits its own
+    /// braces (a fresh Go scope) and can never conflict.
+    fn case_body_redefines_binding(stmts: &[Stmt], bound: &[&str]) -> bool {
+        if bound.is_empty() {
+            return false;
+        }
+        stmts.iter().any(|s| match s {
+            Stmt::Local(l) => l.names.iter().any(|n| bound.contains(&n.as_str())),
+            _ => false,
+        })
     }
 
     fn block_terminates(b: &Block) -> bool {
