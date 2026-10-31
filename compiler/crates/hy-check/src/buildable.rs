@@ -2175,7 +2175,10 @@ impl<'a> Collector<'a> {
                 Some((_, fty)) => {
                     let want = self.kind_of_ty_with_subst(fty, &subst, 0);
                     let got = self.kind_of_expr(&f.value);
-                    if kinds_conflict(&want, &got) {
+                    let int_float_conflict = want == OpKind::Float
+                        && got == OpKind::Int
+                        && !self.is_untyped_int_const(&f.value);
+                    if kinds_conflict(&want, &got) || int_float_conflict {
                         self.emit_e1002(
                             f.value.span(),
                             format!(
@@ -3568,6 +3571,34 @@ impl<'a> Collector<'a> {
         false
     }
 
+    fn is_untyped_int_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit {
+                kind: LitKind::Int(_) | LitKind::Char(_),
+                ..
+            } => true,
+            Expr::Ident { name, .. } => {
+                if self.file_consts.contains_key(name) {
+                    return true;
+                }
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        return matches!(self.defines[*id].kind, LocalKind::Const);
+                    }
+                }
+                false
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnOp::Neg)
+                    && self.is_untyped_int_const(operand)
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.is_untyped_int_const(lhs) && self.is_untyped_int_const(rhs)
+            }
+            _ => false,
+        }
+    }
+
     fn expr_has_non_const_local(&self, e: &Expr) -> bool {
         match unwrap_parens(e) {
             Expr::Ident { name, .. } => self.is_non_const_local(name),
@@ -3650,7 +3681,7 @@ impl<'a> Collector<'a> {
             }
             if expected == OpKind::Float
                 && ik == OpKind::Int
-                && crate::const_overflow::const_int_value(item).is_some()
+                && self.is_untyped_int_const(item)
             {
                 continue;
             }
@@ -3711,11 +3742,12 @@ impl<'a> Collector<'a> {
             }
             if expected == OpKind::Float
                 && ik == OpKind::Int
-                && crate::const_overflow::const_int_value(item).is_some()
+                && self.is_untyped_int_const(item)
             {
                 continue;
             }
-            if !kinds_conflict(&expected, &ik) {
+            let int_float_conflict = expected == OpKind::Float && ik == OpKind::Int;
+            if !kinds_conflict(&expected, &ik) && !int_float_conflict {
                 continue;
             }
             self.emit_e1002(
@@ -3748,8 +3780,9 @@ impl<'a> Collector<'a> {
                     && kk != exp_key
                     && !(exp_key == OpKind::Float
                         && kk == OpKind::Int
-                        && crate::const_overflow::const_int_value(k).is_some())
-                    && kinds_conflict(&exp_key, &kk)
+                        && self.is_untyped_int_const(k))
+                    && (kinds_conflict(&exp_key, &kk)
+                        || (exp_key == OpKind::Float && kk == OpKind::Int))
                 {
                     self.emit_e1002(
                         k.span(),
@@ -3773,8 +3806,9 @@ impl<'a> Collector<'a> {
                     && vk != exp_val
                     && !(exp_val == OpKind::Float
                         && vk == OpKind::Int
-                        && crate::const_overflow::const_int_value(v).is_some())
-                    && kinds_conflict(&exp_val, &vk)
+                        && self.is_untyped_int_const(v))
+                    && (kinds_conflict(&exp_val, &vk)
+                        || (exp_val == OpKind::Float && vk == OpKind::Int))
                 {
                     self.emit_e1002(
                         v.span(),
