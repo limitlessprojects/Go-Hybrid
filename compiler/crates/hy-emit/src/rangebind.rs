@@ -203,7 +203,25 @@ fn stmt_reads(s: &Stmt, target: &str) -> bool {
                         return true;
                     }
                     if var == target {
-                        return *inclusive && expr_reads(hi, target);
+                        // Issue #1614: `Emitter::emit_for` hoists `?`
+                        // subexpressions of `hi` (and their order-sensitive
+                        // siblings) *before* the `for <var> := …` head, so
+                        // those statements run while the OUTER binding is
+                        // still in scope — mentioning <var> there reads the
+                        // outer name, and blanking it emits `undefined: x`.
+                        // With no hoistable `?`, `hi` stays in the loop head,
+                        // where <var> shadows the outer name (the exclusive
+                        // part of the #139 lowering). The inclusive form
+                        // always evaluates `hi` before the head (`hyHi := hi`),
+                        // so it counts regardless. Conservative direction:
+                        // treat the name as read; a missing `_` merely leaves
+                        // the old emission.
+                        if *inclusive || crate::Emitter::expr_has_hoistable_try(hi) {
+                            if expr_reads(hi, target) {
+                                return true;
+                            }
+                        }
+                        return false;
                     }
                     if expr_reads(hi, target) {
                         return true;
