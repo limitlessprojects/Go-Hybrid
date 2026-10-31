@@ -117,5 +117,16 @@ class ProbeParser(unittest.TestCase):
         self.assertFalse(any("removed line" in ln for ln in added))
 
 
+class PreflightWorkflowContract(unittest.TestCase):
+    """shepherd-preflight must guard go build/vet against missing root go.mod (issue #2168)."""
+
+    def test_preflight_guards_root_gomod(self):
+        workflow = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "shepherd-preflight.yml"
+        self.assertTrue(workflow.is_file(), "shepherd-preflight.yml must exist")
+        text = workflow.read_text(encoding="utf-8")
+        self.assertIn("[ -f go.mod ]", text, "Preflight must check for go.mod before invoking go build/vet")
+
+
 if __name__ == "__main__":
     unittest.main()
+
