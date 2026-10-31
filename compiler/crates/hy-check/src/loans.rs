@@ -1094,10 +1094,16 @@ impl<'a> Checker<'a> {
                 let mut cap_bound = bound;
                 let mut caps = Vec::new();
                 collect_capture_idents_block(body, &mut cap_bound, &mut caps);
+                let resolved_caps: Vec<String> = caps
+                    .iter()
+                    .map(|c| crate::freeze::resolve_alias(st, c))
+                    .collect();
                 if let Some(&closure_last) = st.last_use.get(name) {
                     for loan in &mut st.loans {
                         if let LoanTarget::MapSlot { binding, .. } = &loan.target {
-                            if caps.iter().any(|c| c == binding) {
+                            if caps.iter().any(|c| c == binding)
+                                || resolved_caps.iter().any(|rc| rc == binding)
+                            {
                                 loan.last = loan.last.max(closure_last);
                             }
                         }
@@ -1112,6 +1118,26 @@ impl<'a> Checker<'a> {
                     .or_else(|| st.closure_defs.get(&resolved))
                     .cloned()
                 {
+                    let mut cap_bound: HashSet<String> =
+                        def.0.iter().map(|p| p.name.clone()).collect();
+                    cap_bound.extend(def.1.iter().filter_map(|r| r.name.clone()));
+                    let mut caps = Vec::new();
+                    collect_capture_idents_block(&def.2, &mut cap_bound, &mut caps);
+                    let resolved_caps: Vec<String> = caps
+                        .iter()
+                        .map(|c| crate::freeze::resolve_alias(st, c))
+                        .collect();
+                    if let Some(&closure_last) = st.last_use.get(name) {
+                        for loan in &mut st.loans {
+                            if let LoanTarget::MapSlot { binding, .. } = &loan.target {
+                                if caps.iter().any(|c| c == binding)
+                                    || resolved_caps.iter().any(|rc| rc == binding)
+                                {
+                                    loan.last = loan.last.max(closure_last);
+                                }
+                            }
+                        }
+                    }
                     st.closure_defs.insert(name.to_string(), def);
                 }
                 if let Some(existing_fnlit) = st.closure_fnlits.get(src).cloned() {
@@ -2086,7 +2112,14 @@ impl<'a> Checker<'a> {
     /// composites (#125), which lower to package-level `var` in Go.
     fn binding_may_share(&self, st: &FnState, name: &str) -> bool {
         self.lookup_binding(st, name)
-            .map(|b| self.shape_may_share(&b.shape))
+            .map(|b| {
+                self.shape_may_share(&b.shape)
+                    || (!self.shape_is_const_sendable(&b.shape, &mut Vec::new())
+                        && ((matches!(b.shape, TypeShape::Unknown)
+                            && (b.non_owned_origin.is_some() || b.immutable))
+                            || st.may_share.get(name).is_some_and(|s| !s.is_empty())
+                            || st.aliases.contains_key(name)))
+            })
             .unwrap_or(false)
     }
 
@@ -2488,7 +2521,8 @@ impl<'a> Checker<'a> {
                         // views the array's storage even when the element
                         // type is primitive - link it so a later move
                         // freezes the array too.
-                        if self.shape_may_share(&b.shape)
+                        if (self.binding_may_share(st, &root)
+                            && !self.shape_is_const_sendable(&result, &mut Vec::new()))
                             || self.expr_slices_addressable_array(st, value, &root)
                         {
                             st.share_edge(name, &root);
