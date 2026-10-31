@@ -1,7 +1,9 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 129 programs — ACCEPT 39 · ACCEPT-MANAGED 2 · REJECT 88 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
-**Current registered corpus: 129 programs — ACCEPT 39 · ACCEPT-MANAGED 2 · REJECT 88 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 130 programs — ACCEPT 40 · ACCEPT-MANAGED 2 · REJECT 88 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 130 programs — ACCEPT 40 · ACCEPT-MANAGED 2 · REJECT 88 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 128 programs — ACCEPT 40 · ACCEPT-MANAGED 2 · REJECT 86 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 128 programs — ACCEPT 40 · ACCEPT-MANAGED 2 · REJECT 86 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -301,3 +303,40 @@ in `hy-check/tests/type_name_in_value_position.rs` (13 tests).
 
 With this registration the corpus is **120 programs: ACCEPT 38 ·
 ACCEPT-MANAGED 2 · REJECT 80** — main's 118 plus these two.
+
+## Bounty-track registration — 2026-10-25: match arm bodies redeeming the arm's pattern binding (BUILDABLE, Row 13)
+
+`match-arm-binding-redeclare-accept.hy` — `hyb check` accepted
+`some(v): { v := v + 1 ... }` with 0 diagnostics and the emitted Go failed
+`go build` with `no new variables on left side of :=`. The checker is RIGHT
+here: hy-check/src/buildable.rs `Stmt::Match` pushes a scope per arm and runs
+the body `block_scoped`, so an arm-top-level redeclare of the pattern binding
+is a legal nested shadow. Both `hy-emit` option-match lowerings (the simple
+unguarded chain and the per-arm `has_unguarded_some` path) injected
+`v := hyMatch0.val` into the SAME Go block as the inlined arm body, which is
+where the illegal `:=` pair came from. Pure codegen fix — no new rule, no new
+E-code, no reject side: any "reject arm-body redefines the binding"
+alternative would shrink accepted programs that never emitted, breaking
+programs that build fine today.
+
+The fix is surgical and byte-exact for every non-redefining program: the
+pattern-binding injection stays in the arm's Go scope and ONLY a redefining
+arm body gains a nested `{ ... }` block, so the body's `:=` is a fresh
+declaration — the Go shape that matches hy-check's nested arm scope.
+`rangebind::body_reads` is shadow-aware (a read after a top-level redeclare
+of the binding does not count), which keeps the injection alive only when
+the pre-shadow binding is genuinely used: a wrap-around-both spelling was
+tried first and was rejected because a body that redefines the binding
+without reading it first (`some(v): { v := 5 ... }`) would still fail
+`go build` with `v declared and not used`. Regression pins live in
+`hy-emit/tests/match_arm_redeclare_scope.rs` (5 tests: both lowerings, the
+no-inject/no-wrap unread case, the byte-exact flat control, and a
+build+run when Go is present).
+
+The fixture was checked (0 diagnostics), built with go1.27.2 and RUN before
+it was committed: it prints `true 3 3 5` — the first match's shadow prints
+the arm-local `3`, the guarded neighbour keeps printing the guard-bound
+value, and the unread-redefine control prints its fixed arm-local `5`.
+
+With this registration the corpus is **128 programs: ACCEPT 40 ·
+ACCEPT-MANAGED 2 · REJECT 86** — main's 127 plus this one.
