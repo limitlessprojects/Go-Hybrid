@@ -32,7 +32,11 @@ impl<'a> Checker<'a> {
         match ty {
             TypeExpr::Named { name, .. } => self.named_shape_depth(name, depth),
             TypeExpr::Pointer { to, .. } => {
-                TypeShape::Pointer(Box::new(self.shape_of_type_depth(to, depth + 1)))
+                if self.ty_is_option(to) {
+                    TypeShape::Pointer(Box::new(TypeShape::Struct(None)))
+                } else {
+                    TypeShape::Pointer(Box::new(self.shape_of_type_depth(to, depth + 1)))
+                }
             }
             TypeExpr::Slice { elem, .. } => {
                 TypeShape::Slice(Box::new(self.shape_of_type_depth(elem, depth + 1)))
@@ -243,12 +247,20 @@ impl<'a> Checker<'a> {
             }
             Expr::Unary { op, operand, .. } => match op {
                 hy_syntax::UnOp::Addr => {
-                    TypeShape::Pointer(Box::new(self.shape_of_expr(st, operand)))
+                    if self.expr_is_option(st, operand) {
+                        TypeShape::Pointer(Box::new(TypeShape::Struct(None)))
+                    } else {
+                        TypeShape::Pointer(Box::new(self.shape_of_expr(st, operand)))
+                    }
                 }
                 _ => TypeShape::Primitive,
             },
             Expr::AddrOf { operand, .. } => {
-                TypeShape::Pointer(Box::new(self.shape_of_expr(st, operand)))
+                if self.expr_is_option(st, operand) {
+                    TypeShape::Pointer(Box::new(TypeShape::Struct(None)))
+                } else {
+                    TypeShape::Pointer(Box::new(self.shape_of_expr(st, operand)))
+                }
             }
             Expr::Move { operand, .. }
             | Expr::Try { operand, .. }
@@ -366,33 +378,48 @@ impl<'a> Checker<'a> {
                     // check-site. The pointee is inferred when the type argument
                     // resolves; otherwise Unknown — still a non-sendable pointer.
                     "new" => {
-                        let pointee = match args
-                            .first()
-                            .map(|a| crate::model::unwrap_parens(&a.value))
-                        {
-                            // `new(pool_stats)` / `new((pool_stats))` / `new(alias)` — the
-                            // argument is a type name, not a value; resolve structs, type
-                            // aliases, primitives, and foreign types via `named_shape`.
-                            Some(Expr::Ident { name, .. }) => self.named_shape(name),
-                            Some(Expr::Field { base, name, .. }) => {
-                                if let Expr::Ident { name: pkg, .. } =
-                                    crate::model::unwrap_parens(base)
-                                {
-                                    self.named_shape(&format!("{}.{}", pkg, name))
-                                } else {
-                                    TypeShape::Unknown
+                        let first_arg =
+                            args.first().map(|a| crate::model::unwrap_parens(&a.value));
+                        let is_option_pointee = match first_arg {
+                            Some(Expr::Ident { name, .. }) => self
+                                .type_aliases
+                                .get(name.as_str())
+                                .is_some_and(|t| self.ty_is_option(t)),
+                            Some(Expr::Index { base, .. }) => matches!(
+                                crate::model::unwrap_parens(base),
+                                Expr::Ident { name, .. } if name == "option"
+                            ),
+                            _ => false,
+                        };
+                        let pointee = if is_option_pointee {
+                            TypeShape::Struct(None)
+                        } else {
+                            match first_arg {
+                                // `new(pool_stats)` / `new((pool_stats))` / `new(alias)` — the
+                                // argument is a type name, not a value; resolve structs, type
+                                // aliases, primitives, and foreign types via `named_shape`.
+                                Some(Expr::Ident { name, .. }) => self.named_shape(name),
+                                Some(Expr::Field { base, name, .. }) => {
+                                    if let Expr::Ident { name: pkg, .. } =
+                                        crate::model::unwrap_parens(base)
+                                    {
+                                        self.named_shape(&format!("{}.{}", pkg, name))
+                                    } else {
+                                        TypeShape::Unknown
+                                    }
                                 }
-                            }
-                            Some(Expr::Index { base, .. }) => {
-                                if let Expr::Ident { name, .. } = crate::model::unwrap_parens(base)
-                                {
-                                    self.named_shape(name)
-                                } else {
-                                    TypeShape::Unknown
+                                Some(Expr::Index { base, .. }) => {
+                                    if let Expr::Ident { name, .. } =
+                                        crate::model::unwrap_parens(base)
+                                    {
+                                        self.named_shape(name)
+                                    } else {
+                                        TypeShape::Unknown
+                                    }
                                 }
+                                Some(other) => self.shape_of_expr(st, other),
+                                None => TypeShape::Unknown,
                             }
-                            Some(other) => self.shape_of_expr(st, other),
-                            None => TypeShape::Unknown,
                         };
                         TypeShape::Pointer(Box::new(pointee))
                     }
@@ -562,6 +589,38 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Source types of the variables bound by `for v[, i] in <expr>`, when directly available.
+    pub(crate) fn iterate_var_tys(
+        &self,
+        st: &FnState,
+        expr: &Expr,
+        n_vars: usize,
+    ) -> Vec<Option<TypeExpr>> {
+        let Some(ty) = self.ty_of_expr(st, expr) else {
+            return vec![None; n_vars.max(1)];
+        };
+        let one = |v: TypeExpr| {
+            if n_vars >= 2 {
+                vec![None, Some(v)]
+            } else {
+                vec![Some(v)]
+            }
+        };
+        match self.resolve_type_alias(&ty) {
+            TypeExpr::Slice { elem, .. }
+            | TypeExpr::Array { elem, .. }
+            | TypeExpr::Chan { elem, .. } => one(*elem),
+            TypeExpr::Map { key, value, .. } => {
+                if n_vars >= 2 {
+                    vec![Some(*key), Some(*value)]
+                } else {
+                    vec![Some(*value)]
+                }
+            }
+            _ => vec![None; n_vars.max(1)],
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Source types for diagnostics
     // -----------------------------------------------------------------------
@@ -591,6 +650,31 @@ impl<'a> Checker<'a> {
             break;
         }
         cur
+    }
+
+    pub(crate) fn ty_is_option(&self, ty: &TypeExpr) -> bool {
+        matches!(self.resolve_type_alias(ty), TypeExpr::Option { .. })
+    }
+
+    pub(crate) fn expr_is_option(&self, st: &FnState, expr: &Expr) -> bool {
+        if let Some(ty) = self.ty_of_expr(st, expr) {
+            if self.ty_is_option(&ty) {
+                return true;
+            }
+        }
+        match crate::model::unwrap_parens(expr) {
+            Expr::Move { operand, .. } | Expr::Try { operand, .. } => {
+                self.expr_is_option(st, operand)
+            }
+            Expr::Receive { chan, .. } => self
+                .ty_of_expr(st, chan)
+                .map(|ct| match self.resolve_type_alias(&ct) {
+                    TypeExpr::Chan { elem, .. } => self.ty_is_option(&elem),
+                    _ => false,
+                })
+                .unwrap_or(false),
+            _ => false,
+        }
     }
 
     /// The as-written type of an initializer, when directly available
@@ -668,6 +752,34 @@ impl<'a> Checker<'a> {
                     _ => None,
                 }
             }
+            Expr::Slice { base, span, .. } => {
+                let base_ty = self.ty_of_expr(st, base)?;
+                match self.resolve_type_alias(&base_ty) {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+                        Some(TypeExpr::Slice { elem, span: *span })
+                    }
+                    _ => None,
+                }
+            }
+            Expr::Receive { chan, .. } => {
+                let chan_ty = self.ty_of_expr(st, chan)?;
+                match self.resolve_type_alias(&chan_ty) {
+                    TypeExpr::Chan { elem, .. } => Some(*elem),
+                    _ => None,
+                }
+            }
+            Expr::AddrOf { operand, span }
+            | Expr::Unary {
+                op: hy_syntax::UnOp::Addr,
+                operand,
+                span,
+            } => {
+                let inner = self.ty_of_expr(st, operand)?;
+                Some(TypeExpr::Pointer {
+                    to: Box::new(inner),
+                    span: *span,
+                })
+            }
             Expr::StructLit { ty, .. } => ty.clone(),
             Expr::MapLit {
                 key, value, span, ..
@@ -696,6 +808,17 @@ impl<'a> Checker<'a> {
                 }
                 Some(TypeExpr::Slice {
                     elem: e.clone(),
+                    span: *span,
+                })
+            }
+            Expr::SliceLit {
+                elem: None,
+                items,
+                span,
+            } => {
+                let first_ty = items.first().and_then(|it| self.ty_of_expr(st, it))?;
+                Some(TypeExpr::Slice {
+                    elem: Box::new(first_ty),
                     span: *span,
                 })
             }
@@ -736,13 +859,32 @@ impl<'a> Checker<'a> {
                             span: *span,
                         });
                     }
-                    if name == "make" {
+                    if name == "append" {
                         return args.first().and_then(|a| self.ty_of_expr(st, &a.value));
                     }
+                    if name == "make" {
+                        return args.first().and_then(|a| {
+                            let arg = crate::model::unwrap_parens(&a.value);
+                            if let Expr::Ident {
+                                name: tname,
+                                span: tspan,
+                            } = arg
+                            {
+                                if self.type_aliases.contains_key(tname.as_str()) {
+                                    return Some(TypeExpr::Named {
+                                        name: tname.clone(),
+                                        span: *tspan,
+                                    });
+                                }
+                            }
+                            self.ty_of_expr(st, arg)
+                        });
+                    }
                     if args.len() == 1 {
-                        let is_type_name = crate::const_overflow::fixed_width_int_range(name).is_some()
-                            || crate::const_init::is_conversion_type_name(name)
-                            || self.type_aliases.contains_key(name);
+                        let is_type_name =
+                            crate::const_overflow::fixed_width_int_range(name).is_some()
+                                || crate::const_init::is_conversion_type_name(name)
+                                || self.type_aliases.contains_key(name);
                         if is_type_name && !self.fns.contains_key(name.as_str()) {
                             return Some(TypeExpr::Named {
                                 name: name.clone(),
@@ -1156,12 +1298,27 @@ impl<'a> Checker<'a> {
                             _ => None,
                         },
                         _ => None,
-                    })?;
-                self.method_decls
-                    .get(&(recv_base, head.to_string()))
-                    .map(|f| f.results.iter().map(|r| r.ty.clone()).collect())
+                    });
+                if let Some(rb) = recv_base {
+                    if let Some(f) = self.method_decls.get(&(rb, head.to_string())) {
+                        return Some(f.results.iter().map(|r| r.ty.clone()).collect());
+                    }
+                }
+                let callee_ty = self.ty_of_expr(st, callee)?;
+                if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&callee_ty) {
+                    Some(results)
+                } else {
+                    None
+                }
             }
-            _ => None,
+            other => {
+                let callee_ty = self.ty_of_expr(st, other)?;
+                if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&callee_ty) {
+                    Some(results)
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -1173,7 +1330,10 @@ impl<'a> Checker<'a> {
         value: &Expr,
         n_names: usize,
     ) -> Vec<TypeShape> {
-        let v = crate::model::unwrap_parens(value);
+        let mut v = crate::model::unwrap_parens(value);
+        while let Expr::Move { operand, .. } = v {
+            v = crate::model::unwrap_parens(operand);
+        }
         if n_names == 2 {
             if let Expr::Index { base, .. } = v {
                 if let TypeShape::Map(_, val) = self.shape_of_expr(st, base) {
@@ -1191,7 +1351,13 @@ impl<'a> Checker<'a> {
             }
         }
         let (call_expr, is_try) = match v {
-            Expr::Try { operand, .. } => (crate::model::unwrap_parens(operand), true),
+            Expr::Try { operand, .. } => {
+                let mut inner = crate::model::unwrap_parens(operand);
+                while let Expr::Move { operand: op, .. } = inner {
+                    inner = crate::model::unwrap_parens(op);
+                }
+                (inner, true)
+            }
             other => (other, false),
         };
         if let Expr::Call { callee, .. } = call_expr {
@@ -1214,23 +1380,41 @@ impl<'a> Checker<'a> {
     }
 
     /// As-written source types for a multi-name define/assign from one value
-    /// (`a, b := f()`, `a, b = f()?`, `v, ok := m[k]`), when directly available.
+    /// (`a, b := f()`, `a, b = f()?`, `v, ok := m[k]`, `v, ok := <-ch`), when directly available.
     pub(crate) fn multi_value_tys(
         &self,
         st: &FnState,
         value: &Expr,
         n_names: usize,
     ) -> Vec<Option<TypeExpr>> {
-        let v = crate::model::unwrap_parens(value);
+        let mut v = crate::model::unwrap_parens(value);
+        while let Expr::Move { operand, .. } = v {
+            v = crate::model::unwrap_parens(operand);
+        }
         if n_names == 2 {
             if let Expr::Index { base, .. } = v {
-                if let Some(TypeExpr::Map { value: val_ty, .. }) = self.ty_of_expr(st, base) {
-                    return vec![Some(*val_ty), None];
+                if let Some(base_ty) = self.ty_of_expr(st, base) {
+                    if let TypeExpr::Map { value: val_ty, .. } = self.resolve_type_alias(&base_ty) {
+                        return vec![Some(*val_ty), None];
+                    }
+                }
+            }
+            if let Expr::Receive { chan, .. } = v {
+                if let Some(chan_ty) = self.ty_of_expr(st, chan) {
+                    if let TypeExpr::Chan { elem, .. } = self.resolve_type_alias(&chan_ty) {
+                        return vec![Some(*elem), None];
+                    }
                 }
             }
         }
         let (call_expr, is_try) = match v {
-            Expr::Try { operand, .. } => (crate::model::unwrap_parens(operand), true),
+            Expr::Try { operand, .. } => {
+                let mut inner = crate::model::unwrap_parens(operand);
+                while let Expr::Move { operand: op, .. } = inner {
+                    inner = crate::model::unwrap_parens(op);
+                }
+                (inner, true)
+            }
             other => (other, false),
         };
         if let Expr::Call { callee, .. } = call_expr {

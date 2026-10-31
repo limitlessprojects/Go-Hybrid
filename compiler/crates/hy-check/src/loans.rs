@@ -2113,7 +2113,9 @@ impl<'a> Checker<'a> {
         if let Some(ty) = &b.ty {
             let resolved = self.resolve_type_alias(ty);
             match &resolved {
-                hy_syntax::TypeExpr::Array { .. } => return true,
+                hy_syntax::TypeExpr::Array { .. } | hy_syntax::TypeExpr::Option { .. } => {
+                    return true
+                }
                 hy_syntax::TypeExpr::Named { name: tname, .. } => {
                     let base = Self::base_named_type_str(tname);
                     if self.structs.contains_key(base) {
@@ -5343,7 +5345,10 @@ impl<'a> Checker<'a> {
         managed: bool,
     ) {
         let shape = self.shape_of_expr(st, subject);
-        let ty = match self.ty_of_expr(st, subject) {
+        let ty = match self
+            .ty_of_expr(st, subject)
+            .map(|t| self.resolve_type_alias(&t))
+        {
             Some(hy_syntax::TypeExpr::Option { elem, .. }) => Some(*elem),
             other => other,
         };
@@ -5761,15 +5766,18 @@ impl<'a> Checker<'a> {
                     }
 
                     if let Some(b) = st.env_lookup_mut(name) {
+                        let keep_existing_option_ty = matches!(info.shape, TypeShape::Unknown)
+                            && b.ty.as_ref().is_some_and(|t| self.ty_is_option(t));
                         if !matches!(info.shape, TypeShape::Unknown) || b.ty.is_none() {
                             b.shape = info.shape;
                         }
-                        if info.ty.is_some()
-                            || b.ty.is_none()
-                            || matches!(
-                                b.ty.as_ref().map(|t| self.resolve_type_alias(t)),
-                                Some(hy_syntax::TypeExpr::Fn { .. })
-                            )
+                        if !keep_existing_option_ty
+                            && (info.ty.is_some()
+                                || b.ty.is_none()
+                                || matches!(
+                                    b.ty.as_ref().map(|t| self.resolve_type_alias(t)),
+                                    Some(hy_syntax::TypeExpr::Fn { .. })
+                                ))
                         {
                             b.ty = info.ty;
                         }
@@ -5884,10 +5892,12 @@ impl<'a> Checker<'a> {
                         self.preserve_peers_before_sever(st, name, false);
                     }
                     if let Some(b) = st.env_lookup_mut(name) {
+                        let keep_existing_option_ty = matches!(shape, TypeShape::Unknown)
+                            && b.ty.as_ref().is_some_and(|t| self.ty_is_option(t));
                         if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
                             b.shape = shape.clone();
                         }
-                        if ty.is_some() || b.ty.is_none() {
+                        if !keep_existing_option_ty && (ty.is_some() || b.ty.is_none()) {
                             b.ty = ty;
                         }
                         b.moved = None;
