@@ -372,6 +372,9 @@ impl Emitter {
                     None => self.push(&format!("{} {} = {}", kw, names, value)),
                 }
                 self.shadow_local_names(&l.names);
+                if !composite && l.names.len() == l.values.len() {
+                    for (n, v) in l.names.iter().zip(l.values.iter()) { if n != "_" { self.local_consts.insert(n.clone(), v.clone()); } }
+                }
                 return Ok(());
             }
             // `:=` and `let` both render as Go's short declaration —
