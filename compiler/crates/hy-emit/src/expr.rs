@@ -630,7 +630,7 @@ impl Emitter {
         self.member_name(base, name)
     }
 
-    fn unwrap_parens(mut e: &Expr) -> &Expr {
+    pub(crate) fn unwrap_parens(mut e: &Expr) -> &Expr {
         while let Expr::Paren { inner, .. } = e {
             e = inner;
         }
@@ -655,24 +655,7 @@ impl Emitter {
     }
 
     fn is_user_struct_expr(&self, e: &Expr) -> bool {
-        match Self::unwrap_parens(e) {
-            Expr::Ident { name, .. } => self.var_struct.contains_key(name),
-            Expr::StructLit { .. } => true,
-            Expr::AddrOf { operand, .. } => self.is_user_struct_expr(operand),
-            Expr::Field { base, name, .. } => {
-                if let Expr::Ident { name: vn, .. } = Self::unwrap_parens(base) {
-                    if let Some(sn) = self.var_struct.get(vn) {
-                        if let Some(fields) = self.struct_fields.get(sn) {
-                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
-                                return self.struct_fields.contains_key(fty.as_str());
-                            }
-                        }
-                    }
-                }
-                false
-            }
-            _ => false,
-        }
+        self.struct_name_of_expr(e).is_some() || matches!(Self::unwrap_parens(e), Expr::StructLit { .. })
     }
 
     pub(crate) fn emit_call(
@@ -866,11 +849,24 @@ impl Emitter {
         // own method-receiver auto-address precedent, pinned by the
         // pre-registered corpus).
         let mut ptr_params: Vec<bool> = Vec::new();
-        if let Expr::Ident { name, .. } = callee {
-            let (fn_head, _) = split_type_args(name);
-            if let Some((_, _, _, params)) = self.fn_shapes.get(fn_head) {
-                ptr_params = params.iter().map(|p| p.is_some()).collect();
+        match Self::unwrap_parens(callee) {
+            Expr::Ident { name, .. } => {
+                let (fn_head, _) = split_type_args(name.as_str());
+                if let Some((_, _, _, params)) = self.fn_shapes.get(fn_head) {
+                    ptr_params = params.iter().map(|p| p.is_some()).collect();
+                }
             }
+            Expr::Field { base, name, .. } => {
+                let (method_name, _) = split_type_args(name.as_str());
+                if let Some(sn) = self.struct_name_of_expr(base.as_ref()) {
+                    if let Some((_, _, _, params)) =
+                        self.method_shapes.get(&(sn, method_name.to_string()))
+                    {
+                        ptr_params = params.iter().map(|p| p.is_some()).collect();
+                    }
+                }
+            }
+            _ => {}
         }
         let c = self.emit_expr(callee, ATOM)?;
         let mut parts = Vec::new();
