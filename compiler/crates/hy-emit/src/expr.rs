@@ -607,6 +607,7 @@ impl Emitter {
             }
             // A zero-arg/method call's result type is the member's result.
             Expr::Call { callee, .. } => self.type_of_expr(callee),
+            Expr::Try { operand, .. } => self.type_of_expr(operand),
             _ => None,
         }
     }
@@ -725,6 +726,10 @@ impl Emitter {
                             parts.push(self.emit_call_arg(a)?);
                         }
                         return Ok(format!("{}.{}({})", b, m.go, parts.join(", ")));
+                    }
+                    if m.kind == MemberKind::MethodZero && args.is_empty() {
+                        let b = self.emit_expr(base, ATOM)?;
+                        return Ok(format!("{}.{}()", b, m.go));
                     }
                     // MethodZero called WITH args (or a Field called) is a
                     // surface error — fall through; Go rejects Field(args)

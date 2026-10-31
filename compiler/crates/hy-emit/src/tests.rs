@@ -3053,3 +3053,78 @@ fn main() {}
     assert!(go6.contains("func read_url() int {"));
     assert!(go6.contains("func read_u_r_l() int {"));
 }
+
+
+// ---------------------------------------------------------------------------
+// Issue #2207: := binding foreign field or zero-arg accessor discards shape
+// ---------------------------------------------------------------------------
+
+#[test]
+fn issue_2207_infer_foreign_shape_on_field_and_accessor_bind() {
+    // 1. foreign field -> field: u := r.url; return u.path
+    let src1 = r#"
+import "net/http"
+
+fn f(r *http.request) string {
+    u := r.url
+    return u.path
+}
+"#;
+    let go1 = emit(src1);
+    assert!(go1.contains("u := r.URL"), "must contain u := r.URL:\n{}", go1);
+    assert!(go1.contains("return u.Path"), "must contain return u.Path:\n{}", go1);
+    assert!(!go1.contains("return u.path"), "must NOT contain return u.path:\n{}", go1);
+
+    // 2. foreign field/zero-arg accessor -> method: h := w.header; h.get("k")
+    let src2 = r#"
+import "net/http"
+
+fn f(w http.response_writer) string {
+    h := w.header
+    return h.get("k")
+}
+"#;
+    let go2 = emit(src2);
+    assert!(go2.contains("h.Get("), "must contain h.Get:\n{}", go2);
+    assert!(!go2.contains("h.get("), "must NOT contain h.get:\n{}", go2);
+
+    // 3. foreign method call binding: h := w.header(); h.get("k")
+    let src3 = r#"
+import "net/http"
+
+fn f(w http.response_writer) string {
+    h := w.header()
+    return h.get("k")
+}
+"#;
+    let go3 = emit(src3);
+    assert!(go3.contains("h.Get("), "must contain h.Get:\n{}", go3);
+    assert!(!go3.contains("h.get("), "must NOT contain h.get:\n{}", go3);
+
+    // 4. two-step field chain: u := r.url; q := u.query; q.get("k")
+    let src4 = r#"
+import "net/http"
+
+fn f(r *http.request) string {
+    u := r.url
+    q := u.query
+    return q.get("k")
+}
+"#;
+    let go4 = emit(src4);
+    assert!(go4.contains("q.Get("), "must contain q.Get:\n{}", go4);
+    assert!(!go4.contains("q.get("), "must NOT contain q.get:\n{}", go4);
+
+    // 5. accessor with zero args bound: a := r.url.query; a.get("k")
+    let src5 = r#"
+import "net/http"
+
+fn f(r *http.request) string {
+    a := r.url.query
+    return a.get("k")
+}
+"#;
+    let go5 = emit(src5);
+    assert!(go5.contains("a.Get("), "must contain a.Get:\n{}", go5);
+    assert!(!go5.contains("a.get("), "must NOT contain a.get:\n{}", go5);
+}
