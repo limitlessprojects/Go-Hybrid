@@ -80,25 +80,28 @@ impl<'a> Scan<'a> {
         if crate::foreign::BUILTIN_PACKAGES.contains(&name) {
             return;
         }
-        // `parser.rs` (`fold_type_args`) folds bracketed type arguments (and
-        // single-ident index expressions before `(`) into `Expr::Ident`
-        // (`id[int](42)` -> `Ident("id[int]")`, `m[k](42)` -> `Ident("m[k]")`).
+        // `parser.rs` (`fold_type_args`) folds a bracketed argument into the name
+        // in two shapes: a type argument on a named callee (`id[int](42)` ->
+        // `Ident("id[int]")`) and an index on a value before a call (`m[k](42)` ->
+        // `Ident("m[k]")`). `file_decls` answers the first question ("is this
+        // head a generic callee rather than a value?"), but it also carries the
+        // `PREDECLARED` seed, so a parameter or local that shadows a builtin read
+        // as a generic callee and `fn run(copy map[string]fn(int)) {
+        // copy[undef_key](42) }` never checked the key. A head bound in the
+        // current scope is a value: its bracket is an index whose key must
+        // resolve (issue #2423). Legal type arguments stay green either way —
+        // predeclared types, fn type parameters and file-level type/fn names are
+        // all in the resolved set.
         if let Some((head, rest)) = name.split_once('[') {
             let head_ok = self.allowed.contains(head)
                 || self.packages.contains(head)
                 || crate::foreign::BUILTIN_PACKAGES.contains(&head);
             if head_ok {
-                if !self.file_decls.contains(head) {
+                let generic_callee =
+                    self.file_decls.contains(head) && !self.local_decls.contains(head);
+                if !generic_callee {
                     if let Some(inside) = rest.strip_suffix(']') {
-                        let trimmed = inside.trim();
-                        if !trimmed.is_empty()
-                            && trimmed
-                                .chars()
-                                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-                            && !trimmed.chars().next().unwrap().is_ascii_digit()
-                        {
-                            self.ident(trimmed, span);
-                        }
+                        self.check_folded_bracket(inside, span);
                     }
                 }
                 return;
@@ -125,6 +128,25 @@ impl<'a> Scan<'a> {
                 ],
             ),
         );
+    }
+
+    /// A bracketed argument folded into a name by `parser.rs`: `id[int]`, `m[k]`,
+    /// `r.header[k]`, `http.status_ok[t]`. A bare identifier there is a USE and
+    /// must resolve — whether it is an index key on a value or a type argument,
+    /// the resolved set already carries every legal spelling (predeclared types,
+    /// fn type parameters, file-level type/fn names). Compound spellings
+    /// (`[]int`, `map[string]int`) are left to the type walkers.
+    fn check_folded_bracket(&mut self, inside: &str, span: Span) {
+        let trimmed = inside.trim();
+        if trimmed.is_empty()
+            || !trimmed.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return;
+        }
+        if trimmed.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(true) {
+            return;
+        }
+        self.ident(trimmed, span);
     }
 
     fn run_block(&mut self, b: &Block) {
@@ -236,13 +258,18 @@ impl<'a> Scan<'a> {
                     let saved_allowed = self.allowed.clone();
                     let saved_locals = self.local_decls.clone();
                     if let MatchPattern::Path { segments, binding } = &arm.pattern {
-                        if segments.len() == 1 {
+                        // A qualified arm root (`undef_enum.variant:`) names the
+                        // enum in segment 0, and segment 0 is what must resolve;
+                        // the variants after the dot are not declarations of their
+                        // own. Checking only single-segment paths is how an
+                        // undeclared enum root reached `go build` (issue #2423).
+                        if let Some(root) = segments.first() {
                             let arm_span = arm
                                 .guard
                                 .as_ref()
                                 .map(|g| g.span())
                                 .unwrap_or(arm.body.span);
-                            self.ident(&segments[0], arm_span);
+                            self.ident(root, arm_span);
                         }
                         if let Some(b) = binding {
                             self.define(b);
@@ -371,6 +398,20 @@ impl<'a> Scan<'a> {
                 }
             }
             Expr::Field { base, name, span } => {
+                // `fold_type_args` folds a bracketed argument onto a field name as
+                // well (`r.header[k]` -> `Field { name: "header[k]" }`, and
+                // `http.status_ok[t]` -> `Field { name: "status_ok[t]" }`), so the
+                // member is the name before the bracket and the bracket is a use of
+                // its own. Walking only `base` — and matching curated members by
+                // prefix — is how an undeclared index key reached `go build`
+                // (issue #2423).
+                let (member, folded) = match name.split_once('[') {
+                    Some((m, rest)) => (m, rest.strip_suffix(']').map(str::to_string)),
+                    None => (name.as_str(), None),
+                };
+                if let Some(inside) = folded {
+                    self.check_folded_bracket(&inside, *span);
+                }
                 let unwrapped = crate::model::unwrap_parens(base);
                 if let Expr::Ident { name: root, .. } = unwrapped {
                     if !self.local_decls.contains(root) {
@@ -385,7 +426,7 @@ impl<'a> Scan<'a> {
                                     format!(
                                         "`{}.{}` cannot be resolved — package `{}` is outside the M5 curated allowlist (allowlist: {}) (HYB-E1001)",
                                         root,
-                                        name,
+                                        member,
                                         root,
                                         crate::foreign::CURATED_ALLOWLIST_DISPLAY
                                     ),
@@ -396,7 +437,7 @@ impl<'a> Scan<'a> {
                             );
                             return;
                         } else if crate::foreign::is_curated_package_root(root) {
-                            if !crate::foreign::is_curated_package_member(root, name) {
+                            if !crate::foreign::is_curated_package_member(root, member) {
                                 self.diags.push(
                                     hy_diag::Diagnostic::error(
                                         "HYB-E1001",
@@ -404,7 +445,7 @@ impl<'a> Scan<'a> {
                                         *span,
                                         format!(
                                             "`{}.{}` is not a resolved member of curated package `{}` (HYB-E1001)",
-                                            root, name, root
+                                            root, member, root
                                         ),
                                     )
                                     .with_notes(vec![
