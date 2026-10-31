@@ -414,6 +414,16 @@ pub(crate) fn to_go_name(name: &str) -> String {
         .collect()
 }
 
+/// Mangle identifiers that are Go keywords but legal Hybrid identifiers
+/// (today: `default`, per SPEC-LANGUAGE LX14 / issue #1167).
+pub(crate) fn mangle_ident(name: &str) -> &str {
+    if name == "default" {
+        "default_"
+    } else {
+        name
+    }
+}
+
 /// The base NAMED type of a TypeExpr, if any (`*atomic.int64` →
 /// "atomic.int64", `env` → "env", `map[string]int` → None). Batch I's
 /// receiver tables key on this.
@@ -943,6 +953,7 @@ impl Emitter {
 
     fn emit_file_const(&mut self, c: &ConstDecl) -> Result<(), EmitError> {
         let value = self.emit_expr(&c.value, 0)?;
+        let name = mangle_ident(&c.name);
         // Go's `const` admits only bool/string/number literals. Composite
         // values (slices/maps/structs — 17's `const thresholds = [10, …]`,
         // 18's seed_urls) lower to `var`: same identifier surface, the
@@ -955,14 +966,15 @@ impl Emitter {
         match &c.ty {
             Some(t) => {
                 let ty = self.type_text(t);
-                self.push(&format!("{} {} {} = {}", kw, c.name, ty, value));
+                self.push(&format!("{} {} {} = {}", kw, name, ty, value));
             }
-            None => self.push(&format!("{} {} = {}", kw, c.name, value)),
+            None => self.push(&format!("{} {} = {}", kw, name, value)),
         }
         Ok(())
     }
 
     fn emit_struct(&mut self, s: &StructDecl) -> Result<(), EmitError> {
+        let s_name = mangle_ident(&s.name);
         if !s.type_params.is_empty() {
             // Generic struct (example-07 surface): Go requires a constraint on
             // every type parameter (`type box[t any] struct {`). Without a
@@ -975,20 +987,21 @@ impl Emitter {
                 Self::collect_comparable_in_ty(&f.ty, &param_names, &mut comparable_params);
             }
             let params = self.format_type_params(&s.type_params, &comparable_params);
-            self.push(&format!("type {}[{}] struct {{", s.name, params));
+            self.push(&format!("type {}[{}] struct {{", s_name, params));
         } else {
-            self.push(&format!("type {} struct {{", s.name));
+            self.push(&format!("type {} struct {{", s_name));
         }
         self.indent += 1;
         // gofmt aligns consecutive field declarations: names padded to the
         // longest, types in one column. Do it here so emitted output is
         // gofmt-canonical without a post-pass.
-        let width = s.fields.iter().map(|f| f.name.len()).max().unwrap_or(0);
+        let width = s.fields.iter().map(|f| mangle_ident(&f.name).len()).max().unwrap_or(0);
         for f in &s.fields {
             // Our own struct fields stay snake_case (M4 normalizes FOREIGN
             // names, never ours).
             let ty = self.type_text(&f.ty);
-            self.push(&format!("{:<width$} {}", f.name, ty, width = width));
+            let f_name = mangle_ident(&f.name);
+            self.push(&format!("{:<width$} {}", f_name, ty, width = width));
         }
         self.indent -= 1;
         self.push("}");
@@ -1291,6 +1304,8 @@ impl Emitter {
         let go_name =
             if self.export_pub && f.is_pub && f.receiver.is_none() && !f.name.contains('.') {
                 to_go_name(&f.name)
+            } else if f.name == "default" {
+                "default_".to_string()
             } else {
                 f.name.replace('.', "_")
             };
@@ -1375,9 +1390,10 @@ impl Emitter {
             }
             let recv_ty = self.type_text(&recv.ty);
             let star = if recv.is_pointer { "*" } else { "" };
+            let recv_name = mangle_ident(&recv.name);
             self.push_raw(&format!(
                 "func ({} {}{}) {}(",
-                recv.name, star, recv_ty, go_name
+                recv_name, star, recv_ty, go_name
             ));
         } else {
             // Generic fn: `func lru_cache_new[k comparable, v any](...)`.
@@ -1462,7 +1478,7 @@ impl Emitter {
                 let r = &f.results[0];
                 let ty = self.type_text(&r.ty);
                 match &r.name {
-                    Some(n) => self.push_raw(&format!(" ({} {}) {{\n", n, ty)),
+                    Some(n) => self.push_raw(&format!(" ({} {}) {{\n", mangle_ident(n), ty)),
                     None => self.push_raw(&format!(" {} {{\n", ty)),
                 }
             }
@@ -1505,7 +1521,7 @@ impl Emitter {
         for (i, r) in results.iter().enumerate() {
             let ty = self.type_text(&r.ty);
             match &r.name {
-                Some(n) => parts.push(format!("{} {}", n, ty)),
+                Some(n) => parts.push(format!("{} {}", mangle_ident(n), ty)),
                 None if mixed => {
                     let base = format!("hyR{}", i);
                     let mut name = base.clone();
@@ -1533,7 +1549,13 @@ impl Emitter {
                 .results
                 .iter()
                 .enumerate()
-                .map(|(i, r)| r.name.clone().unwrap_or_else(|| format!("hyR{}", i)))
+                .map(|(i, r)| {
+                    r.name
+                        .as_deref()
+                        .map(mangle_ident)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| format!("hyR{}", i))
+                })
                 .collect();
             names.join(", ") + ", hyErr"
         }
@@ -1544,7 +1566,12 @@ impl Emitter {
     fn main_closure_sig(&mut self, f: &FnDecl) -> String {
         let mut parts: Vec<String> = Vec::new();
         for (i, r) in f.results.iter().enumerate() {
-            let n = r.name.clone().unwrap_or_else(|| format!("hyR{}", i));
+            let n = r
+                .name
+                .as_deref()
+                .map(mangle_ident)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("hyR{}", i));
             let ty = self.type_text(&r.ty);
             parts.push(format!("{} {}", n, ty));
         }
@@ -1559,7 +1586,7 @@ impl Emitter {
                 rendered.push_str(", ");
             }
             let ty = self.type_text(&p.ty);
-            rendered.push_str(&format!("{} {}", p.name, ty));
+            rendered.push_str(&format!("{} {}", mangle_ident(&p.name), ty));
         }
         self.push_raw(&rendered);
     }
@@ -1812,7 +1839,7 @@ impl Emitter {
             } => {
                 let ps = params
                     .iter()
-                    .map(|p| format!("{} {}", p.name, self.type_text(&p.ty)))
+                    .map(|p| format!("{} {}", mangle_ident(&p.name), self.type_text(&p.ty)))
                     .collect::<Vec<_>>()
                     .join(", ");
                 let rs = results
@@ -1894,7 +1921,7 @@ impl Emitter {
             // (`u16` -> `uint16`); anything else stays verbatim. Issue #147.
             match shapes::go_primitive_name(name) {
                 Some(go) => go.to_string(),
-                None => name.to_string(),
+                None => mangle_ident(name).to_string(),
             }
         }
     }
