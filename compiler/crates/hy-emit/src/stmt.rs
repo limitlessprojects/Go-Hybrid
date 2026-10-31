@@ -1176,12 +1176,14 @@ impl Emitter {
                 _ => false,
             },
             Expr::Field { base, name, .. } => {
-                if let Expr::Ident { name: vn, .. } = base.as_ref() {
-                    if let Some(sn) = self.var_struct.get(vn) {
-                        if let Some(fields) = self.struct_fields.get(sn) {
-                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
-                                return fty.starts_with("set[") || fty == "set";
-                            }
+                // Recursive since #1553: `o.sub.seen` is a set field of a
+                // nested struct, not just `o.seen`. The single-hop read
+                // made `len(o.sub.seen)` / `delete(o.sub.seen, k)` fall
+                // through to raw Go builtins on the `set[T]` wrapper.
+                if let Some(sn) = self.user_struct_name_of(base.as_ref()) {
+                    if let Some(fields) = self.struct_fields.get(sn) {
+                        if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
+                            return fty.starts_with("set[") || fty == "set";
                         }
                     }
                 }
