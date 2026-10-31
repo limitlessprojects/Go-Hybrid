@@ -1,0 +1,2 @@
+#[test]
+fn moving_slot_loan_rejects_e3104() { for b in ["var s *acct; s = &m[\"a\"]; task w(move s)", "var s *acct; s = &m[\"a\"]; ch <- move s", "s := &m[\"a\"]; task w(move s)"] { let r = hy_check::check_file(&hy_syntax::parse_file("t.hy", &format!("struct acct {{ n int }}\nfn w(p *acct) {{ p.n = 1 }}\nfn main() {{\n    m := map[string]acct{{\"a\": acct{{n: 1}}}}\n    ch := make(chan *acct, 1)\n    {}\n    _ = ch\n}}\n", b.replace("; ", "\n    "))).unwrap()); assert!(r.diagnostics.iter().any(|d| d.code == "HYB-E3104"), "{b}: {:?}", r.diagnostics); } }
