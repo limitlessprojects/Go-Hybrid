@@ -181,5 +181,56 @@ class FailClosedTests(_ProblemsMixin, unittest.TestCase):
         self.assertIn("no corpus count found", hits[0])
 
 
+class HarnessVerdictTests(unittest.TestCase):
+    def _assert_invalid_verdict(self, content, error):
+        files = consistent_tree()
+        rel = "tests/checker-corpus/f00.hy"
+        files[rel] = content
+        tmp, root = make_tree(files)
+        self.addCleanup(tmp.cleanup)
+
+        problems, total, counts = MOD.collect_problems(root)
+
+        self.assertEqual(total, 3)
+        self.assertEqual(counts["INVALID"], 1)
+        self.assertEqual(counts["ACCEPT"], 0)
+        self.assertEqual(counts["ACCEPT-MANAGED"], 0)
+        self.assertEqual(counts["REJECT"], 2)
+        self.assertTrue(
+            any("f00.hy" in problem and error in problem for problem in problems),
+            problems,
+        )
+
+    def test_accept_unknown_is_invalid(self):
+        self._assert_invalid_verdict(corpus_file("ACCEPT-UNKNOWN"), "malformed EXPECTED-VERDICT")
+
+    def test_accept_with_trailing_text_is_invalid(self):
+        self._assert_invalid_verdict(corpus_file("ACCEPT junk"), "unexpected rule after ACCEPT")
+
+    def test_duplicate_verdict_headers_are_invalid(self):
+        self._assert_invalid_verdict(
+            "// EXPECTED-VERDICT: ACCEPT\n// EXPECTED-VERDICT: REJECT A1c\n",
+            "multiple EXPECTED-VERDICT headers",
+        )
+
+    def test_reject_without_rule_id_is_invalid(self):
+        self._assert_invalid_verdict(corpus_file("REJECT"), "REJECT without a rule id")
+
+    def test_indented_accept_header_is_counted_as_accept(self):
+        files = consistent_tree()
+        files["tests/checker-corpus/f00.hy"] = (
+            "   // EXPECTED-VERDICT: ACCEPT\nfn main() {\n}\n"
+        )
+        tmp, root = make_tree(files)
+        self.addCleanup(tmp.cleanup)
+
+        problems, total, counts = MOD.collect_problems(root)
+
+        self.assertEqual(problems, [])
+        self.assertEqual(total, 3)
+        self.assertEqual(counts["ACCEPT"], 1)
+        self.assertEqual(counts["NO-VERDICT"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
