@@ -983,7 +983,24 @@ impl<'a> Checker<'a> {
     /// element type), so a `nil` whose slot resolves to a non-nilable shape
     /// is a type error right there — boundary or not.
     pub(crate) fn check_composite_nils(&mut self, st: &FnState, value: &Expr) {
-        match unwrap_parens(value) {
+        // Unwrap once so the `as_array_lit()` probe below sees the literal
+        // rather than the parentheses (#1987 cause 2), and so a `move`-wrapped
+        // literal reaches this match at all (cause 4).
+        let value = unwrap_parens(value);
+        match value {
+            Expr::Move { operand, .. } => {
+                self.check_composite_nils(st, operand);
+            }
+            Expr::Call { callee, args, .. }
+                if matches!(unwrap_parens(callee), Expr::Ident { name, .. } if name == "some") =>
+            {
+                // `some(job{p: nil})` carries a composite literal in its only
+                // argument; N1 is a type contract, so the wrapper cannot hide it
+                // (#1987 cause 5).
+                for a in args {
+                    self.check_composite_nils(st, &a.value);
+                }
+            }
             Expr::StructLit { ty, fields, .. } => {
                 // the literal's own ascription wins; else infer from the env
                 // (an ascribed define `var j jobT = jobT{...}` names the
@@ -1013,14 +1030,21 @@ impl<'a> Checker<'a> {
                     }
                     cur
                 });
-                if let Some(sname) = sname.or_else(|| {
-                    let shape = self.shape_of_expr(st, value);
-                    match shape {
-                        TypeShape::Struct(Some(n)) => Some(n),
-                        _ => None,
+                let mut def = ty.as_ref().and_then(|t| self.struct_fields_for_type(t));
+                let mut disp = sname.clone().unwrap_or_default();
+                if def.is_none() {
+                    if let Some(n) = sname.as_ref() {
+                        def = self.structs.get(n).cloned();
+                        disp = n.clone();
                     }
-                }) {
-                    if let Some(def) = self.structs.get(&sname).cloned() {
+                }
+                if def.is_none() {
+                    if let TypeShape::Struct(Some(n)) = self.shape_of_expr(st, value) {
+                        def = self.structs.get(&n).cloned();
+                        disp = n;
+                    }
+                }
+                if let Some(def) = def {
                         for f in fields {
                             if let Some((_, fty)) = def.iter().find(|(n, _)| n == &f.name) {
                                 if Checker::is_nil_literal(&f.value) {
@@ -1030,7 +1054,7 @@ impl<'a> Checker<'a> {
                                             &fshape,
                                             fty.render(),
                                             f.value.span(),
-                                            &format!("the field `{}.{}`", sname, f.name),
+                                            &format!("the field `{}.{}`", disp, f.name),
                                         );
                                     }
                                     continue;
@@ -1038,13 +1062,27 @@ impl<'a> Checker<'a> {
                                 self.check_composite_nils(st, &f.value);
                             }
                         }
-                    }
                 }
             }
-            Expr::MapLit { value: vty, entries, .. } => {
+            Expr::MapLit { key: kty, value: vty, entries, .. } => {
+                let kshape = self.shape_of_type(kty);
                 let vshape = self.shape_of_type(vty);
+                let kty_text = kty.render();
                 let vty_text = vty.render();
                 for (k, v) in entries {
+                    // The key slot is a typed slot too: `map[*int]int{nil: 1}`
+                    // used to slip through because only the value was classified
+                    // (#1987 cause 1).
+                    if Checker::is_nil_literal(k) && !Checker::is_nilable_shape(&kshape) {
+                        self.emit_nil_type_error_text(
+                            &kshape,
+                            kty_text.clone(),
+                            k.span(),
+                            &format!("the map key slot `{}`", kty_text),
+                        );
+                    } else {
+                        self.check_composite_nils(st, k);
+                    }
                     if Checker::is_nil_literal(v) && !Checker::is_nilable_shape(&vshape) {
                         self.emit_nil_type_error_text(
                             &vshape,
@@ -1052,10 +1090,9 @@ impl<'a> Checker<'a> {
                             v.span(),
                             &format!("the map value slot `{}`", vty_text),
                         );
-                        continue;
+                    } else {
+                        self.check_composite_nils(st, v);
                     }
-                    self.check_composite_nils(st, v);
-                    self.check_composite_nils(st, k);
                 }
             }
             Expr::SliceLit { elem, items, .. } => {
