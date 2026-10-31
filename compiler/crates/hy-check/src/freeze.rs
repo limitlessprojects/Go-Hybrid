@@ -16,9 +16,7 @@ use std::collections::{HashMap, HashSet};
 /// created a cycle in `st.aliases`, return the lexicographically smallest
 /// member of the cycle so every member of the cycle resolves to the same
 /// canonical root.
-pub(crate) fn resolve_alias(_st: &FnState, name: &str) -> String {
-    name.to_string()
-}
+pub(crate) fn resolve_alias(st: &FnState, name: &str) -> String {
     let mut cur = name.to_string();
     let mut seen: Vec<String> = vec![cur.clone()];
     for _ in 0..16 {
@@ -42,9 +40,7 @@ pub(crate) fn resolve_alias(_st: &FnState, name: &str) -> String {
 
 /// Transitive connected component of `seed` across both `aliases` (parent and
 /// child directions) and `may_share`, including `seed` itself.
-fn storage_component(_st: &FnState, seed: &str) -> HashSet<String> {
-    HashSet::from([seed.to_string()])
-}
+fn storage_component(st: &FnState, seed: &str) -> HashSet<String> {
     if !st.aliases.contains_key(seed)
         && st.may_share.get(seed).is_none_or(|peers| peers.is_empty())
         && !st.aliases.values().any(|parent| parent == seed)
