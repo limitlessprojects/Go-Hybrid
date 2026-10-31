@@ -59,6 +59,8 @@ WORKFLOW_EXT = ".yml"
 TOP_LEVEL_KEY_RE = re.compile(
     r"^(?:[A-Za-z_][A-Za-z0-9_.\-]*|'[^'\n]+'|\"[^\"\n]+\")\s*:"
 )
+DOC_MARKER_RE = re.compile(r"^(?:---|\.\.\.)(?:\s|$)")
+YAML_DIRECTIVE_RE = re.compile(r"^%[A-Za-z0-9_-]+(?:\s|$)")
 
 
 def is_text_candidate(path):
@@ -113,9 +115,8 @@ def scan_workflow_file(path):
                     continue
                 if (
                     stripped.startswith("#")
-                    or stripped.startswith("---")
-                    or stripped.startswith("...")
-                    or stripped.startswith("%")
+                    or DOC_MARKER_RE.match(stripped)
+                    or YAML_DIRECTIVE_RE.match(stripped)
                 ):
                     continue
                 if TOP_LEVEL_KEY_RE.match(stripped):
