@@ -287,11 +287,78 @@ fn parenthesized_and_aliased_make_preserves_share_and_closure_checks() {
 }
 
 #[test]
+#[test]
 fn make_array_lit_rejected_hyb_e2005() {
     let r1 = check("fn main() {\n    _ = make([4]int{}, 4)\n}\n");
     assert_has(&r1, "HYB-E2005");
 
     let r2 = check("fn main() {\n    _ = make(([4]int{}), 4)\n}\n");
     assert_has(&r2, "HYB-E2005");
+}
+
+#[test]
+fn min_max_complex_real_imag_arity_and_spread_rejected() {
+    let bad_min_0 = check("fn main() {\n    _ = min()\n}\n");
+    assert_has(&bad_min_0, "HYB-E2005");
+
+    let bad_max_0 = check("fn main() {\n    _ = max()\n}\n");
+    assert_has(&bad_max_0, "HYB-E2005");
+
+    let bad_min_spread = check("fn main() {\n    xs := []int{1, 2}\n    _ = min(xs...)\n}\n");
+    assert_has(&bad_min_spread, "HYB-E2005");
+
+    let bad_complex_0 = check("fn main() {\n    _ = complex()\n}\n");
+    assert_has(&bad_complex_0, "HYB-E2005");
+
+    let bad_complex_1 = check("fn main() {\n    _ = complex(1.0)\n}\n");
+    assert_has(&bad_complex_1, "HYB-E2005");
+
+    let bad_complex_3 = check("fn main() {\n    _ = complex(1.0, 2.0, 3.0)\n}\n");
+    assert_has(&bad_complex_3, "HYB-E2005");
+
+    let bad_complex_spread = check("fn main() {\n    xs := []float64{1.0, 2.0}\n    _ = complex(xs...)\n}\n");
+    assert_has(&bad_complex_spread, "HYB-E2005");
+
+    let bad_real_0 = check("fn main() {\n    _ = real()\n}\n");
+    assert_has(&bad_real_0, "HYB-E2005");
+
+    let bad_real_2 = check("fn main() {\n    _ = real(1, 2)\n}\n");
+    assert_has(&bad_real_2, "HYB-E2005");
+
+    let bad_real_spread = check("fn main() {\n    xs := []int{1}\n    _ = real(xs...)\n}\n");
+    assert_has(&bad_real_spread, "HYB-E2005");
+
+    let bad_imag_0 = check("fn main() {\n    _ = imag()\n}\n");
+    assert_has(&bad_imag_0, "HYB-E2005");
+
+    let bad_imag_2 = check("fn main() {\n    _ = imag(1, 2)\n}\n");
+    assert_has(&bad_imag_2, "HYB-E2005");
+
+    let bad_imag_spread = check("fn main() {\n    xs := []int{1}\n    _ = imag(xs...)\n}\n");
+    assert_has(&bad_imag_spread, "HYB-E2005");
+
+    let bad_panic_spread = check("fn main() {\n    xs := []int{1}\n    panic(xs...)\n}\n");
+    assert_has(&bad_panic_spread, "HYB-E2005");
+
+    let bad_close_spread = check("fn main() {\n    ch := make(chan int)\n    close(ch...)\n}\n");
+    assert_has(&bad_close_spread, "HYB-E2005");
+}
+
+#[test]
+fn min_max_complex_real_imag_valid_calls_pass() {
+    let ok_min_int = check("fn main() {\n    _ = min(1, 2)\n}\n");
+    assert_lacks(&ok_min_int, "HYB-E2005");
+
+    let ok_max_float = check("fn main() {\n    _ = max(1.5, 2.5, 3.5)\n}\n");
+    assert_lacks(&ok_max_float, "HYB-E2005");
+
+    let ok_min_str = check("fn main() {\n    _ = min(\"a\", \"b\")\n}\n");
+    assert_lacks(&ok_min_str, "HYB-E2005");
+
+    let ok_complex = check("fn main() {\n    _ = complex(1.0, 2.0)\n}\n");
+    assert_lacks(&ok_complex, "HYB-E2005");
+
+    let ok_real_imag = check("fn main() {\n    var c complex128\n    _ = real(c)\n    _ = imag(c)\n}\n");
+    assert_lacks(&ok_real_imag, "HYB-E2005");
 }
 
