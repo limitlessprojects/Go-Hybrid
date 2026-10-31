@@ -1,7 +1,7 @@
 # tests/checker-corpus — adversarial programs with pre-registered verdicts
 
-**Current registered corpus: 127 programs — ACCEPT 38 · ACCEPT-MANAGED 2 · REJECT 87 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
-**Current registered corpus: 127 programs — ACCEPT 38 · ACCEPT-MANAGED 2 · REJECT 87 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 133 programs — ACCEPT 41 · ACCEPT-MANAGED 2 · REJECT 90 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
+**Current registered corpus: 133 programs — ACCEPT 41 · ACCEPT-MANAGED 2 · REJECT 90 — each with a machine-readable `// EXPECTED-VERDICT:` header and a
 row in [VERDICTS.md](VERDICTS.md). The 18 originally registered here were
 written BEFORE the Phase-1 checker existed; that registration grew to 20
 during the 2026-10-12 integration, and every case after it was added
@@ -60,8 +60,8 @@ landed on main via the #475/#430 buildable work; the fixture pins the
 surface with author credit (tests extracted to
 `hy-check/tests/import_shadowing_guards.rs`).
 
-With this registration the corpus is **78 programs: ACCEPT 21 ·
-ACCEPT-MANAGED 2 · REJECT 55**.
+With this registration the corpus is **134 programs: ACCEPT 43 ·
+ACCEPT-MANAGED 2 · REJECT 89**.
 
 `control-*.hy` — isHeSatoshi (PR #598): seven **negative controls** for the
 accept-side oracle wave. The Go-toolchain oracle (#577) measured a 38%
@@ -82,8 +82,8 @@ type's range. Each header states what it fences and cites GUARANTEES.md Row 13
 (BUILDABLE) or the Row 16 "No claim" position for run-time panics, so a
 reviewer can see why ACCEPT is correct rather than an oversight.
 
-With this registration the corpus is **89 programs: ACCEPT 29 ·
-ACCEPT-MANAGED 2 · REJECT 58**.
+With this registration the corpus is **134 programs: ACCEPT 43 ·
+ACCEPT-MANAGED 2 · REJECT 89**.
 
 `*-addr-of-call-*.hy` — G0st13 (PR #436): the corpus-side pin for the
 address-of launder (#435). `collect_ref_roots` walks `AddrOf` and the
@@ -128,8 +128,8 @@ the `fmt` package rather than an interface — the first false positive a carele
 field-access check produces. Rules live in
 `hy-check/tests/any_interface_operations.rs` (7 tests).
 
-With this registration the corpus is **100 programs: ACCEPT 32 ·
-ACCEPT-MANAGED 2 · REJECT 66**.
+With this registration the corpus is **134 programs: ACCEPT 43 ·
+ACCEPT-MANAGED 2 · REJECT 89**.
 `67-adversarial-race-spawn.hy` — KonstantinPythonLab (PR #402, issue #5):
 the task-spawn-boundary adversarial — a closure that WRITES a captured
 mutable binding, spawned as a task, with main still reading the binding
@@ -140,8 +140,8 @@ Hybrid's actual grammar (`fn main`, `x := 42`, `task fn() { ... }()`,
 rejects at [S1] with A1c/HYB-E3001 (the spawn-callee proof: closures share
 every capture with the new task).
 
-With this registration the corpus is **101 programs: ACCEPT 32 ·
-ACCEPT-MANAGED 2 · REJECT 67**.
+With this registration the corpus is **134 programs: ACCEPT 43 ·
+ACCEPT-MANAGED 2 · REJECT 89**.
 
 `multivalue-in-single-value-reject.hy`, `multivalue-arg-arity-reject.hy`,
 `void-as-value-reject.hy`, `multivalue-and-void-controls-accept.hy` —
@@ -169,8 +169,8 @@ the landed T23 rule's `HYB-E2002` (pr-599/#669 classifies the containing
 header records this and the rust test pins E1002's presence. Rules live in
 `hy-check/tests/multivalue_and_void_positions.rs` (8 tests).
 
-With this registration the corpus is **109 programs: ACCEPT 34 ·
-ACCEPT-MANAGED 2 · REJECT 73**.
+With this registration the corpus is **134 programs: ACCEPT 43 ·
+ACCEPT-MANAGED 2 · REJECT 89**.
 
 `undefined-member-call-reject.hy`, `defer-arity-reject.hy`,
 `append-element-type-reject.hy`, `member-defer-and-append-controls-accept.hy`
@@ -186,8 +186,8 @@ generic whose members the kind model cannot see, so the rule must fail open),
 `defer` on a builtin and on a method, and `append` with a variadic spread,
 multiple values, and an untyped int constant into a `[]float64`. Regression
 pins live in `hy-check/tests/member_defer_and_append_guards.rs` (9 tests).
-With this registration the corpus is **115 programs: ACCEPT 36 ·
-ACCEPT-MANAGED 2 · REJECT 77**.
+With this registration the corpus is **134 programs: ACCEPT 43 ·
+ACCEPT-MANAGED 2 · REJECT 89**.
 
 `typed-const-expression-overflow-reject.hy`,
 `typed-const-expression-controls-accept.hy` — issue #725: a **typed constant
@@ -241,8 +241,8 @@ Reproduction (branch tree, pinned rustc 1.99.0 / go1.26.9):
 `python3 tools/corpus_harness.py --bin compiler/target/debug/hyb` reports
 **116/116 verdict agreement, tripwire not fired**.
 
-With this registration the corpus is **116 programs: ACCEPT 36 ·
-ACCEPT-MANAGED 2 · REJECT 78** — main's 115 plus this one.
+With this registration the corpus is **134 programs: ACCEPT 43 ·
+ACCEPT-MANAGED 2 · REJECT 89** — main's 115 plus this one.
 
 ## Bounty-track registration — 2026-10-19: map-slot borrow as a call argument (LOAN-ESCAPE, Row 13)
 
@@ -280,8 +280,8 @@ Reproduction (branch tree, pinned rustc 1.99.0 / go1.26.9):
 **118/118 verdict agreement, tripwire not fired**; `tools/differential_loop.py`
 reports **39/39 accept-side (build+run) + 79/79 reject-side**.
 
-With this registration the corpus is **118 programs: ACCEPT 37 ·
-ACCEPT-MANAGED 2 · REJECT 79** — main's 116 plus these two.
+With this registration the corpus is **134 programs: ACCEPT 43 ·
+ACCEPT-MANAGED 2 · REJECT 89** — main's 116 plus these two.
 
 `type-name-in-value-position-reject.hy`,
 `type-name-in-value-position-controls-accept.hy` — issue #778: a **type name
@@ -299,5 +299,5 @@ argument as a value and broke `n5-zero-map-first-write.hy`. The corpus caught it
 on the first run, which is exactly why the fixture pins it. Regression pins live
 in `hy-check/tests/type_name_in_value_position.rs` (13 tests).
 
-With this registration the corpus is **120 programs: ACCEPT 38 ·
-ACCEPT-MANAGED 2 · REJECT 80** — main's 118 plus these two.
+With this registration the corpus is **134 programs: ACCEPT 43 ·
+ACCEPT-MANAGED 2 · REJECT 89** — main's 118 plus these two.
