@@ -285,3 +285,62 @@ fn addressable_field_index_paren_slice_pop_and_user_struct_pop_accepted() {
         r.diagnostics
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #1822: Non-slice struct, pointer, and interface pop calls rejected
+// ---------------------------------------------------------------------------
+
+#[test]
+fn struct_and_pointer_without_pop_method_rejected_with_e1002() {
+    let struct_val = check(
+        "struct point {\n\
+           x int\n\
+           y int\n\
+         }\n\
+         fn main() {\n\
+           var pt point\n\
+           _ = pt.pop()\n\
+         }\n",
+    );
+    assert_eq!(struct_val.verdict, Verdict::Reject, "{:?}", struct_val.diagnostics);
+    assert!(
+        struct_val.diagnostics.iter().any(|d| d.code == "HYB-E1002"),
+        "expected HYB-E1002 on struct without pop method, got: {:?}",
+        struct_val.diagnostics
+    );
+
+    let struct_ptr = check(
+        "struct point {\n\
+           x int\n\
+           y int\n\
+         }\n\
+         fn main() {\n\
+           var pt point\n\
+           var ptr *point = &pt\n\
+           _ = ptr.pop()\n\
+         }\n",
+    );
+    assert_eq!(struct_ptr.verdict, Verdict::Reject, "{:?}", struct_ptr.diagnostics);
+    assert!(
+        struct_ptr.diagnostics.iter().any(|d| d.code == "HYB-E1002"),
+        "expected HYB-E1002 on pointer to struct without pop method, got: {:?}",
+        struct_ptr.diagnostics
+    );
+}
+
+#[test]
+fn interface_without_pop_method_rejected_with_e1002() {
+    let iface = check(
+        "fn main() {\n\
+           var a any\n\
+           _ = a.pop()\n\
+         }\n",
+    );
+    assert_eq!(iface.verdict, Verdict::Reject, "{:?}", iface.diagnostics);
+    assert!(
+        iface.diagnostics.iter().any(|d| d.code == "HYB-E1002"),
+        "expected HYB-E1002 on interface without pop method, got: {:?}",
+        iface.diagnostics
+    );
+}
+
