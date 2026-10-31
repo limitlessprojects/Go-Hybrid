@@ -453,6 +453,59 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
 }
 
 impl<'a> Collector<'a> {
+    fn is_untyped_numeric_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit { kind, .. } => matches!(kind, LitKind::Int(_) | LitKind::Float(_)),
+            Expr::Ident { name, .. } => {
+                if let Some(d) = self.ck.file.decls.iter().find_map(|d| match d {
+                    Decl::Const(cd) if &cd.name == name => Some(cd),
+                    _ => None,
+                }) {
+                    return d.ty.is_none() && self.is_untyped_numeric_const(&d.value);
+                }
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        let def = &self.defines[*id];
+                        if def.kind == LocalKind::Const {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnOp::Neg) && self.is_untyped_numeric_const(operand)
+            }
+            Expr::Binary { op, lhs, rhs, .. } => {
+                matches!(
+                    op,
+                    BinOp::Add
+                        | BinOp::Sub
+                        | BinOp::Mul
+                        | BinOp::Div
+                        | BinOp::Mod
+                        | BinOp::BitAnd
+                        | BinOp::BitOr
+                        | BinOp::BitXor
+                        | BinOp::Shl
+                        | BinOp::Shr
+                ) && self.is_untyped_numeric_const(lhs)
+                    && self.is_untyped_numeric_const(rhs)
+            }
+            _ => false,
+        }
+    }
+
+    fn binary_numeric_conflict(&self, lhs: &Expr, lk: &OpKind, rhs: &Expr, rk: &OpKind) -> bool {
+        if lk == &OpKind::Float && rk == &OpKind::Int {
+            return !self.is_untyped_numeric_const(rhs);
+        }
+        if lk == &OpKind::Int && rk == &OpKind::Float {
+            return !self.is_untyped_numeric_const(lhs);
+        }
+        false
+    }
+
     // -- scope bookkeeping ---------------------------------------------------
 
     fn push_scope(&mut self) {
@@ -2967,9 +3020,10 @@ impl<'a> Collector<'a> {
             // are rejected here under HYB-E1002 (rule `BUILDABLE`).
             BinOp::Eq | BinOp::Ne => {
                 let op_str = if matches!(op, BinOp::Eq) { "==" } else { "!=" };
+                let num_conflict = lk.is_numeric() && rk.is_numeric() && self.binary_numeric_conflict(lhs, &lk, rhs, &rk);
                 if !Checker::is_nil_literal(lhs)
                     && !Checker::is_nil_literal(rhs)
-                    && equality_kinds_conflict(&lk, &rk)
+                    && (num_conflict || (!lk.is_numeric() && !rk.is_numeric() && equality_kinds_conflict(&lk, &rk)))
                 {
                     self.emit_e1002(
                         span,
@@ -3015,7 +3069,7 @@ impl<'a> Collector<'a> {
                 let r_ok = matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
                 let mismatch = lk != OpKind::Unknown
                     && rk != OpKind::Unknown
-                    && lk.is_numeric() != rk.is_numeric();
+                    && (lk.is_numeric() != rk.is_numeric() || (lk.is_numeric() && rk.is_numeric() && self.binary_numeric_conflict(lhs, &lk, rhs, &rk)));
                 if !l_ok || !r_ok || mismatch {
                     self.emit_e1002(
                         span,
@@ -3036,7 +3090,7 @@ impl<'a> Collector<'a> {
                 let r_ok = matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
                 let mismatch = lk != OpKind::Unknown
                     && rk != OpKind::Unknown
-                    && lk.is_numeric() != rk.is_numeric();
+                    && (lk.is_numeric() != rk.is_numeric() || (lk.is_numeric() && rk.is_numeric() && self.binary_numeric_conflict(lhs, &lk, rhs, &rk)));
                 if !l_ok || !r_ok || mismatch {
                     self.emit_e1002(
                         span,
@@ -3057,9 +3111,12 @@ impl<'a> Collector<'a> {
                     BinOp::Mul => "*",
                     _ => "/",
                 };
-                if !matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float)
-                    || !matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float)
-                {
+                let l_ok = matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float);
+                let r_ok = matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float);
+                let mismatch = lk != OpKind::Unknown
+                    && rk != OpKind::Unknown
+                    && (lk.is_numeric() && rk.is_numeric() && self.binary_numeric_conflict(lhs, &lk, rhs, &rk));
+                if !l_ok || !r_ok || mismatch {
                     self.emit_e1002(
                         span,
                         format!(
