@@ -4123,6 +4123,118 @@ mod tests {
     }
 
     #[test]
+    fn match_variant_patterns_on_scalar_subject_reject_e5002() {
+        // S1: scalar subject + `some`/`none` arms was silently "upgraded" to
+        // an option match (0 diagnostics) while the emitter lowers
+        // `hyMatchN.ok`/`.val` on the raw `int` — `go build` rejected
+        // `hyMatch0.ok undefined`. Now a dedicated type error (T13/T20).
+        let r1 = check(
+            "fn main() {\n\
+               var n int\n\
+               match n {\n\
+                 some(v): fmt.println(v)\n\
+                 none: fmt.println(0)\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r1.verdict, Verdict::Reject, "{:?}", r1.diagnostics);
+        assert_eq!(r1.diagnostics[0].code, "HYB-E5002");
+        assert_eq!(r1.diagnostics[0].tier0_rule.as_deref(), Some("T13"));
+        assert!(r1.diagnostics[0].message.contains("`int`"));
+
+        // S1b: a define without ascription (`n := 5`) carries no TypeExpr —
+        // the gate still fires (fail-closed) and reports the shape render.
+        let r1b = check(
+            "fn main() {\n\
+               n := 5\n\
+               match n {\n\
+                 some(v): fmt.println(v)\n\
+                 none: fmt.println(0)\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r1b.verdict, Verdict::Reject, "{:?}", r1b.diagnostics);
+        assert_eq!(r1b.diagnostics[0].code, "HYB-E5002");
+
+        // S2: scalar subject + enum variant paths — same machinery mismatch.
+        let r2 = check(
+            "enum shape {\n\
+               circle(f64)\n\
+               point\n\
+             }\n\
+             fn main() {\n\
+               n := 5\n\
+               match n {\n\
+                 circle(r): fmt.println(r)\n\
+                 point: fmt.println(0)\n\
+               }\n\
+             }",
+        );
+        assert_eq!(r2.verdict, Verdict::Reject, "{:?}", r2.diagnostics);
+        assert_eq!(r2.diagnostics[0].code, "HYB-E5002");
+        assert_eq!(r2.diagnostics[0].tier0_rule.as_deref(), Some("T13"));
+
+        // S3: enum subject + option patterns (`some`/`none` on an enum) —
+        // same fail-closed family (the absence mechanisms stay distinct, T20).
+        let r3 = check(
+            "enum shape {\n\
+               circle(f64)\n\
+               point\n\
+             }\n\
+             fn area(s shape) {\n\
+               match s {\n\
+                 some(v): fmt.println(v)\n\
+                 none: fmt.println(0)\n\
+               }\n\
+             }\n\
+             fn main() {}",
+        );
+        assert_eq!(r3.verdict, Verdict::Reject, "{:?}", r3.diagnostics);
+        assert_eq!(r3.diagnostics[0].code, "HYB-E5002");
+
+        // Positive controls: literal arms on a scalar subject, exhaustive
+        // option match on an option subject, and exhaustive enum match all
+        // still accept with 0 diagnostics — the guard rejects nothing legal.
+        let ok_scalar = check(
+            "fn main() {\n\
+               n := 2\n\
+               var s string\n\
+               match n {\n\
+                 1: s = \"one\"\n\
+                 2: s = \"two\"\n\
+                 _: s = \"many\"\n\
+               }\n\
+               fmt.println(s)\n\
+             }",
+        );
+        assert_eq!(ok_scalar.verdict, Verdict::Accept, "{:?}", ok_scalar.diagnostics);
+
+        let ok_option = check(
+            "fn main() {\n\
+               var x option[int] = some(1)\n\
+               match x {\n\
+                 some(v): fmt.println(v)\n\
+                 none: fmt.println(0)\n\
+               }\n\
+             }",
+        );
+        assert_eq!(ok_option.verdict, Verdict::Accept, "{:?}", ok_option.diagnostics);
+
+        let ok_enum = check(
+            "enum shape { circle(f64) square(f64) point }\n\
+             fn area(s shape) {\n\
+               match s {\n\
+                 circle(r): fmt.println(r)\n\
+                 square(w): fmt.println(w)\n\
+                 point: fmt.println(0)\n\
+               }\n\
+             }\n\
+             fn main() {}",
+        );
+        assert_eq!(ok_enum.verdict, Verdict::Accept, "{:?}", ok_enum.diagnostics);
+    }
+
+    #[test]
     fn enum_and_struct_without_zero_value_reject_e4002() {
         // R5: enum whose first variant carries a payload has no zero value (N3 -> HYB-E4002)
         let r5 = check(

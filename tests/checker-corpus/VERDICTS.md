@@ -34,6 +34,7 @@ this file is the human-normative record.
 | A8 | top-level `?` exit contract — NOT exercised by this corpus (noted so nobody mistakes absence for coverage) | — |
 | LOAN-ESCAPE | "loans never escape functions" (Tier-0 Layer-2 text; unambiguous, but has no A-number — flagged OQ4) | `HYB-E3104` family (SPEC O2) |
 | IMMUT | T22 deep immutability: a `const` binding is frozen — no rebind, no element/index write, no field store through it; reads stay legal (the file-level form lowers to package-level state every task body reaches ambiently) | `HYB-E3006` |
+| T13 | variant patterns are defined only for their machinery's subjects: `some`/`none` match only `option[T]` (T20), enum variant paths match only their declared enum — a subject resolving to any other type rejects fail-closed (variant arms lower to `.val`/`.ok` field accesses Go rejects) | `HYB-E5002` |
 
 The code column exists so checker output, SPEC-LANGUAGE.md rules, and this
 table are joinable from day one (registry format `HYB-Exxxx`, decided
@@ -1076,3 +1077,49 @@ by the autonomous pipeline (bundles author-758 / author-827, landings
 0107658 / d0a2db5). Sibling-take credit: sonson0910's stale-base
 companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.| local-composite-chan-recv-accept | ACCEPT | — | — | a local bound from a composite of bidirectional channels (`sub := append(chs, ch)`) carries the composite-projected type, so a later `<-sub[0]` receive stays legal end to end — checker accept, emitted Go builds, run exits 0 (rows added in-merge; the PR missed the README's own VERDICTS.md contract) |
 | local-composite-chan-recv-reject-e2008 | REJECT | BUILDABLE | `HYB-E2008` | same shape, send-only channels: `sub` previously carried no `ty`, so `<-sub[0]` in a type position passed with 0 diagnostics; the composite_type_expr fallback in process_local projects `chan<- int` through the Index arm and the direction check fires (rows added in-merge) |
+companions #759 / #828 per AUTHOR-STAGE.md §5 amendment 2.
+-------------------------------------------------------------------------------
+
+### Additive corpus registration — 2026-10-25: match-subject type vs variant patterns (HYB-E5002)
+
+Two fixtures, hand-derived from SPEC-LANGUAGE T13/T20 text BEFORE the
+checker run (pre-registration discipline), registered with the fix:
+
+- `match-variant-arms-on-scalar-subject-reject` — REJECT T13, exact
+  diagnostic HYB-E5002. A subject resolving to a known non-option,
+  non-enum type (`var n int`) matched with `some(v)`/`none` arms passed
+  `hyb check` with 0 diagnostics before the fix: the pass-2 option upgrade
+  in `check_match` re-classed any variant-pattern match as an option match,
+  exhaustiveness passed, and the emitter lowered the arms to
+  `hyMatchN.ok`/`hyMatchN.val` field accesses on the raw subject — `go
+  build` rejected the accepted program (`hyMatch0.ok undefined (type int
+  has no field or method ok)`), accepted-but-unbuildable (GUARANTEES row
+  13, BUILDABLE). The fix fails closed: variant machinery is defined ONLY
+  for `option[T]` subjects (T20) and declared enums (T13/T14); anything
+  else resolves is a dedicated type error. Also rejects enum subjects
+  matched with `some`/`none` (absence mechanisms stay distinct, T20).
+- `match-subject-type-guard-option-controls-accept` — ACCEPT control
+  (builds and prints 7, EXPECTED-OUTPUT pinned). variant`some`/`none` arms
+  on an `option[int]` subject MUST stay accepted — it is the same arms
+  rejecting the scalar subject above, so a guard that fails to resolve the
+  subject type (rejecting every variant-pattern match) breaks this
+  program; exactly the first fix draft's regression, the twin pins it shut.
+  A literal-arm scalar `match` is intentionally NOT used as the control:
+  the MVP emitter does not lower scalar-subject matches yet (the enum
+  representation decision is still open), so the corpus pins at the emit
+  surface too.
+
+Scope note: distinct from corpus void-as-value / issue #1021 (void subjects
+and literal-type compat in the buildable passer) and #155 (`?` operands) —
+this gate lives in `check_match`'s target inference seam, before any
+exhaustiveness verdict.
+
+Verified on the fixed tree: 129/129 verdict agreement, tripwire not fired;
+ACCEPT 40 · ACCEPT-MANAGED 2 · REJECT 87. Unit pins:
+`hy-check/src/lib.rs::match_variant_patterns_on_scalar_subject_reject_e5002`
+(4 rejects — ascribed scalar, untyped define, enum-variant arms on a
+scalar, option arms on an enum — plus 3 positive controls: the literal-arm
+scalar twin, an exhaustive option match, and an exhaustive enum match); registry entry `HYB-E5002` (rule T13/T20,
+`tier0_rule_id: T13`) added to `hy-diag/data/diagnostics.json` in the same
+commit. Reproduction against pre-fix `main` (`n := 5` scalar subject,
+`match n { some(v): … none: … }`): check OK, `go build` fails.
