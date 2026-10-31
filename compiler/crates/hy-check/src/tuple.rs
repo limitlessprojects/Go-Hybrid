@@ -17,7 +17,6 @@
 //! foreign package calls. `?`-unwrapped calls stay permissive (unwrapping the
 //! error produces a single value).
 
-use crate::buildable::OpKind;
 use crate::foreign;
 use crate::model::{unwrap_parens, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};
@@ -111,6 +110,11 @@ impl<'a> Checker<'a> {
             Stmt::Task { callee, args, .. } => {
                 self.check_expr_single_value(st, callee, callee.span());
                 if args.len() == 1 && !args[0].spread {
+                    if let Some(w) = self.forwarded_tuple_arity(st, callee, true) {
+                        if self.static_result_count(st, &args[0].value).is_some_and(|(_, r)| r >= 2) {
+                            self.check_multi_value_bind(st, &args[0].value, w, args[0].span);
+                        }
+                    }
                     self.check_subexprs_single_value(st, &args[0].value);
                 } else {
                     for a in args {
@@ -213,6 +217,11 @@ impl<'a> Checker<'a> {
             Expr::Call { callee, args, .. } => {
                 self.check_expr_single_value(st, callee, callee.span());
                 if args.len() == 1 && !args[0].spread {
+                    if let Some(w) = self.forwarded_tuple_arity(st, callee, false) {
+                        if self.static_result_count(st, &args[0].value).is_some_and(|(_, r)| r >= 2) {
+                            self.check_multi_value_bind(st, &args[0].value, w, args[0].span);
+                        }
+                    }
                     self.check_subexprs_single_value(st, &args[0].value);
                 } else {
                     for a in args {
@@ -337,6 +346,41 @@ impl<'a> Checker<'a> {
                 _ => None,
             },
             _ => None,
+        }
+    }
+
+    fn forwarded_tuple_arity(&self, st: &FnState, callee: &Expr, is_task: bool) -> Option<usize> {
+        match unwrap_parens_and_move(callee) {
+            Expr::Ident { name, .. } => {
+                if let Some(b) = self.lookup_binding(st, name) {
+                    if let Some(TypeExpr::Fn { params, .. }) = b.ty.as_ref().map(|t| self.resolve_type_alias(t)) {
+                        return Some(params.len());
+                    }
+                    return st.closure_defs.get(name.as_str()).map(|(p, _, _)| p.len());
+                }
+                let head = Self::base_named_type_str(name);
+                if let Some(f) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
+                    return is_task.then_some(f.params.len());
+                }
+                (name == "some").then_some(1)
+            }
+            Expr::FnLit { params, .. } => Some(params.len()),
+            Expr::Field { base, name, .. } => {
+                if matches!(name.as_str(), "insert" | "contains" | "remove")
+                    && self.ty_of_expr(st, base).map(|t| self.resolve_type_alias(&t))
+                        .is_some_and(|t| matches!(t, TypeExpr::Named { name: n, .. } if Self::base_named_type_str(&n) == "set"))
+                {
+                    return Some(1);
+                }
+                if let Some(TypeExpr::Fn { params, .. }) = self.ty_of_expr(st, callee).map(|t| self.resolve_type_alias(&t)) {
+                    return Some(params.len());
+                }
+                None
+            }
+            other => match self.ty_of_expr(st, other).map(|t| self.resolve_type_alias(&t))? {
+                TypeExpr::Fn { params, .. } => Some(params.len()),
+                _ => None,
+            },
         }
     }
 
