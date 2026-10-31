@@ -312,10 +312,10 @@ fn min_max_and_len_cap_operands_validated_e2005() {
     assert_has(&bad_max_nil, "HYB-E2005");
 
     // 3. min / max reject struct, slice, and map composite literals
-    let bad_min_struct = check("struct Point { x int }\nfn main() {\n    _ = min(Point{x: 1}, Point{x: 2})\n}\n");
+    let bad_min_struct = check("struct point { x int }\nfn main() {\n    _ = min(point{x: 1}, point{x: 2})\n}\n");
     assert_has(&bad_min_struct, "HYB-E2005");
 
-    let bad_max_struct = check("struct Point { x int }\nfn main() {\n    _ = max(Point{x: 1}, Point{x: 2})\n}\n");
+    let bad_max_struct = check("struct point { x int }\nfn main() {\n    _ = max(point{x: 1}, point{x: 2})\n}\n");
     assert_has(&bad_max_struct, "HYB-E2005");
 
     let bad_min_slice = check("fn main() {\n    _ = min([]int{1}, []int{2})\n}\n");
@@ -325,10 +325,10 @@ fn min_max_and_len_cap_operands_validated_e2005() {
     assert_has(&bad_max_map, "HYB-E2005");
 
     // 4. len / cap reject struct composite literals
-    let bad_len_struct = check("struct Point { x int }\nfn main() {\n    _ = len(Point{x: 1})\n}\n");
+    let bad_len_struct = check("struct point { x int }\nfn main() {\n    _ = len(point{x: 1})\n}\n");
     assert_has(&bad_len_struct, "HYB-E2005");
 
-    let bad_cap_struct = check("struct Point { x int }\nfn main() {\n    _ = cap(Point{x: 1})\n}\n");
+    let bad_cap_struct = check("struct point { x int }\nfn main() {\n    _ = cap(point{x: 1})\n}\n");
     assert_has(&bad_cap_struct, "HYB-E2005");
 
     // 5. len / cap reject nil literals
