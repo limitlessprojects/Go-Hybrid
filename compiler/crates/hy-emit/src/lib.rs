@@ -1023,9 +1023,8 @@ impl Emitter {
     }
 
     /// Format a type parameter list for Go emission, supplying a constraint
-    /// (`comparable` when used as a map key or set element, inherited from a
-    /// grouped trailing constraint `[a, b comparable]`, or `any` by default)
-    /// whenever the Hybrid source omits one (#722).
+    /// (`comparable` when used as a map key or set element, or `any` by default)
+    /// whenever the Hybrid source omits one (#722, #742).
     fn format_type_params(
         &self,
         type_params: &[TypeParam],
@@ -1033,18 +1032,12 @@ impl Emitter {
     ) -> String {
         type_params
             .iter()
-            .enumerate()
-            .map(|(i, p)| {
+            .map(|p| {
                 let constraint = match &p.constraint {
                     Some(c) => self.constraint_text(c),
                     None => {
                         if comparable_params.contains(&p.name) {
                             "comparable".to_string()
-                        } else if let Some(inherited) = type_params[i + 1..]
-                            .iter()
-                            .find_map(|next| next.constraint.as_deref())
-                        {
-                            self.constraint_text(inherited)
                         } else {
                             "any".to_string()
                         }
