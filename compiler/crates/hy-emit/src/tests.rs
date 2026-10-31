@@ -1265,6 +1265,25 @@ fn slice_pop_uses_prelude_helper() {
     assert!(go.contains("return hy_pop(&stack)"), ":\n{}", go);
 }
 
+#[test]
+fn slice_pop_prelude_panics_with_hy_panic_on_empty() {
+    // T7 pins `.pop()` as "panics on empty", and `option.unwrap()` already
+    // brands its panic (`HY-PANIC/unwrap-none`), so an empty pop must report
+    // the Hybrid operation instead of Go's raw `index out of range [-1]`,
+    // which points at generated code (issue #2442).
+    let go =
+        emit("type node_id = int\n\nfn f(stack []node_id) node_id {\n    return stack.pop()\n}\n");
+    assert!(
+        go.contains("\tif n == 0 {\n\t\tpanic(\"HY-PANIC/pop-empty\")\n\t}"),
+        "pop prelude must guard the empty case with the branded panic:\n{}",
+        go
+    );
+    // Semantics unchanged: the panic still happens, and the non-empty path is
+    // byte-for-byte what it was.
+    assert!(go.contains("v := (*s)[n-1]"), "pop reads the last element:\n{}", go);
+    assert!(go.contains("*s = (*s)[:n-1]"), "pop shrinks the slice:\n{}", go);
+}
+
 // ---------------------------------------------------------------------------
 // Batch E — the foreign shape table (example 06: net/http surface)
 // ---------------------------------------------------------------------------
