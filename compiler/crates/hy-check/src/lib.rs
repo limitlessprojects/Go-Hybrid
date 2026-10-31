@@ -50,6 +50,7 @@ mod buildable;
 mod const_overflow;
 mod closures;
 mod emit_guard;
+mod missing_return;
 mod foreign;
 mod freeze;
 mod loans;
@@ -320,6 +321,17 @@ fn build_tables(ck: &mut Checker<'_>) {
                 }
                 for r in &f.results {
                     ck.check_type_expr(&r.ty);
+                }
+                // `fn main() (code int)` is the exit-code surface (example
+                // 02): the emitter lowers its result to an `os.Exit` wrapper,
+                // so falling off the end of `main` is legal.
+                let is_main = f.receiver.is_none() && f.name == "main";
+                if let (Some(body), false) = (&f.body, is_main) {
+                    let what = match &f.receiver {
+                        Some(r) => format!("method `{}.{}`", r.ty.render(), f.name),
+                        None => format!("function `{}`", f.name),
+                    };
+                    ck.check_missing_return(&what, &f.results, body, f.span);
                 }
             }
             Decl::TypeAlias(a) => ck.check_type_expr(&a.ty),
