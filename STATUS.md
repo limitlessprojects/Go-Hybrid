@@ -1,3 +1,4 @@
+- Draft contributor validation (2026-10-29, #1944): Windows descendant-timeout cleanup and pre-spawn deadline validation checked; Linux and upstream CI pending. Original report credit remains with @linkinsider-work.
 # STATUS (for the human — 15 lines max)
 
 - Contributor #1165: range bounds spelled as different names of one Go integer type no longer raise a false HYB-E2009 (shared canonicaliser in `hy-check` + regression pin); workspace/corpus/differential/CI remain delivery gates.

@@ -1,3 +1,5 @@
+- Contributor validation (2026-10-29, issue #1944): scoped descendant cancellation and pre-spawn deadline validation. Windows regressions and a three-version malformed-timeout comparison pass; full Linux/Go/Rust/corpus/differential and upstream CI remain required. Original report: @linkinsider-work; compare the alternative in #1945.
+
 # Hybrid Language: Development Plan
 
 - Contributor amendment (2026-10-28, #1165): range bounds are compared as emitted Go integer types, so equivalent SPEC/Go spellings (`u8`/`uint8`/`byte`, `i32`/`int32`/`rune`) no longer raise a false HYB-E2009, while `int`/`int64`, `uint`/`uintptr` and the undefined `usize`/`isize` stay distinct. One shared canonicaliser (`canonical_int_type_name` in `hy-check`) plus a regression pin in `range_bound_type_forms.rs`. Workspace, corpus, differential and CI remain delivery gates.
