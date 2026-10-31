@@ -266,360 +266,63 @@ fn main() {
     );
 }
 
-#[test]
-fn test_single_iteration_control_0_to_01_legacy_octal_is_accepted() {
-    let src = "\
-package main
-
-fn wm(x map[string]int, done chan int) {
-    done <- 1
-}
-
-fn main() {
-    done := make(chan int, 2)
-    keep := map[string]int{}
-    nxt := map[string]int{}
-    for i in 0..01 {
-        t := nxt
-        nxt = map[string]int{}
-        task wm(move t, done)
-        keep[\"race\"] = i
-        keep = nxt
-    }
-    <-done
-}
-";
-    let r = check(src);
-    let cs = error_codes(&r);
-    assert!(
-        cs.is_empty(),
-        "expected 0 diagnostics for sound 0..01 legacy octal loop control, got: {:?}",
-        cs
+fn check_loop_body(rng: &str, body: &str, expect_e3003: bool) {
+    let src = format!(
+        "package main\nfn wm(x map[string]int, done chan int) {{ done <- 1 }}\nfn main() {{\n    done := make(chan int, 2)\n    keep := map[string]int{{}}\n    nxt := map[string]int{{}}\n    for i in {rng} {{\n        t := nxt\n        nxt = map[string]int{{}}\n        task wm(move t, done)\n        keep[\"race\"] = i\n        keep = nxt\n{body}\n    }}\n    <-done\n}}\n"
     );
+    let cs = error_codes(&check(&src));
+    if expect_e3003 {
+        assert!(cs.iter().any(|c| c == "HYB-E3003"), "expected HYB-E3003 for {rng} with {body}, got: {cs:?}");
+    } else {
+        assert!(cs.is_empty(), "expected 0 diagnostics for {rng} with {body}, got: {cs:?}");
+    }
 }
 
 #[test]
-fn test_single_iteration_control_0_to_0o1_modern_octal_is_accepted() {
-    let src = "\
-package main
-
-fn wm(x map[string]int, done chan int) {
-    done <- 1
-}
-
-fn main() {
-    done := make(chan int, 2)
-    keep := map[string]int{}
-    nxt := map[string]int{}
-    for i in 0..0o1 {
-        t := nxt
-        nxt = map[string]int{}
-        task wm(move t, done)
-        keep[\"race\"] = i
-        keep = nxt
+fn test_single_iteration_radix_and_empty_ranges_accepted() {
+    for rng in ["0..01", "0..0o1", "0x0..0x1", "1..0"] {
+        check_loop_body(rng, "", false);
     }
-    <-done
-}
-";
-    let r = check(src);
-    let cs = error_codes(&r);
-    assert!(
-        cs.is_empty(),
-        "expected 0 diagnostics for sound 0..0o1 modern octal loop control, got: {:?}",
-        cs
-    );
 }
 
 #[test]
-fn test_single_iteration_control_0x0_to_0x1_hex_is_accepted() {
-    let src = "\
-package main
-
-fn wm(x map[string]int, done chan int) {
-    done <- 1
-}
-
-fn main() {
-    done := make(chan int, 2)
-    keep := map[string]int{}
-    nxt := map[string]int{}
-    for i in 0x0..0x1 {
-        t := nxt
-        nxt = map[string]int{}
-        task wm(move t, done)
-        keep[\"race\"] = i
-        keep = nxt
+fn test_multi_iteration_radix_ranges_rejected() {
+    for rng in ["0..0o2", "0b0..0b10", "010..11"] {
+        check_loop_body(rng, "", true);
     }
-    <-done
-}
-";
-    let r = check(src);
-    let cs = error_codes(&r);
-    assert!(
-        cs.is_empty(),
-        "expected 0 diagnostics for sound 0x0..0x1 hex loop control, got: {:?}",
-        cs
-    );
-}
-
-#[test]
-fn test_empty_range_control_1_to_0_is_accepted() {
-    let src = "\
-package main
-
-fn wm(x map[string]int, done chan int) {
-    done <- 1
-}
-
-fn main() {
-    done := make(chan int, 2)
-    keep := map[string]int{}
-    nxt := map[string]int{}
-    for i in 1..0 {
-        t := nxt
-        nxt = map[string]int{}
-        task wm(move t, done)
-        keep[\"race\"] = i
-        keep = nxt
-    }
-    <-done
-}
-";
-    let r = check(src);
-    let cs = error_codes(&r);
-    assert!(
-        cs.is_empty(),
-        "expected 0 diagnostics for sound 1..0 empty range loop control, got: {:?}",
-        cs
-    );
-}
-
-#[test]
-fn test_multi_iteration_octal_and_binary_is_rejected_e3003() {
-    let src_octal = "\
-package main
-
-fn wm(x map[string]int, done chan int) {
-    done <- 1
-}
-
-fn main() {
-    done := make(chan int, 2)
-    keep := map[string]int{}
-    nxt := map[string]int{}
-    for i in 0..0o2 {
-        t := nxt
-        nxt = map[string]int{}
-        task wm(move t, done)
-        keep[\"race\"] = i
-        keep = nxt
-    }
-    <-done
-}
-";
-    let r = check(src_octal);
-    let cs = error_codes(&r);
-    assert!(
-        cs.iter().any(|c| c == "HYB-E3003"),
-        "expected HYB-E3003 for multi-iteration 0..0o2 octal loop, got: {:?}",
-        cs
-    );
-
-    let src_bin = "\
-package main
-
-fn wm(x map[string]int, done chan int) {
-    done <- 1
-}
-
-fn main() {
-    done := make(chan int, 2)
-    keep := map[string]int{}
-    nxt := map[string]int{}
-    for i in 0b0..0b10 {
-        t := nxt
-        nxt = map[string]int{}
-        task wm(move t, done)
-        keep[\"race\"] = i
-        keep = nxt
-    }
-    <-done
-}
-";
-    let r_bin = check(src_bin);
-    let cs_bin = error_codes(&r_bin);
-    assert!(
-        cs_bin.iter().any(|c| c == "HYB-E3003"),
-        "expected HYB-E3003 for multi-iteration 0b0..0b10 binary loop, got: {:?}",
-        cs_bin
-    );
-}
-
-#[test]
-fn test_octal_multi_iteration_range_010_to_11_is_rejected_e3003() {
-    // In Go / Go-Hybrid legacy octal, 010 is octal 8, while 11 is decimal 11.
-    // Range 8..11 iterates 3 times (8, 9, 10). Loop-carried alias freeze must reject!
-    let src = "\
-package main
-
-fn wm(x map[string]int, done chan int) {
-    done <- 1
-}
-
-fn main() {
-    done := make(chan int, 2)
-    keep := map[string]int{}
-    nxt := map[string]int{}
-    for i in 010..11 {
-        t := nxt
-        nxt = map[string]int{}
-        task wm(move t, done)
-        keep[\"race\"] = i
-        keep = nxt
-    }
-    <-done
-}
-";
-    let r = check(src);
-    let cs = error_codes(&r);
-    assert!(
-        cs.iter().any(|c| c == "HYB-E3003"),
-        "expected HYB-E3003 for multi-iteration 010..11 octal range, got: {:?}",
-        cs
-    );
 }
 
 #[test]
 fn test_mutated_induction_var_direct_assign_is_rejected_e3003() {
-    let src = "\
-package main
-
-fn wm(x map[string]int, done chan int) {
-    done <- 1
-}
-
-fn main() {
-    done := make(chan int, 2)
-    keep := map[string]int{}
-    nxt := map[string]int{}
-    for i in 0..1 {
-        t := nxt
-        nxt = map[string]int{}
-        task wm(move t, done)
-        keep[\"race\"] = i
-        keep = nxt
-        i = -1
-    }
-    <-done
-}
-";
-    let r = check(src);
-    let cs = error_codes(&r);
-    assert!(
-        cs.iter().any(|c| c == "HYB-E3003"),
-        "expected HYB-E3003 when loop induction var is reassigned (i = -1), got: {:?}",
-        cs
-    );
+    check_loop_body("0..1", "        i = -1", true);
 }
 
 #[test]
 fn test_mutated_induction_var_sub_assign_is_rejected_e3003() {
-    let src = "\
-package main
-
-fn wm(x map[string]int, done chan int) {
-    done <- 1
-}
-
-fn main() {
-    done := make(chan int, 2)
-    keep := map[string]int{}
-    nxt := map[string]int{}
-    for i in 0..1 {
-        t := nxt
-        nxt = map[string]int{}
-        task wm(move t, done)
-        keep[\"race\"] = i
-        keep = nxt
-        i -= 1
-    }
-    <-done
-}
-";
-    let r = check(src);
-    let cs = error_codes(&r);
-    assert!(
-        cs.iter().any(|c| c == "HYB-E3003"),
-        "expected HYB-E3003 when loop induction var is decremented (i -= 1), got: {:?}",
-        cs
-    );
+    check_loop_body("0..1", "        i -= 1", true);
 }
 
 #[test]
 fn test_mutated_induction_var_dec_op_is_rejected_e3003() {
-    let src = "\
-package main
-
-fn wm(x map[string]int, done chan int) {
-    done <- 1
-}
-
-fn main() {
-    done := make(chan int, 2)
-    keep := map[string]int{}
-    nxt := map[string]int{}
-    for i in 0..1 {
-        t := nxt
-        nxt = map[string]int{}
-        task wm(move t, done)
-        keep[\"race\"] = i
-        keep = nxt
-        i--
-    }
-    <-done
-}
-";
-    let r = check(src);
-    let cs = error_codes(&r);
-    assert!(
-        cs.iter().any(|c| c == "HYB-E3003"),
-        "expected HYB-E3003 when loop induction var is decremented (i--), got: {:?}",
-        cs
-    );
+    check_loop_body("0..1", "        i--", true);
 }
 
 #[test]
 fn test_mutated_induction_var_closure_capture_is_rejected_e3003() {
-    let src = "\
-package main
-
-fn wm(x map[string]int, done chan int) {
-    done <- 1
+    check_loop_body("0..1", "        cb := fn() { i = -1 }\n        cb()", true);
 }
 
-fn main() {
-    done := make(chan int, 2)
-    keep := map[string]int{}
-    nxt := map[string]int{}
-    for i in 0..1 {
-        t := nxt
-        nxt = map[string]int{}
-        task wm(move t, done)
-        keep[\"race\"] = i
-        keep = nxt
-        cb := fn() {
-            i = -1
-        }
-        cb()
-    }
-    <-done
+#[test]
+fn test_mutated_induction_var_target_index_is_rejected_e3003() {
+    check_loop_body("0..1", "        arr := []int{0}\n        arr[fn() int { i = -1; return 0 }()] = 1", true);
 }
-";
-    let r = check(src);
-    let cs = error_codes(&r);
-    assert!(
-        cs.iter().any(|c| c == "HYB-E3003"),
-        "expected HYB-E3003 when loop induction var is mutated inside a closure, got: {:?}",
-        cs
-    );
+
+#[test]
+fn test_mutated_induction_var_select_recv_is_rejected_e3003() {
+    check_loop_body("0..1", "        ch := make(chan int, 1)\n        select { i := <-ch: }", true);
+}
+
+#[test]
+fn test_shadowed_induction_var_in_closure_is_accepted() {
+    check_loop_body("0..1", "        f := fn(i int) { i = i + 1 }\n        f(10)", false);
 }
