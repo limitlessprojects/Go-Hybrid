@@ -4847,6 +4847,21 @@ impl<'a> Collector<'a> {
                                 ),
                                 "arguments to `copy` must have identical element types",
                             );
+                        } else if let (Some(dst_sc), Some(src_sc)) = (
+                            self.slice_elem_scalar(dst_arg),
+                            self.slice_elem_scalar(src_arg),
+                        ) {
+                            if dst_sc != src_sc {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "arguments to `copy` have different element types: `[]{}` and `[]{}` (HYB-E1002)",
+                                        dst_sc,
+                                        src_sc
+                                    ),
+                                    "arguments to `copy` must have identical element types",
+                                );
+                            }
                         }
                     }
                     (OpKind::Slice(dst_elem), OpKind::Str) => {
@@ -4859,6 +4874,17 @@ impl<'a> Collector<'a> {
                                 ),
                                 "copying from a string requires a byte slice destination (`[]byte`)",
                             );
+                        } else if let Some(dst_sc) = self.slice_elem_scalar(dst_arg) {
+                            if dst_sc != "uint8" {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "cannot copy string into slice with element type `[]{}` (HYB-E1002)",
+                                        dst_sc
+                                    ),
+                                    "copying from a string requires a byte slice destination (`[]byte`)",
+                                );
+                            }
                         }
                     }
                     _ => {}
