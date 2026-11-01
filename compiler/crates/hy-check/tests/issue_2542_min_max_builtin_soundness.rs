@@ -145,6 +145,28 @@ fn main() {
     _ = min(1.5, k)
 }
 "#,
+        // 7. identical concrete typed scalars
+        r#"
+fn main() {
+    var a int32 = 1
+    var b int32 = 2
+    _ = min(a, b)
+}
+"#,
+        // 8. concrete typed scalar with untyped constant
+        r#"
+fn main() {
+    var a int32 = 1
+    _ = min(a, 2)
+}
+"#,
+        // 9. strings result used as string
+        r#"
+fn main() {
+    s := min("a", "b")
+    _ = s + "c"
+}
+"#,
     ];
 
     for (idx, src) in cases.iter().enumerate() {
@@ -153,6 +175,99 @@ fn main() {
             verdict,
             Verdict::Accept,
             "compatible case #{idx} should accept, got Reject with diags: {diags:?}\n{src}"
+        );
+    }
+}
+
+#[test]
+fn min_max_mismatched_scalar_types_rejected_with_e1002() {
+    let cases = [
+        // 1. int32 and int64 in min
+        r#"
+fn main() {
+    var a int32 = 1
+    var b int64 = 2
+    _ = min(a, b)
+}
+"#,
+        // 2. float32 and float64 in max
+        r#"
+fn main() {
+    var a float32 = 1.0
+    var b float64 = 2.0
+    _ = max(a, b)
+}
+"#,
+        // 3. uint and int in min
+        r#"
+fn main() {
+    var a uint = 1
+    var b int = 2
+    _ = min(a, b)
+}
+"#,
+        // 4. constant prefix with mismatched scalars
+        r#"
+fn main() {
+    var a int32 = 1
+    var b int64 = 2
+    _ = min(0, a, b)
+}
+"#,
+    ];
+
+    for (idx, src) in cases.iter().enumerate() {
+        let (verdict, diags) = check(src);
+        assert_eq!(
+            verdict,
+            Verdict::Reject,
+            "mismatched scalar case #{idx} should reject, got Accept:\n{src}"
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "HYB-E1002"),
+            "mismatched scalar case #{idx} should emit HYB-E1002: {diags:?}\n{src}"
+        );
+    }
+}
+
+#[test]
+fn min_max_result_kind_and_scalar_propagated() {
+    let cases = [
+        // 1. min(int, int) assigned to string variable
+        r#"
+fn main() {
+    var s string = min(1, 2)
+    _ = s
+}
+"#,
+        // 2. min(int, int) combined with string binary op
+        r#"
+fn main() {
+    _ = min(1, 2) + "hello"
+}
+"#,
+        // 3. min(int32, int32) assigned to int64 variable
+        r#"
+fn main() {
+    var a int32 = 1
+    var b int32 = 2
+    m := min(a, b)
+    var c int64 = m
+    _ = c
+}
+"#,
+    ];
+
+    for (idx, src) in cases.iter().enumerate() {
+        let (verdict, diags) = check(src);
+        assert_eq!(
+            verdict,
+            Verdict::Reject,
+            "result kind propagation case #{idx} should reject, got Accept:\n{src}"
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "HYB-E1002"),
+            "result kind propagation case #{idx} should emit HYB-E1002: {diags:?}\n{src}"
         );
     }
 }
