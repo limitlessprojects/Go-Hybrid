@@ -135,6 +135,50 @@ impl OpKind {
 /// NOTE: open PR #620 introduces this same helper for return-statement
 /// checking. Whichever of the two lands second should drop one copy — the two
 /// are textually identical on purpose.
+/// #2997 — Go result kinds of curated foreign package-level calls, in Hybrid's
+/// snake_case spelling. The `error` slot of a `(T, error)` pair is `Unknown`
+/// (the kind model has no error kind), so only the value slot carries a claim.
+/// Anything not listed returns `None` and stays fail-open, exactly as before.
+fn foreign_call_result_kinds(pkg: &str, method: &str) -> Option<Vec<OpKind>> {
+    use OpKind::*;
+    let one = |k: OpKind| Some(vec![k]);
+    let str_slice = || Slice(Box::new(Str));
+    match (pkg, method) {
+        (
+            "strings",
+            "contains" | "contains_any" | "contains_rune" | "has_prefix" | "has_suffix"
+            | "equal_fold",
+        ) => one(Bool),
+        (
+            "strings",
+            "index" | "index_any" | "index_byte" | "index_rune" | "last_index"
+            | "last_index_any" | "last_index_byte" | "count" | "compare",
+        ) => one(Int),
+        (
+            "strings",
+            "clone" | "join" | "repeat" | "replace" | "replace_all" | "title" | "to_lower"
+            | "to_upper" | "to_title" | "to_valid_utf8" | "trim" | "trim_left" | "trim_right"
+            | "trim_prefix" | "trim_suffix" | "trim_space",
+        ) => one(Str),
+        ("strings", "split" | "split_n" | "split_after" | "split_after_n" | "fields") => {
+            one(str_slice())
+        }
+        (
+            "strconv",
+            "itoa" | "format_bool" | "format_float" | "format_int" | "format_uint" | "quote"
+            | "quote_rune" | "quote_to_ascii",
+        ) => one(Str),
+        ("strconv", "atoi" | "parse_int" | "parse_uint") => Some(vec![Int, Unknown]),
+        ("strconv", "parse_float") => Some(vec![Float, Unknown]),
+        ("strconv", "parse_bool") => Some(vec![Bool, Unknown]),
+        ("strconv", "unquote") => Some(vec![Str, Unknown]),
+        ("fmt", "sprint" | "sprintf" | "sprintln") => one(Str),
+        ("os", "getenv" | "expand_env" | "temp_dir") => one(Str),
+        ("os", "getpid" | "getppid" | "getuid" | "getpagesize") => one(Int),
+        _ => None,
+    }
+}
+
 fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
     use OpKind::*;
     match (want, got) {
@@ -3142,6 +3186,19 @@ impl<'a> Collector<'a> {
                 None
             }
             Expr::Field { base, name, .. } => {
+                // #2997: curated package calls (`strings.contains`,
+                // `strconv.itoa`, `fmt.sprintf`, ...) carry their Go result
+                // kinds. Only a bare package root that no local, parameter or
+                // file constant shadows qualifies; unlisted members stay
+                // `None` (fail-open).
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none()
+                        && crate::foreign::is_curated_package_root(pkg)
+                        && crate::foreign::is_curated_package_member(pkg, name)
+                    {
+                        return foreign_call_result_kinds(pkg, name);
+                    }
+                }
                 let bk = self.kind_of_expr(base);
                 // #2823: the option payload methods carry a real result kind —
                 // `unwrap()` / `or(d)` yield the payload, `is_some()` /
