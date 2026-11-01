@@ -814,6 +814,57 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn underlying_type_key_of_named(&self, name: &str) -> Option<String> {
+        let base = Checker::base_named_type_str(name);
+        if let Some(s) = canonical_numeric_name(base) {
+            return Some(s.to_string());
+        }
+        if base == "string" || base == "bool" {
+            return Some(base.to_string());
+        }
+        if self.ck.structs.contains_key(base) || self.ck.struct_type_params.contains_key(base) {
+            return Some(format!("struct:{}", base));
+        }
+        if let Some(alias_ty) = self.ck.type_aliases.get(base) {
+            return self.underlying_type_key(alias_ty);
+        }
+        None
+    }
+
+    fn underlying_type_key_of_expr(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    if let Some(k) = self.underlying_type_key_of_named(&tname) {
+                        return Some(k);
+                    }
+                    if let Some(s) = canonical_numeric_name(&tname) {
+                        return Some(s.to_string());
+                    }
+                }
+                if let Some(s) = self.lookup_scalar(name) {
+                    return Some(s.to_string());
+                }
+                None
+            }
+            Expr::Call { callee, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if let Some(k) = self.underlying_type_key_of_named(name) {
+                        return Some(k);
+                    }
+                    if let Some(f) = self.ck.fns.get(name.as_str()) {
+                        if let Some(first_res) = f.results.first() {
+                            return self.underlying_type_key(&first_res.ty);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn slice_element_type_name(&self, e: &Expr) -> Option<String> {
         let bare = unwrap_parens(e);
         match bare {
@@ -3584,6 +3635,25 @@ impl<'a> Collector<'a> {
                                 name
                             ),
                             "in Go, converting between pointer types requires identical base underlying types (Go spec §Conversions)",
+                        );
+                    }
+                }
+            }
+        }
+
+        if matches!(k, OpKind::Map(_, _) | OpKind::Chan(_)) {
+            if let Some(target_key) = self.underlying_type_key_of_named(name) {
+                if let Some(arg_key) = self.underlying_type_key_of_expr(arg) {
+                    if target_key != arg_key {
+                        self.emit_e1002(
+                            arg.span(),
+                            format!(
+                                "cannot convert `{}` (type `{}`) to type `{}` (HYB-E1002)",
+                                arg.render(),
+                                arg_k.label(),
+                                name
+                            ),
+                            "in Go, type conversions between map or channel types require identical underlying types (Go spec §Conversions)",
                         );
                     }
                 }
