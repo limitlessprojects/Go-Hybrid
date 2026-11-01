@@ -857,7 +857,10 @@ impl<'a> Collector<'a> {
             let want = self.kind_of_ty(t, 0);
             if l.values.len() == 1 && l.names.len() == 1 {
                 let vk = self.kind_of_expr(&l.values[0]);
-                if kinds_conflict(&want, &vk) {
+                let int_float_conflict = want == OpKind::Float
+                    && vk == OpKind::Int
+                    && !self.is_untyped_int_const(&l.values[0]);
+                if kinds_conflict(&want, &vk) || int_float_conflict {
                     self.emit_e1002(
                         l.span,
                         format!(
@@ -873,7 +876,10 @@ impl<'a> Collector<'a> {
             } else if l.values.len() > 1 && l.values.len() == l.names.len() {
                 for (name, v) in l.names.iter().zip(l.values.iter()) {
                     let vk = self.kind_of_expr(v);
-                    if kinds_conflict(&want, &vk) {
+                    let int_float_conflict = want == OpKind::Float
+                        && vk == OpKind::Int
+                        && !self.is_untyped_int_const(v);
+                    if kinds_conflict(&want, &vk) || int_float_conflict {
                         self.emit_e1002(
                             l.span,
                             format!(
@@ -2175,7 +2181,10 @@ impl<'a> Collector<'a> {
                 Some((_, fty)) => {
                     let want = self.kind_of_ty_with_subst(fty, &subst, 0);
                     let got = self.kind_of_expr(&f.value);
-                    if kinds_conflict(&want, &got) {
+                    let int_float_conflict = want == OpKind::Float
+                        && got == OpKind::Int
+                        && !self.is_untyped_int_const(&f.value);
+                    if kinds_conflict(&want, &got) || int_float_conflict {
                         self.emit_e1002(
                             f.value.span(),
                             format!(
@@ -3150,7 +3159,10 @@ impl<'a> Collector<'a> {
                     let is_loan_shape = as_addr_of(&values[0])
                         .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }));
                     let vk = self.kind_of_expr(&values[0]);
-                    if !is_loan_shape && kinds_conflict(&tk, &vk) {
+                    let int_float_conflict = tk == OpKind::Float
+                        && vk == OpKind::Int
+                        && !self.is_untyped_int_const(&values[0]);
+                    if !is_loan_shape && (kinds_conflict(&tk, &vk) || int_float_conflict) {
                         self.emit_e1002(
                             span,
                             format!(
@@ -3188,7 +3200,10 @@ impl<'a> Collector<'a> {
                         }
                         let tpk = self.kind_of_place(t);
                         let vk = self.kind_of_expr(v);
-                        if kinds_conflict(&tpk, &vk) {
+                        let int_float_conflict = tpk == OpKind::Float
+                            && vk == OpKind::Int
+                            && !self.is_untyped_int_const(v);
+                        if kinds_conflict(&tpk, &vk) || int_float_conflict {
                             self.emit_e1002(
                                 v.span(),
                                 format!(
@@ -4134,6 +4149,33 @@ impl<'a> Collector<'a> {
     /// selection on a pointer or addressable struct.
     /// Non-addressable: map index (`m[k]`), function/method call result
     /// (`make_t()`), and struct literal (`T{}`).
+    fn is_untyped_int_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit {
+                kind: LitKind::Int(_) | LitKind::Char(_),
+                ..
+            } => true,
+            Expr::Ident { name, .. } => {
+                if let Some(k) = self.file_consts.get(name) {
+                    return *k == OpKind::Int;
+                }
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        return matches!(self.defines[*id].kind, LocalKind::Const);
+                    }
+                }
+                false
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnOp::Neg) && self.is_untyped_int_const(operand)
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.is_untyped_int_const(lhs) && self.is_untyped_int_const(rhs)
+            }
+            _ => false,
+        }
+    }
+
     fn is_addressable_value_receiver(&self, e: &Expr) -> bool {
         match unwrap_parens(e) {
             Expr::Ident { .. } => true,
