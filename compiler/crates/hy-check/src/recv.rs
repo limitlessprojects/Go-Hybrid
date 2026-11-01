@@ -286,17 +286,30 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::Field { base, .. } => self.check_expr_recv_operands(st, base),
-            Expr::StructLit { fields, .. } => {
+            Expr::StructLit { ty, fields, .. } => {
+                if let Some(ty) = ty {
+                    self.check_type_recv_operands(st, ty);
+                }
                 for f in fields {
                     self.check_expr_recv_operands(st, &f.value);
                 }
             }
-            Expr::SliceLit { items, .. } => {
+            Expr::SliceLit { elem, items, .. } => {
+                if let Some(elem) = elem {
+                    self.check_type_recv_operands(st, elem);
+                }
                 for it in items {
                     self.check_expr_recv_operands(st, it);
                 }
             }
-            Expr::MapLit { entries, .. } => {
+            Expr::MapLit {
+                key,
+                value,
+                entries,
+                ..
+            } => {
+                self.check_type_recv_operands(st, key);
+                self.check_type_recv_operands(st, value);
                 for (k, v) in entries {
                     self.check_expr_recv_operands(st, k);
                     self.check_expr_recv_operands(st, v);
@@ -309,7 +322,17 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Expr::FnLit { .. } | Expr::Ident { .. } | Expr::Lit { .. } => {}
+            Expr::FnLit {
+                params, results, ..
+            } => {
+                for p in params {
+                    self.check_type_recv_operands(st, &p.ty);
+                }
+                for r in results {
+                    self.check_type_recv_operands(st, &r.ty);
+                }
+            }
+            Expr::Ident { .. } | Expr::Lit { .. } => {}
         }
     }
 
