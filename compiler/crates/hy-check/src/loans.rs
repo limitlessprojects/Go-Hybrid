@@ -2735,6 +2735,120 @@ impl<'a> Checker<'a> {
     /// binding freezes the other (O5.2, `HYB-E3003`) and cannot launder a
     /// non-owned parameter/capture/const across a concurrency boundary
     /// (O5.1 / O5.4, `HYB-E3004`; T22, `HYB-E3006`).
+    fn is_prelude_set_shape(&self, shape: &TypeShape) -> bool {
+        if self.structs.contains_key("set") {
+            return false;
+        }
+        match shape {
+            TypeShape::Struct(Some(s)) => s == "set" || s.starts_with("set["),
+            TypeShape::Pointer(inner) => {
+                matches!(&**inner, TypeShape::Struct(Some(s)) if s == "set" || s.starts_with("set["))
+            }
+            _ => false,
+        }
+    }
+
+    fn record_set_insert_store(&self, st: &mut FnState, cr: &CallRef) -> bool {
+        let Expr::Field {
+            base,
+            name: method_name,
+            ..
+        } = crate::model::unwrap_parens(cr.callee)
+        else {
+            return false;
+        };
+        if method_name != "insert" || cr.args.len() != 1 {
+            return false;
+        }
+        if !self.is_prelude_set_shape(&self.shape_of_expr(st, base)) {
+            return false;
+        }
+        let arg_expr = &cr.args[0].value;
+        let set_elem_shape = self
+            .ty_of_expr(st, base)
+            .and_then(|ty| self.set_elem_type(&ty))
+            .map(|et| self.shape_of_type(&et));
+        let arg_shape = self.shape_of_expr(st, arg_expr);
+        let carries_borrow = self.expr_carries_borrow(st, arg_expr);
+        let elem_shares = set_elem_shape
+            .as_ref()
+            .is_some_and(|es| self.shape_may_share(es) || matches!(es, TypeShape::Unknown))
+            || self.shape_may_share(&arg_shape)
+            || matches!(arg_shape, TypeShape::Unknown)
+            || carries_borrow;
+        if !elem_shares {
+            return true;
+        }
+        let mut dst_roots = Vec::new();
+        collect_ref_roots(base, &mut dst_roots);
+        self.collect_borrowed_roots(st, base, &mut dst_roots);
+        let mut ref_roots = Vec::new();
+        collect_ref_roots(arg_expr, &mut ref_roots);
+        let mut addr_roots = Vec::new();
+        self.collect_borrowed_roots(st, arg_expr, &mut addr_roots);
+        let mut move_ops = Vec::new();
+        crate::model::collect_move_operands(arg_expr, &mut move_ops);
+        for (op, _) in move_ops {
+            if let Expr::Ident { name, .. } = op {
+                ref_roots.push(name.clone());
+            } else if let Some(r) = op.root_ident() {
+                ref_roots.push(r.to_string());
+            }
+        }
+        let is_unmoved_borrow = carries_borrow && move_operand_ident(arg_expr).is_none();
+        for d in &dst_roots {
+            if !self.binding_may_share(st, d) {
+                continue;
+            }
+            if is_unmoved_borrow {
+                st.borrow_bindings.insert(d.clone());
+            }
+            for s in &ref_roots {
+                if d != s
+                    && (self.binding_may_share(st, s)
+                        || self.lookup_binding(st, s).is_some_and(|b| b.immutable)
+                        || self.expr_slices_addressable_array(st, arg_expr, s))
+                {
+                    st.share_edge(d, s);
+                }
+            }
+            for s in &addr_roots {
+                if d != s && self.lookup_binding(st, s).is_some() {
+                    st.share_edge(d, s);
+                }
+            }
+        }
+        let src_origin = self
+            .moved_non_owned_origin_in_expr(st, arg_expr)
+            .or_else(|| {
+                addr_roots.iter().find_map(|r| {
+                    self.non_owned_origin_of(st, r)
+                        .map(|(o, _)| o)
+                        .or_else(|| {
+                            self.lookup_binding(st, r)
+                                .and_then(|b| b.non_owned_origin.clone())
+                        })
+                })
+            });
+        if let Some(origin) = src_origin {
+            let peer_origin = if origin.starts_with("a may-share peer of ") {
+                origin
+            } else {
+                format!("a may-share peer of {}", origin)
+            };
+            for d in &dst_roots {
+                if self.binding_may_share(st, d) {
+                    if let Some(db) = st.env_lookup_mut(d) {
+                        if db.non_owned_origin.is_none() {
+                            db.non_owned_origin = Some(peer_origin.clone());
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
     fn is_opaque_interproc_call(&self, st: &FnState, callee: &Expr) -> bool {
         match crate::model::unwrap_parens(callee) {
             Expr::Ident { name, .. } => self.lookup_binding(st, name).is_some(),
@@ -2749,6 +2863,9 @@ impl<'a> Checker<'a> {
     }
 
     pub(crate) fn record_callee_param_stores(&self, st: &mut FnState, cr: &CallRef) {
+        if self.record_set_insert_store(st, cr) {
+            return;
+        }
         let Some((slots, body)) = self.resolve_callee_slots_and_body(st, cr) else {
             if self.is_opaque_interproc_call(st, cr.callee) {
                 let mut roots = Vec::new();
@@ -2838,8 +2955,14 @@ impl<'a> Checker<'a> {
                     continue;
                 }
                 for s in &src_roots {
+                    let is_addr_arg = matches!(src_src, CalleeSlotSource::Arg(e) if {
+                        let mut ar = Vec::new();
+                        collect_addr_of_roots(e, &mut ar);
+                        ar.contains(s)
+                    });
                     if d != s
                         && (self.binding_may_share(st, s)
+                            || (is_addr_arg && self.lookup_binding(st, s).is_some())
                             || self.lookup_binding(st, s).is_some_and(|b| b.immutable) || matches!(src_src, CalleeSlotSource::Arg(e) if self.expr_slices_addressable_array(st, e, s)))
                     {
                         st.share_edge(d, s);
@@ -3624,6 +3747,50 @@ impl<'a> Checker<'a> {
                             .entry(d_root.to_string())
                             .or_default()
                             .extend(src_slots);
+                    }
+                }
+                return;
+            }
+        }
+        if let Expr::Field {
+            base,
+            name: method_name,
+            ..
+        } = crate::model::unwrap_parens(cr.callee)
+        {
+            if method_name == "insert"
+                && cr.args.len() == 1
+                && self.is_prelude_set_shape(&self.shape_of_expr(cst, base))
+            {
+                let arg = &cr.args[0].value;
+                let set_elem_shape = self
+                    .ty_of_expr(cst, base)
+                    .and_then(|ty| self.set_elem_type(&ty))
+                    .map(|et| self.shape_of_type(&et));
+                let arg_shape = self.shape_of_expr(cst, arg);
+                let elem_shares = set_elem_shape
+                    .as_ref()
+                    .is_some_and(|es| self.shape_may_share(es) || matches!(es, TypeShape::Unknown))
+                    || self.shape_may_share(&arg_shape)
+                    || matches!(arg_shape, TypeShape::Unknown)
+                    || self.expr_carries_borrow(cst, arg);
+                if elem_shares {
+                    let dst_slots = Self::raw_expr_slot_origins(base, aliases);
+                    let src_slots = Self::raw_expr_slot_origins(arg, aliases);
+                    for d in &dst_slots {
+                        for s in &src_slots {
+                            if d != s {
+                                out.insert((*d, *s));
+                            }
+                        }
+                    }
+                    if let Some(d_root) = base.root_ident() {
+                        if !param_names.contains(d_root) && !src_slots.is_empty() {
+                            aliases
+                                .entry(d_root.to_string())
+                                .or_default()
+                                .extend(src_slots);
+                        }
                     }
                 }
                 return;

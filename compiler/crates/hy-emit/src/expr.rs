@@ -538,6 +538,39 @@ impl Emitter {
                 "empty `[]` literal — write `[]T{}` with the element type",
             ));
         };
+        // Parentheses and a sign on a numeric literal are transparent:
+        // `[-1, 2]` is `[]int`, `[(2.5), 1]` is `[]float64` — the same head
+        // hy-check's untyped-slice item check infers.
+        let mut first = first;
+        let mut negated = false;
+        loop {
+            match first {
+                Expr::Paren { inner, .. } => first = inner,
+                Expr::Unary {
+                    op: UnOp::Neg,
+                    operand,
+                    ..
+                } => {
+                    negated = true;
+                    first = operand;
+                }
+                _ => break,
+            }
+        }
+        if negated
+            && !matches!(
+                first,
+                Expr::Lit {
+                    kind: LitKind::Int(_) | LitKind::Float(_),
+                    ..
+                }
+            )
+        {
+            return Err(EmitError::unsupported(format!(
+                "untyped slice literal of `-{}` — spell the element type",
+                first.render()
+            )));
+        }
         let elem = match first {
             Expr::Lit { kind, .. } => match kind {
                 LitKind::Int(_) => "int",

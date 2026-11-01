@@ -33,6 +33,8 @@
 //!     (issue #201: incomparable `==`, package-level redeclarations,
 //!     invalid receivers, negative shift counts, bad array lengths).
 //!   * this file    — Pass B: the per-statement driver and the verdict.
+//!   * `elided_literal.rs` — HYB-E1002: a type-elided struct literal `{...}`
+//!     outside a composite element slot the emitter can fill (Row 13).
 //!   * `builtins.rs` — HYB-E2001 defer-non-call + HYB-E2005 builtin args (issue #187).
 //!
 //! Tier-0 discipline (O4.9, rule FC — human directive 2026-10-13): the
@@ -49,6 +51,7 @@ mod arith;
 mod buildable;
 mod const_overflow;
 mod closures;
+mod elided_literal;
 mod emit_guard;
 mod foreign;
 mod freeze;
@@ -113,6 +116,11 @@ pub fn check_file(file: &File) -> CheckResult {
     // declaration-signature expressions (array lengths) at file level; each
     // function body inside check_fn below.
     ck.check_file_undefined_names();
+
+    // GUARANTEES Row 13: a type-elided struct literal (`{x: 1}`) outside a
+    // composite element slot is HYB-E1002 here, not an `emitter (MVP-0):
+    // not yet supported` refusal at `hyb build`.
+    ck.check_elided_struct_literals();
 
     let fns: Vec<&FnDecl> = file.fns().collect();
     for f in fns {

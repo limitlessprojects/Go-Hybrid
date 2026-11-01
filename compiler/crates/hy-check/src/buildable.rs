@@ -380,6 +380,10 @@ struct Collector<'a> {
     scopes: Vec<HashMap<String, Option<usize>>>,
     /// Parallel lexical scope stack tracking resolved operand kinds (#425).
     kind_scopes: Vec<HashMap<String, OpKind>>,
+    /// `set[T]` bindings -> their element type text (`"int"`), scoped like
+    /// `kind_scopes`. `set[T]` has no OpKind (it lowers to a prelude
+    /// struct), so without this its element type was never checked (#2474).
+    set_elem_scopes: Vec<HashMap<String, Option<String>>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
     file_untyped_consts: HashSet<String>,
@@ -412,6 +416,12 @@ struct Collector<'a> {
     roots: HashSet<String>,
     diags: Vec<Diagnostic>,
     path: String,
+    /// Composite element slots (items of a typed slice/array literal, keys
+    /// and values of a map literal, and items of an elided slice literal in
+    /// such a slot). hy-emit gives an untyped `[...]` there the EXPECTED
+    /// element type, so only untyped literals OUTSIDE these slots take their
+    /// type from their first item (`infer_slice_head`).
+    elided_slots: HashSet<*const Expr>,
 }
 
 /// Entry point: `check_file` calls this once per file (after the per-fn
@@ -423,6 +433,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             ck,
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
+            set_elem_scopes: Vec::new(),
             file_consts: HashMap::new(),
             file_untyped_consts: HashSet::new(),
             fn_results: Vec::new(),
@@ -435,6 +446,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             roots: HashSet::new(),
             diags: Vec::new(),
             path: ck.path.clone(),
+            elided_slots: HashSet::new(),
         };
         for d in &file.decls {
             if let Decl::Const(cd) = d {
@@ -485,11 +497,13 @@ impl<'a> Collector<'a> {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.kind_scopes.push(HashMap::new());
+        self.set_elem_scopes.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.kind_scopes.pop();
+        self.set_elem_scopes.pop();
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -506,6 +520,88 @@ impl<'a> Collector<'a> {
             if let Some(top) = self.kind_scopes.last_mut() {
                 top.insert(name.to_string(), kind);
             }
+            // Every (re)binding shadows an outer set binding; callers that
+            // know the new binding is a set record it via bind_set_elem.
+            if let Some(top) = self.set_elem_scopes.last_mut() {
+                top.insert(name.to_string(), None);
+            }
+        }
+    }
+
+    fn bind_set_elem(&mut self, name: &str, elem: Option<String>) {
+        if name != "_" && elem.is_some() {
+            if let Some(top) = self.set_elem_scopes.last_mut() {
+                top.insert(name.to_string(), elem);
+            }
+        }
+    }
+
+    /// `set[int]` -> `"int"`.
+    fn set_elem_of_ty(ty: &TypeExpr) -> Option<String> {
+        if let TypeExpr::Named { name, .. } = ty {
+            return name
+                .strip_prefix("set[")
+                .and_then(|r| r.strip_suffix(']'))
+                .map(|t| t.to_string());
+        }
+        None
+    }
+
+    /// The element type text of a set-valued expression, when provable.
+    fn set_elem_of_expr(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                for layer in self.set_elem_scopes.iter().rev() {
+                    if let Some(v) = layer.get(name) {
+                        return v.clone();
+                    }
+                }
+                None
+            }
+            Expr::StructLit { ty: Some(t), .. } => Self::set_elem_of_ty(t),
+            // `mk()` where `fn mk() set[T]` — the declared single result.
+            Expr::Call { callee, .. } => match unwrap_parens(callee) {
+                Expr::Ident { name, .. } if self.lookup_kind(name).is_none() => self
+                    .ck
+                    .fns
+                    .get(name.as_str())
+                    .filter(|f| f.results.len() == 1)
+                    .and_then(|f| Self::set_elem_of_ty(&f.results[0].ty)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// #2474: `s.insert(v)` / `s.contains(v)` / `s.remove(v)` on a `set[T]`
+    /// need `v` of type `T`; the prelude's Go signature takes `T`, so a
+    /// mismatched argument passed `hyb check` and failed `go build`.
+    fn check_set_method_arg(&mut self, callee: &Expr, args: &[CallArg]) {
+        let Expr::Field { base, name, .. } = unwrap_parens(callee) else {
+            return;
+        };
+        if !matches!(name.as_str(), "insert" | "contains" | "remove") || args.len() != 1 {
+            return;
+        }
+        let Some(elem) = self.set_elem_of_expr(base) else {
+            return;
+        };
+        let want = self.kind_of_named(&elem, 0);
+        let got = self.kind_of_expr(&args[0].value);
+        if kinds_conflict(&want, &got) {
+            self.emit_e1002(
+                args[0].value.span(),
+                format!(
+                    "cannot use `{}` (type `{}`) as `{}` value in argument to `{}.{}` on `set[{}]` (HYB-E1002)",
+                    args[0].value.render(),
+                    got.label(),
+                    want.label(),
+                    base.render(),
+                    name,
+                    elem
+                ),
+                "a set's insert/contains/remove take a value of the set's element type",
+            );
         }
     }
 
@@ -773,6 +869,7 @@ impl<'a> Collector<'a> {
             self.exempt(&p.name);
             let pk = self.kind_of_ty(&p.ty, 0);
             self.bind_kind(&p.name, pk);
+            self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
         }
         for r in &f.results {
             if let Some(rname) = &r.name {
@@ -927,8 +1024,16 @@ impl<'a> Collector<'a> {
         // tracking; #430's operand-kind inference runs for EVERY name so
         // `kind_of_expr` resolves binding-shaped operands (issue #425).
         let kinds = self.infer_local_kinds(l);
-        for (name, kind) in l.names.iter().zip(kinds) {
+        let set_elems: Vec<Option<String>> = (0..l.names.len())
+            .map(|i| match (&l.ty, l.values.len() == l.names.len()) {
+                (Some(t), _) => Self::set_elem_of_ty(t),
+                (None, true) => self.set_elem_of_expr(&l.values[i]),
+                _ => None,
+            })
+            .collect();
+        for ((name, kind), set_elem) in l.names.iter().zip(kinds).zip(set_elems) {
             self.bind_kind(name, kind);
+            self.bind_set_elem(name, set_elem);
             if !track_read {
                 self.exempt(name);
                 continue;
@@ -1480,6 +1585,7 @@ impl<'a> Collector<'a> {
                     self.check_multi_value_arg_arity(callee, args, *span);
                 }
                 self.check_call_operands(callee, args, *span);
+                self.check_set_method_arg(callee, args);
             }
             Expr::StructLit { ty, fields, span } => {
                 if let Some(t) = ty {
@@ -1496,6 +1602,12 @@ impl<'a> Collector<'a> {
                     self.ty(t);
                     self.check_value_position_type_name(t);
                 }
+                let in_slot = self.elided_slots.contains(&(e as *const Expr));
+                if elem.is_some() || in_slot {
+                    for i in items {
+                        self.elided_slots.insert(unwrap_parens(i) as *const Expr);
+                    }
+                }
                 for i in items {
                     self.expr(i);
                 }
@@ -1503,6 +1615,8 @@ impl<'a> Collector<'a> {
                     self.check_array_lit_items(inner_elem, items);
                 } else if let Some(t) = elem {
                     self.check_slice_lit_items(t, items);
+                } else if !in_slot {
+                    self.check_untyped_slice_lit_items(items);
                 }
             }
             Expr::MapLit {
@@ -1515,6 +1629,10 @@ impl<'a> Collector<'a> {
                 self.ty(value);
                 self.check_value_position_type_name(key);
                 self.check_value_position_type_name(value);
+                for (k, v) in entries {
+                    self.elided_slots.insert(unwrap_parens(k) as *const Expr);
+                    self.elided_slots.insert(unwrap_parens(v) as *const Expr);
+                }
                 for (k, v) in entries {
                     self.expr(k);
                     self.expr(v);
@@ -1539,6 +1657,7 @@ impl<'a> Collector<'a> {
                     self.exempt(&p.name);
                     let pk = self.kind_of_ty(&p.ty, 0);
                     self.bind_kind(&p.name, pk);
+                    self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
                 }
                 for r in results {
                     if let Some(rname) = &r.name {
@@ -3835,19 +3954,25 @@ impl<'a> Collector<'a> {
         if let OpKind::Map(key_kind, _) = bk {
             if **key_kind != OpKind::Unknown
                 && *ik != OpKind::Unknown
-                && kinds_conflict(key_kind, ik)
             {
-                self.emit_e1002(
-                    index.span(),
-                    format!(
-                        "cannot use `{}` (type `{}`) as `{}` value in map index on `{}` (HYB-E1002)",
-                        index.render(),
-                        ik.label(),
-                        key_kind.label(),
-                        bk.label()
-                    ),
-                    "map index expression must match the map's key type",
-                );
+                let is_untyped_int_to_float = **key_kind == OpKind::Float
+                    && *ik == OpKind::Int
+                    && self.is_untyped_int_const(index);
+                let conflict = (**key_kind == OpKind::Float && *ik == OpKind::Int && !is_untyped_int_to_float)
+                    || kinds_conflict(key_kind, ik);
+                if conflict {
+                    self.emit_e1002(
+                        index.span(),
+                        format!(
+                            "cannot use `{}` (type `{}`) as `{}` value in map index on `{}` (HYB-E1002)",
+                            index.render(),
+                            ik.label(),
+                            key_kind.label(),
+                            bk.label()
+                        ),
+                        "map index expression must match the map's key type",
+                    );
+                }
             }
             return;
         }
@@ -4264,6 +4389,79 @@ impl<'a> Collector<'a> {
                 ),
                 "every element of a slice composite literal `[]T{...}` must be assignable to the element type `T`",
             );
+        }
+    }
+
+    /// `[h, a, b]` with no element type lowers to `[]H{h, a, b}`, where `H`
+    /// is what hy-emit infers from the first item (`infer_slice_head`): `int`,
+    /// `float64`, `string`, `bool`, or `rune` for a basic literal (a sign or
+    /// parentheses are transparent), the struct type for a typed struct
+    /// literal. Every later item must be assignable to `H`, exactly as in
+    /// the spelled-out `[]H{...}` — before this check `[1, "a"]`,
+    /// `[1, 2.5]`, `[1, x]` with `x float64`, and `["a", nil]` passed
+    /// `hyb check` and failed `go build` (`cannot use … in array or slice
+    /// literal`). A `nil` first item has no type at all and is refused by
+    /// the emitter (`nil in an untyped slice literal`), so it is rejected
+    /// here too.
+    fn check_untyped_slice_lit_items(&mut self, items: &[Expr]) {
+        let Some((first, rest)) = items.split_first() else {
+            return;
+        };
+        if matches!(
+            unwrap_parens(first),
+            Expr::Lit {
+                kind: LitKind::Nil,
+                ..
+            }
+        ) {
+            // `[nil, …]`: no element type at all — hy-emit refuses it
+            // (`nil in an untyped slice literal`).
+            self.emit_e1002(
+                first.span(),
+                "an untyped slice literal cannot start with `nil` — it has no element type to infer (HYB-E1002)".to_string(),
+                "spell the element type: `[]*T{nil}`, `[]error{nil}`, …",
+            );
+            return;
+        }
+        let Some(head) = untyped_slice_head_ty(first) else {
+            return;
+        };
+        let head_text = head.render();
+        let mut checked = Vec::new();
+        for item in rest {
+            match unwrap_parens(item) {
+                Expr::Lit {
+                    kind: LitKind::Nil,
+                    ..
+                } => {
+                    self.emit_e1002(
+                        item.span(),
+                        format!(
+                            "cannot use `nil` as `{}` value in the untyped slice literal (its element type is inferred from the first item `{}`) (HYB-E1002)",
+                            head_text,
+                            first.render()
+                        ),
+                        "an untyped `[...]` takes its element type from its first item; spell a nilable element type instead (`[]*T{...}`, `[]error{...}`)",
+                    );
+                }
+                // Go accepts an integral float constant in an int slot
+                // (`[]int{1, 2.0}`).
+                Expr::Lit {
+                    kind: LitKind::Float(f),
+                    ..
+                } if head_text == "int"
+                    && f.replace('_', "").parse::<f64>().is_ok_and(|v| v.fract() == 0.0) => {}
+                _ => checked.push(item.clone()),
+            }
+        }
+        let before = self.diags.len();
+        self.check_slice_lit_items(&head, &checked);
+        for d in &mut self.diags[before..] {
+            d.notes.push(format!(
+                "why: the untyped slice literal's element type `{}` is inferred from its first item `{}`; spell the element type (`[]T{{...}}`) when the items differ",
+                head_text,
+                first.render()
+            ));
         }
     }
 
@@ -4833,12 +5031,36 @@ impl<'a> Collector<'a> {
                 let key_arg = &args[1].value;
                 let mk = self.kind_of_expr(map_arg);
                 match &mk {
-                    OpKind::Unknown => {}
+                    // #2474: `delete(s, v)` on a `set[T]` (lowered to
+                    // `s.remove(v)`) needs `v` of type `T`.
+                    OpKind::Unknown => {
+                        if let Some(elem) = self.set_elem_of_expr(map_arg) {
+                            let want = self.kind_of_named(&elem, 0);
+                            let got = self.kind_of_expr(key_arg);
+                            if kinds_conflict(&want, &got) {
+                                self.emit_e2005(
+                                    span,
+                                    format!(
+                                        "cannot use `{}` (type `{}`) as element type `{}` in `delete` on `set[{}]` (HYB-E2005)",
+                                        key_arg.render(),
+                                        got.label(),
+                                        want.label(),
+                                        elem
+                                    ),
+                                    "the second argument to `delete(s, v)` must match the set's element type",
+                                );
+                            }
+                        }
+                    }
                     OpKind::Map(k_expected, _) => {
                         let kk = self.kind_of_expr(key_arg);
+                        let is_untyped_int_to_float = **k_expected == OpKind::Float
+                            && kk == OpKind::Int
+                            && self.is_untyped_int_const(key_arg);
                         if **k_expected != OpKind::Unknown
                             && kk != OpKind::Unknown
                             && kk != **k_expected
+                            && !is_untyped_int_to_float
                         {
                             self.emit_e2005(
                                 span,
@@ -5480,5 +5702,32 @@ fn main() {
             "unexpected diagnostics: {:?}",
             r.diagnostics
         );
+    }
+}
+
+/// The element type hy-emit's `infer_slice_head` gives an untyped slice
+/// literal from its first item, or `None` when it infers none.
+fn untyped_slice_head_ty(first: &Expr) -> Option<TypeExpr> {
+    let span = first.span();
+    let named = |n: &str| Some(TypeExpr::Named { name: n.to_string(), span });
+    match first {
+        Expr::Paren { inner, .. } => untyped_slice_head_ty(inner),
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => untyped_slice_head_ty(operand).filter(|t| {
+            matches!(t, TypeExpr::Named { name, .. } if name == "int" || name == "float64")
+        }),
+        Expr::Lit { kind, .. } => match kind {
+            LitKind::Int(_) => named("int"),
+            LitKind::Float(_) => named("float64"),
+            LitKind::Str(_) | LitKind::RawStr(_) => named("string"),
+            LitKind::Bool(_) => named("bool"),
+            LitKind::Char(_) => named("rune"),
+            LitKind::Nil => None,
+        },
+        Expr::StructLit { ty: Some(t), .. } => Some(t.clone()),
+        _ => None,
     }
 }
