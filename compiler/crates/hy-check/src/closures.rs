@@ -26,7 +26,7 @@
 //!     subset — corpus 10's `hits++` handler shape is the standing example
 //!     (A5, QUESTIONS.md Q1/OQ1: pre-registered ACCEPT, contested openly).
 
-use crate::model::{Binding, Checker, FnState, TypeShape};
+use crate::model::{Binding, Checker, FnState, LoopBreakSnapshot, TypeShape};
 use hy_syntax::ForKind::*;
 use hy_syntax::{Block, Expr, LocalKind, SelectArmKind, Stmt};
 
@@ -989,7 +989,13 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     }
                     SelectArmKind::Default => {}
                 }
+                if let Some(lb) = st.loop_breaks.last_mut() {
+                    lb.1 = true;
+                }
                 check_body_boundaries(ck, st, &arm.body, managed, nested);
+                if let Some(lb) = st.loop_breaks.last_mut() {
+                    lb.1 = false;
+                }
                 pop_scope_and_sync(st, nested);
             }
         }
@@ -1112,7 +1118,11 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 Infinite => {}
             }
             st.scope_push(); // the body's own scope
+            st.loop_breaks.push((outer_depth, false, Vec::new()));
             check_body_boundaries(ck, st, body, managed, nested);
+            for snap in &st.loop_breaks.pop().unwrap().2 {
+                snap.apply(st);
+            }
             if !managed {
                 let flat_body = crate::walk::flatten(body);
                 let mut loop_stmts: Vec<(&Stmt, usize)> =
@@ -1190,6 +1200,14 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             st.scope_push();
             check_body_boundaries(ck, st, block, managed, nested);
             pop_scope_and_sync(st, nested);
+        }
+        Stmt::Break { label, .. } => {
+            if let Some(lb) = st.loop_breaks.last() {
+                if !lb.1 || label.is_some() {
+                    let snap = LoopBreakSnapshot::capture(st, lb.0);
+                    st.loop_breaks.last_mut().unwrap().2.push(snap);
+                }
+            }
         }
         Stmt::Assign {
             targets,

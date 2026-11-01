@@ -71,7 +71,7 @@ mod try_context;
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
 
 use hy_syntax::{Decl, Expr, File, FnDecl, ForKind, SelectArmKind, Stmt};
-use model::{Binding, Checker, FnState, MANAGED_CATEGORIES, TypeShape};
+use model::{Binding, Checker, FnState, LoopBreakSnapshot, MANAGED_CATEGORIES, TypeShape};
 
 /// The result of checking one file.
 #[derive(Debug, Default)]
@@ -457,6 +457,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         usize,
         &hy_syntax::Block,
         std::collections::HashSet<String>,
+        Vec<LoopBreakSnapshot>,
     )> = Vec::new();
     let mut reported_backedge: std::collections::HashSet<String> =
         std::collections::HashSet::new();
@@ -504,7 +505,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 .filter(|(_, b)| b.moved.is_some())
                 .map(|(k, _)| k.clone())
                 .collect();
-            active_loops.push((idx, flat.loop_end_of(idx), outer_depth, lbody, pre_moved));
+            active_loops.push((idx, flat.loop_end_of(idx), outer_depth, lbody, pre_moved, Vec::new()));
         }
         if let Stmt::Managed {
             reason,
@@ -899,16 +900,37 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 st.deferred_calls.push((call.clone(), arg_borrows));
             }
 
+            // #2511: record the state at each `break`; the loop's exit joins them.
+            Stmt::Break { label, .. } => {
+                let in_select = flat.select_end.iter().any(|(&s, &e)| {
+                    s < idx && idx <= e && active_loops.last().map_or(true, |l| l.0 < s)
+                });
+                if !in_select || label.is_some() {
+                    // `break loop` targets the nearest enclosing `loop`, not the innermost `for`.
+                    let t = label
+                        .as_ref()
+                        .and_then(|_| active_loops.iter().rposition(|l| flat.infinite_loop_end.contains_key(&l.0)))
+                        .or(active_loops.len().checked_sub(1));
+                    if let Some(t) = t {
+                        let snap = LoopBreakSnapshot::capture(&st, active_loops[t].2);
+                        active_loops[t].5.push(snap);
+                    }
+                }
+            }
+
             // If-init Locals and blocks: already covered by the flat walk
             // (init is its own statement entry) and the uses/calls collected above.
             _ => {}
         }
 
-        while let Some((_, loop_end, _, _, _)) = active_loops.last() {
+        while let Some((_, loop_end, _, _, _, _)) = active_loops.last() {
             if *loop_end != idx {
                 break;
             }
-            let (for_idx, loop_end, outer_depth, lbody, pre_moved) = active_loops.pop().unwrap();
+            let (for_idx, loop_end, outer_depth, lbody, pre_moved, break_snaps) = active_loops.pop().unwrap();
+            for snap in &break_snaps {
+                snap.apply(&mut st);
+            }
             ck.replay_const_backedge(&st, outer_depth, lbody);
             ck.check_loop_backedge(
                 &st,
