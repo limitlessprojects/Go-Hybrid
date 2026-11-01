@@ -73,6 +73,12 @@ pub(crate) struct RejectInfo {
     pub notes: Vec<String>,
 }
 
+enum SetElemIssue {
+    Closure,
+    UnmovableLeaf,
+    Unproven(String),
+}
+
 impl<'a> Checker<'a> {
     // -----------------------------------------------------------------------
     // Classification
@@ -145,7 +151,101 @@ impl<'a> Checker<'a> {
                     )],
                 })
             }
-            _ => Outcome::Ok,
+            shape if self.shape_holds_unproven_type_param(shape, &mut Vec::new()) => {
+                Outcome::Unproven(UnprovenInfo {
+                    value: name.to_string(),
+                    reason: "it carries an unresolved generic type parameter whose sendability class cannot be proven at this boundary (O4.9)".to_string(),
+                })
+            }
+            shape => {
+                let fallback_ty = if b.ty.is_none() {
+                    match shape {
+                        TypeShape::Struct(Some(sname)) if sname.contains("set[") => {
+                            Some(TypeExpr::Named {
+                                name: sname.clone(),
+                                span: Span::point(hy_diag::Pos::new(1, 1)),
+                            })
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some(ty) = b.ty.as_ref().or(fallback_ty.as_ref()) {
+                    match self.check_type_set_elements(ty) {
+                        Some(SetElemIssue::Closure) => {
+                            return Outcome::Rejected(RejectInfo {
+                                value: name.to_string(),
+                                ty: self.binding_ty_str(b),
+                                notes: vec![format!(
+                                    "`{}` is a {} that holds closures; moving the container moves only the closure values, not the environment they capture, so the captured state stays reachable from this task (A5 perimeter, same rule as moving a bare closure)",
+                                    name,
+                                    shape.noun()
+                                )],
+                            });
+                        }
+                        Some(SetElemIssue::UnmovableLeaf) => {
+                            return Outcome::Rejected(RejectInfo {
+                                value: name.to_string(),
+                                ty: self.binding_ty_str(b),
+                                notes: vec![format!(
+                                    "`{}` is a {} that holds a borrow handle or foreign opaque value; moving the container cannot transfer non-movable interior state across tasks (O4/O7/A5)",
+                                    name,
+                                    shape.noun()
+                                )],
+                            });
+                        }
+                        Some(SetElemIssue::Unproven(elem)) => {
+                            return Outcome::Unproven(UnprovenInfo {
+                                value: name.to_string(),
+                                reason: format!(
+                                    "set element type `{}` did not resolve to a proven movable sendability class (O4.9)",
+                                    elem
+                                ),
+                            });
+                        }
+                        None => {}
+                    }
+                }
+                Outcome::Ok
+            }
+        }
+    }
+
+    /// True when a composite shape carries a generic struct with an unbound /
+    /// unresolved type parameter (`holder[t]` inside `fn f[t](h holder[t])` or
+    /// uninstantiated `holder`). Moving bare `x: t` already fails closed with
+    /// HYB-E3005 (`O4.9`); wrapping `t` inside a generic struct must not
+    /// launder an unproven type parameter across a task boundary (#2483).
+    pub(crate) fn shape_holds_unproven_type_param(
+        &self,
+        shape: &TypeShape,
+        seen: &mut Vec<String>,
+    ) -> bool {
+        match shape {
+            TypeShape::Slice(e) | TypeShape::Array(e) | TypeShape::Pointer(e) => {
+                self.shape_holds_unproven_type_param(e, seen)
+            }
+            TypeShape::Map(k, v) => {
+                self.shape_holds_unproven_type_param(k, seen)
+                    || self.shape_holds_unproven_type_param(v, seen)
+            }
+            TypeShape::Struct(Some(sname)) => {
+                if seen.iter().any(|s| s == sname) {
+                    return false;
+                }
+                seen.push(sname.clone());
+                if self.struct_has_unresolved_type_param(sname) {
+                    return true;
+                }
+                let Some(fields) = self.struct_fields_for_sname(sname) else {
+                    return false;
+                };
+                fields.iter().any(|(_, ty)| {
+                    self.shape_holds_unproven_type_param(&self.shape_of_type(ty), seen)
+                })
+            }
+            _ => false,
         }
     }
 
@@ -168,7 +268,7 @@ impl<'a> Checker<'a> {
                     return false;
                 }
                 seen.push(sname.clone());
-                let Some(fields) = self.structs.get(sname) else {
+                let Some(fields) = self.struct_fields_for_sname(sname) else {
                     return false;
                 };
                 fields
@@ -200,7 +300,7 @@ impl<'a> Checker<'a> {
                     return false;
                 }
                 seen.push(sname.clone());
-                let Some(fields) = self.structs.get(sname) else {
+                let Some(fields) = self.struct_fields_for_sname(sname) else {
                     return false;
                 };
                 fields
@@ -208,6 +308,86 @@ impl<'a> Checker<'a> {
                     .any(|(_, ty)| self.shape_holds_unmovable_leaf(&self.shape_of_type(ty), seen))
             }
             _ => false,
+        }
+    }
+
+    fn check_type_set_elements(&self, ty: &TypeExpr) -> Option<SetElemIssue> {
+        self.check_type_set_elements_rec(ty, false, &mut Vec::new(), 0)
+    }
+
+    fn check_type_set_elements_rec(
+        &self,
+        ty: &TypeExpr,
+        in_set: bool,
+        seen: &mut Vec<String>,
+        depth: usize,
+    ) -> Option<SetElemIssue> {
+        if depth > 16 {
+            return if in_set {
+                Some(SetElemIssue::Unproven(ty.render()))
+            } else {
+                None
+            };
+        }
+        let resolved = self.resolve_type_alias(ty);
+        match &resolved {
+            TypeExpr::Chan { .. } => None,
+            TypeExpr::Fn { .. } => {
+                if in_set {
+                    Some(SetElemIssue::Closure)
+                } else {
+                    None
+                }
+            }
+            TypeExpr::Pointer { to: inner, .. }
+            | TypeExpr::Slice { elem: inner, .. }
+            | TypeExpr::Array { elem: inner, .. }
+            | TypeExpr::Option { elem: inner, .. } => {
+                self.check_type_set_elements_rec(inner, in_set, seen, depth + 1)
+            }
+            TypeExpr::Map { key, value, .. } => self
+                .check_type_set_elements_rec(key, in_set, seen, depth + 1)
+                .or_else(|| self.check_type_set_elements_rec(value, in_set, seen, depth + 1)),
+            TypeExpr::Named { name, .. } => {
+                if !self.structs.contains_key("set") {
+                    if let Some((base, args)) = Self::parse_generic_type_args(name) {
+                        if base == "set" && args.len() == 1 {
+                            return self.check_type_set_elements_rec(
+                                &args[0],
+                                true,
+                                seen,
+                                depth + 1,
+                            );
+                        }
+                    }
+                }
+                if let Some(fields) = self.struct_fields_for_type(&resolved) {
+                    let key = format!("{}:{}", in_set, resolved.render());
+                    if seen.contains(&key) {
+                        return None;
+                    }
+                    seen.push(key);
+                    for (_, fty) in &fields {
+                        if let Some(issue) =
+                            self.check_type_set_elements_rec(fty, in_set, seen, depth + 1)
+                        {
+                            return Some(issue);
+                        }
+                    }
+                    return None;
+                }
+                if !in_set {
+                    return None;
+                }
+                match self.shape_of_type(&resolved) {
+                    TypeShape::Closure => Some(SetElemIssue::Closure),
+                    TypeShape::BorrowHandle(_) | TypeShape::ForeignOpaque(_) => {
+                        Some(SetElemIssue::UnmovableLeaf)
+                    }
+                    TypeShape::Unknown => Some(SetElemIssue::Unproven(resolved.render())),
+                    _ => None,
+                }
+            }
         }
     }
 
@@ -227,7 +407,10 @@ impl<'a> Checker<'a> {
                     return false;
                 }
                 seen.push(sname.clone());
-                let Some(fields) = self.structs.get(sname) else {
+                if self.struct_has_unresolved_type_param(sname) {
+                    return false;
+                }
+                let Some(fields) = self.struct_fields_for_sname(sname) else {
                     return false;
                 };
                 fields
@@ -673,7 +856,8 @@ impl<'a> Checker<'a> {
                     _ => None,
                 };
                 let f = recv_base.and_then(|rb| {
-                    self.method_decls.get(&(rb, method_name.clone())).copied()
+                    let base = Self::base_named_type_str(&rb).to_string();
+                    self.method_decls.get(&(base, method_name.clone())).copied()
                 })?;
                 if f.params.len() != argc {
                     return None;
@@ -1020,7 +1204,7 @@ impl<'a> Checker<'a> {
                         _ => None,
                     }
                 }) {
-                    if let Some(def) = self.structs.get(&sname).cloned() {
+                    if let Some(def) = self.struct_fields_for_sname(&sname) {
                         for f in fields {
                             if let Some((_, fty)) = def.iter().find(|(n, _)| n == &f.name) {
                                 if Checker::is_nil_literal(&f.value) {
@@ -2216,7 +2400,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn parse_generic_type_args(name: &str) -> Option<(&str, Vec<hy_syntax::TypeExpr>)> {
+    pub(crate) fn parse_generic_type_args(name: &str) -> Option<(&str, Vec<hy_syntax::TypeExpr>)> {
         let open = name.find('[')?;
         if !name.ends_with(']') || open == 0 {
             return None;
@@ -2332,7 +2516,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn peel_pointer_and_alias(&self, ty: &hy_syntax::TypeExpr) -> hy_syntax::TypeExpr {
+    pub(crate) fn peel_pointer_and_alias(&self, ty: &hy_syntax::TypeExpr) -> hy_syntax::TypeExpr {
         let mut cur = self.resolve_type_alias(ty);
         while let hy_syntax::TypeExpr::Pointer { to, .. } = cur {
             cur = self.resolve_type_alias(&to);
@@ -2340,7 +2524,7 @@ impl<'a> Checker<'a> {
         cur
     }
 
-    fn struct_fields_for_type(
+    pub(crate) fn struct_fields_for_type(
         &self,
         ty: &hy_syntax::TypeExpr,
     ) -> Option<Vec<(String, hy_syntax::TypeExpr)>> {
@@ -2348,15 +2532,19 @@ impl<'a> Checker<'a> {
         let hy_syntax::TypeExpr::Named { name, .. } = &peeled else {
             return None;
         };
+        self.struct_fields_for_sname(name)
+    }
+
+    pub(crate) fn struct_fields_for_sname(
+        &self,
+        name: &str,
+    ) -> Option<Vec<(String, hy_syntax::TypeExpr)>> {
         let sname = Self::base_named_type_str(name);
         let fields = self.structs.get(sname)?.clone();
         if let Some((_, type_args)) = Self::parse_generic_type_args(name) {
-            if let Some(sdecl) = self.file.decls.iter().find_map(|d| match d {
-                hy_syntax::Decl::Struct(s) if s.name == sname => Some(s),
-                _ => None,
-            }) {
+            if let Some(tparams) = self.struct_type_params.get(sname) {
                 let mut subst = std::collections::HashMap::new();
-                for (tp, arg) in sdecl.type_params.iter().zip(type_args.iter()) {
+                for (tp, arg) in tparams.iter().zip(type_args.iter()) {
                     subst.insert(tp.name.clone(), arg.clone());
                 }
                 if !subst.is_empty() {
@@ -2370,6 +2558,26 @@ impl<'a> Checker<'a> {
             }
         }
         Some(fields)
+    }
+
+    pub(crate) fn struct_has_unresolved_type_param(&self, name: &str) -> bool {
+        let sname = Self::base_named_type_str(name);
+        let Some(tparams) = self.struct_type_params.get(sname) else {
+            return false;
+        };
+        if tparams.is_empty() {
+            return false;
+        }
+        let Some((_, type_args)) = Self::parse_generic_type_args(name) else {
+            return true;
+        };
+        if type_args.len() < tparams.len() {
+            return true;
+        }
+        type_args
+            .iter()
+            .take(tparams.len())
+            .any(|arg| matches!(self.shape_of_type(arg), TypeShape::Unknown))
     }
 
     fn infer_type_param_bindings(

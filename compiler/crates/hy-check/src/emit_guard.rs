@@ -109,7 +109,7 @@ impl<'a> Checker<'a> {
                 if deep {
                     if matches!(l.kind, hy_syntax::LocalKind::Const) {
                         for (name, value) in l.names.iter().zip(l.values.iter()) {
-                            self.check_const_init_is_constant(name, value, Some(st));
+                            self.check_const_init_is_constant(name, l.ty.as_ref(), value, Some(st));
                         }
                     }
                     if let Some(ty) = &l.ty {
@@ -122,6 +122,7 @@ impl<'a> Checker<'a> {
                             self.check_default_float_overflow(name, value, Some(st));
                         }
                     }
+                    self.check_slot_loan_rebind(st, stmt);
                     self.bind_closure_local_for_emit_guard(st, l);
                     self.mark_slot_loans_local(st, l);
                 }
@@ -359,14 +360,32 @@ impl<'a> Checker<'a> {
                 self.define_binding(st, name, shape.clone(), ty.clone(), immutable, false, is_let);
             }
         } else if l.names.len() == l.values.len() {
+            let pre_st = st.clone();
             for (name, val) in l.names.iter().zip(l.values.iter()) {
-                let inferred = self.shape_of_expr(st, val);
+                let inferred = self.shape_of_expr(&pre_st, val);
                 let shape = match (&l.ty, inferred) {
                     (Some(t), TypeShape::Unknown) => self.shape_of_type(t),
                     (_, s) => s,
                 };
-                let ty = l.ty.clone().or_else(|| self.ty_of_expr(st, val));
+                let ty = l.ty.clone().or_else(|| self.ty_of_expr(&pre_st, val));
+                let rhs_slot_loan = match unwrap_parens(val) {
+                    Expr::Ident { name: src, .. } => {
+                        self.lookup_binding(&pre_st, src).is_some_and(|b| b.slot_loan)
+                    }
+                    Expr::Move { operand, .. } => match unwrap_parens(operand) {
+                        Expr::Ident { name: src, .. } => {
+                            self.lookup_binding(&pre_st, src).is_some_and(|b| b.slot_loan)
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                };
                 self.define_binding(st, name, shape, ty, immutable, false, is_let);
+                if rhs_slot_loan {
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        b.slot_loan = true;
+                    }
+                }
             }
         }
     }
@@ -797,15 +816,15 @@ impl<'a> Checker<'a> {
             // `[N]T` is comparable exactly when `T` is.
             TypeShape::Array(elem) => self.incomparable_rec(elem, seen),
             TypeShape::Struct(Some(name)) => {
-                if name == "set" && !self.structs.contains_key("set") {
+                if Self::base_named_type_str(name) == "set" && !self.structs.contains_key("set") {
                     return Some("set");
                 }
                 if seen.iter().any(|n| n == name) {
                     return None; // value cycle — Go rejects the type itself elsewhere
                 }
                 seen.push(name.clone());
-                let fields = self.structs.get(name)?;
-                for (_, ft) in fields {
+                let fields = self.struct_fields_for_sname(name)?;
+                for (_, ft) in &fields {
                     let fs = self.shape_of_type(ft);
                     if let Some(n) = self.incomparable_rec(&fs, seen) {
                         return Some(n);
@@ -936,7 +955,9 @@ impl<'a> Checker<'a> {
             );
         }
         // -- C: method-set duplication (`method box.get already declared`) --
-        let base = r.ty.render();
+        let base = Self::base_named_type(&r.ty)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| r.ty.render());
         if !self.methods.insert((base.clone(), f.name.clone())) {
             let msg = format!("method `{}.{}` already declared (HYB-E1003)", base, f.name);
             self.diags.push(
@@ -1219,7 +1240,7 @@ impl<'a> Checker<'a> {
         }
         // 2b) A boolean, string, or comparison/logical expression (`[true]int`,
         // `[!true]int`, `[1 == 2]int`, `["hi"]int`) is never an integer length.
-        if is_non_int_array_len_expr(len) {
+        if self.is_non_int_array_len_expr(len) {
             let msg = format!(
                 "array length `{}` is not an integer constant — Go rejects this (`invalid array length`), so the emitted module would not build (HYB-E6004)",
                 len.render()
@@ -1272,7 +1293,7 @@ impl<'a> Checker<'a> {
                         .resolve_local_binding_at(name, span.start)
                         .and_then(|sight| {
                             let init_expr = sight.constant_initializer()?;
-                            if sight.ty.as_ref().is_some_and(is_non_int_primitive_type) {
+                            if sight.ty.as_ref().is_some_and(|ty| self.is_non_int_type(ty)) {
                                 return None;
                             }
                             self.const_int_value_at(init_expr, sight.pos, 0)
@@ -1350,8 +1371,73 @@ impl<'a> Checker<'a> {
                 ]),
             );
         }
-        // 4) Anything else (calls, `pkg.CONST`, arithmetic over idents) —
-        // fail open: those can be legal constant expressions in Go.
+        // 4) `len`/`cap` over an operand that can never be an array. Go folds
+        // `len(s)`/`cap(s)` to a constant only when `s` is an array or a
+        // pointer to an array (and `len(s)` when `s` is a string *constant*),
+        // so a channel, slice, map, struct, or a string/primitive *variable*
+        // operand is never a constant array length — the fail-open below must
+        // not cover it (issue #1133).
+        if let Some((builtin, operand, kind)) = self.nonconst_len_cap_operand(st, len) {
+            let msg = format!(
+                "array length `{}` is not a constant — `{}({})` over a {} is not a constant expression in Go (`invalid array length {}`), so the emitted module would not build (HYB-E6004)",
+                len.render(),
+                builtin,
+                operand,
+                kind,
+                len.render()
+            );
+            self.diags.push(
+                Diagnostic::error("HYB-E6004", self.path.clone(), span, msg).with_notes(vec![
+                    "why: Go's array length must be a constant, and `len`/`cap` are constant only over an array, a pointer to an array, or a string constant (issue #1133)".to_string(),
+                    "fix: use a literal or `const` length, or declare a slice (`[]T`) for a dynamic size".to_string(),
+                ]),
+            );
+            return;
+        }
+        // 5) Anything else (calls, `pkg.CONST`, arithmetic over idents) —
+        // fail open: those can still be legal constant expressions in Go.
+    }
+
+    /// Return the first `(builtin, operand, kind)` inside an array-length
+    /// expression whose `len`/`cap` operand is a local binding that Go can
+    /// never fold to a constant — only arrays and pointers to arrays (and
+    /// string constants for `len`) qualify. `Unknown` shapes and non-local
+    /// bindings stay fail-open: the checker cannot prove those, and a
+    /// package-level array operand would still be legal (issue #1133).
+    fn nonconst_len_cap_operand(
+        &self,
+        st: Option<&FnState>,
+        expr: &Expr,
+    ) -> Option<(&'static str, String, &'static str)> {
+        let st = st?;
+        let mut calls = Vec::new();
+        collect_len_cap_calls(expr, &mut calls);
+        for (builtin, arg) in calls {
+            let Expr::Ident { name, .. } = unwrap_parens(arg) else {
+                continue; // calls/selectors/literals: no proof, keep fail-open
+            };
+            if name.is_empty() {
+                continue;
+            }
+            let Some(b) = st.env_lookup(name) else {
+                continue; // not a local binding: cannot prove, keep fail-open
+            };
+            let kind = match &b.shape {
+                TypeShape::Array(_) => continue,
+                TypeShape::Pointer(inner) if matches!(**inner, TypeShape::Array(_)) => continue,
+                TypeShape::Chan(_) => "channel",
+                TypeShape::Slice(_) => "slice",
+                TypeShape::Map(_, _) => "map",
+                TypeShape::Str => "string variable",
+                TypeShape::Primitive => "primitive value",
+                TypeShape::Struct(_) => "struct value",
+                TypeShape::Closure => "function value",
+                TypeShape::Atomic => "atomic value",
+                _ => continue, // Unknown / handles: keep fail-open
+            };
+            return Some((builtin, name.clone(), kind));
+        }
+        None
     }
 
     fn file_const_is_valid_array_len(&self, name: &str, depth: usize) -> bool {
@@ -1370,11 +1456,11 @@ impl<'a> Checker<'a> {
             return true;
         };
         if let Some(ty) = &d.ty {
-            if is_non_int_primitive_type(ty) {
+            if self.is_non_int_type(ty) {
                 return false;
             }
         }
-        if is_non_int_array_len_expr(&d.value) {
+        if self.is_non_int_array_len_expr(&d.value) {
             return false;
         }
         if const_float_value(&d.value).is_some_and(|f| f.fract() != 0.0) {
@@ -1403,7 +1489,7 @@ impl<'a> Checker<'a> {
             hy_syntax::Decl::Const(c) if c.name == name => Some(c),
             _ => None,
         })?;
-        if d.ty.as_ref().is_some_and(is_non_int_primitive_type) {
+        if d.ty.as_ref().is_some_and(|ty| self.is_non_int_type(ty)) {
             return None;
         }
         self.const_int_value_at(&d.value, d.span.start, depth + 1)
@@ -1433,7 +1519,7 @@ impl<'a> Checker<'a> {
             } => {
                 if let Some(sight) = self.resolve_local_binding_at(name, id_span.start) {
                     if let Some(next_val) = sight.constant_initializer() {
-                        if sight.ty.as_ref().is_some_and(is_non_int_primitive_type) {
+                        if sight.ty.as_ref().is_some_and(|ty| self.is_non_int_type(ty)) {
                             return None;
                         }
                         if (sight.pos.line, sight.pos.col) != (use_pos.line, use_pos.col) {
@@ -1481,8 +1567,10 @@ impl<'a> Checker<'a> {
                 if fn_name == "len" {
                     return self.const_string_len_at(&args[0].value, use_pos, depth);
                 }
-                if self.is_int_conversion_name(fn_name) {
-                    return self.const_int_value_at(&args[0].value, use_pos, depth);
+                if let Some(target) = self.resolve_int_conversion_name(fn_name) {
+                    return self
+                        .const_int_value_at(&args[0].value, use_pos, depth)
+                        .map(|v| wrap_int_conversion(v, &target));
                 }
                 None
             }
@@ -1531,17 +1619,37 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn is_int_conversion_name(&self, name: &str) -> bool {
+    fn resolve_int_conversion_name(&self, name: &str) -> Option<String> {
         if is_int_primitive_type_name(name) {
-            return true;
+            return Some(name.to_string());
         }
-        if let Some(ty) = self.type_aliases.get(name) {
-            let resolved = self.resolve_type_alias(ty);
-            if let TypeExpr::Named { name: target, .. } = resolved {
-                return is_int_primitive_type_name(&target);
+        let ty = self.type_aliases.get(name)?;
+        if let TypeExpr::Named { name: target, .. } = self.resolve_type_alias(ty) {
+            if is_int_primitive_type_name(&target) {
+                return Some(target);
             }
         }
-        false
+        None
+    }
+
+    fn is_non_int_type(&self, ty: &TypeExpr) -> bool {
+        let resolved = self.resolve_type_alias(ty);
+        is_non_int_primitive_type(&resolved)
+    }
+
+    fn is_non_int_array_len_expr(&self, expr: &Expr) -> bool {
+        if let Expr::Call { callee, .. } = unwrap_parens(expr) {
+            if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                if !self.fns.contains_key(name.as_str()) {
+                    if let Some(ty) = self.type_aliases.get(name.as_str()) {
+                        if self.is_non_int_type(ty) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        is_non_int_array_len_syntax(expr)
     }
 
     /// The binding `name` has at `use_pos`, when it is a local of the enclosing
@@ -2521,18 +2629,75 @@ fn span_contains(span: Span, pos: hy_diag::Pos) -> bool {
         && (pos.line, pos.col) <= (span.end.line, span.end.col)
 }
 
+fn wrap_int_conversion(v: i128, target: &str) -> i128 {
+    match target {
+        "i8" | "int8" => (v as i8) as i128,
+        "i16" | "int16" => (v as i16) as i128,
+        "i32" | "int32" | "rune" => (v as i32) as i128,
+        "i64" | "int64" | "int" | "isize" => (v as i64) as i128,
+        "u8" | "uint8" | "byte" => (v as u8) as i128,
+        "u16" | "uint16" => (v as u16) as i128,
+        "u32" | "uint32" => (v as u32) as i128,
+        "u64" | "uint64" | "uint" | "uintptr" | "usize" => (v as u64) as i128,
+        _ => v,
+    }
+}
+
 fn is_non_int_primitive_type(ty: &TypeExpr) -> bool {
     matches!(
         ty,
         TypeExpr::Named { name, .. }
             if matches!(
                 name.as_str(),
-                "bool" | "string" | "float32" | "float64" | "error"
+                "bool"
+                    | "string"
+                    | "float32"
+                    | "float64"
+                    | "f32"
+                    | "f64"
+                    | "complex64"
+                    | "complex128"
+                    | "error"
+                    | "any"
             )
     )
 }
 
-fn is_non_int_array_len_expr(expr: &Expr) -> bool {
+/// Collect every `len(x)` / `cap(x)` call inside an array-length expression,
+/// descending through parentheses, unary/binary operators (so `cap(ch)-1` is
+/// caught), address-of, and nested calls (issue #1133).
+fn collect_len_cap_calls<'a>(expr: &'a Expr, out: &mut Vec<(&'static str, &'a Expr)>) {
+    match unwrap_parens(expr) {
+        Expr::Call { callee, args, .. } => {
+            if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                let builtin = match name.as_str() {
+                    "len" => Some("len"),
+                    "cap" => Some("cap"),
+                    _ => None,
+                };
+                if let Some(b) = builtin {
+                    if args.len() == 1 {
+                        out.push((b, &args[0].value));
+                    }
+                }
+            }
+            collect_len_cap_calls(callee, out);
+            for a in args {
+                collect_len_cap_calls(&a.value, out);
+            }
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_len_cap_calls(lhs, out);
+            collect_len_cap_calls(rhs, out);
+        }
+        Expr::Unary { operand, .. } | Expr::AddrOf { operand, .. } => {
+            collect_len_cap_calls(operand, out)
+        }
+        _ => {}
+    }
+}
+
+fn is_non_int_array_len_syntax(expr: &Expr) -> bool {
     match unwrap_parens(expr) {
         Expr::Lit {
             kind:
@@ -2576,6 +2741,8 @@ fn is_non_int_array_len_expr(expr: &Expr) -> bool {
                         | "string"
                         | "float32"
                         | "float64"
+                        | "f32"
+                        | "f64"
                         | "complex64"
                         | "complex128"
                         | "complex"
@@ -2645,9 +2812,15 @@ fn is_primitive_receiver(name: &str) -> bool {
             | "uint64"
             | "float32"
             | "float64"
+            | "f32"
+            | "f64"
+            | "complex64"
+            | "complex128"
             | "byte"
             | "rune"
             | "char"
             | "error"
+            | "any"
+            | "comparable"
     )
 }
