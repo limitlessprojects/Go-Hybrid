@@ -308,6 +308,7 @@ impl<'a> Scan<'a> {
                 self.run_place(base);
                 self.run_expr(index);
             }
+            PlaceKind::Deref { base } => self.run_place(base),
             PlaceKind::Field { base, name } => {
                 if let PlaceKind::Ident(base_name) = &base.kind {
                     if !self.local_decls.contains(base_name) {

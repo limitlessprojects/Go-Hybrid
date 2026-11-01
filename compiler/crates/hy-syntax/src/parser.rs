@@ -1626,6 +1626,7 @@ impl Parser {
     fn place_of(&mut self, e: Expr) -> PResult<Place> {
         let span = e.span();
         match e {
+            Expr::Paren { inner, .. } => self.place_of(*inner),
             Expr::Ident { name, .. } => Ok(Place {
                 kind: PlaceKind::Ident(name),
                 span,
@@ -1651,6 +1652,17 @@ impl Parser {
                 let base = Box::new(self.place_of(*operand)?);
                 Ok(Place {
                     kind: PlaceKind::AddrOf { base },
+                    span,
+                })
+            }
+            Expr::Unary {
+                op: UnOp::Deref,
+                operand,
+                ..
+            } => {
+                let base = Box::new(self.place_of(*operand)?);
+                Ok(Place {
+                    kind: PlaceKind::Deref { base },
                     span,
                 })
             }
@@ -1681,6 +1693,17 @@ impl Parser {
         let mut lhs = self.parse_unary(lit)?;
         while let Some((op, prec)) = bin_op(self.cur()) {
             if prec < min_prec {
+                break;
+            }
+            // Newline sensitivity (#77), like the `.`/`(`/`<-` guards: a `*`,
+            // `&`, or `-` that OPENS a new line begins a new statement, because
+            // those three are also unary prefixes. Otherwise `p := &x` on one
+            // line and `*p = 7` on the next fused into `&x * p` and the `= 7`
+            // was left dangling. `+`, `|`, `^`, `<<`, `>>`, `%`, `/` cannot
+            // begin a unary in Hy, so they keep folding across lines.
+            if matches!(op, BinOp::Mul | BinOp::BitAnd | BinOp::Sub)
+                && !self.same_line_as_prev()
+            {
                 break;
             }
             self.bump();
@@ -1722,6 +1745,16 @@ impl Parser {
                 self.bump();
                 let operand = Box::new(self.parse_unary(lit)?);
                 Ok(Expr::AddrOf {
+                    operand,
+                    span: self.span_from(start),
+                })
+            }
+            Tok::Punct("*") => {
+                // `*p` — pointer dereference.
+                self.bump();
+                let operand = Box::new(self.parse_unary(lit)?);
+                Ok(Expr::Unary {
+                    op: UnOp::Deref,
                     operand,
                     span: self.span_from(start),
                 })

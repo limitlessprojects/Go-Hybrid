@@ -7657,6 +7657,7 @@ impl<'a> Checker<'a> {
         enum Step<'a> {
             Index,
             Field(&'a str),
+            Deref,
         }
         let mut steps = Vec::new();
         let mut walker = p;
@@ -7673,11 +7674,22 @@ impl<'a> Checker<'a> {
                 PlaceKind::AddrOf { base } => {
                     walker = base;
                 }
+                PlaceKind::Deref { base } => {
+                    steps.push(Step::Deref);
+                    walker = base;
+                }
                 PlaceKind::Ident(name) => {
                     let b = self.lookup_binding(st, name)?;
                     let mut cur = b.ty.as_ref()?;
                     steps.reverse();
                     for step in steps {
+                        if let Step::Deref = step {
+                            match cur {
+                                hy_syntax::TypeExpr::Pointer { to, .. } => cur = to.as_ref(),
+                                _ => return None,
+                            }
+                            continue;
+                        }
                         while let hy_syntax::TypeExpr::Pointer { to, .. } = cur {
                             cur = to.as_ref();
                         }
@@ -7703,6 +7715,7 @@ impl<'a> Checker<'a> {
                                 }
                                 _ => return None,
                             },
+                            Step::Deref => {}
                         }
                     }
                     return Some(cur.clone());
@@ -8098,6 +8111,7 @@ fn collect_capture_idents_place(
         }
         PlaceKind::Field { base, .. } => collect_capture_idents_place(base, bound, out),
         PlaceKind::AddrOf { base } => collect_capture_idents_place(base, bound, out),
+        PlaceKind::Deref { base } => collect_capture_idents_place(base, bound, out),
     }
 }
 

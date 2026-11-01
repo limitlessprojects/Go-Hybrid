@@ -386,7 +386,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } | PlaceKind::Deref { base } => {
                 self.check_place_emit_guard(st, base)
             }
         }

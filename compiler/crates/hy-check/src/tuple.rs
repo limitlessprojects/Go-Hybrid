@@ -189,7 +189,7 @@ impl<'a> Checker<'a> {
                 self.check_place_single_value(st, base);
                 self.check_expr_single_value(st, index, index.span());
             }
-            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } | PlaceKind::Deref { base } => {
                 self.check_place_single_value(st, base);
             }
         }

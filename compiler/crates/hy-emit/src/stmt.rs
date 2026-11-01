@@ -594,7 +594,7 @@ impl Emitter {
             PlaceKind::Index { base, index } => {
                 Self::place_has_hoistable_try(base) || Self::expr_has_hoistable_try(index)
             }
-            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } | PlaceKind::Deref { base } => {
                 Self::place_has_hoistable_try(base)
             }
         }
@@ -1267,7 +1267,7 @@ impl Emitter {
                 }
                 Ok(())
             }
-            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } | PlaceKind::Deref { base } => {
                 self.hoist_tries_place(base, later_has_try)
             }
         }
@@ -1433,6 +1433,10 @@ impl Emitter {
             PlaceKind::AddrOf { base } => {
                 let b = self.emit_place(base)?;
                 Ok(format!("&{}", b))
+            }
+            PlaceKind::Deref { base } => {
+                let b = self.emit_place(base)?;
+                Ok(format!("(*{})", b))
             }
         }
     }
@@ -3221,7 +3225,7 @@ impl Emitter {
     fn place_mentions_ident(p: &Place, target: &str) -> bool {
         match &p.kind {
             PlaceKind::Ident(n) => n == target,
-            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } | PlaceKind::Deref { base } => {
                 Self::place_mentions_ident(base, target)
             }
             PlaceKind::Index { base, index } => {

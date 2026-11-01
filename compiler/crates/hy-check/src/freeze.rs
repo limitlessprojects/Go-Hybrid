@@ -375,7 +375,7 @@ impl<'a> Checker<'a> {
         match &place.kind {
             hy_syntax::PlaceKind::Ident(_) => {}
             hy_syntax::PlaceKind::Field { base, .. }
-            | hy_syntax::PlaceKind::AddrOf { base } => {
+            | hy_syntax::PlaceKind::AddrOf { base } | hy_syntax::PlaceKind::Deref { base } => {
                 self.mark_move_in_place(st, base);
             }
             hy_syntax::PlaceKind::Index { base, index } => {

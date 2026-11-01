@@ -107,7 +107,7 @@ impl<'a> Checker<'a> {
                 Some(TypeShape::Struct(_)) => self.place_unaddressable_at(st, base),
                 _ => None,
             },
-            PlaceKind::Ident(_) | PlaceKind::AddrOf { .. } => None,
+            PlaceKind::Ident(_) | PlaceKind::AddrOf { .. } | PlaceKind::Deref { .. } => None,
         }
     }
 

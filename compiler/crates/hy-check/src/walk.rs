@@ -402,6 +402,7 @@ fn place_uses(place: &Place, out: &mut Vec<Use>) {
         }
         PlaceKind::Field { base, .. } => place_uses(base, out),
         PlaceKind::AddrOf { base } => place_uses(base, out),
+        PlaceKind::Deref { base } => place_uses(base, out),
     }
 }
 
@@ -805,6 +806,7 @@ pub(crate) fn place_path(place: &Place) -> Option<String> {
         PlaceKind::Field { base, name } => Some(format!("{}.{}", place_path(base)?, name)),
         PlaceKind::Index { base, .. } => place_path(base),
         PlaceKind::AddrOf { base } => place_path(base),
+        PlaceKind::Deref { base } => place_path(base),
     }
 }
 
