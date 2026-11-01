@@ -1270,8 +1270,23 @@ impl<'a> Collector<'a> {
             Stmt::Managed { body, .. } => self.block_scoped(body),
             Stmt::Match { subject, arms, .. } => {
                 self.expr(subject);
+                let mut seen_patterns = std::collections::HashSet::new();
                 for arm in arms {
                     self.push_scope();
+                    if arm.guard.is_none() {
+                        if let Some(key) = match_pattern_key(&arm.pattern) {
+                            if !seen_patterns.insert(key) {
+                                self.emit_e1002(
+                                    arm.body.span,
+                                    format!(
+                                        "duplicate case `{}` in match — Go refuses `duplicate case ... in switch` (HYB-E1002)",
+                                        render_match_pattern(&arm.pattern)
+                                    ),
+                                    "duplicate case values in match/switch statements are forbidden",
+                                );
+                            }
+                        }
+                    }
                     if let MatchPattern::Path { segments, binding } = &arm.pattern {
                         if let Some(root) = segments.first() {
                             self.mention(root);
@@ -5284,6 +5299,52 @@ impl<'a> Collector<'a> {
                 );
             }
         }
+    }
+}
+
+fn match_pattern_key(p: &MatchPattern) -> Option<String> {
+    match p {
+        MatchPattern::Lit(lit) => match lit {
+            LitKind::Int(s) => {
+                if let Some(crate::const_overflow::ConstInt::Value(v)) =
+                    crate::const_overflow::parse_int_lit(s)
+                {
+                    Some(format!("int:{v}"))
+                } else {
+                    Some(format!("int:{s}"))
+                }
+            }
+            LitKind::Float(s) => Some(format!("float:{s}")),
+            LitKind::Bool(b) => Some(format!("bool:{b}")),
+            LitKind::Str(s) | LitKind::RawStr(s) => Some(format!("str:{s}")),
+            LitKind::Char(c) => Some(format!("char:{c}")),
+            LitKind::Nil => Some("nil".to_string()),
+        },
+        MatchPattern::Path { segments, .. } => Some(format!("path:{}", segments.join("."))),
+        MatchPattern::Wildcard => None,
+    }
+}
+
+fn render_match_pattern(p: &MatchPattern) -> String {
+    match p {
+        MatchPattern::Wildcard => "_".to_string(),
+        MatchPattern::Path { segments, binding } => {
+            let base = segments.join(".");
+            if let Some(b) = binding {
+                format!("{base}({b})")
+            } else {
+                base
+            }
+        }
+        MatchPattern::Lit(lit) => match lit {
+            LitKind::Int(s) => s.clone(),
+            LitKind::Float(s) => s.clone(),
+            LitKind::Bool(b) => b.to_string(),
+            LitKind::Str(s) => format!("\"{s}\""),
+            LitKind::RawStr(s) => format!("`{s}`"),
+            LitKind::Char(c) => format!("'{c}'"),
+            LitKind::Nil => "nil".to_string(),
+        },
     }
 }
 
