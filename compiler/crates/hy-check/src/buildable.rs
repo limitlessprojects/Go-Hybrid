@@ -248,12 +248,14 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         (Int | Float, Str | Slice(_) | Map(_, _) | Chan(_) | Struct(_)) => true,
 
         // String target: can convert from Int (rune/byte code point) or Slice (byte/rune slice) or Str.
-        // Cannot convert from Float, Bool, Map, Chan, Struct.
-        (Str, Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
+        // Cannot convert from Float, Bool, Map, Chan, Struct, Array, or Slice with non-byte/rune element.
+        (Str, Float | Bool | Map(_, _) | Chan(_) | Struct(_) | Array(_)) => true,
+        (Str, Slice(elem)) if !matches!(**elem, Unknown | Int) => true,
 
         // Slice target: can convert from Str (to []byte/[]rune), or Slice/Array.
         // Cannot convert from Int, Float, Bool, Map, Chan, Struct.
         (Slice(_), Int | Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
+        (Slice(elem), Str) if !matches!(**elem, Unknown | Int) => true,
 
         // Map target: cannot convert from Int, Float, Bool, Str, Slice, Chan, Struct.
         (Map(_, _), Int | Float | Bool | Str | Slice(_) | Chan(_) | Struct(_)) => true,
@@ -559,6 +561,13 @@ impl<'a> Collector<'a> {
                 if let Expr::Ident { name, .. } = unwrap_parens(callee) {
                     if name == "make" {
                         if let Some(first) = args.first() {
+                            let bare_arg = unwrap_parens(&first.value);
+                            if let Expr::SliceLit { elem: Some(t), .. } = bare_arg {
+                                return self.scalar_of_ty(&self.ck.resolve_type_alias(t));
+                            }
+                            if let Expr::Ident { name, .. } = bare_arg {
+                                return self.slice_elem_scalar_of_type_name(name);
+                            }
                             return self.slice_elem_scalar(&first.value);
                         }
                     }
@@ -567,6 +576,17 @@ impl<'a> Collector<'a> {
             }
             _ => None,
         }
+    }
+
+    fn slice_elem_scalar_of_type_name(&self, name: &str) -> Option<&'static str> {
+        let base = Checker::base_named_type_str(name);
+        if let Some(target) = self.ck.type_aliases.get(base) {
+            let resolved = self.ck.resolve_type_alias(target);
+            if let TypeExpr::Slice { elem, .. } = resolved {
+                return self.scalar_of_ty(&self.ck.resolve_type_alias(&elem));
+            }
+        }
+        None
     }
 
     fn bind_map_key_scalar(&mut self, name: &str, scalar: &'static str) {
@@ -2458,6 +2478,36 @@ impl<'a> Collector<'a> {
                 ),
                 note,
             );
+        } else if matches!(k, OpKind::Str) && matches!(arg_k, OpKind::Slice(_)) {
+            if let Some(elem_scalar) = self.slice_elem_scalar(arg) {
+                if elem_scalar != "uint8" && elem_scalar != "int32" {
+                    self.emit_e1002(
+                        arg.span(),
+                        format!(
+                            "cannot convert `{}` (type `[]{}`) to type `{}` (HYB-E1002)",
+                            arg.render(),
+                            elem_scalar,
+                            name
+                        ),
+                        "in Go, converting a slice to string requires a []byte or []rune element type",
+                    );
+                }
+            }
+        } else if matches!(k, OpKind::Slice(_)) && matches!(arg_k, OpKind::Str) {
+            if let Some(elem_scalar) = self.slice_elem_scalar_of_type_name(name) {
+                if elem_scalar != "uint8" && elem_scalar != "int32" {
+                    self.emit_e1002(
+                        arg.span(),
+                        format!(
+                            "cannot convert `{}` (type `{}`) to type `{}` (HYB-E1002)",
+                            arg.render(),
+                            arg_k.label(),
+                            name
+                        ),
+                        "in Go, converting a string to slice requires a []byte or []rune target slice type",
+                    );
+                }
+            }
         }
     }
 
