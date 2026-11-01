@@ -636,6 +636,157 @@ impl<'a> Collector<'a> {
         None
     }
 
+    fn pointer_base_underlying_key_of_named(&self, name: &str) -> Option<String> {
+        let base = Checker::base_named_type_str(name);
+        if let Some(alias_ty) = self.ck.type_aliases.get(base) {
+            self.pointer_base_underlying_key_of_ty(alias_ty)
+        } else {
+            None
+        }
+    }
+
+    fn pointer_base_underlying_key_of_ty(&self, ty: &TypeExpr) -> Option<String> {
+        match ty {
+            TypeExpr::Pointer { to, .. } => self.underlying_type_key(to),
+            TypeExpr::Named { name, .. } => {
+                let base = Checker::base_named_type_str(name);
+                if let Some(alias_ty) = self.ck.type_aliases.get(base) {
+                    self.pointer_base_underlying_key_of_ty(alias_ty)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn underlying_type_key(&self, ty: &TypeExpr) -> Option<String> {
+        match ty {
+            TypeExpr::Named { name, .. } => {
+                let base = Checker::base_named_type_str(name);
+                if let Some(s) = canonical_numeric_name(base) {
+                    return Some(s.to_string());
+                }
+                if base == "string" || base == "bool" {
+                    return Some(base.to_string());
+                }
+                if self.ck.structs.contains_key(base) || self.ck.struct_type_params.contains_key(base) {
+                    return Some(format!("struct:{}", base));
+                }
+                if let Some(alias_ty) = self.ck.type_aliases.get(base) {
+                    return self.underlying_type_key(alias_ty);
+                }
+                Some(base.to_string())
+            }
+            TypeExpr::Slice { elem, .. } => {
+                let elem_key = self.underlying_type_key(elem)?;
+                Some(format!("[]{}", elem_key))
+            }
+            TypeExpr::Array { len, elem, .. } => {
+                let elem_key = self.underlying_type_key(elem)?;
+                let len_str = len.as_ref().map(|l| l.render()).unwrap_or_default();
+                Some(format!("[{}]{}", len_str, elem_key))
+            }
+            TypeExpr::Pointer { to, .. } => {
+                let to_key = self.underlying_type_key(to)?;
+                Some(format!("*{}", to_key))
+            }
+            TypeExpr::Map { key, value, .. } => {
+                let k_key = self.underlying_type_key(key)?;
+                let v_key = self.underlying_type_key(value)?;
+                Some(format!("map[{}]{}", k_key, v_key))
+            }
+            TypeExpr::Chan { elem, .. } => {
+                let elem_key = self.underlying_type_key(elem)?;
+                Some(format!("chan {}", elem_key))
+            }
+            _ => None,
+        }
+    }
+
+    fn pointer_base_underlying_key_of_expr(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    let trimmed = tname.trim();
+                    if let Some(base_str) = trimmed.strip_prefix('*') {
+                        let base_trimmed = base_str.trim();
+                        if let Some(s) = canonical_numeric_name(base_trimmed) {
+                            return Some(s.to_string());
+                        }
+                        if base_trimmed == "string" || base_trimmed == "bool" {
+                            return Some(base_trimmed.to_string());
+                        }
+                        if self.ck.structs.contains_key(base_trimmed) {
+                            return Some(format!("struct:{}", base_trimmed));
+                        }
+                        return self
+                            .pointer_base_underlying_key_of_named(base_trimmed)
+                            .or_else(|| Some(base_trimmed.to_string()));
+                    }
+                    if let Some(k) = self.pointer_base_underlying_key_of_named(&tname) {
+                        return Some(k);
+                    }
+                }
+                None
+            }
+            Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                ..
+            } => {
+                let bare_op = unwrap_parens(operand);
+                if let Expr::Ident { name, .. } = bare_op {
+                    if let Some(s) = self.lookup_scalar(name) {
+                        return Some(s.to_string());
+                    }
+                    if let Some(tname) = self.lookup_type_name(name) {
+                        let base = Checker::base_named_type_str(&tname);
+                        if let Some(s) = canonical_numeric_name(base) {
+                            return Some(s.to_string());
+                        }
+                        if self.ck.structs.contains_key(base) {
+                            return Some(format!("struct:{}", base));
+                        }
+                        if let Some(alias_ty) = self.ck.type_aliases.get(base) {
+                            return self.underlying_type_key(alias_ty);
+                        }
+                        return Some(base.to_string());
+                    }
+                }
+                if let Some(s) = self.typed_value_scalar(bare_op) {
+                    return Some(s.to_string());
+                }
+                let k = self.kind_of_expr(bare_op);
+                match k {
+                    OpKind::Str => Some("string".to_string()),
+                    OpKind::Bool => Some("bool".to_string()),
+                    OpKind::Struct(Some(n)) => {
+                        let base = Checker::base_named_type_str(&n);
+                        Some(format!("struct:{}", base))
+                    }
+                    _ => None,
+                }
+            }
+            Expr::Call { callee, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if let Some(k) = self.pointer_base_underlying_key_of_named(name) {
+                        return Some(k);
+                    }
+                    if let Some(f) = self.ck.fns.get(name.as_str()) {
+                        if let Some(first_res) = f.results.first() {
+                            return self.pointer_base_underlying_key_of_ty(&first_res.ty);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn slice_element_type_name(&self, e: &Expr) -> Option<String> {
         let bare = unwrap_parens(e);
         match bare {
@@ -1437,8 +1588,27 @@ impl<'a> Collector<'a> {
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
+                let bare = unwrap_parens(val);
                 if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                } else if matches!(bare, Expr::AddrOf { .. } | Expr::Unary { op: UnOp::Addr, .. }) {
+                    let operand = match bare {
+                        Expr::AddrOf { operand, .. } => operand,
+                        Expr::Unary {
+                            op: UnOp::Addr,
+                            operand,
+                            ..
+                        } => operand,
+                        _ => unreachable!(),
+                    };
+                    let bare_op = unwrap_parens(operand);
+                    if let Expr::Ident { name: op_name, .. } = bare_op {
+                        if let Some(s) = self.lookup_scalar(op_name) {
+                            self.bind_type_name(name, format!("*{}", s));
+                        } else if let Some(t) = self.lookup_type_name(op_name) {
+                            self.bind_type_name(name, format!("*{}", t));
+                        }
+                    }
                 }
             }
         }
@@ -3244,6 +3414,26 @@ impl<'a> Collector<'a> {
                 ),
                 note,
             );
+            return;
+        }
+
+        if let OpKind::Pointer(_) = &k {
+            if let Some(target_base) = self.pointer_base_underlying_key_of_named(name) {
+                if let Some(arg_base) = self.pointer_base_underlying_key_of_expr(arg) {
+                    if target_base != arg_base {
+                        self.emit_e1002(
+                            arg.span(),
+                            format!(
+                                "cannot convert `{}` (type `{}`) to type `{}` (HYB-E1002)",
+                                arg.render(),
+                                arg_k.label(),
+                                name
+                            ),
+                            "in Go, converting between pointer types requires identical base underlying types (Go spec §Conversions)",
+                        );
+                    }
+                }
+            }
         }
     }
 
