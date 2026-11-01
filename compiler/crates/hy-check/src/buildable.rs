@@ -3215,6 +3215,21 @@ impl<'a> Collector<'a> {
         );
     }
 
+    /// #1681 — bare `nil` is not a value of any type until Go assigns it a
+    /// context. `kind_of_expr` maps it to `OpKind::Unknown` (fail-open), so
+    /// every built-in arm below must catch it *before* consulting the kind,
+    /// or `len(nil)`, `cap(nil)`, `delete(nil, k)`, `delete(m, nil)` and
+    /// `append(nil, ...)` pass `hyb check` and fail `go build`.
+    fn nil_is_expr(e: &Expr) -> bool {
+        matches!(
+            unwrap_parens(e),
+            Expr::Lit {
+                kind: LitKind::Nil,
+                ..
+            }
+        )
+    }
+
     /// #682 U14/U15 — a struct literal may only name fields the struct
     /// declares, once each, with a value assignable to the field's type. Go
     /// refuses the emitted literal otherwise (`unknown field`, `duplicate
@@ -4324,6 +4339,38 @@ impl<'a> Collector<'a> {
                             "a spread argument to `append` must be a slice (or string for `[]byte`)",
                         );
                     }
+                }
+                continue;
+            }
+            // #1681 — a bare `nil` element is only assignable when the
+            // destination slice's element type is itself nil-able (pointer,
+            // slice, array, map, chan, func, interface). Go refuses
+            // `append(xs, nil)` on a scalar slice with
+            // `cannot use nil as int value in argument to append`, so catch
+            // it before the kind model, which maps nil to `OpKind::Unknown`
+            // (fail-open). Unresolved destinations stay silent.
+            if Self::nil_is_expr(&extra.value) {
+                let elem_nilable = matches!(
+                    &elem,
+                    OpKind::Slice(_)
+                        | OpKind::Array(_)
+                        | OpKind::Map(_, _)
+                        | OpKind::Chan(_)
+                        | OpKind::Fn(_, _)
+                        | OpKind::Pointer(_)
+                        | OpKind::Interface
+                        | OpKind::Unknown
+                );
+                if !elem_nilable {
+                    self.emit_e1002(
+                        extra.value.span(),
+                        format!(
+                            "cannot use `nil` as `{}` value in argument to append — Go rejects `cannot use nil as {} value in argument to append` (HYB-E1002)",
+                            elem.label(),
+                            elem.label()
+                        ),
+                        "untyped `nil` is only assignable to nil-able types (pointer, slice, map, chan, func, interface)",
+                    );
                 }
                 continue;
             }
@@ -6368,6 +6415,14 @@ impl<'a> Collector<'a> {
                     return; // arity handled by builtins.rs
                 }
                 let op = &args[0].value;
+                if Self::nil_is_expr(op) {
+                    self.emit_e2005(
+                        span,
+                        "untyped `nil` has no `len` — Go rejects `len(nil)` (`invalid argument: nil for built-in len`) (HYB-E2005)".to_string(),
+                        "`len` needs a string, slice, array, map, or channel value; nil is none of them",
+                    );
+                    return;
+                }
                 if builtins_already_flags_len_cap(op, false) {
                     return;
                 }
@@ -6401,6 +6456,14 @@ impl<'a> Collector<'a> {
                     return; // arity handled by builtins.rs
                 }
                 let op = &args[0].value;
+                if Self::nil_is_expr(op) {
+                    self.emit_e2005(
+                        span,
+                        "untyped `nil` has no `cap` — Go rejects `cap(nil)` (`invalid argument: nil for built-in cap`) (HYB-E2005)".to_string(),
+                        "`cap` needs a slice, array, or channel value; nil is none of them",
+                    );
+                    return;
+                }
                 if builtins_already_flags_len_cap(op, true) {
                     return;
                 }
@@ -6451,6 +6514,14 @@ impl<'a> Collector<'a> {
                 }
                 let map_arg = &args[0].value;
                 let key_arg = &args[1].value;
+                if Self::nil_is_expr(map_arg) {
+                    self.emit_e2005(
+                        span,
+                        "untyped `nil` is not a map — Go rejects `delete(nil, k)` (`invalid argument: nil is not a map`) (HYB-E2005)".to_string(),
+                        "`delete(m, k)` requires a map value as its first argument",
+                    );
+                    return;
+                }
                 let mk = self.kind_of_expr(map_arg);
                 match &mk {
                     // #2474: `delete(s, v)` on a `set[T]` (lowered to
@@ -6482,6 +6553,21 @@ impl<'a> Collector<'a> {
                         let is_untyped_int_to_float = **k_expected == OpKind::Float
                             && kk == OpKind::Int
                             && self.is_untyped_int_const(key_arg);
+                        // `delete(m, nil)` compiles only when the key type can
+                        // hold nil (pointer/map/slice/chan/func/interface);
+                        // a string/int/... key makes Go reject it outright.
+                        if Self::nil_is_expr(key_arg)
+                            && matches!(**k_expected, OpKind::Int | OpKind::Float | OpKind::Bool | OpKind::Str)
+                        {
+                            self.emit_e2005(
+                                span,
+                                format!(
+                                    "cannot use `nil` as `{}` key in `delete` — Go rejects `delete(m, nil)` for this key type (HYB-E2005)",
+                                    k_expected.label()
+                                ),
+                                "only pointer, map, slice, chan, func, or interface key types accept `nil`",
+                            );
+                        }
                         if **k_expected != OpKind::Unknown
                             && kk != OpKind::Unknown
                             && kk != **k_expected
@@ -6523,6 +6609,14 @@ impl<'a> Collector<'a> {
                     return;
                 }
                 let slice_arg = &args[0].value;
+                if Self::nil_is_expr(slice_arg) {
+                    self.emit_e2005(
+                        span,
+                        "untyped `nil` is not a slice — Go rejects `append(nil, ...)` (`invalid append: argument must be a slice; have untyped nil`) (HYB-E2005)".to_string(),
+                        "the first argument to `append(xs, ...)` must be a slice (`[]T`)",
+                    );
+                    return;
+                }
                 let sk = self.kind_of_expr(slice_arg);
                 if !matches!(sk, OpKind::Unknown | OpKind::Slice(_)) {
                     self.emit_e2005(
@@ -7042,6 +7136,36 @@ mod operand_kind_tests {
                 error_codes(&r)
             );
         }
+    }
+
+    #[test]
+    fn accepts_append_onto_nil_struct_field_slice_1681() {
+        // #1681: `append` onto a zero-value (nil) slice held in a struct
+        // field must stay accepted — a nil slice is a usable zero value,
+        // exactly as for a bare binding; do not fold this into the E2005
+        // misuse net. The nil-ness arises from the zero literal `rec{}`,
+        // not a spelled `nil`: upstream rule N1 rejects an explicit
+        // `rec{ xs: nil }` with HYB-E4001 (nil has exactly two homes —
+        // error and foreign Go — see callee_and_nil.rs), asserted below.
+        let src = "struct rec { xs []int }\nfn main() {\n    r := rec{}\n    r.xs = append(r.xs, 1)\n    fmt.println(r.xs)\n}\n";
+        let r = check(src);
+        assert_eq!(r.verdict, Verdict::Accept, "expected accept for:\n{src}\ndiagnostics: {:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn spelled_nil_struct_field_is_e4001_n1_upstream() {
+        // Upstream N1 (rebase onto main c891004): an explicitly spelled nil
+        // in a non-nilable struct-field slot is a TYPE error (HYB-E4001),
+        // not an append concern — nil has exactly two homes (error, foreign
+        // Go). Recorded so the #1681 acceptance above cannot be read as
+        // endorsing the spelled-nil form.
+        let src = "struct rec { xs []int }\nfn main() {\n    r := rec{ xs: nil }\n    fmt.println(r.xs)\n}\n";
+        let r = check(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E4001"),
+            "expected HYB-E4001 for `rec{{ xs: nil }}`, got {:?}",
+            r.diagnostics
+        );
     }
 
     #[test]
