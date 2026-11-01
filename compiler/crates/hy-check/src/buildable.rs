@@ -1325,8 +1325,17 @@ impl<'a> Collector<'a> {
             self.ty(t);
         }
         // RHS first: `x := x` reads the OUTER `x` (Go's scoping).
+        // O8 map-slot loans (`x := &m[k]`) are lowered to copy-read + store-back
+        // only at the root of an untyped `:=` or `let` binding with matching counts.
+        let allow_slot_loan = matches!(l.kind, LocalKind::Define | LocalKind::Let)
+            && l.ty.is_none()
+            && l.names.len() == l.values.len();
         for v in &l.values {
-            self.expr(v);
+            if allow_slot_loan {
+                self.expr_in_slot_loan_root(v);
+            } else {
+                self.expr(v);
+            }
         }
         // #682 U8: `a := v()` where `v` produces no value. Only the
         // single-name/single-value shape is checked; `a, b := f()` is a legal
@@ -1562,8 +1571,17 @@ impl<'a> Collector<'a> {
                     }
                     self.place(t, *op);
                 }
+                let allow_slot_loan = *op == AssignOp::Assign
+                    && targets.len() == values.len()
+                    && targets
+                        .iter()
+                        .all(|t| matches!(&t.kind, PlaceKind::Ident(_)));
                 for v in values {
-                    self.expr(v);
+                    if allow_slot_loan {
+                        self.expr_in_slot_loan_root(v);
+                    } else {
+                        self.expr(v);
+                    }
                 }
                 // #682 U8: `a = v()` where `v` produces no value. The
                 // multi-name form (`a, b = f()`) is a legal multi-value
@@ -4210,17 +4228,42 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// Visits an expression at the root of an O8 slot-loan binding (`n := &m[k]`
+    /// or `n = &m[k]`). A direct map-index borrow `&m[k]` in this position is
+    /// lowered by `hy-emit` to a copy-read + store-back, so its operand is
+    /// visited without firing the Go `&`-addressability check on the outer `&`.
+    /// Any nested `&` inside `m` or `k`, or a projection like `&m[k].field` /
+    /// `&m[k][0]`, still goes through `self.expr` and `check_addr_of_operand`.
+    fn expr_in_slot_loan_root(&mut self, e: &Expr) {
+        if let Some(operand) = as_addr_of(e) {
+            if let Expr::Index { base, .. } = unwrap_parens(operand) {
+                if matches!(self.kind_of_expr(base), OpKind::Map(_, _)) {
+                    self.expr(operand);
+                    return;
+                }
+            }
+        }
+        self.expr(e);
+    }
+
     /// Go spec §Address operators: operand must be addressable or a composite literal.
     fn check_addr_of_operand(&mut self, operand: &Expr, span: Span) {
         if !self.is_addressable_expr(operand) {
-            self.emit_e1002(
-                span,
-                format!(
-                    "cannot take the address of `{}` (HYB-E1002)",
-                    operand.render()
-                ),
-                "the operand of `&` must be addressable (a variable, pointer indirection, field, slice/array element, or composite literal)",
-            );
+            let inner_span = unwrap_parens(operand).span();
+            let already_diagnosed = self.ck.diags.iter().any(|d| {
+                (d.span == span || d.span == operand.span() || d.span == inner_span)
+                    && matches!(d.code.as_str(), "HYB-E3104" | "HYB-E2010")
+            });
+            if !already_diagnosed {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "cannot take the address of `{}` (HYB-E1002)",
+                        operand.render()
+                    ),
+                    "the operand of `&` must be addressable (a variable, pointer indirection, field, slice/array element, or composite literal)",
+                );
+            }
         }
     }
 
@@ -4265,8 +4308,7 @@ impl<'a> Collector<'a> {
             Expr::Index { base, .. } => {
                 let bk = self.kind_of_expr(base);
                 match bk {
-                    OpKind::Str => false,
-                    OpKind::Map(_, _) => true,
+                    OpKind::Str | OpKind::Map(_, _) => false,
                     OpKind::Slice(_) => true,
                     OpKind::Array(_) => self.is_addressable_expr(base),
                     OpKind::Pointer(inner) if matches!(*inner, OpKind::Array(_) | OpKind::Slice(_)) => true,
@@ -6800,6 +6842,112 @@ fn main() {
     fmt.println(p.key, id[int](p.val))
 }
 ";
+        let r = check(src);
+        assert_eq!(
+            r.verdict,
+            Verdict::Accept,
+            "unexpected diagnostics: {:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn rejects_map_index_addr_of_in_non_loan_and_projection_positions_1977() {
+        // Field and array-element projections rooted at a map index expression
+        // recurse through `is_addressable_expr` and must be rejected as
+        // non-addressable (HYB-E1002).
+        for src in [
+            r#"struct acct { bal int }
+fn take(p *int) {}
+fn main() {
+    m := map[string]acct{"a": acct{bal: 1}}
+    take(&m["a"].bal)
+}
+"#,
+            r#"struct acct { bal int }
+struct holder { p *int }
+fn main() {
+    m := map[string]acct{"a": acct{bal: 1}}
+    h := holder{ p: &m["a"].bal }
+    fmt.println(h.p)
+}
+"#,
+            r#"fn take(p *int) {}
+fn main() {
+    var arr [2]int
+    m := map[string][2]int{"a": arr}
+    take(&m["a"][0])
+}
+"#,
+            r#"struct acct { bal int }
+fn make_map() map[string]acct {
+    return map[string]acct{"a": acct{bal: 1}}
+}
+fn take(p *int) {}
+fn main() {
+    take(&make_map()["a"].bal)
+}
+"#,
+        ] {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:
+{src}");
+            assert!(
+                error_codes(&r).contains(&"HYB-E1002".to_string()),
+                "expected HYB-E1002, got {:?} for:
+{src}",
+                error_codes(&r)
+            );
+        }
+
+        // Direct `&m["a"]` in call/value/typed-var positions is also rejected.
+        for src in [
+            r#"fn take(p *int) {}
+fn main() {
+    m := map[string]int{"a": 1}
+    take(&m["a"])
+}
+"#,
+            r#"fn main() {
+    m := map[string]int{"a": 1}
+    var p *int = &m["a"]
+    fmt.println(p)
+}
+"#,
+        ] {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:
+{src}");
+            assert!(
+                error_codes(&r)
+                    .iter()
+                    .any(|c| c == "HYB-E3104" || c == "HYB-E1002"),
+                "expected HYB-E3104 or HYB-E1002, got {:?} for:
+{src}",
+                error_codes(&r)
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_map_index_o8_slot_loan_controls_1977() {
+        let src = r#"struct acct {
+    bal int
+}
+
+fn main() {
+    m := map[string]acct{"a": acct{bal: 1}, "b": acct{bal: 2}}
+    p := &m["a"]
+    p.bal = 10
+    p = &m["b"]
+    p.bal = 20
+    let lp := &m["a"]
+    fmt.println(lp.bal, m["b"].bal)
+    sm := map[string][]int{"k": []int{7}}
+    sp := &sm["k"][0]
+    fmt.println(sp)
+}
+"#;
         let r = check(src);
         assert_eq!(
             r.verdict,
