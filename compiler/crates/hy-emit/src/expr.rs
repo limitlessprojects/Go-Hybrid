@@ -470,7 +470,7 @@ impl Emitter {
         }
     }
 
-    fn lit_text(&self, k: &LitKind) -> String {
+    pub(crate) fn lit_text(&self, k: &LitKind) -> String {
         match k {
             LitKind::Int(s) | LitKind::Float(s) => s.clone(),
             LitKind::Bool(b) => b.to_string(),

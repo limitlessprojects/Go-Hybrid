@@ -2400,6 +2400,7 @@ impl Emitter {
             Some(String),
             NoneArm,
             Wildcard,
+            Lit(LitKind),
         }
         let mut classified: Vec<(ArmKind, &MatchArm)> = Vec::new();
         for a in arms {
@@ -2419,6 +2420,7 @@ impl Emitter {
                     binding: _,
                 } if segments == &["none"] => ArmKind::NoneArm,
                 MatchPattern::Wildcard => ArmKind::Wildcard,
+                MatchPattern::Lit(k) => ArmKind::Lit(k.clone()),
                 other => {
                     return Err(EmitError::unsupported(format!(
                         "match pattern `{:?}` — option-subject matches (some(v)/none/_) only; \
@@ -2429,6 +2431,63 @@ impl Emitter {
             };
             classified.push((kind, a));
         }
+        // Literal-pattern matches lower to a tagless Go `switch` on
+        // `subject == lit`. The checker accepts these (E5001 covers
+        // exhaustiveness); the option lowering below is wrong for them, so
+        // they take a separate path.
+        let general = classified
+            .iter()
+            .any(|(k, _)| matches!(k, ArmKind::Lit(_)));
+        if general {
+            self.hoist_tries_expr(subject)?;
+            let temp = self.next_temp("hyMatch");
+            let s = self.emit_expr(subject, 0)?;
+            self.push(&format!("{} := {}", temp, s));
+
+            // Emit every guard up front so a `?`-hoist in a guard lands
+            // before the switch rather than mid-chain.
+            let mut conds: Vec<Option<String>> = Vec::with_capacity(classified.len());
+            for (kind, arm) in &classified {
+                if let (ArmKind::Lit(_), Some(g)) = (kind, &arm.guard) {
+                    self.hoist_tries_expr(g)?;
+                    conds.push(Some(self.emit_expr(g, 0)?));
+                } else {
+                    conds.push(None);
+                }
+            }
+
+            self.push("switch {");
+            let mut default_arm: Option<&MatchArm> = None;
+            for (idx, (kind, arm)) in classified.iter().enumerate() {
+                match kind {
+                    ArmKind::Lit(lit) => {
+                        let cond = match &conds[idx] {
+                            Some(g) => format!("{} == {} && ({})", temp, self.lit_text(lit), g),
+                            None => format!("{} == {}", temp, self.lit_text(lit)),
+                        };
+                        self.push(&format!("case {}:", cond));
+                        self.indent += 1;
+                        let saved = self.save_scope();
+                        self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                        self.restore_scope(saved);
+                        self.indent -= 1;
+                    }
+                    ArmKind::Wildcard => default_arm = Some(*arm),
+                    _ => {}
+                }
+            }
+            if let Some(arm) = default_arm {
+                self.push("default:");
+                self.indent += 1;
+                let saved = self.save_scope();
+                self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
+                self.restore_scope(saved);
+                self.indent -= 1;
+            }
+            self.push("}");
+            return Ok(());
+        }
+
         if let Some((ArmKind::Wildcard, _)) = classified.first() {
             return Err(EmitError::unsupported(
                 "`_` as the FIRST match arm (MVP-0 lowers some→if, none/_→else)",
@@ -2450,6 +2509,7 @@ impl Emitter {
                 }
                 ArmKind::NoneArm => none_arm = Some(*arm),
                 ArmKind::Wildcard => wildcard_arm = Some(*arm),
+                ArmKind::Lit(_) => {}
             }
         }
 
