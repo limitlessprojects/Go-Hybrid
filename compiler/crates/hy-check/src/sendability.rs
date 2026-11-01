@@ -522,6 +522,35 @@ impl<'a> Checker<'a> {
             // everything else (calls, receives, arithmetic, try, paren):
             // classify the result shape
             _ => {
+                let (call_expr, is_try) = match expr {
+                    Expr::Try { operand, .. } => (unwrap_parens(operand), true),
+                    other => (other, false),
+                };
+                if let Expr::Call { callee, args, .. } = call_expr {
+                    if let Some(results) = self.call_result_shapes(st, callee, args) {
+                        let end = if is_try {
+                            results.len().saturating_sub(1)
+                        } else {
+                            results.len()
+                        };
+                        let avail = &results[..end];
+                        if avail.len() > 1 {
+                            let mut unprov: Option<Outcome> = None;
+                            for rshape in avail {
+                                match self.outcome_for_shape(rshape, &expr.render()) {
+                                    Outcome::Ok | Outcome::Managed { .. } => {}
+                                    r @ Outcome::Rejected(_) => return r,
+                                    u @ Outcome::Unproven(_) => {
+                                        if unprov.is_none() {
+                                            unprov = Some(u);
+                                        }
+                                    }
+                                }
+                            }
+                            return unprov.unwrap_or(Outcome::Ok);
+                        }
+                    }
+                }
                 let shape = self.shape_of_expr(st, expr);
                 self.outcome_for_shape(&shape, &expr.render())
             }
@@ -807,7 +836,11 @@ impl<'a> Checker<'a> {
         match unwrap_parens(callee) {
             Expr::FnLit { .. } => closure_reject(callee.render()),
             Expr::Ident { name, .. } => {
-                if let Some(b) = self.lookup_binding(st, name) {
+                let head = Self::base_named_type_str(name);
+                if let Some(b) = self
+                    .lookup_binding(st, name)
+                    .or_else(|| self.lookup_binding(st, head))
+                {
                     if matches!(b.shape, TypeShape::Closure) {
                         return closure_reject(name.clone());
                     }
@@ -816,7 +849,7 @@ impl<'a> Checker<'a> {
                         name
                     ));
                 }
-                if self.fns.contains_key(name) {
+                if self.fns.contains_key(name) || self.fns.contains_key(head) {
                     return CalleeVerdict::Proven;
                 }
                 CalleeVerdict::Unproven(format!(
@@ -842,14 +875,31 @@ impl<'a> Checker<'a> {
     ) -> Option<Vec<TypeShape>> {
         match unwrap_parens(callee) {
             Expr::Ident { name, .. } => {
-                if self.lookup_binding(st, name).is_some() {
+                let head = Self::base_named_type_str(name);
+                if self.lookup_binding(st, name).is_some()
+                    || self.lookup_binding(st, head).is_some()
+                {
                     return None; // shadowed by a local binding — not a static fn call
                 }
-                let f = self.fns.get(name)?;
+                let f = self.fns.get(name).or_else(|| self.fns.get(head))?;
                 if f.params.len() != argc {
                     return None;
                 }
-                Some(f.params.iter().map(|p| self.shape_of_type(&p.ty)).collect())
+                let mut subst = std::collections::HashMap::new();
+                if let Some((_, explicit_args)) = Self::parse_generic_type_args(name) {
+                    for (tp, arg) in f.type_params.iter().zip(explicit_args.iter()) {
+                        subst.insert(tp.name.clone(), arg.clone());
+                    }
+                }
+                Some(
+                    f.params
+                        .iter()
+                        .map(|p| {
+                            let ty = Self::substitute_type_params(&p.ty, &subst);
+                            self.shape_of_type(&ty)
+                        })
+                        .collect(),
+                )
             }
             Expr::FnLit { params, .. } => {
                 if params.len() != argc {
@@ -862,6 +912,7 @@ impl<'a> Checker<'a> {
                 name: method_name,
                 ..
             } => {
+                let mhead = Self::base_named_type_str(method_name);
                 let recv_base = match self.shape_of_expr(st, base) {
                     TypeShape::Struct(Some(s)) => Some(s),
                     TypeShape::Pointer(inner) => match *inner {
@@ -870,14 +921,42 @@ impl<'a> Checker<'a> {
                     },
                     _ => None,
                 };
-                let f = recv_base.and_then(|rb| {
-                    let base = Self::base_named_type_str(&rb).to_string();
-                    self.method_decls.get(&(base, method_name.clone())).copied()
+                let f = recv_base.as_ref().and_then(|rb| {
+                    let bname = Self::base_named_type_str(rb).to_string();
+                    self.method_decls
+                        .get(&(bname.clone(), method_name.clone()))
+                        .or_else(|| self.method_decls.get(&(bname, mhead.to_string())))
+                        .copied()
                 })?;
                 if f.params.len() != argc {
                     return None;
                 }
-                Some(f.params.iter().map(|p| self.shape_of_type(&p.ty)).collect())
+                let mut subst = std::collections::HashMap::new();
+                if let Some(rb) = &recv_base {
+                    let sname = Self::base_named_type_str(rb);
+                    if let (Some((_, rargs)), Some(tps)) = (
+                        Self::parse_generic_type_args(rb),
+                        self.struct_type_params.get(sname),
+                    ) {
+                        for (tp, arg) in tps.iter().zip(rargs.iter()) {
+                            subst.insert(tp.name.clone(), arg.clone());
+                        }
+                    }
+                }
+                if let Some((_, explicit_args)) = Self::parse_generic_type_args(method_name) {
+                    for (tp, arg) in f.type_params.iter().zip(explicit_args.iter()) {
+                        subst.insert(tp.name.clone(), arg.clone());
+                    }
+                }
+                Some(
+                    f.params
+                        .iter()
+                        .map(|p| {
+                            let ty = Self::substitute_type_params(&p.ty, &subst);
+                            self.shape_of_type(&ty)
+                        })
+                        .collect(),
+                )
             }
             _ => None,
         }
@@ -1358,6 +1437,43 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+
+        let inferred_targets: Option<Vec<TypeShape>> = spawn_callee.and_then(|callee| {
+            let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+                return None;
+            };
+            let head = Self::base_named_type_str(name);
+            let f = self.fns.get(name.as_str()).or_else(|| self.fns.get(head))?;
+            if f.type_params.is_empty() || f.params.len() != values.len() {
+                return None;
+            }
+            let tp_names: std::collections::HashSet<String> =
+                f.type_params.iter().map(|tp| tp.name.clone()).collect();
+            let mut subst = std::collections::HashMap::new();
+            if let Some((_, explicit_args)) = Self::parse_generic_type_args(name) {
+                for (tp, arg) in f.type_params.iter().zip(explicit_args.iter()) {
+                    subst.insert(tp.name.clone(), arg.clone());
+                }
+            }
+            for (p, v) in f.params.iter().zip(values.iter()) {
+                if let Some(arg_ty) = self.ty_of_expr(st, v) {
+                    self.infer_type_param_bindings(&p.ty, &arg_ty, &tp_names, &mut subst);
+                }
+            }
+            if subst.is_empty() {
+                return None;
+            }
+            Some(
+                f.params
+                    .iter()
+                    .map(|p| {
+                        let ty = Self::substitute_type_params(&p.ty, &subst);
+                        self.shape_of_type(&ty)
+                    })
+                    .collect(),
+            )
+        });
+        let target_shapes = inferred_targets.as_deref().or(target_shapes);
 
         for (vi, v) in values.iter().enumerate() {
             // N1 for composite literals: a literal that crosses the boundary
@@ -2955,7 +3071,11 @@ impl<'a> Checker<'a> {
         env: &ChanDirEnv,
     ) -> Option<Vec<hy_syntax::TypeExpr>> {
         use hy_syntax::TypeExpr;
-        match unwrap_parens(expr) {
+        let (inner, is_try) = match unwrap_parens(expr) {
+            Expr::Try { operand, .. } => (unwrap_parens(operand), true),
+            other => (other, false),
+        };
+        let mut out = match inner {
             Expr::Receive { chan, span } => {
                 let chan_ty = self.dir_ty_of_expr(chan, env)?;
                 if let TypeExpr::Chan { elem, .. } = self.resolve_type_alias(&chan_ty) {
@@ -2988,14 +3108,22 @@ impl<'a> Checker<'a> {
                     if let Some(found) = env.lookup(name) {
                         let bty = found?;
                         if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&bty) {
-                            return Some(results);
+                            return Some(if is_try {
+                                results[..results.len().saturating_sub(1)].to_vec()
+                            } else {
+                                results
+                            });
                         }
                         return None;
                     }
                     if self.consts.contains_key(name) {
                         let bty = self.resolve_const_dir_ty(name, env)?;
                         if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&bty) {
-                            return Some(results);
+                            return Some(if is_try {
+                                results[..results.len().saturating_sub(1)].to_vec()
+                            } else {
+                                results
+                            });
                         }
                         return None;
                     }
@@ -3016,12 +3144,15 @@ impl<'a> Checker<'a> {
                             let full = format!("{}.{}", root, head);
                             if let Some(f) = self.fns.get(full.as_str()) {
                                 let subst = self.fn_subst_for_call(f, name, None, args, env, true);
-                                return Some(
-                                    f.results
-                                        .iter()
-                                        .map(|r| Self::substitute_type_params(&r.ty, &subst))
-                                        .collect(),
-                                );
+                                let mut res: Vec<TypeExpr> = f
+                                    .results
+                                    .iter()
+                                    .map(|r| Self::substitute_type_params(&r.ty, &subst))
+                                    .collect();
+                                if is_try {
+                                    res.pop();
+                                }
+                                return Some(res);
                             }
                         }
                     }
@@ -3040,17 +3171,23 @@ impl<'a> Checker<'a> {
                         {
                             let subst =
                                 self.fn_subst_for_call(m, name, Some(&base_ty), args, env, true);
-                            return Some(
-                                m.results
-                                    .iter()
-                                    .map(|r| Self::substitute_type_params(&r.ty, &subst))
-                                    .collect(),
-                            );
+                            let mut res: Vec<TypeExpr> = m
+                                .results
+                                .iter()
+                                .map(|r| Self::substitute_type_params(&r.ty, &subst))
+                                .collect();
+                            if is_try {
+                                res.pop();
+                            }
+                            return Some(res);
                         }
                     }
                     if let Some(fields) = self.struct_fields_for_type(&base_ty) {
                         if let Some((_, fty)) = fields.iter().find(|(n, _)| n == name) {
-                            if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(fty) {
+                            if let TypeExpr::Fn { mut results, .. } = self.resolve_type_alias(fty) {
+                                if is_try {
+                                    results.pop();
+                                }
                                 return Some(results);
                             }
                         }
@@ -3067,7 +3204,11 @@ impl<'a> Checker<'a> {
                 }
             },
             _ => None,
+        }?;
+        if is_try {
+            out.pop();
         }
+        Some(out)
     }
 
     fn dir_ty_of_place(
