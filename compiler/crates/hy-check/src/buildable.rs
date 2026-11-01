@@ -6330,7 +6330,17 @@ impl<'a> Collector<'a> {
         // spread argument is legal.
         if matches!(
             name,
-            "len" | "cap" | "close" | "delete" | "min" | "max" | "clear" | "copy"
+            "len"
+                | "cap"
+                | "close"
+                | "delete"
+                | "min"
+                | "max"
+                | "clear"
+                | "copy"
+                | "real"
+                | "imag"
+                | "complex"
         ) && args.iter().any(|a| a.spread)
         {
             self.emit_e1002(
@@ -6682,6 +6692,104 @@ impl<'a> Collector<'a> {
                         } else {
                             first_typed_scalar = Some((&arg.value, s));
                         }
+                    }
+                }
+            }
+            "real" | "imag" => {
+                if args.len() != 1 {
+                    return; // arity handled by builtins.rs
+                }
+                let op = &args[0].value;
+                if matches!(
+                    unwrap_parens(op),
+                    Expr::Lit {
+                        kind: LitKind::Int(_) | LitKind::Float(_),
+                        ..
+                    }
+                ) {
+                    return;
+                }
+                let ak = self.kind_of_expr(op);
+                if matches!(
+                    ak,
+                    OpKind::Bool
+                        | OpKind::Str
+                        | OpKind::Slice(_)
+                        | OpKind::Array(_)
+                        | OpKind::Map(_, _)
+                        | OpKind::Chan(_)
+                        | OpKind::Struct(_)
+                        | OpKind::Pointer(_)
+                        | OpKind::Fn(..)
+                        | OpKind::Interface
+                        | OpKind::Int
+                        | OpKind::Float
+                ) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "invalid argument `{}` (type `{}`) for `{name}` — expected complex type (HYB-E2005)",
+                            op.render(),
+                            ak.label()
+                        ),
+                        "the argument to `real` or `imag` must have a complex type",
+                    );
+                }
+            }
+            "complex" => {
+                if args.len() != 2 {
+                    return; // arity handled by builtins.rs
+                }
+                for arg in args {
+                    let op = &arg.value;
+                    if matches!(
+                        unwrap_parens(op),
+                        Expr::Lit {
+                            kind: LitKind::Int(_) | LitKind::Float(_),
+                            ..
+                        }
+                    ) {
+                        continue;
+                    }
+                    let ak = self.kind_of_expr(op);
+                    if matches!(
+                        ak,
+                        OpKind::Bool
+                            | OpKind::Str
+                            | OpKind::Slice(_)
+                            | OpKind::Array(_)
+                            | OpKind::Map(_, _)
+                            | OpKind::Chan(_)
+                            | OpKind::Struct(_)
+                            | OpKind::Pointer(_)
+                            | OpKind::Fn(..)
+                            | OpKind::Interface
+                            | OpKind::Int
+                    ) {
+                        self.emit_e2005(
+                            span,
+                            format!(
+                                "invalid argument `{}` (type `{}`) in `complex` — expected floating-point (HYB-E2005)",
+                                op.render(),
+                                ak.label()
+                            ),
+                            "arguments to `complex` must be floating-point numbers (`float32` or `float64`)",
+                        );
+                        return;
+                    }
+                }
+                let s1 = self.typed_value_scalar(&args[0].value);
+                let s2 = self.typed_value_scalar(&args[1].value);
+                if let (Some(t1), Some(t2)) = (s1, s2) {
+                    if t1 != t2 {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "mismatched types `{}` and `{}` in `complex` (HYB-E1002)",
+                                t1, t2
+                            ),
+                            "both arguments to `complex` must have matching floating-point types",
+                        );
                     }
                 }
             }
