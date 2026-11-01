@@ -71,12 +71,46 @@ class CheckClaimsLinksTest(unittest.TestCase):
         self.assertEqual(mismatch[0]["expected"], "ACCEPT")
         self.assertEqual(mismatch[0]["found"], "REJECT")
 
+    def test_accept_marker_rejects_accept_managed_verdict(self):
+        (self.root / "tests" / "checker-corpus" / "15-good.hy").write_text(
+            "// EXPECTED-VERDICT: ACCEPT-MANAGED\n", encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 1)
+        report = json.loads(result.stdout)
+        mismatch = [i for i in report["issues"] if i["kind"] == "verdict-mismatch"]
+        self.assertEqual(len(mismatch), 1)
+        self.assertEqual(mismatch[0]["expected"], "ACCEPT")
+        self.assertEqual(mismatch[0]["found"], "ACCEPT-MANAGED")
+
     def test_missing_verdict_header_is_reported(self):
         (self.root / "tests" / "checker-corpus" / "01-bad.hy").write_text("fn main() {}\n", encoding="utf-8")
         result = self.run_tool()
         self.assertEqual(result.returncode, 1)
         report = json.loads(result.stdout)
         self.assertEqual([i["kind"] for i in report["issues"]], ["no-verdict-header"])
+
+    def test_unmarked_corpus_link_and_inline_refs_require_verdict_header(self):
+        (self.root / "tests" / "checker-corpus" / "16-move.hy").write_text("fn main() {}\n", encoding="utf-8")
+        (self.root / "tests" / "checker-corpus" / "34-select-send-unproven-name.hy").write_text(
+            "fn main() {}\n", encoding="utf-8"
+        )
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 1)
+        report = json.loads(result.stdout)
+        no_header_targets = [i["target"] for i in report["issues"] if i["kind"] == "no-verdict-header"]
+        self.assertIn("tests/checker-corpus/16-move.hy", no_header_targets)
+        self.assertIn("tests/checker-corpus/34-select-send-unproven-name.hy", no_header_targets)
+        self.assertIn("16", no_header_targets)
+
+    def test_three_digit_inline_corpus_ref_is_checked(self):
+        (self.root / "GUARANTEES.md").write_text(
+            CLAIMS + "| 3 | 3digit | check | **Guaranteed** | corpus `105-three-digit-fixture` |\n",
+            encoding="utf-8",
+        )
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 1)
+        report = json.loads(result.stdout)
+        self.assertIn("missing-inline-corpus", [i["kind"] for i in report["issues"]])
 
     def test_missing_inline_corpus_is_reported(self):
         (self.root / "tests" / "checker-corpus" / "34-select-send-unproven-name.hy").unlink()

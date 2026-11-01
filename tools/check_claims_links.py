@@ -25,7 +25,7 @@ from pathlib import Path
 TABLE_HEADING = "## The claims table"
 ROW_RE = re.compile(r"^\|\s*(\d+)\s*\|")
 LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
-INLINE_CORPUS_RE = re.compile(r"`(\d{2}-[a-z0-9][a-z0-9-]*(?:\.hy)?)`")
+INLINE_CORPUS_RE = re.compile(r"`(\d{2,3}-[a-z0-9][a-z0-9-]*(?:\.hy)?)`")
 CORPUS_NUM_RE = re.compile(r"\bcorpus\s+(\d{1,3})\b")
 MARKER_RE = re.compile(r"^\s*\((reject|accept|managed)\)", re.IGNORECASE)
 VERDICT_RE = re.compile(r"EXPECTED-VERDICT:\s*([A-Za-z-]+)")
@@ -78,7 +78,7 @@ def marker_matches(marker, verdict):
     if marker == "reject":
         return verdict == "REJECT"
     if marker == "accept":
-        return verdict.startswith("ACCEPT")
+        return verdict == "ACCEPT"
     if marker == "managed":
         return verdict == "ACCEPT-MANAGED"
     return True
@@ -108,15 +108,15 @@ def check(root):
                 continue
             if resolved.suffix.lower() != ".hy":
                 continue
+            verdict = verdict_of(resolved)
+            if verdict is None:
+                issues.append({"row": row_number, "kind": "no-verdict-header", "target": path})
+                continue
             follow = evidence[match.end():]
             marker_match = MARKER_RE.match(follow)
             if not marker_match:
                 continue
             marker = marker_match.group(1).lower()
-            verdict = verdict_of(resolved)
-            if verdict is None:
-                issues.append({"row": row_number, "kind": "no-verdict-header", "target": path})
-                continue
             if not marker_matches(marker, verdict):
                 issues.append({
                     "row": row_number,
@@ -136,8 +136,11 @@ def check(root):
                 continue
             inline_seen.add(target)
             refs += 1
-            if not (root / target).is_file():
+            resolved_inline = root / target
+            if not resolved_inline.is_file():
                 issues.append({"row": row_number, "kind": "missing-inline-corpus", "target": target})
+            elif verdict_of(resolved_inline) is None:
+                issues.append({"row": row_number, "kind": "no-verdict-header", "target": target})
         corpus_dir = root / "tests" / "checker-corpus"
         numbers_seen = set()
         for match in CORPUS_NUM_RE.finditer(evidence):
@@ -146,8 +149,12 @@ def check(root):
                 continue
             numbers_seen.add(number)
             refs += 1
-            if corpus_dir.is_dir() and not list(corpus_dir.glob("%02d-*.hy" % int(number))):
-                issues.append({"row": row_number, "kind": "missing-corpus-number", "target": number})
+            if corpus_dir.is_dir():
+                matched_files = sorted(corpus_dir.glob("%02d-*.hy" % int(number)))
+                if not matched_files:
+                    issues.append({"row": row_number, "kind": "missing-corpus-number", "target": number})
+                elif any(verdict_of(f) is None for f in matched_files):
+                    issues.append({"row": row_number, "kind": "no-verdict-header", "target": number})
     return {"ok": not issues, "rows": rows, "links": links, "refs": refs, "issues": issues}
 
 
