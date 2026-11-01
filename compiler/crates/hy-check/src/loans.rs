@@ -3434,7 +3434,15 @@ impl<'a> Checker<'a> {
         out: &mut HashSet<(usize, usize)>,
     ) {
         for s in &block.stmts {
-            self.walk_stmt_param_stores(s, cst, aliases, param_names, depth, out);
+            self.walk_stmt_param_stores(
+                s,
+                cst,
+                aliases,
+                &mut std::collections::HashMap::new(),
+                param_names,
+                depth,
+                out,
+            );
         }
     }
 
@@ -3443,6 +3451,7 @@ impl<'a> Checker<'a> {
         block: &Block,
         cst: &mut FnState,
         aliases: &mut std::collections::HashMap<String, HashSet<usize>>,
+        break_aliases: &mut std::collections::HashMap<String, HashSet<usize>>,
         param_names: &HashSet<String>,
         depth: usize,
         out: &mut HashSet<(usize, usize)>,
@@ -3457,7 +3466,15 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            self.walk_stmt_param_stores(s, cst, aliases, param_names, depth, out);
+            self.walk_stmt_param_stores(
+                s,
+                cst,
+                aliases,
+                break_aliases,
+                param_names,
+                depth,
+                out,
+            );
         }
         cst.scopes.pop();
         for (name, entry) in outer_entries {
@@ -3477,6 +3494,7 @@ impl<'a> Checker<'a> {
         stmt: &Stmt,
         cst: &mut FnState,
         aliases: &mut std::collections::HashMap<String, HashSet<usize>>,
+        break_aliases: &mut std::collections::HashMap<String, HashSet<usize>>,
         param_names: &HashSet<String>,
         depth: usize,
         out: &mut HashSet<(usize, usize)>,
@@ -3702,6 +3720,14 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            Stmt::Break { .. } => {
+                for (k, v) in aliases.iter() {
+                    break_aliases
+                        .entry(k.clone())
+                        .or_default()
+                        .extend(v.clone());
+                }
+            }
             Stmt::If {
                 init,
                 then,
@@ -3715,6 +3741,7 @@ impl<'a> Checker<'a> {
                         i,
                         &mut branch_cst,
                         &mut branch_aliases,
+                        break_aliases,
                         param_names,
                         depth,
                         out,
@@ -3726,6 +3753,7 @@ impl<'a> Checker<'a> {
                     then,
                     &mut then_cst,
                     &mut then_aliases,
+                    break_aliases,
                     param_names,
                     depth,
                     out,
@@ -3740,6 +3768,7 @@ impl<'a> Checker<'a> {
                         o,
                         &mut else_cst,
                         &mut else_aliases,
+                        break_aliases,
                         param_names,
                         depth,
                         out,
@@ -3761,6 +3790,7 @@ impl<'a> Checker<'a> {
                     hy_syntax::ForKind::While { .. } | hy_syntax::ForKind::Infinite => {}
                 }
                 let mut head = aliases.clone();
+                let mut inner_breaks = std::collections::HashMap::new();
                 loop {
                     let mut body_cst = cst.clone();
                     let mut body_aliases = head.clone();
@@ -3814,6 +3844,7 @@ impl<'a> Checker<'a> {
                         body,
                         &mut body_cst,
                         &mut body_aliases,
+                        &mut inner_breaks,
                         param_names,
                         depth,
                         out,
@@ -3823,9 +3854,22 @@ impl<'a> Checker<'a> {
                     }
                 }
                 *aliases = head;
+                for (k, v) in inner_breaks {
+                    if !loop_bound.contains(k.as_str()) {
+                        aliases.entry(k).or_default().extend(v);
+                    }
+                }
             }
             Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
-                self.walk_scoped_block_param_stores(body, cst, aliases, param_names, depth, out);
+                self.walk_scoped_block_param_stores(
+                    body,
+                    cst,
+                    aliases,
+                    break_aliases,
+                    param_names,
+                    depth,
+                    out,
+                );
             }
             Stmt::Match { subject, arms, .. } => {
                 let subj_origins = self.expr_slot_origins(cst, subject, aliases);
@@ -3861,6 +3905,7 @@ impl<'a> Checker<'a> {
                         &arm.body,
                         &mut arm_cst,
                         &mut arm_aliases,
+                        break_aliases,
                         param_names,
                         depth,
                         out,
@@ -3883,6 +3928,7 @@ impl<'a> Checker<'a> {
                         &arm.body,
                         &mut arm_cst,
                         &mut arm_aliases,
+                        break_aliases,
                         param_names,
                         depth,
                         out,
@@ -7888,8 +7934,18 @@ impl<'a> Checker<'a> {
         aliases: &mut HashSet<String>,
         depth: usize,
     ) -> bool {
+        self.block_mutates_const_param_breaks(block, aliases, &mut HashSet::new(), depth)
+    }
+
+    fn block_mutates_const_param_breaks(
+        &self,
+        block: &Block,
+        aliases: &mut HashSet<String>,
+        break_aliases: &mut HashSet<String>,
+        depth: usize,
+    ) -> bool {
         for s in &block.stmts {
-            if self.stmt_mutates_const_param(s, aliases, depth) {
+            if self.stmt_mutates_const_param(s, aliases, break_aliases, depth) {
                 return true;
             }
         }
@@ -7920,6 +7976,7 @@ impl<'a> Checker<'a> {
         &self,
         stmt: &Stmt,
         aliases: &mut HashSet<String>,
+        break_aliases: &mut HashSet<String>,
         depth: usize,
     ) -> bool {
         match stmt {
@@ -8033,6 +8090,9 @@ impl<'a> Checker<'a> {
                     return true;
                 }
             }
+            Stmt::Break { .. } => {
+                break_aliases.extend(aliases.iter().cloned());
+            }
             _ => {}
         }
         let mut calls = Vec::new();
@@ -8052,18 +8112,18 @@ impl<'a> Checker<'a> {
             } => {
                 let mut branch_aliases = aliases.clone();
                 if let Some(i) = init {
-                    if self.stmt_mutates_const_param(i, &mut branch_aliases, depth) {
+                    if self.stmt_mutates_const_param(i, &mut branch_aliases, break_aliases, depth) {
                         return true;
                     }
                 }
                 let mut then_aliases = branch_aliases.clone();
-                if self.block_mutates_const_param(then, &mut then_aliases, depth) {
+                if self.block_mutates_const_param_breaks(then, &mut then_aliases, break_aliases, depth) {
                     return true;
                 }
                 aliases.extend(then_aliases);
                 if let Some(o) = otherwise {
                     let mut else_aliases = branch_aliases;
-                    if self.stmt_mutates_const_param(o, &mut else_aliases, depth) {
+                    if self.stmt_mutates_const_param(o, &mut else_aliases, break_aliases, depth) {
                         return true;
                     }
                     aliases.extend(else_aliases);
@@ -8071,6 +8131,7 @@ impl<'a> Checker<'a> {
             }
             Stmt::For { kind, body, .. } => {
                 let mut body_aliases = aliases.clone();
+                let mut inner_breaks = HashSet::new();
                 match kind {
                     hy_syntax::ForKind::Iterate { vars, expr } => {
                         let reaches = Self::expr_reaches_const_aliases(expr, &body_aliases);
@@ -8087,14 +8148,15 @@ impl<'a> Checker<'a> {
                     }
                     _ => {}
                 }
-                if self.block_mutates_const_param(body, &mut body_aliases, depth) {
+                if self.block_mutates_const_param_breaks(body, &mut body_aliases, &mut inner_breaks, depth) {
                     return true;
                 }
                 aliases.extend(body_aliases);
+                aliases.extend(inner_breaks);
             }
             Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
                 let mut body_aliases = aliases.clone();
-                if self.block_mutates_const_param(body, &mut body_aliases, depth) {
+                if self.block_mutates_const_param_breaks(body, &mut body_aliases, break_aliases, depth) {
                     return true;
                 }
                 aliases.extend(body_aliases);
@@ -8114,7 +8176,7 @@ impl<'a> Checker<'a> {
                             arm_aliases.remove(bname);
                         }
                     }
-                    if self.block_mutates_const_param(&arm.body, &mut arm_aliases, depth) {
+                    if self.block_mutates_const_param_breaks(&arm.body, &mut arm_aliases, break_aliases, depth) {
                         return true;
                     }
                     aliases.extend(arm_aliases);
@@ -8136,7 +8198,7 @@ impl<'a> Checker<'a> {
                         }
                         _ => {}
                     }
-                    if self.block_mutates_const_param(&arm.body, &mut arm_aliases, depth) {
+                    if self.block_mutates_const_param_breaks(&arm.body, &mut arm_aliases, break_aliases, depth) {
                         return true;
                     }
                     aliases.extend(arm_aliases);

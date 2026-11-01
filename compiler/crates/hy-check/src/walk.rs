@@ -50,6 +50,8 @@ pub(crate) struct FlatInfo<'a> {
     pub loop_end: HashMap<usize, usize>,
     /// loop-statement index -> last index inside its body for LoopStmt (ForKind::Infinite).
     pub infinite_loop_end: HashMap<usize, usize>,
+    /// select-statement index -> last index inside its arms
+    pub select_end: HashMap<usize, usize>,
     /// managed-block index -> last index inside its body
     pub managed_end: HashMap<usize, usize>,
     /// binding name -> last statement index referencing it
@@ -246,6 +248,7 @@ fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt, named_results: &[String]
                     out.mark_event(out.next, ScopeEvent::Pop);
                 }
             }
+            out.select_end.insert(idx, out.next.saturating_sub(1));
         }
         _ => {}
     }
