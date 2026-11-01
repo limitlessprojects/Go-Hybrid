@@ -1591,6 +1591,15 @@ impl Emitter {
         // hints write no lines; no bump is needed anywhere here.
         self.emit_hints_from_params(&f.params);
         if let Some(body) = &f.body {
+            self.indent += 1;
+            for r in &f.results {
+                if let Some(name) = r.name.as_deref().filter(|n| *n != "_") {
+                    if let Some(init) = self.n5_zero_init(&r.ty) {
+                        self.push(&format!("{} = {}", name, init));
+                    }
+                }
+            }
+            self.indent -= 1;
             self.emit_block_body(&body.stmts)?;
         }
         self.push("}");
@@ -2069,6 +2078,9 @@ impl Emitter {
     /// returns). `*new(T)` is the universal fallback — a stack zero, no
     /// allocation.
     pub fn zero_value(&mut self, t: &TypeExpr) -> String {
+        if let Some(init) = self.n5_zero_init(t) {
+            return init;
+        }
         match t {
             TypeExpr::Named { name, .. } if !name.contains('.') && !name.contains('[') => {
                 if self.struct_fields.contains_key(name.as_str()) {
