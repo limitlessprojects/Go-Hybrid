@@ -6220,6 +6220,15 @@ impl<'a> Checker<'a> {
         let shape = self.shape_of_expr(st, subject);
         let ty = match self.ty_of_expr(st, subject) {
             Some(hy_syntax::TypeExpr::Option { elem, .. }) => Some(*elem),
+            // An enum arm binding (`circle(r)`) holds the VARIANT'S PAYLOAD,
+            // never the enum itself; the variant is not known here, so the
+            // binding stays untyped rather than mistyped as the enum (#2444:
+            // `r == 2` must not read as an enum equality).
+            Some(hy_syntax::TypeExpr::Named { name, .. })
+                if self.enums.contains_key(name.as_str()) =>
+            {
+                None
+            }
             other => other,
         };
 

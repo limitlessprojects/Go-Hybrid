@@ -888,6 +888,18 @@ impl<'a> Checker<'a> {
                             if let Some(f) = self.fns.get(full.as_str()) {
                                 return f.results.first().map(|r| r.ty.clone());
                             }
+                            // `shape.circle(1)` — a payload variant
+                            // constructor has the enum's type (T12).
+                            if self
+                                .enums
+                                .get(root.as_str())
+                                .is_some_and(|vs| vs.iter().any(|v| v == name))
+                            {
+                                return Some(TypeExpr::Named {
+                                    name: root.clone(),
+                                    span: *span,
+                                });
+                            }
                         }
                     }
                     let recv_base = self

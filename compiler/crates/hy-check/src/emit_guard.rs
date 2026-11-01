@@ -754,6 +754,31 @@ impl<'a> Checker<'a> {
         } else if let Some(n) = self.incomparable_noun(&r) {
             (rhs, n)
         } else {
+            // T16: `==`/`!=` exist only for unit-only enums. A data-carrying
+            // enum compares via `match` — payload equality is a deep-equality
+            // policy MVP must not guess (and a slice/map/fn payload has no Go
+            // `==` at all).
+            if let Some((op, ename)) = self
+                .data_enum_operand(st, lhs)
+                .map(|n| (lhs, n))
+                .or_else(|| self.data_enum_operand(st, rhs).map(|n| (rhs, n)))
+            {
+                let msg = format!(
+                    "`{}` is a data-carrying enum (`{}`) — `==`/`!=` are defined only for unit-only enums (T16, HYB-E2006)",
+                    op.render(),
+                    ename
+                );
+                let notes = vec![
+                    format!(
+                        "why: SPEC-LANGUAGE T16 — `{}` has a variant with a payload, and payload equality is a deep-equality policy (reference vs structural) Hybrid does not guess; a slice/map/fn payload has no `==` in Go at all",
+                        ename
+                    ),
+                    "fix: compare via `match` — destructure the variants and compare the payloads you mean (`match a { data(x): … }`)".to_string(),
+                ];
+                self.diags.push(
+                    Diagnostic::error("HYB-E2006", self.path.clone(), span, msg).with_notes(notes),
+                );
+            }
             return;
         };
         let msg = format!(
@@ -798,6 +823,16 @@ impl<'a> Checker<'a> {
             }
         }
         self.shape_of_expr(st, e)
+    }
+
+    /// The data-carrying enum an equality operand provably has, if any
+    /// (enum-typed bindings, params, and variant constructors).
+    fn data_enum_operand(&self, st: &FnState, e: &Expr) -> Option<String> {
+        let ty = self.ty_of_expr(st, unwrap_parens(e))?;
+        match self.resolve_type_alias(&ty) {
+            TypeExpr::Named { name, .. } if self.data_enums.contains(&name) => Some(name),
+            _ => None,
+        }
     }
 
     /// `Some(noun)` when a `==` over this shape is provably illegal in
