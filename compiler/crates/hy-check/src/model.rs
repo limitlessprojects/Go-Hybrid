@@ -212,6 +212,18 @@ pub(crate) struct Loan {
     pub desc: String,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ShadowedBindingMeta {
+    pub was_borrowed: bool,
+    pub closure_mutates: Option<HashSet<String>>,
+    pub closure_fnlit: Option<(
+        Vec<(String, Option<hy_syntax::TypeExpr>)>,
+        Vec<(String, Option<hy_syntax::TypeExpr>)>,
+        hy_syntax::Block,
+    )>,
+    pub closure_def: Option<(Vec<hy_syntax::Param>, Vec<hy_syntax::FnResult>, hy_syntax::Block)>,
+}
+
 /// Per-function mutable state (environment, aliases, live loans).
 #[derive(Debug, Default, Clone)]
 pub(crate) struct FnState {
@@ -307,6 +319,9 @@ pub(crate) struct FnState {
     /// Active `defer <call>` sites seen prior to the current program point, paired
     /// with eager per-argument borrow flags evaluated at the `defer` statement.
     pub deferred_calls: Vec<(hy_syntax::Expr, Vec<bool>)>,
+    /// Per-scope saved outer borrow and closure metadata for bindings shadowed
+    /// inside that block scope, restored on `scope_pop`.
+    pub shadowed_meta_scopes: Vec<HashMap<String, ShadowedBindingMeta>>,
 }
 
 impl FnState {
@@ -317,6 +332,7 @@ impl FnState {
         self.share_scopes.push(self.may_share.clone());
         self.shadow_link_scopes.push(self.shadow_links.clone());
         self.fnlit_scopes.push(Vec::new());
+        self.shadowed_meta_scopes.push(HashMap::new());
     }
 
     /// Exit the innermost block scope (walk.rs's Pop events).
@@ -531,6 +547,30 @@ impl FnState {
                 }
             }
         }
+        if let Some(shadowed_meta) = self.shadowed_meta_scopes.pop() {
+            for (name, meta) in shadowed_meta {
+                if meta.was_borrowed {
+                    self.borrow_bindings.insert(name.clone());
+                } else {
+                    self.borrow_bindings.remove(&name);
+                }
+                if let Some(mutates) = meta.closure_mutates {
+                    self.closure_mutates.insert(name.clone(), mutates);
+                } else {
+                    self.closure_mutates.remove(&name);
+                }
+                if let Some(fnlit) = meta.closure_fnlit {
+                    self.closure_fnlits.insert(name.clone(), fnlit);
+                } else {
+                    self.closure_fnlits.remove(&name);
+                }
+                if let Some(def) = meta.closure_def {
+                    self.closure_defs.insert(name, def);
+                } else {
+                    self.closure_defs.remove(&name);
+                }
+            }
+        }
     }
 
     /// Return the scope depth of the currently visible binding `name`:
@@ -584,6 +624,26 @@ impl FnState {
     /// its own layer — the fix for issue #14 (a flat env let the inner
     /// define overwrite the outer map's shape and launder it past a spawn).
     pub(crate) fn env_define(&mut self, name: &str, b: Binding) {
+        let is_new_in_top = self
+            .scopes
+            .last()
+            .is_some_and(|top| !top.contains_key(name));
+        if is_new_in_top {
+            let meta = ShadowedBindingMeta {
+                was_borrowed: self.borrow_bindings.contains(name),
+                closure_mutates: self.closure_mutates.get(name).cloned(),
+                closure_fnlit: self.closure_fnlits.get(name).cloned(),
+                closure_def: self.closure_defs.get(name).cloned(),
+            };
+            if let Some(meta_map) = self.shadowed_meta_scopes.last_mut() {
+                meta_map.entry(name.to_string()).or_insert(meta);
+            }
+            if !matches!(b.shape, TypeShape::Closure) {
+                self.closure_mutates.remove(name);
+                self.closure_fnlits.remove(name);
+                self.closure_defs.remove(name);
+            }
+        }
         if let Some(top) = self.scopes.last_mut() {
             top.insert(name.to_string(), b);
         } else {
@@ -916,15 +976,8 @@ pub(crate) fn collect_ref_roots(e: &Expr, out: &mut Vec<String>) {
 /// Ordinary calls, binary operations, indexing, and fields do not propagate borrow roots into results.
 pub(crate) fn collect_addr_of_roots(e: &Expr, out: &mut Vec<String>) {
     match unwrap_parens(e) {
-        Expr::AddrOf { operand, .. } => {
-            if let Some(id) = operand.root_ident() {
-                if id != "_" {
-                    out.push(id.to_string());
-                }
-            }
-            collect_addr_of_roots(operand, out);
-        }
-        Expr::Unary {
+        Expr::AddrOf { operand, .. }
+        | Expr::Unary {
             op: hy_syntax::UnOp::Addr,
             operand,
             ..
@@ -933,11 +986,23 @@ pub(crate) fn collect_addr_of_roots(e: &Expr, out: &mut Vec<String>) {
                 if id != "_" {
                     out.push(id.to_string());
                 }
+            } else if matches!(
+                unwrap_parens(operand),
+                Expr::Field { .. } | Expr::Index { .. } | Expr::Slice { .. }
+            ) {
+                collect_ref_roots(operand, out);
             }
             collect_addr_of_roots(operand, out);
         }
-        Expr::Try { operand, .. } => collect_addr_of_roots(operand, out),
-        Expr::Move { operand, .. } => collect_addr_of_roots(operand, out),
+        Expr::Call { callee, args, .. }
+            if matches!(unwrap_parens(callee), Expr::Ident { name, .. } if name == "some")
+                && args.len() == 1 =>
+        {
+            collect_addr_of_roots(&args[0].value, out);
+        }
+        Expr::Try { operand, .. } | Expr::Move { operand, .. } => {
+            collect_addr_of_roots(operand, out);
+        }
         Expr::StructLit { fields, .. } => {
             for f in fields {
                 collect_addr_of_roots(&f.value, out);
