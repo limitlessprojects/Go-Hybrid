@@ -371,6 +371,7 @@ struct Collector<'a> {
     scalar_scopes: Vec<HashMap<String, &'static str>>,
     slice_elem_scopes: Vec<HashMap<String, &'static str>>,
     map_key_scopes: Vec<HashMap<String, &'static str>>,
+    chan_elem_scopes: Vec<HashMap<String, &'static str>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
     /// File-level `const` declared numeric scalar types.
@@ -412,6 +413,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             scalar_scopes: Vec::new(),
             slice_elem_scopes: Vec::new(),
             map_key_scopes: Vec::new(),
+            chan_elem_scopes: Vec::new(),
             file_consts: HashMap::new(),
             file_const_scalars: HashMap::new(),
             fn_results: Vec::new(),
@@ -481,6 +483,7 @@ impl<'a> Collector<'a> {
         self.scalar_scopes.push(HashMap::new());
         self.slice_elem_scopes.push(HashMap::new());
         self.map_key_scopes.push(HashMap::new());
+        self.chan_elem_scopes.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
@@ -489,6 +492,7 @@ impl<'a> Collector<'a> {
         self.scalar_scopes.pop();
         self.slice_elem_scopes.pop();
         self.map_key_scopes.pop();
+        self.chan_elem_scopes.pop();
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -622,6 +626,79 @@ impl<'a> Collector<'a> {
                 None
             }
             _ => None,
+        }
+    }
+
+    fn bind_chan_elem_scalar(&mut self, name: &str, scalar: &'static str) {
+        if name != "_" {
+            if let Some(top) = self.chan_elem_scopes.last_mut() {
+                top.insert(name.to_string(), scalar);
+            }
+        }
+    }
+
+    fn lookup_chan_elem_scalar(&self, name: &str) -> Option<&'static str> {
+        for layer in self.chan_elem_scopes.iter().rev() {
+            if let Some(s) = layer.get(name) {
+                return Some(*s);
+            }
+        }
+        None
+    }
+
+    fn chan_elem_scalar(&self, e: &Expr) -> Option<&'static str> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => self.lookup_chan_elem_scalar(name),
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            let bare_arg = unwrap_parens(&first.value);
+                            if let Expr::StructLit { ty: Some(t), .. } = bare_arg {
+                                if let TypeExpr::Chan { elem, .. } = self.ck.resolve_type_alias(t) {
+                                    return self.scalar_of_ty(&self.ck.resolve_type_alias(&elem));
+                                }
+                            }
+                            if let Expr::Ident { name, .. } = bare_arg {
+                                return self.chan_elem_scalar_of_type_name(name);
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn chan_elem_scalar_of_type_name(&self, name: &str) -> Option<&'static str> {
+        let base = Checker::base_named_type_str(name);
+        if let Some(target) = self.ck.type_aliases.get(base) {
+            let resolved = self.ck.resolve_type_alias(target);
+            if let TypeExpr::Chan { elem, .. } = resolved {
+                return self.scalar_of_ty(&self.ck.resolve_type_alias(&elem));
+            }
+        }
+        None
+    }
+
+    fn check_send_operands(&mut self, chan: &Expr, value: &Expr, span: Span) {
+        if let Some(elem_sc) = self.chan_elem_scalar(chan) {
+            if let Some(val_sc) = self.expr_scalar_type(value) {
+                if elem_sc != val_sc {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "cannot use `{}` (variable of type `{}`) as `{}` value in send (HYB-E1002)",
+                            value.render(),
+                            val_sc,
+                            elem_sc
+                        ),
+                        "in Go, channel sends require exactly matching numeric types; write an explicit conversion when intended",
+                    );
+                }
+            }
         }
     }
 
@@ -919,6 +996,10 @@ impl<'a> Collector<'a> {
                 if let Some(sc) = self.scalar_of_ty(&self.ck.resolve_type_alias(key)) {
                     self.bind_map_key_scalar(&p.name, sc);
                 }
+            } else if let TypeExpr::Chan { elem, .. } = &resolved {
+                if let Some(sc) = self.scalar_of_ty(&self.ck.resolve_type_alias(elem)) {
+                    self.bind_chan_elem_scalar(&p.name, sc);
+                }
             }
         }
         for r in &f.results {
@@ -1091,6 +1172,12 @@ impl<'a> Collector<'a> {
                         self.bind_map_key_scalar(name, sc);
                     }
                 }
+            } else if let TypeExpr::Chan { elem, .. } = &resolved {
+                if let Some(sc) = self.scalar_of_ty(&self.ck.resolve_type_alias(elem)) {
+                    for name in &l.names {
+                        self.bind_chan_elem_scalar(name, sc);
+                    }
+                }
             }
         } else if l.names.len() == l.values.len() {
             for (name, v) in l.names.iter().zip(l.values.iter()) {
@@ -1102,6 +1189,9 @@ impl<'a> Collector<'a> {
                 }
                 if let Some(sc) = self.map_key_scalar(v) {
                     self.bind_map_key_scalar(name, sc);
+                }
+                if let Some(sc) = self.chan_elem_scalar(v) {
+                    self.bind_chan_elem_scalar(name, sc);
                 }
             }
         }
@@ -1226,13 +1316,14 @@ impl<'a> Collector<'a> {
                 self.check_assign_operands(targets, *op, values, *span);
             }
             Stmt::Expr { expr, .. } => self.expr(expr),
-            Stmt::Send { chan, value, .. } => {
+            Stmt::Send { chan, value, span, .. } => {
                 self.expr(chan);
                 // #887: the sent value is a single-value position. A void call
                 // or a multi-value call here passed the checker and emitted
                 // `ch <- noop()` / `ch <- pair()`, which Go rejects.
                 self.check_single_value_position(value, "a channel send", false);
                 self.expr(value);
+                self.check_send_operands(chan, value, *span);
             }
             Stmt::If {
                 init,
@@ -1391,6 +1482,7 @@ impl<'a> Collector<'a> {
                     self.check_single_value_position(value, "a channel send", false);
                             self.expr(chan);
                             self.expr(value);
+                            self.check_send_operands(chan, value, chan.span());
                         }
                         SelectArmKind::Recv { names, chan } => {
                             self.check_repeated_bindings(names, chan.span());
