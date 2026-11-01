@@ -291,6 +291,20 @@ impl<'a> Checker<'a> {
             "make" => self.check_make_args(args, span),
             "len" => self.check_len_cap_args("len", args, span, /*cap=*/ false),
             "cap" => self.check_len_cap_args("cap", args, span, /*cap=*/ true),
+            // #1673: Go's append spec requires at least two arguments (slice,
+            // elements...). A 0/1-arg call passed `hyb check` and then failed
+            // `go build` ("not enough arguments in call to append").
+            "append" => {
+                if args.len() < 2 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`append` requires at least 2 arguments (slice, elements...), found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                }
+            }
             "delete" => {
                 if args.len() != 2 {
                     self.emit_builtin(
