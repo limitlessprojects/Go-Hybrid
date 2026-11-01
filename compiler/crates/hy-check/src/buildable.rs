@@ -619,6 +619,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             }
         }
         c.check_imports(file);
+        c.check_recursive_struct_value_types(file);
         c.finish();
         c.diags
     };
@@ -6644,6 +6645,77 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// Issue #1566: reject recursive struct value cycles (e.g. `struct node { next node }`
+    /// or `struct node { kids [N]node }`). Slices, maps, channels, and pointers break
+    /// the cycle and remain legal.
+    fn check_recursive_struct_value_types(&mut self, file: &File) {
+        let struct_decls: Vec<&hy_syntax::StructDecl> = file
+            .decls
+            .iter()
+            .filter_map(|d| match d {
+                Decl::Struct(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+
+        let mut adj: HashMap<String, Vec<(String, Span)>> = HashMap::new();
+        for s in &struct_decls {
+            let mut edges = Vec::new();
+            for f in &s.fields {
+                let mut targets = Vec::new();
+                let mut seen_aliases = HashSet::new();
+                collect_by_value_struct_targets(
+                    &f.ty,
+                    &self.ck.type_aliases,
+                    &mut seen_aliases,
+                    &mut targets,
+                );
+                for (target_name, span) in targets {
+                    if self.ck.structs.contains_key(&target_name) {
+                        edges.push((target_name, span));
+                    }
+                }
+            }
+            adj.insert(s.name.clone(), edges);
+        }
+
+        let mut reported = HashSet::new();
+
+        for s in &struct_decls {
+            if reported.contains(&s.name) {
+                continue;
+            }
+            let mut visited = HashSet::new();
+            let mut path = Vec::new();
+            if let Some(cycle) = find_struct_value_cycle(
+                &s.name,
+                &s.name,
+                &adj,
+                &mut visited,
+                &mut path,
+            ) {
+                let closing_span = cycle.last().map(|(_, span)| *span).unwrap_or(s.span);
+                let cycle_names: Vec<&str> = std::iter::once(s.name.as_str())
+                    .chain(cycle.iter().map(|(n, _)| *n))
+                    .collect();
+                let cycle_str = cycle_names.join(" -> ");
+
+                self.emit_e1002(
+                    closing_span,
+                    format!("invalid recursive type: {} refers to itself (HYB-E1002)", s.name),
+                    &format!(
+                        "cycle: {} — a struct cannot contain itself by value; break the cycle with an indirection (pointer `*T`, slice `[]T`, map, or channel)",
+                        cycle_str
+                    ),
+                );
+
+                for name in cycle_names {
+                    reported.insert(name.to_string());
+                }
+            }
+        }
+    }
+
     /// All fn-local declarations have the same Go unused-binding rule.
     fn finish(&mut self) {
         for d in &self.defines {
@@ -6686,6 +6758,57 @@ fn builtins_already_flags_close(e: &Expr) -> bool {
         } => matches!(unwrap_parens(operand), Expr::Lit { .. }),
         _ => false,
     }
+}
+
+fn collect_by_value_struct_targets<'b>(
+    ty: &'b TypeExpr,
+    type_aliases: &'b HashMap<String, TypeExpr>,
+    seen_aliases: &mut HashSet<&'b str>,
+    out: &mut Vec<(String, Span)>,
+) {
+    match ty {
+        TypeExpr::Named { name, span } => {
+            let base = Checker::base_named_type_str(name);
+            if let Some(aliased) = type_aliases.get(base) {
+                if seen_aliases.insert(base) {
+                    collect_by_value_struct_targets(aliased, type_aliases, seen_aliases, out);
+                    seen_aliases.remove(base);
+                }
+            } else {
+                out.push((base.to_string(), *span));
+            }
+        }
+        TypeExpr::Array { elem, .. } => {
+            collect_by_value_struct_targets(elem, type_aliases, seen_aliases, out);
+        }
+        _ => {}
+    }
+}
+
+fn find_struct_value_cycle<'a>(
+    current: &'a str,
+    target: &'a str,
+    adj: &'a HashMap<String, Vec<(String, Span)>>,
+    visited: &mut HashSet<&'a str>,
+    path: &mut Vec<(&'a str, Span)>,
+) -> Option<Vec<(&'a str, Span)>> {
+    let edges = adj.get(current)?;
+    for (next_name, span) in edges {
+        if next_name == target {
+            let mut res = path.clone();
+            res.push((next_name.as_str(), *span));
+            return Some(res);
+        }
+        if visited.insert(next_name.as_str()) {
+            path.push((next_name.as_str(), *span));
+            if let Some(cycle) = find_struct_value_cycle(next_name, target, adj, visited, path) {
+                return Some(cycle);
+            }
+            path.pop();
+            visited.remove(next_name.as_str());
+        }
+    }
+    None
 }
 
 fn builtins_already_flags_len_cap(e: &Expr, is_cap: bool) -> bool {
