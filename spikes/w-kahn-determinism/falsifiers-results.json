@@ -1,0 +1,79 @@
+[
+  {
+    "program": "f1-helper-spawn-two-producers.hy",
+    "classifier": "ADMIT",
+    "classifier_diags": [],
+    "hy_check": "ACCEPT",
+    "hy_check_detail": "",
+    "runs": 1000,
+    "distinct_outputs": 12,
+    "outputs": {
+      "order=4123\n": 737,
+      "order=1243\n": 146,
+      "order=1423\n": 44,
+      "order=4231\n": 26,
+      "order=1234\n": 21,
+      "order=4213\n": 5,
+      "order=1432\n": 5,
+      "order=4312\n": 4,
+      "order=4321\n": 4,
+      "order=4132\n": 4
+    },
+    "falsifies_H1": true
+  },
+  {
+    "program": "f2-bidirectional-chan-producers.hy",
+    "classifier": "ADMIT",
+    "classifier_diags": [],
+    "hy_check": "ACCEPT",
+    "hy_check_detail": "",
+    "runs": 1000,
+    "distinct_outputs": 12,
+    "outputs": {
+      "order=4123\n": 732,
+      "order=1243\n": 132,
+      "order=1423\n": 54,
+      "order=4231\n": 30,
+      "order=1234\n": 15,
+      "order=4132\n": 14,
+      "order=4321\n": 7,
+      "order=4213\n": 7,
+      "order=1432\n": 5,
+      "order=4312\n": 2
+    },
+    "falsifies_H1": true
+  },
+  {
+    "program": "f3-main-is-second-producer.hy",
+    "classifier": "ADMIT",
+    "classifier_diags": [],
+    "hy_check": "ACCEPT",
+    "hy_check_detail": "",
+    "runs": 1000,
+    "distinct_outputs": 1,
+    "outputs": {
+      "order=21\n": 1000
+    },
+    "falsifies_H1": false
+  },
+  {
+    "program": "f4-map-iteration-via-param.hy",
+    "classifier": "ADMIT",
+    "classifier_diags": [],
+    "hy_check": "ACCEPT",
+    "hy_check_detail": "",
+    "runs": 1000,
+    "distinct_outputs": 8,
+    "outputs": {
+      "f=6\ng=7\nh=8\na=1\nb=2\nc=3\nd=4\ne=5\n": 135,
+      "d=4\ne=5\nf=6\ng=7\nh=8\na=1\nb=2\nc=3\n": 133,
+      "c=3\nd=4\ne=5\nf=6\ng=7\nh=8\na=1\nb=2\n": 130,
+      "g=7\nh=8\na=1\nb=2\nc=3\nd=4\ne=5\nf=6\n": 127,
+      "e=5\nf=6\ng=7\nh=8\na=1\nb=2\nc=3\nd=4\n": 126,
+      "h=8\na=1\nb=2\nc=3\nd=4\ne=5\nf=6\ng=7\n": 125,
+      "b=2\nc=3\nd=4\ne=5\nf=6\ng=7\nh=8\na=1\n": 114,
+      "a=1\nb=2\nc=3\nd=4\ne=5\nf=6\ng=7\nh=8\n": 110
+    },
+    "falsifies_H1": true
+  }
+]
