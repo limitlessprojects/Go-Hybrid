@@ -257,10 +257,14 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         (Slice(_), Int | Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
         (Slice(elem), Str) if !matches!(**elem, Unknown | Int) => true,
 
-        // Map target: cannot convert from Int, Float, Bool, Str, Slice, Chan, Struct.
+        // Map target: cannot convert from Int, Float, Bool, Str, Slice, Chan, Struct,
+        // and can only convert from another Map if both key and value kinds match.
+        (Map(k1, v1), Map(k2, v2)) => kinds_conflict(k1, k2) || kinds_conflict(v1, v2),
         (Map(_, _), Int | Float | Bool | Str | Slice(_) | Chan(_) | Struct(_)) => true,
 
-        // Chan target: cannot convert from Int, Float, Bool, Str, Slice, Map, Struct.
+        // Chan target: cannot convert from Int, Float, Bool, Str, Slice, Map, Struct,
+        // and can only convert from another Chan if the element kind matches.
+        (Chan(c1), Chan(c2)) => kinds_conflict(c1, c2),
         (Chan(_), Int | Float | Bool | Str | Slice(_) | Map(_, _) | Struct(_)) => true,
 
         // Pointer targets and arguments: Go only converts between pointers with compatible base types.
@@ -371,6 +375,7 @@ struct Collector<'a> {
     scalar_scopes: Vec<HashMap<String, &'static str>>,
     slice_elem_scopes: Vec<HashMap<String, &'static str>>,
     map_key_scopes: Vec<HashMap<String, &'static str>>,
+    map_val_scopes: Vec<HashMap<String, &'static str>>,
     chan_elem_scopes: Vec<HashMap<String, &'static str>>,
     pointer_base_scopes: Vec<HashMap<String, &'static str>>,
     /// File-level `const` kinds (#425).
@@ -415,6 +420,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             scalar_scopes: Vec::new(),
             slice_elem_scopes: Vec::new(),
             map_key_scopes: Vec::new(),
+            map_val_scopes: Vec::new(),
             chan_elem_scopes: Vec::new(),
             pointer_base_scopes: Vec::new(),
             file_consts: HashMap::new(),
@@ -487,6 +493,7 @@ impl<'a> Collector<'a> {
         self.scalar_scopes.push(HashMap::new());
         self.slice_elem_scopes.push(HashMap::new());
         self.map_key_scopes.push(HashMap::new());
+        self.map_val_scopes.push(HashMap::new());
         self.chan_elem_scopes.push(HashMap::new());
         self.pointer_base_scopes.push(HashMap::new());
     }
@@ -497,6 +504,7 @@ impl<'a> Collector<'a> {
         self.scalar_scopes.pop();
         self.slice_elem_scopes.pop();
         self.map_key_scopes.pop();
+        self.map_val_scopes.pop();
         self.chan_elem_scopes.pop();
         self.pointer_base_scopes.pop();
     }
@@ -650,6 +658,54 @@ impl<'a> Collector<'a> {
             }
             _ => None,
         }
+    }
+
+    fn map_key_scalar_of_type_name(&self, name: &str) -> Option<&'static str> {
+        let base = Checker::base_named_type_str(name);
+        if let Some(target) = self.ck.type_aliases.get(base) {
+            let resolved = self.ck.resolve_type_alias(target);
+            if let TypeExpr::Map { key, .. } = resolved {
+                return self.scalar_of_ty(&self.ck.resolve_type_alias(&key));
+            }
+        }
+        None
+    }
+
+    fn bind_map_val_scalar(&mut self, name: &str, scalar: &'static str) {
+        if name != "_" {
+            if let Some(top) = self.map_val_scopes.last_mut() {
+                top.insert(name.to_string(), scalar);
+            }
+        }
+    }
+
+    fn lookup_map_val_scalar(&self, name: &str) -> Option<&'static str> {
+        for layer in self.map_val_scopes.iter().rev() {
+            if let Some(s) = layer.get(name) {
+                return Some(*s);
+            }
+        }
+        None
+    }
+
+    fn map_val_scalar(&self, e: &Expr) -> Option<&'static str> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => self.lookup_map_val_scalar(name),
+            Expr::MapLit { value, .. } => self.scalar_of_ty(&self.ck.resolve_type_alias(value)),
+            _ => None,
+        }
+    }
+
+    fn map_val_scalar_of_type_name(&self, name: &str) -> Option<&'static str> {
+        let base = Checker::base_named_type_str(name);
+        if let Some(target) = self.ck.type_aliases.get(base) {
+            let resolved = self.ck.resolve_type_alias(target);
+            if let TypeExpr::Map { value, .. } = resolved {
+                return self.scalar_of_ty(&self.ck.resolve_type_alias(&value));
+            }
+        }
+        None
     }
 
     fn bind_chan_elem_scalar(&mut self, name: &str, scalar: &'static str) {
@@ -1099,9 +1155,12 @@ impl<'a> Collector<'a> {
                 if let Some(sc) = self.scalar_of_ty(&self.ck.resolve_type_alias(elem)) {
                     self.bind_slice_elem_scalar(&p.name, sc);
                 }
-            } else if let TypeExpr::Map { key, .. } = &resolved {
+            } else if let TypeExpr::Map { key, value, .. } = &resolved {
                 if let Some(sc) = self.scalar_of_ty(&self.ck.resolve_type_alias(key)) {
                     self.bind_map_key_scalar(&p.name, sc);
+                }
+                if let Some(sc) = self.scalar_of_ty(&self.ck.resolve_type_alias(value)) {
+                    self.bind_map_val_scalar(&p.name, sc);
                 }
             } else if let TypeExpr::Chan { elem, .. } = &resolved {
                 if let Some(sc) = self.scalar_of_ty(&self.ck.resolve_type_alias(elem)) {
@@ -1284,10 +1343,15 @@ impl<'a> Collector<'a> {
                         self.bind_slice_elem_scalar(name, sc);
                     }
                 }
-            } else if let TypeExpr::Map { key, .. } = &resolved {
+            } else if let TypeExpr::Map { key, value, .. } = &resolved {
                 if let Some(sc) = self.scalar_of_ty(&self.ck.resolve_type_alias(key)) {
                     for name in &l.names {
                         self.bind_map_key_scalar(name, sc);
+                    }
+                }
+                if let Some(sc) = self.scalar_of_ty(&self.ck.resolve_type_alias(value)) {
+                    for name in &l.names {
+                        self.bind_map_val_scalar(name, sc);
                     }
                 }
             } else if let TypeExpr::Chan { elem, .. } = &resolved {
@@ -1313,6 +1377,9 @@ impl<'a> Collector<'a> {
                 }
                 if let Some(sc) = self.map_key_scalar(v) {
                     self.bind_map_key_scalar(name, sc);
+                }
+                if let Some(sc) = self.map_val_scalar(v) {
+                    self.bind_map_val_scalar(name, sc);
                 }
                 if let Some(sc) = self.chan_elem_scalar(v) {
                     self.bind_chan_elem_scalar(name, sc);
@@ -2774,6 +2841,59 @@ impl<'a> Collector<'a> {
                             t_sc
                         ),
                         "in Go, converting between pointer types requires identical base types",
+                    );
+                }
+            }
+        } else if matches!(k, OpKind::Chan(_)) && matches!(arg_k, OpKind::Chan(_)) {
+            let target_elem_sc = self.chan_elem_scalar_of_type_name(name);
+            let arg_elem_sc = self.chan_elem_scalar(arg);
+            if let (Some(t_sc), Some(a_sc)) = (target_elem_sc, arg_elem_sc) {
+                if t_sc != a_sc {
+                    self.emit_e1002(
+                        arg.span(),
+                        format!(
+                            "cannot convert `{}` (type `chan {}`) to type `{}` (element type `{}`) (HYB-E1002)",
+                            arg.render(),
+                            a_sc,
+                            name,
+                            t_sc
+                        ),
+                        "in Go, converting between channel types requires identical element types",
+                    );
+                }
+            }
+        } else if matches!(k, OpKind::Map(_, _)) && matches!(arg_k, OpKind::Map(_, _)) {
+            let target_key_sc = self.map_key_scalar_of_type_name(name);
+            let arg_key_sc = self.map_key_scalar(arg);
+            if let (Some(t_k), Some(a_k)) = (target_key_sc, arg_key_sc) {
+                if t_k != a_k {
+                    self.emit_e1002(
+                        arg.span(),
+                        format!(
+                            "cannot convert `{}` (key type `{}`) to type `{}` (key type `{}`) (HYB-E1002)",
+                            arg.render(),
+                            a_k,
+                            name,
+                            t_k
+                        ),
+                        "in Go, converting between map types requires identical key types",
+                    );
+                }
+            }
+            let target_val_sc = self.map_val_scalar_of_type_name(name);
+            let arg_val_sc = self.map_val_scalar(arg);
+            if let (Some(t_v), Some(a_v)) = (target_val_sc, arg_val_sc) {
+                if t_v != a_v {
+                    self.emit_e1002(
+                        arg.span(),
+                        format!(
+                            "cannot convert `{}` (value type `{}`) to type `{}` (value type `{}`) (HYB-E1002)",
+                            arg.render(),
+                            a_v,
+                            name,
+                            t_v
+                        ),
+                        "in Go, converting between map types requires identical value types",
                     );
                 }
             }
