@@ -2761,6 +2761,89 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #2899 — result kinds of a call to a generic top-level function.
+    ///
+    /// The declared result types name type parameters (`fn id[t any](v t) t`),
+    /// which `kind_of_ty` resolves to `Unknown`, so every operand guard used to
+    /// accept `var s string = id(3)`, `take_string(id(3))` or `id(3) == "a"`.
+    /// Bind each type parameter from explicit type arguments (`id[int](3)`)
+    /// or, failing that, by matching parameter types against argument kinds,
+    /// then substitute. A parameter bound to two different kinds, bound only
+    /// to `Unknown`, or never bound stays `Unknown` (fail-open).
+    fn generic_call_result_kinds(&self, f: &FnDecl, name: &str, args: &[CallArg]) -> Vec<OpKind> {
+        let tparams: Vec<&str> = f.type_params.iter().map(|p| p.name.as_str()).collect();
+        let mut bound: HashMap<String, OpKind> = HashMap::new();
+        let explicit = name
+            .find('[')
+            .filter(|_| name.ends_with(']'))
+            .map(|open| split_top_level_type_args(&name[open + 1..name.len() - 1]));
+        if let Some(targs) = explicit {
+            if targs.len() == tparams.len() {
+                for (tp, arg) in tparams.iter().zip(targs) {
+                    bound.insert((*tp).to_string(), self.kind_of_type_str(arg, 0));
+                }
+            }
+        } else if args.len() == f.params.len() && args.iter().all(|a| a.name.is_none() && !a.spread)
+        {
+            let mut conflicted: HashSet<String> = HashSet::new();
+            for (p, a) in f.params.iter().zip(args) {
+                let k = self.kind_of_expr(&a.value);
+                bind_type_params(&p.ty, &k, &tparams, &mut bound, &mut conflicted, 0);
+            }
+            for c in conflicted {
+                bound.insert(c, OpKind::Unknown);
+            }
+        }
+        f.results
+            .iter()
+            .map(|r| self.kind_of_ty_with_kind_subst(&r.ty, &tparams, &bound, 0))
+            .collect()
+    }
+
+    /// `kind_of_ty` with type parameters replaced by already-resolved kinds.
+    /// An unbound type parameter, or a generic named type mentioning one
+    /// (`pair[t]`), is `Unknown`.
+    fn kind_of_ty_with_kind_subst(
+        &self,
+        ty: &TypeExpr,
+        tparams: &[&str],
+        bound: &HashMap<String, OpKind>,
+        depth: usize,
+    ) -> OpKind {
+        if depth > 8 {
+            return OpKind::Unknown;
+        }
+        let rec =
+            |t: &TypeExpr| Box::new(self.kind_of_ty_with_kind_subst(t, tparams, bound, depth + 1));
+        match ty {
+            TypeExpr::Named { name, .. } => {
+                let n = name.trim();
+                if tparams.contains(&n) {
+                    return bound.get(n).cloned().unwrap_or(OpKind::Unknown);
+                }
+                if n.contains('[') && tparams.iter().any(|tp| type_text_mentions(n, tp)) {
+                    return OpKind::Unknown;
+                }
+                self.kind_of_named(n, depth)
+            }
+            TypeExpr::Pointer { to, .. } => OpKind::Pointer(rec(to)),
+            TypeExpr::Slice { elem, .. } => OpKind::Slice(rec(elem)),
+            TypeExpr::Array { elem, .. } => OpKind::Array(rec(elem)),
+            TypeExpr::Map { key, value, .. } => OpKind::Map(rec(key), rec(value)),
+            TypeExpr::Chan { elem, .. } => OpKind::Chan(rec(elem)),
+            TypeExpr::Option { elem, .. } => OpKind::Option(rec(elem)),
+            TypeExpr::Fn {
+                params, results, ..
+            } => OpKind::Fn(
+                results
+                    .iter()
+                    .map(|r| self.kind_of_ty_with_kind_subst(r, tparams, bound, depth + 1))
+                    .collect(),
+                Some(params.len()),
+            ),
+        }
+    }
+
     fn struct_type_arg_map(&self, full_name: &str) -> HashMap<String, String> {
         let mut map = HashMap::new();
         let Some(open) = full_name.find('[') else {
@@ -3073,6 +3156,9 @@ impl<'a> Collector<'a> {
                 }
                 let head = Checker::base_named_type_str(name);
                 if let Some(f) = self.ck.fns.get(name.as_str()).or_else(|| self.ck.fns.get(head)) {
+                    if f.receiver.is_none() && !f.type_params.is_empty() {
+                        return Some(self.generic_call_result_kinds(f, name, args));
+                    }
                     return Some(
                         f.results
                             .iter()
@@ -6849,6 +6935,62 @@ fn collect_comparable_type_params<'a>(
                 collect_comparable_type_params(r, param_names, out);
             }
         }
+    }
+}
+
+/// #2899 — does the type text `text` mention the identifier `name`
+/// as a whole word (`pair[t]` mentions `t`; `pair[int]` does not)?
+fn type_text_mentions(text: &str, name: &str) -> bool {
+    text.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .any(|w| w == name)
+}
+
+/// #2899 — infer type-parameter kinds by matching a declared
+/// parameter type against the kind of the argument passed for it. Only
+/// structural positions the kind model tracks are matched; anything else
+/// binds nothing. A type parameter seen with two different kinds is recorded
+/// in `conflicted`.
+fn bind_type_params(
+    ty: &TypeExpr,
+    k: &OpKind,
+    tparams: &[&str],
+    bound: &mut HashMap<String, OpKind>,
+    conflicted: &mut HashSet<String>,
+    depth: usize,
+) {
+    if depth > 8 || matches!(k, OpKind::Unknown) {
+        return;
+    }
+    match (ty, k) {
+        (TypeExpr::Named { name, .. }, _) => {
+            let n = name.trim();
+            if !tparams.contains(&n) || matches!(k, OpKind::Void | OpKind::Fn(..)) {
+                return;
+            }
+            match bound.get(n) {
+                Some(prev) if prev != k => {
+                    conflicted.insert(n.to_string());
+                }
+                Some(_) => {}
+                None => {
+                    bound.insert(n.to_string(), k.clone());
+                }
+            }
+        }
+        (TypeExpr::Pointer { to, .. }, OpKind::Pointer(e)) => {
+            bind_type_params(to, e, tparams, bound, conflicted, depth + 1)
+        }
+        (TypeExpr::Slice { elem, .. }, OpKind::Slice(e))
+        | (TypeExpr::Array { elem, .. }, OpKind::Array(e))
+        | (TypeExpr::Chan { elem, .. }, OpKind::Chan(e))
+        | (TypeExpr::Option { elem, .. }, OpKind::Option(e)) => {
+            bind_type_params(elem, e, tparams, bound, conflicted, depth + 1)
+        }
+        (TypeExpr::Map { key, value, .. }, OpKind::Map(kk, vk)) => {
+            bind_type_params(key, kk, tparams, bound, conflicted, depth + 1);
+            bind_type_params(value, vk, tparams, bound, conflicted, depth + 1);
+        }
+        _ => {}
     }
 }
 
