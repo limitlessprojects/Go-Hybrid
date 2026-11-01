@@ -1798,21 +1798,27 @@ impl<'a> Collector<'a> {
                 } else {
                     self.check_multi_value_arg_arity(callee, args, *span);
                 }
-                for a in args {
+                let type_first_arg = matches!(
+                    unwrap_parens(callee),
+                    Expr::Ident { name, .. } if name == "new" || name == "make"
+                );
+                if type_first_arg {
+                    if let Some(first_arg) = args.first() {
+                        if let Expr::Ident { name, span } = unwrap_parens(&first_arg.value) {
+                            self.check_named_type_instantiation(name, *span);
+                        }
+                    }
+                }
+                for (i, a) in args.iter().enumerate() {
+                    if type_first_arg && i == 0 {
+                        continue;
+                    }
                     self.expr(&a.value);
                 }
-                match unwrap_parens(callee) {
-                    Expr::Ident { name, .. } => {
-                        self.check_user_fn_arity(name, args, *span);
-                        self.check_user_fn_arg_types(name, args);
-                    }
-                    Expr::Field { base, name, .. } => {
-                        let bk = self.kind_of_expr(base);
-                        self.check_method_arity(&bk, name, args, *span);
-                        self.check_method_arg_types(&bk, name, args);
-                    }
-                    _ => {}
-                }
+                self.check_task_spawn_callee(callee, *span);
+                self.check_call_operands(callee, args, *span);
+                self.check_set_method_arg(callee, args);
+                self.check_option_method_arg(callee, args);
             }
             Stmt::Managed { body, .. } => self.block_scoped(body),
             Stmt::Match { subject, arms, .. } => {
@@ -4970,7 +4976,11 @@ impl<'a> Collector<'a> {
                             (self.place_scalar(t), self.typed_value_scalar(v)),
                             (Some(tp), Some(vp)) if tp != vp
                         );
-                        if conflict || scalar_mismatch {
+                        let sized_array_mismatch = self.sized_array_names_differ(
+                            self.place_type_name(t).as_deref(),
+                            self.typed_value_type_name(v).as_deref(),
+                        );
+                        if conflict || scalar_mismatch || sized_array_mismatch {
                             self.emit_e1002(
                                 v.span(),
                                 format!(
@@ -5018,6 +5028,7 @@ impl<'a> Collector<'a> {
             }
             AssignOp::AddAssign => {
                 let Some(val) = values.first() else { return };
+                self.check_single_value_position(val, "a compound assignment", true);
                 // Issue #1777 (belt for the N1-silent shape): nil is
                 // fail-open only in the `Unknown`-target gates — a literal
                 // `nil` as the compound value is a `go build` error for
@@ -5067,6 +5078,7 @@ impl<'a> Collector<'a> {
             }
             AssignOp::SubAssign | AssignOp::MulAssign | AssignOp::DivAssign => {
                 let Some(val) = values.first() else { return };
+                self.check_single_value_position(val, "a compound assignment", true);
                 if tk == OpKind::Unknown && Checker::is_nil_literal(val) {
                     let op_sym = match op {
                         AssignOp::SubAssign => "-=",
@@ -5125,6 +5137,7 @@ impl<'a> Collector<'a> {
             | AssignOp::ShlAssign
             | AssignOp::ShrAssign => {
                 let Some(val) = values.first() else { return };
+                self.check_single_value_position(val, "a compound assignment", true);
                 if tk == OpKind::Unknown && Checker::is_nil_literal(val) {
                     let op_sym = match op {
                         AssignOp::ModAssign => "%=",
@@ -5857,6 +5870,71 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
+        }
+    }
+
+    /// #3088: Go's `go` statement (§Go statements) forbids built-ins that
+    /// return values (`len`, `cap`, `append`, `make`, `new`, `complex`,
+    /// `real`, `imag`, `min`, `max`) and type conversions (`int(x)`,
+    /// `[]byte(s)`, `[2]int(s)`, user-defined type conversions `T(x)`).
+    fn check_task_spawn_callee(&mut self, callee: &Expr, span: Span) {
+        match unwrap_parens(callee) {
+            Expr::SliceLit {
+                elem: Some(_),
+                items,
+                ..
+            } if items.is_empty() => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`task` requires a function call, not type conversion `{}` — Go refuses `go requires function call, not conversion` (HYB-E1002)",
+                        callee.render()
+                    ),
+                    "spawn a function or closure call instead (`task fn() { ... }()`)",
+                );
+            }
+            Expr::Ident { name, .. } => {
+                let shadowed = self.lookup_kind(name).is_some()
+                    || self.ck.fns.contains_key(name.as_str())
+                    || self.ck.fns.contains_key(Checker::base_named_type_str(name));
+                if shadowed {
+                    return;
+                }
+                let is_value_builtin = matches!(
+                    name.as_str(),
+                    "len" | "cap" | "append" | "make" | "new" | "complex" | "real" | "imag" | "min" | "max"
+                );
+                if is_value_builtin {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`task` cannot invoke built-in `{name}` because Go refuses `go discards result of {name}(...)` (HYB-E1002)"
+                        ),
+                        "wrap the call in a closure (`task fn() { _ = ... }()`) or call a function",
+                    );
+                    return;
+                }
+                let head = Checker::base_named_type_str(name);
+                let is_conversion_type = matches!(
+                    head,
+                    "int" | "int8" | "int16" | "int32" | "int64"
+                        | "uint" | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr"
+                        | "float32" | "float64" | "complex64" | "complex128"
+                        | "bool" | "byte" | "rune" | "string" | "error"
+                ) || self.ck.type_aliases.contains_key(head)
+                    || self.ck.structs.contains_key(head)
+                    || self.ck.enums.contains_key(head);
+                if is_conversion_type {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "`task` requires a function call, not type conversion `{name}(...)` — Go refuses `go requires function call, not conversion` (HYB-E1002)"
+                        ),
+                        "spawn a function or closure call instead (`task fn() { ... }()`)",
+                    );
+                }
+            }
+            _ => {}
         }
     }
 
