@@ -339,10 +339,18 @@ impl<'a> Checker<'a> {
             Expr::Ident { name, .. } => {
                 // Local bindings shadow top-level functions and builtins.
                 if let Some(b) = self.lookup_binding(st, name) {
-                    if let Some(TypeExpr::Fn { results, .. }) = &b.ty {
+                    if let Some(ty) = &b.ty {
+                        if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(ty) {
+                            return results
+                                .first()
+                                .map(|r| self.shape_of_type(r))
+                                .unwrap_or(TypeShape::Unknown);
+                        }
+                    }
+                    if let Some((_, results, _)) = st.closure_defs.get(name) {
                         return results
                             .first()
-                            .map(|r| self.shape_of_type(r))
+                            .map(|r| self.shape_of_type(&r.ty))
                             .unwrap_or(TypeShape::Unknown);
                     }
                     return TypeShape::Unknown;
@@ -546,17 +554,37 @@ impl<'a> Checker<'a> {
                         },
                         _ => None,
                     });
-                recv_base
-                    .and_then(|rb| self.method_decls.get(&(rb, head.to_string())))
-                    .and_then(|f| {
-                        let subst = self.fn_call_shape_subst(st, f, name, Some(base), args);
-                        f.results
+                if let Some(f) =
+                    recv_base.and_then(|rb| self.method_decls.get(&(rb, head.to_string())))
+                {
+                    let subst = self.fn_call_shape_subst(st, f, name, Some(base), args);
+                    return f
+                        .results
+                        .first()
+                        .map(|r| self.shape_of_type_with_subst(&r.ty, &subst, 0))
+                        .unwrap_or(TypeShape::Unknown);
+                }
+                if let Some(callee_ty) = self.ty_of_expr(st, callee) {
+                    if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&callee_ty) {
+                        return results
                             .first()
-                            .map(|r| self.shape_of_type_with_subst(&r.ty, &subst, 0))
-                    })
-                    .unwrap_or(TypeShape::Unknown)
+                            .map(|r| self.shape_of_type(r))
+                            .unwrap_or(TypeShape::Unknown);
+                    }
+                }
+                TypeShape::Unknown
             }
-            _ => TypeShape::Unknown,
+            other => {
+                if let Some(callee_ty) = self.ty_of_expr(st, other) {
+                    if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&callee_ty) {
+                        return results
+                            .first()
+                            .map(|r| self.shape_of_type(r))
+                            .unwrap_or(TypeShape::Unknown);
+                    }
+                }
+                TypeShape::Unknown
+            }
         }
     }
 
@@ -1292,6 +1320,9 @@ impl<'a> Checker<'a> {
                             return Some(results);
                         }
                     }
+                    if let Some((_, results, _)) = st.closure_defs.get(name) {
+                        return Some(results.iter().map(|r| r.ty.clone()).collect());
+                    }
                     return None;
                 }
                 let head = Self::base_named_type_str(name);
@@ -1873,6 +1904,9 @@ impl<'a> Checker<'a> {
                             return Some(results.iter().map(|r| self.shape_of_type(r)).collect());
                         }
                     }
+                    if let Some((_, results, _)) = st.closure_defs.get(name) {
+                        return Some(results.iter().map(|r| self.shape_of_type(&r.ty)).collect());
+                    }
                     return None;
                 }
                 let head = Self::base_named_type_str(name);
@@ -1919,18 +1953,33 @@ impl<'a> Checker<'a> {
                             _ => None,
                         },
                         _ => None,
-                    })?;
-                self.method_decls
-                    .get(&(recv_base, head.to_string()))
-                    .map(|f| {
+                    });
+                if let Some(rb) = recv_base {
+                    if let Some(f) = self.method_decls.get(&(rb, head.to_string())) {
                         let subst = self.fn_call_shape_subst(st, f, name, Some(base), args);
-                        f.results
-                            .iter()
-                            .map(|r| self.shape_of_type_with_subst(&r.ty, &subst, 0))
-                            .collect()
-                    })
+                        return Some(
+                            f.results
+                                .iter()
+                                .map(|r| self.shape_of_type_with_subst(&r.ty, &subst, 0))
+                                .collect(),
+                        );
+                    }
+                }
+                let callee_ty = self.ty_of_expr(st, callee)?;
+                if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&callee_ty) {
+                    Some(results.iter().map(|r| self.shape_of_type(r)).collect())
+                } else {
+                    None
+                }
             }
-            _ => None,
+            other => {
+                let callee_ty = self.ty_of_expr(st, other)?;
+                if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&callee_ty) {
+                    Some(results.iter().map(|r| self.shape_of_type(r)).collect())
+                } else {
+                    None
+                }
+            }
         }
     }
 }
