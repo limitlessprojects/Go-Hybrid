@@ -137,6 +137,23 @@ def joined(problems):
 
 
 class CleanTree(unittest.TestCase):
+    def test_relative_section_link_checks_the_file_without_fragment(self):
+        tmp, root = build(rows=[row(evidence='[spec](SPEC-LANGUAGE.md#safety)')])
+        self.addCleanup(tmp.cleanup)
+        (root / 'SPEC-LANGUAGE.md').write_text('# Safety\n', encoding='utf-8')
+        self.assertEqual(problems_of(root), [])
+
+    def test_percent_encoded_filename_checks_the_decoded_path(self):
+        tmp, root = build(rows=[row(evidence='[spec](supporting%20evidence.md#proof)')])
+        self.addCleanup(tmp.cleanup)
+        (root / 'supporting evidence.md').write_text('# Proof\n', encoding='utf-8')
+        self.assertEqual(problems_of(root), [])
+
+    def test_missing_file_with_fragment_still_fails(self):
+        tmp, root = build(rows=[row(evidence='[spec](absent.md#safety)')])
+        self.addCleanup(tmp.cleanup)
+        self.assertIn('does not exist', joined(problems_of(root)))
+
     def test_consistent_table_passes(self):
         tmp, root = build()
         self.addCleanup(tmp.cleanup)

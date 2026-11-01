@@ -52,6 +52,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from urllib.parse import unquote
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -213,7 +214,10 @@ def check(root: Path, table_path: Path, doc_override: str | None = None) -> list
         for target in LINK_RE.findall(evidence_md):
             if target.startswith(("http://", "https://", "#", "mailto:")):
                 continue
-            if not (root / target).exists():
+            # Markdown fragments identify a section, not part of a filename;
+            # decode the path after separating the fragment so %23 stays literal.
+            link_path = unquote(target.split("#", 1)[0])
+            if not (root / link_path).exists():
                 problems.append(f"{where}: evidence link `{target}` does not exist")
 
     for code, entry in sorted(codes.items()):
