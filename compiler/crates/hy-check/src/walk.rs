@@ -110,7 +110,221 @@ pub(crate) fn flatten<'a>(body: &'a Block) -> FlatInfo<'a> {
 pub(crate) fn flatten_with_results<'a>(body: &'a Block, named_results: &[String]) -> FlatInfo<'a> {
     let mut out = FlatInfo::default();
     walk_block(&mut out, body, named_results);
+    propagate_closure_capture_last_uses(&mut out);
     out
+}
+
+fn record_stmt_last_uses(out: &mut FlatInfo<'_>, stmt: &Stmt, idx: usize, named_results: &[String]) {
+    let mut uses = Vec::new();
+    own_uses_with_results(stmt, named_results, &mut uses);
+    for u in uses {
+        let e = out.last_use.entry(u.name).or_insert(idx);
+        if *e < idx {
+            *e = idx;
+        }
+    }
+    let mut fnlits = Vec::new();
+    own_fnlits(stmt, &mut fnlits);
+    let mut cap_names = Vec::new();
+    for fl in fnlits {
+        collect_fnlit_free_uses(fl, &mut cap_names);
+    }
+    for name in cap_names {
+        let e = out.last_use.entry(name).or_insert(idx);
+        if *e < idx {
+            *e = idx;
+        }
+    }
+}
+
+fn propagate_closure_capture_last_uses(out: &mut FlatInfo<'_>) {
+    let mut closure_caps: Vec<(String, Vec<String>)> = Vec::new();
+    for &(stmt, _) in &out.stmts {
+        match stmt {
+            Stmt::Local(l) if l.names.len() == l.values.len() => {
+                for (name, val) in l.names.iter().zip(l.values.iter()) {
+                    let mut fnlits = Vec::new();
+                    expr_fnlits(val, &mut fnlits);
+                    if !fnlits.is_empty() {
+                        let mut caps = Vec::new();
+                        for fl in fnlits {
+                            collect_fnlit_free_uses(fl, &mut caps);
+                        }
+                        if !caps.is_empty() {
+                            closure_caps.push((name.clone(), caps));
+                        }
+                    }
+                }
+            }
+            Stmt::Assign {
+                targets, values, ..
+            } if targets.len() == values.len() => {
+                for (t, val) in targets.iter().zip(values.iter()) {
+                    if let PlaceKind::Ident(name) = &t.kind {
+                        let mut fnlits = Vec::new();
+                        expr_fnlits(val, &mut fnlits);
+                        if !fnlits.is_empty() {
+                            let mut caps = Vec::new();
+                            for fl in fnlits {
+                                collect_fnlit_free_uses(fl, &mut caps);
+                            }
+                            if !caps.is_empty() {
+                                closure_caps.push((name.clone(), caps));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    for _ in 0..closure_caps.len().min(8) {
+        let mut changed = false;
+        for (fn_name, caps) in &closure_caps {
+            if let Some(&fn_last) = out.last_use.get(fn_name) {
+                for cap in caps {
+                    let e = out.last_use.entry(cap.clone()).or_insert(fn_last);
+                    if *e < fn_last {
+                        *e = fn_last;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+fn collect_fnlit_free_uses(fl: &Expr, out: &mut Vec<String>) {
+    let Expr::FnLit {
+        params,
+        results,
+        body,
+        ..
+    } = fl
+    else {
+        return;
+    };
+    let mut bound: std::collections::HashSet<String> =
+        params.iter().map(|p| p.name.clone()).collect();
+    for r in results {
+        if let Some(n) = &r.name {
+            bound.insert(n.clone());
+        }
+    }
+    collect_block_free_uses(body, &mut bound, out);
+}
+
+fn collect_block_free_uses(
+    block: &Block,
+    bound: &mut std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    for s in &block.stmts {
+        collect_stmt_free_uses(s, bound, out);
+    }
+}
+
+fn collect_stmt_free_uses(
+    stmt: &Stmt,
+    bound: &mut std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    let mut uses = Vec::new();
+    own_uses(stmt, &mut uses);
+    for u in uses {
+        if !bound.contains(&u.name) {
+            out.push(u.name);
+        }
+    }
+    let mut nested_fnlits = Vec::new();
+    own_fnlits(stmt, &mut nested_fnlits);
+    for fl in nested_fnlits {
+        let mut inner_caps = Vec::new();
+        collect_fnlit_free_uses(fl, &mut inner_caps);
+        for c in inner_caps {
+            if !bound.contains(&c) {
+                out.push(c);
+            }
+        }
+    }
+    match stmt {
+        Stmt::Local(l) => {
+            for n in &l.names {
+                bound.insert(n.clone());
+            }
+        }
+        Stmt::If {
+            init,
+            cond,
+            then,
+            otherwise,
+            ..
+        } => {
+            let mut if_bound = bound.clone();
+            if let Some(i) = init {
+                collect_stmt_free_uses(i, &mut if_bound, out);
+            }
+            let mut cond_uses = Vec::new();
+            expr_uses(cond, &mut cond_uses);
+            for u in cond_uses {
+                if !if_bound.contains(&u.name) {
+                    out.push(u.name);
+                }
+            }
+            let mut then_bound = if_bound.clone();
+            collect_block_free_uses(then, &mut then_bound, out);
+            if let Some(o) = otherwise {
+                let mut else_bound = if_bound;
+                collect_stmt_free_uses(o, &mut else_bound, out);
+            }
+        }
+        Stmt::For { kind, body, .. } => {
+            let mut loop_bound = bound.clone();
+            match kind {
+                ForKind::Range { var, .. } => {
+                    loop_bound.insert(var.clone());
+                }
+                ForKind::Iterate { vars, .. } => {
+                    for v in vars {
+                        loop_bound.insert(v.clone());
+                    }
+                }
+                ForKind::While { .. } | ForKind::Infinite => {}
+            }
+            collect_block_free_uses(body, &mut loop_bound, out);
+        }
+        Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+            let mut blk_bound = bound.clone();
+            collect_block_free_uses(body, &mut blk_bound, out);
+        }
+        Stmt::Match { arms, .. } => {
+            for arm in arms {
+                let mut arm_bound = bound.clone();
+                if let hy_syntax::MatchPattern::Path {
+                    binding: Some(b), ..
+                } = &arm.pattern
+                {
+                    arm_bound.insert(b.clone());
+                }
+                collect_block_free_uses(&arm.body, &mut arm_bound, out);
+            }
+        }
+        Stmt::Select { arms, .. } => {
+            for arm in arms {
+                let mut arm_bound = bound.clone();
+                if let SelectArmKind::Recv { names, .. } = &arm.kind {
+                    for n in names {
+                        arm_bound.insert(n.clone());
+                    }
+                }
+                collect_block_free_uses(&arm.body, &mut arm_bound, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn walk_block<'a>(out: &mut FlatInfo<'a>, block: &'a Block, named_results: &[String]) {
@@ -138,14 +352,7 @@ fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt, named_results: &[String]
         out.next += 1;
         out.stmts.push((stmt, idx));
 
-        let mut uses = Vec::new();
-        own_uses_with_results(stmt, named_results, &mut uses);
-        for u in uses {
-            let e = out.last_use.entry(u.name).or_insert(idx);
-            if *e < idx {
-                *e = idx;
-            }
-        }
+        record_stmt_last_uses(out, stmt, idx, named_results);
 
         scoped_block(out, then, named_results);
         if let Some(o) = otherwise {
@@ -159,14 +366,7 @@ fn walk_one<'a>(out: &mut FlatInfo<'a>, stmt: &'a Stmt, named_results: &[String]
     out.next += 1;
     out.stmts.push((stmt, idx));
 
-    let mut uses = Vec::new();
-    own_uses_with_results(stmt, named_results, &mut uses);
-    for u in uses {
-        let e = out.last_use.entry(u.name).or_insert(idx);
-        if *e < idx {
-            *e = idx;
-        }
-    }
+    record_stmt_last_uses(out, stmt, idx, named_results);
 
     match stmt {
         Stmt::If {
@@ -459,6 +659,7 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
                         via_move: true,
                         via_addr: false,
                     });
+                    expr_chain_sub_uses(operand, out);
                 } else {
                     expr_uses(operand, out);
                 }
@@ -511,6 +712,34 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
     }
 }
 
+fn expr_chain_sub_uses(expr: &Expr, out: &mut Vec<Use>) {
+    match expr {
+        Expr::Field { base, .. }
+        | Expr::AddrOf { operand: base, .. }
+        | Expr::Unary {
+            op: hy_syntax::UnOp::Addr,
+            operand: base,
+            ..
+        }
+        | Expr::Paren { inner: base, .. }
+        | Expr::Try { operand: base, .. } => expr_chain_sub_uses(base, out),
+        Expr::Index { base, index, .. } => {
+            expr_chain_sub_uses(base, out);
+            expr_uses(index, out);
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            expr_chain_sub_uses(base, out);
+            if let Some(lo) = lo {
+                expr_uses(lo, out);
+            }
+            if let Some(hi) = hi {
+                expr_uses(hi, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Calls (A2 loan windows, A7 consumes, handle-argument loans)
 // ---------------------------------------------------------------------------
@@ -523,9 +752,7 @@ pub(crate) struct CallRef<'a> {
     pub span: Span,
 }
 
-/// Collect the calls of THIS statement only. For-statement ITERATE
-/// expressions are excluded here: their borrow calls get loop-extent loans
-/// and are processed by the For handler (loans.rs / lib.rs dispatch).
+/// Collect the calls of THIS statement only.
 pub(crate) fn own_calls<'a>(stmt: &'a Stmt, out: &mut Vec<CallRef<'a>>) {
     match stmt {
         Stmt::Local(l) => {
@@ -557,7 +784,7 @@ pub(crate) fn own_calls<'a>(stmt: &'a Stmt, out: &mut Vec<CallRef<'a>>) {
                 expr_calls(lo, out);
                 expr_calls(hi, out);
             }
-            ForKind::Iterate { .. } => {} // handled with loop-extent loans
+            ForKind::Iterate { expr, .. } => expr_calls(expr, out),
             ForKind::Infinite => {}
         },
         Stmt::Return { values, .. } => {
