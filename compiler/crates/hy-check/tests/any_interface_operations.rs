@@ -168,3 +168,37 @@ fn equality_on_any_stays_accepted() {
         "fn main() {\n    var a any = 1\n    if a == 1 {\n        fmt.println(\"eq\")\n    }\n}\n",
     );
 }
+
+
+// ---------------------------------------------------------------------------
+// #2962: implicit assignment of `any` to concrete type is rejected
+// ---------------------------------------------------------------------------
+
+#[test]
+fn any_to_concrete_type_is_rejected() {
+    // Variable initialization with `any` variable
+    assert_code(
+        "fn main() {\n    var a any = 1\n    var n int = a\n    fmt.println(\"{n}\")\n}\n",
+        "HYB-E1002",
+    );
+    // Passing recover() (any) to concrete parameter
+    assert_code(
+        "fn take(s string) { fmt.println(s) }\nfn main() {\n    defer fn() {\n        take(recover())\n    }()\n    panic(\"boom\")\n}\n",
+        "HYB-E1002",
+    );
+    // Returning recover() (any) as concrete return type
+    assert_code(
+        "fn get() string {\n    return recover()\n}\nfn main() {\n    fmt.println(get())\n}\n",
+        "HYB-E1002",
+    );
+    // Initializing concrete slice literal with recover() (any)
+    assert_code(
+        "fn main() {\n    defer fn() {\n        r := recover()\n        xs := []string{r}\n        fmt.println(xs)\n    }()\n    panic(\"boom\")\n}\n",
+        "HYB-E1002",
+    );
+    // Initializing int variable with recover() (any)
+    assert_code(
+        "fn main() {\n    r := recover()\n    var n int = r\n    fmt.println(\"{n}\")\n}\n",
+        "HYB-E1002",
+    );
+}
