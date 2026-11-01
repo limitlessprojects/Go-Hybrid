@@ -184,6 +184,34 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
     }
 }
 
+/// #3082 — the numeric families Go unifies at a generic call site: two untyped
+/// numeric constants (`same(1, 2.5)`) pick the wider type instead of
+/// conflicting, so the inference helper must not treat Int vs Float as a clash
+/// between two untyped constants.
+fn is_numeric_kind(k: &OpKind) -> bool {
+    matches!(k, OpKind::Int | OpKind::Float)
+}
+
+/// #3082 — the type spelling a bound kind stands for, so an inferred type
+/// parameter can be fed back through `kind_of_ty_with_subst` (which takes
+/// type-parameter → type-name substitutions).
+fn opkind_type_name(k: &OpKind) -> String {
+    match k {
+        OpKind::Int => "int".to_string(),
+        OpKind::Float => "float64".to_string(),
+        OpKind::Str => "string".to_string(),
+        OpKind::Bool => "bool".to_string(),
+        OpKind::Interface => "any".to_string(),
+        OpKind::Slice(i) | OpKind::Array(i) => format!("[]{}", opkind_type_name(i)),
+        OpKind::Pointer(i) => format!("*{}", opkind_type_name(i)),
+        OpKind::Map(k, v) => format!("map[{}]{}", opkind_type_name(k), opkind_type_name(v)),
+        OpKind::Chan(i) => format!("chan {}", opkind_type_name(i)),
+        OpKind::Option(i) => format!("option[{}]", opkind_type_name(i)),
+        OpKind::Struct(Some(n)) => n.clone(),
+        _ => String::new(),
+    }
+}
+
 /// #1031 — the exact Go spelling of a predeclared numeric type, after the
 /// emitter's SPEC→Go primitive mapping (`shapes::go_primitive_name`) and Go's
 /// own identities (`byte` = `uint8`, `rune` = `int32`).
@@ -3910,17 +3938,25 @@ impl<'a> Collector<'a> {
         let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
             return;
         };
-        if !f.type_params.is_empty() {
-            return;
-        }
         if self.multi_value_arg_count(args).is_some() {
             return;
         }
         if f.params.len() != args.len() {
             return;
         }
+        // #3082: a callee with type parameters is not a reason to skip the
+        // arguments — infer the parameters from them (and from an explicit
+        // `f[T]` callee), then run the same checks. SPEC G5: call-site
+        // inference follows Go's rules.
+        let type_params: std::collections::HashSet<String> =
+            f.type_params.iter().map(|tp| tp.name.clone()).collect();
+        let mut subst: HashMap<String, String> = HashMap::new();
+        if !type_params.is_empty() {
+            self.explicit_type_args_into(name, f, &mut subst);
+            self.infer_generic_arg_kinds(name, &type_params, &f.params, args, &mut subst);
+        }
         for (p, a) in f.params.iter().zip(args.iter()) {
-            let want = self.kind_of_ty(&p.ty, 0);
+            let want = self.kind_of_ty_with_subst(&p.ty, &subst, 0);
             let got = self.kind_of_expr(&a.value);
             if let OpKind::Pointer(inner) = &want {
                 if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
@@ -3956,6 +3992,117 @@ impl<'a> Collector<'a> {
                     "argument types must match declared parameter types",
                 );
             }
+        }
+    }
+
+    /// #3082 — `f[T](...)`: bind the declared type parameters to the explicit
+    /// type arguments written on the callee (`id[int]`), in declaration order.
+    fn explicit_type_args_into(&self, name: &str, f: &hy_syntax::FnDecl, subst: &mut HashMap<String, String>) {
+        let Some(open) = name.find('[') else {
+            return;
+        };
+        if !name.ends_with(']') {
+            return;
+        }
+        let written = split_top_level_type_args(&name[open + 1..name.len() - 1]);
+        if written.len() != f.type_params.len() {
+            return;
+        }
+        for (tp, arg) in f.type_params.iter().zip(written.iter()) {
+            subst.insert(tp.name.clone(), arg.trim().to_string());
+        }
+    }
+
+    /// #3082 — bind each type parameter from the argument that fixes it, and
+    /// report an argument that contradicts a parameter another argument already
+    /// fixed (`push([]int{1}, "a")`, `put(m, 1, 2)`).
+    ///
+    /// Go's two untyped-constant rules are honoured: an untyped constant yields
+    /// to a typed argument, and two untyped **numeric** constants unify rather
+    /// than conflict (`same(1, 2.5)` stays accepted).
+    fn infer_generic_arg_kinds(
+        &mut self,
+        name: &str,
+        type_params: &std::collections::HashSet<String>,
+        params: &[hy_syntax::Param],
+        args: &[CallArg],
+        subst: &mut HashMap<String, String>,
+    ) {
+        // type parameter -> (kind, came-from-a-typed-argument)
+        let mut bound: HashMap<String, (OpKind, bool)> = HashMap::new();
+        for (p, a) in params.iter().zip(args.iter()) {
+            let got = self.kind_of_expr(&a.value);
+            let is_typed = self.typed_value_type_name(&a.value).is_some();
+            let mut leaves: Vec<(String, OpKind)> = Vec::new();
+            self.type_param_leaves(type_params, &p.ty, &got, &mut leaves);
+            for (tp, k) in leaves {
+                match bound.get(tp.as_str()).cloned() {
+                    None => {
+                        bound.insert(tp, (k, is_typed));
+                    }
+                    Some((prev, prev_typed)) => {
+                        let numeric_unification = is_numeric_kind(&prev)
+                            && is_numeric_kind(&k)
+                            && !(prev_typed && is_typed);
+                        if kinds_conflict(&prev, &k) && !numeric_unification {
+                            self.emit_e1002(
+                                a.value.span(),
+                                format!(
+                                    "cannot use `{}` (value of type `{}`) in argument to `{}` — type parameter `{}` is already `{}` here (HYB-E1002)",
+                                    a.value.render(),
+                                    k.label(),
+                                    name,
+                                    tp,
+                                    prev.label()
+                                ),
+                                "call-site inference follows Go's rules (SPEC G5): one argument fixes the type parameter, every other argument must match it",
+                            );
+                        } else if numeric_unification {
+                            // Two untyped numeric constants unify to the WIDER
+                            // type (`same(1, 2.5)` infers `float64`), so the
+                            // parameter must not stay pinned to `int`.
+                            if matches!(k, OpKind::Float) || matches!(prev, OpKind::Float) {
+                                bound.insert(tp, (OpKind::Float, false));
+                            }
+                        } else if is_typed && !prev_typed {
+                            // a typed argument outranks an untyped constant
+                            bound.insert(tp, (k, true));
+                        }
+                    }
+                }
+            }
+        }
+        for (tp, (k, _)) in bound {
+            subst.entry(tp).or_insert_with(|| opkind_type_name(&k));
+        }
+    }
+
+    /// The type parameters a declared parameter type pins to an argument kind:
+    /// `t` → the argument kind; `[]t` / `[N]t` → the element kind of a slice or
+    /// array argument; `map[k]v` → the key and value kinds of a map argument.
+    fn type_param_leaves(
+        &self,
+        type_params: &std::collections::HashSet<String>,
+        ty: &TypeExpr,
+        ak: &OpKind,
+        out: &mut Vec<(String, OpKind)>,
+    ) {
+        match ty {
+            TypeExpr::Named { name, .. } if type_params.contains(name) => {
+                out.push((name.clone(), ak.clone()));
+            }
+            TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+                if let OpKind::Slice(inner) | OpKind::Array(inner) = ak {
+                    self.type_param_leaves(type_params, elem, inner, out);
+                }
+            }
+            TypeExpr::Map { key, value, .. } => {
+                if let OpKind::Map(k, v) = ak {
+                    self.type_param_leaves(type_params, key, k, out);
+                    self.type_param_leaves(type_params, value, v, out);
+                }
+            }
+            _ => {}
         }
     }
 
