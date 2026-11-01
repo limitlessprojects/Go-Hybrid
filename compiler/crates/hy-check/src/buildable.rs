@@ -3617,7 +3617,11 @@ impl<'a> Collector<'a> {
                     let is_loan_shape = as_addr_of(&values[0])
                         .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }));
                     let vk = self.kind_of_expr(&values[0]);
-                    if !is_loan_shape && kinds_conflict(&tk, &vk) {
+                    let scalar_mismatch = match (self.place_scalar_type(target), self.expr_scalar_type(&values[0])) {
+                        (Some(t_sc), Some(v_sc)) => t_sc != v_sc,
+                        _ => false,
+                    };
+                    if !is_loan_shape && (kinds_conflict(&tk, &vk) || scalar_mismatch) {
                         self.emit_e1002(
                             span,
                             format!(
@@ -3655,7 +3659,11 @@ impl<'a> Collector<'a> {
                         }
                         let tpk = self.kind_of_place(t);
                         let vk = self.kind_of_expr(v);
-                        if kinds_conflict(&tpk, &vk) {
+                        let scalar_mismatch = match (self.place_scalar_type(t), self.expr_scalar_type(v)) {
+                            (Some(t_sc), Some(v_sc)) => t_sc != v_sc,
+                            _ => false,
+                        };
+                        if kinds_conflict(&tpk, &vk) || scalar_mismatch {
                             self.emit_e1002(
                                 v.span(),
                                 format!(
