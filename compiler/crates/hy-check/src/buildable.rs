@@ -2555,6 +2555,13 @@ impl<'a> Collector<'a> {
                 }
                 match name.as_str() {
                     "len" | "cap" | "copy" => return Some(vec![OpKind::Int]),
+                    "min" | "max" => {
+                        let first = args
+                            .first()
+                            .map(|a| self.kind_of_expr(&a.value))
+                            .unwrap_or(OpKind::Unknown);
+                        return Some(vec![first]);
+                    }
                     "append" => {
                         let first = args
                             .first()
@@ -5155,6 +5162,72 @@ impl<'a> Collector<'a> {
     /// (`builtins.rs`) to resolved binding shapes.
     fn check_builtin_operand_kinds(&mut self, name: &str, args: &[CallArg], span: Span) {
         match name {
+            "min" | "max" => {
+                if args.is_empty() {
+                    return; // arity handled by builtins.rs
+                }
+                for arg in args {
+                    let op = &arg.value;
+                    let ak = self.kind_of_expr(op);
+                    if !matches!(ak, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str) {
+                        self.emit_e2005(
+                            span,
+                            format!(
+                                "invalid argument `{}` (type `{}`) for `{}` (HYB-E2005)",
+                                op.render(),
+                                ak.label(),
+                                name
+                            ),
+                            "`min` and `max` accept ordered types (integers, floating-point numbers, and strings)",
+                        );
+                        return;
+                    }
+                }
+                let mut prev_arg: Option<(&Expr, OpKind, Option<&str>)> = None;
+                for arg in args {
+                    let op = &arg.value;
+                    let ak = self.kind_of_expr(op);
+                    let sc = self.expr_scalar_type(op);
+                    if let Some((_prev_op, prev_k, prev_sc)) = prev_arg {
+                        let num_mismatch = prev_k != OpKind::Unknown
+                            && ak != OpKind::Unknown
+                            && prev_k.is_numeric() != ak.is_numeric();
+                        let conflict = kinds_conflict(&prev_k, &ak) || num_mismatch;
+                        if conflict {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "invalid arguments for `{}`: mismatched types `{}` and `{}` (HYB-E1002)",
+                                    name,
+                                    prev_k.label(),
+                                    ak.label()
+                                ),
+                                "arguments to `min` and `max` must have the same type",
+                            );
+                            return;
+                        }
+                        if let (Some(ps), Some(cs)) = (prev_sc, sc) {
+                            if ps != cs {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "invalid arguments for `{}`: mismatched types `{}` and `{}` (HYB-E1002)",
+                                        name,
+                                        ps,
+                                        cs
+                                    ),
+                                    "arguments to `min` and `max` must have identical scalar types",
+                                );
+                                return;
+                            }
+                        }
+                        let current_sc = sc.or(prev_sc);
+                        prev_arg = Some((op, ak, current_sc));
+                    } else {
+                        prev_arg = Some((op, ak, sc));
+                    }
+                }
+            }
             "make" => {
                 for arg in args.iter().skip(1) {
                     let op = &arg.value;
