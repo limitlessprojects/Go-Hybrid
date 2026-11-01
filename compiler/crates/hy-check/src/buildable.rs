@@ -60,6 +60,16 @@ use crate::model::{as_addr_of, unwrap_parens, Checker};
 /// are rejected at check time rather than failing `go build`.
 /// `Unknown` stays permissive (fail-open for operand checks; concurrency
 /// boundaries remain fail-closed in `sendability.rs`).
+fn integer_type_bit_width(ty_name: &str) -> Option<u32> {
+    match ty_name {
+        "int8" | "uint8" | "i8" | "u8" | "byte" => Some(8),
+        "int16" | "uint16" | "i16" | "u16" => Some(16),
+        "int32" | "uint32" | "i32" | "u32" | "rune" => Some(32),
+        "int64" | "uint64" | "i64" | "u64" | "int" | "uint" | "isize" | "usize" | "uintptr" => Some(64),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OpKind {
     Unknown,
@@ -365,6 +375,8 @@ struct Collector<'a> {
     scopes: Vec<HashMap<String, Option<usize>>>,
     /// Parallel lexical scope stack tracking resolved operand kinds (#425).
     kind_scopes: Vec<HashMap<String, OpKind>>,
+    /// Parallel lexical scope stack tracking declared concrete type names.
+    type_name_scopes: Vec<HashMap<String, String>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
     /// Result kinds of the function whose body is currently being walked
@@ -401,6 +413,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             ck,
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
+            type_name_scopes: Vec::new(),
             file_consts: HashMap::new(),
             fn_results: Vec::new(),
             fn_results_all_named: false,
@@ -458,11 +471,51 @@ impl<'a> Collector<'a> {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.kind_scopes.push(HashMap::new());
+        self.type_name_scopes.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.kind_scopes.pop();
+        self.type_name_scopes.pop();
+    }
+
+    fn bind_type_name(&mut self, name: &str, type_name: String) {
+        if name != "_" {
+            if let Some(top) = self.type_name_scopes.last_mut() {
+                top.insert(name.to_string(), type_name);
+            }
+        }
+    }
+
+    fn lookup_type_name(&self, name: &str) -> Option<String> {
+        for layer in self.type_name_scopes.iter().rev() {
+            if let Some(t) = layer.get(name) {
+                return Some(t.clone());
+            }
+        }
+        None
+    }
+
+    fn integer_bit_width_of_expr(&self, e: &Expr) -> Option<u32> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    integer_type_bit_width(&tname)
+                } else {
+                    None
+                }
+            }
+            Expr::Call { callee, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    integer_type_bit_width(name)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -745,6 +798,7 @@ impl<'a> Collector<'a> {
             self.exempt(&p.name);
             let pk = self.kind_of_ty(&p.ty, 0);
             self.bind_kind(&p.name, pk);
+            self.bind_type_name(&p.name, p.ty.render());
         }
         for r in &f.results {
             if let Some(rname) = &r.name {
@@ -893,6 +947,12 @@ impl<'a> Collector<'a> {
         // set (Define|Let|Var|Const) drives which locals get unused-read
         // tracking; #430's operand-kind inference runs for EVERY name so
         // `kind_of_expr` resolves binding-shaped operands (issue #425).
+        if let Some(t) = &l.ty {
+            let tname = t.render();
+            for name in &l.names {
+                self.bind_type_name(name, tname.clone());
+            }
+        }
         let kinds = self.infer_local_kinds(l);
         for (name, kind) in l.names.iter().zip(kinds) {
             self.bind_kind(name, kind);
@@ -1488,6 +1548,7 @@ impl<'a> Collector<'a> {
                     self.exempt(&p.name);
                     let pk = self.kind_of_ty(&p.ty, 0);
                     self.bind_kind(&p.name, pk);
+                    self.bind_type_name(&p.name, p.ty.render());
                 }
                 for r in results {
                     if let Some(rname) = &r.name {
@@ -3102,6 +3163,24 @@ impl<'a> Collector<'a> {
                         ),
                         "modulo, bitwise, and shift operators require integer operands",
                     );
+                } else if let Some(width) = self.integer_bit_width_of_expr(lhs) {
+                    if self.eval_const_int_at(lhs, span.start).is_none() {
+                        if let Some(shift_count) = self.eval_const_int_at(rhs, span.start) {
+                            if shift_count >= width as i128 {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "invalid operation `{}`: shift count `{}` >= {} (width of `{}`) — Go refuses constant shift count exceeding bit width (HYB-E1002)",
+                                        span_expr_label(lhs, op_str, rhs),
+                                        shift_count,
+                                        width,
+                                        lhs.render()
+                                    ),
+                                    "a constant shift count on a typed integer must satisfy `0 <= shift < bit_width`",
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -3304,6 +3383,31 @@ impl<'a> Collector<'a> {
                         ),
                         "integer compound assignment operators require integer operands",
                     );
+                } else if matches!(op, AssignOp::ShlAssign | AssignOp::ShrAssign) {
+                    let width = match &target.kind {
+                        PlaceKind::Ident(name) => self.lookup_type_name(name).and_then(|t| integer_type_bit_width(&t)),
+                        _ => None,
+                    };
+                    if let Some(width) = width {
+                        if let Some(shift_count) = self.eval_const_int_at(val, span.start) {
+                            if shift_count >= width as i128 {
+                                let op_sym = if matches!(op, AssignOp::ShlAssign) { "<<=" } else { ">>=" };
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "invalid operation `{} {} {}`: shift count `{}` >= {} (width of `{}`) — Go refuses constant shift count exceeding bit width (HYB-E1002)",
+                                        target.render(),
+                                        op_sym,
+                                        val.render(),
+                                        shift_count,
+                                        width,
+                                        target.render()
+                                    ),
+                                    "a constant shift count on a typed integer must satisfy `0 <= shift < bit_width`",
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
