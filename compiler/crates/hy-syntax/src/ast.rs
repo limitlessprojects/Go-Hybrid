@@ -239,7 +239,34 @@ impl TypeExpr {
                 ChanDir::Send => format!("chan<- {}", elem.render()),
             },
             TypeExpr::Option { elem, .. } => format!("option[{}]", elem.render()),
-            TypeExpr::Fn { .. } => "fn".to_string(),
+            TypeExpr::Fn {
+                params, results, ..
+            } => {
+                let ps = params
+                    .iter()
+                    .map(|p| {
+                        let t = p.ty.render();
+                        if t.is_empty() {
+                            p.name.clone()
+                        } else if p.name.is_empty() {
+                            t
+                        } else {
+                            format!("{} {}", p.name, t)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let rs = results
+                    .iter()
+                    .map(|r| r.render())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if rs.is_empty() {
+                    format!("fn({})", ps)
+                } else {
+                    format!("fn({}) {}", ps, rs)
+                }
+            }
         }
     }
 }
@@ -766,22 +793,28 @@ impl Expr {
                 operand,
                 ..
             } => operand.root_ident(),
+            Expr::Move { operand, .. } => operand.root_ident(),
             Expr::Paren { inner, .. } => inner.root_ident(),
             Expr::Try { operand, .. } => operand.root_ident(),
             _ => None,
         }
     }
 
-    /// If this `SliceLit` represents a typed array composite literal
-    /// (`[N]T{…}` or `[...]T{…}`), returns `(len, inner_elem, array_ty)`.
-    /// Distinguished from a slice-of-arrays literal `[][N]T{…}` by the
-    /// array `TypeExpr` sharing the literal's opening `[` source position.
+    /// If this `SliceLit` (or a parenthesized `SliceLit`) represents a typed
+    /// array composite literal (`[N]T{…}` or `[...]T{…}`), returns
+    /// `(len, inner_elem, array_ty)`. Distinguished from a slice-of-arrays
+    /// literal `[][N]T{…}` by the array `TypeExpr` sharing the literal's
+    /// opening `[` source position.
     pub fn as_array_lit(&self) -> Option<(Option<&Expr>, &TypeExpr, &TypeExpr)> {
+        let mut cur = self;
+        while let Expr::Paren { inner, .. } = cur {
+            cur = inner;
+        }
         if let Expr::SliceLit {
             elem: Some(t),
             span,
             ..
-        } = self
+        } = cur
         {
             if let TypeExpr::Array {
                 len,
