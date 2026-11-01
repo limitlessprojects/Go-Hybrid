@@ -4328,6 +4328,23 @@ impl<'a> Collector<'a> {
                 continue;
             }
             let got = self.kind_of_expr(&extra.value);
+            // #2745: untyped `nil` is assignable only to a NILABLE element type
+            // (`*T`, slice, map, channel, interface, fn). Appending it to `[]int`,
+            // `[]string`, `[]bool`, `[]struct{...}`, … is `cannot use nil as T
+            // value in argument to append`. `nil` resolves to `OpKind::Unknown`,
+            // so `kinds_conflict` below never fires for it.
+            if Checker::is_nil_literal(&extra.value) && is_non_nilable(&elem) {
+                self.emit_e1002(
+                    extra.value.span(),
+                    format!(
+                        "cannot use `nil` as `{}` value in argument to append — Go refuses `cannot use nil as {} value in argument to append` (HYB-E1002)",
+                        elem.label(),
+                        elem.label()
+                    ),
+                    "`nil` is assignable only to a nilable element type (pointer, slice, map, channel, interface, or function)",
+                );
+                continue;
+            }
             let int_to_float_conflict = elem == OpKind::Float
                 && got == OpKind::Int
                 && !self.is_untyped_int_const(&extra.value);
@@ -6523,6 +6540,18 @@ impl<'a> Collector<'a> {
                     return;
                 }
                 let slice_arg = &args[0].value;
+                // #2745: untyped `nil` is not a slice. `append(nil, x)` is
+                // `first argument to append must be a slice; have untyped nil`.
+                // `nil` resolves to `Unknown`, so the slice-kind check below it
+                // would fail-open and accept the call.
+                if Checker::is_nil_literal(slice_arg) {
+                    self.emit_e2005(
+                        span,
+                        "invalid `append`: the first argument is untyped `nil`, not a slice — Go refuses `first argument to append must be a slice; have untyped nil` (HYB-E2005)".to_string(),
+                        "pass an actual slice (`[]T`) as the first argument to `append(xs, ...)`",
+                    );
+                    return;
+                }
                 let sk = self.kind_of_expr(slice_arg);
                 if !matches!(sk, OpKind::Unknown | OpKind::Slice(_)) {
                     self.emit_e2005(
