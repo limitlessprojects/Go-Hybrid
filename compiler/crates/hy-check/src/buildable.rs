@@ -1692,6 +1692,7 @@ impl<'a> Collector<'a> {
                 // `ch <- noop()` / `ch <- pair()`, which Go rejects.
                 self.check_single_value_position(value, "a channel send", false);
                 self.expr(value);
+                self.check_chan_send_operands(chan, value);
             }
             Stmt::If {
                 init,
@@ -1903,6 +1904,7 @@ impl<'a> Collector<'a> {
                     self.check_single_value_position(value, "a channel send", false);
                             self.expr(chan);
                             self.expr(value);
+                            self.check_chan_send_operands(chan, value);
                         }
                         SelectArmKind::Recv { names, chan } => {
                             self.check_repeated_bindings(names, chan.span());
@@ -5513,6 +5515,65 @@ impl<'a> Collector<'a> {
             }
         }
         false
+    }
+
+    fn is_untyped_int_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit {
+                kind: LitKind::Int(_) | LitKind::Char(_),
+                ..
+            } => true,
+            Expr::Ident { name, .. } => {
+                if self.file_consts.contains_key(name) {
+                    return true;
+                }
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        return matches!(self.defines[*id].kind, LocalKind::Const);
+                    }
+                }
+                false
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnOp::Neg)
+                    && self.is_untyped_int_const(operand)
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.is_untyped_int_const(lhs) && self.is_untyped_int_const(rhs)
+            }
+            _ => false,
+        }
+    }
+
+    fn check_chan_send_operands(&mut self, chan: &Expr, value: &Expr) {
+        let ck = self.kind_of_expr(chan);
+        if let OpKind::Chan(elem) = ck {
+            let vk = self.kind_of_expr(value);
+            let int_float_conflict = *elem == OpKind::Float
+                && vk == OpKind::Int
+                && !self.is_untyped_int_const(value);
+            if *elem != OpKind::Unknown
+                && vk != OpKind::Unknown
+                && int_float_conflict
+            {
+                let name_desc = match unwrap_parens(value) {
+                    Expr::Ident { name, .. } => {
+                        format!("`{}` (type `{}`)", name, vk.label())
+                    }
+                    _ => format!("type `{}`", vk.label()),
+                };
+                self.emit_e1002(
+                    value.span(),
+                    format!(
+                        "cannot use {} as `{}` value in send to `{}` (HYB-E1002)",
+                        name_desc,
+                        elem.label(),
+                        chan.render()
+                    ),
+                    "channel sends require the sent value to be assignable to the channel element type",
+                );
+            }
+        }
     }
 
     fn expr_has_non_const_local(&self, e: &Expr) -> bool {
