@@ -94,6 +94,11 @@ pub(crate) enum OpKind {
     /// fail-open in every operand guard, so `op + 1`, `takes_int(op)` and
     /// `var s string = op.unwrap()` all passed and failed `go build`.
     Option(Box<OpKind>),
+    /// #3064 — Predeclared `error` interface type (`Error() string`).
+    /// Prevents invalid returns (`fn f() int { var err error; return err }`),
+    /// invalid scalar returns in error fns (`fn f() error { return 42 }`),
+    /// invalid call arguments, and operands (`err + 1`).
+    Error,
     Void,
 }
 
@@ -119,6 +124,7 @@ impl OpKind {
             OpKind::Pointer(inner) => format!("*{}", inner.label()),
             OpKind::Fn(..) => "fn".to_string(),
             OpKind::Option(e) => format!("option[{}]", e.label()),
+            OpKind::Error => "error".to_string(),
             OpKind::Void => "void".to_string(),
         }
     }
@@ -179,6 +185,10 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         // Fn kinds only carry results here, so a result match is not proof of
         // a signature match; stay permissive.
         (Fn(..), Fn(..)) => false,
+        // A struct or struct-pointer value might implement the `error`
+        // interface (`Error() string`), so assigning it to `error` stays permissive.
+        (Error, Struct(_)) => false,
+        (Error, Pointer(inner)) if matches!(**inner, Struct(_) | Unknown) => false,
         // Everything else is a shape or scalar-family mismatch Go refuses.
         _ => true,
     }
@@ -390,6 +400,10 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         (Pointer(_), Interface) => false,
         (Pointer(_), _) | (_, Pointer(_)) => true,
 
+        // Error targets and arguments: cannot convert to/from non-interface types.
+        (Error, other) if !matches!(other, Unknown | Interface) => true,
+        (other, Error) if !matches!(other, Unknown | Interface) => true,
+
         _ => false,
     }
 }
@@ -412,7 +426,7 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         // kind model (it may hold anything), so a member lookup on it cannot
         // claim absence — same fail-open as `kinds_conflict`'s Interface arm.
         OpKind::Interface => false,
-        OpKind::Int | OpKind::Float | OpKind::Bool | OpKind::Str => true,
+        OpKind::Int | OpKind::Float | OpKind::Bool | OpKind::Str | OpKind::Error => true,
         OpKind::Void => false,
         // A struct whose NAME did not resolve cannot have its members looked up.
         OpKind::Struct(None) => false,
@@ -2728,6 +2742,8 @@ impl<'a> Collector<'a> {
             // #682 U9-U12: `any` is a resolved interface type, not an
             // unresolved one, so it must not fall through to `Unknown`.
             "any" | "interface{}" => OpKind::Interface,
+            // #3064: `error` is a resolved interface type (`Error() string`).
+            "error" => OpKind::Error,
             "bool" => OpKind::Bool,
             "string" => OpKind::Str,
             "float32" | "float64" | "f32" | "f64" => OpKind::Float,
@@ -3155,6 +3171,11 @@ impl<'a> Collector<'a> {
                             return Some(vec![OpKind::Bool])
                         }
                         _ => {}
+                    }
+                }
+                if let OpKind::Error = &bk {
+                    if (name == "error" || name == "Error") && args.is_empty() {
+                        return Some(vec![OpKind::Str]);
                     }
                 }
                 if name == "pop" && args.is_empty() {
@@ -6103,8 +6124,10 @@ impl<'a> Collector<'a> {
                     // generic is the common case; `LOWERED_METHOD_INTRINSICS`
                     // covers the other one, a name `hy-emit` lowers to a
                     // prelude call rather than a Go method (only on slices).
-                    let is_lowered = matches!(bk, OpKind::Slice(_))
-                        && LOWERED_METHOD_INTRINSICS.contains(&name.as_str());
+                    let is_lowered = (matches!(bk, OpKind::Slice(_))
+                        && LOWERED_METHOD_INTRINSICS.contains(&name.as_str()))
+                        || (matches!(bk, OpKind::Error)
+                            && (name == "error" || name == "Error"));
                     if is_fully_resolved(&bk) && !is_lowered
                     {
                         self.emit_e1002(
@@ -6119,6 +6142,11 @@ impl<'a> Collector<'a> {
                             ),
                             "declare the method on that type, or call something that exists",
                         );
+                    }
+                    if matches!(bk, OpKind::Error) && (name == "error" || name == "Error") {
+                        if !args.is_empty() {
+                            self.report_local_arity(&callee.render(), 0, args.len(), span);
+                        }
                     }
                 }
                 if has_method {
@@ -6307,7 +6335,8 @@ impl<'a> Collector<'a> {
             | OpKind::Str
             | OpKind::Array(_)
             | OpKind::Map(_, _)
-            | OpKind::Chan(_) => {
+            | OpKind::Chan(_)
+            | OpKind::Error => {
                 self.emit_e1002(
                     span,
                     format!(
