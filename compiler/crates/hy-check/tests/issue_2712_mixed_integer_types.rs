@@ -120,3 +120,21 @@ fn rejects_typed_var_initializer_of_other_integer_type() {
 fn accepts_typed_var_initializer_of_same_or_converted_type() {
     assert_accepts(&wrap("    var a i32 = 1", "    var b i32 = a\n    var c u8 = u8(a)\n    var d byte = c\n    var e u8 = 7\n    fmt.println(b, c, d, e)"));
 }
+
+#[test]
+fn rejects_string_range_rune_into_other_integer_type() {
+    // `for i, c in s` / `for c in s`: the element is a rune (int32).
+    assert_rejects("fn main() {\n    s := \"abc\"\n    for i, c in s {\n        var b u8 = c\n        fmt.println(i, b)\n    }\n}\n");
+    assert_rejects("fn take(b u8) u8 {\n    return b\n}\nfn main() {\n    for c in \"abc\" {\n        fmt.println(take(c))\n    }\n}\n");
+}
+
+#[test]
+fn accepts_string_range_rune_as_rune_or_converted() {
+    assert_accepts("fn take(r rune) rune {\n    return r\n}\nfn main() {\n    for c in \"abc\" {\n        var b i32 = c\n        fmt.println(take(c), b, take_u8(u8(c)))\n    }\n}\nfn take_u8(b u8) u8 {\n    return b\n}\n");
+}
+
+#[test]
+fn rejects_typed_integer_argument_of_other_type() {
+    assert_rejects("fn take(b u8) u8 {\n    return b\n}\nfn main() {\n    var a i32 = 1\n    fmt.println(take(a))\n}\n");
+    assert_accepts("fn take(b u8) u8 {\n    return b\n}\nfn main() {\n    var a u8 = 1\n    fmt.println(take(a), take(7))\n}\n");
+}
