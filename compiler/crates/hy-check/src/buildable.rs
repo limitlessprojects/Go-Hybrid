@@ -1724,6 +1724,16 @@ impl<'a> Collector<'a> {
                         self.check_bool_condition(cond, "for");
                     }
                     ForKind::Range { var, lo, hi, .. } => {
+                        self.check_single_value_position(
+                            lo,
+                            "a for-range bound",
+                            /*binding_position=*/ false,
+                        );
+                        self.check_single_value_position(
+                            hi,
+                            "a for-range bound",
+                            /*binding_position=*/ false,
+                        );
                         self.expr(lo);
                         self.expr(hi);
                         // The loop head always reads the counter.
@@ -1731,6 +1741,11 @@ impl<'a> Collector<'a> {
                         self.bind_kind(var, OpKind::Int);
                     }
                     ForKind::Iterate { vars, expr } => {
+                        self.check_single_value_position(
+                            expr,
+                            "a for-range expression",
+                            /*binding_position=*/ false,
+                        );
                         self.check_repeated_bindings(vars, *span);
                         self.expr(expr);
                         let iter_kinds = self.iterate_var_kinds(expr, vars.len());
