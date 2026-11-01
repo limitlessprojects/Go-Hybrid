@@ -984,7 +984,13 @@ fn conv_const(e: &Expr) -> Option<ConvConst> {
             ConvConst::Huge { f, lt_512 } => Some(ConvConst::Huge { f: -f, lt_512 }),
             other => Some(other),
         },
-        _ => None,
+        _ => {
+            if let Some(v) = crate::arith::const_eval_int(e) {
+                Some(ConvConst::Int(v))
+            } else {
+                None
+            }
+        }
     }
 }
 
