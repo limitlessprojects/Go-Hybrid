@@ -1203,26 +1203,36 @@ fn single_var_iterate_over_make_slice_variable_binds_element() {
 }
 
 #[test]
-fn single_var_iterate_over_map_variable_does_not_lower_as_channel() {
+fn single_var_iterate_over_map_variable_binds_key_lx13() {
     let go = emit("fn f() {\n    m := map[string]int{}\n    for k in m {\n        _ = k\n    }\n}\n");
     assert!(
-        go.contains("for _, k := range m {"),
-        "map variable must not be lowered as channel:\n{}",
+        go.contains("for k := range m {"),
+        "map variable single-var range must bind keys (LX13):\n{}",
         go
     );
     assert!(
-        !go.contains("for k := range m {"),
-        "map variable single-var range must not be lowered as channel range:\n{}",
+        !go.contains("for _, k := range m {"),
+        "map variable single-var range must not bind value:\n{}",
         go
     );
 }
 
 #[test]
-fn single_var_iterate_over_make_map_literal_does_not_lower_as_channel() {
+fn single_var_iterate_over_make_map_literal_binds_key_lx13() {
     let go = emit("fn f() {\n    m := make(map[string]int{})\n    for k in m {\n        _ = k\n    }\n}\n");
     assert!(
-        go.contains("for _, k := range m {"),
-        "make(map) variable must not be lowered as channel:\n{}",
+        go.contains("for k := range m {"),
+        "make(map) variable single-var range must bind keys (LX13):\n{}",
+        go
+    );
+}
+
+#[test]
+fn single_var_iterate_over_map_literal_binds_key_lx13() {
+    let go = emit("fn f() {\n    for k in map[string]int{\"a\": 1} {\n        _ = k\n    }\n}\n");
+    assert!(
+        go.contains("for k := range map[string]int{\"a\": 1} {"),
+        "map literal single-var range must bind keys (LX13):\n{}",
         go
     );
 }

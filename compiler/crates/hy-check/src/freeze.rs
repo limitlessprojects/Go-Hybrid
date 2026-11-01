@@ -877,7 +877,13 @@ impl<'a> Checker<'a> {
                             let elem = match self.shape_of_expr(&replay_st, expr) {
                                 crate::model::TypeShape::Slice(e) | crate::model::TypeShape::Array(e) => *e,
                                 crate::model::TypeShape::Chan(e) => *e,
-                                crate::model::TypeShape::Map(_, v) => *v,
+                                crate::model::TypeShape::Map(k, v) => {
+                                    if vars.len() == 1 {
+                                        *k
+                                    } else {
+                                        *v
+                                    }
+                                }
                                 _ => crate::model::TypeShape::Unknown,
                             };
                             for (idx_var, v) in vars.iter().enumerate() {

@@ -623,7 +623,7 @@ impl<'a> Checker<'a> {
                 if n_vars >= 2 {
                     vec![(**k).clone(), (**v).clone()]
                 } else {
-                    vec![(**v).clone()]
+                    vec![(**k).clone()]
                 }
             }
             TypeShape::Struct(Some(n)) if n == "set" || n.starts_with("set[") => {

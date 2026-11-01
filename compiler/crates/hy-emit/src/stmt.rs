@@ -1200,6 +1200,9 @@ impl Emitter {
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
         let e = Self::peel_parens(e);
+        if matches!(e, Expr::MapLit { .. }) {
+            return BindingKind::Map;
+        }
         if let Expr::StructLit { ty: Some(t), .. } = e {
             if let Some(kind) = self.binding_kind_of_ty(t) {
                 return kind;
@@ -1248,9 +1251,7 @@ impl Emitter {
             }
         }
         // make(chan …) → Chan (single-var range emits the value directly).
-        // Only classify as Chan if the first argument is a channel type.
-        // make([]T, n) (SliceLit) and make(map[K]V) (MapLit) must remain Plain
-        // so single-var range binds elements/keys rather than channel values.
+        // make(map[K]V) → Map (single-var range emits the key directly, LX13).
         if matches!(call, Expr::Ident { name, .. } if name == "make") {
             if let Some(first) = args.first() {
                 if let Expr::StructLit {
@@ -1259,6 +1260,16 @@ impl Emitter {
                 } = &first.value
                 {
                     return BindingKind::Chan;
+                }
+                if let Expr::StructLit {
+                    ty: Some(TypeExpr::Map { .. }),
+                    ..
+                } = &first.value
+                {
+                    return BindingKind::Map;
+                }
+                if let Expr::MapLit { .. } = &first.value {
+                    return BindingKind::Map;
                 }
             }
             return BindingKind::Plain;
@@ -1310,6 +1321,33 @@ impl Emitter {
             }
             Expr::Call { .. } | Expr::Try { .. } => {
                 self.binding_kind_of(e) == BindingKind::Set
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether an expression evaluates to a map (`map[K]V`). Single-variable
+    /// iterate over a map in Hybrid binds the map's keys (SPEC-LANGUAGE LX13),
+    /// which lowers to Go's `for k := range m`.
+    pub(crate) fn is_map_expr(&self, e: &Expr) -> bool {
+        let e = Self::peel_parens(e);
+        match e {
+            Expr::Ident { name, .. } => {
+                matches!(self.bindings.get(name), Some(BindingKind::Map))
+            }
+            Expr::MapLit { .. } => true,
+            Expr::Field { base, name, .. } => {
+                if let Some(sn) = self.user_struct_name_of(base.as_ref()) {
+                    if let Some(fields) = self.struct_fields.get(sn) {
+                        if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
+                            return fty.starts_with("map[") || fty == "map";
+                        }
+                    }
+                }
+                false
+            }
+            Expr::Call { .. } | Expr::Try { .. } => {
+                self.binding_kind_of(e) == BindingKind::Map
             }
             _ => false,
         }
@@ -2078,6 +2116,16 @@ impl Emitter {
                                 format!("for range {}.m {{", e)
                             } else {
                                 format!("for {} := range {}.m {{", vars[0], e)
+                            }
+                        } else if self.is_map_expr(expr) {
+                            self.shadow_local_names(vars);
+                            if !read {
+                                self.local_vars.remove(&vars[0]);
+                                format!("for range {} {{", e)
+                            } else {
+                                // SPEC-LANGUAGE LX13: `for x in e` iterates "maps (keys)".
+                                // In Go, `for k := range m` binds the key directly.
+                                format!("for {} := range {} {{", vars[0], e)
                             }
                         } else if !read {
                             self.shadow_local_names(vars);

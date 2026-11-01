@@ -130,10 +130,11 @@ fn map_value_struct_write_through_range_rejects() {
 }
 
 #[test]
-fn single_var_map_range_binds_the_value_copy_and_rejects() {
-    // iterate_var_kinds: one var over a map is the VALUE, not the key.
+fn single_var_map_range_binds_the_key_copy_and_rejects() {
+    // iterate_var_kinds: one var over a map is the KEY (LX13). When the key is a
+    // struct, mutating the key copy drops writes and rejects with HYB-E1002.
     rejects_with_e1002(&format!(
-        "{}fn main() {{\n    m := map[string]cell{{\"a\": cell{{n: 1}}}}\n    for v in m {{\n        v.n = 7\n    }}\n    fmt.println(m[\"a\"].n)\n}}",
+        "{}fn main() {{\n    m := map[cell]int{{cell{{n: 1}}: 1}}\n    for k in m {{\n        k.n = 7\n    }}\n    fmt.println(m)\n}}",
         CELL
     ));
 }

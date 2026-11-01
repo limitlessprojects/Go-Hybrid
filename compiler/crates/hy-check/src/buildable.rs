@@ -1890,7 +1890,7 @@ impl<'a> Collector<'a> {
                 if n_vars >= 2 {
                     vec![*k, *v]
                 } else {
-                    vec![*v]
+                    vec![*k]
                 }
             }
             OpKind::Str => vec![OpKind::Int; n_vars.max(1)],

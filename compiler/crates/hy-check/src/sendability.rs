@@ -2799,7 +2799,7 @@ impl<'a> Checker<'a> {
                 if n_vars >= 2 {
                     vec![Some(*key), Some(*value)]
                 } else {
-                    vec![Some(*value)]
+                    vec![Some(*key)]
                 }
             }
             _ => vec![None; n_vars.max(1)],
