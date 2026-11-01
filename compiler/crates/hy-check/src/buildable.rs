@@ -4386,7 +4386,11 @@ impl<'a> Collector<'a> {
 
                 match (&dk, &sk) {
                     (OpKind::Slice(dst_elem), OpKind::Slice(src_elem)) => {
-                        if kinds_conflict(dst_elem, src_elem) {
+                        let conflict = kinds_conflict(dst_elem, src_elem)
+                            || (**dst_elem != OpKind::Unknown
+                                && **src_elem != OpKind::Unknown
+                                && dst_elem != src_elem);
+                        if conflict {
                             self.emit_e1002(
                                 span,
                                 format!(
