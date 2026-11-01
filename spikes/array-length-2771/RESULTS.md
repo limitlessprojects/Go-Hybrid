@@ -53,6 +53,31 @@ workspace/CLI run: it is rejected by the repository's toolchain pin. The pinned
 Go 1.26.9 toolchain was selected through `GOTOOLCHAIN`, without changing project
 pins or test expectations. Existing upstream compiler warnings remain.
 
+## Refresh onto current main
+
+Rebased onto `8b3efb21c5a1504bb0af4c5ead6d650237803250` after upstream
+advanced. The new upstream array-addressability checks added two one-field
+`OpKind::Array` patterns; both now ignore the additional length field. Their
+behavior is preserved. The original two patches rebase unchanged (range-diff).
+
+Fresh validation on `c251974fbc8d40179a8911f5a997a345a018079d`:
+
+- Focused regressions/controls: 20/20.
+- Full compiler workspace: 2412 passed, no failures or ignored tests.
+- Corpus: 130/130; differential FULL AGREEMENT, 42/42 accept + 88/88 reject.
+- Registration, census, conflict markers and diff guards pass.
+- Original comparison and assignment examples reject through the CLI with exit
+  1 and HYB-E1002 showing `[3]int` and `[4]int`; valid control builds/runs `true`.
+
+The assistant sandbox places a protected, non-repository `.git` placeholder
+under `/tmp`. The first refreshed differential attempt therefore failed Go VCS
+stamping for two bridge modules, with exit 128 from Git. Setting `TMPDIR` to
+the repository's ignored `target/verification-tmp` lets those temporary modules
+use the real repository for VCS stamping; the complete battery then passes.
+No compiler, Go toolchain, test expectation, or VCS-stamping setting was altered
+for this environment correction. Source/tests/lockfiles remain unchanged by
+the subsequent evidence-only update. Hosted CI and review remain pending.
+
 ## Repeat
 
 From the repository root, with the pinned tools on PATH:
@@ -61,6 +86,8 @@ From the repository root, with the pinned tools on PATH:
 export RUSTUP_TOOLCHAIN=1.99.0
 export GOTOOLCHAIN=go1.26.9
 export CARGO_BUILD_JOBS=2
+mkdir -p target/verification-tmp
+export TMPDIR="$PWD/target/verification-tmp"
 flock /tmp/heavy.lock cargo test --locked --manifest-path compiler/Cargo.toml -p hy-check --test array_length_compatibility_2771
 flock /tmp/heavy.lock cargo test --locked --manifest-path compiler/Cargo.toml --workspace -- --test-threads=2
 flock /tmp/heavy.lock cargo build --locked --manifest-path compiler/Cargo.toml -p hyb
