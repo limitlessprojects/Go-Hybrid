@@ -79,7 +79,7 @@ def python_commands(workflow_text):
                 elif option.startswith(("-W", "-X")):
                     arguments = arguments[1:]
                 elif option == "--":
-                    arguments = arguments[1:]
+                    # Keep '--' so callers know subsequent tokens are script operands, not interpreter options.
                     break
                 else:
                     break  # In particular, never interpret a -c string.
@@ -147,8 +147,13 @@ def is_reached_discover(root, relpath, start, pattern):
 
 def is_registered_direct(relpath, workflow_text):
     """A script must be the Python entry point, not a comment or argument."""
-    return any(arguments and arguments[0] in (relpath, "./" + relpath)
-               for arguments in python_commands(workflow_text))
+    for arguments in python_commands(workflow_text):
+        if not arguments:
+            continue
+        entry = arguments[1] if arguments[0] == "--" and len(arguments) > 1 else arguments[0]
+        if entry in (relpath, "./" + relpath):
+            return True
+    return False
 
 
 def find_test_files(root, directory):
