@@ -2370,6 +2370,7 @@ impl<'a> Collector<'a> {
             TypeExpr::Named { name, span } => {
                 self.record_type_name_roots(name);
                 self.check_named_type_instantiation(name, *span);
+                self.check_type_name_not_shadowed(name, *span);
             }
             TypeExpr::Pointer { to, .. } => self.ty(to),
             TypeExpr::Slice { elem, .. } => self.ty(elem),
@@ -2674,6 +2675,42 @@ impl<'a> Collector<'a> {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// #3029: local value named like a type shadows type uses in same scope.
+    fn check_type_name_not_shadowed(&mut self, name: &str, span: Span) {
+        if self.scopes.is_empty() {
+            return;
+        }
+        for seg in name.split(|c: char| matches!(c, '[' | ']' | ',' | '*' | ' ' | '(' | ')')) {
+            let seg = seg.trim();
+            if seg.is_empty() {
+                continue;
+            }
+            let ident = if let Some((pkg, _)) = seg.split_once('.') {
+                pkg.trim()
+            } else {
+                seg
+            };
+            if ident.is_empty() || ident == "_" {
+                continue;
+            }
+            let is_shadowed = self.scopes.iter().any(|layer| layer.contains_key(ident));
+            if is_shadowed {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "cannot use `{}` as a type: shadowed by local binding in this scope (HYB-E1002)",
+                        ident
+                    ),
+                    &format!(
+                        "in Go, local identifier `{}` shadows the type name in this scope (`{} (local variable) is not a type`)",
+                        ident, ident
+                    ),
+                );
+                return;
+            }
         }
     }
 
