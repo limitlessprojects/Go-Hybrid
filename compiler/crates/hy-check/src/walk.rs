@@ -832,13 +832,25 @@ pub(crate) fn expr_path(expr: &Expr) -> Option<String> {
 /// an index-free ident/field chain, so two different keys on the same base
 /// are provably distinct slots. `None` means the slot may be any slot.
 pub(crate) fn addr_of_index_slot_key(value: &Expr) -> Option<String> {
-    let Expr::Index { base, index, .. } = as_addr_of(value)? else {
-        return None;
-    };
+    let (base, index) = peel_slot_loan_index(value)?;
     if !expr_is_index_free(base) {
         return None;
     }
     lit_index_key(index)
+}
+
+fn peel_slot_loan_index(mut value: &Expr) -> Option<(&Expr, &Expr)> {
+    while let Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } = value {
+        value = inner;
+    }
+    let mut cur = as_addr_of(value)?;
+    loop {
+        match cur {
+            Expr::Index { base, index, .. } => return Some((base, index)),
+            Expr::Field { base, .. } | Expr::Paren { inner: base, .. } => cur = base,
+            _ => return None,
+        }
+    }
 }
 
 /// A field store `s[k].f = v` (or `s[k].f.g op= v`) writes into one slot of
@@ -894,9 +906,6 @@ fn place_is_index_free(p: &Place) -> bool {
 /// `svc := &e.services[existing]` — extract (defined-name-agnostic) the base
 /// path of an `&path[key]`-shaped value, if it is one.
 pub(crate) fn addr_of_index_base_path(value: &Expr) -> Option<String> {
-    let operand = as_addr_of(value)?;
-    match operand {
-        Expr::Index { base, .. } => expr_path(base),
-        _ => None,
-    }
+    let (base, _) = peel_slot_loan_index(value)?;
+    expr_path(base)
 }
