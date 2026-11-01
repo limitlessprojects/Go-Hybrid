@@ -450,8 +450,8 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
                 via_move: true,
                 via_addr: false,
             }),
-            Expr::Field { .. } | Expr::Index { .. } | Expr::Slice { .. } => {
-                if let Some(root) = crate::model::unwrap_parens(operand).root_ident() {
+            op @ (Expr::Field { .. } | Expr::Index { .. } | Expr::Slice { .. }) => {
+                if let Some(root) = op.root_ident() {
                     out.push(Use {
                         name: root.to_string(),
                         span: *span,
@@ -459,6 +459,7 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
                         via_move: true,
                         via_addr: false,
                     });
+                    move_projection_subexpr_uses(op, out);
                 } else {
                     expr_uses(operand, out);
                 }
@@ -511,6 +512,56 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
     }
 }
 
+fn move_projection_subexpr_uses(expr: &Expr, out: &mut Vec<Use>) {
+    match expr {
+        Expr::Field { base, .. }
+        | Expr::Paren { inner: base, .. }
+        | Expr::Try { operand: base, .. }
+        | Expr::AddrOf { operand: base, .. }
+        | Expr::Unary {
+            op: hy_syntax::UnOp::Addr,
+            operand: base,
+            ..
+        } => move_projection_subexpr_uses(base, out),
+        Expr::Index { base, index, .. } => {
+            move_projection_subexpr_uses(base, out);
+            expr_uses(index, out);
+        }
+        Expr::Slice { base, lo, hi, .. } => {
+            move_projection_subexpr_uses(base, out);
+            if let Some(lo) = lo {
+                expr_uses(lo, out);
+            }
+            if let Some(hi) = hi {
+                expr_uses(hi, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn place_calls<'a>(place: &'a Place, out: &mut Vec<CallRef<'a>>) {
+    match &place.kind {
+        PlaceKind::Ident(_) => {}
+        PlaceKind::Index { base, index } => {
+            place_calls(base, out);
+            expr_calls(index, out);
+        }
+        PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => place_calls(base, out),
+    }
+}
+
+fn place_fnlits<'a>(place: &'a Place, out: &mut Vec<&'a Expr>) {
+    match &place.kind {
+        PlaceKind::Ident(_) => {}
+        PlaceKind::Index { base, index } => {
+            place_fnlits(base, out);
+            expr_fnlits(index, out);
+        }
+        PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => place_fnlits(base, out),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Calls (A2 loan windows, A7 consumes, handle-argument loans)
 // ---------------------------------------------------------------------------
@@ -537,9 +588,7 @@ pub(crate) fn own_calls<'a>(stmt: &'a Stmt, out: &mut Vec<CallRef<'a>>) {
             targets, values, ..
         } => {
             for t in targets {
-                if let PlaceKind::Index { index, .. } = &t.kind {
-                    expr_calls(index, out);
-                }
+                place_calls(t, out);
             }
             for v in values {
                 expr_calls(v, out);
@@ -608,7 +657,12 @@ pub(crate) fn own_fnlits<'a>(stmt: &'a Stmt, out: &mut Vec<&'a Expr>) {
                 expr_fnlits(v, out);
             }
         }
-        Stmt::Assign { values, .. } => {
+        Stmt::Assign {
+            targets, values, ..
+        } => {
+            for t in targets {
+                place_fnlits(t, out);
+            }
             for v in values {
                 expr_fnlits(v, out);
             }
@@ -876,9 +930,33 @@ pub(crate) fn place_field_store_slot(place: &Place) -> Option<(String, Option<St
     }
 }
 
+fn const_str_index_key(expr: &Expr) -> Option<String> {
+    match crate::model::unwrap_parens(expr) {
+        Expr::Lit {
+            kind: hy_syntax::LitKind::Str(s) | hy_syntax::LitKind::RawStr(s),
+            ..
+        } => Some(s.clone()),
+        Expr::Binary {
+            op: hy_syntax::BinOp::Add,
+            lhs,
+            rhs,
+            ..
+        } => {
+            let mut l = const_str_index_key(lhs)?;
+            let r = const_str_index_key(rhs)?;
+            l.push_str(&r);
+            Some(l)
+        }
+        _ => None,
+    }
+}
+
 fn lit_index_key(index: &Expr) -> Option<String> {
     if let Some(v) = crate::const_overflow::const_int_value(index) {
         return Some(v.to_string());
+    }
+    if let Some(s) = const_str_index_key(index) {
+        return Some(format!("\"{s}\""));
     }
     match crate::model::unwrap_parens(index) {
         e @ Expr::Lit { .. } => Some(e.render()),
