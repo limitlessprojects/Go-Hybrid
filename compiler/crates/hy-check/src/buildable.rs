@@ -90,6 +90,16 @@ pub(crate) enum OpKind {
     /// declaration is out of reach). The count is what closes the
     /// closure/method-value arity bypass (#577 C9).
     Fn(Vec<OpKind>, Option<usize>),
+    /// The builtin `option[T]` (SPEC §2.6 T19), carrying its payload kind.
+    ///
+    /// Deliberately NOT `Unknown`: an option lowers to the prelude's generic
+    /// `option[T]` struct, which Go refuses to add, index, compare in order,
+    /// pass where a `T` is expected, `len`, `range`, and so on. Mapping it to
+    /// `Unknown` made every such operand fail-open (`op + 1`, `var n int = op`,
+    /// `takes_int(op)`, `op[0]`, `len(op)` all passed `hyb check` and broke
+    /// `go build`). Member lookups stay fail-open (`is_fully_resolved`),
+    /// because `unwrap`/`or`/`is_some`/`is_none` are prelude methods.
+    Option(Box<OpKind>),
     Void,
 }
 
@@ -114,6 +124,7 @@ impl OpKind {
             OpKind::Struct(None) => "struct".to_string(),
             OpKind::Pointer(inner) => format!("*{}", inner.label()),
             OpKind::Fn(..) => "fn".to_string(),
+            OpKind::Option(e) => format!("option[{}]", e.label()),
             OpKind::Void => "void".to_string(),
         }
     }
@@ -167,6 +178,7 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         }
         (Map(k1, v1), Map(k2, v2)) => kinds_conflict(k1, k2) || kinds_conflict(v1, v2),
         (Pointer(a), Pointer(b)) => kinds_conflict(a, b),
+        (Option(a), Option(b)) => kinds_conflict(a, b),
         // Fn kinds only carry results here, so a result match is not proof of
         // a signature match; stay permissive.
         (Fn(..), Fn(..)) => false,
@@ -269,9 +281,8 @@ fn copy_element_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
         // Struct whose name did not resolve is not evidence of mismatch.
         (Struct(None), _) | (_, Struct(None)) => false,
         (a, b) if a == b => false,
-        (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) | (Pointer(a), Pointer(b)) => {
-            copy_element_kinds_conflict(a, b)
-        }
+        (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) | (Pointer(a), Pointer(b))
+        | (Option(a), Option(b)) => copy_element_kinds_conflict(a, b),
         (Map(k1, v1), Map(k2, v2)) => {
             copy_element_kinds_conflict(k1, k2) || copy_element_kinds_conflict(v1, v2)
         }
@@ -367,6 +378,11 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         (Pointer(_), Interface) => false,
         (Pointer(_), _) | (_, Pointer(_)) => true,
 
+        // `option[T]` lowers to a generic prelude struct: Go converts it only
+        // to the identical option type (or to an interface, handled above).
+        (Option(a), Option(b)) => kinds_conflict(a, b) || kinds_conflict(b, a),
+        (Option(_), _) | (_, Option(_)) => true,
+
         _ => false,
     }
 }
@@ -401,6 +417,10 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         // A fn kind only carries results here, so it is not evidence about
         // members either way.
         OpKind::Fn(..) => false,
+        // `unwrap`/`or`/`is_some`/`is_none` are prelude methods `hy-emit`
+        // lowers; the kind model does not enumerate them, so a member lookup
+        // on an option must not claim absence.
+        OpKind::Option(_) => false,
     }
 }
 
@@ -2582,7 +2602,9 @@ impl<'a> Collector<'a> {
             TypeExpr::Chan { elem, .. } => {
                 OpKind::Chan(Box::new(self.kind_of_ty(elem, depth + 1)))
             }
-            TypeExpr::Option { .. } => OpKind::Unknown,
+            TypeExpr::Option { elem, .. } => {
+                OpKind::Option(Box::new(self.kind_of_ty(elem, depth + 1)))
+            }
             TypeExpr::Fn { params, results, .. } => OpKind::Fn(
                 results
                     .iter()
@@ -2678,7 +2700,9 @@ impl<'a> Collector<'a> {
             TypeExpr::Chan { elem, .. } => {
                 OpKind::Chan(Box::new(self.kind_of_ty_with_subst(elem, subst, depth + 1)))
             }
-            TypeExpr::Option { .. } => OpKind::Unknown,
+            TypeExpr::Option { elem, .. } => {
+                OpKind::Option(Box::new(self.kind_of_ty_with_subst(elem, subst, depth + 1)))
+            }
             TypeExpr::Fn { results, .. } => OpKind::Fn(
                 results
                     .iter()
@@ -2975,6 +2999,14 @@ impl<'a> Collector<'a> {
                     "new" => return Some(vec![OpKind::Pointer(Box::new(OpKind::Unknown))]),
                     "delete" | "close" | "clear" | "panic" => return Some(Vec::new()),
                     "recover" => return Some(vec![OpKind::Interface]),
+                    // T19: `some(v)` builds an `option[T]` whose payload is
+                    // `v`'s kind. A user declaration named `some` is rejected
+                    // by the prelude-collision rule (#777), so the name is the
+                    // builtin here.
+                    "some" if args.len() == 1 && !self.ck.fns.contains_key("some") => {
+                        let payload = self.kind_of_expr(&args[0].value);
+                        return Some(vec![OpKind::Option(Box::new(payload))]);
+                    }
                     _ => {}
                 }
                 let conv = self.kind_of_named(name, 0);
@@ -2997,6 +3029,15 @@ impl<'a> Collector<'a> {
                 if name == "pop" && args.is_empty() {
                     if let OpKind::Slice(elem) = bk {
                         return Some(vec![*elem]);
+                    }
+                }
+                // T20: the option prelude methods. `unwrap()` and `or(d)`
+                // yield the payload, `is_some()`/`is_none()` a bool.
+                if let OpKind::Option(payload) = &bk {
+                    match (name.as_str(), args.len()) {
+                        ("unwrap", 0) | ("or", 1) => return Some(vec![(**payload).clone()]),
+                        ("is_some", 0) | ("is_none", 0) => return Some(vec![OpKind::Bool]),
+                        _ => return None,
                     }
                 }
                 let head = Checker::base_named_type_str(name);
