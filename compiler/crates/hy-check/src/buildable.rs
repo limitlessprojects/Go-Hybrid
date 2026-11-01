@@ -601,9 +601,13 @@ impl<'a> Collector<'a> {
         let base = Checker::base_named_type_str(name);
         if let Some(target) = self.ck.type_aliases.get(base) {
             let resolved = self.ck.resolve_type_alias(target);
-            if let TypeExpr::Slice { elem, .. } = resolved {
+            if let TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } = resolved {
                 return self.scalar_of_ty(&self.ck.resolve_type_alias(&elem));
             }
+        }
+        if let Some(stripped) = name.strip_prefix("[]") {
+            let elem_base = Checker::base_named_type_str(stripped);
+            return canonical_numeric_scalar(elem_base);
         }
         None
     }
@@ -2676,6 +2680,24 @@ impl<'a> Collector<'a> {
                             name
                         ),
                         "in Go, converting a string to slice requires a []byte or []rune target slice type",
+                    );
+                }
+            }
+        } else if matches!(k, OpKind::Slice(_)) && matches!(arg_k, OpKind::Slice(_)) {
+            let target_elem_sc = self.slice_elem_scalar_of_type_name(name);
+            let arg_elem_sc = self.slice_elem_scalar(arg);
+            if let (Some(t_sc), Some(a_sc)) = (target_elem_sc, arg_elem_sc) {
+                if t_sc != a_sc {
+                    self.emit_e1002(
+                        arg.span(),
+                        format!(
+                            "cannot convert `{}` (type `[]{}`) to type `{}` (element type `{}`) (HYB-E1002)",
+                            arg.render(),
+                            a_sc,
+                            name,
+                            t_sc
+                        ),
+                        "in Go, converting between slice types requires identical element types",
                     );
                 }
             }
