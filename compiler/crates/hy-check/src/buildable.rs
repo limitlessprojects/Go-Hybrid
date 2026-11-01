@@ -2359,6 +2359,38 @@ impl<'a> Collector<'a> {
 
     /// #577 C9 — a closure or `fn`-typed value whose declared parameter count
     /// is known (`f := fn(x int) int {...}; f(1, 2)`).
+    fn has_mixed_int_float_conflict(&self, lk: &OpKind, rk: &OpKind, lhs: &Expr, rhs: &Expr) -> bool {
+        (lk == &OpKind::Float && rk == &OpKind::Int && !self.is_untyped_int_const(rhs))
+            || (lk == &OpKind::Int && rk == &OpKind::Float && !self.is_untyped_int_const(lhs))
+    }
+
+    fn is_untyped_int_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit {
+                kind: LitKind::Int(_) | LitKind::Char(_),
+                ..
+            } => true,
+            Expr::Unary { op: UnOp::Neg, operand, .. } => self.is_untyped_int_const(operand),
+            Expr::Binary { op, lhs, rhs, .. } => {
+                matches!(
+                    op,
+                    BinOp::Add
+                        | BinOp::Sub
+                        | BinOp::Mul
+                        | BinOp::Div
+                        | BinOp::Mod
+                        | BinOp::BitAnd
+                        | BinOp::BitOr
+                        | BinOp::BitXor
+                        | BinOp::Shl
+                        | BinOp::Shr
+                ) && self.is_untyped_int_const(lhs)
+                    && self.is_untyped_int_const(rhs)
+            }
+            _ => false,
+        }
+    }
+
     fn report_local_arity(&mut self, name: &str, want: usize, got: usize, span: Span) {
         let msg = if got < want {
             format!(
@@ -2967,9 +2999,10 @@ impl<'a> Collector<'a> {
             // are rejected here under HYB-E1002 (rule `BUILDABLE`).
             BinOp::Eq | BinOp::Ne => {
                 let op_str = if matches!(op, BinOp::Eq) { "==" } else { "!=" };
+                let int_float_conflict = self.has_mixed_int_float_conflict(&lk, &rk, lhs, rhs);
                 if !Checker::is_nil_literal(lhs)
                     && !Checker::is_nil_literal(rhs)
-                    && equality_kinds_conflict(&lk, &rk)
+                    && (equality_kinds_conflict(&lk, &rk) || int_float_conflict)
                 {
                     self.emit_e1002(
                         span,
@@ -3016,7 +3049,8 @@ impl<'a> Collector<'a> {
                 let mismatch = lk != OpKind::Unknown
                     && rk != OpKind::Unknown
                     && lk.is_numeric() != rk.is_numeric();
-                if !l_ok || !r_ok || mismatch {
+                let int_float_conflict = self.has_mixed_int_float_conflict(&lk, &rk, lhs, rhs);
+                if !l_ok || !r_ok || mismatch || int_float_conflict {
                     self.emit_e1002(
                         span,
                         format!(
@@ -3037,7 +3071,8 @@ impl<'a> Collector<'a> {
                 let mismatch = lk != OpKind::Unknown
                     && rk != OpKind::Unknown
                     && lk.is_numeric() != rk.is_numeric();
-                if !l_ok || !r_ok || mismatch {
+                let int_float_conflict = self.has_mixed_int_float_conflict(&lk, &rk, lhs, rhs);
+                if !l_ok || !r_ok || mismatch || int_float_conflict {
                     self.emit_e1002(
                         span,
                         format!(
@@ -3057,8 +3092,10 @@ impl<'a> Collector<'a> {
                     BinOp::Mul => "*",
                     _ => "/",
                 };
+                let int_float_conflict = self.has_mixed_int_float_conflict(&lk, &rk, lhs, rhs);
                 if !matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float)
+                    || int_float_conflict
                 {
                     self.emit_e1002(
                         span,
@@ -3242,7 +3279,9 @@ impl<'a> Collector<'a> {
                 let mismatch = tk != OpKind::Unknown
                     && vk != OpKind::Unknown
                     && tk.is_numeric() != vk.is_numeric();
-                if !t_ok || !v_ok || mismatch || kinds_conflict(&tk, &vk) {
+                let int_float_conflict = (tk == OpKind::Float && vk == OpKind::Int && !self.is_untyped_int_const(val))
+                    || (tk == OpKind::Int && vk == OpKind::Float);
+                if !t_ok || !v_ok || mismatch || kinds_conflict(&tk, &vk) || int_float_conflict {
                     self.emit_e1002(
                         span,
                         format!(
@@ -3264,9 +3303,12 @@ impl<'a> Collector<'a> {
                     AssignOp::MulAssign => "*=",
                     _ => "/=",
                 };
+                let int_float_conflict = (tk == OpKind::Float && vk == OpKind::Int && !self.is_untyped_int_const(val))
+                    || (tk == OpKind::Int && vk == OpKind::Float);
                 if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || kinds_conflict(&tk, &vk)
+                    || int_float_conflict
                 {
                     self.emit_e1002(
                         span,
