@@ -4236,6 +4236,30 @@ impl<'a> Collector<'a> {
             .and_then(canonical_numeric_name)
     }
 
+    /// #2825 — the exact Go numeric element type of a slice-VALUED expression,
+    /// named-slice aliases included (`my_int64_slice` → `int64`).
+    ///
+    /// `copy` operates on slice values, so the element spelling comes either
+    /// from the binding itself (`slice_element_type_name`, which sees the
+    /// `[]T` text) or, when the variable is declared with a named slice type,
+    /// through the alias registry (`named_slice_element_name`, the #2811
+    /// resolver). `None` — fail-open, like #2811 — for unresolved elements,
+    /// user-defined element types and non-numeric spellings, so shapes this
+    /// cannot prove stay silent.
+    fn copy_slice_elem_scalar(&self, e: &Expr) -> Option<&'static str> {
+        let elem = match self.slice_element_type_name(e) {
+            Some(n) => n,
+            None => {
+                let Expr::Ident { name, .. } = unwrap_parens(e) else {
+                    return None;
+                };
+                let declared = self.lookup_type_name(name)?;
+                self.named_slice_element_name(&declared)?
+            }
+        };
+        canonical_numeric_name(&elem)
+    }
+
     fn check_append_elements(&mut self, args: &[CallArg]) {
         let Some(first) = args.first() else { return };
         let elem = match self.kind_of_expr(&first.value) {
@@ -6573,25 +6597,54 @@ impl<'a> Collector<'a> {
 
                 match (&dk, &sk) {
                     (OpKind::Slice(dst_elem), OpKind::Slice(src_elem)) => {
-                        if copy_element_kinds_conflict(dst_elem, src_elem) {
+                        // #2825: `copy_element_kinds_conflict` compares `OpKind`s,
+                        // which collapse every integer width into `Int` and both
+                        // float widths into `Float`, so `copy([]int64, []int32)`
+                        // passed here and failed `go build` (`arguments to copy
+                        // have different element types`). Compare the exact
+                        // canonical spellings when both sides are provable.
+                        let dst_scalar = self.copy_slice_elem_scalar(dst_arg);
+                        let src_scalar = self.copy_slice_elem_scalar(src_arg);
+                        let width_conflict = matches!((dst_scalar, src_scalar),
+                            (Some(d), Some(s)) if d != s);
+                        if copy_element_kinds_conflict(dst_elem, src_elem) || width_conflict {
+                            let (d_label, s_label) = match (dst_scalar, src_scalar) {
+                                (Some(d), Some(s)) =>
+                                    (format!("[]{}", d), format!("[]{}", s)),
+                                _ => (
+                                    format!("[]{}", dst_elem.label()),
+                                    format!("[]{}", src_elem.label()),
+                                ),
+                            };
                             self.emit_e1002(
                                 span,
                                 format!(
                                     "arguments to `copy` have different element types: `{}` and `{}` (HYB-E1002)",
-                                    dst_elem.label(),
-                                    src_elem.label()
+                                    d_label, s_label
                                 ),
                                 "arguments to `copy` must have identical element types",
                             );
                         }
                     }
                     (OpKind::Slice(dst_elem), OpKind::Str) => {
-                        if !matches!(**dst_elem, OpKind::Unknown | OpKind::Int) {
+                        // #2825: Go admits a string source only for `[]byte`
+                        // (element `uint8`); the `OpKind::Int` arm treated every
+                        // integer slice (`[]int`, `[]int64`, `[]rune`) as a valid
+                        // destination and `go build` then refused the copy.
+                        let bad_family =
+                            !matches!(**dst_elem, OpKind::Unknown | OpKind::Int);
+                        let dst_scalar = self.copy_slice_elem_scalar(dst_arg);
+                        let not_byte = matches!(dst_scalar, Some(s) if s != "uint8");
+                        if bad_family || not_byte {
+                            let d_label = match dst_scalar {
+                                Some(s) => format!("[]{}", s),
+                                None => format!("[]{}", dst_elem.label()),
+                            };
                             self.emit_e1002(
                                 span,
                                 format!(
                                     "cannot copy string into slice with element type `{}` (HYB-E1002)",
-                                    dst_elem.label()
+                                    d_label
                                 ),
                                 "copying from a string requires a byte slice destination (`[]byte`)",
                             );
