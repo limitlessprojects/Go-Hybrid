@@ -74,6 +74,14 @@ class DupPlanner(unittest.TestCase):
         plan = sh.plan_phase_a(items, clusters, is_open=lambda n: True)
         self.assertEqual(plan, [])
 
+    def test_closed_member_is_filtered_out(self):
+        items = [_item(5, dup_members=[6, 7]), _item(6), _item(7)]
+        clusters = [[5, 6, 7]]
+        plan = sh.plan_phase_a(items, clusters, is_open=lambda n: n in (5, 7))
+        self.assertEqual(plan, [(5, [7])])
+        plan_none = sh.plan_phase_a(items, clusters, is_open=lambda n: n == 5)
+        self.assertEqual(plan_none, [])
+
 
 class ConflictClassifier(unittest.TestCase):
     """Docs-only conflicts resolve deterministically; anything else is human
@@ -183,6 +191,108 @@ class CmdProbeTests(unittest.TestCase):
             self.assertNotIn("no premise patterns matched in diff", out.getvalue())
         finally:
             Path(p).unlink(missing_ok=True)
+
+
+class DupLifecycleAndMergeMsgTests(unittest.TestCase):
+    """W4 label age resets on unlabeled events, freshly-proposed Phase-A PRs do
+    not enter Phase-B auto-close in the same run, and W5 merge-msg parses
+    Closes/Resolves/multi-issue links."""
+
+    def test_label_age_days_resets_when_unlabeled(self):
+        from datetime import datetime, timezone
+
+        class FakeGh:
+            repo = "limitlessprojects/Go-Hybrid"
+
+            def __init__(self, events):
+                self._events = events
+
+            def req(self, method, path):
+                return 200, self._events
+
+        now = datetime(2026, 11, 2, 0, 0, tzinfo=timezone.utc)
+        gh_unlabeled = FakeGh([
+            {"event": "labeled", "label": {"name": "bot:dup-of:#10"},
+             "created_at": "2026-10-25T00:00:00Z"},
+            {"event": "unlabeled", "label": {"name": "bot:dup-of:#10"},
+             "created_at": "2026-10-26T00:00:00Z"},
+        ])
+        self.assertIsNone(sh._label_age_days(gh_unlabeled, 11, "bot:dup-of:#10", now))
+
+        gh_relabeled = FakeGh([
+            {"event": "labeled", "label": {"name": "bot:dup-of:#10"},
+             "created_at": "2026-10-25T00:00:00Z"},
+            {"event": "unlabeled", "label": {"name": "bot:dup-of:#10"},
+             "created_at": "2026-10-26T00:00:00Z"},
+            {"event": "labeled", "label": {"name": "bot:dup-of:#10"},
+             "created_at": "2026-11-01T00:00:00Z"},
+        ])
+        self.assertAlmostEqual(
+            sh._label_age_days(gh_relabeled, 11, "bot:dup-of:#10", now), 1.0, places=2
+        )
+
+    def test_extract_issue_fixes_supports_closes_resolves_title_and_multi_issues(self):
+        self.assertEqual(
+            sh.extract_issue_fixes(
+                "fix(hy-check): slot loans (fixes #822)",
+                "Closes #821\nResolves: #867\nFixes #822",
+            ),
+            ["821", "867", "822"],
+        )
+        self.assertEqual(sh.extract_issue_fixes("chore: docs", "no issue link"), [])
+
+    def test_cmd_dup_fresh_phase_a_proposal_does_not_auto_close_in_same_run(self):
+        import json, os, tempfile
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        scan_data = {
+            "items": [
+                _item(10, dup_members=[11]),
+                _item(11),
+            ],
+            "clusters": [[10, 11]],
+        }
+        posts = []
+        patches = []
+
+        class FakeGh:
+            repo = "limitlessprojects/Go-Hybrid"
+
+            def req(self, method, path, body=None):
+                if method == "GET" and "/pulls/" in path:
+                    return 200, {"state": "open", "user": {"login": "alice"}}
+                if method == "GET" and path.endswith("/labels?per_page=100"):
+                    return 200, []
+                if method == "GET" and path.endswith("/events?per_page=100"):
+                    return 200, [
+                        {"event": "labeled", "label": {"name": "bot:dup-of:#10"},
+                         "created_at": "2026-01-01T00:00:00Z"}
+                    ]
+                if method == "PATCH":
+                    patches.append((path, body))
+                    return 200, {}
+                return 200, {}
+
+            def post(self, path, body):
+                posts.append((path, body))
+                return {}
+
+            def get(self, path):
+                return {"user": {"login": "alice"}}
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
+            json.dump(scan_data, tf)
+            scan_path = tf.name
+        try:
+            with patch.object(sh.tb, "Gh", return_value=FakeGh()), \
+                 patch.object(sh.tb, "load_token", return_value="tok"), \
+                 patch.dict(os.environ, {"SHEPHERD_MODE": "live"}):
+                sh.cmd_dup(SimpleNamespace(from_scan=scan_path, dry=False, phase_b=True))
+            self.assertEqual(patches, [])
+            self.assertTrue(any("/issues/11/labels" in p for p, _ in posts))
+        finally:
+            Path(scan_path).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

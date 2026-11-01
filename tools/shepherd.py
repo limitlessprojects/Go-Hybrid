@@ -268,6 +268,7 @@ def plan_phase_a(items, clusters, is_open):
             continue
         members = [by[n] for n in cl
                    if n != primary["number"] and by.get(n)
+                   and is_open(n)
                    and not by[n].get("wildcard_hold")
                    and not by[n].get("draft_parked")]
         if members:
@@ -295,8 +296,12 @@ def _label_age_days(gh, n, name, now):
                        % (gh.repo, n))
     newest = None
     for ev in (events or []):
-        if ev.get("event") == "labeled" and (ev.get("label") or {}).get("name") == name:
+        if (ev.get("label") or {}).get("name") != name:
+            continue
+        if ev.get("event") == "labeled":
             newest = ev.get("created_at")
+        elif ev.get("event") == "unlabeled":
+            newest = None
     if not newest:
         return None
     return tb.age_days(newest, now)
@@ -329,8 +334,9 @@ def cmd_dup(args):
     d = json.loads(Path(args.from_scan).read_text())
     items, clusters = d["items"], d["clusters"]
 
-    survivors = sorted({p for p, _ in plan_phase_a(items, clusters, lambda n: True)})
-    open_map = {n: _pr_open(gh, n) for n in survivors}
+    candidates = sorted({n for p, ms in plan_phase_a(items, clusters, lambda _: True)
+                         for n in [p] + ms})
+    open_map = {n: _pr_open(gh, n) for n in candidates}
     plan = plan_phase_a(items, clusters, lambda n: open_map.get(n, False))
     tb.log("phase-A plan: %d cluster(s) eligible" % len(plan))
     for surv, members in plan:
@@ -346,6 +352,7 @@ def cmd_dup(args):
                 continue
             if _has_label(gh, m, lname):
                 tb.log("  #%d already labeled %s" % (m, lname))
+                closable.append((m, surv))
             else:
                 ensure_palette(gh, cfg, extra=[lname])
                 gh.post("/repos/%s/issues/%d/labels" % (gh.repo, m),
@@ -360,7 +367,6 @@ def cmd_dup(args):
                         "off. Cluster signal is a file-set heuristic; the verdict stays "
                         "human.\n\n<!-- shepherd:dup-propose -->" % surv})
                 tb.log("  proposed: #%d superseded by #%d" % (m, surv))
-            closable.append((m, surv))
 
     if not args.phase_b:
         step_summary("W4 dup: %d cluster(s), %d member(s) in Phase-A plan "
@@ -463,6 +469,17 @@ def cmd_verify_assert(args):
     sys.exit(1)
 
 
+def extract_issue_fixes(title, body):
+    """Extract deduplicated linked issue numbers from PR body/title closing keywords."""
+    pattern = r"\b(?:[fF]ix(?:e[sd]?|ing)?|[cC]los(?:e[sd]?|ing)|[rR]esolv(?:e[sd]?|ing)):?\s+#(\d+)"
+    seen = []
+    for text in (body or "", title or ""):
+        for num in re.findall(pattern, text):
+            if num not in seen:
+                seen.append(num)
+    return seen
+
+
 def cmd_merge_msg(args):
     cfg = load_cfg()
     gh = tb.Gh(cfg["repo"], tb.load_token(args))
@@ -472,8 +489,8 @@ def cmd_merge_msg(args):
     title = (pr.get("title") or "")[:120]
     author = (pr.get("user") or {}).get("login", "unknown")
     body = pr.get("body") or ""
-    fixes = re.findall(r"[fF]ix(?:e[sd]?|ing)?\s+#(\d+)", body)
-    fixpart = ("fixes #%s" % fixes[0]) if fixes else "refs #%d" % args.pr
+    fixes = extract_issue_fixes(title, body)
+    fixpart = (", ".join("fixes #%s" % f for f in fixes)) if fixes else "refs #%d" % args.pr
     subject = "Merge pr-%d (%s, %s): %s" % (args.pr, author, fixpart, title)
     trailer = ("Original-author: @%s\nVerified-by: Shepherd W5 (%s)\n"
                "Protocol: merge-gate, repro-main-vs-pr, cargo-workspace, "
