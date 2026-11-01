@@ -653,6 +653,8 @@ pub enum UnOp {
     Neg,
     /// `&x` — also spelled `Expr::AddrOf` (both are legal AST).
     Addr,
+    /// `^x` — bitwise NOT in Go and Hybrid.
+    BitNot,
 }
 
 impl UnOp {
@@ -661,6 +663,7 @@ impl UnOp {
             UnOp::Not => "!",
             UnOp::Neg => "-",
             UnOp::Addr => "&",
+            UnOp::BitNot => "^",
         }
     }
 }

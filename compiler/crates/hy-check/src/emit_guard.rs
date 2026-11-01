@@ -1561,6 +1561,13 @@ impl<'a> Checker<'a> {
             } => self
                 .const_int_value_at(operand, use_pos, depth)
                 .and_then(|v| v.checked_neg()),
+            Expr::Unary {
+                op: hy_syntax::UnOp::BitNot,
+                operand,
+                ..
+            } => self
+                .const_int_value_at(operand, use_pos, depth)
+                .map(|v| !v),
             Expr::Binary { op, lhs, rhs, .. } => {
                 let l = self.const_int_value_at(lhs, use_pos, depth)?;
                 let r = self.const_int_value_at(rhs, use_pos, depth)?;

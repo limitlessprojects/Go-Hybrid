@@ -2964,6 +2964,10 @@ impl<'a> Collector<'a> {
                     OpKind::Int => OpKind::Int,
                     _ => OpKind::Unknown,
                 },
+                UnOp::BitNot => match self.kind_of_expr(operand) {
+                    OpKind::Int => OpKind::Int,
+                    _ => OpKind::Unknown,
+                },
             },
             Expr::Binary { op, lhs, rhs, .. } => match op {
                 BinOp::Eq
@@ -4605,6 +4609,19 @@ impl<'a> Collector<'a> {
                             k.label()
                         ),
                         "unary `-` is only defined on integer and floating-point values",
+                    );
+                }
+            }
+            UnOp::BitNot => {
+                if !matches!(k, OpKind::Unknown | OpKind::Int) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "operator `^` not defined on `{}` (type `{}`) — bitwise `^` requires an integer operand (HYB-E1002)",
+                            operand.render(),
+                            k.label()
+                        ),
+                        "bitwise `^` is only defined on integer values",
                     );
                 }
             }

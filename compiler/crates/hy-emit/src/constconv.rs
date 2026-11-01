@@ -240,6 +240,39 @@ impl WideInt {
         Self(out)
     }
 
+    fn bit_not(self) -> Self {
+        let mut out = [0u64; 8];
+        for i in 0..8 {
+            out[i] = !self.0[i];
+        }
+        Self(out)
+    }
+
+    fn cmp_signed(self, rhs: Self) -> std::cmp::Ordering {
+        if self.is_neg() != rhs.is_neg() {
+            if self.is_neg() {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            }
+        } else if let (Some(a), Some(b)) = (self.to_i128(), rhs.to_i128()) {
+            a.cmp(&b)
+        } else {
+            match self.checked_sub(rhs) {
+                Some(diff) => {
+                    if diff == Self::from_i128(0) {
+                        std::cmp::Ordering::Equal
+                    } else if diff.is_neg() {
+                        std::cmp::Ordering::Less
+                    } else {
+                        std::cmp::Ordering::Greater
+                    }
+                }
+                None => std::cmp::Ordering::Equal,
+            }
+        }
+    }
+
     fn truncate_to_width(self, bits: u32, signed: bool) -> i128 {
         let low = (self.0[0] as u128) as i128;
         let len = 1i128 << bits;
@@ -255,12 +288,17 @@ impl WideInt {
 fn const_int_expr(expr: &hy_syntax::Expr) -> Option<WideInt> {
     use hy_syntax::{BinOp, Expr, UnOp};
     match expr {
-        Expr::Paren { inner, .. } => const_int_expr(inner),
+        Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } => const_int_expr(inner),
         Expr::Unary {
             op: UnOp::Neg,
             operand,
             ..
         } => const_int_expr(operand)?.checked_neg(),
+        Expr::Unary {
+            op: UnOp::BitNot,
+            operand,
+            ..
+        } => Some(const_int_expr(operand)?.bit_not()),
         Expr::Lit {
             kind: LitKind::Int(t),
             ..
@@ -269,6 +307,52 @@ fn const_int_expr(expr: &hy_syntax::Expr) -> Option<WideInt> {
             kind: LitKind::Char(c),
             ..
         } => Some(WideInt::from_i128(*c as u32 as i128)),
+        Expr::Call { callee, args, .. } => {
+            let callee_inner = match callee.as_ref() {
+                Expr::Paren { inner, .. } => inner.as_ref(),
+                other => other,
+            };
+            if let Expr::Ident { name, .. } = callee_inner {
+                if let Some((inner_bits, inner_signed)) = width_of(name) {
+                    if args.len() == 1 {
+                        let inner_val = const_int_expr(&args[0].value)?;
+                        let truncated = inner_val.truncate_to_width(inner_bits, inner_signed);
+                        return Some(WideInt::from_i128(truncated));
+                    }
+                }
+                if name == "len" && args.len() == 1 {
+                    let arg_inner = match &args[0].value {
+                        Expr::Paren { inner, .. } => inner.as_ref(),
+                        other => other,
+                    };
+                    if let Expr::Lit {
+                        kind: LitKind::Str(s) | LitKind::RawStr(s),
+                        ..
+                    } = arg_inner
+                    {
+                        return Some(WideInt::from_i128(s.len() as i128));
+                    }
+                }
+                if (name == "min" || name == "max") && !args.is_empty() {
+                    let mut vals = Vec::with_capacity(args.len());
+                    for a in args {
+                        vals.push(const_int_expr(&a.value)?);
+                    }
+                    let is_min = name == "min";
+                    let mut best = vals[0];
+                    for v in &vals[1..] {
+                        let ord = v.cmp_signed(best);
+                        if is_min && ord == std::cmp::Ordering::Less {
+                            best = *v;
+                        } else if !is_min && ord == std::cmp::Ordering::Greater {
+                            best = *v;
+                        }
+                    }
+                    return Some(best);
+                }
+            }
+            None
+        }
         Expr::Binary { op, lhs, rhs, .. } => {
             let l = const_int_expr(lhs)?;
             let r = const_int_expr(rhs)?;
@@ -300,12 +384,22 @@ fn has_out_of_range_subexpr(expr: &hy_syntax::Expr, bits: u32, signed: bool) -> 
         return true;
     }
     match expr {
-        Expr::Paren { inner, .. } | Expr::Unary { operand: inner, .. } => {
+        Expr::Paren { inner, .. }
+        | Expr::Unary { operand: inner, .. }
+        | Expr::Move { operand: inner, .. } => {
             has_out_of_range_subexpr(inner, bits, signed)
         }
         Expr::Binary { lhs, rhs, .. } => {
             has_out_of_range_subexpr(lhs, bits, signed)
                 || has_out_of_range_subexpr(rhs, bits, signed)
+        }
+        Expr::Call { callee, args, .. } => {
+            if let Expr::Ident { name, .. } = callee.as_ref() {
+                if width_of(name).is_some() {
+                    return true;
+                }
+            }
+            args.iter().any(|a| has_out_of_range_subexpr(&a.value, bits, signed))
         }
         _ => false,
     }
@@ -413,5 +507,48 @@ mod tests {
         assert_eq!(fold_constant(&operand, "i8"), Some(-44));
         let operand = operand_of("fn main() { b := int8((300)) }");
         assert_eq!(fold_constant(&operand, "int8"), Some(44));
+    }
+
+    #[test]
+    fn issue_2972_bitwise_not_move_nested_and_builtin_const_folding() {
+        // 1. Bitwise NOT (^x) & Expr::Move (move x)
+        let operand = operand_of("fn main() { b := u8(^0) }");
+        assert_eq!(fold_constant(&operand, "u8"), Some(255));
+
+        let operand = operand_of("fn main() { b := i8(^255) }");
+        assert_eq!(fold_constant(&operand, "i8"), Some(0));
+
+        let operand = operand_of("fn main() { b := u8(move 300) }");
+        assert_eq!(fold_constant(&operand, "u8"), Some(44));
+
+        // 2. Nested integer conversions
+        let operand = operand_of("fn main() { b := i8(u8(200)) }");
+        assert_eq!(fold_constant(&operand, "i8"), Some(-56));
+
+        let operand = operand_of("fn main() { b := u8(i8(-1)) }");
+        assert_eq!(fold_constant(&operand, "u8"), Some(255));
+
+        let operand = operand_of("fn main() { b := u16(u8(200) + 100) }");
+        assert_eq!(fold_constant(&operand, "u16"), Some(300));
+
+        // 3. Compile-time constant builtin calls (len, min, max)
+        let operand = operand_of("fn main() { b := u8(len(\"abc\") - 10) }");
+        assert_eq!(fold_constant(&operand, "u8"), Some(249));
+
+        let operand = operand_of("fn main() { b := u8(max(300, 10)) }");
+        assert_eq!(fold_constant(&operand, "u8"), Some(44));
+
+        let operand = operand_of("fn main() { b := u8(min(-1, 5)) }");
+        assert_eq!(fold_constant(&operand, "u8"), Some(255));
+
+        // Fitting controls must stay untouched
+        let operand = operand_of("fn main() { b := u8(len(\"abc\")) }");
+        assert_eq!(fold_constant(&operand, "u8"), None, "len(\"abc\") is 3, fits u8");
+
+        let operand = operand_of("fn main() { b := u8(min(10, 20)) }");
+        assert_eq!(fold_constant(&operand, "u8"), None, "min(10, 20) is 10, fits u8");
+
+        let operand = operand_of("fn main() { b := u8(max(10, 20)) }");
+        assert_eq!(fold_constant(&operand, "u8"), None, "max(10, 20) is 20, fits u8");
     }
 }
