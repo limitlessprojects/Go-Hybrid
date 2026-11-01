@@ -18,7 +18,7 @@
 //! redefinition in an inner block starts clean (no false rejects).
 
 use crate::model::{as_addr_of, unwrap_parens, Checker, FnState, TypeShape};
-use crate::walk::{self, Use};
+use crate::walk::Use;
 use hy_diag::{Diagnostic, FixIt, Span};
 use hy_syntax::{
     AssignOp, Expr, ForKind, InterpPart, LocalDecl, LocalKind, Place, PlaceKind, SelectArmKind,
@@ -27,11 +27,30 @@ use hy_syntax::{
 
 fn is_slot_loan_expr(ck: &Checker<'_>, st: &FnState, e: &Expr) -> bool {
     let _ = as_addr_of;
-    walk::addr_of_index_base_path(e).is_some_and(|p| {
-        ck.lookup_binding(st, p.split('.').next().unwrap_or(&p)).is_some_and(|b| {
-            matches!(b.shape, TypeShape::Map(..) | TypeShape::Slice(_) | TypeShape::Array(_) | TypeShape::Struct(_) | TypeShape::Pointer(_))
-        })
-    })
+    let inner = match unwrap_parens(e) {
+        Expr::AddrOf { operand, .. } => unwrap_parens(operand),
+        Expr::Unary {
+            op: hy_syntax::UnOp::Addr,
+            operand,
+            ..
+        } => unwrap_parens(operand),
+        _ => return false,
+    };
+    match inner {
+        Expr::Index { base, .. } => {
+            matches!(ck.shape_of_expr(st, base), TypeShape::Map(..))
+        }
+        Expr::Field { base, .. } => {
+            if ck.map_slot_borrow_span(st, e).is_some() {
+                return false;
+            }
+            matches!(
+                ck.shape_of_expr(st, base),
+                TypeShape::Struct(_) | TypeShape::Pointer(_)
+            )
+        }
+        _ => false,
+    }
 }
 
 fn is_slot_loan_or_alias_expr(
@@ -135,7 +154,7 @@ impl<'a> Checker<'a> {
                             continue;
                         };
                         if !b.slot_loan
-                            || walk::addr_of_index_base_path(v).is_some()
+                            || is_slot_loan_expr(self, st, v)
                             || !self.is_general_pointer_value(st, v)
                         {
                             continue;
@@ -165,7 +184,7 @@ impl<'a> Checker<'a> {
                             continue;
                         };
                         if !b.slot_loan
-                            || walk::addr_of_index_base_path(v).is_some()
+                            || is_slot_loan_expr(self, st, v)
                             || !self.is_general_pointer_value(st, v)
                         {
                             continue;
@@ -222,14 +241,15 @@ impl<'a> Checker<'a> {
         self.diags.push(d);
     }
 
-    /// A value that is a general Go pointer (or `nil`), not another loan.
+    /// A value that is a general Go pointer (or `nil`), not a new slot-loan initializer.
+    /// Re-binding a slot loan to another slot-loan identifier or itself is also an invalid rebind.
     fn is_general_pointer_value(&self, st: &FnState, v: &hy_syntax::Expr) -> bool {
         if Checker::is_nil_literal(v) {
             return true;
         }
         if let hy_syntax::Expr::Ident { name, .. } = unwrap_parens(v) {
             if self.lookup_binding(st, name).is_some_and(|b| b.slot_loan) {
-                return false;
+                return true;
             }
         }
         matches!(self.shape_of_expr(st, v), TypeShape::Pointer(_))
@@ -350,7 +370,7 @@ impl<'a> Checker<'a> {
                         {
                             self.bind_match_arm(&mut arm_st, b, subject, false);
                         }
-                        self.check_expr_addr_of_loan_projections(&arm_st, g, include_direct_ident);
+                        self.check_expr_addr_of_loan_projections(&arm_st, g, true);
                     }
                 }
             }
@@ -598,9 +618,11 @@ impl<'a> Checker<'a> {
         self.diags.push(d);
     }
 
-    /// The `&m[k]` shape whose base resolves to a map: the address-of a map
-    /// index expression, which Go refuses (`cannot take address of m[k]`).
-    /// Only map bases qualify — slice/array elements are addressable.
+    /// The `&m[k]` shape whose base resolves to a map, as well as field and
+    /// array-element projections rooted at an unaddressable map value (`&m[k].field`,
+    /// `&m[k].arr[0]`), which Go refuses (`cannot take address of m[k]`).
+    /// Pointers and slice projections (`&ptr_map[k].field`, `&slice_map[k][0]`) remain
+    /// addressable and return None.
     fn map_slot_borrow_span(&self, st: &FnState, e: &Expr) -> Option<Span> {
         let (operand, span) = match unwrap_parens(e) {
             Expr::AddrOf { operand, span } => (operand.as_ref(), *span),
@@ -611,11 +633,33 @@ impl<'a> Checker<'a> {
             } => (operand.as_ref(), *span),
             _ => return None,
         };
-        match unwrap_parens(operand) {
-            Expr::Index { base, .. } if matches!(self.shape_of_expr(st, base), TypeShape::Map(..)) => {
-                Some(span)
+        let mut curr = unwrap_parens(operand);
+        loop {
+            match curr {
+                Expr::Field { base, .. } => {
+                    let base_shape = self.shape_of_expr(st, base);
+                    if matches!(base_shape, TypeShape::Pointer(_) | TypeShape::Slice(_)) {
+                        return None;
+                    }
+                    curr = unwrap_parens(base);
+                }
+                Expr::Index { base, .. } => {
+                    let base_shape = self.shape_of_expr(st, base);
+                    if matches!(base_shape, TypeShape::Map(..)) {
+                        if let TypeShape::Map(_, val) = base_shape {
+                            if matches!(*val, TypeShape::Pointer(_) | TypeShape::Slice(_)) {
+                                return None;
+                            }
+                        }
+                        return Some(span);
+                    } else if matches!(base_shape, TypeShape::Array(_)) {
+                        curr = unwrap_parens(base);
+                    } else {
+                        return None;
+                    }
+                }
+                _ => return None,
             }
-            _ => None,
         }
     }
 
@@ -854,5 +898,151 @@ fn main() {
             "got {:?}",
             loop_codes
         );
+    }
+
+    fn accepts(src: &str) {
+        let ast = parse_file("inline.hy", src).expect("must parse");
+        let res = check_file(&ast);
+        assert_eq!(res.verdict, Verdict::Accept, "expected accept, got {:?}", res.diagnostics);
+    }
+
+    #[test]
+    fn field_loan_and_call_returned_map_slot_loan_reject_e3104() {
+        let field_addr_codes = error_codes(
+            r#"struct acct { bal int }
+struct holder { a acct }
+fn main() {
+    h := holder{a: acct{bal: 1}}
+    n := &h.a
+    p := &n
+    fmt.println(p)
+}
+"#,
+        );
+        assert!(field_addr_codes.contains(&"HYB-E3104".to_string()), "got {:?}", field_addr_codes);
+
+        let field_proj_codes = error_codes(
+            r#"struct acct { bal int }
+struct holder { a acct }
+fn main() {
+    h := holder{a: acct{bal: 1}}
+    n := &h.a
+    p := &n.bal
+    fmt.println(p)
+}
+"#,
+        );
+        assert!(field_proj_codes.contains(&"HYB-E3104".to_string()), "got {:?}", field_proj_codes);
+
+        let call_map_codes = error_codes(
+            r#"struct acct { bal int }
+fn get_m() map[string]acct {
+    return map[string]acct{"a": acct{bal: 1}}
+}
+fn main() {
+    n := &get_m()["a"]
+    p := &n
+    fmt.println(p)
+}
+"#,
+        );
+        assert!(call_map_codes.contains(&"HYB-E3104".to_string()), "got {:?}", call_map_codes);
+
+        accepts(
+            r#"struct acct { bal int }
+struct holder {
+    a acct
+    b acct
+}
+fn main() {
+    h := holder{a: acct{bal: 1}, b: acct{bal: 2}}
+    n := &h.a
+    n.bal = 10
+    n = &h.b
+    n.bal = 20
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn unaddressable_map_projections_in_operand_positions_reject_e3104() {
+        let call_arg_codes = error_codes(
+            r#"struct acct { bal int }
+fn touch(p *int) {}
+fn main() {
+    m := map[string]acct{"a": acct{bal: 1}}
+    touch(&m["a"].bal)
+}
+"#,
+        );
+        assert!(call_arg_codes.contains(&"HYB-E3104".to_string()), "got {:?}", call_arg_codes);
+
+        let send_codes = error_codes(
+            r#"struct acct { bal int }
+fn main() {
+    ch := make(chan *int, 1)
+    m := map[string]acct{"a": acct{bal: 1}}
+    ch <- &m["a"].bal
+}
+"#,
+        );
+        assert!(send_codes.contains(&"HYB-E3104".to_string()), "got {:?}", send_codes);
+
+        let task_codes = error_codes(
+            r#"struct acct { bal int }
+fn w(p *int) {}
+fn main() {
+    m := map[string]acct{"a": acct{bal: 1}}
+    task w(&m["a"].bal)
+}
+"#,
+        );
+        assert!(task_codes.contains(&"HYB-E3104".to_string()), "got {:?}", task_codes);
+
+        // Addressable pointer and slice map projections stay accepted
+        accepts(
+            r#"struct acct { bal int }
+fn touch(p *int) {}
+fn main() {
+    ptr_map := map[string]*acct{"a": &acct{bal: 1}}
+    touch(&ptr_map["a"].bal)
+    slice_map := map[string][]int{"a": []int{1, 2}}
+    touch(&slice_map["a"][0])
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn slot_loan_rebind_to_slot_ident_and_match_arm_guard_reject_e3104() {
+        let rebind_ident_codes = error_codes(
+            r#"struct acct { bal int }
+fn main() {
+    m := map[string]acct{"a": acct{bal: 1}, "b": acct{bal: 2}}
+    q := &m["a"]
+    r := &m["b"]
+    q = r
+    fmt.println(q.bal)
+}
+"#,
+        );
+        assert!(rebind_ident_codes.contains(&"HYB-E3104".to_string()), "got {:?}", rebind_ident_codes);
+
+        let match_guard_codes = error_codes(
+            r#"struct acct { bal int }
+fn main() {
+    m := map[string]acct{"a": acct{bal: 1}}
+    q := &m["a"]
+    match some(q) {
+        some(b) if &b != nil => {
+            fmt.println(b.bal)
+        }
+        _ => {}
+    }
+}
+"#,
+        );
+        assert!(match_guard_codes.contains(&"HYB-E3104".to_string()), "got {:?}", match_guard_codes);
     }
 }
