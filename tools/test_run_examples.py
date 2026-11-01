@@ -5,6 +5,7 @@ or network are used. These tests exercise the runner, not the compiler.
 """
 
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -121,6 +122,41 @@ class ExampleExitTests(unittest.TestCase):
 
     def test_timing_example_compares_only_stdout(self):
         self.check_streams([EXAMPLE])
+
+
+class UnsupportedExampleTests(unittest.TestCase):
+    def test_successful_build_without_an_oracle_fails_the_suite(self):
+        unknown = "11-without-oracle"
+        for names in ([unknown], [STD_EXAMPLE, unknown], [unknown, STD_EXAMPLE]):
+            with self.subTest(requested=names), tempfile.TemporaryDirectory() as tmp:
+                fixture = Path(tmp)
+                (fixture / "tools").mkdir()
+                runner = fixture / "tools/run_examples.sh"
+                shutil.copyfile(ROOT / "tools/run_examples.sh", runner)
+                for name in (unknown, STD_EXAMPLE):
+                    directory = fixture / "examples" / name
+                    directory.mkdir(parents=True)
+                    (directory / "program.hy").write_text("fn main() {}\n", encoding="utf-8")
+                (fixture / "examples" / STD_EXAMPLE / "expected.txt").write_text(
+                    STD_EXPECTED, encoding="utf-8")
+                executable = f"#!{sys.executable}\nprint({STD_EXPECTED!r}, end='')\n"
+                builder = fixture / "builder"
+                builder.write_text(
+                    f"#!{sys.executable}\nimport pathlib, sys\n"
+                    "output = pathlib.Path(sys.argv[sys.argv.index('-o') + 1])\n"
+                    f"output.write_text({executable!r}, encoding='utf-8')\n"
+                    "output.chmod(0o755)\n", encoding="utf-8")
+                builder.chmod(0o755)
+                result = subprocess.run(
+                    ["bash", str(runner), *names],
+                    env={**os.environ, "HYB_BIN": str(builder)},
+                    capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(f"FAIL {unknown}", result.stdout)
+                self.assertIn("examples: FAILURES", result.stdout)
+                self.assertNotIn("examples: ALL PASS", result.stdout)
+                if STD_EXAMPLE in names:
+                    self.assertIn(f"PASS {STD_EXAMPLE}", result.stdout)
 
 
 class StandardExampleExitTests(unittest.TestCase):
