@@ -621,6 +621,10 @@ impl<'a> Checker<'a> {
             return;
         }
         let arg = unwrap_parens(&args[0].value);
+        // #2853: a parenthesized callee is the same conversion —
+        // `(int8)(2.5)`, `(int)("abc")`, `([]int)(3)` all reached emission
+        // unchecked because only the bare forms matched.
+        let callee = unwrap_parens(callee);
         // `[]byte("abc")` — a slice type-as-value called with one argument
         // (the standing type-as-value encoding; see hy-emit's conversion
         // branch for the emission half of issue #228).
@@ -638,17 +642,74 @@ impl<'a> Checker<'a> {
         let Expr::Ident { name, .. } = callee else {
             return;
         };
-        if !is_conversion_target(name) {
+        // #2853: resolve the callee before deciding it is a conversion. A
+        // declared function of that name shadows the predeclared type
+        // (`fn int8(x float64) int { ... }` then `int8(2.5)` is an ordinary
+        // call), and a `type` alias resolves to its target
+        // (`type my_i8 = int8; my_i8(2.5)` is the same conversion).
+        let Some(target) = self.conversion_target_name(name) else {
             return;
-        }
-        let Some(c) = conv_const(arg) else {
+        };
+        let Some(c) = self.conv_const_resolved(arg) else {
             return; // non-constant operand: run-time conversion (SPEC X4)
         };
-        self.check_conv_against_target(name, &c, arg, span);
+        self.check_conv_against_target(&target, &c, arg, span);
+    }
+
+    /// #2853 — the predeclared conversion target `name` denotes, or `None` when
+    /// it denotes none. `fns` shadows the predeclared types (a user
+    /// `fn int8(…)` is a plain call, not a conversion), and `type` aliases are
+    /// followed so an aliased conversion gets the same constant checks —
+    /// bounded like `resolve_type_alias`.
+    fn conversion_target_name(&self, name: &str) -> Option<String> {
+        if self.fns.contains_key(name) {
+            return None;
+        }
+        let mut cur = name.to_string();
+        for _ in 0..8 {
+            if is_conversion_target(&cur) {
+                return Some(cur);
+            }
+            let TypeExpr::Named { name: target, .. } = self.type_aliases.get(&cur)? else {
+                return None;
+            };
+            cur = target.clone();
+        }
+        None
+    }
+
+    /// #2853 — `conv_const` extended past direct literals: a named constant
+    /// (`const c = 300; int8(c)`, `const s = "abc"; int(s)`) and a folded
+    /// constant expression (`int8(1.5 + 1.0)`, `float32(1e30 * 1e20)`) reach a
+    /// conversion with the same constant value a literal would. Integer folds
+    /// keep the exact value when it fits `i128`; a fold past `i128` has no
+    /// exact reading here either, so it falls through to the float fold (which
+    /// is what decides the float targets and the `string` 2^512 boundary via
+    /// the literal path).
+    fn conv_const_resolved(&self, e: &Expr) -> Option<ConvConst> {
+        if let Some(c) = conv_const(e) {
+            return Some(c);
+        }
+        if let Expr::Ident { name, .. } = unwrap_parens(e) {
+            if let Some(value) = self.const_values.get(name.as_str()) {
+                return self.conv_const_resolved(value);
+            }
+        }
+        match const_int_fold_with(e, &self.const_values, 0, None) {
+            ConstFold::Val(v) => Some(ConvConst::Int(v)),
+            ConstFold::TooBig | ConstFold::NotConst => {
+                self.const_float_fold(e, None).map(ConvConst::Float)
+            }
+        }
     }
 
     fn check_slice_conversion(&mut self, elem: &TypeExpr, arg: &Expr, span: Span) {
-        let TypeExpr::Named { name: slice_elem, .. } = elem else {
+        // #2853: `type my_byte = byte` then `[]my_byte("abc")` is the legal
+        // string -> []byte conversion, but the element name is an alias, so the
+        // byte/rune test below missed it and rejected a program `go build`
+        // accepts. Resolve first, exactly like the target-name path.
+        let resolved = self.resolve_type_alias(elem);
+        let TypeExpr::Named { name: slice_elem, .. } = &resolved else {
             return; // []T with a non-named element + a run-time operand
         };
         match conv_const(arg) {
@@ -1242,6 +1303,23 @@ pub(crate) fn const_int_fold_with(
             let Expr::Ident { name, .. } = unwrap_parens(callee) else {
                 return ConstFold::NotConst;
             };
+            // #2853: `len(<string constant>)` is a Go constant expression, so
+            // `len("hello") + 125` overflows an `int8` exactly as `130` would.
+            // Only an escape-free literal is folded: the value must be the
+            // emitted byte count, and the raw spelling of a literal that
+            // contains an escape is not that byte count.
+            if name == "len" {
+                if let Expr::Lit {
+                    kind: LitKind::Str(s) | LitKind::RawStr(s),
+                    ..
+                } = unwrap_parens(&args[0].value)
+                {
+                    if !s.contains('\\') {
+                        return ConstFold::Val(s.len() as i128);
+                    }
+                }
+                return ConstFold::NotConst;
+            }
             let Some((lo, hi)) = fixed_width_int_range(name) else {
                 return ConstFold::NotConst;
             };

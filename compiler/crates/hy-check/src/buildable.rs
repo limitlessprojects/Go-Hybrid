@@ -5862,8 +5862,14 @@ impl<'a> Collector<'a> {
                 let arg = &args[0].value;
                 self.check_single_value_position(arg, "a type conversion", false);
                 let ak = self.kind_of_expr(arg);
+                // #2853: classify the RESOLVED element. `type my_byte = byte`
+                // then `[]my_byte("abc")` is the legal string -> []byte
+                // conversion, but the written element name is an alias, so the
+                // byte/rune set missed it and the slice arm below rejected a
+                // program `go build` accepts.
+                let resolved_elem = self.ck.resolve_type_alias(elem_ty);
                 let is_byte_or_rune = matches!(
-                    elem_str.as_str(),
+                    resolved_elem.render().as_str(),
                     "byte" | "uint8" | "u8" | "rune" | "int32" | "i32"
                 );
                 if is_byte_or_rune {
