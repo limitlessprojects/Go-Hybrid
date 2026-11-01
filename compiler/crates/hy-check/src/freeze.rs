@@ -803,6 +803,27 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn define_for_iterate_bindings(&mut self, st: &mut FnState, vars: &[String], expr: &hy_syntax::Expr, managed: bool) {
+        let is_chan = matches!(self.shape_of_expr(st, expr), crate::model::TypeShape::Chan(_));
+        for (name, shape) in vars.iter().zip(self.iterate_var_shapes(st, expr, vars.len())) {
+            let (is_ref, may_share) = (shape.is_reference_alias(), self.shape_may_share(&shape));
+            self.define_binding(st, name, shape, None, false, managed, false);
+            if !is_chan {
+                if may_share {
+                    self.record_may_share(st, name, expr);
+                }
+                if is_ref {
+                    if let Some(root) = expr.root_ident().filter(|r| self.lookup_binding(st, r).is_some()) {
+                        st.aliases.insert(name.clone(), root.to_string());
+                    }
+                }
+                if let Some(b) = st.env_lookup_mut(name) {
+                    b.non_owned_origin = Some(format!("range variable `{}` iterating `{}` (the collection still holds the element)", name, expr.render()));
+                }
+            }
+        }
+    }
+
     fn check_loop_backedge_replay(
         &mut self,
         iter_st: &FnState,
@@ -820,7 +841,10 @@ impl<'a> Checker<'a> {
                     || self.non_owned_origin_of(iter_st, name).is_some()
                     || iter_st.aliases.contains_key(name)
                     || !iter_st.share_group(name).is_empty()
-            });
+            })
+            || !iter_st.borrow_bindings.is_empty()
+            || !iter_st.loans.is_empty()
+            || !iter_st.deferred_calls.is_empty();
         if !has_loop_carried_state {
             return;
         }
@@ -874,20 +898,7 @@ impl<'a> Checker<'a> {
                 if let hy_syntax::Stmt::For { kind, .. } = stmt {
                     match kind {
                         hy_syntax::ForKind::Iterate { vars, expr, .. } => {
-                            let elem = match self.shape_of_expr(&replay_st, expr) {
-                                crate::model::TypeShape::Slice(e) | crate::model::TypeShape::Array(e) => *e,
-                                crate::model::TypeShape::Chan(e) => *e,
-                                crate::model::TypeShape::Map(_, v) => *v,
-                                _ => crate::model::TypeShape::Unknown,
-                            };
-                            for (idx_var, v) in vars.iter().enumerate() {
-                                let shape = if idx_var == 0 && vars.len() > 1 {
-                                    crate::model::TypeShape::Primitive
-                                } else {
-                                    elem.clone()
-                                };
-                                self.define_binding(&mut replay_st, v, shape, None, false, managed, false);
-                            }
+                            self.define_for_iterate_bindings(&mut replay_st, vars, expr, managed);
                         }
                         hy_syntax::ForKind::Range { var, .. } => {
                             self.define_binding(
@@ -913,6 +924,19 @@ impl<'a> Checker<'a> {
             self.check_slot_loan_rebind(&replay_st, stmt);
             self.check_stmt_addr_of_loan_projections(&replay_st, stmt, false);
 
+            let (mut calls, mut stmt_consumes) = (Vec::new(), Vec::new());
+            if let hy_syntax::Stmt::For { kind: hy_syntax::ForKind::Iterate { expr, .. }, .. } = stmt {
+                crate::walk::expr_calls(expr, &mut calls);
+            } else {
+                crate::walk::own_calls(stmt, &mut calls);
+            }
+            for cr in calls {
+                self.process_call(&mut replay_st, &cr, idx, None, &mut stmt_consumes);
+            }
+            if !stmt_consumes.is_empty() {
+                self.check_same_stmt_consumes(&replay_st, &uses, &stmt_consumes);
+            }
+
             match stmt {
                 hy_syntax::Stmt::Local(l) => {
                     self.process_local(&mut replay_st, l, idx, managed);
@@ -929,12 +953,11 @@ impl<'a> Checker<'a> {
                     self.record_assign_borrow_aliases(&mut replay_st, targets, *op, values);
                     self.mark_slot_loans_assign(&mut replay_st, targets, *op, values);
                 }
+                hy_syntax::Stmt::Return { values, span } => {
+                    self.process_return(&mut replay_st, values, *span);
+                }
                 hy_syntax::Stmt::Task { callee, args, span } => {
-                    self.mark_move_in_value(
-                        &mut replay_st,
-                        callee,
-                        format!("the spawn callee `{}`", callee.render()),
-                    );
+                    self.mark_move_in_value(&mut replay_st, callee, format!("the spawn callee `{}`", callee.render()));
                     let desc = format!("the spawn `task {}(...)`", callee.render());
                     let vals: Vec<&hy_syntax::Expr> = args.iter().map(|a| &a.value).collect();
                     let targets = self.spawn_param_shapes(&replay_st, callee, args.len());
@@ -956,11 +979,7 @@ impl<'a> Checker<'a> {
                     is_move,
                     span,
                 } => {
-                    self.mark_move_in_value(
-                        &mut replay_st,
-                        chan,
-                        format!("the send target `{}`", chan.render()),
-                    );
+                    self.mark_move_in_value(&mut replay_st, chan, format!("the send target `{}`", chan.render()));
                     if self.check_send_target(&replay_st, chan, *span) {
                         let desc = if *is_move {
                             format!(
@@ -971,6 +990,7 @@ impl<'a> Checker<'a> {
                         } else {
                             format!("the send `{} <- {}`", chan.render(), value.render())
                         };
+                        let targets = self.chan_elem_shape(&replay_st, chan);
                         self.check_site(
                             &mut replay_st,
                             *span,
@@ -980,10 +1000,25 @@ impl<'a> Checker<'a> {
                             &desc,
                             *is_move,
                             None,
-                            None,
+                            targets.as_deref(),
                         );
                     }
                 }
+                hy_syntax::Stmt::For { kind, .. } => match kind {
+                    hy_syntax::ForKind::Iterate { vars, expr } => {
+                        self.mark_move_in_value(&mut replay_st, expr, format!("the loop header `{}`", expr.render()));
+                        self.define_for_iterate_bindings(&mut replay_st, vars, expr, managed);
+                    }
+                    hy_syntax::ForKind::Range { var, lo, hi, .. } => {
+                        self.mark_move_in_value(&mut replay_st, lo, format!("the range bound `{}`", lo.render()));
+                        self.mark_move_in_value(&mut replay_st, hi, format!("the range bound `{}`", hi.render()));
+                        self.define_binding(&mut replay_st, var, crate::model::TypeShape::Primitive, None, false, managed, false);
+                    }
+                    hy_syntax::ForKind::While { cond } => {
+                        self.mark_move_in_value(&mut replay_st, cond, format!("the loop condition `{}`", cond.render()));
+                    }
+                    hy_syntax::ForKind::Infinite => {}
+                },
                 hy_syntax::Stmt::Select { arms, .. } => {
                     for arm in arms {
                         if let hy_syntax::SelectArmKind::Send {
@@ -1027,8 +1062,19 @@ impl<'a> Checker<'a> {
                                     targets.as_ref().map(|v| &**v),
                                 );
                             }
+                        } else if let hy_syntax::SelectArmKind::Recv { chan, .. } = &arm.kind {
+                            self.mark_move_in_value(&mut replay_st, chan, format!("the select-recv `{}`", chan.render()));
                         }
                     }
+                }
+                hy_syntax::Stmt::Match { subject, arms, .. } => {
+                    self.mark_move_in_value(&mut replay_st, subject, format!("the match subject `{}`", subject.render()));
+                    for g in arms.iter().filter_map(|a| a.guard.as_ref()) {
+                        self.mark_move_in_value(&mut replay_st, g, format!("the match guard `{}`", g.render()));
+                    }
+                }
+                hy_syntax::Stmt::If { cond, .. } | hy_syntax::Stmt::Expr { expr: cond, .. } => {
+                    self.mark_move_in_value(&mut replay_st, cond, format!("the expression `{}`", cond.render()));
                 }
                 hy_syntax::Stmt::Defer { call, .. } => {
                     self.mark_move_in_value(
@@ -1036,6 +1082,11 @@ impl<'a> Checker<'a> {
                         call,
                         format!("the deferred call `defer {}`", call.render()),
                     );
+                    let arg_borrows = match crate::model::unwrap_parens(call) {
+                        Expr::Call { args, .. } => args.iter().map(|a| self.expr_is_return_borrow(&replay_st, &a.value)).collect(),
+                        _ => Vec::new(),
+                    };
+                    replay_st.deferred_calls.push((call.clone(), arg_borrows));
                 }
                 _ => {}
             }
@@ -1048,7 +1099,7 @@ impl<'a> Checker<'a> {
 
         let new_diags = self.diags.split_off(diags_len_before);
         for d in new_diags {
-            if d.code == "HYB-E3003" || d.code == "HYB-E3004" || d.code == "HYB-E3104" {
+            if matches!(d.code.as_str(), "HYB-E3003" | "HYB-E3004" | "HYB-E3101" | "HYB-E3102" | "HYB-E3104") {
                 if !self
                     .diags
                     .iter()
