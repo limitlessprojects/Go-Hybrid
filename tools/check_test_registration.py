@@ -111,6 +111,8 @@ def registered_discoveries(workflow_text):
     for arguments in python_commands(workflow_text):
         if arguments[:3] != ["-m", "unittest", "discover"]:
             continue
+        if any(re.match(r"^-[vqbfc]*k", argument) for argument in arguments[3:]):
+            continue
         start, pattern = ".", None
         for index, argument in enumerate(arguments[3:], 3):
             if argument in ("-s", "--start-directory") and index + 1 < len(arguments):

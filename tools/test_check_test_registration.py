@@ -121,6 +121,23 @@ class PatternExtractionTests(unittest.TestCase):
             "python3 -m unittest discover -s tools -p test_disabled.py -p test_live.py\n"),
             ["test_live.py"])
 
+    def test_k_filtered_discovery_does_not_register_pattern(self):
+        for filtered in (
+            "python3 -m unittest discover -s tools -p test_live.py -k never_matches\n",
+            "python3 -m unittest discover -s tools -p test_live.py -knever_matches\n",
+            "python3 -m unittest discover -s tools -p test_live.py -vknever_matches\n",
+            "python3 -m unittest discover -s tools -p test_live.py -qk never_matches\n",
+            "python3 -m unittest discover -s tools -p test_live.py -k test_one -k test_two\n",
+        ):
+            with self.subTest(filtered=filtered):
+                self.assertEqual(guard.registered_patterns(filtered), [])
+                self.assertEqual(
+                    guard.registered_patterns(
+                        filtered + "python3 -m unittest discover -s tools -p test_live.py\n"
+                    ),
+                    ["test_live.py"],
+                )
+
 
 class RegistrationTests(unittest.TestCase):
     def build(self, workflow, suites):
@@ -294,6 +311,35 @@ class RegistrationTests(unittest.TestCase):
             ["tools/test_failing.py", "tests/test_direct.py"])
         self.assertEqual(guard.unregistered(root, and_workflow), [])
 
+    def test_filtered_discovery_skips_failing_test_and_guard_rejects_it(self):
+        workflow = "python3 -m unittest discover -s tools -p test_live.py -k never_matches\n"
+        root, text = self.build(workflow, ["tools/test_live.py"])
+        (root / "tools/test_live.py").write_text(
+            "import unittest\n"
+            "class Tests(unittest.TestCase):\n"
+            "    def test_pass(self): pass\n"
+            "    def test_failure(self): self.fail('must run')\n",
+            encoding="utf-8",
+        )
+        command = [sys.executable, "-m", "unittest", "discover", "-s", "tools", "-p", "test_live.py"]
+        filtered_zero = subprocess.run(
+            command + ["-k", "never_matches"], cwd=root, capture_output=True, text=True, timeout=15
+        )
+        filtered_pass = subprocess.run(
+            command + ["-k", "test_pass"], cwd=root, capture_output=True, text=True, timeout=15
+        )
+        complete = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=15)
+        self.assertIn(filtered_zero.returncode, (0, 5), filtered_zero.stderr)
+        self.assertIn("Ran 0 tests", filtered_zero.stderr)
+        self.assertEqual(filtered_pass.returncode, 0, filtered_pass.stderr)
+        self.assertIn("Ran 1 test", filtered_pass.stderr)
+        self.assertNotEqual(complete.returncode, 0)
+        self.assertIn("must run", complete.stderr)
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text)], ["tools/test_live.py"])
+        self.assertEqual(
+            guard.unregistered(root, text + "python3 -m unittest discover -s tools -p test_live.py\n"),
+            [],
+        )
 
 
 class GuardMisuseTests(unittest.TestCase):
