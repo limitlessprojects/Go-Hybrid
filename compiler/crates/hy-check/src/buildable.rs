@@ -3181,11 +3181,31 @@ impl<'a> Collector<'a> {
             _ => return,
         };
         for extra in &args[1..] {
-            // `append(a, b...)` — a variadic spread passes the whole slice, so
-            // the argument's kind is the SLICE type, not an element. Go accepts
-            // it (for a matching element type), so it must not be compared
-            // against the element kind.
+            // `append(a, b...)` — a variadic spread passes the whole slice (or
+            // a string when appending to []byte), so the argument's kind is the
+            // SLICE type, not an element. Go accepts it only if b is a slice
+            // whose element type is assignable to the target slice's element
+            // type (or a string if the target is []byte / []uint8).
             if extra.spread {
+                let got = self.kind_of_expr(&extra.value);
+                let ok = match &got {
+                    OpKind::Unknown => true,
+                    OpKind::Slice(other_elem) => !kinds_conflict(&elem, other_elem),
+                    OpKind::Str => matches!(elem, OpKind::Unknown | OpKind::Int),
+                    _ => false,
+                };
+                if !ok {
+                    self.emit_e1002(
+                        extra.value.span(),
+                        format!(
+                            "cannot use spread `{}` (type `{}`) in append to `{}` (HYB-E1002)",
+                            extra.value.render(),
+                            got.label(),
+                            self.kind_of_expr(&first.value).label()
+                        ),
+                        "append with `...` requires a slice with matching element type (or a string when appending to []byte)",
+                    );
+                }
                 continue;
             }
             let got = self.kind_of_expr(&extra.value);
