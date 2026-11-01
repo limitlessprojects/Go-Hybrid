@@ -135,10 +135,7 @@ impl<'a> Checker<'a> {
         if depth > 16 {
             return true;
         }
-        if shape.is_reference_alias()
-            || shape.is_handle()
-            || matches!(shape, TypeShape::Closure)
-        {
+        if shape.is_reference_alias() || shape.is_handle() || matches!(shape, TypeShape::Closure) {
             return true;
         }
         match shape {
@@ -371,34 +368,33 @@ impl<'a> Checker<'a> {
                     // check-site. The pointee is inferred when the type argument
                     // resolves; otherwise Unknown — still a non-sendable pointer.
                     "new" => {
-                        let pointee = match args
-                            .first()
-                            .map(|a| crate::model::unwrap_parens(&a.value))
-                        {
-                            // `new(pool_stats)` / `new((pool_stats))` / `new(alias)` — the
-                            // argument is a type name, not a value; resolve structs, type
-                            // aliases, primitives, and foreign types via `named_shape`.
-                            Some(Expr::Ident { name, .. }) => self.named_shape(name),
-                            Some(Expr::Field { base, name, .. }) => {
-                                if let Expr::Ident { name: pkg, .. } =
-                                    crate::model::unwrap_parens(base)
-                                {
-                                    self.named_shape(&format!("{}.{}", pkg, name))
-                                } else {
-                                    TypeShape::Unknown
+                        let pointee =
+                            match args.first().map(|a| crate::model::unwrap_parens(&a.value)) {
+                                // `new(pool_stats)` / `new((pool_stats))` / `new(alias)` — the
+                                // argument is a type name, not a value; resolve structs, type
+                                // aliases, primitives, and foreign types via `named_shape`.
+                                Some(Expr::Ident { name, .. }) => self.named_shape(name),
+                                Some(Expr::Field { base, name, .. }) => {
+                                    if let Expr::Ident { name: pkg, .. } =
+                                        crate::model::unwrap_parens(base)
+                                    {
+                                        self.named_shape(&format!("{}.{}", pkg, name))
+                                    } else {
+                                        TypeShape::Unknown
+                                    }
                                 }
-                            }
-                            Some(Expr::Index { base, .. }) => {
-                                if let Expr::Ident { name, .. } = crate::model::unwrap_parens(base)
-                                {
-                                    self.named_shape(name)
-                                } else {
-                                    TypeShape::Unknown
+                                Some(Expr::Index { base, .. }) => {
+                                    if let Expr::Ident { name, .. } =
+                                        crate::model::unwrap_parens(base)
+                                    {
+                                        self.named_shape(name)
+                                    } else {
+                                        TypeShape::Unknown
+                                    }
                                 }
-                            }
-                            Some(other) => self.shape_of_expr(st, other),
-                            None => TypeShape::Unknown,
-                        };
+                                Some(other) => self.shape_of_expr(st, other),
+                                None => TypeShape::Unknown,
+                            };
                         TypeShape::Pointer(Box::new(pointee))
                     }
                     _ => {
@@ -764,11 +760,39 @@ impl<'a> Checker<'a> {
                     .and_then(|fs| fs.iter().find(|(n, _)| n == name))
                     .map(|(_, t)| t.clone())
             }
+            Expr::Receive { chan, .. } => {
+                let chan_ty = self.ty_of_expr(st, chan)?;
+                match self.resolve_type_alias(&chan_ty) {
+                    TypeExpr::Chan { elem, .. } => Some((*elem).clone()),
+                    _ => None,
+                }
+            }
             Expr::Index { base, .. } => {
                 let base_ty = self.ty_of_expr(st, base)?;
                 match self.resolve_type_alias(&base_ty) {
                     TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => Some(*elem),
                     TypeExpr::Map { value, .. } => Some(*value),
+                    TypeExpr::Pointer { to, .. } => match self.resolve_type_alias(&to) {
+                        TypeExpr::Array { elem, .. } => Some(*elem),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }
+            Expr::Slice { base, span, .. } => {
+                let base_ty = self.ty_of_expr(st, base)?;
+                match self.resolve_type_alias(&base_ty) {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+                        Some(TypeExpr::Slice { elem, span: *span })
+                    }
+                    TypeExpr::Pointer { to, .. } => match self.resolve_type_alias(&to) {
+                        TypeExpr::Array { elem, .. } => Some(TypeExpr::Slice { elem, span: *span }),
+                        _ => None,
+                    },
+                    TypeExpr::Named { name, .. } if name == "string" => Some(TypeExpr::Named {
+                        name: "string".to_string(),
+                        span: *span,
+                    }),
                     _ => None,
                 }
             }
@@ -841,10 +865,20 @@ impl<'a> Checker<'a> {
                         });
                     }
                     if name == "make" {
-                        return args.first().and_then(|a| self.ty_of_expr(st, &a.value));
+                        let first = args.first()?;
+                        return match crate::model::unwrap_parens(&first.value) {
+                            Expr::Ident { name, span } if self.type_aliases.contains_key(name) => {
+                                Some(TypeExpr::Named {
+                                    name: name.clone(),
+                                    span: *span,
+                                })
+                            }
+                            _ => self.ty_of_expr(st, &first.value),
+                        };
                     }
                     if args.len() == 1 {
-                        let is_type_name = crate::const_overflow::fixed_width_int_range(name).is_some()
+                        let is_type_name = crate::const_overflow::fixed_width_int_range(name)
+                            .is_some()
                             || crate::const_init::is_conversion_type_name(name)
                             || self.type_aliases.contains_key(name);
                         if is_type_name && !self.fns.contains_key(name.as_str()) {
@@ -972,7 +1006,8 @@ impl<'a> Checker<'a> {
                         | hy_syntax::BinOp::BitOr
                         | hy_syntax::BinOp::BitXor
                 ) {
-                    self.ty_of_expr(st, lhs).or_else(|| self.ty_of_expr(st, rhs))
+                    self.ty_of_expr(st, lhs)
+                        .or_else(|| self.ty_of_expr(st, rhs))
                 } else {
                     None
                 }
@@ -1312,7 +1347,14 @@ impl<'a> Checker<'a> {
                     .get(&(recv_base, head.to_string()))
                     .map(|f| f.results.iter().map(|r| r.ty.clone()).collect())
             }
-            _ => None,
+            other => {
+                if let Some(ty) = self.ty_of_expr(st, other) {
+                    if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&ty) {
+                        return Some(results);
+                    }
+                }
+                None
+            }
         }
     }
 
@@ -1375,8 +1417,17 @@ impl<'a> Checker<'a> {
         let v = crate::model::unwrap_parens(value);
         if n_names == 2 {
             if let Expr::Index { base, .. } = v {
-                if let Some(TypeExpr::Map { value: val_ty, .. }) = self.ty_of_expr(st, base) {
-                    return vec![Some(*val_ty), None];
+                if let Some(base_ty) = self.ty_of_expr(st, base) {
+                    if let TypeExpr::Map { value: val_ty, .. } = self.resolve_type_alias(&base_ty) {
+                        return vec![Some(*val_ty), None];
+                    }
+                }
+            }
+            if let Expr::Receive { chan, .. } = v {
+                if let Some(chan_ty) = self.ty_of_expr(st, chan) {
+                    if let TypeExpr::Chan { elem, .. } = self.resolve_type_alias(&chan_ty) {
+                        return vec![Some(*elem), None];
+                    }
                 }
             }
         }
@@ -1392,11 +1443,7 @@ impl<'a> Checker<'a> {
                     results.len()
                 };
                 if avail == n_names {
-                    return results
-                        .into_iter()
-                        .take(n_names)
-                        .map(Some)
-                        .collect();
+                    return results.into_iter().take(n_names).map(Some).collect();
                 }
             }
         }
