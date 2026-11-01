@@ -1,3 +1,4 @@
+- Draft contributor validation (2026-10-29, #1944): Windows descendant-timeout cleanup and pre-spawn deadline validation checked; Linux and upstream CI pending. Original report credit remains with @linkinsider-work.
 # STATUS (for the human — 15 lines max)
 
 - Contributor (2026-11-01): PR #2400 integrated with main `7e770ea`; pinned Linux workspace 2097/2097, corpus 130/130, differential 42/42 + 88/88 and all 12 local stages pass. Tested code/lockfile unchanged by final documentation. Hosted CI for the refreshed head, review and any award remain pending. See PLAN.md.

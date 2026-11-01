@@ -1,3 +1,5 @@
+- Contributor validation (2026-10-29, issue #1944): scoped descendant cancellation and pre-spawn deadline validation. Windows regressions and a three-version malformed-timeout comparison pass; full Linux/Go/Rust/corpus/differential and upstream CI remain required. Original report: @linkinsider-work; compare the alternative in #1945.
+
 # Hybrid Language: Development Plan
 
 ## Contributor validation — Go build constraints (2026-10-31)
