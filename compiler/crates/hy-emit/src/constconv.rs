@@ -240,6 +240,27 @@ impl WideInt {
         Self(out)
     }
 
+    fn bit_not(self) -> Self {
+        Self(self.0.map(|w| !w))
+    }
+
+    fn cmp_signed(self, other: Self) -> std::cmp::Ordering {
+        if self.is_neg() != other.is_neg() {
+            return if self.is_neg() {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            };
+        }
+        for i in (0..8).rev() {
+            let ord = self.0[i].cmp(&other.0[i]);
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        std::cmp::Ordering::Equal
+    }
+
     fn truncate_to_width(self, bits: u32, signed: bool) -> i128 {
         let low = (self.0[0] as u128) as i128;
         let len = 1i128 << bits;
@@ -252,15 +273,49 @@ impl WideInt {
     }
 }
 
+fn const_str_len(expr: &hy_syntax::Expr) -> Option<i128> {
+    use hy_syntax::{BinOp, Expr};
+    match expr {
+        Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } => const_str_len(inner),
+        Expr::Lit {
+            kind: LitKind::Str(s) | LitKind::RawStr(s),
+            ..
+        } => Some(s.len() as i128),
+        Expr::Binary {
+            op: BinOp::Add,
+            lhs,
+            rhs,
+            ..
+        } => const_str_len(lhs)?.checked_add(const_str_len(rhs)?),
+        _ => None,
+    }
+}
+
+fn is_int_conv_name(name: &str) -> Option<(u32, bool)> {
+    if let Some(w) = width_of(name) {
+        return Some(w);
+    }
+    match name {
+        "int" | "isize" => Some((64, true)),
+        "uint" | "usize" | "uintptr" => Some((64, false)),
+        _ => None,
+    }
+}
+
 fn const_int_expr(expr: &hy_syntax::Expr) -> Option<WideInt> {
     use hy_syntax::{BinOp, Expr, UnOp};
     match expr {
-        Expr::Paren { inner, .. } => const_int_expr(inner),
+        Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } => const_int_expr(inner),
         Expr::Unary {
             op: UnOp::Neg,
             operand,
             ..
         } => const_int_expr(operand)?.checked_neg(),
+        Expr::Unary {
+            op: UnOp::BitNot,
+            operand,
+            ..
+        } => Some(const_int_expr(operand)?.bit_not()),
         Expr::Lit {
             kind: LitKind::Int(t),
             ..
@@ -286,6 +341,42 @@ fn const_int_expr(expr: &hy_syntax::Expr) -> Option<WideInt> {
                 _ => None,
             }
         }
+        Expr::Call { callee, args, .. } => {
+            let mut bare = callee.as_ref();
+            while let Expr::Paren { inner, .. } = bare {
+                bare = inner;
+            }
+            let Expr::Ident { name, .. } = bare else {
+                return None;
+            };
+            if args.len() == 1 {
+                if let Some((bits, signed)) = is_int_conv_name(name) {
+                    if bits <= 64 {
+                        let inner = const_int_expr(&args[0].value)?;
+                        return Some(WideInt::from_i128(inner.truncate_to_width(bits, signed)));
+                    }
+                }
+                if name == "len" {
+                    return const_str_len(&args[0].value).map(WideInt::from_i128);
+                }
+            }
+            if !args.is_empty() && (name == "min" || name == "max") {
+                let mut best = const_int_expr(&args[0].value)?;
+                for a in &args[1..] {
+                    let cur = const_int_expr(&a.value)?;
+                    let take = if name == "min" {
+                        cur.cmp_signed(best).is_lt()
+                    } else {
+                        cur.cmp_signed(best).is_gt()
+                    };
+                    if take {
+                        best = cur;
+                    }
+                }
+                return Some(best);
+            }
+            None
+        }
         _ => None,
     }
 }
@@ -300,12 +391,25 @@ fn has_out_of_range_subexpr(expr: &hy_syntax::Expr, bits: u32, signed: bool) -> 
         return true;
     }
     match expr {
-        Expr::Paren { inner, .. } | Expr::Unary { operand: inner, .. } => {
-            has_out_of_range_subexpr(inner, bits, signed)
-        }
+        Expr::Paren { inner, .. }
+        | Expr::Move { operand: inner, .. }
+        | Expr::Unary { operand: inner, .. } => has_out_of_range_subexpr(inner, bits, signed),
         Expr::Binary { lhs, rhs, .. } => {
             has_out_of_range_subexpr(lhs, bits, signed)
                 || has_out_of_range_subexpr(rhs, bits, signed)
+        }
+        Expr::Call { callee, args, .. } => {
+            let mut bare = callee.as_ref();
+            while let Expr::Paren { inner, .. } = bare {
+                bare = inner;
+            }
+            if let Expr::Ident { name, .. } = bare {
+                if is_int_conv_name(name).is_some() {
+                    return true;
+                }
+            }
+            args.iter()
+                .any(|a| has_out_of_range_subexpr(&a.value, bits, signed))
         }
         _ => false,
     }
