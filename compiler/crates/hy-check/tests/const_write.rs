@@ -1217,3 +1217,104 @@ fn trailing_dot_float_and_errors_wrap_check_clean_issues_657_659() {
     assert_eq!(r657.verdict, Verdict::Accept, "{:?}", r657.diagnostics);
 }
 
+
+#[test]
+fn const_write_rejects_indirect_and_aliased_fn_calls_issue_1363() {
+    // 1. Slice-indexed function call mutating a const slice
+    let r_slice = check(
+        r#"const c = []int{1, 2}
+fn touch(xs []int) { xs[0] = 9 }
+fn main() {
+    fs := []fn(xs []int){touch}
+    fs[0](c)
+}
+"#,
+    );
+    assert_eq!(r_slice.verdict, Verdict::Reject, "{:?}", codes(&r_slice));
+    assert!(codes(&r_slice).iter().any(|c| c == "HYB-E3006"), "{:?}", codes(&r_slice));
+
+    // 2. Map-indexed function call mutating a const slice
+    let r_map = check(
+        r#"const c = []int{1, 2}
+fn touch(xs []int) { xs[0] = 9 }
+fn main() {
+    fm := map[string]fn(xs []int){"k": touch}
+    fm["k"](c)
+}
+"#,
+    );
+    assert_eq!(r_map.verdict, Verdict::Reject, "{:?}", codes(&r_map));
+    assert!(codes(&r_map).iter().any(|c| c == "HYB-E3006"), "{:?}", codes(&r_map));
+
+    // 3. Returned function call mutating a const slice
+    let r_ret = check(
+        r#"const c = []int{1, 2}
+fn touch(xs []int) { xs[0] = 9 }
+fn pick() fn(xs []int) { return touch }
+fn main() {
+    pick()(c)
+}
+"#,
+    );
+    assert_eq!(r_ret.verdict, Verdict::Reject, "{:?}", codes(&r_ret));
+    assert!(codes(&r_ret).iter().any(|c| c == "HYB-E3006"), "{:?}", codes(&r_ret));
+
+    // 4. Channel-received function call mutating a const slice
+    let r_chan = check(
+        r#"const c = []int{1, 2}
+fn touch(xs []int) { xs[0] = 9 }
+fn run(ch <-chan fn(xs []int)) {
+    (<-ch)(c)
+}
+fn main() {}
+"#,
+    );
+    assert_eq!(r_chan.verdict, Verdict::Reject, "{:?}", codes(&r_chan));
+    assert!(codes(&r_chan).iter().any(|c| c == "HYB-E3006"), "{:?}", codes(&r_chan));
+
+    // 5. Struct field and type-aliased function taking *T auto-addressing a const struct
+    let r_ptr = check(
+        r#"struct item { v int }
+struct runner { f fn(p *item) }
+type mut_fn = fn(p *item)
+const c = item{ v: 1 }
+fn touch(p *item) { p.v = 2 }
+fn main() {
+    r := runner{ f: touch }
+    r.f(c)
+    var f mut_fn = touch
+    f(c)
+}
+"#,
+    );
+    assert_eq!(r_ptr.verdict, Verdict::Reject, "{:?}", codes(&r_ptr));
+    assert_eq!(
+        codes(&r_ptr).iter().filter(|c| *c == "HYB-E3006").count(),
+        2,
+        "{:?}",
+        codes(&r_ptr)
+    );
+
+    // 6. Control: indirect calls with mutable arguments check cleanly
+    let r_ok = check(
+        r#"type mut_fn = fn(p *item)
+struct item { v int }
+struct runner { f fn(p *item) }
+fn touch_slice(xs []int) { xs[0] = 9 }
+fn touch_item(p *item) { p.v = 2 }
+fn pick() fn(xs []int) { return touch_slice }
+fn main() {
+    xs := []int{1, 2}
+    fs := []fn(xs []int){touch_slice}
+    fs[0](xs)
+    pick()(xs)
+    it := item{ v: 1 }
+    r := runner{ f: touch_item }
+    r.f(it)
+    var f mut_fn = touch_item
+    f(it)
+}
+"#,
+    );
+    assert_eq!(r_ok.verdict, Verdict::Accept, "{:?}", r_ok.diagnostics);
+}
