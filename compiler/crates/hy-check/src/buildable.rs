@@ -5207,6 +5207,31 @@ impl<'a> Collector<'a> {
         }
         // For slices, arrays, and strings, the index must be an integer.
         self.check_single_value_position(index, "an index expression", /*binding_position=*/ false);
+        // #2753: untyped `nil` is never a valid index. For a slice/array/string
+        // it is an integer-position violation (`use of untyped nil in index`);
+        // for a map it is only assignable when the key type is nilable
+        // (`cannot use nil as int value in map index`). `nil` resolves to
+        // `OpKind::Unknown`, so every integer/index check below fails open.
+        if Checker::is_nil_literal(index) {
+            let reject = match bk {
+                OpKind::Map(key_kind, _) => is_non_nilable(key_kind),
+                OpKind::Slice(_) | OpKind::Array(_) | OpKind::Str => true,
+                OpKind::Pointer(inner) if matches!(**inner, OpKind::Array(_)) => true,
+                _ => false, // unknown base — stay fail-open
+            };
+            if reject {
+                self.emit_e1002(
+                    index.span(),
+                    format!(
+                        "cannot use `nil` as an index on `{}` — Go refuses `use of untyped nil in index` / `cannot use nil as {} value in map index` (HYB-E1002)",
+                        base_str,
+                        bk.label()
+                    ),
+                    "untyped `nil` is not a valid index: slice, array, and string indices must be integers, and a map key must have a nilable type",
+                );
+            }
+            return;
+        }
         if let OpKind::Map(key_kind, _) = bk {
             if **key_kind != OpKind::Unknown
                 && *ik != OpKind::Unknown
@@ -5383,6 +5408,17 @@ impl<'a> Collector<'a> {
         for (idx, bound_opt) in [lo, hi].into_iter().enumerate() {
             let Some(bound) = bound_opt else { continue };
             self.check_single_value_position(bound, "a slice bound", /*binding_position=*/ false);
+            // #2753: an untyped `nil` slice bound is `use of untyped nil in
+            // slice index` in Go (`nil` resolves to `Unknown`, so the integer
+            // check below fails open).
+            if Checker::is_nil_literal(bound) {
+                self.emit_e1002(
+                    bound.span(),
+                    "cannot use `nil` as a slice bound — Go refuses `use of untyped nil in slice index` (HYB-E1002)".to_string(),
+                    "slice bounds must be integers; untyped `nil` is not",
+                );
+                continue;
+            }
             let k = self.kind_of_expr(bound);
             if !matches!(k, OpKind::Unknown | OpKind::Int | OpKind::Void) {
                 self.emit_e1002(
