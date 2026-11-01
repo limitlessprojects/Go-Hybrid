@@ -346,5 +346,185 @@ class GuardMisuseTests(unittest.TestCase):
     def test_start_directory_escaping_repo_root_is_rejected(self):
         self.assertEqual(self.run_main("python3 -m unittest discover -s .. -p 'test_*.py'\n", ["tools/test_x.py"]), 1)
 
+
+class OptionValueConsumptionTests(unittest.TestCase):
+    """#1333: a consumed option value is not re-read as another option.
+
+    The old scan loop peeked at `arguments[index + 1]` while still iterating
+    over every token, so the value of `-s`/`-p` was parsed a second time as
+    though it were an option of its own.
+    """
+
+    @staticmethod
+    def discoveries(command):
+        return guard.registered_discoveries("          " + command + "\n")
+
+    def test_flag_is_never_read_as_the_start_directory(self):
+        self.assertEqual(
+            self.discoveries("python3 -m unittest discover -s -p test_foo.py"), [])
+
+    def test_flag_is_never_read_as_the_pattern(self):
+        self.assertEqual(
+            self.discoveries("python3 -m unittest discover -s tools -p -v"), [])
+
+    def test_missing_trailing_value_is_not_invented(self):
+        self.assertEqual(
+            self.discoveries("python3 -m unittest discover -s tools -p"), [])
+        self.assertEqual(
+            self.discoveries("python3 -m unittest discover -s"), [])
+
+    def test_discovery_without_a_pattern_keeps_unittests_default(self):
+        # `unittest discover -s tools` really does run test*.py, so the files
+        # it reaches are registered even when the workflow omits -p.
+        self.assertEqual(
+            self.discoveries("python3 -m unittest discover -s tools"),
+            [("tools", guard.DEFAULT_DISCOVER_PATTERN)])
+        self.assertEqual(
+            self.discoveries("python3 -m unittest discover"),
+            [(".", guard.DEFAULT_DISCOVER_PATTERN)])
+
+    def test_top_level_directory_value_does_not_become_a_pattern(self):
+        self.assertEqual(
+            self.discoveries(
+                "python3 -m unittest discover -t tools -s tools -p test_x.py"),
+            [("tools", "test_x.py")])
+        self.assertEqual(
+            self.discoveries("python3 -m unittest discover -s tools -t ."),
+            [("tools", guard.DEFAULT_DISCOVER_PATTERN)])
+
+    def test_equal_form_options_still_pair_with_their_directory(self):
+        self.assertEqual(
+            self.discoveries("python3 -m unittest discover "
+                             "--start-directory=tools/fuzz --pattern=test_hyfuzz.py"),
+            [("tools/fuzz", "test_hyfuzz.py")])
+
+    def test_registration_follows_the_default_pattern(self):
+        with tempfile.TemporaryDirectory(prefix="hybrid-guard-") as temporary:
+            root = Path(temporary)
+            (root / "tools").mkdir()
+            (root / "tools" / "test_x.py").write_text("# suite\n", encoding="utf-8")
+            workflow = "python3 -m unittest discover -s tools\n"
+            self.assertEqual(guard.unregistered(root, workflow), [])
+            # unittest would not descend into a plain subdirectory either, so
+            # the guard must not credit the default pattern with reaching it.
+            (root / "tools" / "plain").mkdir()
+            (root / "tools" / "plain" / "test_deep.py").write_text("# suite\n", encoding="utf-8")
+            self.assertEqual(
+                [rel for rel, _ in guard.unregistered(root, workflow)],
+                ["tools/plain/test_deep.py"])
+
+
+class InterpreterOptionTests(unittest.TestCase):
+    """#1333: `-W`/`-X`/`--check-hash-based-pycs` take a value or they lie."""
+
+    @staticmethod
+    def commands(line):
+        return list(guard.python_commands("          " + line + "\n"))
+
+    def test_valueless_dash_w_does_not_register_its_script(self):
+        # `python3 -W -u tests/test_live.py` is an interpreter error, not a
+        # test run: the old slice swallowed the flag pair and kept the path.
+        self.assertEqual(
+            self.commands("python3 -W -u tests/test_live.py"), [])
+        self.assertEqual(
+            self.commands("python3 -X"), [])
+
+    def test_dash_w_with_its_value_still_runs_the_script(self):
+        self.assertEqual(
+            self.commands("python3 -W ignore tests/test_live.py"),
+            [["tests/test_live.py"]])
+        self.assertEqual(
+            self.commands("python3 -X dev tests/test_live.py"),
+            [["tests/test_live.py"]])
+
+    def test_long_option_with_inline_value_is_consumed(self):
+        self.assertEqual(
+            self.commands("python3 --check-hash-based-pycs=always tests/test_live.py"),
+            [["tests/test_live.py"]])
+
+
+class ScriptPathNormalizationTests(unittest.TestCase):
+    """#1333: equivalent spellings of the invoked path must agree."""
+
+    REL = "tests/test_install_runtime.py"
+
+    def registered(self, invoked):
+        return guard.is_registered_direct(self.REL, "          python3 " + invoked + "\n")
+
+    def test_inner_dot_segment_names_the_same_script(self):
+        self.assertTrue(self.registered("tests/./test_install_runtime.py"))
+
+    def test_doubled_separator_names_the_same_script(self):
+        self.assertTrue(self.registered("tests//test_install_runtime.py"))
+
+    def test_redundant_leading_dot_slash_names_the_same_script(self):
+        self.assertTrue(self.registered("./tests/test_install_runtime.py"))
+
+    def test_plain_path_still_names_the_script(self):
+        self.assertTrue(self.registered("tests/test_install_runtime.py"))
+
+    def test_parent_traversal_does_not_name_the_script(self):
+        self.assertFalse(self.registered("tests/../tests/test_install_runtime.py"))
+
+    def test_interpreter_token_never_names_a_script(self):
+        self.assertFalse(self.registered("-c tests/test_install_runtime.py"))
+        self.assertFalse(guard.is_registered_direct(
+            self.REL, "          python3 -m unittest\n"))
+
+    def test_guard_rejects_a_malformed_committed_path(self):
+        self.assertFalse(guard.is_registered_direct("../outside.py", "          python3 x\n"))
+
+
+class GuardMisuseExitCodeTests(unittest.TestCase):
+    """#1333: misuse is exit 2 with a message, never a traceback."""
+
+    def run_argv(self, argv):
+        original = guard.sys.argv
+        guard.sys.argv = ["check_test_registration.py", *argv]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()) as err:
+                return guard.main(), err.getvalue()
+        finally:
+            guard.sys.argv = original
+
+    def test_missing_workflow_exits_two(self):
+        with tempfile.TemporaryDirectory(prefix="hybrid-guard-") as temporary:
+            root = Path(temporary)
+            (root / "tools").mkdir()
+            code, err = self.run_argv(["--workflow", str(root / "nope.yml"),
+                                       "--root", str(root)])
+            self.assertEqual(code, 2)
+            self.assertIn("REGISTRATION CHECK ERROR", err)
+
+    def test_directory_as_workflow_exits_two(self):
+        with tempfile.TemporaryDirectory(prefix="hybrid-guard-") as temporary:
+            root = Path(temporary)
+            (root / "tools").mkdir()
+            code, err = self.run_argv(["--workflow", str(root), "--root", str(root)])
+            self.assertEqual(code, 2)
+            self.assertIn("REGISTRATION CHECK ERROR", err)
+
+    def test_undecodable_workflow_exits_two(self):
+        with tempfile.TemporaryDirectory(prefix="hybrid-guard-") as temporary:
+            root = Path(temporary)
+            (root / "tools").mkdir()
+            path = root / "ci.yml"
+            path.write_bytes(b"\xff\xfe not utf-8 at all\n")
+            code, err = self.run_argv(["--workflow", str(path), "--root", str(root)])
+            self.assertEqual(code, 2)
+            self.assertIn("REGISTRATION CHECK ERROR", err)
+
+    def test_root_that_is_not_a_directory_exits_two(self):
+        with tempfile.TemporaryDirectory(prefix="hybrid-guard-") as temporary:
+            workflow = Path(temporary) / "ci.yml"
+            workflow.write_text("python3 -m unittest discover -s tools -p test_x.py\n",
+                                encoding="utf-8")
+            for bad in (Path(temporary) / "missing", workflow):
+                code, err = self.run_argv(["--workflow", str(workflow), "--root", str(bad)])
+                self.assertEqual(code, 2)
+                self.assertIn("REGISTRATION CHECK ERROR", err)
+
+
 if __name__ == "__main__":
     unittest.main()
