@@ -135,17 +135,22 @@ impl<'a> Checker<'a> {
                         };
                     }
                 }
-                if let Some(root) = base.root_ident() {
-                    let recv = self.shape_of_expr(st, base);
-                    let root_span = root_ident_span(base).unwrap_or_else(|| base.span());
-                    return Resolved::Method {
-                        root: root.to_string(),
-                        root_span,
-                        method: name.clone(),
-                        recv,
-                    };
-                }
-                Resolved::None
+                    let resolved_root = base.root_ident().map(|s| s.to_string()).or_else(|| {
+                        let mut roots = Vec::new();
+                        collect_ref_roots(base, &mut roots);
+                        roots.into_iter().find(|r| self.lookup_binding(st, r).is_some())
+                    });
+                    if let Some(root) = resolved_root {
+                        let recv = self.shape_of_expr(st, base);
+                        let root_span = root_ident_span(base).unwrap_or_else(|| base.span());
+                        return Resolved::Method {
+                            root,
+                            root_span,
+                            method: name.clone(),
+                            recv,
+                        };
+                    }
+                    Resolved::None
             }
             Expr::Ident { name, .. } => Resolved::Fn { name: name.clone() },
             _ => Resolved::None,
@@ -177,42 +182,55 @@ impl<'a> Checker<'a> {
                         // across the whole loop when iterating a view
                         self.lend_handle_args(st, cr, idx, loop_end);
                     }
-                    CallMode::Mutate => {
-                        for a in cr.args {
-                            if let Some(root) = a.value.root_ident() {
+                        CallMode::Mutate => {
+                            for a in cr.args {
+                                let mut roots: Vec<String> = Vec::new();
+                                if let Some(r) = a.value.root_ident() {
+                                    roots.push(r.to_string());
+                                } else {
+                                    collect_ref_roots(&a.value, &mut roots);
+                                }
                                 let arg_is_handle = self.shape_of_expr(st, &a.value).is_handle();
-                                let active_handle = self
-                                    .lookup_binding(st, root)
-                                    .map(|b| (b.shape.is_handle() || arg_is_handle) && b.moved.is_none())
-                                    .unwrap_or(false);
-                                if active_handle {
-                                    self.check_a2_conflict(st, cr, root, idx);
+                                for root in &roots {
+                                    let active_handle = self
+                                        .lookup_binding(st, root)
+                                        .map(|b| (b.shape.is_handle() || arg_is_handle) && b.moved.is_none())
+                                        .unwrap_or(false);
+                                    if active_handle {
+                                        self.check_a2_conflict(st, cr, root, idx);
+                                    }
                                 }
                             }
                         }
-                    }
-                    CallMode::Consume => {
-                        for a in cr.args {
-                            if let Some(root) = a.value.root_ident() {
+                        CallMode::Consume => {
+                            for a in cr.args {
+                                let mut roots: Vec<String> = Vec::new();
+                                if let Some(r) = a.value.root_ident() {
+                                    roots.push(r.to_string());
+                                } else {
+                                    collect_ref_roots(&a.value, &mut roots);
+                                }
                                 let arg_is_handle = self.shape_of_expr(st, &a.value).is_handle();
-                                let active_handle = self
-                                    .lookup_binding(st, root)
-                                    .map(|b| (b.shape.is_handle() || arg_is_handle) && b.moved.is_none())
-                                    .unwrap_or(false);
-                                if active_handle {
-                                    let rspan = root_ident_span(&a.value).unwrap_or(a.span);
-                                    self.mark_move(
-                                        st,
-                                        root,
-                                        cr.span,
-                                        format!("the consuming call `{}`", cr.callee.render()),
-                                        MoveKind::Consumed,
-                                    );
-                                    stmt_consumes.push((rspan, cr.span));
+                                for root in &roots {
+                                    let active_handle = self
+                                        .lookup_binding(st, root)
+                                        .map(|b| (b.shape.is_handle() || arg_is_handle) && b.moved.is_none())
+                                        .unwrap_or(false);
+                                    if active_handle {
+                                        let rspan = root_ident_span(&a.value).unwrap_or(a.span);
+                                        self.check_non_owned_move(st, root, cr.span);
+                                        self.mark_move(
+                                            st,
+                                            root,
+                                            cr.span,
+                                            format!("the consuming call `{}`", cr.callee.render()),
+                                            MoveKind::Consumed,
+                                        );
+                                        stmt_consumes.push((rspan, cr.span));
+                                    }
                                 }
                             }
                         }
-                    }
                     _ => {}
                 }
             }
@@ -298,17 +316,18 @@ impl<'a> Checker<'a> {
                     CallMode::Mutate => {
                         self.check_a2_conflict(st, cr, &root, idx);
                     }
-                    CallMode::Consume => {
-                        // A7: own-transfer INTO the API — receiver moved-from
-                        self.mark_move(
-                            st,
-                            &root,
-                            cr.span,
-                            format!("the consuming call `{}`", cr.callee.render()),
-                            MoveKind::Consumed,
-                        );
-                        stmt_consumes.push((root_span, cr.span));
-                    }
+                        CallMode::Consume => {
+                            // A7: own-transfer INTO the API — receiver moved-from
+                            self.check_non_owned_move(st, &root, cr.span);
+                            self.mark_move(
+                                st,
+                                &root,
+                                cr.span,
+                                format!("the consuming call `{}`", cr.callee.render()),
+                                MoveKind::Consumed,
+                            );
+                            stmt_consumes.push((root_span, cr.span));
+                        }
                     _ => {}
                 }
             }
