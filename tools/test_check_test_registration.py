@@ -296,6 +296,70 @@ class RegistrationTests(unittest.TestCase):
 
 
 
+class HelpOnlyDiscoveryTests(unittest.TestCase):
+    def test_help_only_invocation_does_not_register_a_pattern(self):
+        for flag in ("-h", "--help"):
+            with self.subTest(flag=flag):
+                self.assertEqual(guard.registered_discoveries(
+                    "python3 -m unittest discover -s tools -p test_live.py "
+                    + flag + "\n"), [])
+
+    def test_real_help_command_skips_failing_module_and_guard_rejects_it(self):
+        with tempfile.TemporaryDirectory(prefix="hybrid-help-only-") as temporary:
+            root = Path(temporary)
+            (root / "tools").mkdir()
+            (root / "tools/test_live.py").write_text(
+                "raise AssertionError('test module actually executed')\n",
+                encoding="utf-8")
+            command = [sys.executable, "-m", "unittest", "discover",
+                       "-s", "tools", "-p", "test_live.py"]
+            control = subprocess.run(command, cwd=root, capture_output=True,
+                                     text=True, timeout=15)
+            self.assertNotEqual(control.returncode, 0)
+            self.assertIn("test module actually executed", control.stderr)
+            for flag in ("-h", "--help"):
+                with self.subTest(flag=flag):
+                    help_run = subprocess.run(command + [flag], cwd=root,
+                                              capture_output=True, text=True,
+                                              timeout=15)
+                    self.assertEqual(help_run.returncode, 0, help_run.stderr)
+                    self.assertNotIn("test module actually executed",
+                                     help_run.stdout + help_run.stderr)
+                    workflow = ("python3 -m unittest discover -s tools "
+                                "-p test_live.py " + flag + "\n")
+                    self.assertEqual(
+                        [rel for rel, _ in guard.unregistered(root, workflow)],
+                        ["tools/test_live.py"])
+
+    def test_real_guard_cli_does_not_certify_help_only_workflow(self):
+        with tempfile.TemporaryDirectory(prefix="hybrid-help-cli-") as temporary:
+            root = Path(temporary)
+            (root / "tools").mkdir()
+            (root / "tools/test_live.py").write_text("# fixture\n", encoding="utf-8")
+            workflow = root / "ci.yml"
+            for flag in ("-h", "--help"):
+                with self.subTest(flag=flag):
+                    workflow.write_text(
+                        "run: python3 -m unittest discover -s tools "
+                        "-p test_live.py " + flag + "\n", encoding="utf-8")
+                    result = subprocess.run(
+                        [sys.executable, str(Path(guard.__file__).resolve()),
+                         "--workflow", str(workflow), "--root", str(root)],
+                        capture_output=True, text=True, timeout=15)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn("test registration: OK", result.stdout)
+            # A help command does not invalidate a separate real invocation.
+            workflow.write_text(
+                "run: python3 -m unittest discover -s tools -p test_live.py --help\n"
+                "run: python3 -m unittest discover -s tools -p test_live.py\n",
+                encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(Path(guard.__file__).resolve()),
+                 "--workflow", str(workflow), "--root", str(root)],
+                capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
 class GuardMisuseTests(unittest.TestCase):
     def run_main(self, workflow, suites=()):
         """Run the real main() against a throwaway workflow/root pair."""
