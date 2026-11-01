@@ -4036,7 +4036,17 @@ impl<'a> Collector<'a> {
         // rejecting the count.
         if values.len() == 1 {
             if let Expr::Call { callee, args, .. } = unwrap_parens(&values[0]) {
-                if let Some(res) = self.call_result_kinds(callee, args) {
+                // #2901: index / call-result callees now resolve their result
+                // kinds, but a count mismatch there is already reported by the
+                // T23 pass (HYB-E2002), so only the positional comparison is
+                // used for them; a mismatch falls through as before.
+                let indirect = matches!(unwrap_parens(callee), Expr::Index { .. } | Expr::Call { .. });
+                let fn_results_error_tail = self.fn_results_error_tail;
+                if let Some(res) = self.call_result_kinds(callee, args).filter(|res| {
+                    !indirect
+                        || res.len() == want.len()
+                        || (!res.is_empty() && fn_results_error_tail && res.len() + 1 == want.len())
+                }) {
                     let res_scalars = self.call_result_scalars(callee, args);
                     if res.len() == want.len() {
                         for (i, (r, w)) in res.iter().zip(want.iter()).enumerate() {
