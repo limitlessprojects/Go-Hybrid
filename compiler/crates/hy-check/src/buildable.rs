@@ -1741,6 +1741,19 @@ impl<'a> Collector<'a> {
                             }
                             self.bind_kind(v, k);
                         }
+                        // #2712: ranging over a string yields a `rune`
+                        // (`int32`) element; the last binding is the element
+                        // (`for c in s` lowers to `for _, c := range s`), so
+                        // `var b u8 = c` or `take_u8(c)` must not pass.
+                        if matches!(self.kind_of_expr(expr), OpKind::Str) {
+                            if let Some(ev) = vars.last() {
+                                if ev != "_" {
+                                    if let Some(top) = self.int_ty_scopes.last_mut() {
+                                        top.insert(ev.clone(), Some("int32"));
+                                    }
+                                }
+                            }
+                        }
                     }
                     ForKind::Infinite => {}
                 }
@@ -3753,6 +3766,28 @@ impl<'a> Collector<'a> {
                     ),
                     "argument types must match declared parameter types",
                 );
+                continue;
+            }
+            // #2712: an explicitly typed integer argument of another concrete
+            // integer type (`take(c)` with `c` an `i32`, param `u8`).
+            if let TypeExpr::Named { name: pn, .. } = &p.ty {
+                if let Some(pt) = canonical_int_ty(pn) {
+                    if let Some(at) = self.int_ty_of_expr(&a.value) {
+                        if at != pt {
+                            self.emit_e1002(
+                                a.value.span(),
+                                format!(
+                                    "cannot use `{}` (variable of type `{}`) as `{}` value in argument to `{}` (HYB-E1002)",
+                                    a.value.render(),
+                                    at,
+                                    pt,
+                                    name
+                                ),
+                                "integer types of different width or signedness do not mix; convert explicitly, e.g. `u8(c)`",
+                            );
+                        }
+                    }
+                }
             }
         }
     }
