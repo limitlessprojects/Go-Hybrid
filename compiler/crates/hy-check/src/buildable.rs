@@ -251,9 +251,25 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         // Cannot convert from Float, Bool, Map, Chan, Struct.
         (Str, Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
 
-        // Slice target: can convert from Str (to []byte/[]rune), or Slice/Array.
+        // Slice target: can convert from Str (to []byte/[]rune, i.e. element kind Int), or Slice/Array of identical element kind.
         // Cannot convert from Int, Float, Bool, Map, Chan, Struct.
         (Slice(_), Int | Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
+        (Slice(t_elem), Str) => {
+            !matches!(**t_elem, Unknown | Int)
+        }
+        (Slice(t_elem), Slice(a_elem)) => {
+            !matches!(**t_elem, Unknown) && !matches!(**a_elem, Unknown) && t_elem != a_elem
+        }
+        (Slice(t_elem), Array(a_elem)) => {
+            !matches!(**t_elem, Unknown) && !matches!(**a_elem, Unknown) && t_elem != a_elem
+        }
+        (Array(t_elem), Slice(a_elem)) => {
+            !matches!(**t_elem, Unknown) && !matches!(**a_elem, Unknown) && t_elem != a_elem
+        }
+        (Array(t_elem), Array(a_elem)) => {
+            !matches!(**t_elem, Unknown) && !matches!(**a_elem, Unknown) && t_elem != a_elem
+        }
+        (Array(_), Int | Float | Bool | Str | Map(_, _) | Chan(_) | Struct(_)) => true,
 
         // Map target: cannot convert from Int, Float, Bool, Str, Slice, Chan, Struct.
         (Map(_, _), Int | Float | Bool | Str | Slice(_) | Chan(_) | Struct(_)) => true,
@@ -3831,6 +3847,25 @@ impl<'a> Collector<'a> {
                             ),
                             "array type conversions require a slice or array operand",
                         );
+                    } else if let Some((_, inner_elem, _)) = bare.as_array_lit() {
+                        let target_elem_k = self.kind_of_ty(inner_elem, 0);
+                        if let OpKind::Slice(arg_elem) | OpKind::Array(arg_elem) = &ak {
+                            if !matches!(target_elem_k, OpKind::Unknown)
+                                && !matches!(**arg_elem, OpKind::Unknown)
+                                && target_elem_k != **arg_elem
+                            {
+                                self.emit_e1002(
+                                    arg.span(),
+                                    format!(
+                                        "cannot convert `{}` (type `{}`) to `{}`: element types must be identical (HYB-E1002)",
+                                        arg.render(),
+                                        ak.label(),
+                                        target_str
+                                    ),
+                                    "array type conversions require the operand slice or array to have the identical element type",
+                                );
+                            }
+                        }
                     }
                     return;
                 }
@@ -3868,6 +3903,23 @@ impl<'a> Collector<'a> {
                             ),
                             "`[]byte` and `[]rune` conversions require a string or compatible slice operand",
                         );
+                    } else if let OpKind::Slice(arg_elem) = &ak {
+                        let target_elem_k = self.kind_of_ty(elem_ty, 0);
+                        if !matches!(target_elem_k, OpKind::Unknown)
+                            && !matches!(**arg_elem, OpKind::Unknown)
+                            && target_elem_k != **arg_elem
+                        {
+                            self.emit_e1002(
+                                arg.span(),
+                                format!(
+                                    "cannot convert `{}` (type `{}`) to `{}`: element types must be identical (HYB-E1002)",
+                                    arg.render(),
+                                    ak.label(),
+                                    target_str
+                                ),
+                                "slice type conversions require the operand slice to have the identical element type",
+                            );
+                        }
                     }
                 } else if !matches!(ak, OpKind::Unknown | OpKind::Slice(_)) {
                     self.emit_e1002(
@@ -3880,6 +3932,23 @@ impl<'a> Collector<'a> {
                         ),
                         "slice type conversions require a string (for `[]byte`/`[]rune`) or compatible slice operand",
                     );
+                } else if let OpKind::Slice(arg_elem) = &ak {
+                    let target_elem_k = self.kind_of_ty(elem_ty, 0);
+                    if !matches!(target_elem_k, OpKind::Unknown)
+                        && !matches!(**arg_elem, OpKind::Unknown)
+                        && target_elem_k != **arg_elem
+                    {
+                        self.emit_e1002(
+                            arg.span(),
+                            format!(
+                                "cannot convert `{}` (type `{}`) to `{}`: element types must be identical (HYB-E1002)",
+                                arg.render(),
+                                ak.label(),
+                                target_str
+                            ),
+                            "slice type conversions require the operand slice to have the identical element type",
+                        );
+                    }
                 }
             }
             Expr::Ident { name, .. } => {
