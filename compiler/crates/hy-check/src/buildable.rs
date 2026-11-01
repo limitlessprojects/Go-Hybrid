@@ -498,6 +498,13 @@ struct Collector<'a> {
     /// `kind_scopes`. `set[T]` has no OpKind (it lowers to a prelude
     /// struct), so without this its element type was never checked (#2474).
     set_elem_scopes: Vec<HashMap<String, Option<String>>>,
+    /// Fn-valued bindings -> their declared parameters, scoped like
+    /// `kind_scopes`. `OpKind::Fn` only carries the parameter COUNT, so a
+    /// call through a closure local or fn-typed parameter (`f := fn(x int)
+    /// int {...}; f("a")`) had its arity checked but never its argument
+    /// types, and Go refuses `cannot use "a" ... as int value in argument
+    /// to f` (Row 13 BUILDABLE).
+    fn_param_scopes: Vec<HashMap<String, Option<Vec<Param>>>>,
     /// One layer per open scope, tracking `for ... in` element bindings
     /// whose kind is copy-semantics storage (`struct`/`array`). The emitter
     /// lowers them to Go's `for _, x := range xs`, so writes through the
@@ -565,6 +572,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             kind_scopes: Vec::new(),
             type_name_scopes: Vec::new(),
             set_elem_scopes: Vec::new(),
+            fn_param_scopes: Vec::new(),
             copy_var_scopes: Vec::new(),
             file_consts: HashMap::new(),
             file_untyped_consts: HashSet::new(),
@@ -634,6 +642,7 @@ impl<'a> Collector<'a> {
         self.type_name_scopes.push(HashMap::new());
         self.scalar_scopes.push(HashMap::new());
         self.set_elem_scopes.push(HashMap::new());
+        self.fn_param_scopes.push(HashMap::new());
         self.copy_var_scopes.push(HashSet::new());
     }
 
@@ -643,6 +652,7 @@ impl<'a> Collector<'a> {
         self.type_name_scopes.pop();
         self.scalar_scopes.pop();
         self.set_elem_scopes.pop();
+        self.fn_param_scopes.pop();
         self.copy_var_scopes.pop();
     }
 
@@ -714,6 +724,52 @@ impl<'a> Collector<'a> {
             if let Some(top) = self.set_elem_scopes.last_mut() {
                 top.insert(name.to_string(), None);
             }
+            // Likewise for fn-valued bindings: callers that know the
+            // declared parameters record them via bind_fn_params.
+            if let Some(top) = self.fn_param_scopes.last_mut() {
+                top.insert(name.to_string(), None);
+            }
+        }
+    }
+
+    fn bind_fn_params(&mut self, name: &str, params: Option<Vec<Param>>) {
+        if name != "_" && params.is_some() {
+            if let Some(top) = self.fn_param_scopes.last_mut() {
+                top.insert(name.to_string(), params);
+            }
+        }
+    }
+
+    fn lookup_fn_params(&self, name: &str) -> Option<Vec<Param>> {
+        for layer in self.fn_param_scopes.iter().rev() {
+            if let Some(p) = layer.get(name) {
+                return p.clone();
+            }
+        }
+        None
+    }
+
+    /// The declared parameters of a fn-valued binding, when they can be
+    /// trusted: a `fn(...)`-typed declaration or a fn-literal initializer,
+    /// outside any generic signature (a type parameter would make the
+    /// parameter types instantiation-dependent).
+    fn fn_params_of(
+        &self,
+        ty: Option<&TypeExpr>,
+        value: Option<&Expr>,
+        generic: bool,
+    ) -> Option<Vec<Param>> {
+        if generic {
+            return None;
+        }
+        match ty {
+            Some(TypeExpr::Fn { params, .. }) => return Some(params.clone()),
+            Some(_) => return None,
+            None => {}
+        }
+        match value.map(unwrap_parens) {
+            Some(Expr::FnLit { params, .. }) => Some(params.clone()),
+            _ => None,
         }
     }
 
@@ -1289,6 +1345,7 @@ impl<'a> Collector<'a> {
             };
             self.bind_kind(&r.name, rk);
         }
+        let generic_sig = !f.type_params.is_empty() || !self.fn_type_params.is_empty();
         for p in &f.params {
             self.exempt(&p.name);
             let pk = self.kind_of_ty(&p.ty, 0);
@@ -1296,6 +1353,8 @@ impl<'a> Collector<'a> {
             let ps = self.scalar_of_ty(&p.ty);
             self.set_scalar(&p.name, ps);
             self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
+            let fp = self.fn_params_of(Some(&p.ty), None, generic_sig);
+            self.bind_fn_params(&p.name, fp);
             self.bind_type_name(&p.name, p.ty.render());
         }
         for r in &f.results {
@@ -1498,6 +1557,17 @@ impl<'a> Collector<'a> {
                 _ => None,
             })
             .collect();
+        let generic = !self.fn_type_params.is_empty();
+        let fn_params: Vec<Option<Vec<Param>>> = (0..l.names.len())
+            .map(|i| {
+                let v = if l.values.len() == l.names.len() {
+                    Some(&l.values[i])
+                } else {
+                    None
+                };
+                self.fn_params_of(l.ty.as_ref(), v, generic)
+            })
+            .collect();
         if let Some(t) = &l.ty {
             let tname = t.render();
             for name in &l.names {
@@ -1510,8 +1580,13 @@ impl<'a> Collector<'a> {
                 }
             }
         }
-        for (((name, kind), scalar), set_elem) in
-            l.names.iter().zip(kinds).zip(scalars).zip(set_elems)
+        for ((((name, kind), scalar), set_elem), fn_param) in l
+            .names
+            .iter()
+            .zip(kinds)
+            .zip(scalars)
+            .zip(set_elems)
+            .zip(fn_params)
         {
             // #1031: a same-scope `:=` re-define keeps the EXISTING variable
             // (and its type) in Go, so only a fresh binding takes the
@@ -1525,6 +1600,11 @@ impl<'a> Collector<'a> {
                 self.set_scalar(name, scalar);
             }
             self.bind_set_elem(name, set_elem);
+            // #1031 rule: a same-scope `:=` re-define keeps the existing
+            // variable, so only a fresh (or typed) binding records params.
+            if fresh || l.ty.is_some() {
+                self.bind_fn_params(name, fn_param);
+            }
             if !track_read {
                 self.exempt(name);
                 continue;
@@ -2260,6 +2340,9 @@ impl<'a> Collector<'a> {
                     let ps = self.scalar_of_ty(&p.ty);
                     self.set_scalar(&p.name, ps);
                     self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
+                    let generic = !self.fn_type_params.is_empty();
+                    let fp = self.fn_params_of(Some(&p.ty), None, generic);
+                    self.bind_fn_params(&p.name, fp);
                     self.bind_type_name(&p.name, p.ty.render());
                 }
                 for r in results {
@@ -3860,7 +3943,12 @@ impl<'a> Collector<'a> {
         if f.params.len() != args.len() {
             return;
         }
-        for (p, a) in f.params.iter().zip(args.iter()) {
+        self.check_arg_types_against(name, &f.params, args);
+    }
+
+    /// Per-argument type check shared by declared fns and fn-valued locals.
+    fn check_arg_types_against(&mut self, name: &str, params: &[Param], args: &[CallArg]) {
+        for (p, a) in params.iter().zip(args.iter()) {
             let want = self.kind_of_ty(&p.ty, 0);
             let got = self.kind_of_expr(&a.value);
             if let OpKind::Pointer(inner) = &want {
@@ -5925,6 +6013,15 @@ impl<'a> Collector<'a> {
                         // checkable (#577 C9).
                         OpKind::Fn(_, Some(want)) if want != args.len() => {
                             self.report_local_arity(name, want, args.len(), span)
+                        }
+                        // Same count: the argument types are checkable too
+                        // when the binding's declared parameters are known.
+                        OpKind::Fn(_, Some(_)) if self.multi_value_arg_count(args).is_none() => {
+                            if let Some(params) = self.lookup_fn_params(name) {
+                                if params.len() == args.len() {
+                                    self.check_arg_types_against(name, &params, args);
+                                }
+                            }
                         }
                         OpKind::Fn(..) | OpKind::Unknown => {}
                         _ => self.emit_e1002(
