@@ -1093,6 +1093,28 @@ impl<'a> Checker<'a> {
                 );
                 false
             }
+            TypeShape::RecvOnlyChan(elem) => {
+                // Foreign stubs that return receive-only channels (`time.after`
+                // — the deadline pattern) carry the direction HERE, at the
+                // shape level: the binding has no declared `<-chan T` type, so
+                // the TypeExpr direction check in the `Chan` arm above never
+                // fires. A send on such a channel is invalid Go (`invalid
+                // operation: cannot send to receive-only channel`) and would
+                // emit unbuildable Go.
+                let msg = format!(
+                    "cannot send to `{}` (recv-only chan `{}`) — this channel is receive-only (HYB-E3007)",
+                    chan.render(),
+                    elem.render()
+                );
+                let notes = vec![
+                    "why: APIs like `time.after` return a `<-chan T` receive-only channel; a send on it is invalid Go, so an accepted Hybrid program would emit unbuildable Go".to_string(),
+                    "fix: receive from it instead — `v := <-deadline`, a select recv arm, or `for v in deadline` (the deadline pattern is receive-only by design)".to_string(),
+                ];
+                self.diags.push(
+                    Diagnostic::error("HYB-E3007", self.path.clone(), span, msg).with_notes(notes),
+                );
+                false
+            }
             other => {
                 let msg = format!(
                     "cannot send to `{}` ({}) — a send target must be a channel (O4)",
