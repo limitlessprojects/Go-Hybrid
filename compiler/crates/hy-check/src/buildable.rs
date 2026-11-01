@@ -263,10 +263,10 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         // Chan target: cannot convert from Int, Float, Bool, Str, Slice, Map, Struct.
         (Chan(_), Int | Float | Bool | Str | Slice(_) | Map(_, _) | Struct(_)) => true,
 
-        // Pointer targets and arguments: Go only converts between pointers.
+        // Pointer targets and arguments: Go only converts between pointers with compatible base types.
         // A pointer cannot convert to or from any non-pointer type; the one
         // exception is an interface target (`any(p)`), handled above.
-        (Pointer(_), Pointer(_)) => false,
+        (Pointer(p1), Pointer(p2)) => kinds_conflict(p1, p2),
         (Pointer(_), Interface) => false,
         (Pointer(_), _) | (_, Pointer(_)) => true,
 
@@ -372,6 +372,7 @@ struct Collector<'a> {
     slice_elem_scopes: Vec<HashMap<String, &'static str>>,
     map_key_scopes: Vec<HashMap<String, &'static str>>,
     chan_elem_scopes: Vec<HashMap<String, &'static str>>,
+    pointer_base_scopes: Vec<HashMap<String, &'static str>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
     /// File-level `const` declared numeric scalar types.
@@ -415,6 +416,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             slice_elem_scopes: Vec::new(),
             map_key_scopes: Vec::new(),
             chan_elem_scopes: Vec::new(),
+            pointer_base_scopes: Vec::new(),
             file_consts: HashMap::new(),
             file_const_scalars: HashMap::new(),
             fn_results: Vec::new(),
@@ -486,6 +488,7 @@ impl<'a> Collector<'a> {
         self.slice_elem_scopes.push(HashMap::new());
         self.map_key_scopes.push(HashMap::new());
         self.chan_elem_scopes.push(HashMap::new());
+        self.pointer_base_scopes.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
@@ -495,6 +498,7 @@ impl<'a> Collector<'a> {
         self.slice_elem_scopes.pop();
         self.map_key_scopes.pop();
         self.chan_elem_scopes.pop();
+        self.pointer_base_scopes.pop();
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -698,6 +702,47 @@ impl<'a> Collector<'a> {
             if let TypeExpr::Chan { elem, .. } = resolved {
                 return self.scalar_of_ty(&self.ck.resolve_type_alias(&elem));
             }
+        }
+        None
+    }
+
+    fn bind_pointer_base_scalar(&mut self, name: &str, scalar: &'static str) {
+        if name != "_" {
+            if let Some(top) = self.pointer_base_scopes.last_mut() {
+                top.insert(name.to_string(), scalar);
+            }
+        }
+    }
+
+    fn lookup_pointer_base_scalar(&self, name: &str) -> Option<&'static str> {
+        for layer in self.pointer_base_scopes.iter().rev() {
+            if let Some(s) = layer.get(name) {
+                return Some(*s);
+            }
+        }
+        None
+    }
+
+    fn pointer_base_scalar(&self, e: &Expr) -> Option<&'static str> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => self.lookup_pointer_base_scalar(name),
+            Expr::AddrOf { operand, .. } => self.expr_scalar_type(operand),
+            _ => None,
+        }
+    }
+
+    fn pointer_base_scalar_of_type_name(&self, name: &str) -> Option<&'static str> {
+        let base = Checker::base_named_type_str(name);
+        if let Some(target) = self.ck.type_aliases.get(base) {
+            let resolved = self.ck.resolve_type_alias(target);
+            if let TypeExpr::Pointer { to, .. } = resolved {
+                return self.scalar_of_ty(&self.ck.resolve_type_alias(&to));
+            }
+        }
+        if let Some(stripped) = name.strip_prefix('*') {
+            let elem_base = Checker::base_named_type_str(stripped);
+            return canonical_numeric_scalar(elem_base);
         }
         None
     }
@@ -1062,6 +1107,10 @@ impl<'a> Collector<'a> {
                 if let Some(sc) = self.scalar_of_ty(&self.ck.resolve_type_alias(elem)) {
                     self.bind_chan_elem_scalar(&p.name, sc);
                 }
+            } else if let TypeExpr::Pointer { to, .. } = &resolved {
+                if let Some(sc) = self.scalar_of_ty(&self.ck.resolve_type_alias(to)) {
+                    self.bind_pointer_base_scalar(&p.name, sc);
+                }
             }
         }
         for r in &f.results {
@@ -1247,6 +1296,12 @@ impl<'a> Collector<'a> {
                         self.bind_chan_elem_scalar(name, sc);
                     }
                 }
+            } else if let TypeExpr::Pointer { to, .. } = &resolved {
+                if let Some(sc) = self.scalar_of_ty(&self.ck.resolve_type_alias(to)) {
+                    for name in &l.names {
+                        self.bind_pointer_base_scalar(name, sc);
+                    }
+                }
             }
         } else if l.names.len() == l.values.len() {
             for (name, v) in l.names.iter().zip(l.values.iter()) {
@@ -1261,6 +1316,9 @@ impl<'a> Collector<'a> {
                 }
                 if let Some(sc) = self.chan_elem_scalar(v) {
                     self.bind_chan_elem_scalar(name, sc);
+                }
+                if let Some(sc) = self.pointer_base_scalar(v) {
+                    self.bind_pointer_base_scalar(name, sc);
                 }
             }
         }
@@ -2698,6 +2756,24 @@ impl<'a> Collector<'a> {
                             t_sc
                         ),
                         "in Go, converting between slice types requires identical element types",
+                    );
+                }
+            }
+        } else if matches!(k, OpKind::Pointer(_)) && matches!(arg_k, OpKind::Pointer(_)) {
+            let target_base_sc = self.pointer_base_scalar_of_type_name(name);
+            let arg_base_sc = self.pointer_base_scalar(arg);
+            if let (Some(t_sc), Some(a_sc)) = (target_base_sc, arg_base_sc) {
+                if t_sc != a_sc {
+                    self.emit_e1002(
+                        arg.span(),
+                        format!(
+                            "cannot convert `{}` (type `*{}`) to type `{}` (base type `{}`) (HYB-E1002)",
+                            arg.render(),
+                            a_sc,
+                            name,
+                            t_sc
+                        ),
+                        "in Go, converting between pointer types requires identical base types",
                     );
                 }
             }
