@@ -383,6 +383,23 @@ impl<'a> Checker<'a> {
                     }
                     return TypeShape::Unknown;
                 }
+                let head = Self::base_named_type_str(name);
+                if let Some(f) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
+                    let subst = self.fn_call_shape_subst(st, f, name, None, args);
+                    return f
+                        .results
+                        .first()
+                        .map(|r| self.shape_of_type_with_subst(&r.ty, &subst, 0))
+                        .unwrap_or(TypeShape::Unknown);
+                }
+                if args.len() == 1
+                    && (self.type_aliases.contains_key(name.as_str())
+                        || self.type_aliases.contains_key(head)
+                        || self.structs.contains_key(name.as_str())
+                        || self.structs.contains_key(head))
+                {
+                    return self.named_shape(name);
+                }
                 match name.as_str() {
                     // `make(chan T, n)` — defensive against parser spellings of
                     // the type argument; defaults Unknown (fail-closed at
@@ -931,6 +948,21 @@ impl<'a> Checker<'a> {
                         }
                         return None;
                     }
+                    let head = Self::base_named_type_str(name);
+                    if let Some(f) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
+                        return f.results.first().map(|r| r.ty.clone());
+                    }
+                    if args.len() == 1
+                        && (self.type_aliases.contains_key(name.as_str())
+                            || self.type_aliases.contains_key(head)
+                            || self.structs.contains_key(name.as_str())
+                            || self.structs.contains_key(head))
+                    {
+                        return Some(TypeExpr::Named {
+                            name: name.clone(),
+                            span: *span,
+                        });
+                    }
                     if name == "some" {
                         let elem = args
                             .first()
@@ -955,19 +987,14 @@ impl<'a> Checker<'a> {
                         let is_type_name = crate::const_overflow::fixed_width_int_range(name).is_some()
                             || crate::const_init::is_conversion_type_name(name)
                             || self.type_aliases.contains_key(name);
-                        if is_type_name && !self.fns.contains_key(name.as_str()) {
+                        if is_type_name {
                             return Some(TypeExpr::Named {
                                 name: name.clone(),
                                 span: *span,
                             });
                         }
                     }
-                    let head = Self::base_named_type_str(name);
-                    self.fns
-                        .get(name.as_str())
-                        .or_else(|| self.fns.get(head))
-                        .and_then(|f| f.results.first())
-                        .map(|r| r.ty.clone())
+                    None
                 }
                 Expr::Field { base, name, .. } => {
                     let head = Self::base_named_type_str(name);
