@@ -127,6 +127,16 @@ impl<'a> Checker<'a> {
                         && self.expr_is_constant_inner(&args[0].value, st, visiting, ref_depth);
                 }
                 if args.len() != 1 || args[0].spread {
+                    // `complex(re, im)` is the one two-argument built-in Go
+                    // admits in a constant expression (§Constant
+                    // expressions); every other arity/shape stays run-time.
+                    if ty_name == "complex" && !self.type_aliases.contains_key("complex") {
+                        return args.len() == 2
+                            && !args[0].spread
+                            && !args[1].spread
+                            && self.expr_is_constant_inner(&args[0].value, st, visiting, ref_depth)
+                            && self.expr_is_constant_inner(&args[1].value, st, visiting, ref_depth);
+                    }
                     return false;
                 }
                 if ty_name == "len" {
@@ -137,6 +147,22 @@ impl<'a> Checker<'a> {
                         && self.is_const_string_expr(&args[0].value, st, ref_depth);
                 }
                 if !self.is_const_conversion_target(ty_name) {
+                    // `real(z)` / `imag(z)` are constants when `z` is one
+                    // (same builtins list as `complex` under §Constant
+                    // expressions).  `cap` is deliberately NOT allowed: a
+                    // constant argument cannot name an array/slice value in
+                    // the shapes Hybrid emits, so it is never a Go constant.
+                    if ty_name == "real" || ty_name == "imag" {
+                        if self.type_aliases.contains_key(ty_name) {
+                            return false;
+                        }
+                        return self.expr_is_constant_inner(
+                            &args[0].value,
+                            st,
+                            visiting,
+                            ref_depth,
+                        );
+                    }
                     return false;
                 }
                 self.expr_is_constant_inner(&args[0].value, st, visiting, ref_depth)
@@ -369,7 +395,13 @@ mod tests {
     fn conversion_type_names_cover_go_builtins() {
         assert!(is_conversion_type_name("int8"));
         assert!(is_conversion_type_name("byte"));
+        assert!(is_conversion_type_name("complex64"));
+        assert!(is_conversion_type_name("complex128"));
         assert!(!is_conversion_type_name("get_val"));
         assert!(!is_conversion_type_name("fmt"));
+        assert!(!is_conversion_type_name("complex"));
+        assert!(!is_conversion_type_name("real"));
+        assert!(!is_conversion_type_name("imag"));
+        assert!(!is_conversion_type_name("cap"));
     }
 }
