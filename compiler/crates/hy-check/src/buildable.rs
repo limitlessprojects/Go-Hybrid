@@ -918,6 +918,7 @@ impl<'a> Collector<'a> {
         let Some(body) = &f.body else { return };
         self.push_scope();
         if let Some(r) = &f.receiver {
+            self.ty(&r.ty);
             self.exempt(&r.name);
             let rk = self.kind_of_ty(&r.ty, 0);
             let rk = if r.is_pointer {
@@ -928,12 +929,14 @@ impl<'a> Collector<'a> {
             self.bind_kind(&r.name, rk);
         }
         for p in &f.params {
+            self.ty(&p.ty);
             self.exempt(&p.name);
             let pk = self.kind_of_ty(&p.ty, 0);
             self.bind_kind(&p.name, pk);
             self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
         }
         for r in &f.results {
+            self.ty(&r.ty);
             if let Some(rname) = &r.name {
                 self.exempt(rname);
                 let rk = self.kind_of_ty(&r.ty, 0);
@@ -1046,6 +1049,7 @@ impl<'a> Collector<'a> {
         // A typed declaration must accept its initializers — Go refuses
         // `cannot use ... as ... value in variable declaration`.
         if let Some(t) = &l.ty {
+            self.ty(t);
             let want = self.kind_of_ty(t, 0);
             if l.values.len() == 1 && l.names.len() == 1 {
                 let vk = self.kind_of_expr(&l.values[0]);
@@ -1783,6 +1787,7 @@ impl<'a> Collector<'a> {
                 entries,
                 ..
             } => {
+                self.check_map_key_comparable(key);
                 self.ty(key);
                 self.ty(value);
                 self.check_value_position_type_name(key);
@@ -1877,6 +1882,7 @@ impl<'a> Collector<'a> {
                 self.ty(elem);
             }
             TypeExpr::Map { key, value, .. } => {
+                self.check_map_key_comparable(key);
                 self.ty(key);
                 self.ty(value);
             }
@@ -2940,6 +2946,36 @@ impl<'a> Collector<'a> {
 
     /// #577 C9 — a closure or `fn`-typed value whose declared parameter count
     /// is known (`f := fn(x int) int {...}; f(1, 2)`).
+    fn check_map_key_comparable(&mut self, key: &TypeExpr) {
+        let kk = self.kind_of_ty(key, 0);
+        if self.is_uncomparable_key_kind(&kk) || self.is_uncomparable_type_expr(key) {
+            self.emit_e1002(
+                key.span(),
+                format!(
+                    "invalid map key type `{}` — Go refuses uncomparable map key types (slices, maps, functions) (HYB-E1002)",
+                    key.render()
+                ),
+                "the key type of a map must be comparable; slices, maps, and functions cannot be used as map keys",
+            );
+        }
+    }
+
+    fn is_uncomparable_key_kind(&self, kind: &OpKind) -> bool {
+        match kind {
+            OpKind::Slice(_) | OpKind::Map(_, _) | OpKind::Fn(_, _) => true,
+            OpKind::Array(elem) => self.is_uncomparable_key_kind(elem),
+            _ => false,
+        }
+    }
+
+    fn is_uncomparable_type_expr(&self, ty: &TypeExpr) -> bool {
+        match ty {
+            TypeExpr::Slice { .. } | TypeExpr::Map { .. } | TypeExpr::Fn { .. } => true,
+            TypeExpr::Array { elem, .. } => self.is_uncomparable_type_expr(elem),
+            _ => false,
+        }
+    }
+
     fn report_local_arity(&mut self, name: &str, want: usize, got: usize, span: Span) {
         let msg = if got < want {
             format!(
