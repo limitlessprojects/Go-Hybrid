@@ -1788,7 +1788,14 @@ impl<'a> Collector<'a> {
                             }
                             if let Some(b) = binding {
                                 self.define_elidable(b, subject.span());
-                                self.bind_kind(b, OpKind::Unknown);
+                                // #2915: `some(v)` on an `option[T]` subject binds
+                                // `v` to `T`'s kind (the same kind `.unwrap()`
+                                // yields). Enum variant payloads stay fail-open.
+                                let kind = match (&subject_kind, segments.as_slice()) {
+                                    (OpKind::Option(elem), [only]) if only == "some" => (**elem).clone(),
+                                    _ => OpKind::Unknown,
+                                };
+                                self.bind_kind(b, kind);
                             }
                         }
                         MatchPattern::Lit(lit) => {
@@ -3901,6 +3908,29 @@ impl<'a> Collector<'a> {
     }
 
     fn check_method_arg_types(&mut self, bk: &OpKind, name: &str, args: &[CallArg]) {
+        // #2915: `option[T].or(default)` — the default must be a `T`.
+        if let OpKind::Option(elem) = bk {
+            if name == "or" && args.len() == 1 && self.multi_value_arg_count(args).is_none() {
+                let want = (**elem).clone();
+                let got = self.kind_of_expr(&args[0].value);
+                let int_to_float_conflict = want == OpKind::Float
+                    && got == OpKind::Int
+                    && !self.is_untyped_int_const(&args[0].value);
+                if kinds_conflict(&want, &got) || int_to_float_conflict {
+                    self.emit_e1002(
+                        args[0].value.span(),
+                        format!(
+                            "cannot use `{}` (value of type `{}`) as `{}` value in argument to `option.or` — Go refuses mismatched argument types (HYB-E1002)",
+                            args[0].value.render(),
+                            got.label(),
+                            want.label(),
+                        ),
+                        "the default passed to `.or` must have the option's payload type",
+                    );
+                }
+            }
+            return;
+        }
         let Some(sn) = self.struct_base_name(bk).or_else(|| self.struct_name(bk)) else {
             return;
         };
@@ -6064,6 +6094,10 @@ impl<'a> Collector<'a> {
                 }
                 if has_method {
                     self.check_method_arity(&bk, name, args, span);
+                    self.check_method_arg_types(&bk, name, args);
+                } else if matches!(bk, OpKind::Option(_)) {
+                    // #2915: prelude `option[T]` methods have no `method_decls`
+                    // entry; `.or(default)` is checked against `T` here.
                     self.check_method_arg_types(&bk, name, args);
                 }
             }
