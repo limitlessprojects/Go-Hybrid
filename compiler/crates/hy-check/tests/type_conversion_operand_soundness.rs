@@ -125,3 +125,28 @@ fn valid_interface_conversion_accepts() {
     let r = check(src);
     assert_eq!(r.verdict, Verdict::Accept, "expected accept, got diagnostics: {:?}", r.diagnostics);
 }
+
+#[test]
+fn slice_conversion_with_incompatible_elements_rejects_e1002() {
+    let src = "type my_slice = []string\nfn main() {\n    var s []int\n    _ = my_slice(s)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn map_conversion_with_incompatible_elements_rejects_e1002() {
+    let src = "type my_map = map[string]int\nfn main() {\n    var m map[int]string\n    _ = my_map(m)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
+#[test]
+fn chan_conversion_with_incompatible_elements_rejects_e1002() {
+    let src = "type my_chan = chan string\nfn main() {\n    var c chan int\n    _ = my_chan(c)\n}\n";
+    let r = check(src);
+    assert_eq!(r.verdict, Verdict::Reject);
+    assert!(error_codes(&r).contains(&"HYB-E1002".to_string()));
+}
+
