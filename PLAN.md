@@ -1,5 +1,8 @@
 # Hybrid Language: Development Plan
 
+## Contributor validation — array lengths (#2771, 2026-11-01)
+- Preserve known constant array lengths in operand kinds; reject incompatible comparisons, assignment/declarations, arguments, returns, conversions and copy elements while keeping unresolved lengths permissive. Baseline initial suite: 10 failures/3 controls pass; final focused suite 20/20, pinned workspace 2383/2383, corpus 130/130; direct invalid CLI examples reject and valid control builds/runs. Differential 40/42 accept + 88/88 reject: two runtime builds lack uncached `regex` in the offline environment. Details: `spikes/array-length-2771/RESULTS.md`; full differential rerun, hosted CI and review pending.
+
 ## Contributor validation — Go build constraints (2026-10-31)
 
 - `hyb generate` excludes sibling filenames reported by `go list -e -find -json .` as `IgnoredGoFiles`, once per directory and invocation. Modern/legacy constraints, platform suffixes and `GOFLAGS` tags use Go's own selection; existing production-package conflict checks remain. This is CLI tooling correctness, not a language/checker soundness change; PR #1900's separate dot/underscore-prefix fix is untouched.
