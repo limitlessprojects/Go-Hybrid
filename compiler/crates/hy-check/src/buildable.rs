@@ -390,6 +390,21 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         (Pointer(_), Interface) => false,
         (Pointer(_), _) | (_, Pointer(_)) => true,
 
+        // Option targets and arguments (#2992): `option[T]` lowers to a Go
+        // struct type (`option[T]`), and Go forbids converting structs to or
+        // from scalar, string, container, or different option types.
+        // The only valid conversion is to `Interface` (`any(op)`), handled above,
+        // or between identical option types (`a == b`).
+        (Option(a), Option(b)) => {
+            if matches!(**a, Unknown) || matches!(**b, Unknown) {
+                false
+            } else {
+                a != b
+            }
+        }
+        (Option(_), other) if !matches!(other, Unknown | Interface) => true,
+        (other, Option(_)) if !matches!(other, Unknown | Interface) => true,
+
         _ => false,
     }
 }
