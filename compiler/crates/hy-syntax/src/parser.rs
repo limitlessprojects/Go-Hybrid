@@ -615,9 +615,7 @@ impl Parser {
             self.bump();
             let mut results = Vec::new();
             while !self.at_punct(")") && !self.at_eof() {
-                let named =
-                    matches!(self.cur(), Tok::Ident(_)) && matches!(self.nth(1), Tok::Ident(_));
-                if named {
+                if self.is_named_result_item() {
                     let name = self.expect_ident()?;
                     let ty = self.parse_type()?;
                     results.push(FnResult {
@@ -640,6 +638,45 @@ impl Parser {
             Ok(vec![FnResult { name: None, ty }])
         } else {
             Ok(Vec::new())
+        }
+    }
+
+    fn is_named_result_item(&self) -> bool {
+        let Tok::Ident(ident) = self.cur() else {
+            return false;
+        };
+        match self.nth(1) {
+            Tok::Ident(_) | Tok::Punct("*") | Tok::Kw("chan") | Tok::Kw("fn") => true,
+            Tok::Punct("<-") => matches!(self.nth(2), Tok::Kw("chan")),
+            Tok::Punct("[") => {
+                if matches!(self.nth(2), Tok::Punct("]") | Tok::Punct("...")) {
+                    return true;
+                }
+                if ident == "map" {
+                    return false;
+                }
+                let mut depth = 1usize;
+                let mut k = 2usize;
+                while depth > 0 {
+                    match self.nth(k) {
+                        Tok::Punct("[") => depth += 1,
+                        Tok::Punct("]") => depth -= 1,
+                        Tok::Eof => return false,
+                        _ => {}
+                    }
+                    k += 1;
+                }
+                match self.nth(k) {
+                    Tok::Punct("*")
+                    | Tok::Punct("[")
+                    | Tok::Kw("chan")
+                    | Tok::Kw("fn")
+                    | Tok::Ident(_) => true,
+                    Tok::Punct("<-") => matches!(self.nth(k + 1), Tok::Kw("chan")),
+                    _ => false,
+                }
+            }
+            _ => false,
         }
     }
 
