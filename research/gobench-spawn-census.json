@@ -1,0 +1,627 @@
+{
+  "collected": "2026-10-27T06:30:54.380Z",
+  "source": "goodmorning-coder/gobench master",
+  "summary": {
+    "kernels": 35,
+    "spawnSites": 73,
+    "fnSpawns": 4,
+    "methodSpawns": 17,
+    "closureSpawns": 52,
+    "otherSpawns": 0,
+    "sendLines": 56,
+    "methodPct": 23.3,
+    "closurePct": 71.2,
+    "fnPct": 5.5
+  },
+  "rows": [
+    {
+      "kernel": "35501/cockroach35501_test.go",
+      "path": "gobench/goker/nonblocking/cockroach/35501/cockroach35501_test.go",
+      "spawns": [
+        {
+          "kind": "closure",
+          "line": 58,
+          "text": "go func() {"
+        },
+        {
+          "kind": "closure",
+          "line": 76,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 0
+    },
+    {
+      "kernel": "4407/cockroach4407_test.go",
+      "path": "gobench/goker/nonblocking/cockroach/4407/cockroach4407_test.go",
+      "spawns": [
+        {
+          "kind": "closure",
+          "line": 17,
+          "text": "go func() {"
+        },
+        {
+          "kind": "method",
+          "line": 67,
+          "text": "go s.Gossip()"
+        }
+      ],
+      "sendLines": 0
+    },
+    {
+      "kernel": "3077/etcd3077_test.go",
+      "path": "gobench/goker/nonblocking/etcd/3077/etcd3077_test.go",
+      "spawns": [
+        {
+          "kind": "method",
+          "line": 37,
+          "text": "go s.r.run()"
+        },
+        {
+          "kind": "method",
+          "line": 57,
+          "text": "go s.run()"
+        }
+      ],
+      "sendLines": 7
+    },
+    {
+      "kernel": "4876/etcd4876_test.go",
+      "path": "gobench/goker/nonblocking/etcd/4876/etcd4876_test.go",
+      "spawns": [
+        {
+          "kind": "method",
+          "line": 40,
+          "text": "go sws.sendLoop()"
+        },
+        {
+          "kind": "closure",
+          "line": 46,
+          "text": "go func() {"
+        },
+        {
+          "kind": "closure",
+          "line": 49,
+          "text": "go func() {"
+        },
+        {
+          "kind": "closure",
+          "line": 54,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 0
+    },
+    {
+      "kernel": "8194/etcd8194_test.go",
+      "path": "gobench/goker/nonblocking/etcd/8194/etcd8194_test.go",
+      "spawns": [
+        {
+          "kind": "method",
+          "line": 55,
+          "text": "go l.runLoop()"
+        },
+        {
+          "kind": "closure",
+          "line": 66,
+          "text": "go func() {"
+        },
+        {
+          "kind": "closure",
+          "line": 70,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 3
+    },
+    {
+      "kernel": "9446/etcd9446_test.go",
+      "path": "gobench/goker/nonblocking/etcd/9446/etcd9446_test.go",
+      "spawns": [
+        {
+          "kind": "closure",
+          "line": 39,
+          "text": "go func() {"
+        },
+        {
+          "kind": "closure",
+          "line": 49,
+          "text": "go func() {"
+        },
+        {
+          "kind": "closure",
+          "line": 53,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 0
+    },
+    {
+      "kernel": "1687/grpc1687_test.go",
+      "path": "gobench/goker/nonblocking/grpc/1687/grpc1687_test.go",
+      "spawns": [],
+      "sendLines": 5
+    },
+    {
+      "kernel": "1748/grpc1748_test.go",
+      "path": "gobench/goker/nonblocking/grpc/1748/grpc1748_test.go",
+      "spawns": [
+        {
+          "kind": "closure",
+          "line": 73,
+          "text": "go func() {"
+        },
+        {
+          "kind": "method",
+          "line": 129,
+          "text": "go ccb.watcher()"
+        },
+        {
+          "kind": "closure",
+          "line": 138,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 0
+    },
+    {
+      "kernel": "2371/grpc2371_test.go",
+      "path": "gobench/goker/nonblocking/grpc/2371/grpc2371_test.go",
+      "spawns": [
+        {
+          "kind": "method",
+          "line": 35,
+          "text": "go ccr.watcher()"
+        },
+        {
+          "kind": "method",
+          "line": 88,
+          "text": "go cc.Close()"
+        }
+      ],
+      "sendLines": 2
+    },
+    {
+      "kernel": "3090/grpc3090_test.go",
+      "path": "gobench/goker/nonblocking/grpc/3090/grpc3090_test.go",
+      "spawns": [
+        {
+          "kind": "closure",
+          "line": 49,
+          "text": "go func() {"
+        },
+        {
+          "kind": "closure",
+          "line": 92,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 0
+    },
+    {
+      "kernel": "16742/istio16742_test.go",
+      "path": "gobench/goker/nonblocking/istio/16742/istio16742_test.go",
+      "spawns": [
+        {
+          "kind": "closure",
+          "line": 92,
+          "text": "go func() {"
+        },
+        {
+          "kind": "closure",
+          "line": 99,
+          "text": "go func() {"
+        },
+        {
+          "kind": "closure",
+          "line": 103,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 0
+    },
+    {
+      "kernel": "8144/istio8144_test.go",
+      "path": "gobench/goker/nonblocking/istio/8144/istio8144_test.go",
+      "spawns": [
+        {
+          "kind": "method",
+          "line": 42,
+          "text": "go c.evicter()"
+        },
+        {
+          "kind": "closure",
+          "line": 49,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 0
+    },
+    {
+      "kernel": "8214/istio8214_test.go",
+      "path": "gobench/goker/nonblocking/istio/8214/istio8214_test.go",
+      "spawns": [
+        {
+          "kind": "closure",
+          "line": 69,
+          "text": "go func() {"
+        },
+        {
+          "kind": "closure",
+          "line": 76,
+          "text": "go func() {"
+        },
+        {
+          "kind": "closure",
+          "line": 80,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 0
+    },
+    {
+      "kernel": "8967/istio8967_test.go",
+      "path": "gobench/goker/nonblocking/istio/8967/istio8967_test.go",
+      "spawns": [
+        {
+          "kind": "closure",
+          "line": 19,
+          "text": "go func() {"
+        },
+        {
+          "kind": "closure",
+          "line": 47,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 1
+    },
+    {
+      "kernel": "13058/kubernetes13058_test.go",
+      "path": "gobench/goker/nonblocking/kubernetes/13058/kubernetes13058_test.go",
+      "spawns": [
+        {
+          "kind": "method",
+          "line": 83,
+          "text": "go controller.Run(stop)"
+        },
+        {
+          "kind": "closure",
+          "line": 95,
+          "text": "go func(name string, f func(string)) {"
+        }
+      ],
+      "sendLines": 3
+    },
+    {
+      "kernel": "49404/kubernetes49404_test.go",
+      "path": "gobench/goker/nonblocking/kubernetes/49404/kubernetes49404_test.go",
+      "spawns": [
+        {
+          "kind": "closure",
+          "line": 81,
+          "text": "go func() {"
+        },
+        {
+          "kind": "method",
+          "line": 110,
+          "text": "go c.serve()"
+        }
+      ],
+      "sendLines": 0
+    },
+    {
+      "kernel": "70892/kubernetes70892_test.go",
+      "path": "gobench/goker/nonblocking/kubernetes/70892/kubernetes70892_test.go",
+      "spawns": [
+        {
+          "kind": "closure",
+          "line": 32,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 3
+    },
+    {
+      "kernel": "77796/kubernetes77796_test.go",
+      "path": "gobench/goker/nonblocking/kubernetes/77796/kubernetes77796_test.go",
+      "spawns": [
+        {
+          "kind": "method",
+          "line": 35,
+          "text": "go cacher.dispatchEvents()"
+        },
+        {
+          "kind": "closure",
+          "line": 46,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 0
+    },
+    {
+      "kernel": "79631/kubernetes79631_test.go",
+      "path": "gobench/goker/nonblocking/kubernetes/79631/kubernetes79631_test.go",
+      "spawns": [
+        {
+          "kind": "fn",
+          "line": 75,
+          "text": "go Until(p.flushBackoffQCompleted, p.stop)"
+        },
+        {
+          "kind": "closure",
+          "line": 108,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 5
+    },
+    {
+      "kernel": "80284/kubernetes80284_test.go",
+      "path": "gobench/goker/nonblocking/kubernetes/80284/kubernetes80284_test.go",
+      "spawns": [
+        {
+          "kind": "closure",
+          "line": 34,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 0
+    },
+    {
+      "kernel": "81091/kubernetes81091_test.go",
+      "path": "gobench/goker/nonblocking/kubernetes/81091/kubernetes81091_test.go",
+      "spawns": [
+        {
+          "kind": "closure",
+          "line": 79,
+          "text": "go func() {"
+        },
+        {
+          "kind": "closure",
+          "line": 97,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 3
+    },
+    {
+      "kernel": "81148/kubernetes81148_test.go",
+      "path": "gobench/goker/nonblocking/kubernetes/81148/kubernetes81148_test.go",
+      "spawns": [
+        {
+          "kind": "fn",
+          "line": 55,
+          "text": "go Until(p.flushUnschedulableQLeftover, p.stop)"
+        },
+        {
+          "kind": "closure",
+          "line": 114,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 8
+    },
+    {
+      "kernel": "82239/kubernetes82239_test.go",
+      "path": "gobench/goker/nonblocking/kubernetes/82239/kubernetes82239_test.go",
+      "spawns": [
+        {
+          "kind": "fn",
+          "line": 100,
+          "text": "go Until(ctrl.volumeWorker, stopCh)"
+        },
+        {
+          "kind": "method",
+          "line": 146,
+          "text": "go ctrl.Run(stopCh)"
+        }
+      ],
+      "sendLines": 5
+    },
+    {
+      "kernel": "82550/kubernetes82550_test.go",
+      "path": "gobench/goker/nonblocking/kubernetes/82550/kubernetes82550_test.go",
+      "spawns": [
+        {
+          "kind": "method",
+          "line": 34,
+          "text": "go provider.LazyProvide()"
+        }
+      ],
+      "sendLines": 0
+    },
+    {
+      "kernel": "88331/kubernetes88331_test.go",
+      "path": "gobench/goker/nonblocking/kubernetes/88331/kubernetes88331_test.go",
+      "spawns": [
+        {
+          "kind": "fn",
+          "line": 75,
+          "text": "go Until(p.flushBackoffQCompleted, p.stop)"
+        },
+        {
+          "kind": "closure",
+          "line": 108,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 5
+    },
+    {
+      "kernel": "89164/kubernetes89164_test.go",
+      "path": "gobench/goker/nonblocking/kubernetes/89164/kubernetes89164_test.go",
+      "spawns": [
+        {
+          "kind": "method",
+          "line": 34,
+          "text": "go cacher.dispatchEvents()"
+        },
+        {
+          "kind": "closure",
+          "line": 47,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 0
+    },
+    {
+      "kernel": "18412/moby18412_test.go",
+      "path": "gobench/goker/nonblocking/moby/18412/moby18412_test.go",
+      "spawns": [
+        {
+          "kind": "closure",
+          "line": 34,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 3
+    },
+    {
+      "kernel": "22941/moby22941_test.go",
+      "path": "gobench/goker/nonblocking/moby/22941/moby22941_test.go",
+      "spawns": [
+        {
+          "kind": "closure",
+          "line": 40,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 0
+    },
+    {
+      "kernel": "27037/moby27037_test.go",
+      "path": "gobench/goker/nonblocking/moby/27037/moby27037_test.go",
+      "spawns": [
+        {
+          "kind": "closure",
+          "line": 13,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 0
+    },
+    {
+      "kernel": "3068/serving3068_test.go",
+      "path": "gobench/goker/nonblocking/serving/3068/serving3068_test.go",
+      "spawns": [
+        {
+          "kind": "closure",
+          "line": 29,
+          "text": "go func() {"
+        },
+        {
+          "kind": "closure",
+          "line": 51,
+          "text": "go func() {"
+        },
+        {
+          "kind": "closure",
+          "line": 63,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 1
+    },
+    {
+      "kernel": "3148/serving3148_test.go",
+      "path": "gobench/goker/nonblocking/serving/3148/serving3148_test.go",
+      "spawns": [
+        {
+          "kind": "closure",
+          "line": 91,
+          "text": "go func() {"
+        },
+        {
+          "kind": "closure",
+          "line": 124,
+          "text": "go func() {"
+        },
+        {
+          "kind": "closure",
+          "line": 159,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 0
+    },
+    {
+      "kernel": "4908/serving4908_test.go",
+      "path": "gobench/goker/nonblocking/serving/4908/serving4908_test.go",
+      "spawns": [
+        {
+          "kind": "closure",
+          "line": 119,
+          "text": "go func() {"
+        },
+        {
+          "kind": "closure",
+          "line": 127,
+          "text": "go func() {"
+        },
+        {
+          "kind": "closure",
+          "line": 135,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 0
+    },
+    {
+      "kernel": "5865/serving5865_test.go",
+      "path": "gobench/goker/nonblocking/serving/5865/serving5865_test.go",
+      "spawns": [
+        {
+          "kind": "method",
+          "line": 35,
+          "text": "go rw.run()"
+        }
+      ],
+      "sendLines": 1
+    },
+    {
+      "kernel": "6171/serving6171_test.go",
+      "path": "gobench/goker/nonblocking/serving/6171/serving6171_test.go",
+      "spawns": [
+        {
+          "kind": "closure",
+          "line": 119,
+          "text": "go func() {"
+        },
+        {
+          "kind": "method",
+          "line": 130,
+          "text": "go rw.run()"
+        },
+        {
+          "kind": "closure",
+          "line": 136,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 0
+    },
+    {
+      "kernel": "6472/serving6472_test.go",
+      "path": "gobench/goker/nonblocking/serving/6472/serving6472_test.go",
+      "spawns": [
+        {
+          "kind": "closure",
+          "line": 101,
+          "text": "go func() {"
+        },
+        {
+          "kind": "closure",
+          "line": 130,
+          "text": "go func() {"
+        },
+        {
+          "kind": "closure",
+          "line": 136,
+          "text": "go func() {"
+        }
+      ],
+      "sendLines": 1
+    }
+  ]
+}
