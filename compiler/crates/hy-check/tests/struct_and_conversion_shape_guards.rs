@@ -182,3 +182,30 @@ fn multi_value_assignment_is_left_to_the_call_rules() {
         "fn two() (int, int) {\n    return 1, 2\n}\n\nfn main() {\n    a, b := two()\n    fmt.println(\"{a} {b}\")\n}\n",
     );
 }
+
+// ---------------------------------------------------------------------------
+// U17 — a struct field initializer must be a single-value expression
+// ---------------------------------------------------------------------------
+
+#[test]
+fn multi_value_call_in_struct_literal_field_is_rejected() {
+    assert_code(
+        "fn two() (int, int) {\n    return 1, 2\n}\n\nstruct Config {\n    timeout int\n    retries int\n}\n\nfn main() {\n    c := Config{timeout: two(), retries: 3}\n    fmt.println(\"{c.timeout}\")\n}\n",
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn void_call_in_struct_literal_field_is_rejected() {
+    assert_code(
+        "fn nothing() {\n    fmt.println(\"side effect\")\n}\n\nstruct Config {\n    timeout int\n}\n\nfn main() {\n    c := Config{timeout: nothing()}\n    fmt.println(\"{c.timeout}\")\n}\n",
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn single_value_call_and_literals_in_struct_fields_stay_accepted() {
+    assert_ok(
+        "fn one() int {\n    return 7\n}\n\nstruct Config {\n    timeout int\n    retries int\n}\n\nfn main() {\n    c := Config{timeout: one(), retries: 3}\n    fmt.println(\"{c.timeout}\")\n}\n",
+    );
+}
