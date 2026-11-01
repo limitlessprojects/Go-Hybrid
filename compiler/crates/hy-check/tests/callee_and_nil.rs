@@ -130,13 +130,18 @@ fn closure_callee_inside_managed_takes_the_hatch() {
 
 #[test]
 fn explain_e8001_example_warns_without_reject() {
-    let r = check(
-        "fn tally(counter map[string]int) {}\n\
-         fn main() {\n\
-             counter := map[string]int{}\n\
-             managed(\"counter access guarded by a mutex\", \"mutex\") { task tally(counter) }\n\
-         }\n",
+    let entry = hy_diag::Registry::global()
+        .lookup("HYB-E8001")
+        .expect("HYB-E8001 must exist in registry");
+    let src = format!(
+        "fn tally(counter map[string]int) {{}}\n\
+         fn main() {{\n\
+             counter := map[string]int{{}}\n\
+             {}\n\
+         }}\n",
+        entry.example
     );
+    let r = check(&src);
     assert_eq!(r.verdict, Verdict::Accept);
     assert!(
         codes(&r).is_empty(),
@@ -147,6 +152,88 @@ fn explain_e8001_example_warns_without_reject() {
         .diagnostics
         .iter()
         .any(|d| d.code == "HYB-E8001" && d.severity == Severity::Warning));
+    assert_eq!(r.managed.managed_blocks, 1);
+    assert_eq!(r.managed.sites_via_managed, 1);
+}
+
+#[test]
+fn spec_e8001_closure_and_fragment_examples_warn_without_reject() {
+    let spec = include_str!("../../../../SPEC-LANGUAGE.md");
+    assert!(
+        spec.contains("managed(\"handler serializes sends\", \"mutex\") { ch <- other }"),
+        "SPEC-LANGUAGE.md O4.10 must use required managed(reason, category) arguments"
+    );
+    assert!(
+        spec.contains("managed(\"counter access guarded by a mutex\", \"mutex\") {"),
+        "SPEC-LANGUAGE.md O6 fragment must use required managed(reason, category) arguments"
+    );
+    assert!(
+        !spec.contains("managed { ch <- other }"),
+        "SPEC-LANGUAGE.md must not regress to bare `managed {{ ch <- other }}`"
+    );
+
+    // Pre-fix negative control: bare `managed { ch <- other }` inside a closure
+    // rejected with two HYB-E0003 errors (missing reason and missing category)
+    // instead of demonstrating an E8001 warning.
+    let stale_closure_src = "fn main() {\n\
+        other := map[string]int{}\n\
+        ch := make(chan map[string]int, 1)\n\
+        f := fn() {\n\
+            managed { ch <- other }\n\
+        }\n\
+        _ = f\n\
+    }\n";
+    let r_stale = check(stale_closure_src);
+    assert_eq!(r_stale.verdict, Verdict::Reject);
+    assert_eq!(
+        codes(&r_stale),
+        vec!["HYB-E0003".to_string(), "HYB-E0003".to_string()],
+        "bare `managed {{ ... }}` inside a closure must reject with two HYB-E0003 errors"
+    );
+
+    let closure_src = "fn main() {\n\
+        other := map[string]int{}\n\
+        ch := make(chan map[string]int, 1)\n\
+        f := fn() {\n\
+            managed(\"handler serializes sends\", \"mutex\") { ch <- other }\n\
+        }\n\
+        _ = f\n\
+    }\n";
+    let r_closure = check(closure_src);
+    assert_eq!(r_closure.verdict, Verdict::Accept);
+    assert!(
+        codes(&r_closure).is_empty(),
+        "expected zero errors for O4.10 closure managed example; got {:?}",
+        codes(&r_closure)
+    );
+    assert!(r_closure
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "HYB-E8001" && d.severity == Severity::Warning));
+    assert_eq!(r_closure.managed.managed_blocks, 1);
+    assert_eq!(r_closure.managed.sites_via_managed, 1);
+
+    let fragment_src = "fn tally(counter map[string]int) {}\n\
+        fn main() {\n\
+            managed(\"counter access guarded by a mutex\", \"mutex\") {\n\
+                counter := map[string]int{}\n\
+                task tally(counter)\n\
+                task tally(counter)\n\
+            }\n\
+        }\n";
+    let r_frag = check(fragment_src);
+    assert_eq!(r_frag.verdict, Verdict::Accept);
+    assert!(
+        codes(&r_frag).is_empty(),
+        "expected zero errors for O6 managed fragment example; got {:?}",
+        codes(&r_frag)
+    );
+    assert!(r_frag
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "HYB-E8001" && d.severity == Severity::Warning));
+    assert_eq!(r_frag.managed.managed_blocks, 1);
+    assert_eq!(r_frag.managed.sites_via_managed, 2);
 }
 
 // ---------------------------------------------------------------------------

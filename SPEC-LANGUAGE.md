@@ -1608,7 +1608,7 @@ own API escapes is still the open question OQ1, unchanged by this rule.
 mux.handle("/x", http.handler(fn(w http.response_writer) {
     ch <- counts        // reject: HYB-E3002 — a send inside a closure is a
                         // real boundary; `counts` is a live mutable map
-    managed { ch <- other }   // ok: hatch taken knowingly (E8001, counted)
+    managed("handler serializes sends", "mutex") { ch <- other }   // ok: hatch taken knowingly (E8001, counted)
 }))
 ```
 
@@ -1733,7 +1733,7 @@ never one without the other.
 
 **O6 — `managed` blocks suspend the sendability checks, visibly.**
 
-- **O6.1 — Block semantics.** Inside `managed { … }`, spawn/send check-sites
+- **O6.1 — Block semantics.** Inside `managed("reason", "category") { … }`, spawn/send check-sites
   are not checked; sharing mutable GC state across tasks follows Go's
   DRF-SC discipline (the programmer synchronizes — typically with a Go
   mutex through interop, or by channel discipline anyway). Memory safety
@@ -1769,7 +1769,7 @@ never one without the other.
 
 ```hy
 // fragment:
-managed {
+managed("counter access guarded by a mutex", "mutex") {
     counter := map[string]int{}
     task tally(counter)        // unchecked share — DRF-SC contract applies;
     task tally(counter)        // audited by --report-managed, linted, -race backstop
