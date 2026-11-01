@@ -328,6 +328,10 @@ fn build_tables(ck: &mut Checker<'_>) {
             Decl::Fn(f) => {
                 if let Some(r) = &f.receiver {
                     ck.check_type_expr(&r.ty);
+                    // Issue #1575: the receiver base must name a type
+                    // declared in this file. Runs here, not in pass 1, so a
+                    // legal forward reference stays accepted.
+                    ck.check_receiver_type_declared(f);
                 }
                 for p in &f.params {
                     ck.check_type_expr(&p.ty);
