@@ -4528,8 +4528,19 @@ impl<'a> Collector<'a> {
                     BinOp::Shl => "<<",
                     _ => ">>",
                 };
+                // #2827: `%` and the bitwise operators require the two TYPED
+                // operands to share one concrete integer type — Go refuses
+                // `a64 % b32` (`invalid operation: a64 % b32 (mismatched types
+                // int64 and int32)`). Shifts are exempt: Go allows a shift
+                // count of any integer type.
+                let scalar_mismatch = !matches!(op, BinOp::Shl | BinOp::Shr)
+                    && self.scalar_names_conflict(
+                        self.typed_value_scalar(lhs),
+                        self.typed_value_scalar(rhs),
+                    );
                 if !matches!(lk, OpKind::Unknown | OpKind::Int)
                     || !matches!(rk, OpKind::Unknown | OpKind::Int)
+                    || scalar_mismatch
                 {
                     self.emit_e1002(
                         span,
@@ -4720,7 +4731,12 @@ impl<'a> Collector<'a> {
                     && self.is_untyped_int_const(val);
                 let conflict = (tk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
                     || kinds_conflict(&tk, &vk);
-                if !t_ok || !v_ok || mismatch || conflict {
+                // #2827: `a64 += b32` — the target and the value must share one
+                // concrete numeric type (Go: `cannot use b32 (variable of type
+                // int32) as int64 value in assignment`).
+                let scalar_mismatch =
+                    self.scalar_names_conflict(self.place_scalar(target), self.typed_value_scalar(val));
+                if !t_ok || !v_ok || mismatch || conflict || scalar_mismatch {
                     self.emit_e1002(
                         span,
                         format!(
@@ -4764,9 +4780,13 @@ impl<'a> Collector<'a> {
                     && self.is_untyped_int_const(val);
                 let conflict = (tk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
                     || kinds_conflict(&tk, &vk);
+                // #2827: `a64 -= b32` and friends need one concrete numeric type.
+                let scalar_mismatch =
+                    self.scalar_names_conflict(self.place_scalar(target), self.typed_value_scalar(val));
                 if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || conflict
+                    || scalar_mismatch
                 {
                     self.emit_e1002(
                         span,
@@ -4810,8 +4830,17 @@ impl<'a> Collector<'a> {
                     );
                 }
                 let vk = self.kind_of_expr(val);
+                // #2827: `a64 %= b32` / `a64 &= b32` need one concrete integer
+                // type on both sides; `<<=`/`>>=` keep Go's any-integer shift
+                // count rule.
+                let scalar_mismatch = !matches!(op, AssignOp::ShlAssign | AssignOp::ShrAssign)
+                    && self.scalar_names_conflict(
+                        self.place_scalar(target),
+                        self.typed_value_scalar(val),
+                    );
                 if !matches!(tk, OpKind::Unknown | OpKind::Int)
                     || !matches!(vk, OpKind::Unknown | OpKind::Int)
+                    || scalar_mismatch
                 {
                     self.emit_e1002(
                         span,
