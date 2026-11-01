@@ -233,6 +233,31 @@ fn is_sized_array_spelling(s: &str) -> bool {
     !head.is_empty() && head.chars().all(|c| c.is_ascii_digit())
 }
 
+fn find_matching_bracket(s: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (idx, ch) in s.char_indices() {
+        match ch {
+            '[' => depth += 1,
+            ']' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn same_composite_head(a: &str, b: &str) -> bool {
+    (a.starts_with("[]") && b.starts_with("[]"))
+        || (is_sized_array_spelling(a) && is_sized_array_spelling(b))
+        || (a.starts_with("map[") && b.starts_with("map["))
+        || (a.starts_with('*') && b.starts_with('*'))
+        || (a.starts_with("option[") && b.starts_with("option["))
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -536,6 +561,8 @@ struct Collector<'a> {
     /// signature (`None` = not a predeclared numeric spelling). Swapped
     /// together with `fn_results`.
     fn_result_scalars: Vec<Option<&'static str>>,
+    /// #2875 — declared result type spellings of the enclosing signature.
+    fn_result_type_names: Vec<Option<String>>,
     /// Lexical nesting depth within loops (`for` / `loop`).
     loop_depth: usize,
     /// Lexical nesting depth within `select` statements.
@@ -574,6 +601,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             fn_results_error_tail: false,
             scalar_scopes: Vec::new(),
             fn_result_scalars: Vec::new(),
+            fn_result_type_names: Vec::new(),
             loop_depth: 0,
             select_depth: 0,
             defines: Vec::new(),
@@ -655,9 +683,17 @@ impl<'a> Collector<'a> {
     }
 
     fn lookup_type_name(&self, name: &str) -> Option<String> {
-        for layer in self.type_name_scopes.iter().rev() {
-            if let Some(t) = layer.get(name) {
+        for (tlayer, klayer) in self
+            .type_name_scopes
+            .iter()
+            .rev()
+            .zip(self.kind_scopes.iter().rev())
+        {
+            if let Some(t) = tlayer.get(name) {
                 return Some(t.clone());
+            }
+            if klayer.contains_key(name) {
+                return None;
             }
         }
         None
@@ -861,15 +897,66 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// #2771 — the declared Go spelling of a value whose type carries detail
-    /// that `OpKind` drops, notably an array's length (`[3]int` vs `[4]int`).
-    /// Only identifiers bound with an explicit type name are known; everything
-    /// else (literals, conversions, calls) fails open.
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
-        match unwrap_parens(e) {
+        let bare = unwrap_parens(e);
+        if let Some(op) = as_addr_of(bare) {
+            let inner = self
+                .typed_value_type_name(op)
+                .or_else(|| self.typed_value_scalar(op).map(str::to_string))?;
+            return Some(format!("*{inner}"));
+        }
+        match bare {
             Expr::Ident { name, .. } => self.lookup_type_name(name),
+            Expr::Move { operand, .. } => self.typed_value_type_name(operand),
+            Expr::SliceLit { elem: Some(t), .. } => Some(if bare.as_array_lit().is_some() {
+                t.render()
+            } else {
+                format!("[]{}", t.render())
+            }),
+            Expr::MapLit { key, value, .. } => Some(format!("map[{}]{}", key.render(), value.render())),
+            Expr::Slice { base, .. } => Some(format!("[]{}", self.slice_element_type_name(base)?)),
+            Expr::Call { callee, args, .. } => match self.call_result_type_names(callee, args) {
+                Some(mut ts) if ts.len() == 1 => ts.pop().flatten(),
+                _ => None,
+            },
             _ => None,
         }
+    }
+
+    fn call_result_type_names(&self, callee: &Expr, args: &[CallArg]) -> Option<Vec<Option<String>>> {
+        let Expr::Ident { name, .. } = unwrap_parens(callee) else { return None };
+        if self.scopes.iter().any(|l| l.contains_key(name.as_str())) {
+            return None;
+        }
+        if name == "make" {
+            let first = unwrap_parens(&args.first()?.value);
+            let tname = match first {
+                Expr::SliceLit { elem: Some(t), .. } if first.as_array_lit().is_none() => {
+                    Some(format!("[]{}", t.render()))
+                }
+                Expr::MapLit { key, value, .. } => Some(format!("map[{}]{}", key.render(), value.render())),
+                Expr::StructLit { ty: Some(t), .. } => Some(t.render()),
+                Expr::Ident { name, .. } => Some(name.clone()),
+                _ => None,
+            };
+            return Some(vec![tname]);
+        }
+        if name == "new" {
+            let inner = match unwrap_parens(&args.first()?.value) {
+                Expr::Ident { name, .. } => Some(name.clone()),
+                Expr::StructLit { ty: Some(t), .. } => Some(t.render()),
+                _ => None,
+            }?;
+            return Some(vec![Some(format!("*{inner}"))]);
+        }
+        if name == "append" {
+            return Some(vec![args.first().and_then(|a| self.typed_value_type_name(&a.value))]);
+        }
+        let fd = self.ck.fns.get(name.as_str())?;
+        if fd.receiver.is_some() || !fd.type_params.is_empty() {
+            return None;
+        }
+        Some(fd.results.iter().map(|r| Some(r.ty.render())).collect())
     }
 
     /// #2771 — the declared Go spelling of a simple local assignment target.
@@ -880,11 +967,63 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// #2771 — two KNOWN and DIFFERENT sized-array spellings. Slices, named
-    /// types and unparsed lengths fail open so aliases never false-reject.
+    /// #2771 / #2875 — two KNOWN and DIFFERENT composite or sized-array
+    /// spellings (`[3]int` vs `[4]int`, `[]i64` vs `[]int`, `[2]i64` vs
+    /// `[2]int`, `map[string]i64` vs `map[string]int`, `*i64` vs `*int`).
     fn sized_array_names_differ(&self, a: Option<&str>, b: Option<&str>) -> bool {
-        matches!((a, b), (Some(x), Some(y))
-            if x != y && is_sized_array_spelling(x) && is_sized_array_spelling(y))
+        let (Some(x), Some(y)) = (a, b) else { return false };
+        if let (Some(cx), Some(cy)) = (
+            self.canonical_type_spelling(x, 0),
+            self.canonical_type_spelling(y, 0),
+        ) {
+            if same_composite_head(&cx, &cy) {
+                return cx != cy;
+            }
+            return false;
+        }
+        x != y && is_sized_array_spelling(x) && is_sized_array_spelling(y)
+    }
+
+    fn canonical_type_spelling(&self, raw: &str, depth: usize) -> Option<String> {
+        if depth > 16 {
+            return None;
+        }
+        let t = raw.trim();
+        if let Some(rest) = t.strip_prefix("[]") {
+            return Some(format!("[]{}", self.canonical_type_spelling(rest, depth + 1)?));
+        }
+        if let Some(rest) = t.strip_prefix('*') {
+            return Some(format!("*{}", self.canonical_type_spelling(rest, depth + 1)?));
+        }
+        if t.starts_with('[') {
+            let close = find_matching_bracket(t)?;
+            let len_str = t[1..close].trim();
+            if len_str.is_empty() || !len_str.chars().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            return Some(format!("[{len_str}]{}", self.canonical_type_spelling(&t[close + 1..], depth + 1)?));
+        }
+        if let Some(after_map) = t.strip_prefix("map").map(str::trim_start) {
+            if after_map.starts_with('[') {
+                let close = find_matching_bracket(after_map)?;
+                let key = self.canonical_type_spelling(&after_map[1..close], depth + 1)?;
+                let val = self.canonical_type_spelling(&after_map[close + 1..], depth + 1)?;
+                return Some(format!("map[{key}]{val}"));
+            }
+        }
+        if let Some(inner) = t.strip_prefix("option[").and_then(|s| s.strip_suffix(']')) {
+            return Some(format!("option[{}]", self.canonical_type_spelling(inner, depth + 1)?));
+        }
+        if self.fn_type_params.contains(t) {
+            return None;
+        }
+        if let Some(aliased) = self.ck.type_aliases.get(t) {
+            return self.canonical_type_spelling(&aliased.render(), depth + 1);
+        }
+        if self.ck.structs.contains_key(t) || self.ck.enums.contains_key(t) || matches!(t, "string" | "bool" | "error" | "any") {
+            return Some(t.to_string());
+        }
+        canonical_numeric_name(t).map(str::to_string)
     }
     /// #1031 — the exact predeclared numeric spelling of a type expression.
     /// A user-declared struct/enum/alias of that name is not the predeclared
@@ -1354,7 +1493,10 @@ impl<'a> Collector<'a> {
         }
         let result_scalars: Vec<Option<&'static str>> =
             f.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+        let result_tnames: Vec<Option<String>> =
+            f.results.iter().map(|r| Some(r.ty.render())).collect();
         let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
+        let outer_tnames = std::mem::replace(&mut self.fn_result_type_names, result_tnames);
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
@@ -1371,6 +1513,7 @@ impl<'a> Collector<'a> {
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
         self.fn_result_scalars = outer_scalars;
+        self.fn_result_type_names = outer_tnames;
         self.fn_type_params = outer_tp;
         self.pop_scope();
     }
@@ -1544,8 +1687,36 @@ impl<'a> Collector<'a> {
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
-                if let Some(elem) = self.slice_element_type_name(val) {
-                    self.bind_type_name(name, format!("[]{}", elem));
+                let fresh = !self
+                    .kind_scopes
+                    .last()
+                    .is_some_and(|top| top.contains_key(name.as_str()));
+                if !fresh {
+                    continue;
+                }
+                if let Some(tname) = self
+                    .typed_value_type_name(val)
+                    .or_else(|| self.slice_element_type_name(val).map(|e| format!("[]{}", e)))
+                {
+                    self.bind_type_name(name, tname);
+                }
+            }
+        } else if l.names.len() >= 2 && l.values.len() == 1 {
+            if let Expr::Call { callee, args, .. } = unwrap_parens(&l.values[0]) {
+                if let Some(ts) = self.call_result_type_names(callee, args) {
+                    if ts.len() == l.names.len() {
+                        for (name, tname) in l.names.iter().zip(ts) {
+                            let fresh = !self
+                                .kind_scopes
+                                .last()
+                                .is_some_and(|top| top.contains_key(name.as_str()));
+                            if fresh {
+                                if let Some(tname) = tname {
+                                    self.bind_type_name(name, tname);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2340,7 +2511,10 @@ impl<'a> Collector<'a> {
                 );
                 let result_scalars: Vec<Option<&'static str>> =
                     results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+                let result_tnames: Vec<Option<String>> =
+                    results.iter().map(|r| Some(r.ty.render())).collect();
                 let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
+                let outer_tnames = std::mem::replace(&mut self.fn_result_type_names, result_tnames);
                 let outer = std::mem::replace(&mut self.fn_results, result_kinds);
                 let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
                 let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
@@ -2353,6 +2527,7 @@ impl<'a> Collector<'a> {
                 self.fn_results_all_named = outer_named;
                 self.fn_results_error_tail = outer_err;
                 self.fn_result_scalars = outer_scalars;
+                self.fn_result_type_names = outer_tnames;
                 self.pop_scope();
             }
             Expr::Paren { inner, .. } => self.expr(inner),
@@ -4028,11 +4203,14 @@ impl<'a> Collector<'a> {
             if let Expr::Call { callee, args, .. } = unwrap_parens(&values[0]) {
                 if let Some(res) = self.call_result_kinds(callee, args) {
                     let res_scalars = self.call_result_scalars(callee, args);
+                    let res_tnames = self.call_result_type_names(callee, args);
                     if res.len() == want.len() {
                         for (i, (r, w)) in res.iter().zip(want.iter()).enumerate() {
                             if !self.report_return_conflict(&values[0], r, w, values[0].span()) {
                                 let got_s = res_scalars.as_ref().and_then(|rs| rs.get(i).copied().flatten());
+                                let got_t = res_tnames.as_ref().and_then(|rt| rt.get(i).and_then(|t| t.as_deref()));
                                 self.report_numeric_return_mismatch(got_s, r, i, values[0].span());
+                                self.report_composite_return_mismatch(got_t, r, i, values[0].span());
                             }
                         }
                         return;
@@ -4044,7 +4222,9 @@ impl<'a> Collector<'a> {
                         for (i, (r, w)) in res.iter().zip(want.iter()).enumerate() {
                             if !self.report_return_conflict(&values[0], r, w, values[0].span()) {
                                 let got_s = res_scalars.as_ref().and_then(|rs| rs.get(i).copied().flatten());
+                                let got_t = res_tnames.as_ref().and_then(|rt| rt.get(i).and_then(|t| t.as_deref()));
                                 self.report_numeric_return_mismatch(got_s, r, i, values[0].span());
+                                self.report_composite_return_mismatch(got_t, r, i, values[0].span());
                             }
                         }
                         return;
@@ -4094,7 +4274,9 @@ impl<'a> Collector<'a> {
                     let got = self.kind_of_expr(v);
                     if !self.report_return_conflict(v, &got, w, v.span()) {
                         let got_s = self.typed_value_scalar(v);
+                        let got_t = self.typed_value_type_name(v);
                         self.report_numeric_return_mismatch(got_s, &got, i, v.span());
+                        self.report_composite_return_mismatch(got_t.as_deref(), &got, i, v.span());
                     }
                 }
                 return;
@@ -4125,9 +4307,40 @@ impl<'a> Collector<'a> {
             let got = self.kind_of_expr(v);
             if !self.report_return_conflict(v, &got, w, v.span()) {
                 let got_s = self.typed_value_scalar(v);
+                let got_t = self.typed_value_type_name(v);
                 self.report_numeric_return_mismatch(got_s, &got, i, v.span());
+                self.report_composite_return_mismatch(got_t.as_deref(), &got, i, v.span());
             }
         }
+    }
+
+    fn report_composite_return_mismatch(
+        &mut self,
+        got: Option<&str>,
+        got_kind: &OpKind,
+        idx: usize,
+        span: Span,
+    ) {
+        let Some(want) = self.fn_result_type_names.get(idx).and_then(|t| t.as_deref()) else {
+            return;
+        };
+        if let Some(want_kind) = self.fn_results.get(idx) {
+            if kinds_conflict(want_kind, got_kind) {
+                return;
+            }
+        }
+        if !self.sized_array_names_differ(Some(want), got) {
+            return;
+        }
+        let fallback = got_kind.label();
+        let got_label = got.unwrap_or(&fallback);
+        self.emit_e1002(
+            span,
+            format!(
+                "cannot return a value of type `{got_label}` from a function declaring `{want}` — Go refuses `cannot use ... (variable of type {got_label}) as {want} value in return statement` (HYB-E1002)"
+            ),
+            "a returned composite value must match its declared result type",
+        );
     }
 
     /// #1031 — a TYPED numeric value returned into a result of a different
@@ -4970,7 +5183,13 @@ impl<'a> Collector<'a> {
                             (self.place_scalar(t), self.typed_value_scalar(v)),
                             (Some(tp), Some(vp)) if tp != vp
                         );
-                        if conflict || scalar_mismatch {
+                        if conflict
+                            || scalar_mismatch
+                            || self.sized_array_names_differ(
+                                self.place_type_name(t).as_deref(),
+                                self.typed_value_type_name(v).as_deref(),
+                            )
+                        {
                             self.emit_e1002(
                                 v.span(),
                                 format!(
