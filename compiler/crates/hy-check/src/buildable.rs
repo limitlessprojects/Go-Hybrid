@@ -1010,6 +1010,13 @@ impl<'a> Collector<'a> {
                 kind: LitKind::Float(_),
                 ..
             } => Some("float64"),
+            // Go's default type for an untyped rune constant is `rune`
+            // (`int32`): `r := 'x'` binds an int32, so `r + i` (i int) or
+            // `var n int = r` must not pass as a same-width pair.
+            Expr::Lit {
+                kind: LitKind::Char(_),
+                ..
+            } => Some("int32"),
             Expr::Unary {
                 op: UnOp::Neg,
                 operand,
@@ -1023,6 +1030,10 @@ impl<'a> Collector<'a> {
                     kind: LitKind::Float(_),
                     ..
                 } => Some("float64"),
+                Expr::Lit {
+                    kind: LitKind::Char(_),
+                    ..
+                } => Some("int32"),
                 _ => self.typed_value_scalar(operand),
             },
             other => self.typed_value_scalar(other),
