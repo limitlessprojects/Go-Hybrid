@@ -4528,6 +4528,28 @@ impl<'a> Collector<'a> {
         // For slices, arrays, and strings, the index must be an integer.
         self.check_single_value_position(index, "an index expression", /*binding_position=*/ false);
         if let OpKind::Map(key_kind, _) = bk {
+            if Checker::is_nil_literal(index)
+                && !matches!(
+                    **key_kind,
+                    OpKind::Unknown
+                        | OpKind::Pointer(_)
+                        | OpKind::Slice(_)
+                        | OpKind::Map(_, _)
+                        | OpKind::Chan(_)
+                        | OpKind::Interface
+                )
+            {
+                self.emit_e1002(
+                    index.span(),
+                    format!(
+                        "cannot use nil as `{}` value in map index on `{}` (HYB-E1002)",
+                        key_kind.label(),
+                        bk.label()
+                    ),
+                    "map index expression must match the map's key type; nil cannot be used as non-nilable key type",
+                );
+                return;
+            }
             if **key_kind != OpKind::Unknown
                 && *ik != OpKind::Unknown
             {
@@ -4559,6 +4581,17 @@ impl<'a> Collector<'a> {
         // past that length is a compile-time error in Go ([3] on [2]int).
         let is_array = matches!(bk, OpKind::Array(_))
             || matches!(bk, OpKind::Pointer(inner) if matches!(**inner, OpKind::Array(_)));
+        if needs_int_idx && Checker::is_nil_literal(index) {
+            self.emit_e1002(
+                index.span(),
+                format!(
+                    "use of untyped nil in index on `{}` (HYB-E1002)",
+                    bk.label()
+                ),
+                "slice, array, and string indices must be non-negative integers; nil is not an integer",
+            );
+            return;
+        }
         if needs_int_idx && !matches!(ik, OpKind::Unknown | OpKind::Int | OpKind::Void) {
             self.emit_e1002(
                 index.span(),
@@ -4667,6 +4700,14 @@ impl<'a> Collector<'a> {
         for (idx, bound_opt) in [lo, hi].into_iter().enumerate() {
             let Some(bound) = bound_opt else { continue };
             self.check_single_value_position(bound, "a slice bound", /*binding_position=*/ false);
+            if Checker::is_nil_literal(bound) {
+                self.emit_e1002(
+                    bound.span(),
+                    "use of untyped nil in slice index (HYB-E1002)".to_string(),
+                    "slice bounds must be non-negative integers; nil is not an integer",
+                );
+                continue;
+            }
             let k = self.kind_of_expr(bound);
             if !matches!(k, OpKind::Unknown | OpKind::Int | OpKind::Void) {
                 self.emit_e1002(
