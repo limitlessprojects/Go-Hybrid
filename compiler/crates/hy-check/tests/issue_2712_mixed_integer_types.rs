@@ -138,3 +138,19 @@ fn rejects_typed_integer_argument_of_other_type() {
     assert_rejects("fn take(b u8) u8 {\n    return b\n}\nfn main() {\n    var a i32 = 1\n    fmt.println(take(a))\n}\n");
     assert_accepts("fn take(b u8) u8 {\n    return b\n}\nfn main() {\n    var a u8 = 1\n    fmt.println(take(a), take(7))\n}\n");
 }
+
+#[test]
+fn return_of_other_integer_type_is_rejected() {
+    // Go: cannot use a (variable of type int32) as uint8 value in return statement
+    assert_rejects("fn f() u8 {\n    var a i32 = 1\n    return a\n}\nfn main() {\n    fmt.println(f())\n}\n");
+    assert_rejects("fn f() (i64, error) {\n    var a i32 = 1\n    return a, nil\n}\nfn main() {\n    v, _ := f()\n    fmt.println(v)\n}\n");
+    assert_rejects("fn main() {\n    g := fn() u16 {\n        var a u8 = 1\n        return a\n    }\n    fmt.println(g())\n}\n");
+}
+
+#[test]
+fn return_of_same_or_untyped_integer_is_accepted() {
+    assert_accepts("fn f() u8 {\n    var a u8 = 1\n    return a\n}\nfn main() {\n    fmt.println(f())\n}\n");
+    assert_accepts("fn f() u8 {\n    var a i32 = 1\n    return u8(a)\n}\nfn main() {\n    fmt.println(f())\n}\n");
+    assert_accepts("fn f() byte {\n    var a u8 = 1\n    return a\n}\nfn main() {\n    fmt.println(f())\n}\n");
+    assert_accepts("fn f() u8 {\n    return 7\n}\nfn main() {\n    fmt.println(f())\n}\n");
+}
