@@ -893,6 +893,12 @@ impl<'a> Collector<'a> {
             }
             return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
         }
+        if name == "min" || name == "max" {
+            let res_scalar = args
+                .iter()
+                .find_map(|a| self.typed_value_scalar(&a.value));
+            return Some(vec![res_scalar]);
+        }
         if args.len() == 1
             && !self.ck.structs.contains_key(name.as_str())
             && !self.ck.enums.contains_key(name.as_str())
@@ -2680,7 +2686,7 @@ impl<'a> Collector<'a> {
             "bool" => OpKind::Bool,
             "string" => OpKind::Str,
             "float32" | "float64" | "f32" | "f64" => OpKind::Float,
-            "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
+            "int" | "uint" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
             | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "usize"
             | "isize" | "uintptr" | "byte" | "rune" | "char" => OpKind::Int,
             _ => OpKind::Unknown,
@@ -3057,6 +3063,14 @@ impl<'a> Collector<'a> {
                     "new" => return Some(vec![OpKind::Pointer(Box::new(OpKind::Unknown))]),
                     "delete" | "close" | "clear" | "panic" => return Some(Vec::new()),
                     "recover" => return Some(vec![OpKind::Interface]),
+                    "min" | "max" => {
+                        let res_kind = args
+                            .iter()
+                            .map(|a| self.kind_of_expr(&a.value))
+                            .find(|k| !matches!(k, OpKind::Unknown | OpKind::Void))
+                            .unwrap_or(OpKind::Unknown);
+                        return Some(vec![res_kind]);
+                    }
                     // #2823: `some(v)` produces `option[kind(v)]`.
                     "some" if !self.ck.fns.contains_key("some") => {
                         let payload = args
@@ -6561,6 +6575,7 @@ impl<'a> Collector<'a> {
             }
             "min" | "max" => {
                 let mut first_arg: Option<(&Expr, OpKind)> = None;
+                let mut first_typed_scalar: Option<(&Expr, &'static str)> = None;
                 for arg in args {
                     let k = self.kind_of_expr(&arg.value);
                     if matches!(k, OpKind::Unknown | OpKind::Void) {
@@ -6603,6 +6618,25 @@ impl<'a> Collector<'a> {
                         }
                     } else {
                         first_arg = Some((&arg.value, k));
+                    }
+
+                    if let Some(s) = self.typed_value_scalar(&arg.value) {
+                        if let Some((_prev_arg, prev_s)) = first_typed_scalar {
+                            if prev_s != s {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "mismatched types `{}` and `{}` in `{name}` (HYB-E1002)",
+                                        prev_s,
+                                        s
+                                    ),
+                                    "all arguments to `min` and `max` must have matching ordered types",
+                                );
+                                return;
+                            }
+                        } else {
+                            first_typed_scalar = Some((&arg.value, s));
+                        }
                     }
                 }
             }
