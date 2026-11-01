@@ -3067,10 +3067,6 @@ impl<'a> Collector<'a> {
                     }
                     _ => {}
                 }
-                let conv = self.kind_of_named(name, 0);
-                if !matches!(conv, OpKind::Unknown | OpKind::Struct(_)) {
-                    return Some(vec![conv]);
-                }
                 let head = Checker::base_named_type_str(name);
                 if let Some(f) = self.ck.fns.get(name.as_str()).or_else(|| self.ck.fns.get(head)) {
                     return Some(
@@ -3079,6 +3075,10 @@ impl<'a> Collector<'a> {
                             .map(|r| self.kind_of_ty(&r.ty, 0))
                             .collect(),
                     );
+                }
+                let conv = self.kind_of_named(name, 0);
+                if !matches!(conv, OpKind::Unknown) && args.len() == 1 {
+                    return Some(vec![conv]);
                 }
                 None
             }
@@ -3104,6 +3104,20 @@ impl<'a> Collector<'a> {
                     }
                 }
                 let head = Checker::base_named_type_str(name);
+                if let Expr::Ident { name: tname, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(tname).is_none() {
+                        let th = Checker::base_named_type_str(tname);
+                        let assoc_key = format!("{}.{}", th, head);
+                        if let Some(f) = self.ck.fns.get(assoc_key.as_str()) {
+                            return Some(
+                                f.results
+                                    .iter()
+                                    .map(|r| self.kind_of_ty(&r.ty, 0))
+                                    .collect(),
+                            );
+                        }
+                    }
+                }
                 if let Some(sname) = self.struct_base_name(&bk) {
                     if let Some(m) = self.ck.method_decls.get(&(sname, head.to_string())) {
                         return Some(
@@ -3119,7 +3133,10 @@ impl<'a> Collector<'a> {
                 }
                 None
             }
-            _ => None,
+            _ => match self.kind_of_expr(bare) {
+                OpKind::Fn(res, _) => Some(res),
+                _ => None,
+            },
         }
     }
 
@@ -4459,7 +4476,11 @@ impl<'a> Collector<'a> {
 
     /// Go spec §Address operators: operand must be addressable or a composite literal.
     fn check_addr_of_operand(&mut self, operand: &Expr, span: Span) {
-        if !self.is_addressable_expr(operand) {
+        let is_comp_lit = matches!(
+            unwrap_parens(operand),
+            Expr::StructLit { .. } | Expr::SliceLit { .. } | Expr::MapLit { .. }
+        );
+        if !is_comp_lit && !self.is_addressable_expr(operand) {
             self.emit_e1002(
                 span,
                 format!(
@@ -4485,7 +4506,7 @@ impl<'a> Collector<'a> {
 
     fn is_addressable_expr(&self, e: &Expr) -> bool {
         match unwrap_parens(e) {
-            Expr::StructLit { .. } | Expr::SliceLit { .. } | Expr::MapLit { .. } => true,
+            Expr::StructLit { .. } | Expr::SliceLit { .. } | Expr::MapLit { .. } => false,
             Expr::Ident { name, .. } => {
                 if name == "_" {
                     return false;
