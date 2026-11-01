@@ -889,6 +889,14 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     call,
                     format!("the deferred call `defer {}`", call.render()),
                 );
+                let arg_borrows = match crate::model::unwrap_parens(call) {
+                    Expr::Call { args, .. } => args
+                        .iter()
+                        .map(|a| ck.expr_is_return_borrow(&st, &a.value))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                st.deferred_calls.push((call.clone(), arg_borrows));
             }
 
             // If-init Locals and blocks: already covered by the flat walk

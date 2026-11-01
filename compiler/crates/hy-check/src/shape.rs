@@ -604,7 +604,10 @@ impl<'a> Checker<'a> {
         expr: &Expr,
         n_vars: usize,
     ) -> Vec<TypeShape> {
-        let s = self.shape_of_expr(st, expr);
+        let s = match self.shape_of_expr(st, expr) {
+            TypeShape::Pointer(inner) if matches!(*inner, TypeShape::Array(_)) => *inner,
+            other => other,
+        };
         let one = |v: TypeShape| {
             if n_vars >= 2 {
                 vec![TypeShape::Primitive, v]

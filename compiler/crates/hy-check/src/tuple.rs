@@ -83,8 +83,22 @@ impl<'a> Checker<'a> {
                 self.check_expr_single_value(st, chan, chan.span());
                 self.check_expr_single_value(st, value, *span);
             }
-            Stmt::If { cond, .. } => {
-                self.check_expr_single_value(st, cond, cond.span());
+            Stmt::If { init, cond, .. } => {
+                let mut tmp = st.clone();
+                if let Some(Stmt::Local(l)) = init.as_deref() {
+                    tmp.scope_push();
+                    let tys = if l.values.len() == 1 && l.names.len() > 1 {
+                        self.multi_value_tys(st, &l.values[0], l.names.len())
+                    } else {
+                        l.values.iter().map(|v| self.ty_of_expr(st, v)).collect()
+                    };
+                    for (i, n) in l.names.iter().enumerate() {
+                        let ty = l.ty.clone().or_else(|| tys.get(i).cloned().flatten());
+                        let s = ty.as_ref().map(|t| self.shape_of_type(t)).unwrap_or(TypeShape::Unknown);
+                        self.define_binding(&mut tmp, n, s, ty, false, false, false);
+                    }
+                }
+                self.check_expr_single_value(&tmp, cond, cond.span());
             }
             Stmt::For { kind, .. } => match kind {
                 ForKind::Infinite => {}
@@ -139,7 +153,19 @@ impl<'a> Checker<'a> {
                 self.check_expr_single_value(st, subject, subject.span());
                 for arm in arms {
                     if let Some(g) = &arm.guard {
-                        self.check_expr_single_value(st, g, g.span());
+                        let mut arm_st = st.clone();
+                        if let hy_syntax::MatchPattern::Path { segments, binding: Some(b) } = &arm.pattern {
+                            if segments == &["some"] {
+                                arm_st.scope_push();
+                                self.bind_match_arm(&mut arm_st, b, subject, false);
+                                if let Some(TypeExpr::Option { elem, .. }) = self.ty_of_expr(st, subject).map(|t| self.resolve_type_alias(&t)) {
+                                    if let Some(bind) = arm_st.env_lookup_mut(b) {
+                                        bind.ty = Some(*elem);
+                                    }
+                                }
+                            }
+                        }
+                        self.check_expr_single_value(&arm_st, g, g.span());
                     }
                 }
             }

@@ -1138,3 +1138,51 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - All eight landings: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88) zero side-shifts, ls-remote==HEAD asserted, written replies posted.
 - Suite trajectory: 249 -> 257. Final main 24c1cf6, tree clean.
 - NEXT TICK QUEUE: #2321 (defer mutations on named returns, behind — verify) -> #2670 (await rebase, gttps) -> #2726 (await rebase) -> #2593 (await rebase+pick) -> #2677 (await rebase) -> #2581/#2622 (await fixes) -> #2517 (await rebase) -> wave tail #2083/#2082/#2080/#2077/#1856/#2078/#2075/#2076/#2074/#2073/#1893/#1855/#1914 -> #1811 (await one-hunk).
+
+## Session 42 — 2026-11-01 evening (tick 487193: 9 landed, 0 gate-fails)
+
+- Sandbox recycled (22nd; toolchains re-restored, go.tgz cache hit again). Baseline e3af322 (own session-41). Scan OK; approve 4/4. Fresh wave: seven score-9 land-candidates — Dimany4/alexrayyandev/aswadi/dextermos-dev checker burst + W-013 spike + ket4min-susan E11 alignment + ocakciomursel-pixel P0 defer.
+- LANDED (Pareto top-down):
+  bc2a754 Merge PR #2744 (Dimany4, fixes #2725) — slice conversions with mismatched element kinds rejected (Row 13). 258 suites.
+  c6149e8 Merge PR #2748 (alexrayyandev, fixes #2733) — uncomparable key types (slices/maps/fns) in map types + literals rejected (Row 13). 259 suites. Author's first landing.
+  aa51dbb Merge PR #2743 (aswadi, fixes #1905) — T23 HYB-E2002 enforced in match arm guards + closure if-init (correct binding scope). 261 suites.
+  319cbdd Merge PR #2747 (dextermos-dev, fixes #2738) — mismatched slice/string elements in variadic append(a, b...) rejected (Go spec + Row 13). 262 suites. Author's first landing.
+  3b99d0f Merge PR #1855 (harmweber787-png, closes #345) — W-013 translation validation feasibility spike (validator.py 240 + pytest 4+3 subtests in worktree; proposal credit @MyTH-zyxeon in merge msg). 262 suites.
+  5e48df1 Merge PR #2752 (ket4min-susan, fixes #2751) — try_context aligned with emitter E3/E11 lowering (http.handler return-fn propagation + const/type no longer inherit try-context). 263 suites.
+  752bca1 Merge PR #2549 (dextermos-dev, closes #2512) — radix-prefix range bounds (0o5..0o6 escaped as non-const) + induction var mutation in single-iteration loops. 264 suites.
+  b68003f Merge PR #2321 (ocakciomursel-pixel, closes #2319, P0) — post-return defer mutations on named results: shared-return races + loan escape + eager arg provenance + const laundering (loans.rs +624, 4 matrices 585 lines). 265 suites.
+  0cf58a2 Merge PR #2726 (ket4min-susan, fixes #2724) — all four A5 foreign-escape bypasses closed (rebased over landed #2729, integrating it); #2724 closes, superseding #2729's partial note. 269 suites.
+- All nine: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88) zero side-shifts, ls-remote==HEAD asserted, written replies posted. Two first-time contributors landed (alexrayyandev, dextermos-dev x2).
+- Suite trajectory: 257 -> 269. Final main 0cf58a2, tree clean.
+- NEXT TICK QUEUE: #2670 (await rebase — head unchanged since ask) -> #2593 (await rebase+pick) -> #2677 (await rebase) -> #2581/#2622 (await fixes) -> #2517 (await rebase) -> #2664's #2670 follow-ups -> wave tail #2083/#2082/#2080/#2077/#1856/#2078/#2075/#2076/#2074/#2073/#1893/#1855/#1914 -> #1811 (await one-hunk).
+
+## Session 43 — 2026-11-01 night (tick 487193: 10 landed, 1 conflict, 1 dup pointer)
+
+- Sandbox recycled (23rd; toolchains re-restored, go.tgz cache hit). Baseline 92eba51 (own session-42; 17:10 tick did not run — no parallel advancement). Scan OK; approve 10/10. 43 land-candidates: massive checker wave (ryder777777, aswadi x3, nyxlabs29-cyber x2, Dimany4 x5) + two first-timers.
+- LANDED (Pareto top-down):
+  affa967 Merge PR #2775 (ryder777777, closes #1101) — worker git clone/checkout exit status preserved (no '| tail -2' masking) + shell arg quoting; pytest 6. 269 suites.
+  4ebcf33 Merge PR #2794 (aswadi, fixes #2793) — SPEC E3 'return _, err' placeholder preserved (regression on landed #2713, same-day fix). 269 suites.
+  6455546 Merge PR #2778 (aswadi, fixes #2777) — LX14 HYB-E3010 break/continue in closure bodies (FnLit outside Tier-0 walk). 269 suites.
+  d13789f Merge PR #2768 (aswadi, closes #1822 + #1979) — .pop() resolution: has_method guard (no method hijack) + interface/struct .pop() reject. 271 suites.
+  3188bee Merge PR #2791 (nyxlabs29-cyber, fixes #2789) — slicing unaddressable array values rejected (Go slice-expr addressability). 272 suites.
+  eab1d79 Merge PR #2774 (ryder777777, fixes #1387) — pointer-to-array unwrapped in iterate_var_shapes (matches check_range_iterable). 273 suites.
+  6458982 Merge PR #2787 (Dimany4, fixes #2782) — struct literal concrete numeric field mismatch rejected. 274 suites.
+  a3f2093 Merge PR #2803 (Dimany4, fixes #2796) — append typed element numeric mismatch rejected. 275 suites.
+  0516d1c Merge PR #2776 (Dimany4, fixes #2770) — float32/float64 cross-width mixing rejected. 276 suites.
+  9187d92 Merge PR #2813 (nyxlabs29-cyber, fixes #2812) — bare generic calls with uninferable type parameter rejected (G5). 277 suites.
+- NOT LANDED: #2795 (Dimany4, slice/map literals) MERGE-CONFLICT with landed #2787/#2803 region — ask-rebase posted, helper-factoring suggested. #2800 (Dimany4) same issue #2789 as landed #2791 — pointer reply, gap-claim invitation.
+- All ten: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88) zero side-shifts, ls-remote==HEAD asserted, written replies posted.
+- Suite trajectory: 269 -> 277. Final main 9187d92, tree clean.
+- NEXT TICK QUEUE: #2795 (await rebase — first in line, same wave) -> #2813's #2812 done; remaining land-candidates from TRIAGE (43 total, scan again) -> #2670 (await rebase) -> #2593/#2677/#2517 (await rebase) -> #2581/#2622 (await fixes) -> wave tail #2083/#2082/#2080/#2077/#1856/#2078/#2075/#2076/#2074/#2073/#1893/#1855/#1914 -> #1811 (await one-hunk).
+
+## Session 44 — 2026-11-01 night II (tick 487193: 3 landed, 1 gate-fail with forensics)
+
+- Sandbox recycled (24th; rustup + go1.26.9 reinstalled — /tmp/go.tgz cache MISSED this time, re-downloaded; target dir cold, warmed via foreground slices). Baseline 8b3efb21 (session-43 worklog; 17:10+18:10 gap was session 43). Scan OK; approve 12/12. 16 land-candidates (fresh checker/emitter wave).
+- LANDED (Pareto top-down):
+  00b73ae8 Merge PR #2833 (aswadi, fixes #2442) — POP_PRELUDE empty-guard panic("HY-PANIC/pop-empty"), SPEC T7 updated; 2 regression tests. 279 suites.
+  e54830f6 Merge PR #2795 (Dimany4, fixes #2788) — rebased over landed #2787/#2803; shared scalar_names_conflict boundary check closes width-collapse escape in slice/array/map literals (typed int into []int64 etc.). 280 suites.
+  ce59b7f6 Merge PR #2720 (alexrayyandev, fixes #2712) — mismatched concrete typed integers rejected in binary ops/comparisons/assignments; shifts exempt (legal Go); u8/i8+i32/i64 matrix. 281 suites.
+- GATE FAIL (not landed): #2831 (aswadi, fixes #1991, emit_call paren unwrap) — PR emit change is right and 4/5 gates verified passing (M4, pkg call, pop prelude, unbound-crate), but: (A) `(box.new[int])(v)` still emits verbatim invalid Go — typeargs-in-parens parses as Index-like node, not Field{name:"new[int]"}, so assoc branch misses it (issue root cause 4 explicitly lists this shape); (B) root cause 5 hoist_tries_call (stmt.rs:584) untouched by diff. Plus two test bugs found: EmitError lacks Display (E0599/E0277; fix = format!("{err:?}")) and `fn main() -> error` doesn't parse (parse_results takes bare type; fix = plain fn main + top-level ?). Evidence reply posted with exact fixup recipes + repro; awaiting rework.
+- All three landings: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88) zero side-shifts, ls-remote==HEAD asserted, written replies posted.
+- Suite trajectory: 277 -> 281. Final main ce59b7f6, tree clean.
+- NEXT TICK QUEUE: #2831 (await rework — evidence reply has exact recipes) -> fresh wave in scan order: #2830 (Dimany4 bitwise/compound) -> #2838 (option payload carry) -> #2818 (string/slice conversions) -> #2779 (array length mismatch) -> #2835 (method expressions) -> #2837 (T22 indirect callees) -> #2841 (channel direction) -> #2839 (T22 loop back-edges, fixes #2309) -> #2836 (capture move-freeze) -> #2723 (mixed int types) -> #2824 (behind 14, needs rebase) -> #2815 (W-2475 falsification spike, score 6) -> #2670/#2593/#2677/#2517 (await rebase) -> #2581/#2622 (await fixes) -> wave tail.
