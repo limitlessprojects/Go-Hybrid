@@ -3315,6 +3315,11 @@ impl<'a> Collector<'a> {
 
         // U14 + value type: unknown names, then assignability.
         for f in fields {
+            self.check_single_value_position(
+                &f.value,
+                "a struct literal field",
+                /*binding_position=*/ false,
+            );
             match declared.iter().find(|(n, _)| n == &f.name) {
                 None => self.emit_e1002(
                     f.span,
