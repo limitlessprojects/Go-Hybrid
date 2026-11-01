@@ -337,7 +337,7 @@ impl<'a> Checker<'a> {
     /// The bound's INTEGER type when a typed expression fixes it — `None`
     /// for untyped literals and untyped consts, which adapt to the
     /// counter's type in the lowering (and in Go's constant arithmetic).
-    fn typed_int_bound(&self, st: &FnState, e: &Expr) -> Option<String> {
+    pub(crate) fn typed_int_bound(&self, st: &FnState, e: &Expr) -> Option<String> {
         match unwrap_parens(e) {
             Expr::Lit { .. } => None,
             Expr::Ident { name, .. } => {
@@ -358,12 +358,35 @@ impl<'a> Checker<'a> {
                 let ty = self.ty_of_expr(st, e)?;
                 self.named_int_of(&ty)
             }
-            Expr::Call { callee, args, .. } if args.len() == 1 && !args[0].spread => {
-                // a fixed-width conversion names its own type: `u32(0)`
-                // is a u32 bound regardless of what ty_of_expr infers.
+            Expr::Call { callee, args, .. } => {
                 if let Expr::Ident { name, .. } = unwrap_parens(callee) {
-                    if crate::const_overflow::fixed_width_int_range(name).is_some() {
-                        return Some(name.clone());
+                    if args.len() == 1 && !args[0].spread {
+                        // a fixed-width conversion names its own type: `u32(0)`
+                        // is a u32 bound regardless of what ty_of_expr infers.
+                        if crate::const_overflow::fixed_width_int_range(name).is_some() {
+                            return Some(name.clone());
+                        }
+                    }
+                    if self.lookup_binding(st, name).is_none()
+                        && !self.fns.contains_key(name.as_str())
+                    {
+                        if matches!(name.as_str(), "len" | "cap" | "copy") {
+                            return Some("int".to_string());
+                        }
+                        if matches!(name.as_str(), "min" | "max") {
+                            for a in args {
+                                if let Some(w) = self.typed_int_bound(st, &a.value) {
+                                    return Some(w);
+                                }
+                            }
+                            if !args.is_empty()
+                                && args
+                                    .iter()
+                                    .all(|a| self.non_integer_bound_kind(st, &a.value).is_none())
+                            {
+                                return Some("int".to_string());
+                            }
+                        }
                     }
                 }
                 let ty = self.ty_of_expr(st, e)?;
