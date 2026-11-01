@@ -4773,6 +4773,30 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #2789 — Go's Slice-expressions rule: *"If the sliced operand is an
+    /// array, it must be addressable."* These two forms are provably NOT
+    /// addressable, so slicing an ARRAY-typed one never builds:
+    ///
+    /// * a composite literal — `[3]int{1, 2, 3}[0:2]`;
+    /// * a map index expression — `m["a"][:2]`.
+    ///
+    /// A call result is deliberately NOT in this set: the emitter lowers an
+    /// array-returning call to an addressable temporary, so
+    /// `clone_arr(a)[:]` builds and
+    /// `tests/addr_slice_and_multireturn_borrow_soundness.rs::array_call_copy_control`
+    /// pins it as accepted. Everything else fails open too: a
+    /// local/parameter array, array indexing of an addressable array
+    /// (`a[i][0:2]`) and field selection on an addressable struct stay
+    /// accepted, and slices/strings may be sliced in all forms (the caller
+    /// only consults this for an array base).
+    fn slice_array_base_is_unaddressable(&self, base: &Expr) -> bool {
+        match unwrap_parens(base) {
+            Expr::Index { base: inner, .. } => matches!(self.kind_of_expr(inner), OpKind::Map(_, _)),
+            Expr::StructLit { .. } | Expr::SliceLit { .. } => true,
+            _ => false,
+        }
+    }
+
     /// Family C2 (#425, #708): `base[lo:hi]` requires a slice, array, or string,
     /// and constant bounds on constant strings must satisfy `0 <= lo <= hi <= len(base)`.
     fn check_slice_kind(
@@ -4799,6 +4823,22 @@ impl<'a> Collector<'a> {
                     bk.label()
                 ),
                 "only slices, arrays, and strings support `x[lo:hi]` slicing",
+            );
+            return;
+        }
+        // #2789 — an ARRAY-typed base must be addressable (see
+        // `slice_array_base_is_unaddressable`). A slice/string base is exempt,
+        // and a pointer-to-array base (`p[lo:hi]`, Go 1.17+) is exempt too:
+        // this arm only runs for a value array.
+        if matches!(bk, OpKind::Array(_)) && self.slice_array_base_is_unaddressable(base) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot slice `{}` (type `{}`) — Go requires the sliced operand of an array to be addressable (HYB-E1002)",
+                    base.render(),
+                    bk.label()
+                ),
+                "a composite literal and a map index expression are not addressable; bind the array to a local (`a := [3]int{1, 2, 3}`) and slice that",
             );
             return;
         }
