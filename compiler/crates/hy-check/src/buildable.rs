@@ -94,6 +94,11 @@ pub(crate) enum OpKind {
     /// fail-open in every operand guard, so `op + 1`, `takes_int(op)` and
     /// `var s string = op.unwrap()` all passed and failed `go build`.
     Option(Box<OpKind>),
+    /// Generic type parameter in scope (`[t any]`, `[k comparable]`).
+    TypeParam {
+        name: String,
+        comparable: bool,
+    },
     Void,
 }
 
@@ -119,6 +124,7 @@ impl OpKind {
             OpKind::Pointer(inner) => format!("*{}", inner.label()),
             OpKind::Fn(..) => "fn".to_string(),
             OpKind::Option(e) => format!("option[{}]", e.label()),
+            OpKind::TypeParam { name, .. } => name.clone(),
             OpKind::Void => "void".to_string(),
         }
     }
@@ -165,6 +171,7 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         (Float, Int) => false,
         // A struct whose name did not resolve is not evidence of a mismatch.
         (Struct(None), _) | (_, Struct(None)) => false,
+        (TypeParam { name: a, .. }, TypeParam { name: b, .. }) => a != b,
         (a, b) if a == b => false,
         // Same container shape: recurse into the element kinds.
         (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) => {
@@ -428,6 +435,7 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         // `option[T]` is a separate concern (#1671), and this pass only needs
         // the payload kind for operand/argument/initializer checks.
         OpKind::Option(_) => false,
+        OpKind::TypeParam { .. } => false,
     }
 }
 
@@ -518,6 +526,7 @@ struct Collector<'a> {
     /// instantiations) — Go compiles them; bare `k` must NOT hit the
     /// value-position undeclared-type net. Swapped per body like `fn_results`.
     fn_type_params: HashSet<String>,
+    type_param_map: HashMap<String, bool>,
     /// Whether every result of the enclosing signature is named, so Go's
     /// naked `return` is legal (corpus 63).
     fn_results_all_named: bool,
@@ -570,6 +579,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             file_untyped_consts: HashSet::new(),
             fn_results: Vec::new(),
             fn_type_params: HashSet::new(),
+            type_param_map: HashMap::new(),
             fn_results_all_named: false,
             fn_results_error_tail: false,
             scalar_scopes: Vec::new(),
@@ -603,9 +613,15 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
                     c.expr(&cd.value);
                 }
                 Decl::Struct(s) => {
+                    let sig_iter = s.fields.iter().map(|f| &f.ty);
+                    let outer_tp = std::mem::replace(
+                        &mut c.type_param_map,
+                        effective_type_param_map(&s.type_params, sig_iter),
+                    );
                     for f in &s.fields {
                         c.ty(&f.ty);
                     }
+                    c.type_param_map = outer_tp;
                 }
                 Decl::Enum(e) => {
                     for v in &e.variants {
@@ -1258,6 +1274,16 @@ impl<'a> Collector<'a> {
             f.span,
         );
 
+        let sig_iter = f
+            .receiver
+            .iter()
+            .map(|r| &r.ty)
+            .chain(f.params.iter().map(|p| &p.ty))
+            .chain(f.results.iter().map(|r| &r.ty));
+        let outer_tpm = std::mem::replace(
+            &mut self.type_param_map,
+            effective_type_param_map(&f.type_params, sig_iter),
+        );
         if let Some(r) = &f.receiver {
             self.ty(&r.ty);
         }
@@ -1277,7 +1303,10 @@ impl<'a> Collector<'a> {
             f.results.last().map(|r| &r.ty),
             Some(TypeExpr::Named { name, .. }) if name == "error"
         );
-        let Some(body) = &f.body else { return };
+        let Some(body) = &f.body else {
+            self.type_param_map = outer_tpm;
+            return;
+        };
         self.push_scope();
         if let Some(r) = &f.receiver {
             self.exempt(&r.name);
@@ -1333,6 +1362,7 @@ impl<'a> Collector<'a> {
         self.fn_results_error_tail = outer_err;
         self.fn_result_scalars = outer_scalars;
         self.fn_type_params = outer_tp;
+        self.type_param_map = outer_tpm;
         self.pop_scope();
     }
 
@@ -2468,6 +2498,9 @@ impl<'a> Collector<'a> {
         if let Some(alias_ty) = self.ck.type_aliases.get(trimmed) {
             return self.incomparable_type_noun_depth(&alias_ty.render(), depth + 1);
         }
+        if let Some(&comparable) = self.type_param_map.get(trimmed) {
+            return if comparable { None } else { Some("unconstrained type parameter") };
+        }
         for d in &self.ck.file.decls {
             if let hy_syntax::Decl::Enum(e) = d {
                 if e.name == trimmed && e.variants.iter().any(|v| v.payload.is_some()) {
@@ -2610,16 +2643,43 @@ impl<'a> Collector<'a> {
                 );
             }
             (n, Some(inner)) if n > 0 => {
-                let got = split_top_level_type_args(inner).len();
-                if got != n {
+                let args = split_top_level_type_args(inner);
+                if args.len() != n {
                     self.emit_e1002(
                         span,
                         format!(
                             "wrong number of type arguments for `{}` in `{}`: expected {}, found {} (HYB-E1002)",
-                            head, name, n, got
+                            head, name, n, args.len()
                         ),
                         "supply one type argument per declared type parameter on the struct",
                     );
+                } else if let Some(sdecl) = self.ck.file.decls.iter().find_map(|d| match d {
+                    Decl::Struct(s) if s.name == head => Some(s),
+                    _ => None,
+                }) {
+                    let param_map = effective_type_param_map(&sdecl.type_params, sdecl.fields.iter().map(|f| &f.ty));
+                    for (tp, arg_raw) in sdecl.type_params.iter().zip(args.iter()) {
+                        let arg_trimmed = arg_raw.trim();
+                        if param_map.get(&tp.name).copied().unwrap_or(false) {
+                            if let Some(noun) = self.incomparable_type_noun(arg_trimmed) {
+                                self.diags.push(
+                                    Diagnostic::error(
+                                        "HYB-E2006",
+                                        self.path.clone(),
+                                        span,
+                                        format!(
+                                            "type argument `{}` ({}) does not satisfy `comparable` constraint for type parameter `{}` of struct `{}` (HYB-E2006)",
+                                            arg_trimmed, noun, tp.name, head
+                                        ),
+                                    )
+                                    .with_notes(vec![format!(
+                                        "type parameter `{}` of `{}` requires a comparable type",
+                                        tp.name, head
+                                    )]),
+                                );
+                            }
+                        }
+                    }
                 }
             }
             _ => {}
@@ -2673,6 +2733,12 @@ impl<'a> Collector<'a> {
         if let Some(target) = self.ck.type_aliases.get(base) {
             return self.kind_of_ty(target, depth + 1);
         }
+        if let Some(&comparable) = self.type_param_map.get(name) {
+            return OpKind::TypeParam {
+                name: name.to_string(),
+                comparable,
+            };
+        }
         match name {
             // #682 U9-U12: `any` is a resolved interface type, not an
             // unresolved one, so it must not fall through to `Unknown`.
@@ -2708,6 +2774,16 @@ impl<'a> Collector<'a> {
         {
             return OpKind::Chan(Box::new(self.kind_of_type_str(rest, depth + 1)));
         }
+        if let Some(after_map) = s.strip_prefix("map") {
+            if let Some((k, v)) = Self::strip_leading_bracket_group(after_map) {
+                if !v.trim().is_empty() {
+                    return OpKind::Map(
+                        Box::new(self.kind_of_type_str(k, depth + 1)),
+                        Box::new(self.kind_of_type_str(v, depth + 1)),
+                    );
+                }
+            }
+        }
         self.kind_of_named(s, depth)
     }
 
@@ -2728,7 +2804,8 @@ impl<'a> Collector<'a> {
                 if let Some(arg) = subst.get(name.as_str()) {
                     return self.kind_of_type_str(arg, depth + 1);
                 }
-                self.kind_of_named(name, depth)
+                let rendered = Self::substitute_type_str(name, subst);
+                self.kind_of_named(&rendered, depth)
             }
             TypeExpr::Pointer { to, .. } => {
                 OpKind::Pointer(Box::new(self.kind_of_ty_with_subst(to, subst, depth + 1)))
@@ -3068,7 +3145,7 @@ impl<'a> Collector<'a> {
                     _ => {}
                 }
                 let conv = self.kind_of_named(name, 0);
-                if !matches!(conv, OpKind::Unknown | OpKind::Struct(_)) {
+                if !matches!(conv, OpKind::Unknown | OpKind::Struct(_) | OpKind::TypeParam { .. }) {
                     return Some(vec![conv]);
                 }
                 let head = Checker::base_named_type_str(name);
@@ -3361,6 +3438,19 @@ impl<'a> Collector<'a> {
     fn check_conversion_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
         let k = self.kind_of_named(name, 0);
         if matches!(k, OpKind::Unknown) {
+            return;
+        }
+        if let OpKind::TypeParam { name: tp_name, .. } = &k {
+            if !self.ck.fns.contains_key(name) {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "cannot convert to type parameter `{}` — Go rejects conversions on unconstrained type parameters (HYB-E1002)",
+                        tp_name
+                    ),
+                    "type parameters with `any` or `comparable` constraints do not support `T(x)` value conversions",
+                );
+            }
             return;
         }
         if args.len() != 1 {
@@ -3657,11 +3747,8 @@ impl<'a> Collector<'a> {
             );
             return;
         }
-        // Generic instantiations (`id[int](x)`) carry type arguments the
-        // parameter list does not describe; leave them to the type checker.
         if !f.type_params.is_empty() {
             self.check_uninferable_type_params(name, f, span);
-            return;
         }
         // A lone multi-value call IS the whole argument list and expands to one
         // argument per result: `g(two())` for a 2-param `g` is one written
@@ -3852,6 +3939,7 @@ impl<'a> Collector<'a> {
             return;
         };
         if !f.type_params.is_empty() {
+            self.check_generic_fn_call(name, head, f, args);
             return;
         }
         if self.multi_value_arg_count(args).is_some() {
@@ -3897,6 +3985,177 @@ impl<'a> Collector<'a> {
                     "argument types must match declared parameter types",
                 );
             }
+        }
+    }
+
+    fn check_generic_fn_call(
+        &mut self,
+        raw_callee: &str,
+        head: &str,
+        f: &FnDecl,
+        args: &[CallArg],
+    ) {
+        if self.multi_value_arg_count(args).is_some() || f.params.len() != args.len() {
+            return;
+        }
+        let sig_iter = f
+            .receiver
+            .iter()
+            .map(|r| &r.ty)
+            .chain(f.params.iter().map(|p| &p.ty))
+            .chain(f.results.iter().map(|r| &r.ty));
+        let param_map = effective_type_param_map(&f.type_params, sig_iter);
+        let mut subst: HashMap<String, String> = HashMap::new();
+        if let Some(open) = raw_callee.find('[') {
+            if raw_callee.ends_with(']') {
+                let inner = &raw_callee[open + 1..raw_callee.len() - 1];
+                let targs = split_top_level_type_args(inner);
+                if targs.len() != f.type_params.len() {
+                    return;
+                }
+                for (tp, targ_raw) in f.type_params.iter().zip(targs.iter()) {
+                    let targ = targ_raw.trim();
+                    if param_map.get(&tp.name).copied().unwrap_or(false) {
+                        if let Some(noun) = self.incomparable_type_noun(targ) {
+                            self.diags.push(
+                                Diagnostic::error(
+                                    "HYB-E2006",
+                                    self.path.clone(),
+                                    args.first().map(|a| a.value.span()).unwrap_or(f.span),
+                                    format!(
+                                        "type argument `{}` ({}) does not satisfy `comparable` constraint for type parameter `{}` in call to `{}` (HYB-E2006)",
+                                        targ, noun, tp.name, head
+                                    ),
+                                )
+                                .with_notes(vec![format!(
+                                    "type parameter `{}` of `{}` requires a comparable type",
+                                    tp.name, head
+                                )]),
+                            );
+                        }
+                    }
+                    subst.insert(tp.name.clone(), targ.to_string());
+                }
+            }
+        }
+        let tp_names: HashSet<&str> = f.type_params.iter().map(|tp| tp.name.as_str()).collect();
+        for (p, a) in f.params.iter().zip(args.iter()) {
+            let got = self.kind_of_expr(&a.value);
+            self.bind_type_params_from_arg(
+                head, &p.ty, &got, &a.value, &tp_names, &param_map, &mut subst,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_type_params_from_arg(
+        &mut self,
+        fn_name: &str,
+        param_ty: &TypeExpr,
+        arg_kind: &OpKind,
+        arg_expr: &Expr,
+        tp_names: &HashSet<&str>,
+        param_map: &HashMap<String, bool>,
+        subst: &mut HashMap<String, String>,
+    ) {
+        if matches!(arg_kind, OpKind::Unknown | OpKind::Void) {
+            return;
+        }
+        match (param_ty, arg_kind) {
+            (TypeExpr::Named { name, .. }, _) if tp_names.contains(name.as_str()) => {
+                let got_str = arg_kind.label();
+                if param_map.get(name.as_str()).copied().unwrap_or(false) {
+                    if let Some(noun) = self.incomparable_type_noun(&got_str) {
+                        self.diags.push(
+                            Diagnostic::error(
+                                "HYB-E2006",
+                                self.path.clone(),
+                                arg_expr.span(),
+                                format!(
+                                    "inferred type `{}` ({}) for argument `{}` does not satisfy `comparable` constraint for type parameter `{}` in call to `{}` (HYB-E2006)",
+                                    got_str, noun, arg_expr.render(), name, fn_name
+                                ),
+                            )
+                            .with_notes(vec![format!(
+                                "type parameter `{}` of `{}` requires a comparable type",
+                                name, fn_name
+                            )]),
+                        );
+                        return;
+                    }
+                }
+                if let Some(prev_str) = subst.get(name.as_str()) {
+                    let prev_k = self.kind_of_type_str(prev_str, 0);
+                    let int_to_float_conflict = prev_k == OpKind::Float
+                        && *arg_kind == OpKind::Int
+                        && !self.is_untyped_int_const(arg_expr);
+                    if kinds_conflict(&prev_k, arg_kind) || int_to_float_conflict {
+                        self.emit_e1002(
+                            arg_expr.span(),
+                            format!(
+                                "type `{}` of `{}` does not match bound type `{}` for `{}` in call to `{}` (HYB-E1002)",
+                                got_str, arg_expr.render(), prev_k.label(), name, fn_name
+                            ),
+                            "all arguments bound to the same type parameter must have matching types",
+                        );
+                    }
+                } else {
+                    subst.insert(name.clone(), got_str);
+                }
+                return;
+            }
+            (TypeExpr::Slice { elem, .. }, OpKind::Slice(inner))
+            | (TypeExpr::Array { elem, .. }, OpKind::Array(inner))
+            | (TypeExpr::Pointer { to: elem, .. }, OpKind::Pointer(inner))
+            | (TypeExpr::Chan { elem, .. }, OpKind::Chan(inner)) => {
+                self.bind_type_params_from_arg(
+                    fn_name, elem, inner, arg_expr, tp_names, param_map, subst,
+                );
+                return;
+            }
+            (TypeExpr::Map { key, value, .. }, OpKind::Map(k, v)) => {
+                self.bind_type_params_from_arg(
+                    fn_name, key, k, arg_expr, tp_names, param_map, subst,
+                );
+                self.bind_type_params_from_arg(
+                    fn_name, value, v, arg_expr, tp_names, param_map, subst,
+                );
+                return;
+            }
+            (TypeExpr::Named { name, .. }, OpKind::Struct(Some(arg_sname)))
+                if Checker::base_named_type_str(name) == Checker::base_named_type_str(arg_sname) =>
+            {
+                if let (Some(po), Some(ao)) = (name.find('['), arg_sname.find('[')) {
+                    if name.ends_with(']') && arg_sname.ends_with(']') {
+                        let p_args = split_top_level_type_args(&name[po + 1..name.len() - 1]);
+                        let a_args = split_top_level_type_args(&arg_sname[ao + 1..arg_sname.len() - 1]);
+                        for (pa, aa) in p_args.iter().zip(a_args.iter()) {
+                            let pt = TypeExpr::Named { name: pa.trim().to_string(), span: arg_expr.span() };
+                            let ak = self.kind_of_type_str(aa.trim(), 0);
+                            self.bind_type_params_from_arg(fn_name, &pt, &ak, arg_expr, tp_names, param_map, subst);
+                        }
+                    }
+                }
+                return;
+            }
+            _ => {}
+        }
+        let expected = self.kind_of_ty_with_subst(param_ty, subst, 0);
+        let int_to_float_conflict = expected == OpKind::Float
+            && *arg_kind == OpKind::Int
+            && !self.is_untyped_int_const(arg_expr);
+        if kinds_conflict(&expected, arg_kind) || int_to_float_conflict {
+            self.emit_e1002(
+                arg_expr.span(),
+                format!(
+                    "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
+                    arg_expr.render(),
+                    arg_kind.label(),
+                    param_ty.render(),
+                    fn_name
+                ),
+                "argument types must match the declared generic parameter shape",
+            );
         }
     }
 
@@ -4613,6 +4872,28 @@ impl<'a> Collector<'a> {
                         "untyped nil cannot be compared with untyped nil",
                     );
                 } else if !lhs_is_nil && !rhs_is_nil {
+                    for (op_expr, k) in [(lhs, &lk), (rhs, &rk)] {
+                        if let OpKind::TypeParam { name, comparable: false } = k {
+                            self.diags.push(
+                                Diagnostic::error(
+                                    "HYB-E2006",
+                                    self.path.clone(),
+                                    span,
+                                    format!(
+                                        "invalid operation `{}`: type parameter `{}` is not comparable (`{}` has constraint `any`, not `comparable`) (HYB-E2006)",
+                                        span_expr_label(lhs, op_str, rhs),
+                                        name,
+                                        op_expr.render()
+                                    ),
+                                )
+                                .with_notes(vec![format!(
+                                    "constrain `{}` as `[{} comparable]` (or use it as a map key / set element in the signature) to allow `==` and `!=`",
+                                    name, name
+                                )]),
+                            );
+                            return;
+                        }
+                    }
                     // #2719: a typed integer and a typed float are different
                     // types, so Go refuses `a == b` (`mismatched types int and
                     // float64`). An untyped numeric constant adapts to the other
@@ -6807,6 +7088,28 @@ impl<'a> Checker<'a> {
             }
         }
     }
+}
+
+fn effective_type_param_map<'a>(
+    type_params: &[hy_syntax::TypeParam],
+    sig_types: impl Iterator<Item = &'a TypeExpr>,
+) -> HashMap<String, bool> {
+    if type_params.is_empty() {
+        return HashMap::new();
+    }
+    let param_names: HashSet<&str> = type_params.iter().map(|p| p.name.as_str()).collect();
+    let mut comparable_needed = HashSet::new();
+    for ty in sig_types {
+        collect_comparable_type_params(ty, &param_names, &mut comparable_needed);
+    }
+    type_params
+        .iter()
+        .map(|p| {
+            let is_comp = p.constraint.as_deref() == Some("comparable")
+                || (p.constraint.is_none() && comparable_needed.contains(p.name.as_str()));
+            (p.name.clone(), is_comp)
+        })
+        .collect()
 }
 
 fn collect_comparable_type_params<'a>(
