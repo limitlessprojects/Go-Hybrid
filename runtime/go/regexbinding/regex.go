@@ -11,15 +11,23 @@ import (
 // The binding's error surface (Spike 5 sentinel shape).
 var ErrRegex = errors.New("regex: pattern or text invalid")
 
-// pinString: the copy-small pinned borrow for one string argument.
-func pinString(s string) (uintptr, uintptr, *runtime.Pinner, []byte) {
-	b := []byte(s)
-	var p runtime.Pinner
-	if len(b) > 0 {
-		p.Pin(&b[0])
-		return uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), &p, b
+// pinString: the copy-small pinned borrow for one string argument using a
+// caller-owned stack runtime.Pinner (avoiding Pinner heap escape and empty-string
+// slice allocation).
+func pinString(s string, p *runtime.Pinner) (uintptr, uintptr) {
+	if len(s) == 0 {
+		return 0, 0
 	}
-	return 0, 0, &p, b
+	b := []byte(s)
+	p.Pin(&b[0])
+	return uintptr(unsafe.Pointer(&b[0])), uintptr(len(b))
+}
+
+func decodeMatchStatus(v int64) (bool, error) {
+	if v != 0 && v != 1 {
+		return false, ErrRegex
+	}
+	return v == 1, nil
 }
 
 // IsMatch reports whether text matches pattern (compile per call — the
@@ -31,19 +39,13 @@ func pinString(s string) (uintptr, uintptr, *runtime.Pinner, []byte) {
 // regex_syntax::ast::Ast / ClassSet recurses on bracket nesting depth. That
 // exceeds the 4,096 B DEFAULT fast-path guard even for a 1-byte pattern.
 func IsMatch(pattern, text string) (bool, error) {
-	pptr, plen, pp, pb := pinString(pattern)
-	tptr, tlen, tp, tb := pinString(text)
+	var p runtime.Pinner
+	pptr, plen := pinString(pattern, &p)
+	tptr, tlen := pinString(text, &p)
 	v := int64(hybridge.CrossDeep4(FnIsMatch, pptr, plen, tptr, tlen))
-	pp.Unpin()
-	tp.Unpin()
-	runtime.KeepAlive(pp)
-	runtime.KeepAlive(pb)
-	runtime.KeepAlive(tp)
-	runtime.KeepAlive(tb)
-	if v < 0 {
-		return false, ErrRegex
-	}
-	return v == 1, nil
+	p.Unpin()
+	runtime.KeepAlive(&p)
+	return decodeMatchStatus(v)
 }
 
 // IsValid reports whether the pattern compiles (validity as a bool — no
@@ -52,10 +54,10 @@ func IsMatch(pattern, text string) (bool, error) {
 // Stack class: DEEP (CrossDeep2) — same Regex::new compilation and AST-drop
 // stack profile as IsMatch.
 func IsValid(pattern string) bool {
-	pptr, plen, pp, pb := pinString(pattern)
+	var p runtime.Pinner
+	pptr, plen := pinString(pattern, &p)
 	v := hybridge.CrossDeep2(FnIsValid, pptr, plen)
-	pp.Unpin()
-	runtime.KeepAlive(pp)
-	runtime.KeepAlive(pb)
+	p.Unpin()
+	runtime.KeepAlive(&p)
 	return v == 1
 }
