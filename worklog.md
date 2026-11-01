@@ -1155,3 +1155,22 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - All nine: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88) zero side-shifts, ls-remote==HEAD asserted, written replies posted. Two first-time contributors landed (alexrayyandev, dextermos-dev x2).
 - Suite trajectory: 257 -> 269. Final main 0cf58a2, tree clean.
 - NEXT TICK QUEUE: #2670 (await rebase — head unchanged since ask) -> #2593 (await rebase+pick) -> #2677 (await rebase) -> #2581/#2622 (await fixes) -> #2517 (await rebase) -> #2664's #2670 follow-ups -> wave tail #2083/#2082/#2080/#2077/#1856/#2078/#2075/#2076/#2074/#2073/#1893/#1855/#1914 -> #1811 (await one-hunk).
+
+## Session 43 — 2026-11-01 night (tick 487193: 10 landed, 1 conflict, 1 dup pointer)
+
+- Sandbox recycled (23rd; toolchains re-restored, go.tgz cache hit). Baseline 92eba51 (own session-42; 17:10 tick did not run — no parallel advancement). Scan OK; approve 10/10. 43 land-candidates: massive checker wave (ryder777777, aswadi x3, nyxlabs29-cyber x2, Dimany4 x5) + two first-timers.
+- LANDED (Pareto top-down):
+  affa967 Merge PR #2775 (ryder777777, closes #1101) — worker git clone/checkout exit status preserved (no '| tail -2' masking) + shell arg quoting; pytest 6. 269 suites.
+  4ebcf33 Merge PR #2794 (aswadi, fixes #2793) — SPEC E3 'return _, err' placeholder preserved (regression on landed #2713, same-day fix). 269 suites.
+  6455546 Merge PR #2778 (aswadi, fixes #2777) — LX14 HYB-E3010 break/continue in closure bodies (FnLit outside Tier-0 walk). 269 suites.
+  d13789f Merge PR #2768 (aswadi, closes #1822 + #1979) — .pop() resolution: has_method guard (no method hijack) + interface/struct .pop() reject. 271 suites.
+  3188bee Merge PR #2791 (nyxlabs29-cyber, fixes #2789) — slicing unaddressable array values rejected (Go slice-expr addressability). 272 suites.
+  eab1d79 Merge PR #2774 (ryder777777, fixes #1387) — pointer-to-array unwrapped in iterate_var_shapes (matches check_range_iterable). 273 suites.
+  6458982 Merge PR #2787 (Dimany4, fixes #2782) — struct literal concrete numeric field mismatch rejected. 274 suites.
+  a3f2093 Merge PR #2803 (Dimany4, fixes #2796) — append typed element numeric mismatch rejected. 275 suites.
+  0516d1c Merge PR #2776 (Dimany4, fixes #2770) — float32/float64 cross-width mixing rejected. 276 suites.
+  9187d92 Merge PR #2813 (nyxlabs29-cyber, fixes #2812) — bare generic calls with uninferable type parameter rejected (G5). 277 suites.
+- NOT LANDED: #2795 (Dimany4, slice/map literals) MERGE-CONFLICT with landed #2787/#2803 region — ask-rebase posted, helper-factoring suggested. #2800 (Dimany4) same issue #2789 as landed #2791 — pointer reply, gap-claim invitation.
+- All ten: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88) zero side-shifts, ls-remote==HEAD asserted, written replies posted.
+- Suite trajectory: 269 -> 277. Final main 9187d92, tree clean.
+- NEXT TICK QUEUE: #2795 (await rebase — first in line, same wave) -> #2813's #2812 done; remaining land-candidates from TRIAGE (43 total, scan again) -> #2670 (await rebase) -> #2593/#2677/#2517 (await rebase) -> #2581/#2622 (await fixes) -> wave tail #2083/#2082/#2080/#2077/#1856/#2078/#2075/#2076/#2074/#2073/#1893/#1855/#1914 -> #1811 (await one-hunk).

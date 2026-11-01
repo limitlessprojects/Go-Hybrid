@@ -792,6 +792,15 @@ impl<'a> Collector<'a> {
         None
     }
 
+    /// #2770 — the canonical numeric spelling of a simple local target, for the
+    /// assignment/argument scalar comparison. Non-ident places fail open.
+    fn place_scalar(&self, p: &Place) -> Option<&'static str> {
+        match &p.kind {
+            PlaceKind::Ident(n) => self.lookup_scalar(n),
+            _ => None,
+        }
+    }
+
     /// #1031 — the exact predeclared numeric spelling of a type expression.
     /// A user-declared struct/enum/alias of that name is not the predeclared
     /// type, so it fails open.
@@ -923,6 +932,19 @@ impl<'a> Collector<'a> {
                 _ => self.typed_value_scalar(operand),
             },
             other => self.typed_value_scalar(other),
+        }
+    }
+
+    /// #2770: two TYPED values of different canonical numeric types (e.g.
+    /// `float32` vs `float64`, `int` vs `int64`) are distinct Go types and
+    /// cannot combine, compare, or assign directly. `typed_value_scalar` is
+    /// `None` for an untyped constant, so `f + 1.5` / `i + 1` stay legal, and
+    /// `byte`/`uint8` (or `rune`/`int32`) share one canonical name so the
+    /// genuine aliases never conflict.
+    fn scalar_conflict(&self, a: &Expr, b: &Expr) -> bool {
+        match (self.typed_value_scalar(a), self.typed_value_scalar(b)) {
+            (Some(x), Some(y)) => x != y,
+            _ => false,
         }
     }
 
@@ -1347,7 +1369,12 @@ impl<'a> Collector<'a> {
                 let int_float_conflict = want == OpKind::Float
                     && vk == OpKind::Int
                     && !self.is_untyped_int_const(&l.values[0]);
-                if kinds_conflict(&want, &vk) || int_float_conflict {
+                // #2770: `var h float64 = f` where `f` is a `float32`.
+                let scalar_mismatch = matches!(
+                    (self.scalar_of_ty(t), self.typed_value_scalar(&l.values[0])),
+                    (Some(w), Some(v)) if w != v
+                );
+                if kinds_conflict(&want, &vk) || int_float_conflict || scalar_mismatch {
                     self.emit_e1002(
                         l.span,
                         format!(
@@ -1366,7 +1393,12 @@ impl<'a> Collector<'a> {
                     let int_float_conflict = want == OpKind::Float
                         && vk == OpKind::Int
                         && !self.is_untyped_int_const(v);
-                    if kinds_conflict(&want, &vk) || int_float_conflict {
+                    // #2770: concrete numeric type differing under one `OpKind`.
+                    let scalar_mismatch = matches!(
+                        (self.scalar_of_ty(t), self.typed_value_scalar(v)),
+                        (Some(w), Some(g)) if w != g
+                    );
+                    if kinds_conflict(&want, &vk) || int_float_conflict || scalar_mismatch {
                         self.emit_e1002(
                             l.span,
                             format!(
@@ -3355,6 +3387,90 @@ impl<'a> Collector<'a> {
         );
     }
 
+    /// SPEC-LANGUAGE §4 G5 — call-site type inference follows Go's rules:
+    /// a type argument is inferred only from the argument types, so a type
+    /// parameter that appears in no parameter type (`fn mk[t any]() t`,
+    /// `fn conv[a any, b any](x a) b`) cannot be inferred from a bare call
+    /// `mk()` / `conv(1)`, whatever the result is assigned to. Go refuses the
+    /// emitted call with `in call to mk, cannot infer t`; the explicit form
+    /// `mk[int]()` (an `Expr::Index` callee) never reaches this check.
+    ///
+    /// Only the MVP constraints (`any`, `comparable`; G3) are handled: with
+    /// a core-type constraint Go could infer a parameter from another
+    /// parameter's constraint, so any other constraint skips the check.
+    fn check_uninferable_type_params(&mut self, name: &str, f: &FnDecl, span: Span) {
+        // An explicit instantiation reaches here folded to `mk[int]`.
+        if f.receiver.is_some() || name.contains('[') {
+            return;
+        }
+        if f.type_params.iter().any(|tp| {
+            !matches!(
+                tp.constraint.as_deref(),
+                None | Some("any") | Some("comparable")
+            )
+        }) {
+            return;
+        }
+        let mut mentioned: HashSet<String> = HashSet::new();
+        // `TypeExpr::render` folds fn types to `fn`, so walk the tree; a
+        // named type keeps its type arguments in the name (`box[t]`).
+        fn collect(ty: &TypeExpr, out: &mut HashSet<String>) {
+            match ty {
+                TypeExpr::Named { name, .. } => {
+                    for tok in name.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+                        if !tok.is_empty() {
+                            out.insert(tok.to_string());
+                        }
+                    }
+                }
+                TypeExpr::Pointer { to: e, .. }
+                | TypeExpr::Slice { elem: e, .. }
+                | TypeExpr::Array { elem: e, .. }
+                | TypeExpr::Chan { elem: e, .. }
+                | TypeExpr::Option { elem: e, .. } => collect(e, out),
+                TypeExpr::Map { key, value, .. } => {
+                    collect(key, out);
+                    collect(value, out);
+                }
+                TypeExpr::Fn {
+                    params, results, ..
+                } => {
+                    for p in params {
+                        collect(&p.ty, out);
+                    }
+                    for r in results {
+                        collect(r, out);
+                    }
+                }
+            }
+        }
+        for p in &f.params {
+            collect(&p.ty, &mut mentioned);
+        }
+        let missing: Vec<&str> = f
+            .type_params
+            .iter()
+            .map(|tp| tp.name.as_str())
+            .filter(|n| !mentioned.contains(*n))
+            .collect();
+        let Some(first) = missing.first() else {
+            return;
+        };
+        let list = missing
+            .iter()
+            .map(|n| format!("`{}`", n))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.emit_e1002(
+            span,
+            format!(
+                "cannot infer type parameter {} of `{}`: it appears in no parameter type — Go refuses `in call to {}, cannot infer {}` (HYB-E1002)",
+                list, name, name, first
+            ),
+            "instantiate explicitly (`f[int](...)`): Go infers type arguments only from argument types (SPEC-LANGUAGE §4 G5), never from the result or the assignment target",
+        );
+    }
+
     /// #577 C9 — a call to a top-level `fn` must pass exactly as many
     /// arguments as the declaration has parameters. Go refuses the emitted
     /// call otherwise (`not enough arguments` / `too many arguments`), so an
@@ -3387,6 +3503,7 @@ impl<'a> Collector<'a> {
         // Generic instantiations (`id[int](x)`) carry type arguments the
         // parameter list does not describe; leave them to the type checker.
         if !f.type_params.is_empty() {
+            self.check_uninferable_type_params(name, f, span);
             return;
         }
         // A lone multi-value call IS the whole argument list and expands to one
@@ -3521,7 +3638,13 @@ impl<'a> Collector<'a> {
             let int_to_float_conflict = want == OpKind::Float
                 && got == OpKind::Int
                 && !self.is_untyped_int_const(&a.value);
-            if kinds_conflict(&want, &got) || int_to_float_conflict {
+            // #2770: both sides share `OpKind::Float`/`Int` but differ in the
+            // concrete type (`float32` vs `float64`, `int` vs `int64`).
+            let scalar_mismatch = matches!(
+                (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
+                (Some(w), Some(g)) if w != g
+            );
+            if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -3564,7 +3687,12 @@ impl<'a> Collector<'a> {
             let int_to_float_conflict = want == OpKind::Float
                 && got == OpKind::Int
                 && !self.is_untyped_int_const(&a.value);
-            if kinds_conflict(&want, &got) || int_to_float_conflict {
+            // #2770: concrete numeric type differing under one `OpKind`.
+            let scalar_mismatch = matches!(
+                (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
+                (Some(w), Some(g)) if w != g
+            );
+            if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -4251,7 +4379,7 @@ impl<'a> Collector<'a> {
                         || (lk == OpKind::Int
                             && rk == OpKind::Float
                             && !self.is_untyped_int_const(lhs));
-                    if equality_kinds_conflict(&lk, &rk) || int_float_conflict {
+                    if equality_kinds_conflict(&lk, &rk) || int_float_conflict || self.scalar_conflict(lhs, rhs) {
                         self.emit_e1002(
                             span,
                             format!(
@@ -4322,7 +4450,7 @@ impl<'a> Collector<'a> {
                     && lk.is_numeric() != rk.is_numeric();
                 let int_float_conflict = (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs))
                     || (lk == OpKind::Int && rk == OpKind::Float && !self.is_untyped_int_const(lhs));
-                if !l_ok || !r_ok || mismatch || int_float_conflict {
+                if !l_ok || !r_ok || mismatch || int_float_conflict || self.scalar_conflict(lhs, rhs) {
                     self.emit_e1002(
                         span,
                         format!(
@@ -4345,7 +4473,7 @@ impl<'a> Collector<'a> {
                     && lk.is_numeric() != rk.is_numeric();
                 let int_float_conflict = (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs))
                     || (lk == OpKind::Int && rk == OpKind::Float && !self.is_untyped_int_const(lhs));
-                if !l_ok || !r_ok || mismatch || int_float_conflict {
+                if !l_ok || !r_ok || mismatch || int_float_conflict || self.scalar_conflict(lhs, rhs) {
                     self.emit_e1002(
                         span,
                         format!(
@@ -4370,6 +4498,7 @@ impl<'a> Collector<'a> {
                 if !matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || int_float_conflict
+                    || self.scalar_conflict(lhs, rhs)
                 {
                     self.emit_e1002(
                         span,
@@ -4466,7 +4595,12 @@ impl<'a> Collector<'a> {
                         && self.is_untyped_int_const(&values[0]);
                     let conflict = (tk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
                         || kinds_conflict(&tk, &vk);
-                    if !is_loan_shape && conflict {
+                    // #2770: `g = f` between a `float64` and a `float32` local.
+                    let scalar_mismatch = matches!(
+                        (self.place_scalar(target), self.typed_value_scalar(&values[0])),
+                        (Some(t), Some(v)) if t != v
+                    );
+                    if !is_loan_shape && (conflict || scalar_mismatch) {
                         self.emit_e1002(
                             span,
                             format!(
