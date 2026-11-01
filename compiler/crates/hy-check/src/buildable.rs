@@ -498,6 +498,9 @@ struct Collector<'a> {
     /// `kind_scopes`. `set[T]` has no OpKind (it lowers to a prelude
     /// struct), so without this its element type was never checked (#2474).
     set_elem_scopes: Vec<HashMap<String, Option<String>>>,
+    /// Fn-valued or collection-of-fn bindings -> their declared TypeExpr,
+    /// scoped like `kind_scopes` (#2901).
+    fn_type_scopes: Vec<HashMap<String, Option<TypeExpr>>>,
     /// One layer per open scope, tracking `for ... in` element bindings
     /// whose kind is copy-semantics storage (`struct`/`array`). The emitter
     /// lowers them to Go's `for _, x := range xs`, so writes through the
@@ -565,6 +568,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             kind_scopes: Vec::new(),
             type_name_scopes: Vec::new(),
             set_elem_scopes: Vec::new(),
+            fn_type_scopes: Vec::new(),
             copy_var_scopes: Vec::new(),
             file_consts: HashMap::new(),
             file_untyped_consts: HashSet::new(),
@@ -634,6 +638,7 @@ impl<'a> Collector<'a> {
         self.type_name_scopes.push(HashMap::new());
         self.scalar_scopes.push(HashMap::new());
         self.set_elem_scopes.push(HashMap::new());
+        self.fn_type_scopes.push(HashMap::new());
         self.copy_var_scopes.push(HashSet::new());
     }
 
@@ -643,6 +648,7 @@ impl<'a> Collector<'a> {
         self.type_name_scopes.pop();
         self.scalar_scopes.pop();
         self.set_elem_scopes.pop();
+        self.fn_type_scopes.pop();
         self.copy_var_scopes.pop();
     }
 
@@ -714,6 +720,140 @@ impl<'a> Collector<'a> {
             if let Some(top) = self.set_elem_scopes.last_mut() {
                 top.insert(name.to_string(), None);
             }
+            // Every (re)binding shadows an outer fn type binding (#2901).
+            if let Some(top) = self.fn_type_scopes.last_mut() {
+                top.insert(name.to_string(), None);
+            }
+        }
+    }
+
+    fn bind_fn_type(&mut self, name: &str, ty: Option<TypeExpr>) {
+        if name != "_" && ty.is_some() {
+            if let Some(top) = self.fn_type_scopes.last_mut() {
+                top.insert(name.to_string(), ty);
+            }
+        }
+    }
+
+    fn lookup_fn_type(&self, name: &str) -> Option<TypeExpr> {
+        for layer in self.fn_type_scopes.iter().rev() {
+            if let Some(Some(ty)) = layer.get(name) {
+                return Some(ty.clone());
+            }
+        }
+        None
+    }
+
+    fn normalize_fn_params(raw: &[Param]) -> Vec<Param> {
+        let untyped = |p: &Param| matches!(&p.ty, TypeExpr::Named { name, .. } if name.is_empty());
+        if raw.iter().all(untyped) {
+            return raw
+                .iter()
+                .map(|p| Param {
+                    name: String::new(),
+                    ty: TypeExpr::Named {
+                        name: p.name.clone(),
+                        span: p.span,
+                    },
+                    span: p.span,
+                })
+                .collect();
+        }
+        let mut out = raw.to_vec();
+        let mut next: Option<TypeExpr> = None;
+        for p in out.iter_mut().rev() {
+            if untyped(p) {
+                if let Some(t) = &next {
+                    p.ty = t.clone();
+                }
+            } else {
+                next = Some(p.ty.clone());
+            }
+        }
+        out
+    }
+
+    fn fn_type_of_expr(&self, e: &Expr) -> Option<TypeExpr> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::FnLit { params, results, span, .. } => Some(TypeExpr::Fn {
+                params: params.clone(),
+                results: results.iter().map(|r| r.ty.clone()).collect(),
+                span: *span,
+            }),
+            Expr::SliceLit { elem: Some(elem_ty), span, .. } => Some(TypeExpr::Slice {
+                elem: elem_ty.clone(),
+                span: *span,
+            }),
+            Expr::MapLit { key, value, span, .. } => Some(TypeExpr::Map {
+                key: key.clone(),
+                value: value.clone(),
+                span: *span,
+            }),
+            Expr::Ident { name, .. } => {
+                if let Some(ty) = self.lookup_fn_type(name) {
+                    return Some(ty);
+                }
+                let head = Checker::base_named_type_str(name);
+                if let Some(f) = self.ck.fns.get(name.as_str()).or_else(|| self.ck.fns.get(head)) {
+                    return Some(TypeExpr::Fn {
+                        params: f.params.clone(),
+                        results: f.results.iter().map(|r| r.ty.clone()).collect(),
+                        span: f.span,
+                    });
+                }
+                None
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            return self.fn_type_of_expr(&first.value);
+                        }
+                    }
+                }
+                if let Some(fty) = self.fn_type_of_expr(callee) {
+                    if let TypeExpr::Fn { results, .. } = self.ck.resolve_type_alias(&fty) {
+                        if let Some(first_res) = results.first() {
+                            let resolved = self.ck.resolve_type_alias(first_res);
+                            if matches!(resolved, TypeExpr::Fn { .. }) {
+                                return Some(resolved);
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Expr::Index { base, .. } => {
+                if let Some(base_ty) = self.fn_type_of_expr(base) {
+                    match self.ck.resolve_type_alias(&base_ty) {
+                        TypeExpr::Slice { elem, .. }
+                        | TypeExpr::Array { elem, .. }
+                        | TypeExpr::Map { value: elem, .. } => {
+                            let resolved = self.ck.resolve_type_alias(&elem);
+                            if matches!(resolved, TypeExpr::Fn { .. }) {
+                                return Some(resolved);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let full_name = self.struct_base_name(&bk).or_else(|| self.struct_name(&bk))?;
+                let base_name = Checker::base_named_type_str(&full_name);
+                let fields = self.ck.structs.get(base_name)?;
+                if let Some((_, fty)) = fields.iter().find(|(n, _)| n == name) {
+                    let resolved = self.ck.resolve_type_alias(fty);
+                    if matches!(resolved, TypeExpr::Fn { .. }) {
+                        return Some(resolved);
+                    }
+                }
+                None
+            }
+            _ => None,
         }
     }
 
@@ -1296,6 +1436,7 @@ impl<'a> Collector<'a> {
             let ps = self.scalar_of_ty(&p.ty);
             self.set_scalar(&p.name, ps);
             self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
+            self.bind_fn_type(&p.name, Some(p.ty.clone()));
             self.bind_type_name(&p.name, p.ty.render());
         }
         for r in &f.results {
@@ -1305,6 +1446,7 @@ impl<'a> Collector<'a> {
                 self.bind_kind(rname, rk);
                 let rs = self.scalar_of_ty(&r.ty);
                 self.set_scalar(rname, rs);
+                self.bind_fn_type(rname, Some(r.ty.clone()));
                 self.bind_type_name(rname, r.ty.render());
             }
         }
@@ -1498,6 +1640,13 @@ impl<'a> Collector<'a> {
                 _ => None,
             })
             .collect();
+        let fn_types: Vec<Option<TypeExpr>> = (0..l.names.len())
+            .map(|i| match (&l.ty, l.values.len() == l.names.len()) {
+                (Some(t), _) => Some(t.clone()),
+                (None, true) => self.fn_type_of_expr(&l.values[i]),
+                _ => None,
+            })
+            .collect();
         if let Some(t) = &l.ty {
             let tname = t.render();
             for name in &l.names {
@@ -1510,8 +1659,8 @@ impl<'a> Collector<'a> {
                 }
             }
         }
-        for (((name, kind), scalar), set_elem) in
-            l.names.iter().zip(kinds).zip(scalars).zip(set_elems)
+        for ((((name, kind), scalar), set_elem), fn_type) in
+            l.names.iter().zip(kinds).zip(scalars).zip(set_elems).zip(fn_types)
         {
             // #1031: a same-scope `:=` re-define keeps the EXISTING variable
             // (and its type) in Go, so only a fresh binding takes the
@@ -1523,6 +1672,9 @@ impl<'a> Collector<'a> {
             self.bind_kind(name, kind);
             if fresh || l.ty.is_some() {
                 self.set_scalar(name, scalar);
+                self.bind_fn_type(name, fn_type);
+            } else {
+                self.bind_fn_type(name, fn_type);
             }
             self.bind_set_elem(name, set_elem);
             if !track_read {
@@ -2260,6 +2412,7 @@ impl<'a> Collector<'a> {
                     let ps = self.scalar_of_ty(&p.ty);
                     self.set_scalar(&p.name, ps);
                     self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
+                    self.bind_fn_type(&p.name, Some(p.ty.clone()));
                     self.bind_type_name(&p.name, p.ty.render());
                 }
                 for r in results {
@@ -2269,6 +2422,7 @@ impl<'a> Collector<'a> {
                         self.bind_kind(rname, rk);
                         let rs = self.scalar_of_ty(&r.ty);
                         self.set_scalar(rname, rs);
+                        self.bind_fn_type(rname, Some(r.ty.clone()));
                         self.bind_type_name(rname, r.ty.render());
                     }
                 }
@@ -2749,14 +2903,12 @@ impl<'a> Collector<'a> {
             TypeExpr::Option { elem, .. } => {
                 OpKind::Option(Box::new(self.kind_of_ty_with_subst(elem, subst, depth + 1)))
             }
-            TypeExpr::Fn { results, .. } => OpKind::Fn(
+            TypeExpr::Fn { params, results, .. } => OpKind::Fn(
                 results
                     .iter()
                     .map(|r| self.kind_of_ty_with_subst(r, subst, depth + 1))
                     .collect(),
-                // A bare fn TYPE does not carry a call signature the kind model
-                // can trust a count from — keep the arity unknown.
-                None,
+                Some(params.len()),
             ),
         }
     }
@@ -3119,7 +3271,12 @@ impl<'a> Collector<'a> {
                 }
                 None
             }
-            _ => None,
+            _ => {
+                if let OpKind::Fn(res, _) = self.kind_of_expr(bare) {
+                    return Some(res);
+                }
+                None
+            }
         }
     }
 
@@ -3846,77 +4003,8 @@ impl<'a> Collector<'a> {
         );
     }
 
-    fn check_user_fn_arg_types(&mut self, name: &str, args: &[CallArg]) {
-        let head = Checker::base_named_type_str(name);
-        let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
-            return;
-        };
-        if !f.type_params.is_empty() {
-            return;
-        }
-        if self.multi_value_arg_count(args).is_some() {
-            return;
-        }
-        if f.params.len() != args.len() {
-            return;
-        }
-        for (p, a) in f.params.iter().zip(args.iter()) {
-            let want = self.kind_of_ty(&p.ty, 0);
-            let got = self.kind_of_expr(&a.value);
-            if let OpKind::Pointer(inner) = &want {
-                if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
-                    continue;
-                }
-            }
-            let int_to_float_conflict = want == OpKind::Float
-                && got == OpKind::Int
-                && !self.is_untyped_int_const(&a.value);
-            // #2770: both sides share `OpKind::Float`/`Int` but differ in the
-            // concrete type (`float32` vs `float64`, `int` vs `int64`).
-            let scalar_mismatch = matches!(
-                (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
-                (Some(w), Some(g)) if w != g
-            );
-            if kinds_conflict(&want, &got)
-                || int_to_float_conflict
-                || scalar_mismatch
-                || self.sized_array_names_differ(
-                    Some(p.ty.render().as_str()),
-                    self.typed_value_type_name(&a.value).as_deref(),
-                )
-            {
-                self.emit_e1002(
-                    a.value.span(),
-                    format!(
-                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
-                        a.value.render(),
-                        got.label(),
-                        want.label(),
-                        name
-                    ),
-                    "argument types must match declared parameter types",
-                );
-            }
-        }
-    }
-
-    fn check_method_arg_types(&mut self, bk: &OpKind, name: &str, args: &[CallArg]) {
-        let Some(sn) = self.struct_base_name(bk).or_else(|| self.struct_name(bk)) else {
-            return;
-        };
-        let Some(m) = self.ck.method_decls.get(&(sn.clone(), name.to_string())) else {
-            return;
-        };
-        if !m.type_params.is_empty() {
-            return;
-        }
-        if self.multi_value_arg_count(args).is_some() {
-            return;
-        }
-        if m.params.len() != args.len() {
-            return;
-        }
-        for (p, a) in m.params.iter().zip(args.iter()) {
+    fn check_arg_types_against(&mut self, callee_name: &str, params: &[Param], args: &[CallArg]) {
+        for (p, a) in params.iter().zip(args.iter()) {
             let want = self.kind_of_ty(&p.ty, 0);
             let got = self.kind_of_expr(&a.value);
             if let OpKind::Pointer(inner) = &want {
@@ -3943,17 +4031,53 @@ impl<'a> Collector<'a> {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
-                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}.{}` — Go refuses mismatched argument types (HYB-E1002)",
+                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
                         a.value.render(),
                         got.label(),
                         want.label(),
-                        sn,
-                        name
+                        callee_name
                     ),
                     "argument types must match declared parameter types",
                 );
             }
         }
+    }
+
+    fn check_user_fn_arg_types(&mut self, name: &str, args: &[CallArg]) {
+        let head = Checker::base_named_type_str(name);
+        let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
+            return;
+        };
+        if !f.type_params.is_empty() {
+            return;
+        }
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        if f.params.len() != args.len() {
+            return;
+        }
+        self.check_arg_types_against(name, &f.params, args);
+    }
+
+    fn check_method_arg_types(&mut self, bk: &OpKind, name: &str, args: &[CallArg]) {
+        let Some(sn) = self.struct_base_name(bk).or_else(|| self.struct_name(bk)) else {
+            return;
+        };
+        let Some(m) = self.ck.method_decls.get(&(sn.clone(), name.to_string())) else {
+            return;
+        };
+        if !m.type_params.is_empty() {
+            return;
+        }
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        if m.params.len() != args.len() {
+            return;
+        }
+        let callee_label = format!("{}.{}", sn, name);
+        self.check_arg_types_against(&callee_label, &m.params, args);
     }
 
     /// #577 C10 — a `return` must supply the enclosing function's result
@@ -3989,6 +4113,48 @@ impl<'a> Collector<'a> {
                             }
                         }
                         return;
+                    }
+                    if want.len() == 1 && res.len() >= 2 {
+                        let bare_callee = unwrap_parens(callee);
+                        let buildable_owns = match bare_callee {
+                            Expr::FnLit { results, .. } => results.len() >= 2,
+                            Expr::Ident { name, .. } => {
+                                if let Some(TypeExpr::Fn { results, .. }) = self.lookup_fn_type(name) {
+                                    results.len() >= 2
+                                } else {
+                                    let head = name.split('.').next().unwrap_or(name.as_str());
+                                    self.ck
+                                        .fns
+                                        .get(name.as_str())
+                                        .or_else(|| self.ck.fns.get(head))
+                                        .is_some_and(|f| f.results.len() >= 2)
+                                }
+                            }
+                            Expr::Field { base, name, .. } => {
+                                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                                    if self.lookup_kind(pkg).is_none() {
+                                        let full = format!("{pkg}.{name}");
+                                        if self.ck.fns.contains_key(full.as_str())
+                                            || crate::foreign::package_result_count(pkg.as_str(), name).is_some()
+                                        {
+                                            false
+                                        } else {
+                                            true
+                                        }
+                                    } else {
+                                        true
+                                    }
+                                } else {
+                                    true
+                                }
+                            }
+                            _ => false,
+                        };
+                        if !buildable_owns {
+                            // Multi-value call in single-value return position is owned by
+                            // tuple.rs (HYB-E2002). Avoid emitting duplicate HYB-E1002.
+                            return;
+                        }
                     }
                     let (nr, nw) = (res.len(), want.len());
                     let msg = match (nw, nr) {
@@ -5919,12 +6085,23 @@ impl<'a> Collector<'a> {
             }
             Expr::Ident { name, .. } => {
                 if let Some(k) = self.lookup_kind(name) {
+                    let got_count = self.multi_value_arg_count(args).unwrap_or(args.len());
                     match k {
                         // A local bound to a closure or fn-typed value carries
                         // its declared parameter count, so the call's arity is
                         // checkable (#577 C9).
-                        OpKind::Fn(_, Some(want)) if want != args.len() => {
-                            self.report_local_arity(name, want, args.len(), span)
+                        OpKind::Fn(_, Some(want)) if want != got_count => {
+                            self.report_local_arity(name, want, got_count, span)
+                        }
+                        OpKind::Fn(..) if self.multi_value_arg_count(args).is_none() => {
+                            if let Some(fty) = self.lookup_fn_type(name) {
+                                if let TypeExpr::Fn { params, .. } = self.ck.resolve_type_alias(&fty) {
+                                    let norm_params = Self::normalize_fn_params(&params);
+                                    if norm_params.len() == args.len() {
+                                        self.check_arg_types_against(name, &norm_params, args);
+                                    }
+                                }
+                            }
                         }
                         OpKind::Fn(..) | OpKind::Unknown => {}
                         _ => self.emit_e1002(
@@ -6001,12 +6178,22 @@ impl<'a> Collector<'a> {
                             "only function-typed struct fields or declared methods can be called",
                         );
                     }
-                    // `u.cb(1, 2)` where `cb fn(x int) int` — the field type
-                    // states the count.
-                    if !has_method {
-                        if let OpKind::Fn(_, Some(want)) = fk {
-                            if want != args.len() {
-                                self.report_local_arity(&callee.render(), want, args.len(), span);
+                    // `u.cb(1, 2)` where `cb fn(x int) int` — check arity
+                    // and argument types against the field's declared fn type (#2901).
+                    if !has_method && self.multi_value_arg_count(args).is_none() {
+                        let got_count = args.len();
+                        if let Some(fty) = self.fn_type_of_expr(callee) {
+                            if let TypeExpr::Fn { params, .. } = self.ck.resolve_type_alias(&fty) {
+                                let norm_params = Self::normalize_fn_params(&params);
+                                if norm_params.len() != got_count {
+                                    self.report_local_arity(&callee.render(), norm_params.len(), got_count, span);
+                                } else {
+                                    self.check_arg_types_against(&callee.render(), &norm_params, args);
+                                }
+                            }
+                        } else if let OpKind::Fn(_, Some(want)) = fk {
+                            if want != got_count {
+                                self.report_local_arity(&callee.render(), want, got_count, span);
                             }
                         }
                     }
@@ -6068,6 +6255,20 @@ impl<'a> Collector<'a> {
                 }
             }
             _ => {
+                if self.multi_value_arg_count(args).is_none() {
+                    let got_count = args.len();
+                    if let Some(fty) = self.fn_type_of_expr(bare) {
+                        if let TypeExpr::Fn { params, .. } = self.ck.resolve_type_alias(&fty) {
+                            let norm_params = Self::normalize_fn_params(&params);
+                            if norm_params.len() != got_count {
+                                self.report_local_arity(&callee.render(), norm_params.len(), got_count, span);
+                            } else {
+                                self.check_arg_types_against(&callee.render(), &norm_params, args);
+                            }
+                            return;
+                        }
+                    }
+                }
                 let ck = self.kind_of_expr(bare);
                 if !matches!(ck, OpKind::Unknown | OpKind::Fn(..)) {
                     self.emit_e1002(
@@ -6080,6 +6281,10 @@ impl<'a> Collector<'a> {
                         ),
                         "only functions, methods, closures, and type conversions can be called",
                     );
+                } else if let OpKind::Fn(_, Some(want)) = ck {
+                    if self.multi_value_arg_count(args).is_none() && want != args.len() {
+                        self.report_local_arity(&callee.render(), want, args.len(), span);
+                    }
                 }
             }
         }
