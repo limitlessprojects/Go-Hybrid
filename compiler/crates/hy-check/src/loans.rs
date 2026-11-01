@@ -1097,16 +1097,131 @@ impl<'a> Checker<'a> {
                 // passing the parameter fails closed
                 cr.args.iter().any(&arg_root_is_param)
             }
-            Expr::Field { base, .. } => {
-                if let Expr::Ident { name: pkg, .. } = &**base {
+            Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
                     if A3_PURE_PKGS.contains(&pkg.as_str()) {
                         return false;
                     }
                 }
-                cr.args.iter().any(&arg_root_is_param)
+                let mut base_roots = Vec::new();
+                collect_ref_roots(base, &mut base_roots);
+                if base_roots.iter().any(|r| r == param)
+                    && self.method_call_mutates_receiver(None, base, name, depth + 1)
+                {
+                    return true;
+                }
+                for (i, a) in cr.args.iter().enumerate() {
+                    if arg_root_is_param(a)
+                        && self.method_call_mutates_arg(None, base, name, i, depth + 1)
+                    {
+                        return true;
+                    }
+                }
+                false
             }
             _ => cr.args.iter().any(&arg_root_is_param),
         }
+    }
+
+    fn resolve_method_decls_for_a3(
+        &self,
+        st: Option<&FnState>,
+        base: &Expr,
+        method: &str,
+    ) -> Vec<&'a FnDecl> {
+        let mhead = Self::base_named_type_str(method);
+        let recv_sname = st.and_then(|s| match self.shape_of_expr(s, base) {
+            TypeShape::Struct(Some(sname)) => Some(sname),
+            TypeShape::Pointer(inner) => match *inner {
+                TypeShape::Struct(Some(sname)) => Some(sname),
+                _ => None,
+            },
+            _ => None,
+        });
+        if let Some(sname) = recv_sname {
+            let sbase = Self::base_named_type_str(&sname);
+            self.file
+                .decls
+                .iter()
+                .filter_map(|d| match d {
+                    hy_syntax::Decl::Fn(f)
+                        if f.name == method || Self::base_named_type_str(&f.name) == mhead =>
+                    {
+                        let r = f.receiver.as_ref()?;
+                        let b = Self::base_named_type(&r.ty)?;
+                        (b == sname || Self::base_named_type_str(&b) == sbase).then_some(f)
+                    }
+                    _ => None,
+                })
+                .collect()
+        } else {
+            self.file
+                .decls
+                .iter()
+                .filter_map(|d| match d {
+                    hy_syntax::Decl::Fn(f)
+                        if f.receiver.is_some()
+                            && (f.name == method
+                                || Self::base_named_type_str(&f.name) == mhead) =>
+                    {
+                        Some(f)
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    fn method_call_mutates_receiver(
+        &self,
+        st: Option<&FnState>,
+        base: &Expr,
+        method: &str,
+        depth: usize,
+    ) -> bool {
+        if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+            if A3_PURE_PKGS.contains(&pkg.as_str()) {
+                return false;
+            }
+            if st.map(|s| self.lookup_binding(s, pkg).is_none()).unwrap_or(false)
+                && self.known_package(pkg)
+            {
+                return false;
+            }
+        }
+        let decls = self.resolve_method_decls_for_a3(st, base, method);
+        if decls.is_empty() {
+            return true;
+        }
+        decls.into_iter().any(|decl| {
+            decl.receiver
+                .as_ref()
+                .map(|r| self.fn_mutates_param(decl, &r.name, depth))
+                .unwrap_or(false)
+        })
+    }
+
+    fn method_call_mutates_arg(
+        &self,
+        st: Option<&FnState>,
+        base: &Expr,
+        method: &str,
+        arg_idx: usize,
+        depth: usize,
+    ) -> bool {
+        if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+            if A3_PURE_PKGS.contains(&pkg.as_str()) {
+                return false;
+            }
+        }
+        let decls = self.resolve_method_decls_for_a3(st, base, method);
+        if decls.is_empty() {
+            return true;
+        }
+        decls.into_iter().any(|decl| match decl.params.get(arg_idx) {
+            Some(p) => self.fn_mutates_param(decl, &p.name, depth),
+            None => true,
+        })
     }
 
     /// Record (at define/rebind time) which base paths a local closure's
@@ -1202,6 +1317,19 @@ impl<'a> Checker<'a> {
                                 collect_ref_roots(&a.value, &mut r);
                                 mutated_roots.extend(r);
                             }
+                        }
+                    }
+                } else if let Expr::Field { base, name: method_name, .. } = unwrap_parens(callee) {
+                    if self.method_call_mutates_receiver(Some(st), base, method_name, 0) {
+                        let mut r = Vec::new();
+                        collect_ref_roots(base, &mut r);
+                        mutated_roots.extend(r);
+                    }
+                    for (i, a) in args.iter().enumerate() {
+                        if self.method_call_mutates_arg(Some(st), base, method_name, i, 0) {
+                            let mut r = Vec::new();
+                            collect_ref_roots(&a.value, &mut r);
+                            mutated_roots.extend(r);
                         }
                     }
                 }
@@ -1445,20 +1573,33 @@ impl<'a> Checker<'a> {
                             }
                         }
                     }
-                    Expr::Field { base, .. } => {
-                        if let Expr::Ident { name: pkg, .. } = &**base {
+                    Expr::Field { base, name, .. } => {
+                        if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
                             if A3_PURE_PKGS.contains(&pkg.as_str()) {
                                 continue;
                             }
                         }
-                        for a in cr.args {
+                        if self.method_call_mutates_receiver(Some(st), base, name, 0) {
                             let mut roots = Vec::new();
-                            collect_ref_roots(&a.value, &mut roots);
+                            collect_ref_roots(base, &mut roots);
                             for root in roots {
                                 if let Some(r) =
                                     resolve(&root, current_aliases, current_shadows)
                                 {
                                     out.insert(r);
+                                }
+                            }
+                        }
+                        for (i, a) in cr.args.iter().enumerate() {
+                            if self.method_call_mutates_arg(Some(st), base, name, i, 0) {
+                                let mut roots = Vec::new();
+                                collect_ref_roots(&a.value, &mut roots);
+                                for root in roots {
+                                    if let Some(r) =
+                                        resolve(&root, current_aliases, current_shadows)
+                                    {
+                                        out.insert(r);
+                                    }
                                 }
                             }
                         }
