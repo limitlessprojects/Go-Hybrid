@@ -642,9 +642,63 @@ impl<'a> Checker<'a> {
             return;
         }
         let Some(c) = conv_const(arg) else {
-            return; // non-constant operand: run-time conversion (SPEC X4)
+            // Not a literal: a constant EXPRESSION may still overflow a
+            // word-sized target the emitter never folds (issue #2700).
+            self.check_word_sized_const_expr_conversion(name, arg, span);
+            return; // otherwise a run-time conversion (SPEC X4)
         };
         self.check_conv_against_target(name, &c, arg, span);
+    }
+
+    /// Issue #2700 — `int(1 << 63)` / `uint(1 << 64)`.
+    ///
+    /// `conv_const` only recognises literal operands, so a constant
+    /// EXPRESSION operand skipped every range check. For the fixed widths
+    /// that is fine: `hy_emit::constconv::fold_constant` folds constant
+    /// expressions too (`u64(1 << 64)` is emitted as `uint64(0)`). The
+    /// word-sized targets are not in the emitter's `width_of`, though, so
+    /// the expression reaches Go verbatim and `go build` fails with
+    /// `constant 9223372036854775808 overflows int`, while the literal
+    /// spelling `int(9223372036854775808)` was already rejected with
+    /// HYB-E6006 above.
+    ///
+    /// Literal-only fold (`const_int_fold`, no identifier resolution): a
+    /// local binding may shadow a file-level `const`, and this pass has no
+    /// function state to tell them apart, so identifiers fail open.
+    fn check_word_sized_const_expr_conversion(&mut self, target: &str, arg: &Expr, span: Span) {
+        if !matches!(target, "int" | "isize" | "uint" | "usize" | "uintptr") {
+            return;
+        }
+        let Some((lo, hi)) = fixed_width_int_range(target) else {
+            return;
+        };
+        let shown = match const_int_fold(arg) {
+            ConstFold::Val(v) if v < lo || v > hi => v.to_string(),
+            ConstFold::TooBig => "a value beyond i128".to_string(),
+            _ => return,
+        };
+        self.emit_const_conversion_error(
+            span,
+            format!(
+                "constant expression `{}` ({}) overflows `{}` in a conversion (HYB-E6006)",
+                arg.render(),
+                shown,
+                target
+            ),
+            vec![
+                format!(
+                    "why: Go folds the constant operand and rejects `{}({})` at compile time (`constant {} overflows {}`); the emitter does not fold word-sized targets, so an accepted Hybrid program would emit unbuildable Go (issue #2700)",
+                    target,
+                    arg.render(),
+                    shown,
+                    target
+                ),
+                format!(
+                    "fix: keep the constant in [{}, {}], use a fixed-width target such as `i64`/`u64` (constant conversions to those truncate per SPEC X4), or convert from a variable if wrap-around is intended",
+                    lo, hi
+                ),
+            ],
+        );
     }
 
     fn check_slice_conversion(&mut self, elem: &TypeExpr, arg: &Expr, span: Span) {
