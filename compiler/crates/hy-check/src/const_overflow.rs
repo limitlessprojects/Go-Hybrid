@@ -635,16 +635,24 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
-        let Expr::Ident { name, .. } = callee else {
+        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
             return;
         };
-        if !is_conversion_target(name) {
+        let resolved_bool_target = matches!(
+            self.resolve_type_alias(&TypeExpr::Named {
+                name: name.clone(),
+                span: callee.span(),
+            }),
+            TypeExpr::Named { ref name, .. } if name == "bool"
+        );
+        let target_name = if resolved_bool_target { "bool" } else { name.as_str() };
+        if !is_conversion_target(target_name) {
             return;
         }
         let Some(c) = conv_const(arg) else {
             return; // non-constant operand: run-time conversion (SPEC X4)
         };
-        self.check_conv_against_target(name, &c, arg, span);
+        self.check_conv_against_target(target_name, &c, arg, span);
     }
 
     fn check_slice_conversion(&mut self, elem: &TypeExpr, arg: &Expr, span: Span) {
@@ -880,6 +888,17 @@ impl<'a> Checker<'a> {
                     self.emit_conv_kind_error(target, c, arg, span)
                 }
             },
+            "bool" => match c {
+                ConvConst::Bool => {}
+                ConvConst::Int(_)
+                | ConvConst::Float(_)
+                | ConvConst::Str
+                | ConvConst::Char(_)
+                | ConvConst::Huge { .. }
+                | ConvConst::Nil => {
+                    self.emit_conv_kind_error(target, c, arg, span);
+                }
+            },
             _ => {}
         }
     }
@@ -1040,7 +1059,7 @@ fn huge_int_as_f64(s: &str) -> f64 {
 /// True when `name` is a built-in conversion target of `Type(const)` calls.
 fn is_conversion_target(name: &str) -> bool {
     fixed_width_int_range(name).is_some()
-        || matches!(name, "f32" | "f64" | "float32" | "float64" | "string")
+        || matches!(name, "f32" | "f64" | "float32" | "float64" | "string" | "bool")
 }
 
 /// Targets the emitter's SPEC X4 fold skips (`bits >= 64`) — constants here
