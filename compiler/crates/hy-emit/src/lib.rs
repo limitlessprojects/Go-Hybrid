@@ -208,17 +208,19 @@ pub struct PreludeNeeds {
     pub option: bool,
     pub set: bool,
     pub pop: bool,
+    pub n5_make: bool,
 }
 
 impl PreludeNeeds {
     pub fn any(&self) -> bool {
-        self.option || self.set || self.pop
+        self.option || self.set || self.pop || self.n5_make
     }
 
     pub fn union(&mut self, other: PreludeNeeds) {
         self.option |= other.option;
         self.set |= other.set;
         self.pop |= other.pop;
+        self.n5_make |= other.n5_make;
     }
 }
 
@@ -249,6 +251,7 @@ pub fn package_prelude_file(pkg_name: &str, needs: PreludeNeeds) -> String {
         (needs.option, OPTION_PRELUDE),
         (needs.set, SET_PRELUDE),
         (needs.pop, POP_PRELUDE),
+        (needs.n5_make, N5_MAKE_PRELUDE),
     ] {
         if want {
             out.push('\n');
