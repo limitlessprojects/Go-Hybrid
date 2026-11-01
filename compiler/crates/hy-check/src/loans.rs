@@ -1269,24 +1269,43 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         }
+                        walk::ScopeEvent::SelectRecv { names, .. } => {
+                            for n in *names {
+                                locals_stack.last_mut().unwrap().insert(n.clone());
+                                shadow_stack.last_mut().unwrap().insert(n.clone());
+                                alias_stack.last_mut().unwrap().remove(n);
+                            }
+                        }
                         walk::ScopeEvent::MatchBind { name, subject } => {
+                            locals_stack.last_mut().unwrap().insert((*name).to_string());
                             let mut sroots = Vec::new();
                             collect_ref_roots(subject, &mut sroots);
                             sroots.retain(|r| !bound.contains(r));
-                            let current_shadows = shadow_stack.last().unwrap();
-                            let current_aliases = alias_stack.last().unwrap();
+                            let current_shadows = shadow_stack.last().unwrap().clone();
+                            let current_aliases = alias_stack.last().unwrap().clone();
+                            let mut matched = false;
                             for sr in sroots {
-                                if let Some(target) = resolve(&sr, current_aliases, current_shadows) {
+                                if let Some(target) = resolve(&sr, &current_aliases, &current_shadows) {
                                     match_aliases.entry(name.to_string()).or_default().push(target.clone());
+                                    shadow_stack.last_mut().unwrap().remove(*name);
                                     alias_stack.last_mut().unwrap().insert(name.to_string(), target);
+                                    matched = true;
                                     break;
                                 }
                             }
+                            if !matched {
+                                alias_stack.last_mut().unwrap().remove(*name);
+                                shadow_stack.last_mut().unwrap().insert((*name).to_string());
+                            }
                         }
-                        _ => {}
                     }
                 }
             }
+
+            let is_declared_local =
+                |name: &str, lstack: &[HashSet<String>]| lstack.iter().any(|s| s.contains(name));
+            let local_before: HashSet<String> =
+                locals_stack.iter().flat_map(|s| s.iter().cloned()).collect();
 
             let current_shadows = shadow_stack.last_mut().unwrap();
             let current_aliases = alias_stack.last_mut().unwrap();
@@ -1296,6 +1315,11 @@ impl<'a> Checker<'a> {
             let pre_shadows = current_shadows.clone();
             match stmt {
                 Stmt::Local(l) => {
+                    for name in &l.names {
+                        current_locals.insert(name.clone());
+                        current_aliases.remove(name.as_str());
+                        current_shadows.insert(name.clone());
+                    }
                     for (name, val) in l.names.iter().zip(if l.values.len() == 1 { vec![&l.values[0]; l.names.len()] } else { l.values.iter().collect() }) {
                         current_locals.insert(name.clone());
                         let mut roots = Vec::new();
@@ -1321,13 +1345,54 @@ impl<'a> Checker<'a> {
                             if let Some(r) = resolved {
                                 current_shadows.remove(name.as_str());
                                 current_aliases.insert(name.clone(), r);
-                            } else if bound.contains(name.as_str()) {
+                            } else if bound.contains(name.as_str()) || local_before.contains(name.as_str()) {
                                 current_aliases.remove(name.as_str());
                                 current_shadows.insert(name.clone());
                             }
                         }
                     }
                 }
+                Stmt::Assign {
+                    targets, values, ..
+                } if values.len() == 1 && targets.len() > 1 => {
+                    let mut roots = Vec::new();
+                    collect_ref_roots(&values[0], &mut roots);
+                    let resolved = roots.iter().find_map(|p| resolve(p, &pre_aliases, &pre_shadows));
+                    for t in targets {
+                        if let PlaceKind::Ident(name) = &t.kind {
+                            if let Some(r) = &resolved {
+                                current_shadows.remove(name.as_str());
+                                current_aliases.insert(name.clone(), r.clone());
+                            } else if bound.contains(name.as_str()) || local_before.contains(name.as_str()) {
+                                current_aliases.remove(name.as_str());
+                                current_shadows.insert(name.clone());
+                            }
+                        }
+                    }
+                }
+                Stmt::For { kind, .. } => match kind {
+                    hy_syntax::ForKind::Iterate { vars, expr } => {
+                        let mut roots = Vec::new();
+                        collect_ref_roots(expr, &mut roots);
+                        let resolved = roots.iter().find_map(|p| resolve(p, &pre_aliases, &pre_shadows));
+                        for v in vars {
+                            current_locals.insert(v.clone());
+                            if let Some(r) = &resolved {
+                                current_shadows.remove(v.as_str());
+                                current_aliases.insert(v.clone(), r.clone());
+                            } else {
+                                current_aliases.remove(v.as_str());
+                                current_shadows.insert(v.clone());
+                            }
+                        }
+                    }
+                    hy_syntax::ForKind::Range { var, .. } => {
+                        current_locals.insert(var.clone());
+                        current_aliases.remove(var.as_str());
+                        current_shadows.insert(var.clone());
+                    }
+                    _ => {}
+                },
                 Stmt::Match { subject, arms, .. } => {
                     let mut sroots = Vec::new();
                     collect_ref_roots(subject, &mut sroots);
@@ -1347,13 +1412,27 @@ impl<'a> Checker<'a> {
                 }
                 _ => {}
             }
-            // index-assign targets
+            // index-assign, field-assign, and captured whole-binding rebind targets
             if let Stmt::Assign { targets, .. } = stmt {
                 for t in targets {
-                    if matches!(t.kind, PlaceKind::Index { .. }) || walk::place_field_store_slot(t).is_some() {
+                    if matches!(t.kind, PlaceKind::Index { .. } | PlaceKind::Field { .. })
+                        || walk::place_field_store_slot(t).is_some()
+                    {
                         let raw = t.root().to_string();
                         if let Some(r) = resolve(&raw, current_aliases, current_shadows) {
-                            out.insert(r);
+                            out.insert(r.clone());
+                            if matches!(t.kind, PlaceKind::Field { .. }) {
+                                let rendered = t.render();
+                                if r == raw {
+                                    out.insert(rendered);
+                                } else if let Some(rest) = rendered.strip_prefix(&raw) {
+                                    out.insert(format!("{r}{rest}"));
+                                }
+                            }
+                        }
+                    } else if let PlaceKind::Ident(name) = &t.kind {
+                        if !bound.contains(name.as_str()) && !is_declared_local(name, &locals_stack) {
+                            out.insert(name.clone());
                         }
                     }
                 }
@@ -3021,11 +3100,7 @@ impl<'a> Checker<'a> {
         if slots.len() < 2 {
             return;
         }
-        let slots_meta: Vec<(&str, TypeShape, Option<&hy_syntax::TypeExpr>)> = slots
-            .iter()
-            .map(|(name, shape, ty, _)| (name.as_str(), shape.clone(), ty.as_ref()))
-            .collect();
-        let pairs = self.collect_callee_param_stores(&slots_meta, &body, 0);
+        let pairs = self.collect_callee_slot_stores(st, &slots, &body, 0);
         for (dst_idx, src_idx) in pairs {
             if dst_idx == src_idx {
                 continue;
@@ -3051,6 +3126,7 @@ impl<'a> Checker<'a> {
                 CalleeSlotSource::Arg(src_expr) => {
                     collect_ref_roots(src_expr, &mut src_roots);
                     collect_addr_of_roots(src_expr, &mut src_roots);
+                    self.collect_callee_const_return_roots(st, src_expr, &mut src_roots, 0);
                     let mut move_ops = Vec::new();
                     crate::model::collect_move_operands(src_expr, &mut move_ops);
                     for (op, _) in move_ops {
@@ -3327,9 +3403,46 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn collect_callee_slot_stores<'b>(
+        &self,
+        st: &FnState,
+        slots: &[(String, TypeShape, Option<hy_syntax::TypeExpr>, CalleeSlotSource<'b>)],
+        body: &Block,
+        depth: usize,
+    ) -> Vec<(usize, usize)> {
+        let meta: Vec<_> = slots
+            .iter()
+            .map(|(n, sh, ty, _)| (n.as_str(), sh.clone(), ty.as_ref()))
+            .collect();
+        let outer: HashSet<usize> = slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (_, _, _, src))| {
+                matches!(src, CalleeSlotSource::OuterBinding(_)).then_some(i)
+            })
+            .collect();
+        self.collect_callee_param_stores_inner(&meta, &outer, Some(&st.closure_defs), body, depth)
+    }
+
     fn collect_callee_param_stores(
         &self,
         slots: &[(&str, TypeShape, Option<&hy_syntax::TypeExpr>)],
+        body: &Block,
+        depth: usize,
+    ) -> Vec<(usize, usize)> {
+        self.collect_callee_param_stores_inner(slots, &HashSet::new(), None, body, depth)
+    }
+
+    fn collect_callee_param_stores_inner(
+        &self,
+        slots: &[(&str, TypeShape, Option<&hy_syntax::TypeExpr>)],
+        outer_cell_slots: &HashSet<usize>,
+        outer_closure_defs: Option<
+            &std::collections::HashMap<
+                String,
+                (Vec<hy_syntax::Param>, Vec<hy_syntax::FnResult>, hy_syntax::Block),
+            >,
+        >,
         body: &Block,
         depth: usize,
     ) -> Vec<(usize, usize)> {
@@ -3344,6 +3457,8 @@ impl<'a> Checker<'a> {
         let mut aliases: std::collections::HashMap<String, HashSet<usize>> =
             std::collections::HashMap::new();
         let mut param_names: HashSet<String> = HashSet::new();
+        let mut outer_cells: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         for (idx, (name, slot_shape, ty)) in slots.iter().enumerate() {
             let shape = if !matches!(slot_shape, TypeShape::Unknown) {
                 slot_shape.clone()
@@ -3366,12 +3481,20 @@ impl<'a> Checker<'a> {
             );
             aliases.insert((*name).to_string(), HashSet::from([idx]));
             param_names.insert((*name).to_string());
+            if outer_cell_slots.contains(&idx) {
+                outer_cells.insert((*name).to_string(), idx);
+                if let Some(def) = outer_closure_defs.and_then(|m| m.get(*name)) {
+                    cst.closure_defs.insert((*name).to_string(), def.clone());
+                }
+            }
         }
+        cst.scopes.push(HashMap::new());
         let mut out: HashSet<(usize, usize)> = HashSet::new();
         self.walk_block_param_stores(
             body,
             &mut cst,
             &mut aliases,
+            &outer_cells,
             &param_names,
             depth,
             &mut out,
@@ -3379,6 +3502,16 @@ impl<'a> Checker<'a> {
         let mut pairs: Vec<(usize, usize)> = out.into_iter().collect();
         pairs.sort_unstable();
         pairs
+    }
+
+    fn active_outer_cell(
+        cst: &FnState,
+        outer_cells: &std::collections::HashMap<String, usize>,
+        name: &str,
+    ) -> Option<usize> {
+        (cst.lookup_depth(name) == Some(0))
+            .then(|| outer_cells.get(name).copied())
+            .flatten()
     }
 
     fn raw_expr_slot_origins(
@@ -3429,12 +3562,13 @@ impl<'a> Checker<'a> {
         block: &Block,
         cst: &mut FnState,
         aliases: &mut std::collections::HashMap<String, HashSet<usize>>,
+        outer_cells: &std::collections::HashMap<String, usize>,
         param_names: &HashSet<String>,
         depth: usize,
         out: &mut HashSet<(usize, usize)>,
     ) {
         for s in &block.stmts {
-            self.walk_stmt_param_stores(s, cst, aliases, param_names, depth, out);
+            self.walk_stmt_param_stores(s, cst, aliases, outer_cells, param_names, depth, out);
         }
     }
 
@@ -3443,6 +3577,7 @@ impl<'a> Checker<'a> {
         block: &Block,
         cst: &mut FnState,
         aliases: &mut std::collections::HashMap<String, HashSet<usize>>,
+        outer_cells: &std::collections::HashMap<String, usize>,
         param_names: &HashSet<String>,
         depth: usize,
         out: &mut HashSet<(usize, usize)>,
@@ -3457,7 +3592,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            self.walk_stmt_param_stores(s, cst, aliases, param_names, depth, out);
+            self.walk_stmt_param_stores(s, cst, aliases, outer_cells, param_names, depth, out);
         }
         cst.scopes.pop();
         for (name, entry) in outer_entries {
@@ -3477,6 +3612,7 @@ impl<'a> Checker<'a> {
         stmt: &Stmt,
         cst: &mut FnState,
         aliases: &mut std::collections::HashMap<String, HashSet<usize>>,
+        outer_cells: &std::collections::HashMap<String, usize>,
         param_names: &HashSet<String>,
         depth: usize,
         out: &mut HashSet<(usize, usize)>,
@@ -3493,7 +3629,7 @@ impl<'a> Checker<'a> {
             walk::own_calls(stmt, &mut calls);
         }
         for cr in &calls {
-            self.walk_call_param_stores(cr, cst, aliases, param_names, depth, out);
+            self.walk_call_param_stores(cr, cst, aliases, outer_cells, param_names, depth, out);
         }
 
         // 2. Statement-specific alias & store updates
@@ -3625,10 +3761,25 @@ impl<'a> Checker<'a> {
                                 }
                                 cst.closure_defs.remove(name);
                                 self.record_closure_mutations(cst, name, v);
-                                if src_slots.is_empty() {
+                                let mut next_slots = src_slots;
+                                if let Some(oc) = Self::active_outer_cell(cst, outer_cells, name) {
+                                    let tgt_shares = cst
+                                        .env_lookup(name)
+                                        .map(|b| self.shape_may_share(&b.shape) || matches!(b.shape, TypeShape::Unknown))
+                                        .unwrap_or(true);
+                                    if tgt_shares {
+                                        for s in &next_slots {
+                                            if oc != *s {
+                                                out.insert((oc, *s));
+                                            }
+                                        }
+                                    }
+                                    next_slots.insert(oc);
+                                }
+                                if next_slots.is_empty() {
                                     aliases.remove(name);
                                 } else {
-                                    aliases.insert(name.clone(), src_slots);
+                                    aliases.insert(name.clone(), next_slots);
                                 }
                             }
                             PlaceKind::Index { .. } | PlaceKind::Field { .. } => {
@@ -3638,12 +3789,14 @@ impl<'a> Checker<'a> {
                                     || matches!(t_shape, TypeShape::Unknown);
                                 if tgt_shares && !src_slots.is_empty() {
                                     let t_root = t.root();
-                                    if let Some(dst_slots) = aliases.get(t_root).cloned() {
-                                        for d in &dst_slots {
-                                            for s in &src_slots {
-                                                if d != s {
-                                                    out.insert((*d, *s));
-                                                }
+                                    let mut dst_slots = aliases.get(t_root).cloned().unwrap_or_default();
+                                    if let Some(oc) = Self::active_outer_cell(cst, outer_cells, t_root) {
+                                        dst_slots.insert(oc);
+                                    }
+                                    for d in &dst_slots {
+                                        for s in &src_slots {
+                                            if d != s {
+                                                out.insert((*d, *s));
                                             }
                                         }
                                     }
@@ -3667,10 +3820,21 @@ impl<'a> Checker<'a> {
                         let src_slots = if carries { raw.clone() } else { HashSet::new() };
                         match &t.kind {
                             PlaceKind::Ident(name) => {
-                                if src_slots.is_empty() {
+                                let mut next_slots = src_slots;
+                                if let Some(oc) = Self::active_outer_cell(cst, outer_cells, name) {
+                                    if carries {
+                                        for s in &next_slots {
+                                            if oc != *s {
+                                                out.insert((oc, *s));
+                                            }
+                                        }
+                                    }
+                                    next_slots.insert(oc);
+                                }
+                                if next_slots.is_empty() {
                                     aliases.remove(name);
                                 } else {
-                                    aliases.insert(name.clone(), src_slots);
+                                    aliases.insert(name.clone(), next_slots);
                                 }
                             }
                             PlaceKind::Index { .. } | PlaceKind::Field { .. } => {
@@ -3680,12 +3844,14 @@ impl<'a> Checker<'a> {
                                     || matches!(t_shape, TypeShape::Unknown);
                                 if tgt_shares && !src_slots.is_empty() {
                                     let t_root = t.root();
-                                    if let Some(dst_slots) = aliases.get(t_root).cloned() {
-                                        for d in &dst_slots {
-                                            for s in &src_slots {
-                                                if d != s {
-                                                    out.insert((*d, *s));
-                                                }
+                                    let mut dst_slots = aliases.get(t_root).cloned().unwrap_or_default();
+                                    if let Some(oc) = Self::active_outer_cell(cst, outer_cells, t_root) {
+                                        dst_slots.insert(oc);
+                                    }
+                                    for d in &dst_slots {
+                                        for s in &src_slots {
+                                            if d != s {
+                                                out.insert((*d, *s));
                                             }
                                         }
                                     }
@@ -3710,11 +3876,17 @@ impl<'a> Checker<'a> {
             } => {
                 let mut branch_cst = cst.clone();
                 let mut branch_aliases = aliases.clone();
+                let mut init_bound: HashSet<&str> = HashSet::new();
                 if let Some(i) = init {
+                    branch_cst.scopes.push(HashMap::new());
+                    if let Stmt::Local(l) = i.as_ref() {
+                        init_bound.extend(l.names.iter().map(String::as_str));
+                    }
                     self.walk_stmt_param_stores(
                         i,
                         &mut branch_cst,
                         &mut branch_aliases,
+                        outer_cells,
                         param_names,
                         depth,
                         out,
@@ -3726,13 +3898,12 @@ impl<'a> Checker<'a> {
                     then,
                     &mut then_cst,
                     &mut then_aliases,
+                    outer_cells,
                     param_names,
                     depth,
                     out,
                 );
-                for (k, v) in then_aliases {
-                    aliases.entry(k).or_default().extend(v);
-                }
+                Self::join_scoped_param_aliases(aliases, then_aliases, cst, &init_bound);
                 if let Some(o) = otherwise {
                     let mut else_cst = branch_cst;
                     let mut else_aliases = branch_aliases;
@@ -3740,13 +3911,12 @@ impl<'a> Checker<'a> {
                         o,
                         &mut else_cst,
                         &mut else_aliases,
+                        outer_cells,
                         param_names,
                         depth,
                         out,
                     );
-                    for (k, v) in else_aliases {
-                        aliases.entry(k).or_default().extend(v);
-                    }
+                    Self::join_scoped_param_aliases(aliases, else_aliases, cst, &init_bound);
                 }
             }
             Stmt::For { kind, body, .. } => {
@@ -3792,6 +3962,7 @@ impl<'a> Checker<'a> {
                             }
                         }
                         hy_syntax::ForKind::Range { var, .. } => {
+                            body_cst.env_define(var, Binding { shape: TypeShape::Unknown, ty: None, immutable: false, is_let: false, managed_taint: false, moved: None, non_owned_origin: None, slot_loan: false });
                             body_aliases.remove(var);
                         }
                         hy_syntax::ForKind::While { cond } => {
@@ -3802,6 +3973,7 @@ impl<'a> Checker<'a> {
                                     cr,
                                     &body_cst,
                                     &mut body_aliases,
+                                    outer_cells,
                                     param_names,
                                     depth,
                                     out,
@@ -3814,6 +3986,7 @@ impl<'a> Checker<'a> {
                         body,
                         &mut body_cst,
                         &mut body_aliases,
+                        outer_cells,
                         param_names,
                         depth,
                         out,
@@ -3825,7 +3998,7 @@ impl<'a> Checker<'a> {
                 *aliases = head;
             }
             Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
-                self.walk_scoped_block_param_stores(body, cst, aliases, param_names, depth, out);
+                self.walk_scoped_block_param_stores(body, cst, aliases, outer_cells, param_names, depth, out);
             }
             Stmt::Match { subject, arms, .. } => {
                 let subj_origins = self.expr_slot_origins(cst, subject, aliases);
@@ -3861,6 +4034,7 @@ impl<'a> Checker<'a> {
                         &arm.body,
                         &mut arm_cst,
                         &mut arm_aliases,
+                        outer_cells,
                         param_names,
                         depth,
                         out,
@@ -3879,15 +4053,24 @@ impl<'a> Checker<'a> {
                 for arm in arms {
                     let mut arm_cst = cst.clone();
                     let mut arm_aliases = aliases.clone();
+                    let mut recv_bound: HashSet<&str> = HashSet::new();
+                    if let hy_syntax::SelectArmKind::Recv { names, .. } = &arm.kind {
+                        for n in names {
+                            recv_bound.insert(n.as_str());
+                            arm_cst.env_define(n, Binding { shape: TypeShape::Unknown, ty: None, immutable: false, is_let: false, managed_taint: false, moved: None, non_owned_origin: None, slot_loan: false });
+                            arm_aliases.remove(n);
+                        }
+                    }
                     self.walk_scoped_block_param_stores(
                         &arm.body,
                         &mut arm_cst,
                         &mut arm_aliases,
+                        outer_cells,
                         param_names,
                         depth,
                         out,
                     );
-                    Self::join_scoped_param_aliases(aliases, arm_aliases, cst, &HashSet::new());
+                    Self::join_scoped_param_aliases(aliases, arm_aliases, cst, &recv_bound);
                 }
             }
             _ => {}
@@ -3921,6 +4104,7 @@ impl<'a> Checker<'a> {
         cr: &CallRef,
         cst: &FnState,
         aliases: &mut std::collections::HashMap<String, HashSet<usize>>,
+        outer_cells: &std::collections::HashMap<String, usize>,
         param_names: &HashSet<String>,
         depth: usize,
         out: &mut HashSet<(usize, usize)>,
@@ -3942,7 +4126,12 @@ impl<'a> Checker<'a> {
                 if !elem_shares {
                     return;
                 }
-                let dst_slots = Self::raw_expr_slot_origins(&dst.value, aliases);
+                let mut dst_slots = Self::raw_expr_slot_origins(&dst.value, aliases);
+                if let Some(d_root) = dst.value.root_ident() {
+                    if let Some(oc) = Self::active_outer_cell(cst, outer_cells, d_root) {
+                        dst_slots.insert(oc);
+                    }
+                }
                 let src_slots = Self::raw_expr_slot_origins(&src.value, aliases);
                 for d in &dst_slots {
                     for s in &src_slots {
@@ -4019,11 +4208,7 @@ impl<'a> Checker<'a> {
         if sub_slots.len() < 2 {
             return;
         }
-        let sub_meta: Vec<(&str, TypeShape, Option<&hy_syntax::TypeExpr>)> = sub_slots
-            .iter()
-            .map(|(n, shape, ty, _)| (n.as_str(), shape.clone(), ty.as_ref()))
-            .collect();
-        let sub_pairs = self.collect_callee_param_stores(&sub_meta, &sub_body, depth + 1);
+        let sub_pairs = self.collect_callee_slot_stores(cst, &sub_slots, &sub_body, depth + 1);
         for (sub_dst, sub_src) in sub_pairs {
             if sub_dst == sub_src {
                 continue;
@@ -4036,7 +4221,11 @@ impl<'a> Checker<'a> {
             let dst_slots = match dst_src {
                 CalleeSlotSource::Arg(dst_expr) => self.expr_slot_origins(cst, dst_expr, aliases),
                 CalleeSlotSource::OuterBinding(name) => {
-                    aliases.get(name).cloned().unwrap_or_default()
+                    let mut ds = aliases.get(name).cloned().unwrap_or_default();
+                    if let Some(oc) = Self::active_outer_cell(cst, outer_cells, name) {
+                        ds.insert(oc);
+                    }
+                    ds
                 }
             };
             let src_slots = match src_src {
@@ -5471,12 +5660,8 @@ impl<'a> Checker<'a> {
                 }
                 if let Some((slots, cbody)) = self.resolve_callee_slots_and_body(&cst, cr) {
                     if slots.len() >= 2 {
-                        let slots_meta: Vec<(&str, TypeShape, Option<&hy_syntax::TypeExpr>)> = slots
-                            .iter()
-                            .map(|(n, sh, ty, _)| (n.as_str(), sh.clone(), ty.as_ref()))
-                            .collect();
                         for (dst_idx, src_idx) in
-                            self.collect_callee_param_stores(&slots_meta, &cbody, 0)
+                            self.collect_callee_slot_stores(&cst, &slots, &cbody, 0)
                         {
                             if let (Some((_, _, _, dst_src)), Some((_, _, _, src_src))) =
                                 (slots.get(dst_idx), slots.get(src_idx))
@@ -7184,7 +7369,7 @@ impl<'a> Checker<'a> {
                 }
             }
 
-            if check_writes {
+            {
                 let mut calls = Vec::new();
                 if let Stmt::For {
                     kind: hy_syntax::ForKind::Iterate { expr, .. },
@@ -7196,8 +7381,10 @@ impl<'a> Checker<'a> {
                     walk::own_calls(stmt, &mut calls);
                 }
                 for cr in &calls {
-                    self.check_delete_const(&cst, cr, &HashSet::new());
-                    self.check_call_const_writes(&cst, cr, &HashSet::new());
+                    if check_writes {
+                        self.check_delete_const(&cst, cr, &HashSet::new());
+                        self.check_call_const_writes(&cst, cr, &HashSet::new());
+                    }
                     if let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) {
                         if name == "copy" {
                             self.record_copy_may_share(&mut cst, cr);
@@ -7205,13 +7392,15 @@ impl<'a> Checker<'a> {
                     }
                     self.record_callee_param_stores(&mut cst, cr);
                 }
-                if let Stmt::Task { callee, args, span } = stmt {
-                    let cr = CallRef {
-                        callee,
-                        args,
-                        span: *span,
-                    };
-                    self.check_call_const_writes(&cst, &cr, &HashSet::new());
+                if check_writes {
+                    if let Stmt::Task { callee, args, span } = stmt {
+                        let cr = CallRef {
+                            callee,
+                            args,
+                            span: *span,
+                        };
+                        self.check_call_const_writes(&cst, &cr, &HashSet::new());
+                    }
                 }
             }
 
