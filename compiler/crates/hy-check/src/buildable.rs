@@ -3617,14 +3617,23 @@ impl<'a> Collector<'a> {
         }
         if values.len() != want.len() {
             let (nv, nw) = (values.len(), want.len());
-            // Fewer values than results is legal in exactly two shapes, and
-            // both are lowered to a full-arity Go return:
-            //   * every result is named — Go's naked `return` (corpus 63);
-            //   * the last result is `error` — the emitter's E3 zero-fill
-            //     turns `return v` into `return v, nil` (corpus 13).
-            // Anything else is a genuine arity error.
-            let short_ok = nv < nw
-                && ((nv == 0 && self.fn_results_all_named) || self.fn_results_error_tail);
+            // Fewer values than results is legal in exactly two shapes:
+            //   * a bare `return` — only when every result is named (Go's
+            //     naked return, corpus 63);
+            //   * a partial `return v` — only when the LAST result is `error`
+            //     and exactly that one value is missing, which the emitter's
+            //     E3 zero-fill lowers to `return v, nil` (corpus 13).
+            // The old form ORed `error_tail` unconditionally, so a bare
+            // `return` in an UNNAMED error-tail signature (`fn f() error`,
+            // `fn g() (int, error)`) and an under-arity return missing more
+            // than the error (`fn h() (int, string, error) { return 1 }`)
+            // both passed `hyb check` and failed `go build` with `not enough
+            // return values` (#2749).
+            let short_ok = if nv == 0 {
+                self.fn_results_all_named
+            } else {
+                nv + 1 == nw && self.fn_results_error_tail
+            };
             if short_ok {
                 for (i, (v, w)) in values.iter().zip(want.iter()).enumerate() {
                     let got = self.kind_of_expr(v);
