@@ -259,7 +259,7 @@ impl<'a> Lexer<'a> {
         let mut i = self.i;
         loop {
             match self.chars.get(i).copied() {
-                Some(c) if c.is_whitespace() => i += 1,
+                Some(c) if c.is_whitespace() || c == '\u{FEFF}' => i += 1,
                 Some('/') if self.chars.get(i + 1).copied() == Some('/') => {
                     i += 2;
                     while let Some(c) = self.chars.get(i).copied() {
@@ -317,7 +317,7 @@ impl<'a> Lexer<'a> {
     fn skip_trivia(&mut self) {
         loop {
             match self.at(0) {
-                Some(c) if c.is_whitespace() => {
+                Some(c) if c.is_whitespace() || c == '\u{FEFF}' => {
                     self.bump();
                 }
                 Some('/') if self.at(1) == Some('/') => {
@@ -642,9 +642,13 @@ impl<'a> Lexer<'a> {
         let ch = match self.at(0) {
             Some('\\') => {
                 let esc_start = self.pos();
+                let diags_before = self.diags.len();
                 self.bump();
                 let e = self.escape_char(false);
                 if e.is_none() {
+                    if self.diags.len() == diags_before {
+                        self.diag(PARSE_ERR_CODE, start, "unterminated char literal");
+                    }
                     // diagnostic already recorded; recover to closing quote on this line
                     while let Some(c) = self.at(0) {
                         if c == '\n' {
@@ -840,10 +844,6 @@ impl<'a> Lexer<'a> {
                         }
                         None => {
                             Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
-                            // unknown escape: keep the char verbatim (diag recorded)
-                            if let Some(c2) = self.bump() {
-                                cooked.push(c2);
-                            }
                         }
                     }
                 }
@@ -894,7 +894,25 @@ impl<'a> Lexer<'a> {
             'x' => {
                 let mut v: u32 = 0;
                 for _ in 0..2 {
-                    let h = self.bump()?;
+                    let Some(h) = self.at(0) else {
+                        self.escape_diag(
+                            start,
+                            str_mode,
+                            "malformed \\x escape: unexpected end of input",
+                        );
+                        return None;
+                    };
+                    if h == '"' || h == '\'' || h == '\n' {
+                        self.escape_diag(
+                            start,
+                            str_mode,
+                            format!(
+                                "malformed \\x escape: `{h}` is not a hex digit (\\x takes exactly two hex digits, e.g. \\x41)"
+                            ),
+                        );
+                        return None;
+                    }
+                    self.bump();
                     let Some(d) = h.to_digit(16) else {
                         self.escape_diag(
                             start,
@@ -910,33 +928,9 @@ impl<'a> Lexer<'a> {
                 StrEscape::Byte(v as u8)
             }
             'u' => {
-                if str_mode {
-                    let mut v: u32 = 0;
-                    for _ in 0..4 {
-                        let h = self.bump()?;
-                        let Some(d) = h.to_digit(16) else {
-                            self.escape_diag(
-                                start,
-                                str_mode,
-                                format!(
-                                    "malformed \\u escape: `{h}` is not a hex digit (\\u takes exactly four hex digits, e.g. \\u00e9; the \\u{{…}} rune form (LX6) is char-literal syntax only)"
-                                ),
-                            );
-                            return None;
-                        };
-                        v = v * 16 + d;
-                    }
-                    StrEscape::Char(self.scalar_or_diag(v, start, str_mode, "\\u")?)
-                } else {
+                if !str_mode && self.at(0) == Some('{') {
                     // rune style: \u{1F600}
-                    if self.bump() != Some('{') {
-                        self.escape_diag(
-                            start,
-                            str_mode,
-                            "malformed \\u{…} escape: expected `{` after \\u in the rune form",
-                        );
-                        return None;
-                    }
+                    self.bump();
                     let mut v: u32 = 0;
                     let mut digits: usize = 0;
                     loop {
@@ -970,12 +964,65 @@ impl<'a> Lexer<'a> {
                         }
                     }
                     StrEscape::Char(self.scalar_or_diag(v, start, str_mode, "\\u{…}")?)
+                } else {
+                    let mut v: u32 = 0;
+                    for _ in 0..4 {
+                        let Some(h) = self.at(0) else {
+                            self.escape_diag(
+                                start,
+                                str_mode,
+                                "malformed \\u escape: unexpected end of input",
+                            );
+                            return None;
+                        };
+                        if h == '"' || h == '\'' || h == '\n' {
+                            self.escape_diag(
+                                start,
+                                str_mode,
+                                format!(
+                                    "malformed \\u escape: `{h}` is not a hex digit (\\u takes exactly four hex digits, e.g. \\u00e9)"
+                                ),
+                            );
+                            return None;
+                        }
+                        self.bump();
+                        let Some(d) = h.to_digit(16) else {
+                            self.escape_diag(
+                                start,
+                                str_mode,
+                                format!(
+                                    "malformed \\u escape: `{h}` is not a hex digit (\\u takes exactly four hex digits, e.g. \\u00e9)"
+                                ),
+                            );
+                            return None;
+                        };
+                        v = v * 16 + d;
+                    }
+                    StrEscape::Char(self.scalar_or_diag(v, start, str_mode, "\\u")?)
                 }
             }
             'U' => {
                 let mut v: u32 = 0;
                 for _ in 0..8 {
-                    let h = self.bump()?;
+                    let Some(h) = self.at(0) else {
+                        self.escape_diag(
+                            start,
+                            str_mode,
+                            "malformed \\U escape: unexpected end of input",
+                        );
+                        return None;
+                    };
+                    if h == '"' || h == '\'' || h == '\n' {
+                        self.escape_diag(
+                            start,
+                            str_mode,
+                            format!(
+                                "malformed \\U escape: `{h}` is not a hex digit (\\U takes exactly eight hex digits, e.g. \\U0001F600)"
+                            ),
+                        );
+                        return None;
+                    }
+                    self.bump();
                     let Some(d) = h.to_digit(16) else {
                         self.escape_diag(
                             start,
@@ -1256,7 +1303,7 @@ mod tests {
     #[test]
     fn malformed_rune_u_without_brace_is_diagnosed() {
         let errs = lex_errs(r#"fn main() { c := '\u12' }"#);
-        assert!(errs.iter().any(|d| d.message.contains("expected `{` after \\u")
+        assert!(errs.iter().any(|d| d.message.contains("\\u takes exactly four hex digits")
             && d.tier0_rule.as_deref() == Some("LX6")), "{errs:?}");
     }
 
