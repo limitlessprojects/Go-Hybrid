@@ -58,3 +58,31 @@ fn accepts_matching_and_nil_equality() {
     assert_ok("fn main() {\n    if 1.0 == 1 {}\n}\n");
     assert_ok("fn main() {\n    f := 1.5\n    if f == 1 {}\n}\n");
 }
+
+#[test]
+fn rejects_non_nilable_types_compared_to_nil_issue_2471() {
+    // int
+    assert_e1002("fn main() {\n    x := 5\n    if x == nil {}\n}\n");
+    assert_e1002("fn main() {\n    x := 5\n    if nil == x {}\n}\n");
+    assert_e1002("fn main() {\n    if 100 == nil {}\n}\n");
+    assert_e1002("fn main() {\n    if nil != 100 {}\n}\n");
+
+    // string
+    assert_e1002("fn main() {\n    s := \"hello\"\n    if s != nil {}\n}\n");
+    assert_e1002("fn main() {\n    if \"raw\" == nil {}\n}\n");
+
+    // bool
+    assert_e1002("fn main() {\n    b := true\n    if b == nil {}\n}\n");
+
+    // float
+    assert_e1002("fn main() {\n    f := 3.14\n    if f != nil {}\n}\n");
+
+    // struct
+    assert_e1002("struct point {\n    x int\n    y int\n}\nfn main() {\n    pt := point{x: 1, y: 2}\n    if pt == nil {}\n}\n");
+
+    // array
+    assert_e1002("fn main() {\n    arr := [2]int{1, 2}\n    if arr != nil {}\n}\n");
+
+    // nil == nil
+    assert_e1002("fn main() {\n    if nil == nil {}\n}\n");
+}

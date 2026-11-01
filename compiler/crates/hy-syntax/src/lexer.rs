@@ -176,6 +176,12 @@ enum Frame {
     Interp { depth: u32 },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StrEscape {
+    Char(char),
+    Byte(u8),
+}
+
 struct Lexer<'a> {
     path: String,
     chars: Vec<char>,
@@ -489,6 +495,30 @@ impl<'a> Lexer<'a> {
                     break;
                 }
             }
+            if self.at(0) == Some('.') && self.at(1) != Some('.') {
+                // A prefixed base literal (0x, 0b, 0o) cannot have a fractional part
+                // (SPEC-LANGUAGE.md LX6). Consume the dot and subsequent characters so
+                // it fails as a single malformed literal instead of leaking as an orphan
+                // leading-dot float on the same line (issue #1168).
+                s.push('.');
+                self.bump();
+                while let Some(c) = self.at(0) {
+                    if c == '_' || c.is_ascii_alphanumeric() || c == '+' || c == '-' {
+                        s.push(c);
+                        self.bump();
+                    } else {
+                        break;
+                    }
+                }
+                self.escape_diag(
+                    start,
+                    false,
+                    format!(
+                        "malformed 0{base} integer literal: prefixed base literals cannot have a fractional part (SPEC-LANGUAGE.md LX6)"
+                    ),
+                );
+                return self.tok(start, Tok::Int(s));
+            }
             let digits = &s[2..];
             if digits.is_empty() {
                 self.escape_diag(
@@ -724,6 +754,23 @@ impl<'a> Lexer<'a> {
 
     // -- string mode -----------------------------------------------------------
 
+    /// Flush buffered byte-valued escapes (`\xNN`, `\NNN`) into `cooked`.
+    /// Valid UTF-8 sequences decode directly to their Unicode scalar values
+    /// (preserving multi-byte UTF-8 sequences like `"\xc3\xa9"` -> `"é"` per
+    /// LX7/T3); any non-UTF-8 remainder bytes fall back byte-for-byte.
+    fn flush_str_bytes(pending_bytes: &mut Vec<u8>, cooked: &mut String) {
+        if pending_bytes.is_empty() {
+            return;
+        }
+        for chunk in pending_bytes.utf8_chunks() {
+            cooked.push_str(chunk.valid());
+            for &b in chunk.invalid() {
+                cooked.push(char::from(b));
+            }
+        }
+        pending_bytes.clear();
+    }
+
     /// Scan one segment of a `"…"` string: a literal chunk (terminated by
     /// `"` or EOF) or an interpolation opener (terminated by `{`). Returns
     /// `None` never — every path emits a token (chunks carry their StrEnd /
@@ -731,8 +778,10 @@ impl<'a> Lexer<'a> {
     fn lex_str_segment(&mut self, emitted_any: bool) -> Option<Token> {
         let start = self.pos();
         let mut cooked = String::new();
+        let mut pending_bytes: Vec<u8> = Vec::new();
         loop {
             let Some(c) = self.at(0) else {
+                Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
                 self.frames.pop();
                 self.diag(PARSE_ERR_CODE, start, "unterminated string literal");
                 if cooked.is_empty() && emitted_any {
@@ -743,6 +792,7 @@ impl<'a> Lexer<'a> {
             };
             match c {
                 '"' => {
+                    Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
                     self.bump();
                     self.frames.pop();
                     if cooked.is_empty() && emitted_any {
@@ -752,6 +802,7 @@ impl<'a> Lexer<'a> {
                     return Some(self.tok(start, Tok::StrChunk(cooked)));
                 }
                 '{' => {
+                    Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
                     if self.at(1) == Some('{') {
                         self.bump();
                         self.bump();
@@ -771,6 +822,7 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 '}' => {
+                    Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
                     // `}}` escapes a literal brace; a lone `}` is literal text
                     self.bump();
                     if self.at(0) == Some('}') {
@@ -780,9 +832,14 @@ impl<'a> Lexer<'a> {
                 }
                 '\\' => {
                     self.bump();
-                    match self.escape_char(true) {
-                        Some(e) => cooked.push(e),
+                    match self.escape_raw(true) {
+                        Some(StrEscape::Byte(b)) => pending_bytes.push(b),
+                        Some(StrEscape::Char(e)) => {
+                            Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
+                            cooked.push(e);
+                        }
                         None => {
+                            Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
                             // unknown escape: keep the char verbatim (diag recorded)
                             if let Some(c2) = self.bump() {
                                 cooked.push(c2);
@@ -791,6 +848,7 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 _ => {
+                    Self::flush_str_bytes(&mut pending_bytes, &mut cooked);
                     cooked.push(c);
                     self.bump();
                 }
@@ -798,8 +856,20 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// One escape sequence after `\` for rune literals (`'…'`), where `\xNN`
+    /// and `\NNN` denote a code point in `0..=255`.
+    fn escape_char(&mut self, str_mode: bool) -> Option<char> {
+        match self.escape_raw(str_mode)? {
+            StrEscape::Char(c) => Some(c),
+            StrEscape::Byte(b) => Some(char::from(b)),
+        }
+    }
+
     /// One escape sequence after `\`. `str_mode` selects the Go string escape
     /// set (`\uNNNN`); char literals use the rune set (`\u{…}`, LX6).
+    /// Byte-valued escapes (`\xNN`, `\NNN`) return `StrEscape::Byte(u8)` so
+    /// interpreted strings can assemble multi-byte UTF-8 sequences before
+    /// decoding, while rune literals convert the byte to its scalar value.
     ///
     /// Fail-closed contract (GUARANTEES.md row 4's spirit, extended to the
     /// lexer): every malformed escape this function can SEE must record a
@@ -807,20 +877,20 @@ impl<'a> Lexer<'a> {
     /// recorded" on `None`. The one silent `None` left is end-of-input
     /// mid-escape: the literal loop then runs to EOF and the caller emits
     /// its own `unterminated string/char literal` diagnostic.
-    fn escape_char(&mut self, str_mode: bool) -> Option<char> {
+    fn escape_raw(&mut self, str_mode: bool) -> Option<StrEscape> {
         let start = self.pos();
         let c = self.bump()?;
         let out = match c {
-            'n' => '\n',
-            't' => '\t',
-            'r' => '\r',
-            '\\' => '\\',
-            '"' => '"',
-            '\'' => '\'',
-            'a' => '\u{7}',
-            'b' => '\u{8}',
-            'f' => '\u{c}',
-            'v' => '\u{b}',
+            'n' => StrEscape::Char('\n'),
+            't' => StrEscape::Char('\t'),
+            'r' => StrEscape::Char('\r'),
+            '\\' => StrEscape::Char('\\'),
+            '"' => StrEscape::Char('"'),
+            '\'' => StrEscape::Char('\''),
+            'a' => StrEscape::Char('\u{7}'),
+            'b' => StrEscape::Char('\u{8}'),
+            'f' => StrEscape::Char('\u{c}'),
+            'v' => StrEscape::Char('\u{b}'),
             'x' => {
                 let mut v: u32 = 0;
                 for _ in 0..2 {
@@ -837,8 +907,7 @@ impl<'a> Lexer<'a> {
                     };
                     v = v * 16 + d;
                 }
-                // v <= 0xFF is always a scalar value; from_u32 cannot fail.
-                char::from_u32(v)?
+                StrEscape::Byte(v as u8)
             }
             'u' => {
                 if str_mode {
@@ -857,7 +926,7 @@ impl<'a> Lexer<'a> {
                         };
                         v = v * 16 + d;
                     }
-                    self.scalar_or_diag(v, start, str_mode, "\\u")?
+                    StrEscape::Char(self.scalar_or_diag(v, start, str_mode, "\\u")?)
                 } else {
                     // rune style: \u{1F600}
                     if self.bump() != Some('{') {
@@ -900,7 +969,7 @@ impl<'a> Lexer<'a> {
                             }
                         }
                     }
-                    self.scalar_or_diag(v, start, str_mode, "\\u{…}")?
+                    StrEscape::Char(self.scalar_or_diag(v, start, str_mode, "\\u{…}")?)
                 }
             }
             'U' => {
@@ -919,7 +988,7 @@ impl<'a> Lexer<'a> {
                     };
                     v = v * 16 + d;
                 }
-                self.scalar_or_diag(v, start, str_mode, "\\U")?
+                StrEscape::Char(self.scalar_or_diag(v, start, str_mode, "\\U")?)
             }
             '0'..='7' => {
                 // octal \NNN — at most three digits (c plus up to two more),
@@ -942,7 +1011,7 @@ impl<'a> Lexer<'a> {
                     );
                     return None;
                 }
-                char::from_u32(v)?
+                StrEscape::Byte(v as u8)
             }
             _ => {
                 self.diag(
@@ -1237,6 +1306,40 @@ mod tests {
         assert_eq!(r2[0], Tok::Int("1".into()));
         assert_eq!(r2[1], Tok::Punct("..="));
     }
+
+    #[test]
+    fn prefixed_base_literal_fraction_issue_1168() {
+        // Issue #1168: prefixed base literals (0x, 0b, 0o) followed by a fractional
+        // dot must not split into Tok::Int and orphan leading-dot Tok::Float.
+        for (src, base) in [
+            ("x := 0x1.8", "0x"),
+            ("x := 0x1.f", "0x"),
+            ("x := 0x1.8p-2", "0x"),
+            ("x := 0x1.", "0x"),
+            ("x := 0o7.5", "0o"),
+            ("x := 0b1.0", "0b"),
+        ] {
+            let errs = lex_errs(src);
+            assert!(
+                errs.iter().any(|d| d.message.contains(&format!("malformed {base}"))
+                    && d.message.contains("fractional part")
+                    && d.tier0_rule.as_deref() == Some("LX6")),
+                "expected malformed {base} diagnostic for `{src}`, got: {errs:?}"
+            );
+        }
+
+        // Range syntax on prefixed base literals must remain valid (not treated as fraction)
+        let r_hex = toks("0x1..0x10");
+        assert_eq!(r_hex[0], Tok::Int("0x1".into()));
+        assert_eq!(r_hex[1], Tok::Punct(".."));
+        assert_eq!(r_hex[2], Tok::Int("0x10".into()));
+
+        let r_hex_inc = toks("0x1..=0x10");
+        assert_eq!(r_hex_inc[0], Tok::Int("0x1".into()));
+        assert_eq!(r_hex_inc[1], Tok::Punct("..="));
+        assert_eq!(r_hex_inc[2], Tok::Int("0x10".into()));
+    }
+
 
     #[test]
     fn operators_lex_correctly() {

@@ -17,12 +17,12 @@
 //! foreign package calls. `?`-unwrapped calls stay permissive (unwrapping the
 //! error produces a single value).
 
-use crate::buildable::OpKind;
 use crate::foreign;
-use crate::model::{unwrap_parens, Checker, FnState, TypeShape};
+use crate::model::{unwrap_parens, Binding, Checker, FnState, TypeShape};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
-    AssignOp, Expr, ForKind, InterpPart, Place, PlaceKind, SelectArmKind, Stmt, TypeExpr,
+    AssignOp, Block, Expr, FnResult, ForKind, InterpPart, LocalKind, Param, Place, PlaceKind,
+    SelectArmKind, Stmt, TypeExpr,
 };
 
 /// Statically known value count of a non-call binding source (T23).
@@ -83,8 +83,22 @@ impl<'a> Checker<'a> {
                 self.check_expr_single_value(st, chan, chan.span());
                 self.check_expr_single_value(st, value, *span);
             }
-            Stmt::If { cond, .. } => {
-                self.check_expr_single_value(st, cond, cond.span());
+            Stmt::If { init, cond, .. } => {
+                let mut tmp = st.clone();
+                if let Some(Stmt::Local(l)) = init.as_deref() {
+                    tmp.scope_push();
+                    let tys = if l.values.len() == 1 && l.names.len() > 1 {
+                        self.multi_value_tys(st, &l.values[0], l.names.len())
+                    } else {
+                        l.values.iter().map(|v| self.ty_of_expr(st, v)).collect()
+                    };
+                    for (i, n) in l.names.iter().enumerate() {
+                        let ty = l.ty.clone().or_else(|| tys.get(i).cloned().flatten());
+                        let s = ty.as_ref().map(|t| self.shape_of_type(t)).unwrap_or(TypeShape::Unknown);
+                        self.define_binding(&mut tmp, n, s, ty, false, false, false);
+                    }
+                }
+                self.check_expr_single_value(&tmp, cond, cond.span());
             }
             Stmt::For { kind, .. } => match kind {
                 ForKind::Infinite => {}
@@ -101,6 +115,9 @@ impl<'a> Checker<'a> {
             },
             Stmt::Return { values, .. } => {
                 if values.len() == 1 {
+                    if st.result_shapes.len() == 1 && !self.buildable_owns_multi_value_call(st, &values[0]) {
+                        self.check_multi_value_bind(st, &values[0], 1, values[0].span());
+                    }
                     self.check_subexprs_single_value(st, &values[0]);
                 } else {
                     for v in values {
@@ -111,6 +128,20 @@ impl<'a> Checker<'a> {
             Stmt::Task { callee, args, .. } => {
                 self.check_expr_single_value(st, callee, callee.span());
                 if args.len() == 1 && !args[0].spread {
+                    let forwarded = self.forwarded_tuple_arity(st, callee, &args[0].value);
+                    // usize is Copy, so take the count rather than the tuple:
+                    // the tuple carries a String and would be moved below.
+                    let result_count = self
+                        .static_result_count(st, &args[0].value)
+                        .map(|(_, r)| r);
+                    if let (Some(w), Some(r)) = (forwarded, result_count) {
+                        if r >= 2 {
+                            self.check_multi_value_bind(st, &args[0].value, w, args[0].span);
+                        }
+                    }
+                    // Even when the lone argument legally forwards its multi-value
+                    // result into the callee, its own subexpressions (callee and
+                    // inner arguments) remain single-value contexts.
                     self.check_subexprs_single_value(st, &args[0].value);
                 } else {
                     for a in args {
@@ -122,7 +153,19 @@ impl<'a> Checker<'a> {
                 self.check_expr_single_value(st, subject, subject.span());
                 for arm in arms {
                     if let Some(g) = &arm.guard {
-                        self.check_expr_single_value(st, g, g.span());
+                        let mut arm_st = st.clone();
+                        if let hy_syntax::MatchPattern::Path { segments, binding: Some(b) } = &arm.pattern {
+                            if segments == &["some"] {
+                                arm_st.scope_push();
+                                self.bind_match_arm(&mut arm_st, b, subject, false);
+                                if let Some(TypeExpr::Option { elem, .. }) = self.ty_of_expr(st, subject).map(|t| self.resolve_type_alias(&t)) {
+                                    if let Some(bind) = arm_st.env_lookup_mut(b) {
+                                        bind.ty = Some(*elem);
+                                    }
+                                }
+                            }
+                        }
+                        self.check_expr_single_value(&arm_st, g, g.span());
                     }
                 }
             }
@@ -213,6 +256,20 @@ impl<'a> Checker<'a> {
             Expr::Call { callee, args, .. } => {
                 self.check_expr_single_value(st, callee, callee.span());
                 if args.len() == 1 && !args[0].spread {
+                    let forwarded = self.forwarded_tuple_arity(st, callee, &args[0].value);
+                    // usize is Copy, so take the count rather than the tuple:
+                    // the tuple carries a String and would be moved below.
+                    let result_count = self
+                        .static_result_count(st, &args[0].value)
+                        .map(|(_, r)| r);
+                    if let (Some(w), Some(r)) = (forwarded, result_count) {
+                        if r >= 2 {
+                            self.check_multi_value_bind(st, &args[0].value, w, args[0].span);
+                        }
+                    }
+                    // Even when the lone argument legally forwards its multi-value
+                    // result into the callee, its own subexpressions (callee and
+                    // inner arguments) remain single-value contexts.
                     self.check_subexprs_single_value(st, &args[0].value);
                 } else {
                     for a in args {
@@ -340,6 +397,75 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn forwarded_tuple_arity(&self, st: &FnState, callee: &Expr, arg: &Expr) -> Option<usize> {
+        match unwrap_parens_and_move(callee) {
+            Expr::Ident { name, .. } => {
+                if self.lookup_binding(st, name).is_some() {
+                    if let Some(TypeExpr::Fn { params, .. }) = self.resolve_fn_callee_ty(st, callee)
+                    {
+                        return Some(params.len());
+                    }
+                    return None;
+                }
+                let head = Self::base_named_type_str(name);
+                // A named user function is already owned by buildable's
+                // check_multi_value_arg_arity (E1002) when buildable resolves
+                // `callee` and `arg`. When `callee` is wrapped in `move` or
+                // `arg` is wrapped in `move`, is a foreign package call, or
+                // is an indirect call buildable does not resolve, check here.
+                if let Some(decl) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
+                    let callee_is_bare_ident = matches!(unwrap_parens(callee), Expr::Ident { .. });
+                    if callee_is_bare_ident && self.buildable_owns_multi_value_call(st, arg) {
+                        return None;
+                    }
+                    return Some(decl.params.len());
+                }
+                (name == "some").then_some(1)
+            }
+            Expr::FnLit { params, .. } => Some(params.len()),
+            Expr::Field { base, name, .. } => {
+                if matches!(name.as_str(), "insert" | "contains" | "remove")
+                    && self
+                        .ty_of_expr(st, base)
+                        .map(|t| self.resolve_type_alias(&t))
+                        .is_some_and(|t| matches!(t, TypeExpr::Named { name: n, .. } if Self::base_named_type_str(&n) == "set"))
+                {
+                    return Some(1);
+                }
+                let head = Self::base_named_type_str(name);
+                let recv_base = self
+                    .ty_of_expr(st, base)
+                    .map(|t| self.resolve_type_alias(&t))
+                    .and_then(|t| Self::base_named_type(&t))
+                    .or_else(|| match self.shape_of_expr(st, base) {
+                        TypeShape::Struct(Some(s)) => {
+                            Some(Self::base_named_type_str(&s).to_string())
+                        }
+                        TypeShape::Pointer(inner) => match *inner {
+                            TypeShape::Struct(Some(s)) => {
+                                Some(Self::base_named_type_str(&s).to_string())
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    });
+                if let Some(rb) = recv_base {
+                    if let Some(decl) = self.method_decls.get(&(rb, head.to_string())) {
+                        return Some(decl.params.len());
+                    }
+                }
+                if let Some(TypeExpr::Fn { params, .. }) = self.resolve_fn_callee_ty(st, callee) {
+                    return Some(params.len());
+                }
+                None
+            }
+            other => match self.resolve_fn_callee_ty(st, other)? {
+                TypeExpr::Fn { params, .. } => Some(params.len()),
+                _ => None,
+            },
+        }
+    }
+
     /// `Some((callee, result count))` when `expr` is a direct or indirect call
     /// with a statically known result count (excluding `?`-unwrapped calls).
     fn static_result_count(&self, st: &FnState, expr: &Expr) -> Option<(String, usize)> {
@@ -349,27 +475,11 @@ impl<'a> Checker<'a> {
         match unwrap_parens_and_move(callee) {
             Expr::Ident { name, .. } => {
                 // 1. Local bindings (fn values, closures, parameters, aliases)
-                if let Some(b) = self.lookup_binding(st, name) {
-                    if let Some(ty) = &b.ty {
-                        if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(ty) {
-                            return Some((name.clone(), results.len()));
-                        }
-                    }
-                    let root = crate::freeze::resolve_alias(st, name);
-                    if root != *name {
-                        if let Some(rb) = self.lookup_binding(st, &root) {
-                            if let Some(ty) = &rb.ty {
-                                if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(ty) {
-                                    return Some((name.clone(), results.len()));
-                                }
-                            }
-                        }
-                        let rhead = Self::base_named_type_str(&root);
-                        if let Some(decl) =
-                            self.fns.get(root.as_str()).or_else(|| self.fns.get(rhead))
-                        {
-                            return Some((name.clone(), decl.results.len()));
-                        }
+                if self.lookup_binding(st, name).is_some() {
+                    if let Some(TypeExpr::Fn { results, .. }) =
+                        self.resolve_fn_callee_ty(st, callee)
+                    {
+                        return Some((name.clone(), results.len()));
                     }
                     return None;
                 }
@@ -386,7 +496,7 @@ impl<'a> Checker<'a> {
             } => {
                 let head = Self::base_named_type_str(method_name);
                 // 1. Unshadowed package call (`strconv.parse_int(...)`, etc.)
-                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens_and_move(base) {
                     if self.lookup_binding(st, pkg).is_none() {
                         let full = format!("{pkg}.{head}");
                         if let Some(decl) = self.fns.get(full.as_str()) {
@@ -416,23 +526,386 @@ impl<'a> Checker<'a> {
                     });
                 if let Some(rb) = recv_base {
                     if let Some(decl) = self.method_decls.get(&(rb, head.to_string())) {
-                        return Some((format!("{}.{method_name}", base.render()), decl.results.len()));
+                        return Some((
+                            format!("{}.{method_name}", base.render()),
+                            decl.results.len(),
+                        ));
                     }
                 }
                 // 3. Struct field holding a fn value (`h.mm(3, 9)`)
-                let callee_ty = self.ty_of_expr(st, callee)?;
-                if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&callee_ty) {
+                let callee_ty = self.resolve_fn_callee_ty(st, callee)?;
+                if let TypeExpr::Fn { results, .. } = callee_ty {
                     return Some((callee.render(), results.len()));
                 }
                 None
             }
             other => {
-                let callee_ty = self.ty_of_expr(st, other)?;
-                if let TypeExpr::Fn { results, .. } = self.resolve_type_alias(&callee_ty) {
+                let callee_ty = self.resolve_fn_callee_ty(st, other)?;
+                if let TypeExpr::Fn { results, .. } = callee_ty {
                     return Some((callee.render(), results.len()));
                 }
                 None
             }
+        }
+    }
+
+    fn resolve_fn_callee_ty(&self, st: &FnState, expr: &Expr) -> Option<TypeExpr> {
+        if let Some(ty) = self.ty_of_expr(st, expr) {
+            let resolved = self.resolve_type_alias(&ty);
+            if matches!(resolved, TypeExpr::Fn { .. }) {
+                return Some(resolved);
+            }
+        }
+        match unwrap_parens_and_move(expr) {
+            Expr::Ident { name, span } => {
+                if let Some((params, results, _)) = st.closure_defs.get(name.as_str()) {
+                    return Some(TypeExpr::Fn {
+                        params: params.clone(),
+                        results: results.iter().map(|r| r.ty.clone()).collect(),
+                        span: *span,
+                    });
+                }
+                let root = crate::freeze::resolve_alias(st, name);
+                if root != *name {
+                    if let Some(rb) = self.lookup_binding(st, &root) {
+                        if let Some(ty) = &rb.ty {
+                            return Some(self.resolve_type_alias(ty));
+                        }
+                    }
+                    if let Some((params, results, _)) = st.closure_defs.get(root.as_str()) {
+                        return Some(TypeExpr::Fn {
+                            params: params.clone(),
+                            results: results.iter().map(|r| r.ty.clone()).collect(),
+                            span: *span,
+                        });
+                    }
+                    let rhead = Self::base_named_type_str(&root);
+                    if let Some(decl) = self.fns.get(root.as_str()).or_else(|| self.fns.get(rhead))
+                    {
+                        return Some(TypeExpr::Fn {
+                            params: decl.params.clone(),
+                            results: decl.results.iter().map(|r| r.ty.clone()).collect(),
+                            span: *span,
+                        });
+                    }
+                }
+                if let Some(cval) = self.const_values.get(name.as_str()) {
+                    return self.resolve_fn_callee_ty(st, cval);
+                }
+                None
+            }
+            Expr::Index { base, .. } => {
+                if let Expr::SliceLit {
+                    elem: None, items, ..
+                } = unwrap_parens_and_move(base)
+                {
+                    if let Some(first) = items.first() {
+                        return self.resolve_fn_callee_ty(st, first);
+                    }
+                }
+                let base_ty = match unwrap_parens_and_move(base) {
+                    Expr::Ident { name, .. } => {
+                        let root = crate::freeze::resolve_alias(st, name);
+                        self.lookup_binding(st, &root)
+                            .and_then(|b| b.ty.clone())
+                            .or_else(|| {
+                                self.const_values
+                                    .get(root.as_str())
+                                    .and_then(|cv| match unwrap_parens_and_move(cv) {
+                                        Expr::SliceLit {
+                                            elem: None,
+                                            items,
+                                            span,
+                                        } => items
+                                            .first()
+                                            .and_then(|f| self.resolve_fn_callee_ty(st, f))
+                                            .map(|elem| TypeExpr::Slice {
+                                                elem: Box::new(elem),
+                                                span: *span,
+                                            }),
+                                        _ => self.ty_of_expr(st, cv),
+                                    })
+                            })
+                    }
+                    _ => self.ty_of_expr(st, base),
+                }?;
+                match self.resolve_type_alias(&base_ty) {
+                    TypeExpr::Slice { elem, .. }
+                    | TypeExpr::Array { elem, .. }
+                    | TypeExpr::Map { value: elem, .. } => Some(self.resolve_type_alias(&elem)),
+                    _ => None,
+                }
+            }
+            Expr::Call { callee, .. } => {
+                if let Some(TypeExpr::Fn { results, .. }) = self.resolve_fn_callee_ty(st, callee) {
+                    return results.first().map(|r| self.resolve_type_alias(r));
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn buildable_owns_multi_value_call(&self, st: &FnState, expr: &Expr) -> bool {
+        let Expr::Call { callee, .. } = unwrap_parens(expr) else {
+            return false;
+        };
+        match unwrap_parens(callee) {
+            Expr::FnLit { results, .. } => results.len() >= 2,
+            Expr::Ident { name, .. } => {
+                if let Some(b) = self.lookup_binding(st, name) {
+                    return b
+                        .ty
+                        .as_ref()
+                        .map(|t| self.resolve_type_alias(t))
+                        .is_some_and(|t| matches!(t, TypeExpr::Fn { results, .. } if results.len() >= 2));
+                }
+                let head = Self::base_named_type_str(name);
+                self.fns
+                    .get(name.as_str())
+                    .or_else(|| self.fns.get(head))
+                    .is_some_and(|f| f.results.len() >= 2)
+            }
+            Expr::Field {
+                base,
+                name: method_name,
+                ..
+            } => {
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_binding(st, pkg).is_none() {
+                        let head = Self::base_named_type_str(method_name);
+                        let full = format!("{pkg}.{head}");
+                        if self.fns.contains_key(full.as_str())
+                            || foreign::package_result_count(pkg.as_str(), head).is_some()
+                        {
+                            return false;
+                        }
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Check file-level `const` initializers (including nested closures) for
+    /// multi-value arity violations (T23).
+    pub(crate) fn check_const_multi_value(&mut self, value: &Expr) {
+        let st = FnState::default();
+        self.check_subexprs_single_value(&st, value);
+        self.check_const_expr_fnlits(&st, value);
+    }
+
+    fn check_const_expr_fnlits(&mut self, st: &FnState, expr: &Expr) {
+        let mut flits = Vec::new();
+        crate::walk::expr_fnlits(expr, &mut flits);
+        for flit in flits {
+            if let Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } = unwrap_parens(flit)
+            {
+                self.check_const_closure(st, params, results, body);
+            }
+        }
+    }
+
+    fn check_const_closure(
+        &mut self,
+        outer_st: &FnState,
+        params: &[Param],
+        results: &[FnResult],
+        body: &Block,
+    ) {
+        let mut cst = outer_st.clone();
+        cst.result_shapes = results
+            .iter()
+            .map(|r| self.shape_of_type(&r.ty))
+            .collect();
+        for p in params {
+            let shape = self.shape_of_type(&p.ty);
+            cst.env.insert(
+                p.name.clone(),
+                Binding {
+                    shape,
+                    ty: Some(p.ty.clone()),
+                    immutable: false,
+                    is_let: false,
+                    managed_taint: false,
+                    moved: None,
+                    non_owned_origin: None,
+                    slot_loan: false,
+                },
+            );
+        }
+        for r in results {
+            if let Some(name) = &r.name {
+                if name != "_" {
+                    let shape = self.shape_of_type(&r.ty);
+                    cst.env.insert(
+                        name.clone(),
+                        Binding {
+                            shape,
+                            ty: Some(r.ty.clone()),
+                            immutable: false,
+                            is_let: false,
+                            managed_taint: false,
+                            moved: None,
+                            non_owned_origin: None,
+                            slot_loan: false,
+                        },
+                    );
+                }
+            }
+        }
+        cst.scope_push();
+        self.check_const_closure_block(&mut cst, body);
+        cst.scope_pop();
+    }
+
+    fn check_const_closure_block(&mut self, st: &mut FnState, block: &Block) {
+        for stmt in &block.stmts {
+            self.check_const_closure_stmt(st, stmt);
+        }
+    }
+
+    fn check_const_closure_stmt(&mut self, st: &mut FnState, stmt: &Stmt) {
+        self.check_stmt_multi_value(st, stmt);
+        let mut flits = Vec::new();
+        crate::walk::own_fnlits(stmt, &mut flits);
+        for flit in flits {
+            if let Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } = unwrap_parens(flit)
+            {
+                self.check_const_closure(st, params, results, body);
+            }
+        }
+        match stmt {
+            Stmt::Local(l) => {
+                let immutable = l.kind == LocalKind::Const;
+                let is_let = l.kind == LocalKind::Let;
+                if l.values.is_empty() {
+                    let shape = l
+                        .ty
+                        .as_ref()
+                        .map(|t| self.shape_of_type(t))
+                        .unwrap_or(TypeShape::Unknown);
+                    for name in &l.names {
+                        self.define_binding(
+                            st,
+                            name,
+                            shape.clone(),
+                            l.ty.clone(),
+                            immutable,
+                            false,
+                            is_let,
+                        );
+                    }
+                } else if l.names.len() == l.values.len() {
+                    let pre_st = st.clone();
+                    for (name, val) in l.names.iter().zip(l.values.iter()) {
+                        let shape = self.shape_of_expr(&pre_st, val);
+                        let ty = self.ty_of_expr(&pre_st, val).or_else(|| l.ty.clone());
+                        self.define_binding(st, name, shape, ty, immutable, false, is_let);
+                        match unwrap_parens_and_move(val) {
+                            Expr::Ident { name: src, .. } if src != name => {
+                                st.aliases.insert(name.clone(), src.clone());
+                            }
+                            Expr::FnLit {
+                                params,
+                                results,
+                                body,
+                                ..
+                            } => {
+                                st.closure_defs.insert(
+                                    name.clone(),
+                                    (params.clone(), results.clone(), body.clone()),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Stmt::Assign {
+                targets,
+                op: AssignOp::Assign,
+                values,
+                ..
+            } if targets.len() == values.len() => {
+                let pre_st = st.clone();
+                for (t, val) in targets.iter().zip(values.iter()) {
+                    if let PlaceKind::Ident(name) = &t.kind {
+                        let ty = self.ty_of_expr(&pre_st, val);
+                        if let Some(b) = st.env_lookup_mut(name) {
+                            if ty.is_some() || b.ty.is_none() {
+                                b.ty = ty;
+                            }
+                        }
+                        st.aliases.remove(name);
+                        st.closure_defs.remove(name);
+                        match unwrap_parens_and_move(val) {
+                            Expr::Ident { name: src, .. } if src != name => {
+                                st.aliases.insert(name.clone(), src.clone());
+                            }
+                            Expr::FnLit {
+                                params,
+                                results,
+                                body,
+                                ..
+                            } => {
+                                st.closure_defs.insert(
+                                    name.clone(),
+                                    (params.clone(), results.clone(), body.clone()),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Stmt::If {
+                init,
+                then,
+                otherwise,
+                ..
+            } => {
+                st.scope_push();
+                if let Some(i) = init {
+                    self.check_const_closure_stmt(st, i);
+                }
+                self.check_const_closure_block(st, then);
+                if let Some(o) = otherwise {
+                    self.check_const_closure_stmt(st, o);
+                }
+                st.scope_pop();
+            }
+            Stmt::For { body, .. } | Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
+                st.scope_push();
+                self.check_const_closure_block(st, body);
+                st.scope_pop();
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    st.scope_push();
+                    self.check_const_closure_block(st, &arm.body);
+                    st.scope_pop();
+                }
+            }
+            Stmt::Select { arms, .. } => {
+                for arm in arms {
+                    st.scope_push();
+                    self.check_const_closure_block(st, &arm.body);
+                    st.scope_pop();
+                }
+            }
+            _ => {}
         }
     }
 }

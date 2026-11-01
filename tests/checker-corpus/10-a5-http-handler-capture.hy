@@ -8,19 +8,20 @@
 // goroutines (one per request in production). There is NO Hybrid
 // spawn/send site anywhere — the value escapes through the Go API instead.
 //
-// DECIDED under the scoped-claim ruling (spike-6 RESULTS A5 + Q1 item 6
-// "no overclaiming"): ACCEPT — Tier 0's checked subset is spawn/send
-// sites; Go-API escapes follow Go's DRF-SC story with `go test -race` as
-// the backstop. SPEC-LANGUAGE.md must state the race-freedom claim exactly
-// that narrowly, with the `managed` boundary in the same paragraph.
+// DECIDED (W-016 M2/M3): the A5 perimeter is a FOURTH CHECK-SITE class.
+// SPEC-LANGUAGE §8.5 C9 was promoted from the scoped claim to a hard,
+// closed-world rule with no curated Go API database: a closure that writes
+// a captured mutable binding and is passed to a package-qualified foreign
+// Go call must take `managed("...", "interop")` at the call site, or the
+// capture must be `const`/non-`may_share`. This program has neither, so
+// it FLIPS from ACCEPT to REJECT (HYB-E3013, tier-0 rule A5). The flip is
+// logged here rather than silent — pre-registration is amended in place.
 //
-// CONTESTED (the corpus's second contested program): if SPEC-LANGUAGE
-// adopts the FOURTH CHECK-SITE class ("APIs flagged concurrent"), this
-// program FLIPS to REJECT (or requires atomic-mediated `hits`). That
-// decision is explicitly open — flagged for SPEC-LANGUAGE.md (OQ1), NOT
-// silently decided here. This is request-counter middleware; every Go
-// service has one. Whichever way SPEC-LANGUAGE rules, it rules on code
-// written daily.
+// HISTORY: pre-registered 2026-10-12 as ACCEPT (CONTESTED) under the old
+// scoped-claim ruling, with an explicit "flips to REJECT if the fourth
+// check-site class lands" clause. W-016 is that landing. This is
+// request-counter middleware; every Go service has one, which is exactly
+// why the rule earns its keep.
 //
 // ---- Tier-0 rule set applied to each value ----
 // Layer 1 (Go-side GC): `hits` (int — MUTABLE GC value captured by the
@@ -34,18 +35,19 @@
 //
 // ---- Sendability / check sites (task spawn / channel send) ----
 //   NONE in Hybrid code (no `task`, no channel send). PERIMETER: the
-//   `hits` capture in the closure passed to `mux.handle(...)` escapes
-//   into Go code — unchecked under the scoped claim (A5).
+//   `hits` capture in the closure passed to `http.handler(...)` (and that
+//   value handed to `mux.handle(...)`) escapes into Go code — this is the
+//   HYB-E3013 / A5 check-site (W-016 M3).
 //
-// ---- Expected verdict (PRE-REGISTERED 2026-10-12, before any checker) ----
-// EXPECTED-VERDICT: ACCEPT (CONTESTED)
-//   ACCEPT under the A5 scoped-claim ruling (no check site exists for the
-//   checker to own). Flips to REJECT if the fourth check-site class lands
-//   (OQ1). HONESTY NOTE: production net/http serves handlers concurrently
-//   — `hits++` from two overlapping requests is a REAL Go data race; the
-//   in-process smoke client below is sequential, so this acceptance run
-//   is race-free. The verdict is about which SITES the checker owns, not
-//   about the runtime behavior of foreign code.
+// ---- Expected verdict (amended 2026-10-29 by W-016 M3) ----
+// EXPECTED-VERDICT: REJECT A5
+//   REJECT with HYB-E3013 (tier-0 rule A5): the closure writes the captured
+//   mutable binding `hits` and is passed to the foreign Go call
+//   `http.handler(...)`. HONESTY NOTE: production net/http serves handlers
+//   concurrently — `hits++` from two overlapping requests is a REAL Go data
+//   race, which is why this shape is now a hard reject rather than an
+//   accepted escape. The fix is `managed("counter", "interop")` (or an
+//   atomic/const capture).
 //
 // ---- Annotations / managed ----
 //   lifetime annotations: 0. `managed` blocks: 0.

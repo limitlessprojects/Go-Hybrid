@@ -21,7 +21,5 @@ hy-check = { path = "../hy-check" }
 hy-diag = { path = "../hy-diag" }
 hy-emit = { path = "../hy-emit" }
 
-[dev-dependencies]
-# tests/deny_managed.rs asserts the JSON envelope stays parseable under
-# --deny-managed (stdout purity contract).
+# Reuse the existing test dependency to read Go's file-selection JSON.
 serde_json = "1"

@@ -166,3 +166,84 @@ fn empty_and_multichar_char_literals_fail_closed_without_quote_desync() {
         "multi-char rune literal must recover at closing quote on the same line: {multi_errs:?}"
     );
 }
+
+#[test]
+fn prefixed_base_literal_with_fraction_fails_closed() {
+    // Regression test for Issue #1168:
+    // `0x1.8` previously lexed as `Tok::Int("0x1")` followed by `Tok::Float(".8")`,
+    // parsing as two statements (`x := 0x1` and expression statement `.8`),
+    // passing `hy check` with 0 diagnostics and failing `go build`.
+    for src in [
+        "fn main() { x := 0x1.8 }",
+        "fn main() { x := 0x1.8p+3 }",
+        "fn main() { x := 0b101.1 }",
+        "fn main() { x := 0o77.2 }",
+        "fn main() { x := 0xDEAD.BEEF }",
+    ] {
+        let errs = lex_errs(src);
+        assert!(
+            errs.iter().any(|d| d.code == "HYB-E0002"
+                && d.tier0_rule.as_deref() == Some("LX6")
+                && d.message.contains("cannot have a fractional part")),
+            "expected HYB-E0002 [LX6] for `{src}`, got: {errs:?}"
+        );
+    }
+
+    // Range operations on prefixed base integers must remain valid (not split or rejected as fraction).
+    for valid in [
+        "fn main() { for i in 0x0..0x10 { } }",
+        "fn main() { for i in 0x0..=0x10 { } }",
+        "fn main() { for i in 0b0..0b10 { } }",
+        "fn main() { for i in 0o0..0o7 { } }",
+    ] {
+        assert!(
+            parse_file("test.hy", valid).is_ok(),
+            "expected valid range expression to parse cleanly: {valid}"
+        );
+    }
+}
+
+#[test]
+fn utf8_byte_escapes_in_strings_preserve_utf8_bytes_issue_1199() {
+    // Hex and octal byte escapes in interpreted strings denote raw UTF-8 bytes
+    // (LX7 / T3), not Latin-1 code points re-encoded as UTF-8.
+    let cases = [
+        (r#"fn main() { s := "\xc3\xa9" }"#, "é"),
+        (r#"fn main() { s := "\303\251" }"#, "é"),
+        (r#"fn main() { s := "\xc3\251" }"#, "é"),
+        (r#"fn main() { s := "\xe4\xb8\xad" }"#, "中"),
+        (r#"fn main() { s := "\xf0\x9f\x99\x82" }"#, "🙂"),
+        (r#"fn main() { s := "\x41" }"#, "A"),
+        (r#"fn main() { s := "\u00e9" }"#, "é"),
+        (r#"fn main() { s := "\U0001f642" }"#, "🙂"),
+    ];
+    for (src, expected) in cases {
+        let toks = lex("test.hy", src).unwrap_or_else(|e| panic!("lex failed for {src}: {e:?}"));
+        assert!(
+            toks.iter().any(|t| t.tok == Tok::StrChunk(expected.into())),
+            "expected StrChunk({expected:?}) for {src}, got: {toks:?}"
+        );
+    }
+
+    // Interpolated string with UTF-8 byte escapes before {expr} boundary:
+    let interp_toks = lex("test.hy", r#"fn main() { s := "prefix:\xc3\xa9:{value}" }"#)
+        .expect("interpolated byte escapes");
+    assert!(
+        interp_toks
+            .iter()
+            .any(|t| t.tok == Tok::StrChunk("prefix:é:".into())),
+        "expected StrChunk(\"prefix:é:\") before interpolation, got: {interp_toks:?}"
+    );
+
+    // Rune literals keep code-point semantics ('\xe9' == '\u{e9}' and '\351' == '\u{e9}').
+    let rune_toks = lex("test.hy", "fn main() { a := '\\xe9' b := '\\351' c := '\\u{e9}' }")
+        .expect("rune escapes");
+    let chars: Vec<char> = rune_toks
+        .into_iter()
+        .filter_map(|t| match t.tok {
+            Tok::CharLit(ch) => Some(ch),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(chars, vec!['é', 'é', 'é']);
+}
