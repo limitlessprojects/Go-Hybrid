@@ -477,7 +477,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     walk::ScopeEvent::Pop => st.scope_pop(),
                     walk::ScopeEvent::SelectRecv { names, chan } => {
                         let elem = match ck.shape_of_expr(&st, chan) {
-                            TypeShape::Chan(e) => *e,
+                            TypeShape::Chan(e) | TypeShape::RecvOnlyChan(e) => *e,
                             _ => TypeShape::Unknown,
                         };
                         for (i, n) in names.iter().enumerate() {
@@ -725,7 +725,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         expr,
                         format!("the loop header `{}`", expr.render()),
                     );
-                    let is_chan = matches!(ck.shape_of_expr(&st, expr), TypeShape::Chan(_));
+                    let is_chan = matches!(ck.shape_of_expr(&st, expr), TypeShape::Chan(_) | TypeShape::RecvOnlyChan(_));
                     let shapes = ck.iterate_var_shapes(&st, expr, vars.len());
                     for (name, shape) in vars.iter().zip(shapes) {
                         let is_ref = shape.is_reference_alias();
@@ -2870,6 +2870,141 @@ mod tests {
         assert_eq!(first_error_rule(&r).as_deref(), Some("A1c"));
         assert_eq!(r.diagnostics[0].code, "HYB-E3001");
         assert!(r.diagnostics[0].message.contains("*pool_stats"));
+    }
+
+    #[test]
+    fn time_after_send_rejects_e3007() {
+        // The `time.after` foreign stub produces a RecvOnlyChan shape (Go's
+        // `time.After` returns `<-chan time.Time`). A send on it is invalid
+        // Go and previously passed `hyb check` with 0 diagnostics because
+        // the directionless Chan shape carried no direction — the emitted
+        // program did not build.
+        let r = check(
+            "fn main() {
+               deadline := time.after(time.seconds(5))
+               deadline <- 1
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E3007");
+    }
+
+    #[test]
+    fn time_after_select_send_arm_rejects_e3007() {
+        // Second entry point: the same directionless shape leaked through
+        // select send arms too.
+        let r = check(
+            "fn main() {
+               deadline := time.after(time.seconds(5))
+               select {
+                   deadline <- 1: fmt.println(\"sent\")
+                   default: fmt.println(\"nope\")
+               }
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E3007");
+    }
+
+    #[test]
+    fn time_after_recv_and_range_still_accept() {
+        // The deadline pattern itself must keep working: direct receive,
+        // select recv arm, and range over the deadline channel are the
+        // documented consumers (example 04). The RecvOnlyChan direction
+        // constrains SENDS only.
+        let recv = check(
+            "fn main() {
+               deadline := time.after(time.seconds(5))
+               v := <-deadline
+               fmt.println(v)
+             }",
+        );
+        assert_eq!(recv.verdict, Verdict::Accept, "{:?}", recv.diagnostics);
+        let sel = check(
+            "fn main() {
+               deadline := time.after(time.seconds(5))
+               select {
+                   v := <-deadline: fmt.println(v)
+                   default: fmt.println(\"nope\")
+               }
+             }",
+        );
+        assert_eq!(sel.verdict, Verdict::Accept, "{:?}", sel.diagnostics);
+        let ranged = check(
+            "fn main() {
+               deadline := time.after(time.seconds(5))
+               for v in deadline {
+                   fmt.println(v)
+                   break
+               }
+             }",
+        );
+        assert_eq!(ranged.verdict, Verdict::Accept, "{:?}", ranged.diagnostics);
+    }
+
+    #[test]
+    fn const_ref_negative_shift_rejects_e6005() {
+        // A file-level `const` IS a Go constant: `x << neg` with
+        // `const neg = -2` is the same compile-time `negative shift count`
+        // error as `x << -1`. B4 only folded literal expressions, so the
+        // const-reference form passed `hyb check` with 0 diagnostics while
+        // the emitted Go failed to build.
+        let r = check(
+            "const neg = -2
+             fn main() {
+               x := 1
+               fmt.println(x << neg)
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E6005");
+    }
+
+    #[test]
+    fn const_chain_negative_shift_rejects_e6005() {
+        // const→const chains resolve through the file const map.
+        let r = check(
+            "const a = -1 - 1
+             const b = a
+             fn main() {
+               x := 1
+               fmt.println(x << b)
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E6005");
+    }
+
+    #[test]
+    fn const_ref_positive_shift_accepts() {
+        // A non-negative const shift count stays legal.
+        let r = check(
+            "const neg = 2
+             fn main() {
+               x := 1
+               fmt.println(x << neg)
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn local_shadowing_const_skips_shift_guard() {
+        // A local binding shadowing the const name is a VARIABLE shift
+        // (run-time panic per X2, defined behavior) — the const-reference
+        // resolution must skip it, and the local `fmt.println(m["k"])`
+        // companion below keeps the body non-trivial.
+        let r = check(
+            "const neg = -2
+             fn main() {
+               neg := 3
+               x := 1
+               fmt.println(x << neg)
+             }",
+        );
+        // the shadowed form compiles in Go (variable shift) and must NOT
+        // trip the const-reference guard
+        assert_ne!(r.diagnostics.first().map(|d| d.code.as_str()), Some("HYB-E6005"));
     }
 
     #[test]

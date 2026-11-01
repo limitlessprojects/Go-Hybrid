@@ -44,6 +44,14 @@ impl<'a> Checker<'a> {
                 Box::new(self.shape_of_type_depth(key, depth + 1)),
                 Box::new(self.shape_of_type_depth(value, depth + 1)),
             ),
+            // Direction is deliberately NOT mirrored into the shape for
+            // local `<-chan T` spellings: the TypeExpr layer owns directed-
+            // channel checks for declared types (E3008/E3012 coercion suite),
+            // and duplicating it here changed shape-driven behavior for
+            // bidir→unidir coercions (chan_direction_coercion tests). The
+            // RecvOnlyChan shape exists ONLY for foreign stubs whose result
+            // has no declared type (`time.after`), where the shape layer is
+            // the only place the direction can live.
             TypeExpr::Chan { elem, .. } => {
                 TypeShape::Chan(Box::new(self.shape_of_type_depth(elem, depth + 1)))
             }
@@ -185,7 +193,8 @@ impl<'a> Checker<'a> {
             TypeShape::Slice(e)
             | TypeShape::Array(e)
             | TypeShape::Pointer(e)
-            | TypeShape::Chan(e) => self.shape_carries_handle_at(e, depth + 1),
+            | TypeShape::Chan(e)
+            | TypeShape::RecvOnlyChan(e) => self.shape_carries_handle_at(e, depth + 1),
             TypeShape::Map(k, v) => {
                 self.shape_carries_handle_at(k, depth + 1)
                     || self.shape_carries_handle_at(v, depth + 1)
@@ -260,7 +269,7 @@ impl<'a> Checker<'a> {
             | Expr::Try { operand, .. }
             | Expr::Paren { inner: operand, .. } => self.shape_of_expr(st, operand),
             Expr::Receive { chan, .. } => match self.shape_of_expr(st, chan) {
-                TypeShape::Chan(e) => *e,
+                TypeShape::Chan(e) | TypeShape::RecvOnlyChan(e) => *e,
                 _ => TypeShape::Unknown,
             },
             Expr::Index { base, .. } => match self.shape_of_expr(st, base) {
@@ -618,7 +627,7 @@ impl<'a> Checker<'a> {
         match &s {
             // iterating a view yields views (element loans, corpus 07/11/12)
             TypeShape::BorrowHandle(_) => vec![s.clone()],
-            TypeShape::Slice(e) | TypeShape::Array(e) | TypeShape::Chan(e) => one((**e).clone()),
+            TypeShape::Slice(e) | TypeShape::Array(e) | TypeShape::Chan(e) | TypeShape::RecvOnlyChan(e) => one((**e).clone()),
             TypeShape::Map(k, v) => {
                 if n_vars >= 2 {
                     vec![(**k).clone(), (**v).clone()]
@@ -1354,7 +1363,7 @@ impl<'a> Checker<'a> {
             // the receive-ok flag (a bool)
             if let Expr::Receive { chan, .. } = v {
                 let elem = match self.shape_of_expr(st, chan) {
-                    TypeShape::Chan(e) => *e,
+                    TypeShape::Chan(e) | TypeShape::RecvOnlyChan(e) => *e,
                     _ => TypeShape::Unknown,
                 };
                 return vec![elem, TypeShape::Primitive];

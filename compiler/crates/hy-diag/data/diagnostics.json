@@ -651,7 +651,8 @@
         "swap the operands (`1 << n` instead of `n << -1`) when the intent is to shift the other side"
       ],
       "example": "x := 1 << -1   // reject: HYB-E6005 — negative shift count; Go cannot build the emitted module",
-      "rule": "BUILDABLE"
+      "rule": "BUILDABLE",
+      "tier0_rule_id": "BUILDABLE"
     },
     {
       "code": "HYB-E6006",

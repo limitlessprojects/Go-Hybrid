@@ -43,7 +43,7 @@ impl<'a> Checker<'a> {
                 self.check_range_iterable(st, expr, span);
                 if self.diags.len() == before {
                     let shape = self.shape_of_expr(st, expr);
-                    let is_chan = matches!(shape, TypeShape::Chan(_));
+                    let is_chan = matches!(shape, TypeShape::Chan(_) | TypeShape::RecvOnlyChan(_));
                     let is_set = matches!(
                         shape,
                         TypeShape::Struct(Some(ref n)) if n.starts_with("set[") || n == "set"
@@ -414,7 +414,7 @@ impl<'a> Checker<'a> {
             // NOT a Go range shape — Go cannot range the view struct itself.
             | TypeShape::BorrowHandle(_) => {}
             TypeShape::Struct(Some(ref n)) if n.starts_with("set[") || n == "set" => {}
-            TypeShape::Chan(_) => {
+            TypeShape::Chan(_) | TypeShape::RecvOnlyChan(_) => {
                 let chan_ty = self.ty_of_expr(st, expr).or_else(|| {
                     if let Expr::Ident { name, .. } = unwrap_parens(expr) {
                         let root = crate::freeze::resolve_alias(st, name);

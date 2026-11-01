@@ -173,8 +173,11 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("strings", "split") | ("strings", "fields") => TypeShape::Slice(Box::new(TypeShape::Str)),
         // `time.after(d)` returns a receive-only channel (the deadline
         // pattern, example 04); the element shape is opaque here — the
-        // binding still resolves as a channel so receives on it classify.
-        ("time", "after") => TypeShape::Chan(Box::new(TypeShape::Unknown)),
+        // binding still resolves as a channel so receives on it classify,
+        // and the RecvOnlyChan direction makes a SEND on it reject at the
+        // send target check (HYB-E3007): Go's `time.After` yields
+        // `<-chan time.Time`, so an emitted send would not build.
+        ("time", "after") => TypeShape::RecvOnlyChan(Box::new(TypeShape::Unknown)),
         ("http", "new_serve_mux") => TypeShape::ForeignOpaque("http.serve_mux".into()),
         ("http", "handler") => TypeShape::ForeignOpaque("http.handler".into()),
         // `atomic.load_pointer` / `atomic.swap_pointer` return an
