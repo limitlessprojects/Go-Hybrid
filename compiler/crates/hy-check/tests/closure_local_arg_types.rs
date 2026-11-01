@@ -93,3 +93,26 @@ fn accept_shadowed_binding_uses_inner_signature() {
         "fn main() {\n    f := fn(x int) int { return x }\n    fmt.println(f(1))\n    if true {\n        f := fn(s string) int { return len(s) }\n        fmt.println(f(\"a\"))\n    }\n}\n",
     );
 }
+
+const ACCT: &str = "struct acct {\n    bal int\n}\nfn (a acct) add(n int) int {\n    return a.bal + n\n}\nfn (a acct) label(p string, n int) string {\n    return p\n}\nfn mk() acct {\n    return acct{bal: 1}\n}\n";
+
+#[test]
+fn reject_mismatch_through_method_value_local() {
+    assert_reject(&format!(
+        "{ACCT}fn main() {{\n    a := mk()\n    g := a.add\n    fmt.println(g(\"x\"))\n}}\n"
+    ));
+}
+
+#[test]
+fn reject_second_arg_mismatch_through_method_value_local() {
+    assert_reject(&format!(
+        "{ACCT}fn main() {{\n    a := mk()\n    g := a.label\n    fmt.println(g(\"p\", \"q\"))\n}}\n"
+    ));
+}
+
+#[test]
+fn accept_matching_method_value_local_call() {
+    assert_accept(&format!(
+        "{ACCT}fn main() {{\n    a := mk()\n    g := a.add\n    fmt.println(g(2) + 1)\n    l := a.label\n    fmt.println(l(\"p\", 3))\n}}\n"
+    ));
+}
