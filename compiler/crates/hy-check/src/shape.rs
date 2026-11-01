@@ -88,6 +88,9 @@ impl<'a> Checker<'a> {
         if self.structs.contains_key(base) {
             return TypeShape::Struct(Some(name.to_string()));
         }
+        if self.enums.contains_key(base) {
+            return TypeShape::Enum(Some(base.to_string()));
+        }
         // User type aliases take precedence over predeclared types.
         if let Some(target) = self.type_aliases.get(base) {
             return self.shape_of_type_depth(target, depth + 1);
@@ -274,6 +277,15 @@ impl<'a> Checker<'a> {
                 _ => TypeShape::Unknown,
             },
             Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
+                    if self.lookup_binding(st, root).is_none() {
+                        if let Some(vs) = self.enums.get(root.as_str()) {
+                            if vs.iter().any(|v| v == name) {
+                                return TypeShape::Enum(Some(root.clone()));
+                            }
+                        }
+                    }
+                }
                 let base_shape = self.shape_of_expr(st, base);
                 self.field_shape(&base_shape, name)
             }
@@ -432,6 +444,11 @@ impl<'a> Checker<'a> {
                 let head = Self::base_named_type_str(name);
                 if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
                     if self.lookup_binding(st, root).is_none() {
+                        if let Some(vs) = self.enums.get(root.as_str()) {
+                            if vs.iter().any(|v| v == head) {
+                                return TypeShape::Enum(Some(root.clone()));
+                            }
+                        }
                         let full = format!("{}.{}", root, head);
                         if let Some(f) = self.fns.get(full.as_str()) {
                             let subst = self.fn_call_shape_subst(st, f, name, None, args);
@@ -880,10 +897,18 @@ impl<'a> Checker<'a> {
                         .and_then(|f| f.results.first())
                         .map(|r| r.ty.clone())
                 }
-                Expr::Field { base, name, .. } => {
+                Expr::Field { base, name, span: fspan } => {
                     let head = Self::base_named_type_str(name);
                     if let Expr::Ident { name: root, .. } = crate::model::unwrap_parens(base) {
                         if self.lookup_binding(st, root).is_none() {
+                            if let Some(vs) = self.enums.get(root.as_str()) {
+                                if vs.iter().any(|v| v == head) {
+                                    return Some(TypeExpr::Named {
+                                        name: root.clone(),
+                                        span: *fspan,
+                                    });
+                                }
+                            }
                             let full = format!("{}.{}", root, head);
                             if let Some(f) = self.fns.get(full.as_str()) {
                                 return f.results.first().map(|r| r.ty.clone());
