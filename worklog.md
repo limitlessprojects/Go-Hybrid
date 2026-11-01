@@ -1203,3 +1203,17 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 281 -> 290. Final main 18c8d3b9, tree clean.
 - NOTE: approve step (CI unblock) deferred — core limit 0 until 13:11:32 UTC; comments endpoint worked throughout (different bucket), so replies all landed.
 - NEXT TICK QUEUE: #2836 (capture move-freeze) -> #2723 (mixed int types) -> #2824 (behind, superseded by #2838 — redirect reply) -> #2815 (W-2475 spike) -> approve carry-over if still pending -> #2830 (await rebase) -> #2831 (await rework) -> wave tail #2670/#2593/#2677/#2517/#2581/#2622 -> #1811.
+
+## Session 46 — 2026-11-01 night IV (tick 487193: 5 landed, incl. #2831 rework; hex-audit false-alarm documented)
+
+- No recycle (toolchain + warm target survived). Baseline b3f9d61e (own session-45). Core rate window refreshed at 13:11:32 UTC after the session-45 exhaustion; scan OK, approve 12/12 (4902 remaining). Fresh wave: 12 score-9 candidates (carelessdept x3, aswadi x2, nyxlabs29-cyber x2, Dimany4 x3, ket4min-susan) + #2831 rework at Pareto #4.
+- LANDED (rework first, then Pareto top-down):
+  cd649532 Merge PR #2831 rework (aswadi, fixes #1991) — all gate-fail shapes closed: Index-shape typeargs re-associated via assoc_index_type_arg ((box.new[int])(v) mangles correctly), stmt.rs hoist_tries_call peel_parens (root cause 5), compiled tests. 292 suites.
+  6393055e Merge PR #2814 (carelessdept, fixes #2809) — shepherd cmd_probe NameError (free 'r' on unmatched diff) + TypeError (CompletedProcess subscript); pytest 17 in worktree. 292 suites.
+  68611af0 Merge PR #2888 (carelessdept, fixes #1103) — triage collect(): thread-safe mb_cache for shared merge_base compares + head==main_sha short-circuit; pytest 4. 292 suites. Directly cuts scan API burn.
+  f2d7301e Merge PR #2850 (carelessdept, fixes #2848) — nil in len/cap/delete/min/max + non-numeric literals in real/imag/complex reject HYB-E2005. 294 suites.
+  43030723 Merge PR #2893 (aswadi, fixes #1343) — string-index, paren map-projection, call-rvalue loans reject HYB-E2010 (unwrap_parens + Map/Str shapes). 296 suites.
+- FALSE-ALARM FORENSICS (documented): #2888's mb_cache[merge_base] lines APPEARED mangled in tool output (rg/repr/cat-v/ast-segment all showed mb_cacheerge_base]; only od -c showed the [). Byte-level hex audit (6d 62 5f ... 5b 6d 65) proved the file correct — the rendering layer eats literal [m sequences in contiguous output; od's per-byte spacing survives it. Rule reaffirmed: never gate-fail on suspicious brackets without a hex audit. AST + pytest were authoritative.
+- All five: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88) zero side-shifts, ls-remote==HEAD asserted, written replies posted.
+- Suite trajectory: 290 -> 296. Final main 43030723, tree clean.
+- NEXT TICK QUEUE: #2868 (typed int width through reads) -> #2846 (closure/fn-param call args) -> #2871 (const conversion matrix) -> #2878 (slice conversion element scalars) -> #2882 (shadowed E11/E4/E6 try contexts) -> #2864 (field/index assignment widths) -> #2786 (transitive multi-return pairs) -> #2836/#2723 (carry-over) -> #2824 (superseded by #2838, redirect reply owed) -> #2815 (W-2475 spike) -> #2830 (await rebase) -> wave tail.

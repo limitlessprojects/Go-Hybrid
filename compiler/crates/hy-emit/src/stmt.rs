@@ -719,6 +719,7 @@ impl Emitter {
             let text = self.emit_expr(e, 0)?;
             let temp = self.next_temp("hyT");
             self.push(&format!("{} := {}", temp, text));
+            self.expr_temps.insert(Self::expr_key(inner), temp.clone());
             self.expr_temps.insert(Self::expr_key(e), temp);
         }
         Ok(())
@@ -727,9 +728,7 @@ impl Emitter {
     fn hoist_tries_call(&mut self, callee: &Expr, args: &[CallArg]) -> Result<(), EmitError> {
         let any_arg_has_try = args.iter().any(|a| Self::expr_has_hoistable_try(&a.value));
         if any_arg_has_try {
-            let mut inner = callee;
-            while let Expr::Paren { inner: p, .. } = inner { inner = p; }
-            match inner {
+            match Self::peel_parens(callee) {
                 Expr::Field { base, .. } => self.hoist_order_before_try(base)?,
                 Expr::Ident { .. } | Expr::Lit { .. } | Expr::FnLit { .. } => {
                     self.hoist_tries_expr(callee)?
