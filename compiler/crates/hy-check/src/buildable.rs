@@ -4439,6 +4439,11 @@ impl<'a> Collector<'a> {
 
     /// Family A (#425): `if cond` and `for cond` require a boolean condition.
     fn check_bool_condition(&mut self, cond: &Expr, construct: &str) {
+        self.check_single_value_position(
+            cond,
+            &format!("a {construct} condition"),
+            /*binding_position=*/ false,
+        );
         let k = self.kind_of_expr(cond);
         if !matches!(k, OpKind::Unknown | OpKind::Bool) {
             self.emit_e1002(
