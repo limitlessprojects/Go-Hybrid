@@ -2428,10 +2428,14 @@ impl<'a> Collector<'a> {
                 let head = Checker::base_named_type_str(name);
                 if let Some(sname) = self.struct_base_name(&bk) {
                     if let Some(m) = self.ck.method_decls.get(&(sname, head.to_string())) {
+                        let subst = self
+                            .struct_name(&bk)
+                            .map(|full_name| self.struct_type_arg_map(&full_name))
+                            .unwrap_or_default();
                         return Some(
                             m.results
                                 .iter()
-                                .map(|r| self.kind_of_ty(&r.ty, 0))
+                                .map(|r| self.kind_of_ty_with_subst(&r.ty, &subst, 0))
                                 .collect(),
                         );
                     }
@@ -2973,8 +2977,12 @@ impl<'a> Collector<'a> {
         if m.params.len() != args.len() {
             return;
         }
+        let subst = self
+            .struct_name(bk)
+            .map(|full_name| self.struct_type_arg_map(&full_name))
+            .unwrap_or_default();
         for (p, a) in m.params.iter().zip(args.iter()) {
-            let want = self.kind_of_ty(&p.ty, 0);
+            let want = self.kind_of_ty_with_subst(&p.ty, &subst, 0);
             let got = self.kind_of_expr(&a.value);
             if let OpKind::Pointer(inner) = &want {
                 if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
@@ -5661,6 +5669,48 @@ fn main() {
                 error_codes(&r)
             );
         }
+    }
+
+    #[test]
+    fn rejects_mismatched_generic_method_arg_and_return_types_1959() {
+        let src = "\
+struct container[t] {
+    val t
+}
+
+fn (c *container[t]) put(x t) {
+    c.val = x
+}
+
+fn (c *container[t]) take() t {
+    return c.val
+}
+
+fn main() {
+    c := container[int]{ val: 10 }
+    c.put(\"not an int\")
+    var s string = c.take()
+    _ = s
+}
+";
+        let r = check(src);
+        assert_eq!(
+            r.verdict,
+            Verdict::Reject,
+            "expected reject for generic method type mismatches"
+        );
+        let codes = error_codes(&r);
+        assert!(
+            codes.contains(&"HYB-E1002".to_string()),
+            "expected HYB-E1002, got {:?}",
+            codes
+        );
+        assert_eq!(
+            codes.iter().filter(|c| *c == "HYB-E1002").count(),
+            2,
+            "expected 2 HYB-E1002 diagnostics (put arg and take return assignment), got {:?}",
+            r.diagnostics
+        );
     }
 
     #[test]
