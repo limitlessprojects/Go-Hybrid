@@ -940,6 +940,7 @@ impl Emitter {
         let mut out = String::from("package ");
         out.push_str(&self.package_name);
         out.push('\n');
+        let code_body = mask_go_noncode(&self.body);
         let active_imports: Vec<&String> = self
             .imports
             .iter()
@@ -947,7 +948,7 @@ impl Emitter {
                 // An explicit `import "errors"` whose only Hybrid call was
                 // `errors.wrap(err, msg)` lowers to `fmt.Errorf(...)` and
                 // leaves no `errors.` reference in the emitted Go body (#657).
-                !(root.as_str() == "errors" && !self.body.contains("errors."))
+                !(root.as_str() == "errors" && !code_body.contains("errors."))
             })
             .collect();
         if !active_imports.is_empty() {
@@ -972,14 +973,13 @@ impl Emitter {
             }
             out.push_str(")\n");
         }
-        let body = &self.body;
-        let needs_option = body.contains("option[") || body.contains("some(");
-        let needs_set = body.contains("set[")
-            || body.contains(".remove(")
-            || body.contains(".contains(")
-            || body.contains(".insert(");
-        let needs_pop = body.contains("hy_pop(");
-        let needs_n5_make = body.contains("hy_n5_make(");
+        let needs_option = code_body.contains("option[") || code_body.contains("some(");
+        let needs_set = code_body.contains("set[")
+            || code_body.contains(".remove(")
+            || code_body.contains(".contains(")
+            || code_body.contains(".insert(");
+        let needs_pop = code_body.contains("hy_pop(");
+        let needs_n5_make = code_body.contains("hy_n5_make(");
         if needs_option || needs_set || needs_pop || needs_n5_make {
             out.push('\n');
             if needs_option {
@@ -1097,6 +1097,89 @@ impl Emitter {
             .join(", ")
     }
 
+    fn collect_key_type_params_str(
+        s: &str,
+        param_names: &BTreeSet<String>,
+        out: &mut BTreeSet<String>,
+    ) {
+        let s = s.trim();
+        if param_names.contains(s) {
+            out.insert(s.to_string());
+            return;
+        }
+        if let Some(rest) = s.strip_prefix('[') {
+            if let Some((_, elem)) = Self::split_bracket_prefix(rest) {
+                if !elem.is_empty() {
+                    Self::collect_key_type_params_str(elem, param_names, out);
+                }
+            }
+        }
+    }
+
+    fn collect_comparable_in_folded_name(
+        name: &str,
+        param_names: &BTreeSet<String>,
+        out: &mut BTreeSet<String>,
+    ) {
+        let name = name.trim();
+        if let Some(rest) = name
+            .strip_prefix('*')
+            .or_else(|| name.strip_prefix("[]"))
+            .or_else(|| name.strip_prefix("[...]"))
+            .or_else(|| name.strip_prefix("<-chan "))
+            .or_else(|| name.strip_prefix("chan<- "))
+            .or_else(|| name.strip_prefix("chan "))
+        {
+            Self::collect_comparable_in_folded_name(rest, param_names, out);
+            return;
+        }
+        if let Some(rest) = name.strip_prefix('[') {
+            if let Some((_, elem)) = Self::split_bracket_prefix(rest) {
+                if !elem.is_empty() {
+                    Self::collect_comparable_in_folded_name(elem, param_names, out);
+                    return;
+                }
+            }
+        }
+        if let Some(rest) = name.strip_prefix("map[") {
+            if let Some((key_s, val_s)) = Self::split_bracket_prefix(rest) {
+                Self::collect_key_type_params_str(key_s, param_names, out);
+                Self::collect_comparable_in_folded_name(key_s, param_names, out);
+                Self::collect_comparable_in_folded_name(val_s, param_names, out);
+                return;
+            }
+        }
+        if let Some(inner) = name.strip_prefix("set[").and_then(|s| s.strip_suffix(']')) {
+            Self::collect_key_type_params_str(inner, param_names, out);
+            Self::collect_comparable_in_folded_name(inner, param_names, out);
+            return;
+        }
+        if let Some(open) = name.find('[') {
+            if open > 0 && name.ends_with(']') {
+                let inner = &name[open + 1..name.len() - 1];
+                for arg in Self::split_top_level_type_args(inner) {
+                    Self::collect_comparable_in_folded_name(arg, param_names, out);
+                }
+            }
+        }
+    }
+
+    fn collect_key_type_params(
+        ty: &TypeExpr,
+        param_names: &BTreeSet<String>,
+        out: &mut BTreeSet<String>,
+    ) {
+        match ty {
+            TypeExpr::Named { name, .. } => {
+                Self::collect_key_type_params_str(name, param_names, out);
+            }
+            TypeExpr::Array { elem, .. } => {
+                Self::collect_key_type_params(elem, param_names, out);
+            }
+            _ => {}
+        }
+    }
+
     fn collect_comparable_in_ty(
         ty: &TypeExpr,
         param_names: &BTreeSet<String>,
@@ -1104,21 +1187,12 @@ impl Emitter {
     ) {
         match ty {
             TypeExpr::Map { key, value, .. } => {
-                if let TypeExpr::Named { name, .. } = key.as_ref() {
-                    if param_names.contains(name) {
-                        out.insert(name.clone());
-                    }
-                }
+                Self::collect_key_type_params(key, param_names, out);
                 Self::collect_comparable_in_ty(key, param_names, out);
                 Self::collect_comparable_in_ty(value, param_names, out);
             }
             TypeExpr::Named { name, .. } => {
-                if let Some(inner) = name.strip_prefix("set[").and_then(|s| s.strip_suffix(']')) {
-                    let elem = inner.trim();
-                    if param_names.contains(elem) {
-                        out.insert(elem.to_string());
-                    }
-                }
+                Self::collect_comparable_in_folded_name(name, param_names, out);
             }
             TypeExpr::Pointer { to, .. } => Self::collect_comparable_in_ty(to, param_names, out),
             TypeExpr::Array { len, elem, .. } => {
@@ -1284,11 +1358,7 @@ impl Emitter {
     ) {
         match e {
             Expr::MapLit { key, value, entries, .. } => {
-                if let TypeExpr::Named { name, .. } = key.as_ref() {
-                    if param_names.contains(name) {
-                        out.insert(name.clone());
-                    }
-                }
+                Self::collect_key_type_params(key, param_names, out);
                 Self::collect_comparable_in_ty(key, param_names, out);
                 Self::collect_comparable_in_ty(value, param_names, out);
                 for (k, v) in entries {
@@ -1417,13 +1487,17 @@ impl Emitter {
         // Batch E: a single conversion-target result (`fn logging(…) http.handler`)
         // makes `return fn(…)` wrap in the conversion (HandlerFunc).
         self.cur_fn_conv_result = None;
-        if f.results.len() == 1 && f.results[0].name.is_none() {
-            let rt = self.type_text(&f.results[0].ty);
-            if rt.starts_with("option[") {
-                self.cur_option_result = Some(rt);
+        if let Some(first_res) = f.results.first() {
+            let resolved_res = self.resolve_type_alias(&first_res.ty).clone();
+            let resolved_rt = self.type_text(&resolved_res);
+            if resolved_rt.starts_with("option[") {
+                let declared_rt = self.type_text(&first_res.ty);
+                self.cur_option_result = Some(declared_rt);
             }
-            if let Some(conv) = self.result_conv_key(&f.results[0].ty) {
-                self.cur_fn_conv_result = Some(conv);
+            if f.results.len() == 1 && first_res.name.is_none() {
+                if let Some(conv) = self.result_conv_key(&resolved_res) {
+                    self.cur_fn_conv_result = Some(conv);
+                }
             }
         }
 
@@ -1733,6 +1807,7 @@ impl Emitter {
     /// table knows gives ForeignTy(key) — members resolve field-vs-method;
     /// any other dotted type stays generic Foreign.
     fn binding_kind_of_ty(&self, t: &TypeExpr) -> Option<BindingKind> {
+        let t = self.resolve_type_alias(t);
         if matches!(t, TypeExpr::Chan { .. }) {
             return Some(BindingKind::Chan);
         }
@@ -1924,9 +1999,23 @@ impl Emitter {
             TypeExpr::Fn {
                 params, results, ..
             } => {
+                let any_named = params.iter().any(|p| !p.name.is_empty());
+                let any_unnamed = params.iter().any(|p| p.name.is_empty());
+                let mixed_params = any_named && any_unnamed;
                 let ps = params
                     .iter()
-                    .map(|p| format!("{} {}", p.name, self.type_text(&p.ty)))
+                    .map(|p| {
+                        let ty = self.type_text(&p.ty);
+                        if p.name.is_empty() {
+                            if mixed_params {
+                                format!("_ {}", ty)
+                            } else {
+                                ty
+                            }
+                        } else {
+                            format!("{} {}", p.name, ty)
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 let rs = results
@@ -1934,10 +2023,10 @@ impl Emitter {
                     .map(|t| self.type_text(t))
                     .collect::<Vec<_>>()
                     .join(", ");
-                if rs.is_empty() {
-                    format!("func({})", ps)
-                } else {
-                    format!("func({}) {}", ps, rs)
+                match results.len() {
+                    0 => format!("func({})", ps),
+                    1 => format!("func({}) {}", ps, rs),
+                    _ => format!("func({}) ({})", ps, rs),
                 }
             }
         }
@@ -2075,10 +2164,11 @@ impl Emitter {
     /// returns). `*new(T)` is the universal fallback — a stack zero, no
     /// allocation.
     pub fn zero_value(&mut self, t: &TypeExpr) -> String {
-        match t {
+        let resolved = self.resolve_type_alias(t).clone();
+        match &resolved {
             TypeExpr::Named { name, .. } if !name.contains('.') && !name.contains('[') => {
                 if self.struct_fields.contains_key(name.as_str()) {
-                    return format!("*new({})", name);
+                    return format!("*new({})", self.type_text(t));
                 }
                 match name.as_str() {
                     "bool" => "false".into(),
@@ -2091,13 +2181,14 @@ impl Emitter {
                     | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr" | "float32"
                     | "float64" | "complex64" | "complex128" => "0".into(),
                     "error" | "any" => "nil".into(),
-                    _ => format!("*new({})", name),
+                    _ => format!("*new({})", self.type_text(t)),
                 }
             }
             TypeExpr::Slice { .. }
             | TypeExpr::Map { .. }
             | TypeExpr::Chan { .. }
-            | TypeExpr::Pointer { .. } => "nil".into(),
+            | TypeExpr::Pointer { .. }
+            | TypeExpr::Fn { .. } => "nil".into(),
             TypeExpr::Option { .. } => format!("{}{{}}", self.type_text(t)),
             _ => format!("*new({})", self.type_text(t)),
         }
