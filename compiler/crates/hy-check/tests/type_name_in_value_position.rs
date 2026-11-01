@@ -111,6 +111,56 @@ fn enum_name_in_a_value_position_is_rejected() {
 }
 
 // ---------------------------------------------------------------------------
+// #2199 — the same name in STORE-target position.
+//
+// `n string = "str"` parses as the expression statement `n` followed by a
+// store to `string`, so the target of that second statement is the type name.
+// The emitter prints it verbatim and nothing runs, exactly like the #778
+// positions above.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn type_name_as_a_store_target_is_rejected() {
+    assert_code(
+        "fn main() {\n    var n int\n    n string = \"str\"\n    fmt.println(\"{n}\")\n}\n",
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn type_name_store_target_family_is_rejected() {
+    // The three reported rows: matching type, wrong type, and a struct field
+    // store. The wrong-type one is the interesting one — `q.n = "str"` is
+    // already HYB-E1002, and the annotation must not silence it quietly.
+    assert_code(
+        "fn main() {\n    var n int\n    n int = 5\n    fmt.println(\"{n}\")\n}\n",
+        "HYB-E1002",
+    );
+    assert_code(
+        &format!(
+            "{HOLDER}fn main() {{\n    var q holder\n    q.n int = 5\n    fmt.println(\"{{q.n}}\")\n}}\n"
+        ),
+        "HYB-E1002",
+    );
+}
+
+#[test]
+fn plain_stores_and_declarations_stay_accepted() {
+    // The accept half: the annotation is legal in a declaration, and a plain
+    // store has a real binding as its target.
+    assert_ok("fn main() {\n    var n int = 5\n    fmt.println(\"{n}\")\n}\n");
+    assert_ok("fn main() {\n    n := 5\n    fmt.println(\"{n}\")\n}\n");
+    assert_ok("fn main() {\n    var n int\n    n = 5\n    fmt.println(\"{n}\")\n}\n");
+    assert_ok(&format!(
+        "{HOLDER}fn main() {{\n    h := holder{{n: 1}}\n    h.n = 2\n    fmt.println(\"{{h.n}}\")\n}}\n"
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// The accept half: three TYPE positions a type name is legal in, plus the
+// shadowing case. Each was verified to build.
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // The accept half: three TYPE positions a type name is legal in, plus the
 // shadowing case. Each was verified to build.
 // ---------------------------------------------------------------------------

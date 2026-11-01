@@ -68,6 +68,25 @@ class MarkerDetectionTests(unittest.TestCase):
         root = self._tree({"weird.xyz": "<<<<<<< HEAD\n>>>>>>> main\n"})
         self.assertEqual(list(MOD.scan(str(root))), [])
 
+    def test_runtime_assembly_markers_fail_the_cli(self):
+        for suffix in ("s", "S"):
+            with self.subTest(suffix=suffix):
+                root = self._tree({
+                    "runtime/go/hybridge/call_amd64." + suffix:
+                        "<<<<<<< HEAD\nTEXT old(SB),$0\n=======\nTEXT new(SB),$0\n>>>>>>> main\n"
+                })
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPT), "--root", str(root)],
+                    capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("call_amd64." + suffix, result.stdout + result.stderr)
+
+    def test_clean_assembly_and_binary_file_remain_clean(self):
+        root = self._tree({"runtime/go/hybridge/call_arm64.s":
+                           "// Go assembly\nTEXT call(SB),$0\n"})
+        (root / "blob.bin").write_bytes(b"\xff<<<<<<< HEAD\n>>>>>>> main\n")
+        self.assertEqual(list(MOD.scan(str(root))), [])
+
     def test_git_directory_is_skipped(self):
         root = self._tree({".git/COMMIT_EDITMSG": "<<<<<<< HEAD\n>>>>>>> main\n"})
         self.assertEqual(list(MOD.scan(str(root))), [])

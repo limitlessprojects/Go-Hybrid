@@ -371,6 +371,66 @@ class KaggleArgumentTests(unittest.TestCase):
             mock_status.assert_called_once_with("custom-slug")
 
 
+@unittest.skipUnless(os.name == "posix", "job.py uses a POSIX shell")
+class KaggleStatusExitTests(unittest.TestCase):
+    """A failed status request must fail the real CLI and its Make target."""
+
+    def run_status(self, code=0, output="status fixture", via_make=False, missing=False):
+        with tempfile.TemporaryDirectory(prefix="kaggle-status-") as tmp:
+            cli = Path(tmp) / "fake kaggle"
+            if not missing:
+                cli.write_text(
+                    "#!/bin/sh\nprintf '%s\\n' " + shlex.quote(output)
+                    + "\nexit " + str(code) + "\n",
+                    encoding="utf-8",
+                )
+                cli.chmod(0o755)
+            env = dict(os.environ, KAGGLE_CLI=str(cli))
+            args = (["make", "-s", "kaggle-status", "PY=" + shlex.quote(sys.executable)]
+                    if via_make else
+                    [sys.executable, str(ENTRY), "kaggle", "status", "fixture/kernel"])
+            return subprocess.run(
+                args, cwd=ENTRY.resolve().parents[1], env=env,
+                capture_output=True, text=True, timeout=10,
+            )
+
+    def test_failed_request_preserves_nonzero_exit_and_diagnostic(self):
+        for code in (1, 7):
+            with self.subTest(code=code):
+                result = self.run_status(code, "fixture: request failed")
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                self.assertIn("fixture: request failed", result.stdout)
+                self.assertNotIn("Traceback", result.stdout + result.stderr)
+
+    def test_missing_cli_is_not_reported_as_success(self):
+        result = self.run_status(missing=True)
+        self.assertEqual(result.returncode, 127, result.stdout + result.stderr)
+        self.assertIn("fake kaggle", result.stdout)
+        self.assertNotIn("Traceback", result.stdout + result.stderr)
+
+    def test_successful_request_keeps_output_and_zero_exit(self):
+        result = self.run_status(output='"KernelWorkerStatus.RUNNING"')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, '"KernelWorkerStatus.RUNNING"\n')
+
+    def test_kernel_error_state_is_still_a_successful_status_request(self):
+        result = self.run_status(output='"KernelWorkerStatus.ERROR"')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, '"KernelWorkerStatus.ERROR"\n')
+
+    @unittest.skipUnless(shutil.which("make"), "requires make")
+    def test_make_target_fails_when_status_request_fails(self):
+        result = self.run_status(7, "fixture: request failed", via_make=True)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("fixture: request failed", result.stdout)
+
+    @unittest.skipUnless(shutil.which("make"), "requires make")
+    def test_make_target_succeeds_when_status_request_succeeds(self):
+        result = self.run_status(output="fixture: running", via_make=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "fixture: running\n")
+
+
 class GhTokenTests(unittest.TestCase):
     def test_reads_token_from_environment(self):
         import importlib.util

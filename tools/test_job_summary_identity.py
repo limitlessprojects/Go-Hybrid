@@ -32,7 +32,7 @@ class SummaryIdentityTests(unittest.TestCase):
             # the fetched bytes for diagnosis.
             def offline_download(command, **kwargs):
                 staging = next((root / "result/raw").glob(".staging-*"))
-                (staging / "summary.json").write_text(payload, encoding="utf-8")
+                (staging / "summary.json").write_bytes(payload.encode("utf-8"))
                 return 0, "offline successful transfer"
 
             with mock.patch.object(job, "sh", side_effect=offline_download), \
@@ -81,6 +81,85 @@ class SummaryIdentityTests(unittest.TestCase):
     def test_fetch_without_local_submission_record_remains_supported(self):
         self.fetch(json.dumps({"job": "external-job", "sha": "c" * 40, "ok": True}),
                    submitted=MISSING)
+
+
+class SummaryPublicationTests(unittest.TestCase):
+    def publish(self, failure=None, existing=True, ok=True):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dest = root / "result/summary.json"
+            dest.parent.mkdir()
+            previous = b'{"previous": "reviewed evidence"}\n'
+            if existing:
+                dest.write_bytes(previous)
+            payload = json.dumps(dict(PIN, ok=ok, note="survey: 東京"),
+                                 ensure_ascii=False).encode("utf-8")
+            (root / "submitted.json").write_text(json.dumps(PIN), encoding="utf-8")
+
+            def download(command, **kwargs):
+                staging = next((root / "result/raw").glob(".staging-*"))
+                (staging / "summary.json").write_bytes(payload)
+                return 0, "offline download"
+
+            original_copyfile = job.shutil.copyfile
+            original_copyfileobj = job.shutil.copyfileobj
+
+            def broken_copy(source, destination, *args, **kwargs):
+                # Exercise a real partial write, including the old copyfile
+                # boundary, rather than only throwing before touching output.
+                if hasattr(destination, "write"):
+                    if not Path(destination.name).name.startswith(".summary-"):
+                        return original_copyfileobj(source, destination, *args, **kwargs)
+                    destination.write(b'{"partial":')
+                else:
+                    if Path(destination) != dest:
+                        return original_copyfile(source, destination, *args, **kwargs)
+                    Path(destination).write_bytes(b'{"partial":')
+                raise OSError("fixture disk full")
+
+            with mock.patch.object(job, "sh", side_effect=download), \
+                 contextlib.redirect_stdout(io.StringIO()), \
+                 contextlib.redirect_stderr(io.StringIO()), \
+                 contextlib.ExitStack() as stack:
+                if failure == "copy":
+                    stack.enter_context(mock.patch.object(job.shutil, "copyfile", side_effect=broken_copy))
+                    stack.enter_context(mock.patch.object(job.shutil, "copyfileobj", side_effect=broken_copy))
+                elif failure == "replace":
+                    stack.enter_context(mock.patch.object(job.os, "replace", side_effect=OSError("fixture publish failure")))
+                try:
+                    result = job.kaggle_fetch(str(root), slug="fixture/kernel")
+                except OSError:
+                    # Older code propagates a write error after truncating the
+                    # destination. Still inspect the bytes to prove that loss.
+                    result = 1
+
+            self.assertEqual(result, 1 if failure else 0)
+            self.assertEqual(dest.read_bytes() if dest.exists() else None,
+                             (previous if existing else None) if failure else payload)
+            self.assertEqual((root / "result/raw/summary.json").read_bytes(), payload)
+            self.assertEqual(sorted(p.name for p in dest.parent.iterdir()),
+                             ["raw", "summary.json"] if dest.exists() else ["raw"])
+
+    def test_partial_copy_keeps_reviewed_summary(self):
+        self.publish("copy")
+
+    def test_partial_copy_does_not_create_a_corrupt_summary(self):
+        self.publish("copy", existing=False)
+
+    def test_failed_replace_keeps_reviewed_summary(self):
+        self.publish("replace")
+
+    def test_failed_replace_does_not_create_summary(self):
+        self.publish("replace", existing=False)
+
+    def test_success_publishes_complete_utf8_summary(self):
+        self.publish()
+
+    def test_success_creates_missing_summary(self):
+        self.publish(existing=False)
+
+    def test_failed_job_report_can_still_be_published(self):
+        self.publish(ok=False)
 
 
 if __name__ == "__main__":
