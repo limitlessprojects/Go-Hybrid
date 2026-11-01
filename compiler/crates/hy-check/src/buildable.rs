@@ -368,6 +368,7 @@ struct Collector<'a> {
     /// Parallel lexical scope stack tracking declared numeric scalar types ("int", "int64", etc.).
     scalar_scopes: Vec<HashMap<String, &'static str>>,
     slice_elem_scopes: Vec<HashMap<String, &'static str>>,
+    map_key_scopes: Vec<HashMap<String, &'static str>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
     /// File-level `const` declared numeric scalar types.
@@ -408,6 +409,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             kind_scopes: Vec::new(),
             scalar_scopes: Vec::new(),
             slice_elem_scopes: Vec::new(),
+            map_key_scopes: Vec::new(),
             file_consts: HashMap::new(),
             file_const_scalars: HashMap::new(),
             fn_results: Vec::new(),
@@ -476,6 +478,7 @@ impl<'a> Collector<'a> {
         self.kind_scopes.push(HashMap::new());
         self.scalar_scopes.push(HashMap::new());
         self.slice_elem_scopes.push(HashMap::new());
+        self.map_key_scopes.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
@@ -483,6 +486,7 @@ impl<'a> Collector<'a> {
         self.kind_scopes.pop();
         self.scalar_scopes.pop();
         self.slice_elem_scopes.pop();
+        self.map_key_scopes.pop();
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -556,6 +560,42 @@ impl<'a> Collector<'a> {
                     if name == "make" {
                         if let Some(first) = args.first() {
                             return self.slice_elem_scalar(&first.value);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn bind_map_key_scalar(&mut self, name: &str, scalar: &'static str) {
+        if name != "_" {
+            if let Some(top) = self.map_key_scopes.last_mut() {
+                top.insert(name.to_string(), scalar);
+            }
+        }
+    }
+
+    fn lookup_map_key_scalar(&self, name: &str) -> Option<&'static str> {
+        for layer in self.map_key_scopes.iter().rev() {
+            if let Some(s) = layer.get(name) {
+                return Some(*s);
+            }
+        }
+        None
+    }
+
+    fn map_key_scalar(&self, e: &Expr) -> Option<&'static str> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => self.lookup_map_key_scalar(name),
+            Expr::MapLit { key, .. } => self.scalar_of_ty(&self.ck.resolve_type_alias(key)),
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            return self.map_key_scalar(&first.value);
                         }
                     }
                 }
@@ -855,6 +895,10 @@ impl<'a> Collector<'a> {
                 if let Some(sc) = self.scalar_of_ty(&self.ck.resolve_type_alias(elem)) {
                     self.bind_slice_elem_scalar(&p.name, sc);
                 }
+            } else if let TypeExpr::Map { key, .. } = &resolved {
+                if let Some(sc) = self.scalar_of_ty(&self.ck.resolve_type_alias(key)) {
+                    self.bind_map_key_scalar(&p.name, sc);
+                }
             }
         }
         for r in &f.results {
@@ -1021,6 +1065,12 @@ impl<'a> Collector<'a> {
                         self.bind_slice_elem_scalar(name, sc);
                     }
                 }
+            } else if let TypeExpr::Map { key, .. } = &resolved {
+                if let Some(sc) = self.scalar_of_ty(&self.ck.resolve_type_alias(key)) {
+                    for name in &l.names {
+                        self.bind_map_key_scalar(name, sc);
+                    }
+                }
             }
         } else if l.names.len() == l.values.len() {
             for (name, v) in l.names.iter().zip(l.values.iter()) {
@@ -1029,6 +1079,9 @@ impl<'a> Collector<'a> {
                 }
                 if let Some(sc) = self.slice_elem_scalar(v) {
                     self.bind_slice_elem_scalar(name, sc);
+                }
+                if let Some(sc) = self.map_key_scalar(v) {
+                    self.bind_map_key_scalar(name, sc);
                 }
             }
         }
@@ -3534,17 +3587,33 @@ impl<'a> Collector<'a> {
         // For slices, arrays, and strings, the index must be an integer.
         self.check_single_value_position(index, "an index expression", /*binding_position=*/ false);
         if let OpKind::Map(key_kind, _) = bk {
+            let key_scalar = base_expr.and_then(|b| self.map_key_scalar(b));
+            let idx_scalar = self.expr_scalar_type(index);
+            let scalar_mismatch = match (key_scalar, idx_scalar) {
+                (Some(k), Some(i)) => k != i,
+                _ => false,
+            };
+            let is_untyped_int_to_float = **key_kind == OpKind::Float
+                && *ik == OpKind::Int
+                && crate::const_overflow::const_int_value(index).is_some();
+            let int_to_float_conflict = **key_kind == OpKind::Float
+                && *ik == OpKind::Int
+                && !is_untyped_int_to_float;
             if **key_kind != OpKind::Unknown
                 && *ik != OpKind::Unknown
-                && kinds_conflict(key_kind, ik)
+                && (kinds_conflict(key_kind, ik) || int_to_float_conflict || scalar_mismatch)
             {
+                let (k_label, i_label) = match (key_scalar, idx_scalar) {
+                    (Some(k), Some(i)) => (k.to_string(), i.to_string()),
+                    _ => (key_kind.label().to_string(), ik.label().to_string()),
+                };
                 self.emit_e1002(
                     index.span(),
                     format!(
                         "cannot use `{}` (type `{}`) as `{}` value in map index on `{}` (HYB-E1002)",
                         index.render(),
-                        ik.label(),
-                        key_kind.label(),
+                        i_label,
+                        k_label,
                         bk.label()
                     ),
                     "map index expression must match the map's key type",
@@ -4517,17 +4586,36 @@ impl<'a> Collector<'a> {
                     OpKind::Unknown => {}
                     OpKind::Map(k_expected, _) => {
                         let kk = self.kind_of_expr(key_arg);
+                        let key_scalar = self.map_key_scalar(map_arg);
+                        let arg_scalar = self.expr_scalar_type(key_arg);
+                        let scalar_mismatch = match (key_scalar, arg_scalar) {
+                            (Some(k), Some(a)) => k != a,
+                            _ => false,
+                        };
+                        let is_untyped_int_to_float = **k_expected == OpKind::Float
+                            && kk == OpKind::Int
+                            && crate::const_overflow::const_int_value(key_arg).is_some();
+                        let int_to_float_conflict = **k_expected == OpKind::Float
+                            && kk == OpKind::Int
+                            && !is_untyped_int_to_float;
+                        let conflict = kinds_conflict(k_expected, &kk)
+                            || int_to_float_conflict
+                            || scalar_mismatch;
                         if **k_expected != OpKind::Unknown
                             && kk != OpKind::Unknown
-                            && kk != **k_expected
+                            && conflict
                         {
+                            let (k_label, a_label) = match (key_scalar, arg_scalar) {
+                                (Some(k), Some(a)) => (k.to_string(), a.to_string()),
+                                _ => (k_expected.label().to_string(), kk.label().to_string()),
+                            };
                             self.emit_e2005(
                                 span,
                                 format!(
                                     "cannot use `{}` (type `{}`) as key type `{}` in `delete` (HYB-E2005)",
                                     key_arg.render(),
-                                    kk.label(),
-                                    k_expected.label()
+                                    a_label,
+                                    k_label
                                 ),
                                 "the second argument to `delete(m, k)` must match the map's key type",
                             );
