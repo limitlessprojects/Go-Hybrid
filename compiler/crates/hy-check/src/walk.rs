@@ -450,7 +450,7 @@ pub(crate) fn expr_uses(expr: &Expr, out: &mut Vec<Use>) {
                 via_move: true,
                 via_addr: false,
             }),
-            Expr::Field { .. } => {
+            Expr::Field { .. } | Expr::Index { .. } | Expr::Slice { .. } => {
                 if let Some(root) = crate::model::unwrap_parens(operand).root_ident() {
                     out.push(Use {
                         name: root.to_string(),

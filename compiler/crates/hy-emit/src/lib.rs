@@ -635,6 +635,8 @@ pub struct Emitter {
     var_ty: BTreeMap<String, (String, bool)>,
     /// Variables known to hold a pointer type in the current function frame.
     pointer_vars: BTreeSet<String>,
+    /// Active O8 slot-loan variable → local alias names holding a pointer to that loan.
+    loan_aliases: BTreeMap<String, BTreeSet<String>>,
     /// Local/parameter/receiver/result names bound in the current function frame.
     local_vars: BTreeSet<String>,
     /// Functions whose first result is a pointer type.
@@ -651,6 +653,7 @@ pub(crate) struct ScopeSnapshot {
     var_ty: BTreeMap<String, (String, bool)>,
     var_struct: BTreeMap<String, String>,
     pointer_vars: BTreeSet<String>,
+    loan_aliases: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl Emitter {
@@ -686,6 +689,7 @@ impl Emitter {
             var_struct: BTreeMap::new(),
             var_ty: BTreeMap::new(),
             pointer_vars: BTreeSet::new(),
+            loan_aliases: BTreeMap::new(),
             local_vars: BTreeSet::new(),
             ptr_returning_fns: BTreeSet::new(),
             explicit_imports: BTreeMap::new(),
@@ -705,6 +709,7 @@ impl Emitter {
             var_ty: self.var_ty.clone(),
             var_struct: self.var_struct.clone(),
             pointer_vars: self.pointer_vars.clone(),
+            loan_aliases: self.loan_aliases.clone(),
         }
     }
 
@@ -714,6 +719,7 @@ impl Emitter {
         self.var_ty = saved.var_ty;
         self.var_struct = saved.var_struct;
         self.pointer_vars = saved.pointer_vars;
+        self.loan_aliases = saved.loan_aliases;
     }
 
     pub(crate) fn shadow_local_name(&mut self, name: &str) {
@@ -723,7 +729,30 @@ impl Emitter {
             self.var_ty.remove(name);
             self.var_struct.remove(name);
             self.pointer_vars.remove(name);
+            self.loan_aliases.remove(name);
+            for aliases in self.loan_aliases.values_mut() {
+                aliases.remove(name);
+            }
         }
+    }
+
+    pub(crate) fn resolve_type_alias<'a>(&'a self, mut ty: &'a TypeExpr) -> &'a TypeExpr {
+        let mut seen = BTreeSet::new();
+        while let TypeExpr::Named { name, .. } = ty {
+            if !seen.insert(name.as_str()) {
+                break;
+            }
+            if let Some(target) = self.n5_aliases.get(name) {
+                ty = target;
+            } else {
+                break;
+            }
+        }
+        ty
+    }
+
+    pub(crate) fn is_pointer_ty(&self, ty: &TypeExpr) -> bool {
+        matches!(self.resolve_type_alias(ty), TypeExpr::Pointer { .. })
     }
 
     pub(crate) fn shadow_local_names(&mut self, names: &[String]) {
@@ -803,15 +832,7 @@ impl Emitter {
             .collect();
         self.ptr_returning_fns = file
             .fns()
-            .filter(|f| {
-                matches!(
-                    f.results.first(),
-                    Some(FnResult {
-                        ty: TypeExpr::Pointer { .. },
-                        ..
-                    })
-                )
-            })
+            .filter(|f| f.results.first().is_some_and(|r| self.is_pointer_ty(&r.ty)))
             .map(|f| f.name.clone())
             .collect();
         self.fn_shapes = file
@@ -831,7 +852,7 @@ impl Emitter {
                 let ptr_params = f
                     .params
                     .iter()
-                    .map(|p| match &p.ty {
+                    .map(|p| match self.resolve_type_alias(&p.ty) {
                         TypeExpr::Pointer { to, .. } => base_ty_name(to),
                         _ => None,
                     })
@@ -1356,6 +1377,7 @@ impl Emitter {
         self.closure_shapes.clear();
         self.var_ty.clear();
         self.pointer_vars.clear();
+        self.loan_aliases.clear();
         self.local_vars.clear();
         self.temp_n = 0;
         self.try_temps.clear();
@@ -1428,7 +1450,7 @@ impl Emitter {
             if let Some(name) = &r.name {
                 if name != "_" {
                     self.shadow_local_name(name);
-                    if matches!(r.ty, TypeExpr::Pointer { .. }) {
+                    if self.is_pointer_ty(&r.ty) {
                         self.pointer_vars.insert(name.clone());
                     }
                     if let Some(kind) = self.binding_kind_of_ty(&r.ty) {
@@ -1652,10 +1674,10 @@ impl Emitter {
             self.shadow_local_name(&p.name);
             if let Some(kind) = self.binding_kind_of_ty(&p.ty) {
                 self.bindings.insert(p.name.clone(), kind);
-            } else if matches!(p.ty, TypeExpr::Chan { .. }) {
+            } else if matches!(self.resolve_type_alias(&p.ty), TypeExpr::Chan { .. }) {
                 self.bindings.insert(p.name.clone(), BindingKind::Chan);
             }
-            if matches!(p.ty, TypeExpr::Pointer { .. }) {
+            if self.is_pointer_ty(&p.ty) {
                 self.pointer_vars.insert(p.name.clone());
             }
             self.register_var_ty(&p.name, &p.ty);
@@ -1684,8 +1706,8 @@ impl Emitter {
     /// whose type is a user struct (`pool_stats`, value or pointer) lands
     /// in var_struct — `stats.mu.lock()` types through struct_fields.
     fn register_var_ty(&mut self, name: &str, ty: &TypeExpr) {
-        let (base, ptr) = match ty {
-            TypeExpr::Pointer { to, .. } => (base_ty_name(to), true),
+        let (base, ptr) = match self.resolve_type_alias(ty) {
+            TypeExpr::Pointer { to, .. } => (base_ty_name(self.resolve_type_alias(to)), true),
             t => (base_ty_name(t), false),
         };
         let Some(base) = base else { return };
