@@ -333,6 +333,13 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         (Interface, _) => false,
         (a, b) if a == b => false,
 
+        // An `option[T]` value lowers to the generic prelude struct
+        // `option[T]`; Go converts it to nothing but itself or an interface
+        // (`u8(op)`, `float64(op)`, `string(op)` fail `go build` with
+        // `cannot convert op (variable of struct type option[int])`).
+        (Option(_), Option(_)) => false,
+        (_, Option(_)) => true,
+
         // Struct targets: Go forbids converting non-structs to structs.
         (Struct(_), other) if !matches!(other, Unknown | Struct(_)) => true,
 
