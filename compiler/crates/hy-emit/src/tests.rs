@@ -1300,8 +1300,60 @@ fn set_insert_uses_prelude() {
         "set prelude:\n{}",
         go
     );
-    assert!(go.contains("seen := set[node_id]{}"), ":\n{}", go);
+    assert!(go.contains("seen := set[node_id]{m: map[node_id]struct{}{}}"), ":\n{}", go);
     assert!(go.contains("return seen.insert(3)"), ":\n{}", go);
+}
+
+#[test]
+fn test_set_empty_storage_sharing_issue_2216() {
+    let src = r#"
+fn add(s set[int], v int) {
+    s.insert(v)
+}
+
+struct graph {
+    seen set[int]
+}
+
+fn main() {
+    a := set[int]{}
+    add(a, 1)
+
+    c := set[int]{}
+    d := c
+    d.insert(1)
+
+    var s set[int]
+    var g graph
+    p := new(set[int])
+}
+"#;
+    let go = emit(src);
+    assert!(
+        go.contains("a := set[int]{m: map[int]struct{}{}}"),
+        "empty set literal must initialize m: map[T]struct{{}}:\n{}",
+        go
+    );
+    assert!(
+        go.contains("c := set[int]{m: map[int]struct{}{}}"),
+        "copy source set literal must initialize m: map[T]struct{{}}:\n{}",
+        go
+    );
+    assert!(
+        go.contains("var s set[int] = set[int]{m: map[int]struct{}{}}"),
+        "var set declaration must initialize m: map[T]struct{{}}:\n{}",
+        go
+    );
+    assert!(
+        go.contains("var g graph = graph{seen: set[int]{m: map[int]struct{}{}}}"),
+        "struct carrying set field must initialize field m: map[T]struct{{}}:\n{}",
+        go
+    );
+    assert!(
+        go.contains("p := &set[int]{m: map[int]struct{}{}}"),
+        "new(set[T]) must initialize m: map[T]struct{{}}:\n{}",
+        go
+    );
 }
 
 #[test]
