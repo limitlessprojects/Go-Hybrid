@@ -797,6 +797,39 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #2915: `opt.or(default)` on an `option[T]` needs `default` of type `T`.
+    fn check_option_method_arg(&mut self, callee: &Expr, args: &[CallArg]) {
+        let Expr::Field { base, name, .. } = unwrap_parens(callee) else {
+            return;
+        };
+        if name != "or" || args.len() != 1 {
+            return;
+        }
+        let bk = self.kind_of_expr(base);
+        let OpKind::Option(elem) = bk else {
+            return;
+        };
+        let want = *elem;
+        let got = self.kind_of_expr(&args[0].value);
+        let int_to_float_conflict = want == OpKind::Float
+            && got == OpKind::Int
+            && !self.is_untyped_int_const(&args[0].value);
+        if kinds_conflict(&want, &got) || int_to_float_conflict {
+            self.emit_e1002(
+                args[0].value.span(),
+                format!(
+                    "cannot use `{}` (type `{}`) as `{}` value in argument to `{}.or` on `option[{}]` (HYB-E1002)",
+                    args[0].value.render(),
+                    got.label(),
+                    want.label(),
+                    base.render(),
+                    want.label()
+                ),
+                "argument to `option.or` must match the option payload type",
+            );
+        }
+    }
+
     /// #1031 — record the exact numeric type of a binding that `bind_kind`
     /// just made in the current scope.
     fn set_scalar(&mut self, name: &str, scalar: Option<&'static str>) {
@@ -892,6 +925,12 @@ impl<'a> Collector<'a> {
                 return None;
             }
             return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+        }
+        if name == "min" || name == "max" {
+            let res_scalar = args
+                .iter()
+                .find_map(|a| self.typed_value_scalar(&a.value));
+            return Some(vec![res_scalar]);
         }
         if args.len() == 1
             && !self.ck.structs.contains_key(name.as_str())
@@ -1788,7 +1827,17 @@ impl<'a> Collector<'a> {
                             }
                             if let Some(b) = binding {
                                 self.define_elidable(b, subject.span());
-                                self.bind_kind(b, OpKind::Unknown);
+                                // #2915: payload binding `some(v)` inherits the element type of `option[T]`.
+                                let bind_k = if segments.first().map(|s| s.as_str()) == Some("some") {
+                                    if let OpKind::Option(elem) = &subject_kind {
+                                        (**elem).clone()
+                                    } else {
+                                        OpKind::Unknown
+                                    }
+                                } else {
+                                    OpKind::Unknown
+                                };
+                                self.bind_kind(b, bind_k);
                             }
                         }
                         MatchPattern::Lit(lit) => {
@@ -1887,10 +1936,11 @@ impl<'a> Collector<'a> {
                 }
             }
             OpKind::Map(k, v) => {
+                // SPEC LX13: single-var `for k in m` binds the KEY (#2945).
                 if n_vars >= 2 {
                     vec![*k, *v]
                 } else {
-                    vec![*v]
+                    vec![*k]
                 }
             }
             OpKind::Str => vec![OpKind::Int; n_vars.max(1)],
@@ -2184,6 +2234,7 @@ impl<'a> Collector<'a> {
                 }
                 self.check_call_operands(callee, args, *span);
                 self.check_set_method_arg(callee, args);
+                self.check_option_method_arg(callee, args);
             }
             Expr::StructLit { ty, fields, span } => {
                 if let Some(t) = ty {
@@ -2680,7 +2731,7 @@ impl<'a> Collector<'a> {
             "bool" => OpKind::Bool,
             "string" => OpKind::Str,
             "float32" | "float64" | "f32" | "f64" => OpKind::Float,
-            "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
+            "int" | "uint" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
             | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "usize"
             | "isize" | "uintptr" | "byte" | "rune" | "char" => OpKind::Int,
             _ => OpKind::Unknown,
@@ -3057,6 +3108,14 @@ impl<'a> Collector<'a> {
                     "new" => return Some(vec![OpKind::Pointer(Box::new(OpKind::Unknown))]),
                     "delete" | "close" | "clear" | "panic" => return Some(Vec::new()),
                     "recover" => return Some(vec![OpKind::Interface]),
+                    "min" | "max" => {
+                        let res_kind = args
+                            .iter()
+                            .map(|a| self.kind_of_expr(&a.value))
+                            .find(|k| !matches!(k, OpKind::Unknown | OpKind::Void))
+                            .unwrap_or(OpKind::Unknown);
+                        return Some(vec![res_kind]);
+                    }
                     // #2823: `some(v)` produces `option[kind(v)]`.
                     "some" if !self.ck.fns.contains_key("some") => {
                         let payload = args
@@ -6561,6 +6620,7 @@ impl<'a> Collector<'a> {
             }
             "min" | "max" => {
                 let mut first_arg: Option<(&Expr, OpKind)> = None;
+                let mut first_typed_scalar: Option<(&Expr, &'static str)> = None;
                 for arg in args {
                     let k = self.kind_of_expr(&arg.value);
                     if matches!(k, OpKind::Unknown | OpKind::Void) {
@@ -6603,6 +6663,25 @@ impl<'a> Collector<'a> {
                         }
                     } else {
                         first_arg = Some((&arg.value, k));
+                    }
+
+                    if let Some(s) = self.typed_value_scalar(&arg.value) {
+                        if let Some((_prev_arg, prev_s)) = first_typed_scalar {
+                            if prev_s != s {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "mismatched types `{}` and `{}` in `{name}` (HYB-E1002)",
+                                        prev_s,
+                                        s
+                                    ),
+                                    "all arguments to `min` and `max` must have matching ordered types",
+                                );
+                                return;
+                            }
+                        } else {
+                            first_typed_scalar = Some((&arg.value, s));
+                        }
                     }
                 }
             }

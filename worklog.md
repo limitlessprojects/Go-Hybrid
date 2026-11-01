@@ -1217,3 +1217,42 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - All five: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88) zero side-shifts, ls-remote==HEAD asserted, written replies posted.
 - Suite trajectory: 290 -> 296. Final main 43030723, tree clean.
 - NEXT TICK QUEUE: #2868 (typed int width through reads) -> #2846 (closure/fn-param call args) -> #2871 (const conversion matrix) -> #2878 (slice conversion element scalars) -> #2882 (shadowed E11/E4/E6 try contexts) -> #2864 (field/index assignment widths) -> #2786 (transitive multi-return pairs) -> #2836/#2723 (carry-over) -> #2824 (superseded by #2838, redirect reply owed) -> #2815 (W-2475 spike) -> #2830 (await rebase) -> wave tail.
+
+## Session 47 — 2026-11-01 night V (tick 487193 rerun: 2 landed + 1 supersede-redirect; full env recycle rebuilt)
+
+- Full recycle (rustc/go/target all gone): rustup 1.99.0 + go1.26.9 restored; go tarball now cached at /home/z/my-project/go1.26.9.tar.gz for next time. Cold target rebuilt in ONE 560s slice (jobs=1, cargo test --workspace --no-run).
+- Baseline on start: d2917dcb (session 46 landed 5 — #2831 rework, #2814, #2888, #2850, #2893; suites 296). NOTE for next tick: verify_pr.sh needs NO outer timeout wrapper — it has internal budgets (cargo 1200/corpus 900/diff 1800); the outer 560s wrapper killed the first #2909 attempt mid-build. Pre-warm target from main repo instead when cold.
+- scan OK (4998 core on entry), approve 4/4 (4996 remaining).
+- LANDED:
+  6c694e91 Merge PR #2909 (ket4min-susan, fixes #2880) — check_test_registration rejects OR-list/pipeline/background masked test invocations; guard skips python cmds whose tail holds | or bare &; unit tests over separator shapes + accept/reject YAML fixtures. 296 suites.
+  2f19c4ab Merge PR #2123 (martiindev710, fixes #1363) — HYB-E3006 via indirect_callee_effect routed through Field/Index/Call/Unary + catch-all callee arms; aliased/indirect calls (arr[0](v), obj.field(v), get_fn()(v)) now reject const->pointer-param writes; new indirect_call_const_write.rs suite. 297 suites. (Branch predated #2909; 3-way merge kept both — battery ran the combined tree.)
+- REDIRECT SENT: #2824 → superseded by #2838 (da28e526), written reply posted (rebase-or-close guidance, no silent close). Session-45-era queue debt cleared.
+- All landed: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies posted (protocol summary + bounty rail pointer).
+- Suite trajectory: 296 -> 297. Final main 2f19c4ab, tree clean.
+- NEXT TICK QUEUE (Pareto order): #2593 (make non-int size args, +143 1-file, cheap) -> #2917 (option match payload bindings) -> #2677 (variadic spread append) -> #2836 (capture move-freeze; NOTE same title as gttps #2614 — likely dup, land one, redirect other) -> #2895 -> #2882 -> #2910 -> #2914 -> #2661 -> land-candidate tail (#2807/#2907/#2911/#2798...) -> #2815 (W-2475 spike) -> #2830 (await rebase).
+
+## Session 48 — 2026-11-01 night VI (3 landed; recycled env again, cold build 1 slice)
+
+- Full recycle again (rust/go/target gone; go tarball cache ALSO gone from my-project — re-downloaded, re-cached as gotoolchain-1.26.9.tar; watch for whatever prunes large files here). Cold rebuild again in one 560s slice.
+- Baseline 75444b0f (own session-47). scan OK, approve 1/1 (4992 remaining).
+- LANDED:
+  3c6db0bb Merge PR #2931 (aswadi, fixes #831) — peel_slot_loan_index unwraps Paren/Move/Field chains; field-projected map slot loans (&m[k].f, move(&...), reborrow) register as O8 loans -> live insert/delete rejects HYB-E3102. New issue_831 suite. 298 suites.
+  c2a2550d Merge PR #2928 (Dimank92, fixes #2892) — min/max: result scalar inference + result-kind propagation + mixed-scalar HYB-E1002 + uint as Int. New issue_2542 suite (115L). Branch predated #2931: 3-way merge kept both; issue_831 re-run 4 passed post-merge. 298 suites.
+  b56f04d7 Merge PR #2919 (3y3y3y-huaiji, fixes #2915) — some(v) match bindings inherit option[T] element kind; check_option_method_arg validates option[T].or(default) kinds (incl typed int->float) HYB-E1002. New option_match_and_or_payload_2915.rs (140L). Branch predated #2928/#2931: 3-way merge kept both (verified: issue_2542 green, issue_831 4 passed, uint kept, min/max block at buildable.rs:929, sole deletion is the intended bind_kind replacement). 299 suites.
+- All three: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies + CREDIT posted.
+- Suite trajectory: 297 -> 298 -> 299. Final main b56f04d7, tree clean.
+- NOTE: #2917/#2677/#2836/#2895/#2910 dropped out of Pareto NOW between ticks (authors may have closed/rebased them) — verify status before re-queuing.
+- NEXT TICK QUEUE: #2882 (shadowed E11/E4/E6 try contexts, +253) -> #2914 (receiver methods out of file tables) -> #2614 (capture move-freeze; check dup vs closed #2836) -> #2661 (N5 array zero-init emit) -> #2925 (folded index callees) -> #2807 (N5 pointer/partial zero-init; check overlap w/ #2661) -> #2935 (copy() element types) -> #2934 (builtin range bounds) -> #2907 (nested len fold) -> land-candidate tail (#2911/#2937/#2798/#2926/#2741/#2756/#2781/#2905/#2785/#2923/#2855/#2938) -> #2593 (behind 5, still open) -> #2815 (W-2475 spike).
+
+## Session 49 — 2026-11-02 night I (3 landed; recycle #N, cold build 1 slice; go tarball cache keeps evaporating — re-cached as "go-1.26.9")
+
+- Recycle again: rust 1.99.0 + go1.26.9 reinstalled (tarball cache gone AGAIN — saved under extensionless name this time). Cold rebuild in one 560s slice.
+- Baseline 55c9ac60 (own session-48). scan OK, approve 0/0 (nothing pending; 3864 remaining after scan burn — core burn higher this window).
+- LANDED:
+  34276234 Merge PR #2836 (aswadi, fixes #2613) — closure captures propagate captured ident's moved-state onto the closure binding (post-move closure binds inherit freeze); multi-value rebinds re-establish closure-peer share edges; closure_mutates/closure_defs dropped on rebind. REBASED by author from +218/3f to +63/2f since last tick. New closure_multi_rebind_freeze_2613.rs. 300 suites.
+  d0670d3b Merge PR #2895 (aswadi, fixes #822+#821+#867) — scoped closure envs preserve moved/non_owned_origin (no downgrade) + pull moved from share peers/aliases; self-reading rebinds keep shadow links/outer-depth/shares, skip mark_nested_overwritten. Branch predated #2836 — kept both, both suites re-run green (1+2 passed). New issue_822 suite. 301 suites.
+  9a2b6f21 Merge PR #2951 (nyxlabs29-cyber, fixes #2945, SPEC LX13) — BindingKind::Map in hy-emit; single-var for-in over map emits key-range loop; buildable map-literal classification matches. New for_in_map_binds_key_2945.rs + range_element_mutation_1480 LX13 update. Branch predated #2836/#2895 — kept both (2 sanity suites green). 302 suites.
+- All three: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies + CREDIT posted.
+- Suite trajectory: 299 -> 300 -> 301 -> 302. Final main 9a2b6f21, tree clean.
+- OPEN DEDUPE: #2614 (gttps) same title as landed #2836 (aswadi, fixes #2613) — verify overlap next tick before landing; likely redirect reply if #2836 covers it.
+- NEXT TICK QUEUE: #2958 (option/fn .pop() reject + option method arity, 3y3y3y-huaiji) -> #2960 (method/generic-fn equality guards) -> #2947 (T24 O8 field loans) -> #2959 (foreign const-write args) -> #2882 (shadowed try contexts) -> #2925 (folded index callees) -> #2807/#2661 (N5 zero-init — CHECK OVERLAP, both emit-side) -> #2963 (set[T] typing) -> #2961 (scalar types on field/index assign) -> #2911 -> #2907 -> #2935 -> #2934 -> tail (#2798/#2926/#2741/#2756/#2781/#2905/#2785/#2923/#2855/#2938) -> #2593 -> #2815.
