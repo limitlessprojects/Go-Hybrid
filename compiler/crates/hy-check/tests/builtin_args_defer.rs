@@ -253,7 +253,7 @@ fn copy_and_clear_builtin_args_validated() {
 #[test]
 fn issue_1732_real_imag_complex_new_operands_rejected() {
     // new(composite literal) rejected
-    let new_struct = check("struct Point { x int }\nfn main() { _ = new(Point{x: 1}) }\n");
+    let new_struct = check("struct point { x int }\nfn main() { _ = new(point{x: 1}) }\n");
     assert_has(&new_struct, "HYB-E2005");
 
     let new_slice = check("fn main() { _ = new([]int{1, 2}) }\n");
@@ -272,7 +272,7 @@ fn issue_1732_real_imag_complex_new_operands_rejected() {
     let real_nil = check("fn main() { _ = real(nil) }\n");
     assert_has(&real_nil, "HYB-E2005");
 
-    let real_comp = check("struct Point { x int }\nfn main() { _ = real(Point{x: 1}) }\n");
+    let real_comp = check("struct point { x int }\nfn main() { _ = real(point{x: 1}) }\n");
     assert_has(&real_comp, "HYB-E2005");
 
     // imag(non-complex) rejected
@@ -285,7 +285,7 @@ fn issue_1732_real_imag_complex_new_operands_rejected() {
     let imag_nil = check("fn main() { _ = imag(nil) }\n");
     assert_has(&imag_nil, "HYB-E2005");
 
-    let imag_comp = check("struct Point { x int }\nfn main() { _ = imag(Point{x: 1}) }\n");
+    let imag_comp = check("struct point { x int }\nfn main() { _ = imag(point{x: 1}) }\n");
     assert_has(&imag_comp, "HYB-E2005");
 
     // complex(non-float) rejected
@@ -298,11 +298,11 @@ fn issue_1732_real_imag_complex_new_operands_rejected() {
     let comp_nil = check("fn main() { _ = complex(nil, nil) }\n");
     assert_has(&comp_nil, "HYB-E2005");
 
-    let comp_struct = check("struct Point { x int }\nfn main() { _ = complex(Point{x: 1}, Point{x: 2}) }\n");
+    let comp_struct = check("struct point { x int }\nfn main() { _ = complex(point{x: 1}, point{x: 2}) }\n");
     assert_has(&comp_struct, "HYB-E2005");
 
     // Valid calls accepted
-    let valid_new = check("struct Point { x int }\nfn main() { _ = new(Point) }\n");
+    let valid_new = check("struct point { x int }\nfn main() { _ = new(point) }\n");
     assert_lacks(&valid_new, "HYB-E2005");
 
     let valid_comp = check("fn main() { _ = complex(1.0, 2.0) }\n");
