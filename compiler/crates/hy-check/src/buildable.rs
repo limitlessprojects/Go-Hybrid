@@ -557,9 +557,6 @@ struct Collector<'a> {
     /// the state outside any body, so `Stmt::Return` can only ever see it
     /// while a body is open. `FnLit` bodies swap it like `fn_decl` does.
     fn_results: Vec<OpKind>,
-    /// #2712: the concrete integer type of each result of the enclosing
-    /// signature (`fn f() u8` -> [Some("uint8")]); swapped with `fn_results`.
-    fn_result_int_tys: Vec<Option<&'static str>>,
     /// Type-parameter names of the function whose body is currently walked
     /// (`fn new[k comparable, v any]` → {k, v}). A composite literal inside a
     /// generic signature may spell those parameters (`map[k]v{}`, zero-value
@@ -625,7 +622,6 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             file_consts: HashMap::new(),
             file_untyped_consts: HashSet::new(),
             fn_results: Vec::new(),
-            fn_result_int_tys: Vec::new(),
             fn_type_params: HashSet::new(),
             fn_results_all_named: false,
             fn_results_error_tail: false,
@@ -1677,10 +1673,6 @@ impl<'a> Collector<'a> {
             f.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
         let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
-        let outer_int = std::mem::replace(
-            &mut self.fn_result_int_tys,
-            f.results.iter().map(|r| int_ty_of_type_expr(&r.ty)).collect(),
-        );
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
         let outer_tp = std::mem::replace(
@@ -1693,7 +1685,6 @@ impl<'a> Collector<'a> {
         self.loop_depth = outer_loop;
         self.select_depth = outer_select;
         self.fn_results = outer;
-        self.fn_result_int_tys = outer_int;
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
         self.fn_result_scalars = outer_scalars;
@@ -2176,16 +2167,6 @@ impl<'a> Collector<'a> {
                     self.expr(v);
                 }
                 self.check_return(values, *span);
-                // #2712: `return a` with `a` an `i32` local in a `fn f() u8`.
-                // Go: `cannot use a (variable of type int32) as uint8 value
-                // in return statement`.
-                if values.len() == self.fn_result_int_tys.len() {
-                    let want = self.fn_result_int_tys.clone();
-                    for (v, w) in values.iter().zip(want) {
-                        let label = format!("return {}", v.render());
-                        self.check_int_ty_mismatch(w, v, label, v.span());
-                    }
-                }
             }
             Stmt::Task { callee, args, span } => {
                 self.expr(callee);
@@ -2818,10 +2799,6 @@ impl<'a> Collector<'a> {
                     results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
                 let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
                 let outer = std::mem::replace(&mut self.fn_results, result_kinds);
-                let outer_int = std::mem::replace(
-                    &mut self.fn_result_int_tys,
-                    results.iter().map(|r| int_ty_of_type_expr(&r.ty)).collect(),
-                );
                 let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
                 let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
                 let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
@@ -2830,7 +2807,6 @@ impl<'a> Collector<'a> {
                 self.loop_depth = outer_loop;
                 self.select_depth = outer_select;
                 self.fn_results = outer;
-                self.fn_result_int_tys = outer_int;
                 self.fn_results_all_named = outer_named;
                 self.fn_results_error_tail = outer_err;
                 self.fn_result_scalars = outer_scalars;
@@ -7837,15 +7813,6 @@ impl<'a> Collector<'a> {
                 );
             }
         }
-    }
-}
-
-/// #2712: `u8` / `int64` / `byte` as a type expression -> its canonical Go
-/// integer type; anything else (named structs, slices, generics) is `None`.
-fn int_ty_of_type_expr(ty: &TypeExpr) -> Option<&'static str> {
-    match ty {
-        TypeExpr::Named { name, .. } => canonical_int_ty(name),
-        _ => None,
     }
 }
 
