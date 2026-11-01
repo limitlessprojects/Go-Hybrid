@@ -1176,7 +1176,7 @@ impl<'a> Checker<'a> {
                     _ => {}
                 }
             } else {
-                crate::walk::own_uses(stmt, &mut uses);
+                crate::walk::own_uses_with_results(stmt, &iter_st.named_results, &mut uses);
                 if let hy_syntax::Stmt::Select { arms, .. } = stmt {
                     for arm in arms {
                         match &arm.kind {
