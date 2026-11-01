@@ -325,6 +325,18 @@ impl<'a> Checker<'a> {
         value: &Expr,
         st: Option<&FnState>,
     ) {
+        // A TYPED constant expression is not untyped: `x := u64(1 << 63)`
+        // declares `x` as `uint64` in Go, not `int`, so the default-`int`
+        // range does not apply. Its own range is already enforced where Go
+        // enforces it: the conversion operand (HYB-E6006) and the folded
+        // result of negation / binary operations (#725). Without this,
+        // `x := u64(1 << 63)` and `x := u64(1) << 63` (both build in Go)
+        // were rejected as overflowing `int` (issue #2698).
+        if let Some(st) = st {
+            if self.fixed_width_int_ty_of(st, value).is_some() {
+                return;
+            }
+        }
         let (lo, hi) = target_int_range();
         match const_int_fold_with(value, &self.const_values, 0, st) {
             ConstFold::NotConst => return,
