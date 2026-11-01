@@ -2562,6 +2562,7 @@ impl<'a> Collector<'a> {
                             .unwrap_or(OpKind::Unknown);
                         return Some(vec![first]);
                     }
+                    "real" | "imag" => return Some(vec![OpKind::Float]),
                     "append" => {
                         let first = args
                             .first()
@@ -5162,6 +5163,138 @@ impl<'a> Collector<'a> {
     /// (`builtins.rs`) to resolved binding shapes.
     fn check_builtin_operand_kinds(&mut self, name: &str, args: &[CallArg], span: Span) {
         match name {
+            "real" | "imag" => {
+                if args.len() != 1 {
+                    return; // arity handled by builtins.rs
+                }
+                let op = &args[0].value;
+                let sc = self.expr_scalar_type(op);
+                let ak = self.kind_of_expr(op);
+                let is_complex = matches!(sc, Some("complex64" | "complex128"));
+                if !is_complex {
+                    let is_clearly_non_complex = matches!(
+                        ak,
+                        OpKind::Int
+                            | OpKind::Float
+                            | OpKind::Str
+                            | OpKind::Bool
+                            | OpKind::Slice(_)
+                            | OpKind::Array(_)
+                            | OpKind::Map(_, _)
+                            | OpKind::Chan(_)
+                    ) || matches!(
+                        sc,
+                        Some(
+                            "int" | "int8" | "int16" | "int32" | "int64"
+                                | "uint" | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr"
+                                | "float32" | "float64"
+                        )
+                    );
+                    if is_clearly_non_complex {
+                        let label = sc.map(|s| s.to_string()).unwrap_or_else(|| ak.label());
+                        self.emit_e2005(
+                            span,
+                            format!(
+                                "invalid argument `{}` (type `{}`) for `{}` (HYB-E2005)",
+                                op.render(),
+                                label,
+                                name
+                            ),
+                            "`real` and `imag` require a complex argument (`complex64` or `complex128`)",
+                        );
+                    }
+                }
+            }
+            "complex" => {
+                if args.len() != 2 {
+                    return; // arity handled by builtins.rs
+                }
+                let r_op = &args[0].value;
+                let i_op = &args[1].value;
+                let r_k = self.kind_of_expr(r_op);
+                let i_k = self.kind_of_expr(i_op);
+                let r_sc = self.expr_scalar_type(r_op);
+                let i_sc = self.expr_scalar_type(i_op);
+
+                let is_numeric_lit = |e: &Expr| {
+                    matches!(
+                        unwrap_parens(e),
+                        Expr::Lit {
+                            kind: LitKind::Int(_) | LitKind::Float(_),
+                            ..
+                        }
+                    )
+                };
+
+                let r_is_int = r_k == OpKind::Int
+                    || matches!(
+                        r_sc,
+                        Some(
+                            "int" | "int8" | "int16" | "int32" | "int64"
+                                | "uint" | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr"
+                        )
+                    );
+                let i_is_int = i_k == OpKind::Int
+                    || matches!(
+                        i_sc,
+                        Some(
+                            "int" | "int8" | "int16" | "int32" | "int64"
+                                | "uint" | "uint8" | "uint16" | "uint32" | "uint64" | "uintptr"
+                        )
+                    );
+
+                let r_bad = (!is_numeric_lit(r_op) && r_is_int)
+                    || matches!(
+                        r_k,
+                        OpKind::Str | OpKind::Bool | OpKind::Slice(_) | OpKind::Map(_, _) | OpKind::Chan(_)
+                    );
+                let i_bad = (!is_numeric_lit(i_op) && i_is_int)
+                    || matches!(
+                        i_k,
+                        OpKind::Str | OpKind::Bool | OpKind::Slice(_) | OpKind::Map(_, _) | OpKind::Chan(_)
+                    );
+
+                if r_bad {
+                    let label = r_sc.map(|s| s.to_string()).unwrap_or_else(|| r_k.label());
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "invalid argument `{}` (type `{}`) in `complex` (HYB-E2005)",
+                            r_op.render(),
+                            label
+                        ),
+                        "`complex` requires floating-point arguments (`float32` or `float64`)",
+                    );
+                    return;
+                }
+                if i_bad {
+                    let label = i_sc.map(|s| s.to_string()).unwrap_or_else(|| i_k.label());
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "invalid argument `{}` (type `{}`) in `complex` (HYB-E2005)",
+                            i_op.render(),
+                            label
+                        ),
+                        "`complex` requires floating-point arguments (`float32` or `float64`)",
+                    );
+                    return;
+                }
+
+                if let (Some(rs), Some(is)) = (r_sc, i_sc) {
+                    if rs != is {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "invalid arguments for `complex`: mismatched types `{}` and `{}` (HYB-E1002)",
+                                rs,
+                                is
+                            ),
+                            "arguments to `complex` must have identical floating-point types (`float32` or `float64`)",
+                        );
+                    }
+                }
+            }
             "min" | "max" => {
                 if args.is_empty() {
                     return; // arity handled by builtins.rs
