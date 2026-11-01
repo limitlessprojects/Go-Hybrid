@@ -1507,6 +1507,8 @@ impl<'a> Collector<'a> {
             for (name, val) in l.names.iter().zip(&l.values) {
                 if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                } else if let Some(ptr_ty) = self.pointer_val_type_str(val) {
+                    self.bind_type_name(name, ptr_ty);
                 }
             }
         }
@@ -3346,6 +3348,258 @@ impl<'a> Collector<'a> {
         )
     }
 
+
+    fn resolve_type_expr_pointer_to<'b>(
+        &'b self,
+        ty: &'b TypeExpr,
+        depth: usize,
+    ) -> Option<&'b TypeExpr> {
+        if depth > 8 {
+            return None;
+        }
+        match ty {
+            TypeExpr::Pointer { to, .. } => Some(to),
+            TypeExpr::Named { name, .. } => {
+                let base = Checker::base_named_type_str(name);
+                if let Some(aliased) = self.ck.type_aliases.get(base) {
+                    self.resolve_type_expr_pointer_to(aliased, depth + 1)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn type_expr_base_desc(&self, ty: &TypeExpr, depth: usize) -> Option<String> {
+        if depth > 8 {
+            return None;
+        }
+        match ty {
+            TypeExpr::Named { name, .. } => {
+                let base = Checker::base_named_type_str(name);
+                if let Some(sc) = canonical_numeric_name(base) {
+                    return Some(format!("scalar:{}", sc));
+                }
+                if self.ck.structs.contains_key(base)
+                    || self.ck.struct_type_params.contains_key(base)
+                {
+                    return Some(format!("struct:{}", base));
+                }
+                if let Some(aliased) = self.ck.type_aliases.get(base) {
+                    return self.type_expr_base_desc(aliased, depth + 1);
+                }
+                match base {
+                    "string" => Some("str".to_string()),
+                    "bool" => Some("bool".to_string()),
+                    _ => Some(format!("named:{}", base)),
+                }
+            }
+            TypeExpr::Array { len, elem, .. } => {
+                let len_str = len
+                    .as_ref()
+                    .map(|l| l.render())
+                    .unwrap_or_else(|| "...".to_string());
+                let elem_desc = self
+                    .type_expr_base_desc(elem, depth + 1)
+                    .unwrap_or_else(|| elem.render());
+                Some(format!("array:{}:{}", len_str, elem_desc))
+            }
+            TypeExpr::Slice { elem, .. } => {
+                let elem_desc = self
+                    .type_expr_base_desc(elem, depth + 1)
+                    .unwrap_or_else(|| elem.render());
+                Some(format!("slice:{}", elem_desc))
+            }
+            TypeExpr::Pointer { to, .. } => {
+                let to_desc = self
+                    .type_expr_base_desc(to, depth + 1)
+                    .unwrap_or_else(|| to.render());
+                Some(format!("ptr:{}", to_desc))
+            }
+            TypeExpr::Map { key, value, .. } => {
+                let k_desc = self
+                    .type_expr_base_desc(key, depth + 1)
+                    .unwrap_or_else(|| key.render());
+                let v_desc = self
+                    .type_expr_base_desc(value, depth + 1)
+                    .unwrap_or_else(|| value.render());
+                Some(format!("map:{}:{}", k_desc, v_desc))
+            }
+            _ => None,
+        }
+    }
+
+    fn type_str_base_desc(&self, s: &str, depth: usize) -> Option<String> {
+        if depth > 8 {
+            return None;
+        }
+        let s = s.trim();
+        if let Some(sc) = canonical_numeric_name(s) {
+            return Some(format!("scalar:{}", sc));
+        }
+        if self.ck.structs.contains_key(s) {
+            return Some(format!("struct:{}", s));
+        }
+        if let Some(target) = self.ck.type_aliases.get(s) {
+            return self.type_expr_base_desc(target, depth + 1);
+        }
+        if let Some(rest) = s.strip_prefix('*') {
+            let inner = self.type_str_base_desc(rest, depth + 1)?;
+            return Some(format!("ptr:{}", inner));
+        }
+        if let Some(rest) = s.strip_prefix("[]") {
+            let inner = self.type_str_base_desc(rest, depth + 1)?;
+            return Some(format!("slice:{}", inner));
+        }
+        if s.starts_with('[') {
+            if let Some(close) = s.find(']') {
+                let len = &s[1..close];
+                let elem = &s[close + 1..];
+                let elem_desc = self
+                    .type_str_base_desc(elem, depth + 1)
+                    .unwrap_or_else(|| elem.to_string());
+                return Some(format!("array:{}:{}", len, elem_desc));
+            }
+        }
+        if s == "string" {
+            return Some("str".to_string());
+        }
+        if s == "bool" {
+            return Some("bool".to_string());
+        }
+        None
+    }
+
+    fn pointer_type_base_desc(&self, name: &str) -> Option<String> {
+        let base = Checker::base_named_type_str(name);
+        if let Some(ta) = self.ck.type_aliases.get(base) {
+            let resolved = self.resolve_type_expr_pointer_to(ta, 0)?;
+            return self.type_expr_base_desc(resolved, 0);
+        }
+        if let Some(rest) = name.strip_prefix('*') {
+            return self.type_str_base_desc(rest, 0);
+        }
+        None
+    }
+
+    fn operand_base_desc(&self, operand: &Expr) -> Option<String> {
+        let bare = unwrap_parens(operand);
+        if let Some(sc) = self.typed_value_scalar(bare) {
+            return Some(format!("scalar:{}", sc));
+        }
+        if let Expr::Ident { name, .. } = bare {
+            if let Some(sc) = self.lookup_scalar(name) {
+                return Some(format!("scalar:{}", sc));
+            }
+            if let Some(tname) = self.lookup_type_name(name) {
+                return self.type_str_base_desc(&tname, 0);
+            }
+            if let Some(k) = self.lookup_kind(name) {
+                match k {
+                    OpKind::Struct(Some(s)) => return Some(format!("struct:{}", s)),
+                    OpKind::Str => return Some("str".to_string()),
+                    OpKind::Bool => return Some("bool".to_string()),
+                    _ => {}
+                }
+            }
+        }
+        if let Expr::StructLit { ty: Some(t), .. } = bare {
+            return Some(format!("struct:{}", t.render()));
+        }
+        let k = self.kind_of_expr(bare);
+        match k {
+            OpKind::Struct(Some(s)) => Some(format!("struct:{}", s)),
+            OpKind::Str => Some("str".to_string()),
+            OpKind::Bool => Some("bool".to_string()),
+            _ => None,
+        }
+    }
+
+    fn pointer_arg_base_desc(&self, arg: &Expr) -> Option<String> {
+        let bare = unwrap_parens(arg);
+        match bare {
+            Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                ..
+            } => self.operand_base_desc(operand),
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    return self.pointer_type_base_desc(&tname);
+                }
+                None
+            }
+            Expr::Call { callee, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    return self.pointer_type_base_desc(name);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn pointer_val_type_str(&self, val: &Expr) -> Option<String> {
+        let bare = unwrap_parens(val);
+        match bare {
+            Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                ..
+            } => {
+                let desc = self.operand_base_desc(operand)?;
+                if let Some(sc) = desc.strip_prefix("scalar:") {
+                    return Some(format!("*{}", sc));
+                }
+                if let Some(st) = desc.strip_prefix("struct:") {
+                    return Some(format!("*{}", st));
+                }
+                if let Some(sl) = desc.strip_prefix("slice:") {
+                    return Some(format!("*[]{}", sl));
+                }
+                if let Some(ar) = desc.strip_prefix("array:") {
+                    if let Some(colon) = ar.find(':') {
+                        let len = &ar[..colon];
+                        let elem = &ar[colon + 1..];
+                        return Some(format!("*[{}]{}", len, elem));
+                    }
+                }
+                None
+            }
+            Expr::Ident { name, .. } => self.lookup_type_name(name),
+            Expr::Call { callee, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if self.ck.type_aliases.contains_key(name) {
+                        return Some(name.to_string());
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn pointer_conversion_conflict(
+        &self,
+        target_name: &str,
+        target_k: &OpKind,
+        arg: &Expr,
+        arg_k: &OpKind,
+    ) -> bool {
+        if !matches!(target_k, OpKind::Pointer(_)) || !matches!(arg_k, OpKind::Pointer(_)) {
+            return false;
+        }
+        let target_base_desc = self.pointer_type_base_desc(target_name);
+        let arg_base_desc = self.pointer_arg_base_desc(arg);
+        match (target_base_desc, arg_base_desc) {
+            (Some(t_desc), Some(a_desc)) => t_desc != a_desc,
+            _ => false,
+        }
+    }
+
     fn check_conversion_arity(&mut self, name: &str, args: &[CallArg], span: Span) {
         let k = self.kind_of_named(name, 0);
         if matches!(k, OpKind::Unknown) {
@@ -3370,7 +3624,9 @@ impl<'a> Collector<'a> {
         // #2811: `string`↔slice conversions are restricted to byte/rune
         // elements; `OpKind::Int` cannot tell `int64` from `uint8`.
         let element_mismatch = self.string_slice_conversion_element_mismatch(name, &k, arg, &arg_k);
-        if conversion_kinds_conflict(&k, &arg_k) || element_mismatch {
+        let kinds_conflict = conversion_kinds_conflict(&k, &arg_k);
+        let pointer_conflict = self.pointer_conversion_conflict(name, &k, arg, &arg_k);
+        if kinds_conflict || element_mismatch || pointer_conflict {
             let note = if matches!(k, OpKind::Struct(_)) {
                 "structs cannot be instantiated via function-call conversions; write a struct literal like `T{...}` instead"
             } else {
