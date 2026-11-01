@@ -62,11 +62,11 @@ impl ConstKeyVal {
 /// length resolver must also see `var`/`let`/`:=` bindings, because an array's
 /// length lives in its *type* whether or not the binding is constant.
 #[derive(Debug, Clone, Copy)]
-struct BindingSight<'b> {
-    ty: &'b Option<TypeExpr>,
-    value: Option<&'b Expr>,
-    pos: hy_diag::Pos,
-    is_const: bool,
+pub(crate) struct BindingSight<'b> {
+    pub(crate) ty: &'b Option<TypeExpr>,
+    pub(crate) value: Option<&'b Expr>,
+    pub(crate) pos: hy_diag::Pos,
+    pub(crate) is_const: bool,
 }
 
 impl<'b> BindingSight<'b> {
@@ -1660,7 +1660,7 @@ impl<'a> Checker<'a> {
     /// may fold) from a `var`/`let`/`:=` binding; the type ascription is
     /// reported for every local, because a fixed-size array carries its length
     /// in its type.
-    fn resolve_local_binding_at(
+    pub(crate) fn resolve_local_binding_at(
         &self,
         name: &str,
         use_pos: hy_diag::Pos,
