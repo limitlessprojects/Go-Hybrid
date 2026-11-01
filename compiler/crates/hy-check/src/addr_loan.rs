@@ -34,19 +34,44 @@ fn is_slot_loan_expr(ck: &Checker<'_>, st: &FnState, e: &Expr) -> bool {
     })
 }
 
+fn is_slot_loan_or_alias_expr(
+    ck: &Checker<'_>,
+    st: &FnState,
+    e: &Expr,
+    allow_addr_root: bool,
+) -> bool {
+    if allow_addr_root && is_slot_loan_expr(ck, st, e) {
+        return true;
+    }
+    match unwrap_parens(e) {
+        Expr::Ident { name, .. } => ck.lookup_binding(st, name).is_some_and(|b| b.slot_loan),
+        Expr::Move { operand, .. } => match unwrap_parens(operand) {
+            Expr::Ident { name, .. } => ck.lookup_binding(st, name).is_some_and(|b| b.slot_loan),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 impl<'a> Checker<'a> {
     /// After `process_local`: flag every name bound to `&m[k]` (including
-    /// parenthesized `(&m[k])` and `&(m[k])`). Only runs for define/let bindings
-    /// without explicit type ascriptions where hy-emit actually lowers the loan.
+    /// parenthesized `(&m[k])` and `&(m[k])`) or aliased from an active
+    /// slot-loan binding (`p := slot`, `var p *T = slot`).
     pub(crate) fn mark_slot_loans_local(&self, st: &mut FnState, l: &LocalDecl) {
-        if !matches!(l.kind, LocalKind::Define | LocalKind::Let)
-            || l.ty.is_some()
+        if !matches!(l.kind, LocalKind::Define | LocalKind::Let | LocalKind::Var)
             || l.names.len() != l.values.len()
         {
             return;
         }
-        for (name, val) in l.names.iter().zip(l.values.iter()) {
-            if is_slot_loan_expr(self, st, val) {
+        let allow_addr_root =
+            matches!(l.kind, LocalKind::Define | LocalKind::Let) && l.ty.is_none();
+        let flags: Vec<bool> = l
+            .values
+            .iter()
+            .map(|val| is_slot_loan_or_alias_expr(self, st, val, allow_addr_root))
+            .collect();
+        for (name, is_loan) in l.names.iter().zip(flags) {
+            if is_loan {
                 if let Some(b) = st.env_lookup_mut(name) {
                     b.slot_loan = true;
                 }
@@ -54,10 +79,10 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// After `process_assign`: `x = &m[k]` makes `x` a slot loan; a whole-value
-    /// update (`x = T{...}`) to an already-active slot loan preserves `slot_loan`
-    /// because the emitter keeps the O8 store-back active for `x` until its
-    /// last use or a shadowing declaration. Loan marking only applies when all
+    /// After `process_assign`: `x = &m[k]` or `x = slot` makes `x` a slot loan;
+    /// a whole-value update (`x = T{...}`) to an already-active slot loan preserves
+    /// `slot_loan` because the emitter keeps the O8 store-back active for `x` until
+    /// its last use or a shadowing declaration. Loan marking only applies when all
     /// assignment targets are identifiers matching values.
     pub(crate) fn mark_slot_loans_assign(
         &self,
@@ -72,9 +97,12 @@ impl<'a> Checker<'a> {
         {
             return;
         }
-        for (t, v) in targets.iter().zip(values.iter()) {
+        let flags: Vec<bool> = values
+            .iter()
+            .map(|v| is_slot_loan_or_alias_expr(self, st, v, true))
+            .collect();
+        for (t, is_loan) in targets.iter().zip(flags) {
             if let PlaceKind::Ident(name) = &t.kind {
-                let is_loan = is_slot_loan_expr(self, st, v);
                 if let Some(b) = st.env_lookup_mut(name) {
                     b.slot_loan |= is_loan;
                 }
@@ -169,6 +197,13 @@ impl<'a> Checker<'a> {
     }
 
     fn emit_slot_loan_rebind_diag(&mut self, name: &str, rhs_rendered: &str, span: Span) {
+        if self
+            .diags
+            .iter()
+            .any(|d| d.severity == hy_diag::Severity::Error && d.span == span)
+        {
+            return;
+        }
         let msg = format!(
             "`{} = {}` re-binds the map-slot loan `{}` to a general pointer: a loan is not a pointer (T24) and cannot hold one",
             name, rhs_rendered, name
@@ -254,7 +289,20 @@ impl<'a> Checker<'a> {
                 self.check_expr_addr_of_loan_projections(st, expr, include_direct_ident);
             }
             Stmt::Send { chan, value, is_move, span } => {
-                if *is_move { self.check_addr_of_loan(st, &[Use { name: value.root_ident().unwrap_or("").into(), span: *span, is_write: false, via_move: true, via_addr: false }]); }
+                if *is_move {
+                    if let Some(root) = value.root_ident() {
+                        self.check_addr_of_loan(
+                            st,
+                            &[Use {
+                                name: root.into(),
+                                span: *span,
+                                is_write: false,
+                                via_move: true,
+                                via_addr: false,
+                            }],
+                        );
+                    }
+                }
                 self.check_expr_addr_of_loan_projections(st, chan, include_direct_ident);
                 self.check_expr_addr_of_loan_projections(st, value, include_direct_ident);
             }
@@ -312,7 +360,25 @@ impl<'a> Checker<'a> {
             Stmt::Select { arms, .. } => {
                 for arm in arms {
                     match &arm.kind {
-                        SelectArmKind::Send { chan, value, .. } => {
+                        SelectArmKind::Send {
+                            chan,
+                            value,
+                            is_move,
+                        } => {
+                            if *is_move {
+                                if let Some(root) = value.root_ident() {
+                                    self.check_addr_of_loan(
+                                        st,
+                                        &[Use {
+                                            name: root.into(),
+                                            span: value.span(),
+                                            is_write: false,
+                                            via_move: true,
+                                            via_addr: false,
+                                        }],
+                                    );
+                                }
+                            }
                             self.check_expr_addr_of_loan_projections(
                                 st,
                                 chan,
@@ -405,6 +471,23 @@ impl<'a> Checker<'a> {
                 Expr::Ident { name, span: id_span } if include_direct_ident => {
                     if self.lookup_binding(st, name).is_some_and(|b| b.slot_loan) {
                         self.emit_addr_of_loan_diag(name, *id_span);
+                    }
+                }
+                Expr::Field { .. } | Expr::Index { .. } | Expr::Slice { .. } => {
+                    if let Some(root) = operand.root_ident() {
+                        if self.lookup_binding(st, root).is_some_and(|b| b.slot_loan) {
+                            self.emit_addr_of_loan_diag(root, *span);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Expr::Move { operand, span } = expr {
+            match unwrap_parens(operand) {
+                Expr::Ident { name, .. } if include_direct_ident => {
+                    if self.lookup_binding(st, name).is_some_and(|b| b.slot_loan) {
+                        self.emit_addr_of_loan_diag(name, *span);
                     }
                 }
                 Expr::Field { .. } | Expr::Index { .. } | Expr::Slice { .. } => {
@@ -657,5 +740,119 @@ fn main() {
 "#,
         );
         assert!(codes.contains(&"HYB-E3104".to_string()), "got {:?}", codes);
+    }
+
+    #[test]
+    fn closure_body_slot_loan_move_and_select_send_reject_e3104() {
+        let spawn_codes = error_codes(
+            r#"struct item {
+    peer map[string]item
+    n int
+}
+fn worker(p *item, done chan int) {
+    p.peer["b"] = item{n: 2}
+    done <- 1
+}
+fn main() {
+    done := make(chan int, 1)
+    f := fn() {
+        m := map[string]item{}
+        m["a"] = item{peer: m, n: 1}
+        var slot *item
+        slot = &m["a"]
+        task worker(move slot, done)
+        <-done
+    }
+    f()
+}
+"#,
+        );
+        assert!(
+            spawn_codes.contains(&"HYB-E3104".to_string()),
+            "got {:?}",
+            spawn_codes
+        );
+
+        let select_codes = error_codes(
+            r#"struct acct { bal int }
+fn main() {
+    ch := make(chan *acct, 1)
+    f := fn() {
+        m := map[string]acct{"a": acct{bal: 1}}
+        s := &m["a"]
+        select {
+        ch <- move s:
+            {}
+        default:
+            {}
+        }
+    }
+    f()
+}
+"#,
+        );
+        assert!(
+            select_codes.contains(&"HYB-E3104".to_string()),
+            "got {:?}",
+            select_codes
+        );
+    }
+
+    #[test]
+    fn slot_loan_alias_copy_and_loop_carried_move_reject_e3104() {
+        let alias_codes = error_codes(
+            r#"struct item {
+    peer map[string]item
+    n int
+}
+fn worker(p *item, done chan int) {
+    p.peer["b"] = item{n: 2}
+    done <- 1
+}
+fn main() {
+    done := make(chan int, 1)
+    m := map[string]item{}
+    m["a"] = item{peer: m, n: 1}
+    var slot *item
+    slot = &m["a"]
+    p := slot
+    if false {
+        slot.n = 2
+    } else {
+        task worker(move p, done)
+    }
+    <-done
+}
+"#,
+        );
+        assert!(
+            alias_codes.contains(&"HYB-E3104".to_string()),
+            "got {:?}",
+            alias_codes
+        );
+
+        let loop_codes = error_codes(
+            r#"struct acct { bal int }
+fn worker(p *acct) {
+    p.bal = 9
+}
+fn main() {
+    m := map[string]acct{"a": acct{bal: 1}}
+    var slot *acct
+    for i in 0..2 {
+        if i == 1 {
+            task worker(move slot)
+        }
+        slot = &m["a"]
+        slot.bal = i
+    }
+}
+"#,
+        );
+        assert!(
+            loop_codes.contains(&"HYB-E3104".to_string()),
+            "got {:?}",
+            loop_codes
+        );
     }
 }

@@ -140,6 +140,8 @@ def kaggle_status(slug=None):
     slug = slug or kaggle_slug()
     rc, out = sh("{} kernels status {}".format(shlex.quote(KAGGLE_CLI), shlex.quote(slug)), timeout=60)
     print(out)
+    if rc != 0:
+        sys.exit(rc)
     return out
 
 
