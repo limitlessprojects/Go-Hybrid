@@ -2736,27 +2736,77 @@ impl<'a> Collector<'a> {
     /// carries no claim, so only a proven mismatch is reported.
     fn check_append_elements(&mut self, args: &[CallArg]) {
         let Some(first) = args.first() else { return };
-        let elem = match self.kind_of_expr(&first.value) {
-            OpKind::Slice(e) => *e,
+        let first_kind = self.kind_of_expr(&first.value);
+        let elem = match &first_kind {
+            OpKind::Slice(e) => *e.clone(),
             _ => return,
         };
         for extra in &args[1..] {
-            // `append(a, b...)` — a variadic spread passes the whole slice, so
-            // the argument's kind is the SLICE type, not an element. Go accepts
-            // it (for a matching element type), so it must not be compared
-            // against the element kind.
             if extra.spread {
+                let got = self.kind_of_expr(&extra.value);
+                match got {
+                    OpKind::Slice(ref src_elem) => {
+                        let int_float_conflict = (elem == OpKind::Float && **src_elem == OpKind::Int)
+                            || (elem == OpKind::Int && **src_elem == OpKind::Float);
+                        let conflict = (**src_elem != OpKind::Unknown
+                            && elem != OpKind::Unknown
+                            && **src_elem != elem)
+                            || kinds_conflict(&elem, src_elem)
+                            || int_float_conflict;
+                        if conflict {
+                            self.emit_e1002(
+                                extra.value.span(),
+                                format!(
+                                    "cannot append `{}` to `{}` in spread append — Go refuses `cannot use ... as {} value in argument to append` (HYB-E1002)",
+                                    got.label(),
+                                    first_kind.label(),
+                                    first_kind.label(),
+                                ),
+                                "arguments in spread append must have identical slice types",
+                            );
+                        }
+                    }
+                    OpKind::Str => {
+                        // Go allows append([]byte, "str"...) where []byte element is byte/uint8/int.
+                        if !matches!(elem, OpKind::Unknown | OpKind::Int) {
+                            self.emit_e1002(
+                                extra.value.span(),
+                                format!(
+                                    "cannot use string in spread append to `{}` — Go refuses `cannot use ... as {} value in argument to append` (HYB-E1002)",
+                                    first_kind.label(),
+                                    first_kind.label(),
+                                ),
+                                "spread append of a string requires a byte slice destination (`[]byte`)",
+                            );
+                        }
+                    }
+                    OpKind::Unknown => {}
+                    _ => {
+                        self.emit_e1002(
+                            extra.value.span(),
+                            format!(
+                                "cannot use `{}` as slice or string value in spread append (HYB-E1002)",
+                                got.label(),
+                            ),
+                            "spread append (`...`) requires a slice or string argument",
+                        );
+                    }
+                }
                 continue;
             }
+
             let got = self.kind_of_expr(&extra.value);
-            if kinds_conflict(&elem, &got) {
+            let int_float_conflict = elem == OpKind::Float
+                && got == OpKind::Int
+                && !self.is_untyped_int_const(&extra.value);
+            if kinds_conflict(&elem, &got) || int_float_conflict {
                 self.emit_e1002(
                     extra.value.span(),
                     format!(
                         "cannot append a value of type `{}` to a `{}` — Go refuses `cannot use ... as {} value in argument to append` (HYB-E1002)",
                         got.label(),
-                        self.kind_of_expr(&first.value).label(),
-                        elem.label()
+                        first_kind.label(),
+                        elem.label(),
                     ),
                     "the appended values must be assignable to the slice's element type",
                 );
@@ -4134,6 +4184,33 @@ impl<'a> Collector<'a> {
     /// selection on a pointer or addressable struct.
     /// Non-addressable: map index (`m[k]`), function/method call result
     /// (`make_t()`), and struct literal (`T{}`).
+    fn is_untyped_int_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit {
+                kind: LitKind::Int(_) | LitKind::Char(_),
+                ..
+            } => true,
+            Expr::Ident { name, .. } => {
+                if let Some(k) = self.file_consts.get(name) {
+                    return *k == OpKind::Int;
+                }
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        return matches!(self.defines[*id].kind, LocalKind::Const);
+                    }
+                }
+                false
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnOp::Neg) && self.is_untyped_int_const(operand)
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.is_untyped_int_const(lhs) && self.is_untyped_int_const(rhs)
+            }
+            _ => false,
+        }
+    }
+
     fn is_addressable_value_receiver(&self, e: &Expr) -> bool {
         match unwrap_parens(e) {
             Expr::Ident { .. } => true,
