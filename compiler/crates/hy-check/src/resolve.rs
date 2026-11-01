@@ -80,6 +80,7 @@ struct Scan<'a> {
     file_decls: &'a HashSet<String>,
     allowed: &'a mut HashSet<String>,
     local_decls: &'a mut HashSet<String>,
+    fn_locals: &'a mut HashSet<String>,
     type_params: &'a HashSet<String>,
     uncurated_imports: &'a HashSet<String>,
     diags: &'a mut Vec<hy_diag::Diagnostic>,
@@ -89,6 +90,71 @@ impl<'a> Scan<'a> {
     fn define(&mut self, name: &str) {
         self.allowed.insert(name.to_string());
         self.local_decls.insert(name.to_string());
+        self.fn_locals.insert(name.to_string());
+    }
+
+    fn check_folded_bracket_segments(&mut self, rest: &str, span: Span) {
+        for seg in rest.split('[') {
+            let inside = seg.strip_suffix(']').unwrap_or(seg).trim();
+            let candidate = inside.trim_start_matches('*').trim();
+            if candidate.is_empty() {
+                continue;
+            }
+            if let Some((root, member)) = candidate.split_once('.') {
+                let root = root.trim();
+                let member = member.trim();
+                if !root.is_empty()
+                    && root.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && !root.chars().next().unwrap().is_ascii_digit()
+                {
+                    if !self.local_decls.contains(root) {
+                        if self.uncurated_imports.contains(root)
+                            || crate::foreign::is_uncurated_go_stdlib_root(root)
+                        {
+                            self.diags.push(hy_diag::Diagnostic::error(
+                                "HYB-E1001",
+                                self.path.to_string(),
+                                span,
+                                format!(
+                                    "`{}.{}` cannot be resolved — package `{}` is outside the M5 curated allowlist (allowlist: {}) (HYB-E1001)",
+                                    root,
+                                    member,
+                                    root,
+                                    crate::foreign::CURATED_ALLOWLIST_DISPLAY
+                                ),
+                            ));
+                            continue;
+                        } else if crate::foreign::is_curated_package_root(root) {
+                            if !crate::foreign::is_curated_package_member(root, member) {
+                                self.diags.push(hy_diag::Diagnostic::error(
+                                    "HYB-E1001",
+                                    self.path.to_string(),
+                                    span,
+                                    format!(
+                                        "`{}.{}` is not a resolved member of curated package `{}` (HYB-E1001)",
+                                        root, member, root
+                                    ),
+                                ));
+                            }
+                            continue;
+                        } else if self.packages.contains(root)
+                            || crate::foreign::BUILTIN_PACKAGES.contains(&root)
+                        {
+                            continue;
+                        }
+                    }
+                    self.ident(root, span);
+                }
+                continue;
+            }
+            if candidate
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !candidate.chars().next().unwrap().is_ascii_digit()
+            {
+                self.ident(candidate, span);
+            }
+        }
     }
 
     fn ident(&mut self, name: &str, span: Span) {
@@ -101,18 +167,8 @@ impl<'a> Scan<'a> {
         if let Some((head, rest)) = name.split_once('[') {
             let head_ok = self.allowed.contains(head);
             if head_ok {
-                if !self.file_decls.contains(head) {
-                    if let Some(inside) = rest.strip_suffix(']') {
-                        let trimmed = inside.trim();
-                        if !trimmed.is_empty()
-                            && trimmed
-                                .chars()
-                                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-                            && !trimmed.chars().next().unwrap().is_ascii_digit()
-                        {
-                            self.ident(trimmed, span);
-                        }
-                    }
+                if !self.file_decls.contains(head) || self.fn_locals.contains(head) {
+                    self.check_folded_bracket_segments(rest, span);
                 }
                 return;
             }
@@ -143,11 +199,13 @@ impl<'a> Scan<'a> {
     fn run_block(&mut self, b: &Block) {
         let saved_allowed = self.allowed.clone();
         let saved_locals = self.local_decls.clone();
+        let saved_fn_locals = self.fn_locals.clone();
         for s in &b.stmts {
             self.run_stmt(s);
         }
         *self.allowed = saved_allowed;
         *self.local_decls = saved_locals;
+        *self.fn_locals = saved_fn_locals;
     }
 
     fn run_stmt(&mut self, s: &Stmt) {
@@ -194,6 +252,7 @@ impl<'a> Scan<'a> {
             } => {
                 let saved_allowed = self.allowed.clone();
                 let saved_locals = self.local_decls.clone();
+                let saved_fn_locals = self.fn_locals.clone();
                 if let Some(i) = init {
                     self.run_stmt(i);
                 }
@@ -204,10 +263,12 @@ impl<'a> Scan<'a> {
                 }
                 *self.allowed = saved_allowed;
                 *self.local_decls = saved_locals;
+                *self.fn_locals = saved_fn_locals;
             }
             Stmt::For { kind, body, .. } => {
                 let saved_allowed = self.allowed.clone();
                 let saved_locals = self.local_decls.clone();
+                let saved_fn_locals = self.fn_locals.clone();
                 match kind {
                     hy_syntax::ForKind::Infinite => {}
                     hy_syntax::ForKind::While { cond } => self.run_expr(cond),
@@ -226,6 +287,7 @@ impl<'a> Scan<'a> {
                 self.run_block(body);
                 *self.allowed = saved_allowed;
                 *self.local_decls = saved_locals;
+                *self.fn_locals = saved_fn_locals;
             }
             Stmt::Return { values, .. } => {
                 for v in values {
@@ -248,14 +310,54 @@ impl<'a> Scan<'a> {
                 for arm in arms {
                     let saved_allowed = self.allowed.clone();
                     let saved_locals = self.local_decls.clone();
+                    let saved_fn_locals = self.fn_locals.clone();
                     if let MatchPattern::Path { segments, binding } = &arm.pattern {
+                        let arm_span = arm
+                            .guard
+                            .as_ref()
+                            .map(|g| g.span())
+                            .unwrap_or(arm.body.span);
                         if segments.len() == 1 {
-                            let arm_span = arm
-                                .guard
-                                .as_ref()
-                                .map(|g| g.span())
-                                .unwrap_or(arm.body.span);
                             self.ident(&segments[0], arm_span);
+                        } else if segments.len() >= 2 {
+                            let root = &segments[0];
+                            let member = &segments[1];
+                            if !self.local_decls.contains(root) {
+                                if self.uncurated_imports.contains(root)
+                                    || crate::foreign::is_uncurated_go_stdlib_root(root)
+                                {
+                                    self.diags.push(hy_diag::Diagnostic::error(
+                                        "HYB-E1001",
+                                        self.path.to_string(),
+                                        arm_span,
+                                        format!(
+                                            "`{}.{}` cannot be resolved — package `{}` is outside the M5 curated allowlist (allowlist: {}) (HYB-E1001)",
+                                            root,
+                                            member,
+                                            root,
+                                            crate::foreign::CURATED_ALLOWLIST_DISPLAY
+                                        ),
+                                    ));
+                                } else if crate::foreign::is_curated_package_root(root) {
+                                    if !crate::foreign::is_curated_package_member(root, member) {
+                                        self.diags.push(hy_diag::Diagnostic::error(
+                                            "HYB-E1001",
+                                            self.path.to_string(),
+                                            arm_span,
+                                            format!(
+                                                "`{}.{}` is not a resolved member of curated package `{}` (HYB-E1001)",
+                                                root, member, root
+                                            ),
+                                        ));
+                                    }
+                                } else if !self.packages.contains(root)
+                                    && !crate::foreign::BUILTIN_PACKAGES.contains(&root.as_str())
+                                {
+                                    self.ident(root, arm_span);
+                                }
+                            } else if !self.fn_locals.contains(root) {
+                                self.ident(member, arm_span);
+                            }
                         }
                         if let Some(b) = binding {
                             self.define(b);
@@ -267,6 +369,7 @@ impl<'a> Scan<'a> {
                     self.run_block(&arm.body);
                     *self.allowed = saved_allowed;
                     *self.local_decls = saved_locals;
+                    *self.fn_locals = saved_fn_locals;
                 }
             }
             Stmt::Defer { call, .. } => self.run_expr(call),
@@ -276,6 +379,7 @@ impl<'a> Scan<'a> {
                 for arm in arms {
                     let saved_allowed = self.allowed.clone();
                     let saved_locals = self.local_decls.clone();
+                    let saved_fn_locals = self.fn_locals.clone();
                     match &arm.kind {
                         SelectArmKind::Send { chan, value, .. } => {
                             self.run_expr(chan);
@@ -292,6 +396,7 @@ impl<'a> Scan<'a> {
                     self.run_block(&arm.body);
                     *self.allowed = saved_allowed;
                     *self.local_decls = saved_locals;
+                    *self.fn_locals = saved_fn_locals;
                 }
             }
         }
@@ -443,6 +548,17 @@ impl<'a> Scan<'a> {
                     }
                 }
                 self.run_expr(base);
+                if let Some((member_head, rest)) = name.split_once('[') {
+                    let is_assoc_decl = matches!(
+                        unwrapped,
+                        Expr::Ident { name: root, .. }
+                            if !self.fn_locals.contains(root)
+                                && self.file_decls.contains(&format!("{}.{}", root, member_head))
+                    );
+                    if !is_assoc_decl {
+                        self.check_folded_bracket_segments(rest, *span);
+                    }
+                }
             }
             Expr::Call { callee, args, .. } => {
                 self.run_expr(callee);
@@ -500,14 +616,17 @@ impl<'a> Scan<'a> {
             } => {
                 let mut fn_allowed = self.allowed.clone();
                 let mut fn_locals = self.local_decls.clone();
+                let mut fn_scope_locals = self.fn_locals.clone();
                 for p in params {
                     fn_allowed.insert(p.name.clone());
                     fn_locals.insert(p.name.clone());
+                    fn_scope_locals.insert(p.name.clone());
                 }
                 for r in results {
                     if let Some(n) = &r.name {
                         fn_allowed.insert(n.clone());
                         fn_locals.insert(n.clone());
+                        fn_scope_locals.insert(n.clone());
                     }
                 }
                 let mut check = Scan {
@@ -516,6 +635,7 @@ impl<'a> Scan<'a> {
                     file_decls: self.file_decls,
                     allowed: &mut fn_allowed,
                     local_decls: &mut fn_locals,
+                    fn_locals: &mut fn_scope_locals,
                     type_params: self.type_params,
                     uncurated_imports: self.uncurated_imports,
                     diags: self.diags,
@@ -583,10 +703,10 @@ fn collect_file_decl_names(file: &hy_syntax::File) -> HashSet<String> {
             Decl::TypeAlias(a) => {
                 s.insert(a.name.clone());
             }
-            Decl::Fn(f) => {
+            Decl::Fn(f) if f.receiver.is_none() => {
                 s.insert(f.name.clone());
             }
-            Decl::Import { .. } | Decl::Const(_) => {}
+            Decl::Fn(_) | Decl::Import { .. } | Decl::Const(_) => {}
         }
     }
     s
@@ -618,9 +738,10 @@ fn collect_file_tables(file: &hy_syntax::File) -> HashSet<String> {
             Decl::TypeAlias(a) => {
                 s.insert(a.name.clone());
             }
-            Decl::Fn(f) => {
+            Decl::Fn(f) if f.receiver.is_none() => {
                 s.insert(f.name.clone());
             }
+            Decl::Fn(_) => {}
         }
     }
     s
@@ -646,9 +767,10 @@ fn collect_file_local_decls(file: &hy_syntax::File) -> HashSet<String> {
             Decl::TypeAlias(a) => {
                 s.insert(a.name.clone());
             }
-            Decl::Fn(f) => {
+            Decl::Fn(f) if f.receiver.is_none() => {
                 s.insert(f.name.clone());
             }
+            Decl::Fn(_) => {}
         }
     }
     s
@@ -735,10 +857,10 @@ fn collect_non_const_decls(file: &hy_syntax::File) -> HashSet<String> {
             Decl::TypeAlias(a) => {
                 s.insert(a.name.clone());
             }
-            Decl::Fn(f) => {
+            Decl::Fn(f) if f.receiver.is_none() => {
                 s.insert(f.name.clone());
             }
-            Decl::Import { .. } | Decl::Const(_) => {}
+            Decl::Fn(_) | Decl::Import { .. } | Decl::Const(_) => {}
         }
     }
     s
@@ -835,6 +957,7 @@ impl Checker<'_> {
         for (idx, c) in consts.iter().enumerate() {
             let mut const_allowed = allowed.clone();
             let mut const_locals = local_decls.clone();
+            let mut const_fn_locals = HashSet::new();
             let mut has_other_decl = non_const_decls.contains(&c.name);
             if !has_other_decl {
                 for (other_idx, other_c) in consts.iter().enumerate() {
@@ -865,6 +988,7 @@ impl Checker<'_> {
                 file_decls: &file_decls,
                 allowed: &mut const_allowed,
                 local_decls: &mut const_locals,
+                fn_locals: &mut const_fn_locals,
                 type_params: &empty_tps,
                 uncurated_imports: &uncurated_imports,
                 diags,
@@ -875,12 +999,14 @@ impl Checker<'_> {
             scan.run_expr(&c.value);
         }
         {
+            let mut type_fn_locals = HashSet::new();
             let mut scan = Scan {
                 path,
                 packages,
                 file_decls: &file_decls,
                 allowed: &mut allowed,
                 local_decls: &mut local_decls,
+                fn_locals: &mut type_fn_locals,
                 type_params: &empty_tps,
                 uncurated_imports: &uncurated_imports,
                 diags,
@@ -892,6 +1018,7 @@ impl Checker<'_> {
         for st_decl in structs {
             let mut struct_allowed = allowed.clone();
             let mut struct_locals = local_decls.clone();
+            let mut struct_fn_locals = HashSet::new();
             let struct_tps: HashSet<String> =
                 st_decl.type_params.iter().map(|tp| tp.name.clone()).collect();
             let mut scan = Scan {
@@ -900,6 +1027,7 @@ impl Checker<'_> {
                 file_decls: &file_decls,
                 allowed: &mut struct_allowed,
                 local_decls: &mut struct_locals,
+                fn_locals: &mut struct_fn_locals,
                 type_params: &struct_tps,
                 uncurated_imports: &uncurated_imports,
                 diags,
@@ -911,15 +1039,18 @@ impl Checker<'_> {
         for f_decl in fns {
             let mut fn_allowed = allowed.clone();
             let mut fn_locals = local_decls.clone();
+            let mut fn_scope_locals = HashSet::new();
             let fn_tps = seed_fn_type_params(f_decl);
             seed_fn_scope(f_decl, &mut fn_allowed);
             seed_fn_scope(f_decl, &mut fn_locals);
+            seed_fn_scope(f_decl, &mut fn_scope_locals);
             let mut scan = Scan {
                 path,
                 packages,
                 file_decls: &file_decls,
                 allowed: &mut fn_allowed,
                 local_decls: &mut fn_locals,
+                fn_locals: &mut fn_scope_locals,
                 type_params: &fn_tps,
                 uncurated_imports: &uncurated_imports,
                 diags,
@@ -946,16 +1077,19 @@ impl Checker<'_> {
         let mut allowed = collect_file_tables(self.file);
         let file_decls = collect_file_decl_names(self.file);
         let mut local_decls = collect_file_local_decls(self.file);
+        let mut fn_scope_locals = HashSet::new();
         let uncurated_imports = collect_uncurated_imports(self.file);
         let fn_tps = seed_fn_type_params(f);
         seed_fn_scope(f, &mut allowed);
         seed_fn_scope(f, &mut local_decls);
+        seed_fn_scope(f, &mut fn_scope_locals);
         let mut scan = Scan {
             path: &self.path,
             packages: &self.packages,
             file_decls: &file_decls,
             allowed: &mut allowed,
             local_decls: &mut local_decls,
+            fn_locals: &mut fn_scope_locals,
             type_params: &fn_tps,
             uncurated_imports: &uncurated_imports,
             diags: &mut self.diags,
