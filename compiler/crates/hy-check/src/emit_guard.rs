@@ -1189,6 +1189,7 @@ impl<'a> Checker<'a> {
                 st.unwrap_or(&empty_st),
                 len,
             );
+            self.check_expr_builtin_args(len);
         }
         // #2102: an invalid builtin call inside an array length (`[len(1)]int`,
         // `[cap(1)+1]int`, `[len()]int`) is the same Go build error as in a
