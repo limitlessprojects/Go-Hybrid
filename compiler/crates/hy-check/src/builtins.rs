@@ -335,6 +335,21 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
+            // Issue #1673: Go's `append` requires at least one element to append
+            // (`append(s)` does not compile — "not enough arguments for append").
+            // Without this arm a 0- or 1-argument call passed `hyb check` and then
+            // failed `go build`.
+            "append" => {
+                if args.len() < 2 {
+                    self.emit_builtin(
+                        span,
+                        format!(
+                            "`append` requires at least 2 arguments (slice, elements...), found {} (HYB-E2005)",
+                            args.len()
+                        ),
+                    );
+                }
+            }
             "clear" => {
                 if args.len() != 1 {
                     self.emit_builtin(
