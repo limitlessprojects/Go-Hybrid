@@ -5871,7 +5871,7 @@ impl<'a> Collector<'a> {
                 items,
                 ..
             } if items.is_empty() => {
-                if let Some((_, _, arr_ty)) = bare.as_array_lit() {
+                if let Some((_, inner_elem, arr_ty)) = bare.as_array_lit() {
                     let target_str = arr_ty.render();
                     if args.len() != 1 {
                         self.emit_e1002(
@@ -5889,17 +5889,35 @@ impl<'a> Collector<'a> {
                     let arg = &args[0].value;
                     self.check_single_value_position(arg, "a type conversion", false);
                     let ak = self.kind_of_expr(arg);
-                    if !matches!(ak, OpKind::Unknown | OpKind::Slice(_) | OpKind::Array(_)) {
-                        self.emit_e1002(
-                            arg.span(),
-                            format!(
-                                "cannot convert `{}` (type `{}`) to `{}` (HYB-E1002)",
-                                arg.render(),
-                                ak.label(),
-                                target_str
-                            ),
-                            "array type conversions require a slice or array operand",
-                        );
+                    let target_elem_kind = self.kind_of_ty(inner_elem, 0);
+                    match &ak {
+                        OpKind::Slice(arg_elem) | OpKind::Array(arg_elem) => {
+                            if kinds_conflict(&target_elem_kind, arg_elem) {
+                                self.emit_e1002(
+                                    arg.span(),
+                                    format!(
+                                        "cannot convert `{}` (type `{}`) to `{}` (HYB-E1002)",
+                                        arg.render(),
+                                        ak.label(),
+                                        target_str
+                                    ),
+                                    "array type conversions require a slice or array operand with identical element types",
+                                );
+                            }
+                        }
+                        OpKind::Unknown => {}
+                        _ => {
+                            self.emit_e1002(
+                                arg.span(),
+                                format!(
+                                    "cannot convert `{}` (type `{}`) to `{}` (HYB-E1002)",
+                                    arg.render(),
+                                    ak.label(),
+                                    target_str
+                                ),
+                                "array type conversions require a slice or array operand with identical element types",
+                            );
+                        }
                     }
                     return;
                 }
