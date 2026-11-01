@@ -42,8 +42,18 @@ DEFAULT_BIN = os.path.join(
 
 # Detect declarations before validating their value: a typo must not turn
 # a registered test into an unregistered helper. Keep parsing on one line.
+VERDICT_HEADER_RE = re.compile(
+    r"^//[ \t]*EXPECTED-VERDICT\b[^\r\n]*", re.M
+)
 VERDICT_RE = re.compile(
-    r"^//[ \t]*EXPECTED-VERDICT:[ \t]*([^\r\n]*)", re.M
+    r"^//[ \t]*EXPECTED-VERDICT:[ \t]*(ACCEPT-MANAGED|ACCEPT|REJECT)"
+    r"(?![-\w])(?:[ \t]+([^\s()]+))?(?:[ \t]+\([^)\r\n]*\))?[ \t]*$"
+)
+DIAGNOSTIC_HEADER_RE = re.compile(
+    r"^//[ \t]*EXPECTED-DIAGNOSTIC\b[^\r\n]*", re.M
+)
+DIAGNOSTIC_RE = re.compile(
+    r"^//[ \t]*EXPECTED-DIAGNOSTIC:[ \t]*(HYB-E[0-9]{4})[ \t]*$"
 )
 HAZARD_RE = re.compile(
     r"^//\s*RUNTIME-HAZARD:\s*(.+)$", re.M
@@ -59,20 +69,45 @@ def read_expected(path):
     (e.g. corpus 02's deliberate concurrent map writes)."""
     with open(path, encoding="utf-8") as f:
         src = f.read()
-    markers = VERDICT_RE.findall(src)
-    if not markers:
+    headers = VERDICT_HEADER_RE.findall(src)
+    if not headers:
         return None
-    if len(markers) != 1:
+    if len(headers) != 1:
         raise SystemExit(f"corpus error: {path} has multiple EXPECTED-VERDICT markers")
-    fields = markers[0].split()
+    header = headers[0].strip()
+    colon_match = re.match(r"^//[ \t]*EXPECTED-VERDICT:[ \t]*(.*)", header)
+    if colon_match is None:
+        raise SystemExit(f"corpus error: {path} has invalid EXPECTED-VERDICT: {header!r}")
+    raw_value = colon_match.group(1)
+    fields = raw_value.split()
     if not fields or fields[0] not in ("ACCEPT-MANAGED", "ACCEPT", "REJECT"):
-        raise SystemExit(f"corpus error: {path} has invalid EXPECTED-VERDICT: {markers[0]!r}")
-    verdict = fields[0]
-    rule = fields[1] if verdict == "REJECT" and len(fields) > 1 else None
-    if verdict == "REJECT" and not rule:
+        raise SystemExit(f"corpus error: {path} has invalid EXPECTED-VERDICT: {raw_value!r}")
+    if fields[0] == "REJECT" and (len(fields) < 2 or fields[1].startswith("(")):
         raise SystemExit(f"corpus error: {path} has REJECT without a rule id")
+    m = VERDICT_RE.fullmatch(header)
+    if m is None:
+        raise SystemExit(f"corpus error: {path} has invalid EXPECTED-VERDICT: {raw_value!r}")
+    verdict, rule = m.group(1), m.group(2)
+    if verdict != "REJECT" and rule is not None:
+        raise SystemExit(f"corpus error: {path} has invalid EXPECTED-VERDICT: {raw_value!r}")
     hazards = [h.strip().lower() for h in HAZARD_RE.findall(src)]
     return verdict, (rule or None), hazards
+
+
+def read_expected_diagnostic(path, expected):
+    """Read an optional exact first-error code (EXPECTED-DIAGNOSTIC: HYB-Exxxx)."""
+    with open(path, encoding="utf-8") as f:
+        headers = DIAGNOSTIC_HEADER_RE.findall(f.read())
+    if not headers:
+        return None
+    if len(headers) != 1:
+        raise SystemExit(f"corpus error: {path} has multiple EXPECTED-DIAGNOSTIC markers")
+    match = DIAGNOSTIC_RE.fullmatch(headers[0].strip())
+    if match is None:
+        raise SystemExit(f"corpus error: {path} has malformed EXPECTED-DIAGNOSTIC marker")
+    if expected is None or expected[0] != "REJECT":
+        raise SystemExit(f"corpus error: {path} declares EXPECTED-DIAGNOSTIC without REJECT")
+    return match.group(1)
 
 
 def read_expected_output(path, expected):
@@ -95,7 +130,21 @@ def read_expected_output(path, expected):
     return match.group(1).strip()
 
 
-def checker_rejects(bin_path, hy_path, expected_rule):
+def _run_subproc(cmd, **kwargs):
+    try:
+        return subprocess.run(cmd, **kwargs)
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 193 and cmd:
+            try:
+                with open(cmd[0], "rb") as f:
+                    if f.read(2) == b"#!":
+                        return subprocess.run([sys.executable, *cmd], **kwargs)
+            except OSError:
+                pass
+        raise
+
+
+def checker_rejects(bin_path, hy_path, expected_rule, expected_diag=None):
     """Require the first error to match the pre-registered rejection rule.
 
     False also covers harness faults — an unexecutable checker, a decode
@@ -110,7 +159,7 @@ def checker_rejects(bin_path, hy_path, expected_rule):
     # (False, detail) instead of a traceback — the same failure class as
     # corpus_harness.run_checker (#492).
     try:
-        proc = subprocess.run(
+        proc = _run_subproc(
             [bin_path, "check", hy_path, "--json"],
             capture_output=True, timeout=60,
         )
@@ -162,11 +211,19 @@ def checker_rejects(bin_path, hy_path, expected_rule):
         )
     errors = [d for d in diags if d.get("severity") == "error"]
     first_rule = errors[0].get("tier0_rule") if errors else None
+    first_code = errors[0].get("code") if errors else None
+    diag_ok = expected_diag is None or first_code == expected_diag
+    detail = (
+        f"verdict={summary.get('verdict')} errors={len(errors)} "
+        f"first_rule={first_rule} expected_rule={expected_rule}"
+    )
+    if expected_diag is not None:
+        detail += f" first_code={first_code} expected_code={expected_diag}"
     return (
         summary.get("verdict") == "reject"
-        and first_rule is not None and first_rule == expected_rule,
-        f"verdict={summary.get('verdict')} errors={len(errors)} "
-        f"first_rule={first_rule} expected_rule={expected_rule}",
+        and first_rule is not None and first_rule == expected_rule
+        and diag_ok,
+        detail,
     )
 
 
@@ -206,29 +263,45 @@ def documented_runtime_hazard(stderr, hazards):
     return False
 
 
+def _as_text(stream):
+    if isinstance(stream, bytes):
+        return stream.decode("utf-8", "replace")
+    return stream or ""
+
+
 def build_and_run(bin_path, hy_path, workdir, hazards=(), expected_output=None):
     """Full pipeline: hyb build + run the binary. Returns (ok, detail)."""
-    # TimeoutExpired is a per-case harness fault like any other build/run
-    # failure (pr-468): report the case, keep the corpus running, and let
-    # the aggregate report carry the failure — never abort the loop.
+    # TimeoutExpired and OSError are per-case harness faults like any other
+    # build/run failure (pr-468): report the case, keep the corpus running,
+    # and let the aggregate report carry the failure — never abort the loop.
     try:
-        build = subprocess.run(
+        build = _run_subproc(
             [bin_path, "build", hy_path],
-            cwd=workdir, capture_output=True, text=True, timeout=300,
+            cwd=workdir, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=300,
         )
     except subprocess.TimeoutExpired as exc:
         return False, f"build timed out after {exc.timeout}s"
+    except OSError as exc:
+        return False, f"build could not be run: {exc}"
+    build_stdout = _as_text(build.stdout)
+    build_stderr = _as_text(build.stderr)
     if build.returncode != 0:
-        return False, "build failed: " + (build.stderr or build.stdout).strip()[-300:]
+        return False, "build failed: " + (build_stderr or build_stdout).strip()[-300:]
     binary = os.path.join(workdir, "a.out")
     if not os.path.exists(binary):
         return False, "no a.out produced"
     try:
-        run = subprocess.run(
-            [binary], cwd=workdir, capture_output=True, text=True, timeout=60
+        run = _run_subproc(
+            [binary], cwd=workdir, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=60,
         )
     except subprocess.TimeoutExpired as exc:
         return False, f"run timed out after {exc.timeout}s"
+    except OSError as exc:
+        return False, f"run could not be started: {exc}"
+    run_stdout = _as_text(run.stdout)
+    run_stderr = _as_text(run.stderr)
     detail = "exit 0"
     if run.returncode != 0:
         # A Go fatal normally exits 2; GOTRACEBACK=crash aborts on Unix.
@@ -236,15 +309,15 @@ def build_and_run(bin_path, hy_path, workdir, hazards=(), expected_output=None):
         go_fatal_exit = run.returncode == 2 or (
             os.name == "posix" and run.returncode == -signal.SIGABRT
         )
-        if go_fatal_exit and documented_runtime_hazard(run.stderr, hazards):
+        if go_fatal_exit and documented_runtime_hazard(run_stderr, hazards):
             detail = "documented RUNTIME-HAZARD fatal (pre-registered)"
         else:
-            return False, f"run exit {run.returncode}: {(run.stderr or run.stdout)[-200:]}"
+            return False, f"run exit {run.returncode}: {(run_stderr or run_stdout)[-200:]}"
     if expected_output is not None:
-        stdout = run.stdout.replace("\r\n", "\n")
+        stdout = run_stdout.replace("\r\n", "\n")
         if stdout not in (expected_output, expected_output + "\n"):
             return False, (f"stdout mismatch: expected {expected_output[:200]!r}, "
-                           f"got {run.stdout[:200]!r}")
+                           f"got {run_stdout[:200]!r}")
     return True, detail
 
 
@@ -275,6 +348,7 @@ def main():
 
     for path in files:
         expected = read_expected(path)
+        expected_diag = read_expected_diagnostic(path, expected)
         expected_output = read_expected_output(path, expected)
         if expected is None:
             continue
@@ -282,7 +356,7 @@ def main():
         verdict, rule, hazards = expected
         if verdict == "REJECT":
             reject_total += 1
-            ok, detail = checker_rejects(bin_path, path, rule)
+            ok, detail = checker_rejects(bin_path, path, rule, expected_diag=expected_diag)
             if ok:
                 reject_pass += 1
                 print(f"PASS  {name} (reject {rule})")
