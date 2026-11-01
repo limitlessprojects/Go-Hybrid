@@ -5155,6 +5155,26 @@ impl<'a> Collector<'a> {
     /// (`builtins.rs`) to resolved binding shapes.
     fn check_builtin_operand_kinds(&mut self, name: &str, args: &[CallArg], span: Span) {
         match name {
+            "make" => {
+                for arg in args.iter().skip(1) {
+                    let op = &arg.value;
+                    if builtins_already_flags_make_size(op) {
+                        continue;
+                    }
+                    let ak = self.kind_of_expr(op);
+                    if !matches!(ak, OpKind::Unknown | OpKind::Int) {
+                        self.emit_e2005(
+                            span,
+                            format!(
+                                "non-integer size argument `{}` (type `{}`) in `make` (HYB-E2005)",
+                                op.render(),
+                                ak.label()
+                            ),
+                            "`make` size arguments must be of integer type",
+                        );
+                    }
+                }
+            }
             "len" => {
                 if args.len() != 1 {
                     return; // arity handled by builtins.rs
@@ -5496,6 +5516,19 @@ impl<'a> Collector<'a> {
 
 fn span_expr_label(lhs: &Expr, op: &str, rhs: &Expr) -> String {
     format!("{} {} {}", lhs.render(), op, rhs.render())
+}
+
+fn builtins_already_flags_make_size(e: &Expr) -> bool {
+    let bare = unwrap_parens(e);
+    match bare {
+        Expr::Lit { .. } => true,
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => matches!(unwrap_parens(operand), Expr::Lit { .. }),
+        _ => crate::const_overflow::const_int_value(bare).is_some(),
+    }
 }
 
 fn builtins_already_flags_close(e: &Expr) -> bool {
