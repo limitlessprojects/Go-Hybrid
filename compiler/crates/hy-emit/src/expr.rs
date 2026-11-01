@@ -354,7 +354,7 @@ impl Emitter {
                     if let Some(n) = &r.name {
                         if n != "_" {
                             self.shadow_local_name(n);
-                            if matches!(r.ty, TypeExpr::Pointer { .. }) {
+                            if self.is_pointer_ty(&r.ty) {
                                 self.pointer_vars.insert(n.clone());
                             }
                             if let Some(kind) = self.binding_kind_of_ty(&r.ty) {
@@ -367,7 +367,7 @@ impl Emitter {
                 for (i, p) in params.iter().enumerate() {
                     if p.name != "_" {
                         self.shadow_local_name(&p.name);
-                        if matches!(p.ty, TypeExpr::Pointer { .. }) {
+                        if self.is_pointer_ty(&p.ty) {
                             self.pointer_vars.insert(p.name.clone());
                         }
                     }
@@ -395,6 +395,27 @@ impl Emitter {
                         .unwrap_or_else(|| w.to_string());
                     self.handler_writer = Some(name);
                 }
+                // E4: a closure's `?` binds to the closure's OWN results,
+                // never the enclosing fn's — not main's wrapper `hyErr` (an
+                // assignment to it from here returned from the closure only
+                // and let main keep running), not the outer fn's zero-value
+                // return list (the wrong arity for this literal).
+                let saved_main_closure = std::mem::replace(&mut self.in_main_closure, false);
+                let closure_err_returns = if matches!(
+                    results.last().map(|r| &r.ty),
+                    Some(TypeExpr::Named { name, .. }) if name == "error"
+                ) {
+                    let mut texts: Vec<String> = results[..results.len() - 1]
+                        .iter()
+                        .map(|r| self.zero_value(&r.ty))
+                        .collect();
+                    texts.push(String::new()); // filled by propagate_error
+                    Some(texts)
+                } else {
+                    None
+                };
+                let saved_err_returns =
+                    std::mem::replace(&mut self.cur_fn_error_returns, closure_err_returns);
                 self.fnlit_depth += 1;
                 // Labels do not cross func boundaries: a labeled break/continue
                 // must find its loop INSIDE the literal — reset the depth so
@@ -425,6 +446,8 @@ impl Emitter {
                 let closure_body = std::mem::take(&mut self.body);
                 self.body = main_body;
                 self.fnlit_depth -= 1;
+                self.in_main_closure = saved_main_closure;
+                self.cur_fn_error_returns = saved_err_returns;
                 self.for_depth = saved_for_depth;
                 self.handler_writer = saved_writer;
                 self.restore_scope(saved_scope);
@@ -599,6 +622,58 @@ impl Emitter {
     // Calls — builtins, package specials, foreign methods
     // -----------------------------------------------------------------------
 
+    /// The user-declared struct type name an expression evaluates to, when
+    /// the whole chain resolves through declared fields: `o`, `(&o)`,
+    /// `o.sub`, `o.sub.deep`, parenthesized links included. None the moment
+    /// a link is not a user struct (foreign shape, slice, `set[T]`, …).
+    ///
+    /// This is the recursive form of the single-hop `var_struct[Ident].field`
+    /// lookup the emitters used to inline. `stats.mu.lock()` resolved one
+    /// hop only; `o.sub.mu.lock()` dropped the shape, emitted the hy name
+    /// verbatim, and died in `go build` with
+    /// `has no field or method lock, but does have method Lock` (#1553).
+    pub(crate) fn user_struct_name_of(&self, e: &Expr) -> Option<&str> {
+        match Self::unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.var_struct.get(name).map(String::as_str),
+            Expr::AddrOf { operand, .. } => self.user_struct_name_of(operand),
+            Expr::Field { base, name, .. } => {
+                let sn = self.user_struct_name_of(base)?;
+                let fty = self
+                    .struct_fields
+                    .get(sn)?
+                    .iter()
+                    .find(|(f, _)| f == name)
+                    .map(|(_, t)| t.as_str())?;
+                self.resolve_to_struct_name(fty)
+            }
+            _ => None,
+        }
+    }
+
+    /// Map a type name to a declared struct, following `type alias = …`
+    /// links (#1553 review): a field declared `sub wrapper` where
+    /// `type wrapper = inner` still carries `inner`'s member shapes — the
+    /// old `contains_key(fty)` test only accepted the spelled name, so an
+    /// aliased hop dropped the chain exactly like a missing recursion did.
+    /// A cycle (`type a = b; type b = a`) is not resolvable by Go either;
+    /// bounded walk returns None.
+    fn resolve_to_struct_name(&self, start: &str) -> Option<&str> {
+        let mut cur = std::borrow::Cow::Borrowed(start);
+        for _ in 0..16 {
+            if let Some((k, _)) = self.struct_fields.get_key_value(cur.as_ref()) {
+                return Some(k.as_str());
+            }
+            match self.n5_aliases.get::<str>(cur.as_ref()) {
+                Some(ty) => match super::base_ty_name(ty) {
+                    Some(next) if next.as_str() != cur.as_ref() => cur = std::borrow::Cow::Owned(next),
+                    _ => return None,
+                },
+                None => return None,
+            }
+        }
+        None
+    }
+
     /// Descriptor type of an expression, when the shape table knows it
     /// (Batch E chain resolution):
     ///
@@ -633,18 +708,17 @@ impl Emitter {
                         return m.result;
                     }
                 }
-                // Batch I: user-struct field typing — `stats.mu` resolves
-                // through var_struct + struct_fields when the field's
-                // declared type is shape-known (18: sync.mutex).
-                if let Expr::Ident { name: vn, .. } = Self::unwrap_parens(base.as_ref()) {
-                    if let Some(sn) = self.var_struct.get(vn) {
-                        if let Some(fields) = self.struct_fields.get(sn) {
-                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
-                                if let Some((k, _)) =
-                                    super::shapes::SHAPES.iter().find(|(k, _)| *k == fty)
-                                {
-                                    return Some(k);
-                                }
+                // Batch I (recursive since #1553): user-struct field
+                // typing — `stats.mu` and `o.sub.mu` resolve through
+                // var_struct + struct_fields when the field's declared
+                // type is shape-known (18: sync.mutex).
+                if let Some(sn) = self.user_struct_name_of(base.as_ref()) {
+                    if let Some(fields) = self.struct_fields.get(sn) {
+                        if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
+                            if let Some((k, _)) =
+                                super::shapes::SHAPES.iter().find(|(k, _)| *k == fty)
+                            {
+                                return Some(k);
                             }
                         }
                     }
@@ -752,18 +826,12 @@ impl Emitter {
             Expr::Ident { name, .. } => self.var_struct.contains_key(name),
             Expr::StructLit { .. } => true,
             Expr::AddrOf { operand, .. } => self.is_user_struct_expr(operand),
-            Expr::Field { base, name, .. } => {
-                if let Expr::Ident { name: vn, .. } = Self::unwrap_parens(base) {
-                    if let Some(sn) = self.var_struct.get(vn) {
-                        if let Some(fields) = self.struct_fields.get(sn) {
-                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
-                                return self.struct_fields.contains_key(fty.as_str());
-                            }
-                        }
-                    }
-                }
-                false
-            }
+            // Recursive since #1553: `o.sub` AND `o.sub.deep` are user
+            // structs, not just `o.f`. The old single-hop read made a
+            // three-level `o.sub.thing.pop()` look like a builtin pop and
+            // rewrite to `hy_pop(&o.sub.thing)` — Go has no such method on
+            // a user struct field.
+            Expr::Field { .. } => self.user_struct_name_of(e).is_some(),
             _ => false,
         }
     }

@@ -377,9 +377,9 @@ fn cmd_generate(args: &[String]) -> ExitCode {
 
     let mut drifted: Vec<String> = Vec::new();
     let mut written: usize = 0;
-    let mut formatters = None;
+    let mut tools = GenTools::default();
     for hy in &hy_files {
-        match generate_one(hy, check_only, &binding_prefix, &mut formatters) {
+        match generate_one(hy, check_only, &binding_prefix, &mut tools) {
             Ok(GenOutcome::Wrote(f)) => {
                 written += 1;
                 println!("emitted {}", f);
@@ -415,6 +415,69 @@ enum GenOutcome {
     Wrote(String),
     Fresh(String),
     Drift(String),
+}
+
+#[derive(Default)]
+struct GenTools {
+    formatters: Option<Vec<std::path::PathBuf>>,
+    ignored_go_files:
+        std::collections::BTreeMap<std::path::PathBuf, std::collections::BTreeSet<String>>,
+}
+
+impl GenTools {
+    fn ignored_go_files(
+        &mut self,
+        dir: &std::path::Path,
+    ) -> Result<&std::collections::BTreeSet<String>, String> {
+        let files = match self.ignored_go_files.entry(dir.to_path_buf()) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                // Let Go interpret GOOS/GOARCH, build tags and legacy constraints.
+                // -find does not resolve imports. -e retains file metadata when a
+                // stale generated output disagrees with the hand-written package.
+                // auto also permits module-free projects; selection must not depend
+                // on an enclosing workspace or download project dependencies.
+                let out = Command::new(go_bin())
+                    .args(["list", "-e", "-find", "-json", "."])
+                    .current_dir(dir)
+                    .env("GO111MODULE", "auto")
+                    .env("GOWORK", "off")
+                    .output()
+                    .map_err(|e| format!("selecting Go files in {}: {}", dir.display(), e))?;
+                if !out.status.success() {
+                    return Err(format!(
+                        "selecting Go files in {}: {}",
+                        dir.display(),
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    ));
+                }
+                let package: serde_json::Value =
+                    serde_json::from_slice(&out.stdout).map_err(|e| {
+                        format!("reading Go file selection in {}: {}", dir.display(), e)
+                    })?;
+                if package.get("Dir").and_then(|v| v.as_str()).is_none() {
+                    return Err(format!(
+                        "Go did not identify the package directory {}: {}",
+                        dir.display(),
+                        package
+                    ));
+                }
+                let mut ignored = std::collections::BTreeSet::new();
+                if let Some(files) = package.get("IgnoredGoFiles") {
+                    let files = files.as_array().ok_or("invalid Go ignored-file list")?;
+                    for file in files {
+                        ignored.insert(
+                            file.as_str()
+                                .ok_or("invalid Go ignored filename")?
+                                .to_string(),
+                        );
+                    }
+                }
+                entry.insert(ignored)
+            }
+        };
+        Ok(files)
+    }
 }
 
 /// gofmt over stdin→stdout — the one formatter that decides what a
@@ -497,7 +560,7 @@ fn generate_one(
     hy: &std::path::Path,
     check_only: bool,
     binding_prefix: &str,
-    formatters: &mut Option<Vec<std::path::PathBuf>>,
+    tools: &mut GenTools,
 ) -> Result<GenOutcome, String> {
     let src = std::fs::read_to_string(hy)
         .map_err(|e| format!("reading {}: {}", hy.display(), e))?;
@@ -547,6 +610,12 @@ fn generate_one(
         })
         .collect::<Vec<_>>();
     siblings.sort();
+    if !siblings.is_empty() {
+        let ignored = tools.ignored_go_files(&dir)?;
+        siblings.retain(|p| {
+            !ignored.contains(p.file_name().unwrap_or_default().to_string_lossy().as_ref())
+        });
+    }
     if siblings.is_empty() {
         return Err(format!(
             "{}: no non-test .go files beside it — the emitted file must join a Go package (HYB-E9002); add a non-test .go file with a `package <name>` clause first",
@@ -597,7 +666,7 @@ fn generate_one(
     // Discover lazily after source validation, once per generate invocation.
     let out_text = run_gofmt_candidates(
         &unformatted,
-        formatters.get_or_insert_with(gofmt_candidates),
+        tools.formatters.get_or_insert_with(gofmt_candidates),
     )?;
 
     let stem = hy
@@ -2198,7 +2267,7 @@ mod tests {
         std::fs::write(&main_go, "package oldpkg\n").unwrap();
         std::fs::write(&calc_hy, "fn add(a int, b int) int {\n    return a + b\n}\n").unwrap();
 
-        generate_one(&calc_hy, false, "hybrid.program", &mut None)
+        generate_one(&calc_hy, false, "hybrid.program", &mut GenTools::default())
             .expect("initial generate_one succeeds");
         assert!(
             std::fs::read_to_string(&stale_hy_go)
@@ -2211,7 +2280,7 @@ mod tests {
             "/*\npackage commentpkg\n*/\npackage\tnewpkg; // active\n",
         )
         .unwrap();
-        generate_one(&calc_hy, false, "hybrid.program", &mut None)
+        generate_one(&calc_hy, false, "hybrid.program", &mut GenTools::default())
             .expect("generate_one succeeds despite stale .hy.go");
         let generated = std::fs::read_to_string(&stale_hy_go).unwrap();
         assert!(

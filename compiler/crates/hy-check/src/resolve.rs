@@ -80,6 +80,7 @@ struct Scan<'a> {
     file_decls: &'a HashSet<String>,
     allowed: &'a mut HashSet<String>,
     local_decls: &'a mut HashSet<String>,
+    type_params: &'a HashSet<String>,
     uncurated_imports: &'a HashSet<String>,
     diags: &'a mut Vec<hy_diag::Diagnostic>,
 }
@@ -91,19 +92,14 @@ impl<'a> Scan<'a> {
     }
 
     fn ident(&mut self, name: &str, span: Span) {
-        if self.allowed.contains(name) || self.packages.contains(name) {
-            return;
-        }
-        if crate::foreign::BUILTIN_PACKAGES.contains(&name) {
+        if self.allowed.contains(name) {
             return;
         }
         // `parser.rs` (`fold_type_args`) folds bracketed type arguments (and
         // single-ident index expressions before `(`) into `Expr::Ident`
         // (`id[int](42)` -> `Ident("id[int]")`, `m[k](42)` -> `Ident("m[k]")`).
         if let Some((head, rest)) = name.split_once('[') {
-            let head_ok = self.allowed.contains(head)
-                || self.packages.contains(head)
-                || crate::foreign::BUILTIN_PACKAGES.contains(&head);
+            let head_ok = self.allowed.contains(head);
             if head_ok {
                 if !self.file_decls.contains(head) {
                     if let Some(inside) = rest.strip_suffix(']') {
@@ -329,7 +325,8 @@ impl<'a> Scan<'a> {
                             );
                             return;
                         } else if crate::foreign::is_curated_package_root(base_name) {
-                            if !crate::foreign::is_curated_package_member(base_name, name) {
+                            let member_head = name.split_once('[').map(|(h, _)| h).unwrap_or(name.as_str());
+                            if !crate::foreign::is_curated_package_member(base_name, member_head) {
                                 let msg = format!(
                                     "`{}.{}` is not a resolved member of curated package `{}` (HYB-E1001)",
                                     base_name, name, base_name
@@ -343,6 +340,10 @@ impl<'a> Scan<'a> {
                                     ),
                                 );
                             }
+                            return;
+                        } else if self.packages.contains(base_name)
+                            || crate::foreign::BUILTIN_PACKAGES.contains(&base_name.as_str())
+                        {
                             return;
                         }
                     }
@@ -413,7 +414,8 @@ impl<'a> Scan<'a> {
                             );
                             return;
                         } else if crate::foreign::is_curated_package_root(root) {
-                            if !crate::foreign::is_curated_package_member(root, name) {
+                            let member_head = name.split_once('[').map(|(h, _)| h).unwrap_or(name.as_str());
+                            if !crate::foreign::is_curated_package_member(root, member_head) {
                                 self.diags.push(
                                     hy_diag::Diagnostic::error(
                                         "HYB-E1001",
@@ -444,7 +446,20 @@ impl<'a> Scan<'a> {
             }
             Expr::Call { callee, args, .. } => {
                 self.run_expr(callee);
-                for a in args {
+                let type_first_arg = matches!(
+                    crate::model::unwrap_parens(callee),
+                    Expr::Ident { name, .. }
+                        if (name == "new" || name == "make") && !self.local_decls.contains(name)
+                );
+                for (i, a) in args.iter().enumerate() {
+                    if type_first_arg && i == 0 {
+                        if let Expr::Ident { name, .. } = crate::model::unwrap_parens(&a.value) {
+                            let head = name.split_once('[').map(|(h, _)| h).unwrap_or(name.as_str());
+                            if self.type_params.contains(head) && !self.local_decls.contains(head) {
+                                continue;
+                            }
+                        }
+                    }
                     self.run_expr(&a.value);
                 }
             }
@@ -501,6 +516,7 @@ impl<'a> Scan<'a> {
                     file_decls: self.file_decls,
                     allowed: &mut fn_allowed,
                     local_decls: &mut fn_locals,
+                    type_params: self.type_params,
                     uncurated_imports: self.uncurated_imports,
                     diags: self.diags,
                 };
@@ -584,15 +600,9 @@ fn collect_file_decl_names(file: &hy_syntax::File) -> HashSet<String> {
 /// enum/match refusal is a separate, already-covered failure.
 fn collect_file_tables(file: &hy_syntax::File) -> HashSet<String> {
     let mut s: HashSet<String> = PREDECLARED.iter().map(|n| n.to_string()).collect();
-    for p in crate::foreign::BUILTIN_PACKAGES {
-        s.insert((*p).to_string());
-    }
     for d in &file.decls {
         match d {
-            Decl::Import { path, .. } => {
-                let root = path.rsplit('/').next().unwrap_or(path.as_str());
-                s.insert(root.to_string());
-            }
+            Decl::Import { .. } => {}
             Decl::Const(c) => {
                 s.insert(c.name.clone());
             }
@@ -657,7 +667,7 @@ fn collect_uncurated_imports(file: &hy_syntax::File) -> HashSet<String> {
     s
 }
 
-fn seed_receiver_type_params(ty: &TypeExpr, allowed: &mut HashSet<String>) {
+fn seed_receiver_type_params(ty: &TypeExpr, type_params: &mut HashSet<String>) {
     match ty {
         TypeExpr::Named { name, .. } => {
             if let Some((_, rest)) = name.split_once('[') {
@@ -665,28 +675,35 @@ fn seed_receiver_type_params(ty: &TypeExpr, allowed: &mut HashSet<String>) {
                     for part in inside.split(',') {
                         if let Some(tp) = part.split_whitespace().next() {
                             if !tp.is_empty() {
-                                allowed.insert(tp.to_string());
+                                type_params.insert(tp.to_string());
                             }
                         }
                     }
                 }
             }
         }
-        TypeExpr::Pointer { to, .. } => seed_receiver_type_params(to, allowed),
+        TypeExpr::Pointer { to, .. } => seed_receiver_type_params(to, type_params),
         _ => {}
     }
+}
+
+fn seed_fn_type_params(f: &FnDecl) -> HashSet<String> {
+    let mut tps = HashSet::new();
+    if let Some(r) = &f.receiver {
+        seed_receiver_type_params(&r.ty, &mut tps);
+    }
+    for t in &f.type_params {
+        tps.insert(t.name.clone());
+    }
+    tps
 }
 
 fn seed_fn_scope(f: &FnDecl, allowed: &mut HashSet<String>) {
     if let Some(r) = &f.receiver {
         allowed.insert(r.name.clone());
-        seed_receiver_type_params(&r.ty, allowed);
     }
     for p in &f.params {
         allowed.insert(p.name.clone());
-    }
-    for t in &f.type_params {
-        allowed.insert(t.name.clone());
     }
     for r in &f.results {
         if let Some(n) = &r.name {
@@ -695,15 +712,42 @@ fn seed_fn_scope(f: &FnDecl, allowed: &mut HashSet<String>) {
     }
 }
 
+fn is_composite_const_expr(e: &Expr) -> bool {
+    matches!(
+        crate::model::unwrap_parens(e),
+        Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
+    )
+}
+
+fn collect_non_const_decls(file: &hy_syntax::File) -> HashSet<String> {
+    let mut s: HashSet<String> = PREDECLARED.iter().map(|n| n.to_string()).collect();
+    for d in &file.decls {
+        match d {
+            Decl::Struct(st) => {
+                s.insert(st.name.clone());
+            }
+            Decl::Enum(e) => {
+                s.insert(e.name.clone());
+                for v in &e.variants {
+                    s.insert(v.name.clone());
+                }
+            }
+            Decl::TypeAlias(a) => {
+                s.insert(a.name.clone());
+            }
+            Decl::Fn(f) => {
+                s.insert(f.name.clone());
+            }
+            Decl::Import { .. } | Decl::Const(_) => {}
+        }
+    }
+    s
+}
+
 fn decl_signature_types(d: &Decl) -> Vec<&TypeExpr> {
     let mut out: Vec<&TypeExpr> = Vec::new();
     match d {
-        Decl::Const(c) => {
-            if let Some(t) = &c.ty {
-                out.push(t);
-            }
-        }
-        Decl::Struct(_) | Decl::Fn(_) => {}
+        Decl::Const(_) | Decl::Struct(_) | Decl::Fn(_) | Decl::Import { .. } => {}
         Decl::Enum(e) => {
             for v in &e.variants {
                 if let Some(t) = &v.payload {
@@ -712,7 +756,6 @@ fn decl_signature_types(d: &Decl) -> Vec<&TypeExpr> {
             }
         }
         Decl::TypeAlias(a) => out.push(&a.ty),
-        Decl::Import { .. } => {}
     }
     out
 }
@@ -750,13 +793,14 @@ impl Checker<'_> {
         let mut allowed = collect_file_tables(self.file);
         let file_decls = collect_file_decl_names(self.file);
         let mut local_decls = collect_file_local_decls(self.file);
+        let non_const_decls = collect_non_const_decls(self.file);
         let uncurated_imports = collect_uncurated_imports(self.file);
-        let consts: Vec<(&Expr, Option<&TypeExpr>)> = self
+        let consts: Vec<&hy_syntax::ConstDecl> = self
             .file
             .decls
             .iter()
             .filter_map(|d| match d {
-                Decl::Const(c) => Some((&c.value, c.ty.as_ref())),
+                Decl::Const(c) => Some(c),
                 _ => None,
             })
             .collect();
@@ -784,9 +828,52 @@ impl Checker<'_> {
             .iter()
             .flat_map(decl_signature_types)
             .collect();
+        let empty_tps = HashSet::new();
         let path = &self.path;
         let packages = &self.packages;
         let diags = &mut self.diags;
+        for (idx, c) in consts.iter().enumerate() {
+            let mut const_allowed = allowed.clone();
+            let mut const_locals = local_decls.clone();
+            let mut has_other_decl = non_const_decls.contains(&c.name);
+            if !has_other_decl {
+                for (other_idx, other_c) in consts.iter().enumerate() {
+                    if other_idx != idx && other_c.name == c.name {
+                        has_other_decl = true;
+                        break;
+                    }
+                }
+            }
+            if !has_other_decl {
+                const_allowed.remove(&c.name);
+                const_locals.remove(&c.name);
+            }
+            if is_composite_const_expr(&c.value) {
+                for later_c in &consts[idx + 1..] {
+                    if is_composite_const_expr(&later_c.value)
+                        && !non_const_decls.contains(&later_c.name)
+                        && !consts[..=idx].iter().any(|prev| prev.name == later_c.name)
+                    {
+                        const_allowed.remove(&later_c.name);
+                        const_locals.remove(&later_c.name);
+                    }
+                }
+            }
+            let mut scan = Scan {
+                path,
+                packages,
+                file_decls: &file_decls,
+                allowed: &mut const_allowed,
+                local_decls: &mut const_locals,
+                type_params: &empty_tps,
+                uncurated_imports: &uncurated_imports,
+                diags,
+            };
+            if let Some(t) = &c.ty {
+                scan.run_type(t);
+            }
+            scan.run_expr(&c.value);
+        }
         {
             let mut scan = Scan {
                 path,
@@ -794,15 +881,10 @@ impl Checker<'_> {
                 file_decls: &file_decls,
                 allowed: &mut allowed,
                 local_decls: &mut local_decls,
+                type_params: &empty_tps,
                 uncurated_imports: &uncurated_imports,
                 diags,
-                };
-            for (v, t) in consts {
-                if let Some(t) = t {
-                    scan.run_type(t);
-                }
-                scan.run_expr(v);
-            }
+            };
             for t in types {
                 scan.run_type(t);
             }
@@ -810,19 +892,18 @@ impl Checker<'_> {
         for st_decl in structs {
             let mut struct_allowed = allowed.clone();
             let mut struct_locals = local_decls.clone();
-            for tp in &st_decl.type_params {
-                struct_allowed.insert(tp.name.clone());
-                struct_locals.insert(tp.name.clone());
-            }
+            let struct_tps: HashSet<String> =
+                st_decl.type_params.iter().map(|tp| tp.name.clone()).collect();
             let mut scan = Scan {
                 path,
                 packages,
                 file_decls: &file_decls,
                 allowed: &mut struct_allowed,
                 local_decls: &mut struct_locals,
+                type_params: &struct_tps,
                 uncurated_imports: &uncurated_imports,
                 diags,
-                };
+            };
             for f in &st_decl.fields {
                 scan.run_type(&f.ty);
             }
@@ -830,6 +911,7 @@ impl Checker<'_> {
         for f_decl in fns {
             let mut fn_allowed = allowed.clone();
             let mut fn_locals = local_decls.clone();
+            let fn_tps = seed_fn_type_params(f_decl);
             seed_fn_scope(f_decl, &mut fn_allowed);
             seed_fn_scope(f_decl, &mut fn_locals);
             let mut scan = Scan {
@@ -838,9 +920,10 @@ impl Checker<'_> {
                 file_decls: &file_decls,
                 allowed: &mut fn_allowed,
                 local_decls: &mut fn_locals,
+                type_params: &fn_tps,
                 uncurated_imports: &uncurated_imports,
                 diags,
-                };
+            };
             if let Some(r) = &f_decl.receiver {
                 scan.run_type(&r.ty);
             }
@@ -864,6 +947,7 @@ impl Checker<'_> {
         let file_decls = collect_file_decl_names(self.file);
         let mut local_decls = collect_file_local_decls(self.file);
         let uncurated_imports = collect_uncurated_imports(self.file);
+        let fn_tps = seed_fn_type_params(f);
         seed_fn_scope(f, &mut allowed);
         seed_fn_scope(f, &mut local_decls);
         let mut scan = Scan {
@@ -872,9 +956,10 @@ impl Checker<'_> {
             file_decls: &file_decls,
             allowed: &mut allowed,
             local_decls: &mut local_decls,
+            type_params: &fn_tps,
             uncurated_imports: &uncurated_imports,
             diags: &mut self.diags,
-            };
+        };
         scan.run_block(body);
     }
 }
