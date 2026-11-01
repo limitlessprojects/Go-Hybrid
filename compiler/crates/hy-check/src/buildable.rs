@@ -46,7 +46,7 @@
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
     AssignOp, BinOp, Block, CallArg, Decl, Expr, FieldInit, File, FnDecl, FnResult, ForKind,
-    InterpPart, LitKind, LocalDecl, LocalKind, MatchPattern, Param, Place, PlaceKind, SelectArmKind,
+    InterpPart, LitKind, LocalDecl, LocalKind, MatchArm, MatchPattern, Param, Place, PlaceKind, SelectArmKind,
     Stmt, TypeExpr, UnOp,
 };
 use std::collections::{HashMap, HashSet};
@@ -1778,6 +1778,7 @@ impl<'a> Collector<'a> {
             Stmt::Managed { body, .. } => self.block_scoped(body),
             Stmt::Match { subject, arms, .. } => {
                 self.expr(subject);
+                self.check_match_duplicate_arms(arms);
                 let subject_kind = self.kind_of_expr(subject);
                 for arm in arms {
                     self.push_scope();
@@ -4376,6 +4377,69 @@ impl<'a> Collector<'a> {
                 ),
                 "ensure match arm patterns match the subject expression's type",
             );
+        }
+    }
+
+    /// Row 13 (BUILDABLE) / Go specification §Switch statements:
+    /// all duplicate case constants in switch statements are forbidden.
+    fn check_match_duplicate_arms(&mut self, arms: &[MatchArm]) {
+        let mut seen = std::collections::HashSet::new();
+        for arm in arms {
+            if let MatchPattern::Lit(lit) = &arm.pattern {
+                let (key_val, repr) = match lit {
+                    LitKind::Int(s) => {
+                        let parsed = match crate::const_overflow::parse_int_lit(s) {
+                            Some(crate::const_overflow::ConstInt::Value(v)) => {
+                                crate::emit_guard::ConstKeyVal::Int(v)
+                            }
+                            _ => {
+                                let clean: String = s.chars().filter(|c| *c != '_').collect();
+                                crate::emit_guard::ConstKeyVal::Str(clean)
+                            }
+                        };
+                        (Some(parsed), s.clone())
+                    }
+                    LitKind::Char(c) => (
+                        Some(crate::emit_guard::ConstKeyVal::Int(*c as i128)),
+                        format!("'{}'", c),
+                    ),
+                    LitKind::Str(s) => (
+                        Some(crate::emit_guard::ConstKeyVal::Str(s.clone())),
+                        format!("\"{}\"", s),
+                    ),
+                    LitKind::RawStr(s) => (
+                        Some(crate::emit_guard::ConstKeyVal::Str(s.clone())),
+                        format!("`{}`", s),
+                    ),
+                    LitKind::Bool(b) => (
+                        Some(crate::emit_guard::ConstKeyVal::Bool(*b)),
+                        format!("{b}"),
+                    ),
+                    LitKind::Float(s) => {
+                        let clean: String = s.chars().filter(|c| *c != '_').collect();
+                        let bits = clean.parse::<f64>().ok().map(|f| f.to_bits()).unwrap_or(0);
+                        (
+                            Some(crate::emit_guard::ConstKeyVal::Float(bits)),
+                            s.clone(),
+                        )
+                    }
+                    LitKind::Nil => (
+                        Some(crate::emit_guard::ConstKeyVal::Nil),
+                        "nil".to_string(),
+                    ),
+                };
+
+                if let Some(kv) = key_val {
+                    if !seen.insert(kv) {
+                        let msg = format!(
+                            "duplicate case `{}` in `match` — Go refuses `duplicate case {} in switch` (HYB-E1002)",
+                            repr, repr
+                        );
+                        let note = "all duplicate case constants in switch statements are forbidden by the Go specification (§Switch statements)";
+                        self.emit_e1002(arm.body.span, msg, note);
+                    }
+                }
+            }
         }
     }
 
