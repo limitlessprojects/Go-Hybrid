@@ -2208,6 +2208,9 @@ impl<'a> Collector<'a> {
                 );
                 if type_first_arg {
                     if let Some(first_arg) = args.first() {
+                        if matches!(unwrap_parens(callee), Expr::Ident { name, .. } if name == "new") {
+                            self.check_new_type_arg(&first_arg.value);
+                        }
                         if let Expr::Ident { name, span } = unwrap_parens(&first_arg.value) {
                             self.check_named_type_instantiation(name, *span);
                         }
@@ -2560,6 +2563,91 @@ impl<'a> Collector<'a> {
                 ),
                 "map key types must be comparable (primitives, pointers, strings, or structs without slice/map fields)",
             );
+        }
+    }
+
+    fn check_new_type_arg(&mut self, arg: &Expr) {
+        let unwrapped = unwrap_parens(arg);
+        match unwrapped {
+            Expr::Ident { name, span } => {
+                let base = Checker::base_named_type_str(name);
+                if self.lookup_kind(name).is_some() {
+                    self.emit_e1002(
+                        *span,
+                        format!(
+                            "cannot use local variable `{}` as a type in argument to `new` — Go refuses `{} is not a type` (HYB-E1002)",
+                            name, name
+                        ),
+                        "the argument to `new` must be a type, not a variable",
+                    );
+                    return;
+                }
+                if self.ck.fns.contains_key(name.as_str()) || self.ck.fns.contains_key(base) {
+                    self.emit_e1002(
+                        *span,
+                        format!(
+                            "cannot use function `{}` as a type in argument to `new` — Go refuses `{} is not a type` (HYB-E1002)",
+                            name, name
+                        ),
+                        "the argument to `new` must be a type, not a function",
+                    );
+                    return;
+                }
+                if self.ck.consts.contains_key(name.as_str()) || self.ck.consts.contains_key(base) {
+                    self.emit_e1002(
+                        *span,
+                        format!(
+                            "cannot use constant `{}` as a type in argument to `new` — Go refuses `{} is not a type` (HYB-E1002)",
+                            name, name
+                        ),
+                        "the argument to `new` must be a type, not a constant",
+                    );
+                    return;
+                }
+                if matches!(name.as_str(), "true" | "false" | "nil" | "none") {
+                    self.emit_e1002(
+                        *span,
+                        format!(
+                            "cannot use `{}` as a type in argument to `new` (HYB-E1002)",
+                            name
+                        ),
+                        "the argument to `new` must be a type",
+                    );
+                }
+            }
+            Expr::SliceLit { elem: Some(_), items, .. } if items.is_empty() => {}
+            Expr::MapLit { entries, .. } if entries.is_empty() => {}
+            Expr::StructLit { fields, .. } if fields.is_empty() => {}
+            Expr::AddrOf { operand, .. } => {
+                self.check_new_type_arg(operand);
+            }
+            Expr::Unary { op: UnOp::Addr, operand, .. } => {
+                self.check_new_type_arg(operand);
+            }
+            Expr::Field { base, .. } => {
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_some() {
+                        self.emit_e1002(
+                            unwrapped.span(),
+                            format!(
+                                "cannot use `{}` as a type in argument to `new` — Go refuses `{} is not a type` (HYB-E1002)",
+                                unwrapped.render(), unwrapped.render()
+                            ),
+                            "the argument to `new` must be a type, not a field selector",
+                        );
+                    }
+                }
+            }
+            other => {
+                self.emit_e1002(
+                    other.span(),
+                    format!(
+                        "cannot use `{}` as a type in argument to `new` — Go refuses `{} is not a type` (HYB-E1002)",
+                        other.render(), other.render()
+                    ),
+                    "the argument to `new` must be a type, not a value expression",
+                );
+            }
         }
     }
 
