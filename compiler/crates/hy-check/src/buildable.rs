@@ -151,7 +151,10 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         // `Interface`, and `Interface` vs `Str` falls through to the mismatch
         // arm below, so every assignment to an `any` target would be rejected.
         // The accept-side corpus controls caught exactly that.
-        (Interface, _) | (_, Interface) => false,
+        // #2962: an `Interface` (`any` or `recover()`) value cannot be assigned
+        // to a concrete type without a type assertion. `(_, Interface)` is
+        // therefore rejected when `want` is a concrete kind.
+        (Interface, _) => false,
         // No value is involved; a count check owns that case.
         (Void, _) | (_, Void) => false,
         // An untyped int constant is assignable to a float target
