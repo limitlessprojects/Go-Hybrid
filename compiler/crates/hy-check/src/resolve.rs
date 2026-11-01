@@ -83,12 +83,20 @@ struct Scan<'a> {
     type_params: &'a HashSet<String>,
     uncurated_imports: &'a HashSet<String>,
     diags: &'a mut Vec<hy_diag::Diagnostic>,
+    /// Function-local VALUE names in lexical scope (receiver, params, named
+    /// results, `:=`/`var`/`const` locals, loop/arm/select bindings) — issue
+    /// #3029. `None` outside a function body (file-level declaration and
+    /// signature walks, where Go resolves type names at package scope).
+    value_locals: Option<HashSet<String>>,
 }
 
 impl<'a> Scan<'a> {
     fn define(&mut self, name: &str) {
         self.allowed.insert(name.to_string());
         self.local_decls.insert(name.to_string());
+        if let Some(v) = self.value_locals.as_mut() {
+            v.insert(name.to_string());
+        }
     }
 
     fn ident(&mut self, name: &str, span: Span) {
@@ -143,11 +151,13 @@ impl<'a> Scan<'a> {
     fn run_block(&mut self, b: &Block) {
         let saved_allowed = self.allowed.clone();
         let saved_locals = self.local_decls.clone();
+        let saved_values = self.value_locals.clone();
         for s in &b.stmts {
             self.run_stmt(s);
         }
         *self.allowed = saved_allowed;
         *self.local_decls = saved_locals;
+        self.value_locals = saved_values;
     }
 
     fn run_stmt(&mut self, s: &Stmt) {
@@ -194,6 +204,7 @@ impl<'a> Scan<'a> {
             } => {
                 let saved_allowed = self.allowed.clone();
                 let saved_locals = self.local_decls.clone();
+                let saved_values = self.value_locals.clone();
                 if let Some(i) = init {
                     self.run_stmt(i);
                 }
@@ -204,10 +215,12 @@ impl<'a> Scan<'a> {
                 }
                 *self.allowed = saved_allowed;
                 *self.local_decls = saved_locals;
+                self.value_locals = saved_values;
             }
             Stmt::For { kind, body, .. } => {
                 let saved_allowed = self.allowed.clone();
                 let saved_locals = self.local_decls.clone();
+                let saved_values = self.value_locals.clone();
                 match kind {
                     hy_syntax::ForKind::Infinite => {}
                     hy_syntax::ForKind::While { cond } => self.run_expr(cond),
@@ -226,6 +239,7 @@ impl<'a> Scan<'a> {
                 self.run_block(body);
                 *self.allowed = saved_allowed;
                 *self.local_decls = saved_locals;
+                self.value_locals = saved_values;
             }
             Stmt::Return { values, .. } => {
                 for v in values {
@@ -248,6 +262,7 @@ impl<'a> Scan<'a> {
                 for arm in arms {
                     let saved_allowed = self.allowed.clone();
                     let saved_locals = self.local_decls.clone();
+                    let saved_values = self.value_locals.clone();
                     if let MatchPattern::Path { segments, binding } = &arm.pattern {
                         if segments.len() == 1 {
                             let arm_span = arm
@@ -267,6 +282,7 @@ impl<'a> Scan<'a> {
                     self.run_block(&arm.body);
                     *self.allowed = saved_allowed;
                     *self.local_decls = saved_locals;
+                    self.value_locals = saved_values;
                 }
             }
             Stmt::Defer { call, .. } => self.run_expr(call),
@@ -276,6 +292,7 @@ impl<'a> Scan<'a> {
                 for arm in arms {
                     let saved_allowed = self.allowed.clone();
                     let saved_locals = self.local_decls.clone();
+                    let saved_values = self.value_locals.clone();
                     match &arm.kind {
                         SelectArmKind::Send { chan, value, .. } => {
                             self.run_expr(chan);
@@ -292,6 +309,7 @@ impl<'a> Scan<'a> {
                     self.run_block(&arm.body);
                     *self.allowed = saved_allowed;
                     *self.local_decls = saved_locals;
+                    self.value_locals = saved_values;
                 }
             }
         }
@@ -498,14 +516,30 @@ impl<'a> Scan<'a> {
                 body,
                 ..
             } => {
+                // Closure signature types resolve in the ENCLOSING scope
+                // (Go: `int := 1; f := func(x int) {}` reads the local), so
+                // check them before the closure's params are in scope.
+                for p in params {
+                    self.run_type(&p.ty);
+                }
+                for r in results {
+                    self.run_type(&r.ty);
+                }
                 let mut fn_allowed = self.allowed.clone();
                 let mut fn_locals = self.local_decls.clone();
+                let mut fn_values = self.value_locals.clone();
                 for p in params {
+                    if let Some(v) = fn_values.as_mut() {
+                        v.insert(p.name.clone());
+                    }
                     fn_allowed.insert(p.name.clone());
                     fn_locals.insert(p.name.clone());
                 }
                 for r in results {
                     if let Some(n) = &r.name {
+                        if let Some(v) = fn_values.as_mut() {
+                            v.insert(n.clone());
+                        }
                         fn_allowed.insert(n.clone());
                         fn_locals.insert(n.clone());
                     }
@@ -519,13 +553,8 @@ impl<'a> Scan<'a> {
                     type_params: self.type_params,
                     uncurated_imports: self.uncurated_imports,
                     diags: self.diags,
+                    value_locals: fn_values,
                 };
-                for p in params {
-                    check.run_type(&p.ty);
-                }
-                for r in results {
-                    check.run_type(&r.ty);
-                }
                 check.run_block(body);
             }
         }
@@ -538,7 +567,7 @@ impl<'a> Scan<'a> {
     /// undefined name).
     fn run_type(&mut self, t: &TypeExpr) {
         match t {
-            TypeExpr::Named { .. } => {}
+            TypeExpr::Named { name, span } => self.type_name_shadowed(name, *span),
             TypeExpr::Pointer { to, .. } => self.run_type(to),
             TypeExpr::Slice { elem, .. } => self.run_type(elem),
             TypeExpr::Array { len, elem, .. } => {
@@ -562,6 +591,65 @@ impl<'a> Scan<'a> {
             }
         }
     }
+}
+
+impl<'a> Scan<'a> {
+    /// Issue #3029: a type-position name (`var y int`, `[]bool{..}`,
+    /// `map[string]int{..}`, `p{x: 1}`) that a function-local VALUE of the
+    /// same name shadows. The emitter writes both verbatim, so Go resolves
+    /// the type use to the variable and the module fails `go build` with
+    /// `X (local variable) is not a type`. SPEC primitive spellings the
+    /// emitter renames (`i64` -> `int64`) cannot collide and stay legal;
+    /// qualified (`pkg.t`) names are fail-open.
+    fn type_name_shadowed(&mut self, name: &str, span: Span) {
+        let Some(values) = self.value_locals.as_ref() else {
+            return;
+        };
+        let head = name.split('[').next().unwrap_or(name).trim();
+        if head.is_empty()
+            || head.contains('.')
+            || !head.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || EMITTER_RENAMED_TYPES.contains(&head)
+            || self.type_params.contains(head)
+            || !values.contains(head)
+        {
+            return;
+        }
+        let msg = format!(
+            "type `{}` is shadowed here by a local value named `{}` — Go would read the type position as the variable and reject the emitted module (`{} (local variable) is not a type`) (HYB-E1001)",
+            head, head, head
+        );
+        self.diags.push(
+            hy_diag::Diagnostic::error("HYB-E1001", self.path.to_string(), span, msg).with_notes(
+                vec![
+                    format!(
+                        "why: a local, parameter, or loop/arm binding named `{}` is in scope, and the emitted Go keeps both spellings, so the type name resolves to it",
+                        head
+                    ),
+                    format!(
+                        "fix: rename the local value (e.g. `{}_v`), or move the type use out of its scope",
+                        head
+                    ),
+                ],
+            ),
+        );
+    }
+}
+
+/// SPEC primitive spellings the emitter rewrites to their Go names in type
+/// position (`hy_emit::shapes::go_primitive_name`), plus the two it leaves
+/// undefined on purpose: a local with one of these names cannot capture the
+/// emitted type spelling.
+const EMITTER_RENAMED_TYPES: &[&str] = &[
+    "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "usize", "isize",
+];
+
+/// Function-local value names in scope at the top of `f`'s body: receiver,
+/// params, named results (issue #3029).
+fn fn_value_scope(f: &FnDecl) -> HashSet<String> {
+    let mut s = HashSet::new();
+    seed_fn_scope(f, &mut s);
+    s
 }
 
 /// Top-level declaration names (functions, structs, enums, variants, type
@@ -868,6 +956,7 @@ impl Checker<'_> {
                 type_params: &empty_tps,
                 uncurated_imports: &uncurated_imports,
                 diags,
+                value_locals: None,
             };
             if let Some(t) = &c.ty {
                 scan.run_type(t);
@@ -884,6 +973,7 @@ impl Checker<'_> {
                 type_params: &empty_tps,
                 uncurated_imports: &uncurated_imports,
                 diags,
+                value_locals: None,
             };
             for t in types {
                 scan.run_type(t);
@@ -903,6 +993,7 @@ impl Checker<'_> {
                 type_params: &struct_tps,
                 uncurated_imports: &uncurated_imports,
                 diags,
+                value_locals: None,
             };
             for f in &st_decl.fields {
                 scan.run_type(&f.ty);
@@ -923,6 +1014,7 @@ impl Checker<'_> {
                 type_params: &fn_tps,
                 uncurated_imports: &uncurated_imports,
                 diags,
+                value_locals: None,
             };
             if let Some(r) = &f_decl.receiver {
                 scan.run_type(&r.ty);
@@ -959,6 +1051,7 @@ impl Checker<'_> {
             type_params: &fn_tps,
             uncurated_imports: &uncurated_imports,
             diags: &mut self.diags,
+            value_locals: Some(fn_value_scope(f)),
         };
         scan.run_block(body);
     }
