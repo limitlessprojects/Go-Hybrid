@@ -603,10 +603,14 @@ fn generate_one(
         // Generated .hy.go files join the production package. Go test files
         // may declare a separate <package>_test package and cannot choose it,
         // and pre-existing .hy.go outputs are generated artifacts (not
-        // hand-written package authorities).
+        // hand-written package authorities). Go also ignores source basenames
+        // beginning with '.' or '_', even if they contain a package clause.
         .filter(|p| {
             let name = p.file_name().unwrap_or_default().to_string_lossy();
-            !name.ends_with("_test.go") && !name.ends_with(".hy.go")
+            !name.starts_with('.')
+                && !name.starts_with('_')
+                && !name.ends_with("_test.go")
+                && !name.ends_with(".hy.go")
         })
         .collect::<Vec<_>>();
     siblings.sort();
