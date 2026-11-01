@@ -24,18 +24,25 @@ arguments to other scripts register nothing. This is not a general
 shell/YAML interpreter.
 
 Usage: python3 tools/check_test_registration.py [--workflow PATH] [--root DIR]
-Exit:  0 = every test file is registered; 1 = unregistered file(s); 2 = guard misuse.
+Exit:  0 = every test file is registered; 1 = unregistered file(s); 2 = guard misuse
+       (no workflow or no test files found, an unreadable/undecodable --workflow,
+       or a --root that is not a directory).
 """
 
 import argparse
 import fnmatch
 import os
 from pathlib import Path
+import posixpath
 import re
 import shlex
 import sys
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# What `unittest discover` itself uses when a command omits `-p`: a discovery
+# without a pattern still registers the files it reaches.
+DEFAULT_DISCOVER_PATTERN = "test*.py"
 
 # The workflow uses explicit Python commands, either in a run block or in a
 # single-line run field. Do not count comments, step names, or echoed text
@@ -79,20 +86,29 @@ def python_commands(workflow_text):
             ):
                 continue
             arguments = tokens[1:end]
+            malformed = False
             while arguments:
                 option = arguments[0]
                 if PYTHON_FLAGS_RE.fullmatch(option):
                     arguments = arguments[1:]
                 elif option in ("-W", "-X", "--check-hash-based-pycs"):
+                    # These three take a value, and a second flag (or nothing)
+                    # is not one: `python3 -W -u tests/test_live.py` is an
+                    # interpreter error, so it must not register a test.
+                    if len(arguments) < 2 or arguments[1].startswith("-"):
+                        malformed = True
+                        break
                     arguments = arguments[2:]
-                elif option.startswith(("-W", "-X")):
-                    arguments = arguments[1:]
+                elif option.startswith(("-W", "-X")) or \
+                        option.startswith("--check-hash-based-pycs="):
+                    arguments = arguments[1:]  # value carried inline
                 elif option == "--":
                     arguments = arguments[1:]
                     break
                 else:
                     break  # In particular, never interpret a -c string.
-            yield arguments
+            if not malformed:
+                yield arguments
 
 
 # Directories whose test files this guard covers, and how each is invoked.
@@ -100,29 +116,65 @@ DISCOVER_DIR = "tools"   # referenced through a `unittest discover -p` pattern
 DIRECT_DIRS = ("tests",)  # referenced by literal repo-relative path
 
 
+def option_value(arguments, index):
+    """The value token of a two-token option, or None when there is none.
+
+    argparse refuses to read a following flag as an option value, so
+    `discover -s -p test_foo.py` is a malformed command rather than a start
+    directory of `-p` — and it must register nothing (issue #1333).
+    """
+    if index + 1 >= len(arguments):
+        return None
+    value = arguments[index + 1]
+    if not value or value.startswith("-"):
+        return None
+    return value
+
+
 def registered_discoveries(workflow_text):
     """Pair each discovery pattern with its own start directory (repo cwd).
 
     Like the original guard, this reads explicit one-line commands run from
     the repository root; it is not a general shell/YAML or load_tests
-    interpreter.
+    interpreter. Each consumed option value is skipped instead of re-read as
+    another option, a discovery without an explicit `-p` keeps unittest's own
+    default pattern, and a `-s`/`-p` whose value is missing or flag-shaped
+    registers nothing.
     """
     discoveries = []
     for arguments in python_commands(workflow_text):
         if arguments[:3] != ["-m", "unittest", "discover"]:
             continue
         start, pattern = ".", None
-        for index, argument in enumerate(arguments[3:], 3):
-            if argument in ("-s", "--start-directory") and index + 1 < len(arguments):
-                start = arguments[index + 1]
-            elif argument in ("-p", "--pattern") and index + 1 < len(arguments):
-                pattern = arguments[index + 1]
+        index = 3
+        malformed = False
+        while index < len(arguments):
+            argument = arguments[index]
+            if argument in ("-s", "--start-directory", "-p", "--pattern"):
+                value = option_value(arguments, index)
+                if value is None:
+                    malformed = True
+                    break
+                if argument in ("-s", "--start-directory"):
+                    start = value
+                else:
+                    pattern = value
+                index += 2
             elif argument.startswith("--start-directory="):
                 start = argument.split("=", 1)[1]
+                index += 1
             elif argument.startswith("--pattern="):
                 pattern = argument.split("=", 1)[1]
-        if pattern is not None:
-            discoveries.append((start, pattern))
+                index += 1
+            elif argument in ("-t", "--top-level-directory", "--directory"):
+                index += 2  # takes a value; the value registers nothing itself
+            elif argument.startswith(("--top-level-directory=", "--directory=")):
+                index += 1
+            else:
+                index += 1  # `-v` and friends: never a value, never an option
+        if not malformed:
+            discoveries.append(
+                (start, DEFAULT_DISCOVER_PATTERN if pattern is None else pattern))
     return discoveries
 
 
@@ -154,9 +206,27 @@ def is_reached_discover(root, relpath, start, pattern):
     return True
 
 
+def script_path(path):
+    """Normalize a repo-relative script path, or None when it names none.
+
+    An interpreter token (`-m`, `-c`, `-W`) is never a script, and a path with
+    a `..` segment can address a file outside the directories this guard
+    covers, so neither counts as an invocation. Equivalent spellings of the
+    same path (`./tests/x.py`, `tests//x.py`) do (#1333).
+    """
+    if not path or path.startswith("-"):
+        return None
+    if any(segment == ".." for segment in path.split("/")):
+        return None
+    return posixpath.normpath(path)
+
+
 def is_registered_direct(relpath, workflow_text):
     """A script must be the Python entry point, not a comment or argument."""
-    return any(arguments and arguments[0] in (relpath, "./" + relpath)
+    target = script_path(relpath)
+    if target is None:
+        return False
+    return any(arguments and script_path(arguments[0]) == target
                for arguments in python_commands(workflow_text))
 
 
@@ -196,8 +266,19 @@ def main():
                     help="repository root holding the test directories")
     args = ap.parse_args()
 
-    with open(args.workflow, encoding="utf-8") as handle:
-        workflow_text = handle.read()
+    # Misuse is exit 2, not a traceback: an unreadable workflow or a --root
+    # that is not a directory says nothing about the repository's tests (#1333).
+    if not os.path.isdir(args.root):
+        print(f"REGISTRATION CHECK ERROR: --root {args.root} is not a directory",
+              file=sys.stderr)
+        return 2
+    try:
+        with open(args.workflow, encoding="utf-8") as handle:
+            workflow_text = handle.read()
+    except (OSError, UnicodeDecodeError) as error:
+        print(f"REGISTRATION CHECK ERROR: cannot read --workflow {args.workflow}: "
+              f"{error}", file=sys.stderr)
+        return 2
 
     patterns = registered_patterns(workflow_text)
     found = (find_test_files(args.root, DISCOVER_DIR)
