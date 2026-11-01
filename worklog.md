@@ -1230,3 +1230,16 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - All landed: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies posted (protocol summary + bounty rail pointer).
 - Suite trajectory: 296 -> 297. Final main 2f19c4ab, tree clean.
 - NEXT TICK QUEUE (Pareto order): #2593 (make non-int size args, +143 1-file, cheap) -> #2917 (option match payload bindings) -> #2677 (variadic spread append) -> #2836 (capture move-freeze; NOTE same title as gttps #2614 — likely dup, land one, redirect other) -> #2895 -> #2882 -> #2910 -> #2914 -> #2661 -> land-candidate tail (#2807/#2907/#2911/#2798...) -> #2815 (W-2475 spike) -> #2830 (await rebase).
+
+## Session 48 — 2026-11-01 night VI (3 landed; recycled env again, cold build 1 slice)
+
+- Full recycle again (rust/go/target gone; go tarball cache ALSO gone from my-project — re-downloaded, re-cached as gotoolchain-1.26.9.tar; watch for whatever prunes large files here). Cold rebuild again in one 560s slice.
+- Baseline 75444b0f (own session-47). scan OK, approve 1/1 (4992 remaining).
+- LANDED:
+  3c6db0bb Merge PR #2931 (aswadi, fixes #831) — peel_slot_loan_index unwraps Paren/Move/Field chains; field-projected map slot loans (&m[k].f, move(&...), reborrow) register as O8 loans -> live insert/delete rejects HYB-E3102. New issue_831 suite. 298 suites.
+  c2a2550d Merge PR #2928 (Dimank92, fixes #2892) — min/max: result scalar inference + result-kind propagation + mixed-scalar HYB-E1002 + uint as Int. New issue_2542 suite (115L). Branch predated #2931: 3-way merge kept both; issue_831 re-run 4 passed post-merge. 298 suites.
+  b56f04d7 Merge PR #2919 (3y3y3y-huaiji, fixes #2915) — some(v) match bindings inherit option[T] element kind; check_option_method_arg validates option[T].or(default) kinds (incl typed int->float) HYB-E1002. New option_match_and_or_payload_2915.rs (140L). Branch predated #2928/#2931: 3-way merge kept both (verified: issue_2542 green, issue_831 4 passed, uint kept, min/max block at buildable.rs:929, sole deletion is the intended bind_kind replacement). 299 suites.
+- All three: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies + CREDIT posted.
+- Suite trajectory: 297 -> 298 -> 299. Final main b56f04d7, tree clean.
+- NOTE: #2917/#2677/#2836/#2895/#2910 dropped out of Pareto NOW between ticks (authors may have closed/rebased them) — verify status before re-queuing.
+- NEXT TICK QUEUE: #2882 (shadowed E11/E4/E6 try contexts, +253) -> #2914 (receiver methods out of file tables) -> #2614 (capture move-freeze; check dup vs closed #2836) -> #2661 (N5 array zero-init emit) -> #2925 (folded index callees) -> #2807 (N5 pointer/partial zero-init; check overlap w/ #2661) -> #2935 (copy() element types) -> #2934 (builtin range bounds) -> #2907 (nested len fold) -> land-candidate tail (#2911/#2937/#2798/#2926/#2741/#2756/#2781/#2905/#2785/#2923/#2855/#2938) -> #2593 (behind 5, still open) -> #2815 (W-2475 spike).
