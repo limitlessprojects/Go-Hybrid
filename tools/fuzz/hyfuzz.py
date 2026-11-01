@@ -112,8 +112,10 @@ def gen_nest(rng):
 def check_one(hyb, src, workdir, timeout):
     """Return (failure, accepted) from one checker execution."""
     path = os.path.join(workdir, "case.hy")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(src)
+    # Keep the checked input identical to save_failure's bytes and hash,
+    # including on Windows where a text-mode write would expand newlines.
+    with open(path, "wb") as f:
+        f.write(src.encode("utf-8"))
     try:
         r = subprocess.run(
             [hyb, "check", path], cwd=workdir, capture_output=True,

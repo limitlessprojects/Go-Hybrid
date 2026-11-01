@@ -14,6 +14,23 @@ import hyfuzz
 
 
 class FuzzProcessTests(unittest.TestCase):
+    def test_saved_reproducer_matches_bytes_read_by_checker(self):
+        # Text-mode writes translate LF on Windows, while save_failure hashes
+        # and saves UTF-8 bytes verbatim. Observe the actual checker input.
+        for source in ('fn main() {\n}\n', 'fn main() {\r\n}\r\n',
+                       'fn main() { fmt.println(`東京\nnext`) }\n'):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
+                observed = []
+                def checker(command, **kwargs):
+                    observed.append(Path(command[-1]).read_bytes())
+                    return subprocess.CompletedProcess(command, 101, '', '')
+                with patch.object(hyfuzz.subprocess, 'run', side_effect=checker):
+                    failure, _ = hyfuzz.check_one('hyb', source, directory, 1)
+                saved = Path(hyfuzz.save_failure(directory, 7, 1, 0, failure, source))
+                metadata = json.loads(saved.with_suffix('.json').read_text(encoding='utf-8'))
+                self.assertEqual(saved.read_bytes(), observed[0])
+                self.assertEqual(metadata['source_sha256'], hashlib.sha256(observed[0]).hexdigest())
+
     def test_accept_and_clean_reject_are_valid(self):
         with tempfile.TemporaryDirectory() as workdir:
             for code in (0, 1):
