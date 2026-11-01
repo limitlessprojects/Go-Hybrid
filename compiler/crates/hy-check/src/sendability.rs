@@ -456,15 +456,7 @@ impl<'a> Checker<'a> {
             return Outcome::Ok;
         }
         // closures capture their environment — not sendable in Tier 0
-        if matches!(expr, Expr::FnLit { .. }) {
-            return Outcome::Rejected(RejectInfo {
-                value: expr.render(),
-                ty: "closure".to_string(),
-                notes: vec![
-                    "closures capture their environment; they are not sendable at spawn/send sites in Tier 0 (closure escapes are the A5 perimeter)".to_string(),
-                ],
-            });
-        }
+        
         // `&binding` — the pointer shape
         if let Some(operand) = as_addr_of(expr) {
             return self.classify_addr_of(st, expr, operand);
