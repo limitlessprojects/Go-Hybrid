@@ -39,6 +39,11 @@ pub(crate) enum ConstKeyVal {
 }
 
 impl ConstKeyVal {
+    pub(crate) fn float(f: f64) -> Option<Self> {
+        f.is_finite()
+            .then(|| Self::Float(if f == 0.0 { 0.0f64.to_bits() } else { f.to_bits() }))
+    }
+
     pub(crate) fn render(&self) -> String {
         match self {
             ConstKeyVal::Int(v) => format!("{v}"),
@@ -2434,9 +2439,7 @@ impl<'a> Checker<'a> {
                 LitKind::Char(c) => Some(ConstKeyVal::Int(*c as i128)),
                 LitKind::Str(s) | LitKind::RawStr(s) => Some(ConstKeyVal::Str(s.clone())),
                 LitKind::Bool(b) => Some(ConstKeyVal::Bool(*b)),
-                LitKind::Float(s) => {
-                    s.replace('_', "").parse::<f64>().ok().map(|f| ConstKeyVal::Float(f.to_bits()))
-                }
+                LitKind::Float(s) => s.replace('_', "").parse::<f64>().ok().and_then(ConstKeyVal::float),
                 LitKind::Nil => Some(ConstKeyVal::Nil),
             },
             Expr::Ident { name, span } => {
@@ -2470,10 +2473,7 @@ impl<'a> Checker<'a> {
                 match op {
                     UnOp::Neg => match v {
                         ConstKeyVal::Int(i) => i.checked_neg().map(ConstKeyVal::Int),
-                        ConstKeyVal::Float(bits) => {
-                            let f = -f64::from_bits(bits);
-                            Some(ConstKeyVal::Float(f.to_bits()))
-                        }
+                        ConstKeyVal::Float(bits) => ConstKeyVal::float(-f64::from_bits(bits)),
                         _ => None,
                     },
                     UnOp::Not => match v {
@@ -2494,17 +2494,26 @@ impl<'a> Checker<'a> {
                         (ConstKeyVal::Int(a), ConstKeyVal::Int(b)) => {
                             a.checked_add(b).map(ConstKeyVal::Int)
                         }
+                        (ConstKeyVal::Float(a), ConstKeyVal::Float(b)) => {
+                            ConstKeyVal::float(f64::from_bits(a) + f64::from_bits(b))
+                        }
                         _ => None,
                     },
                     BinOp::Sub => match (l, r) {
                         (ConstKeyVal::Int(a), ConstKeyVal::Int(b)) => {
                             a.checked_sub(b).map(ConstKeyVal::Int)
                         }
+                        (ConstKeyVal::Float(a), ConstKeyVal::Float(b)) => {
+                            ConstKeyVal::float(f64::from_bits(a) - f64::from_bits(b))
+                        }
                         _ => None,
                     },
                     BinOp::Mul => match (l, r) {
                         (ConstKeyVal::Int(a), ConstKeyVal::Int(b)) => {
                             a.checked_mul(b).map(ConstKeyVal::Int)
+                        }
+                        (ConstKeyVal::Float(a), ConstKeyVal::Float(b)) => {
+                            ConstKeyVal::float(f64::from_bits(a) * f64::from_bits(b))
                         }
                         _ => None,
                     },
@@ -2515,6 +2524,9 @@ impl<'a> Checker<'a> {
                             } else {
                                 a.checked_div(b).map(ConstKeyVal::Int)
                             }
+                        }
+                        (ConstKeyVal::Float(a), ConstKeyVal::Float(b)) => {
+                            ConstKeyVal::float(f64::from_bits(a) / f64::from_bits(b))
                         }
                         _ => None,
                     },
@@ -2593,24 +2605,23 @@ impl<'a> Checker<'a> {
             }
             Expr::Call { callee, args, .. } => {
                 if args.len() == 1 && !args[0].spread {
-                    if let Expr::Ident { name, .. } = callee.as_ref() {
+                    if let Expr::Ident { name, .. } = unwrap_parens(callee) {
                         let arg_val = self.fold_const_key(&args[0].value, st, depth + 1)?;
-                        match name.as_str() {
-                            "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32"
-                            | "i64" | "int64" | "uint" | "u8" | "uint8" | "byte" | "u16"
-                            | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "rune"
-                            | "uintptr" => match arg_val {
-                                ConstKeyVal::Int(_) => Some(arg_val),
-                                _ => None,
-                            },
-                            "string" => match arg_val {
-                                ConstKeyVal::Str(_) => Some(arg_val),
-                                _ => None,
-                            },
-                            "bool" => match arg_val {
-                                ConstKeyVal::Bool(_) => Some(arg_val),
-                                _ => None,
-                            },
+                        match (name.as_str(), arg_val) {
+                            ("i8" | "int8", ConstKeyVal::Int(v)) => Some(ConstKeyVal::Int(v as i8 as i128)),
+                            ("u8" | "uint8" | "byte", ConstKeyVal::Int(v)) => Some(ConstKeyVal::Int(v as u8 as i128)),
+                            ("i16" | "int16", ConstKeyVal::Int(v)) => Some(ConstKeyVal::Int(v as i16 as i128)),
+                            ("u16" | "uint16", ConstKeyVal::Int(v)) => Some(ConstKeyVal::Int(v as u16 as i128)),
+                            ("i32" | "int32" | "rune", ConstKeyVal::Int(v)) => Some(ConstKeyVal::Int(v as i32 as i128)),
+                            ("u32" | "uint32", ConstKeyVal::Int(v)) => Some(ConstKeyVal::Int(v as u32 as i128)),
+                            ("i64" | "int64" | "int", ConstKeyVal::Int(v)) => Some(ConstKeyVal::Int(v as i64 as i128)),
+                            ("u64" | "uint64" | "uint" | "uintptr", ConstKeyVal::Int(v)) => Some(ConstKeyVal::Int((v as u64) as i128)),
+                            ("f32" | "float32", ConstKeyVal::Float(b)) => ConstKeyVal::float(f64::from_bits(b) as f32 as f64),
+                            ("f32" | "float32", ConstKeyVal::Int(v)) => ConstKeyVal::float((v as f32) as f64),
+                            ("f64" | "float64", ConstKeyVal::Float(b)) => ConstKeyVal::float(f64::from_bits(b)),
+                            ("f64" | "float64", ConstKeyVal::Int(v)) => ConstKeyVal::float(v as f64),
+                            ("string", v @ ConstKeyVal::Str(_)) | ("bool", v @ ConstKeyVal::Bool(_)) => Some(v),
+                            ("len", ConstKeyVal::Str(s)) => Some(ConstKeyVal::Int(s.len() as i128)),
                             _ => None,
                         }
                     } else {
