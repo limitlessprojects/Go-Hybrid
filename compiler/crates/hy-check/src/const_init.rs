@@ -25,6 +25,9 @@ impl<'a> Checker<'a> {
         value: &Expr,
         st: Option<&FnState>,
     ) {
+        if st.is_none() {
+            self.check_const_expr_named_args(value);
+        }
         if is_composite_lit(value) {
             // Emitter rewrites these to `var` — not the #205 contract break.
             return;
@@ -92,6 +95,9 @@ impl<'a> Checker<'a> {
             // `len("const_str")`. A call to a real function (`get_val()`) or
             // shadowed local binding is never constant.
             Expr::Call { callee, args, .. } => {
+                if args.iter().any(|a| a.name.is_some()) {
+                    return false;
+                }
                 let Some(ty_name) = conversion_callee_name(callee) else {
                     return false;
                 };
@@ -233,6 +239,9 @@ impl<'a> Checker<'a> {
                 false
             }
             Expr::Call { callee, args, .. } => {
+                if args.iter().any(|a| a.name.is_some()) {
+                    return false;
+                }
                 let Some(ty_name) = conversion_callee_name(callee) else {
                     return false;
                 };

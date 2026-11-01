@@ -12,7 +12,10 @@
 use crate::const_overflow::{const_int_fold_with, ConstFold};
 use crate::model::{unwrap_parens, Checker, FnState};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::{ChanDir, Expr, ForKind, LitKind, Place, PlaceKind, SelectArmKind, Stmt, UnOp};
+use hy_syntax::{
+    CallArg, ChanDir, Decl, Expr, ForKind, LitKind, MatchPattern, Place, PlaceKind, SelectArmKind,
+    Stmt, UnOp,
+};
 use std::collections::HashMap;
 
 impl<'a> Checker<'a> {
@@ -62,6 +65,9 @@ impl<'a> Checker<'a> {
                 for v in &l.values {
                     self.check_expr_builtin_args(st, v);
                 }
+                if deep {
+                    self.zd_defined.extend(l.names.iter().cloned());
+                }
             }
             Stmt::Assign {
                 targets, values, ..
@@ -85,6 +91,7 @@ impl<'a> Checker<'a> {
                 otherwise,
                 ..
             } => {
+                let saved = deep.then(|| self.zd_defined.clone());
                 if deep {
                     if let Some(init) = init {
                         self.check_stmt_builtin_args_inner(st, init, true);
@@ -92,12 +99,17 @@ impl<'a> Checker<'a> {
                 }
                 self.check_expr_builtin_args(st, cond);
                 if deep {
+                    let after_cond = self.zd_defined.clone();
                     for s in &then.stmts {
                         self.check_stmt_builtin_args_inner(st, s, true);
                     }
+                    self.zd_defined = after_cond;
                     if let Some(other) = otherwise {
                         self.check_stmt_builtin_args_inner(st, other, true);
                     }
+                }
+                if let Some(saved) = saved {
+                    self.zd_defined = saved;
                 }
             }
             Stmt::For { kind, body, .. } => {
@@ -111,9 +123,20 @@ impl<'a> Checker<'a> {
                     ForKind::Infinite => {}
                 }
                 if deep {
+                    let saved = self.zd_defined.clone();
+                    match kind {
+                        ForKind::Iterate { vars, .. } => {
+                            self.zd_defined.extend(vars.iter().cloned());
+                        }
+                        ForKind::Range { var, .. } => {
+                            self.zd_defined.insert(var.clone());
+                        }
+                        _ => {}
+                    }
                     for s in &body.stmts {
                         self.check_stmt_builtin_args_inner(st, s, true);
                     }
+                    self.zd_defined = saved;
                 }
             }
             Stmt::Return { values, .. } => {
@@ -123,12 +146,14 @@ impl<'a> Checker<'a> {
             }
             Stmt::Task { callee, args, .. } => {
                 self.check_expr_builtin_args(st, callee);
+                self.check_named_call_args(callee, args);
                 for a in args {
                     self.check_expr_builtin_args(st, &a.value);
                 }
             }
             Stmt::Managed { body, .. } => {
                 if deep {
+                    let saved = self.zd_defined.clone();
                     // W-016 M3: escapes inside a walked `managed` block are the
                     // declared hatch — raise the depth so HYB-E3013 stays quiet.
                     self.managed_depth += 1;
@@ -136,11 +161,21 @@ impl<'a> Checker<'a> {
                         self.check_stmt_builtin_args_inner(st, s, true);
                     }
                     self.managed_depth -= 1;
+                    self.zd_defined = saved;
                 }
             }
             Stmt::Match { subject, arms, .. } => {
                 self.check_expr_builtin_args(st, subject);
                 for arm in arms {
+                    let saved = deep.then(|| self.zd_defined.clone());
+                    if deep {
+                        if let MatchPattern::Path {
+                            binding: Some(b), ..
+                        } = &arm.pattern
+                        {
+                            self.zd_defined.insert(b.clone());
+                        }
+                    }
                     if let Some(g) = &arm.guard {
                         self.check_expr_builtin_args(st, g);
                     }
@@ -149,15 +184,20 @@ impl<'a> Checker<'a> {
                             self.check_stmt_builtin_args_inner(st, s, true);
                         }
                     }
+                    if let Some(saved) = saved {
+                        self.zd_defined = saved;
+                    }
                 }
             }
             Stmt::Defer { call, .. } => self.check_expr_builtin_args(st, call),
             Stmt::Break { .. } | Stmt::Continue { .. } => {}
             Stmt::Block { block, .. } => {
                 if deep {
+                    let saved = self.zd_defined.clone();
                     for s in &block.stmts {
                         self.check_stmt_builtin_args_inner(st, s, true);
                     }
+                    self.zd_defined = saved;
                 }
             }
             Stmt::Select { arms, .. } => {
@@ -171,12 +211,141 @@ impl<'a> Checker<'a> {
                         SelectArmKind::Default => {}
                     }
                     if deep {
+                        let saved = self.zd_defined.clone();
+                        if let SelectArmKind::Recv { names, .. } = &arm.kind {
+                            self.zd_defined.extend(names.iter().cloned());
+                        }
                         for s in &arm.body.stmts {
                             self.check_stmt_builtin_args_inner(st, s, true);
                         }
+                        self.zd_defined = saved;
                     }
                 }
             }
+        }
+    }
+
+    /// Issue #1851: only the rust-crate call surface places named arguments
+    /// (`sha3.stream_checksum(n, seed=7)`); Go has none, so on any other
+    /// callee the emitter drops the name and passes by position while some
+    /// checker passes bind by name. Reject non-rust named arguments and
+    /// validate rust-crate named argument descriptors (HYB-E1002).
+    pub(crate) fn check_named_call_args(&mut self, callee: &Expr, args: &[CallArg]) {
+        if !args.iter().any(|a| a.name.is_some()) {
+            return;
+        }
+        if let Expr::Field { base, name: field, .. } = unwrap_parens(callee) {
+            if let Expr::Ident { name, .. } = unwrap_parens(base) {
+                let imported = self.file.decls.iter().any(|d| {
+                    matches!(d, Decl::Import { path, .. }
+                        if path.strip_prefix("rust/") == Some(name.as_str()))
+                });
+                let shadowed = self.zd_defined.contains(name.as_str())
+                    || self.consts.contains_key(name.as_str())
+                    || self.fns.contains_key(name.as_str())
+                    || self.structs.contains_key(name.as_str())
+                    || self.struct_type_params.contains_key(name.as_str())
+                    || self.enums.contains_key(name.as_str())
+                    || self.type_aliases.contains_key(name.as_str());
+                if imported && !shadowed {
+                    if let Some(params) = rust_crate_fn_params(name.as_str(), field.as_str()) {
+                        let mut slots = vec![false; params.len()];
+                        let mut next_free = 0usize;
+                        let mut had_err = false;
+                        for a in args {
+                            match &a.name {
+                                Some(n) => {
+                                    if let Some(i) = params.iter().position(|p| *p == n.as_str()) {
+                                        if slots[i] {
+                                            had_err = true;
+                                            self.diags.push(Diagnostic::error(
+                                                "HYB-E1002",
+                                                self.path.clone(),
+                                                a.value.span(),
+                                                format!(
+                                                    "rust/{}.{}: parameter `{}` bound more than once (HYB-E1002)",
+                                                    name, field, n
+                                                ),
+                                            ));
+                                        } else {
+                                            slots[i] = true;
+                                        }
+                                    } else {
+                                        had_err = true;
+                                        self.diags.push(Diagnostic::error(
+                                            "HYB-E1002",
+                                            self.path.clone(),
+                                            a.value.span(),
+                                            format!(
+                                                "rust/{}.{}: unknown named argument `{}=` (expected: {}) (HYB-E1002)",
+                                                name,
+                                                field,
+                                                n,
+                                                params.join(", ")
+                                            ),
+                                        ));
+                                    }
+                                }
+                                None => {
+                                    while next_free < slots.len() && slots[next_free] {
+                                        next_free += 1;
+                                    }
+                                    if next_free >= slots.len() {
+                                        had_err = true;
+                                        self.diags.push(Diagnostic::error(
+                                            "HYB-E1002",
+                                            self.path.clone(),
+                                            a.value.span(),
+                                            format!(
+                                                "rust/{}.{}: too many arguments (descriptor has {}) (HYB-E1002)",
+                                                name,
+                                                field,
+                                                params.len()
+                                            ),
+                                        ));
+                                    } else {
+                                        slots[next_free] = true;
+                                        next_free += 1;
+                                    }
+                                }
+                            }
+                        }
+                        if !had_err && slots.iter().any(|s| !*s) {
+                            if let Some(first_named) = args.iter().find(|a| a.name.is_some()) {
+                                self.diags.push(Diagnostic::error(
+                                    "HYB-E1002",
+                                    self.path.clone(),
+                                    first_named.value.span(),
+                                    format!(
+                                        "rust/{}.{}: missing required arguments (params: {}) (HYB-E1002)",
+                                        name,
+                                        field,
+                                        params.join(", ")
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+        for named in args.iter().filter(|a| a.name.is_some()) {
+            let arg = named.name.as_deref().unwrap_or_default();
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E1002",
+                    self.path.clone(),
+                    named.value.span(),
+                    format!(
+                        "named argument `{arg}=` is only supported on rust/ crate calls; Go has no named arguments (HYB-E1002)"
+                    ),
+                )
+                .with_notes(vec![
+                    "the emitter would pass the arguments by position and ignore the name, silently changing which parameter receives which value".to_string(),
+                    "pass the arguments positionally, in declaration order".to_string(),
+                ]),
+            );
         }
     }
 
@@ -197,6 +366,7 @@ impl<'a> Checker<'a> {
         match expr {
             Expr::Call { callee, args, span } => {
                 self.check_expr_builtin_args(st, callee);
+                self.check_named_call_args(callee, args);
                 let is_type_arg_builtin = matches!(
                     unwrap_parens(callee),
                     Expr::Ident { name, .. }
@@ -273,11 +443,14 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::FnLit { params, body, .. } => {
+                let saved_zd = self.zd_defined.clone();
+                self.zd_defined.extend(params.iter().map(|p| p.name.clone()));
                 self.push_closure_bound(params, body);
                 for stmt in &body.stmts {
                     self.check_stmt_builtin_args_inner(st, stmt, /*deep=*/ true);
                 }
                 self.pop_closure_bound();
+                self.zd_defined = saved_zd;
             }
             Expr::Ident { .. } | Expr::Lit { .. } => {}
         }
@@ -1093,4 +1266,79 @@ fn is_non_numeric_literal(e: &Expr) -> bool {
             ..
         }
     )
+}
+
+fn rust_crate_fn_params(crate_name: &str, fn_name: &str) -> Option<&'static [&'static str]> {
+    match (crate_name, fn_name) {
+        ("sha3", "digest256") => Some(&["data"]),
+        ("sha3", "stream_checksum") => Some(&["iters", "seed"]),
+        ("serde_json", "parse") => Some(&["data"]),
+        ("serde_json", "new_object" | "new_array") => Some(&[]),
+        ("serde_json", "to_string_pretty") => Some(&["v"]),
+        ("regex", "is_match") => Some(&["pattern", "text"]),
+        ("regex", "is_valid") => Some(&["pattern"]),
+        _ => None,
+    }
+}
+
+impl<'a> Checker<'a> {
+    pub(crate) fn check_const_expr_named_args(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Call { callee, args, .. } => {
+                self.check_const_expr_named_args(callee);
+                self.check_named_call_args(callee, args);
+                for a in args {
+                    self.check_const_expr_named_args(&a.value);
+                }
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.check_const_expr_named_args(lhs);
+                self.check_const_expr_named_args(rhs);
+            }
+            Expr::Unary { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Move { operand, .. }
+            | Expr::Try { operand, .. }
+            | Expr::Paren { inner: operand, .. } => self.check_const_expr_named_args(operand),
+            Expr::Receive { chan, .. } => self.check_const_expr_named_args(chan),
+            Expr::Index { base, index, .. } => {
+                self.check_const_expr_named_args(base);
+                self.check_const_expr_named_args(index);
+            }
+            Expr::Slice { base, lo, hi, .. } => {
+                self.check_const_expr_named_args(base);
+                if let Some(lo) = lo {
+                    self.check_const_expr_named_args(lo);
+                }
+                if let Some(hi) = hi {
+                    self.check_const_expr_named_args(hi);
+                }
+            }
+            Expr::Field { base, .. } => self.check_const_expr_named_args(base),
+            Expr::StructLit { fields, .. } => {
+                for f in fields {
+                    self.check_const_expr_named_args(&f.value);
+                }
+            }
+            Expr::SliceLit { items, .. } => {
+                for it in items {
+                    self.check_const_expr_named_args(it);
+                }
+            }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    self.check_const_expr_named_args(k);
+                    self.check_const_expr_named_args(v);
+                }
+            }
+            Expr::Interp { parts, .. } => {
+                for p in parts {
+                    if let hy_syntax::InterpPart::Expr(e) = p {
+                        self.check_const_expr_named_args(e);
+                    }
+                }
+            }
+            Expr::FnLit { .. } | Expr::Ident { .. } | Expr::Lit { .. } => {}
+        }
+    }
 }
