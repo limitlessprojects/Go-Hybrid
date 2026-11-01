@@ -2568,7 +2568,12 @@ impl<'a> Checker<'a> {
                 bound.extend(results.iter().filter_map(|r| r.name.clone()));
                 let mut idents = Vec::new();
                 collect_capture_idents_block(body, &mut bound, &mut idents);
+                let mut captured_move = None;
                 for id in idents {
+                    if captured_move.is_none() {
+                        captured_move =
+                            self.lookup_binding(st, &id).and_then(|b| b.moved.clone());
+                    }
                     if self.binding_may_share(st, &id)
                         || self
                             .lookup_binding(st, &id)
@@ -2576,6 +2581,13 @@ impl<'a> Checker<'a> {
                             .unwrap_or(false)
                     {
                         st.share_edge(name, &id);
+                    }
+                }
+                if let Some(mv) = captured_move {
+                    if let Some(nb) = st.env_lookup_mut(name) {
+                        if nb.moved.is_none() {
+                            nb.moved = Some(mv);
+                        }
                     }
                 }
             }
@@ -6849,8 +6861,32 @@ impl<'a> Checker<'a> {
                             None
                         };
                     }
+                    let closure_peers: Vec<String> = if !st.closure_defs.contains_key(name)
+                        && !st.closure_fnlits.contains_key(name)
+                        && !matches!(shape, TypeShape::Closure)
+                    {
+                        st.may_share
+                            .get(name)
+                            .into_iter()
+                            .flatten()
+                            .filter(|c| {
+                                st.closure_defs.contains_key(*c)
+                                    || st.closure_fnlits.contains_key(*c)
+                                    || matches!(
+                                        self.lookup_binding(st, c).map(|b| &b.shape),
+                                        Some(TypeShape::Closure)
+                                    )
+                            })
+                            .cloned()
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     st.aliases.remove(name);
                     st.share_clear(name);
+                    for cp in closure_peers {
+                        st.share_edge(name, &cp);
+                    }
                     if reads_self {
                         if !prior_shadows.is_empty() {
                             st.shadow_links
@@ -6903,6 +6939,9 @@ impl<'a> Checker<'a> {
                     if may_share {
                         self.record_move_const_and_a3_loans(st, name, &values[0], idx);
                     }
+                    st.closure_mutates.remove(name);
+                    st.closure_defs.remove(name);
+                    st.closure_fnlits.remove(name);
                 } else {
                     let root = t.root();
                     if !root.is_empty() && self.binding_may_share(st, root) {
