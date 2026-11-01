@@ -366,19 +366,29 @@ impl<'a> Checker<'a> {
                 }
             }
             Resolved::Fn { name } => {
+                let head = Self::base_named_type_str(&name).to_string();
+                let is_unshadowed_builtin = self.lookup_binding(st, &name).is_none()
+                    && !self.fns.contains_key(name.as_str())
+                    && !self.fns.contains_key(head.as_str())
+                    && !self.type_aliases.contains_key(name.as_str())
+                    && !self.type_aliases.contains_key(head.as_str())
+                    && !self.structs.contains_key(name.as_str())
+                    && !self.structs.contains_key(head.as_str());
                 // `copy(dst, src)` (#178): an element-wise slice copy
                 // duplicates the element *references* when the element type
                 // carries mutable GC storage, so the destination and source
                 // share it afterwards — a later `move` of either must freeze
                 // the other (O5.2). Primitive-element slices share nothing.
-                if name == "copy" {
+                if is_unshadowed_builtin && name == "copy" {
                     self.record_copy_may_share(st, cr);
                 }
-                if name == "delete" || name == "clear" {
+                if is_unshadowed_builtin && (name == "delete" || name == "clear") {
                     // A3: map delete / clear is a map mutation
                     self.check_delete_conflict(st, cr, idx);
                 }
-                if matches!(name.as_str(), "delete" | "copy" | "clear" | "append") {
+                if is_unshadowed_builtin
+                    && matches!(name.as_str(), "delete" | "copy" | "clear" | "append")
+                {
                     // T22 (#123/#188): a delete, copy, or clear mutates its first
                     // argument — a `const` root is frozen like an index write.
                     // `append` writes in place into the destination's spare
@@ -387,11 +397,19 @@ impl<'a> Checker<'a> {
                 }
                 self.check_call_const_writes(st, cr, &HashSet::new());
                 self.record_callee_param_stores(st, cr);
-                if self.fns.contains_key(&name) {
+                if self.lookup_binding(st, &name).is_none()
+                    && (self.fns.contains_key(name.as_str())
+                        || self.fns.contains_key(head.as_str()))
+                {
+                    let fn_key = if self.fns.contains_key(name.as_str()) {
+                        name.as_str()
+                    } else {
+                        head.as_str()
+                    };
                     // A3 #111: the callee may insert/delete through the
                     // argument — that event runs inside THIS call site's
                     // window when the call is within it.
-                    self.check_a3_call_conflict(st, cr, idx, &name);
+                    self.check_a3_call_conflict(st, cr, idx, fn_key);
                     // A7 borrow-by-default: a handle passed to a Hybrid
                     // function is lent for the call only
                     self.lend_handle_args(st, cr, idx, None);
@@ -403,7 +421,9 @@ impl<'a> Checker<'a> {
                         // A3 #111 form 4: a local closure whose body mutates a
                         // captured binding — event attributed to this call site.
                         self.check_a3_closure_call(st, cr, idx, &name);
-                    } else if !A3_PURE_FNS.contains(&name.as_str()) && name != "delete" {
+                    } else if !(is_unshadowed_builtin
+                        && (A3_PURE_FNS.contains(&name.as_str()) || name == "delete"))
+                    {
                         // Unresolved callee (e.g. a `fn(...)` parameter or local
                         // function variable): fail-closed on any map argument
                         // that conflicts with a live slot loan.
@@ -1071,13 +1091,8 @@ impl<'a> Checker<'a> {
         };
         match cr.callee {
             Expr::Ident { name, .. } => {
-                if name == "delete" || name == "clear" {
-                    return cr.args.first().map(&arg_root_is_param).unwrap_or(false);
-                }
-                if A3_PURE_FNS.contains(&name.as_str()) {
-                    return false;
-                }
-                if let Some(decl) = self.fns.get(name) {
+                let head = Self::base_named_type_str(name);
+                if let Some(decl) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
                     for (i, a) in cr.args.iter().enumerate() {
                         if !arg_root_is_param(a) {
                             continue;
@@ -1091,6 +1106,12 @@ impl<'a> Checker<'a> {
                             None => return true, // fail closed
                         }
                     }
+                    return false;
+                }
+                if name == "delete" || name == "clear" {
+                    return cr.args.first().map(&arg_root_is_param).unwrap_or(false);
+                }
+                if A3_PURE_FNS.contains(&name.as_str()) {
                     return false;
                 }
                 // unknown Ident callee (closure / builtin we don't model):
@@ -7782,10 +7803,18 @@ impl<'a> Checker<'a> {
     pub(crate) fn check_call_const_writes(&mut self, st: &FnState, cr: &CallRef, declared: &HashSet<String>) {
         let callee = crate::model::unwrap_parens(cr.callee);
         if let Expr::Ident { name, .. } = callee {
-            if name == "delete"
-                || name == "copy"
-                || name == "clear"
-                || A3_PURE_FNS.contains(&name.as_str())
+            let head = Self::base_named_type_str(name);
+            let is_unshadowed_builtin = !declared.contains(name)
+                && self.lookup_binding(st, name).is_none()
+                && !self.fns.contains_key(name.as_str())
+                && !self.fns.contains_key(head)
+                && !self.type_aliases.contains_key(name.as_str())
+                && !self.type_aliases.contains_key(head);
+            if is_unshadowed_builtin
+                && (name == "delete"
+                    || name == "copy"
+                    || name == "clear"
+                    || A3_PURE_FNS.contains(&name.as_str()))
             {
                 return;
             }
@@ -7918,9 +7947,14 @@ impl<'a> Checker<'a> {
 
             let (param_is_ptr, mutates) = match callee {
                 Expr::Ident { name, .. } => {
+                    let head = Self::base_named_type_str(name);
                     if declared.contains(name) {
                         (false, true)
-                    } else if let Some(decl) = self.fns.get(name) {
+                    } else if self.lookup_binding(st, name).is_some() {
+                        indirect_callee_effect(callee)
+                    } else if let Some(decl) =
+                        self.fns.get(name.as_str()).or_else(|| self.fns.get(head))
+                    {
                         match decl.params.get(i) {
                             Some(p) => {
                                 let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
@@ -7929,8 +7963,6 @@ impl<'a> Checker<'a> {
                             }
                             None => (false, true),
                         }
-                    } else if self.lookup_binding(st, name).is_some() {
-                        indirect_callee_effect(callee)
                     } else {
                         (false, false)
                     }
@@ -8565,13 +8597,8 @@ impl<'a> Checker<'a> {
             |a: &hy_syntax::CallArg| Self::expr_reaches_const_aliases(&a.value, aliases);
         match crate::model::unwrap_parens(cr.callee) {
             Expr::Ident { name, .. } => {
-                if name == "delete" || name == "copy" || name == "clear" {
-                    return cr.args.first().map(&arg_reaches_alias).unwrap_or(false);
-                }
-                if A3_PURE_FNS.contains(&name.as_str()) {
-                    return false;
-                }
-                if let Some(decl) = self.fns.get(name) {
+                let head = Self::base_named_type_str(name);
+                if let Some(decl) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
                     for (i, a) in cr.args.iter().enumerate() {
                         if !arg_reaches_alias(a) {
                             continue;
@@ -8585,6 +8612,12 @@ impl<'a> Checker<'a> {
                             None => return true,
                         }
                     }
+                    return false;
+                }
+                if name == "delete" || name == "copy" || name == "clear" {
+                    return cr.args.first().map(&arg_reaches_alias).unwrap_or(false);
+                }
+                if A3_PURE_FNS.contains(&name.as_str()) {
                     return false;
                 }
                 cr.args.iter().any(&arg_reaches_alias)

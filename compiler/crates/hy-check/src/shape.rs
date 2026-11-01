@@ -347,6 +347,23 @@ impl<'a> Checker<'a> {
                     }
                     return TypeShape::Unknown;
                 }
+                let head = Self::base_named_type_str(name);
+                if let Some(f) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
+                    let subst = self.fn_call_shape_subst(st, f, name, None, args);
+                    return f
+                        .results
+                        .first()
+                        .map(|r| self.shape_of_type_with_subst(&r.ty, &subst, 0))
+                        .unwrap_or(TypeShape::Unknown);
+                }
+                if args.len() == 1
+                    && (self.type_aliases.contains_key(name.as_str())
+                        || self.type_aliases.contains_key(head)
+                        || self.structs.contains_key(name.as_str())
+                        || self.structs.contains_key(head))
+                {
+                    return self.named_shape(name);
+                }
                 match name.as_str() {
                     // `make(chan T, n)` — defensive against parser spellings of
                     // the type argument; defaults Unknown (fail-closed at
@@ -846,6 +863,21 @@ impl<'a> Checker<'a> {
                         }
                         return None;
                     }
+                    let head = Self::base_named_type_str(name);
+                    if let Some(f) = self.fns.get(name.as_str()).or_else(|| self.fns.get(head)) {
+                        return f.results.first().map(|r| r.ty.clone());
+                    }
+                    if args.len() == 1
+                        && (self.type_aliases.contains_key(name.as_str())
+                            || self.type_aliases.contains_key(head)
+                            || self.structs.contains_key(name.as_str())
+                            || self.structs.contains_key(head))
+                    {
+                        return Some(TypeExpr::Named {
+                            name: name.clone(),
+                            span: *span,
+                        });
+                    }
                     if name == "some" {
                         let elem = args
                             .first()
@@ -866,19 +898,14 @@ impl<'a> Checker<'a> {
                         let is_type_name = crate::const_overflow::fixed_width_int_range(name).is_some()
                             || crate::const_init::is_conversion_type_name(name)
                             || self.type_aliases.contains_key(name);
-                        if is_type_name && !self.fns.contains_key(name.as_str()) {
+                        if is_type_name {
                             return Some(TypeExpr::Named {
                                 name: name.clone(),
                                 span: *span,
                             });
                         }
                     }
-                    let head = Self::base_named_type_str(name);
-                    self.fns
-                        .get(name.as_str())
-                        .or_else(|| self.fns.get(head))
-                        .and_then(|f| f.results.first())
-                        .map(|r| r.ty.clone())
+                    None
                 }
                 Expr::Field { base, name, .. } => {
                     let head = Self::base_named_type_str(name);
@@ -2263,5 +2290,152 @@ mod tests {
         );
         assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
         assert_eq!(r.diagnostics[0].code, "HYB-E3003");
+    }
+
+    // ---- #1386: package-level declarations shadowing predeclared callees/types ----
+
+    #[test]
+    fn shadowed_builtin_min_returning_slice_rejected_at_spawn() {
+        let r = check(
+            "fn min(s []int) []int {\n\
+               return s\n\
+             }\n\
+             fn worker(view []int, done chan<- int) {\n\
+               view[0] = 1\n\
+               done <- 1\n\
+             }\n\
+             fn main() {\n\
+               s := []int{0}\n\
+               done := make(chan int, 1)\n\
+               task worker(min(s), done)\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E3001");
+    }
+
+    #[test]
+    fn shadowed_string_type_alias_conversion_rejected_at_spawn() {
+        let r = check(
+            "type string = []byte\n\
+             fn worker(view string, done chan<- int) {\n\
+               view[0] = 1\n\
+               done <- 1\n\
+             }\n\
+             fn main() {\n\
+               raw := []byte{0}\n\
+               aliased := string(raw)\n\
+               done := make(chan int, 1)\n\
+               task worker(aliased, done)\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E3001");
+    }
+
+    #[test]
+    fn shadowed_some_returning_map_rejected_at_spawn() {
+        let r = check(
+            "fn some(n int) map[string]int {\n\
+               return map[string]int{\"k\": n}\n\
+             }\n\
+             fn worker(m map[string]int, done chan<- int) {\n\
+               m[\"k\"] = 2\n\
+               done <- 1\n\
+             }\n\
+             fn main() {\n\
+               done := make(chan int, 1)\n\
+               task worker(some(1), done)\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert_eq!(r.diagnostics[0].code, "HYB-E3001");
+    }
+
+    #[test]
+    fn shadowed_len_mutating_const_slice_rejected_with_e3006() {
+        let r = check(
+            "const shared = []int{0}\n\
+             fn len(s []int) {\n\
+               s[0] = 1\n\
+             }\n\
+             fn main() {\n\
+               len(shared)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3006"),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn shadowed_len_transitive_const_mutation_rejected_with_e3006() {
+        let r = check(
+            "const shared = []int{0}\n\
+             fn len(s []int) {\n\
+               s[0] = 1\n\
+             }\n\
+             fn relay(s []int) {\n\
+               len(s)\n\
+             }\n\
+             fn main() {\n\
+               relay(shared)\n\
+             }",
+        );
+        assert_eq!(r.verdict, Verdict::Reject, "{:?}", r.diagnostics);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E3006"),
+            "{:?}",
+            r.diagnostics
+        );
+    }
+
+    #[test]
+    fn unshadowed_builtins_and_primitive_shadow_remain_accepted() {
+        let unshadowed = check(
+            "const shared = []int{0}\n\
+             fn worker(n int, done chan<- int) {\n\
+               done <- n\n\
+             }\n\
+             fn main() {\n\
+               done := make(chan int, 1)\n\
+               n := min(len(shared), 2)\n\
+               task worker(n, done)\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(
+            unshadowed.verdict,
+            Verdict::Accept,
+            "{:?}",
+            unshadowed.diagnostics
+        );
+
+        let primitive_shadow = check(
+            "fn min(s []int) int {\n\
+               return 0\n\
+             }\n\
+             fn worker(n int, done chan<- int) {\n\
+               done <- n\n\
+             }\n\
+             fn main() {\n\
+               s := []int{1}\n\
+               done := make(chan int, 1)\n\
+               task worker(min(s), done)\n\
+               <-done\n\
+             }",
+        );
+        assert_eq!(
+            primitive_shadow.verdict,
+            Verdict::Accept,
+            "{:?}",
+            primitive_shadow.diagnostics
+        );
     }
 }
