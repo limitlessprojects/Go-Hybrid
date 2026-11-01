@@ -762,38 +762,87 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// #2474: `s.insert(v)` / `s.contains(v)` / `s.remove(v)` on a `set[T]`
-    /// need `v` of type `T`; the prelude's Go signature takes `T`, so a
-    /// mismatched argument passed `hyb check` and failed `go build`.
+    /// #2474, #2968: methods on `set[T]` (`insert`, `contains`, `remove`, `len`).
+    /// Undefined methods (e.g. `s.add(1)`, `s.pop()`) and invalid method arities
+    /// (e.g. `s.insert()`, `s.len(42)`) must be rejected with HYB-E1002.
+    /// Argument types for `insert`, `contains`, `remove` must match `T`.
     fn check_set_method_arg(&mut self, callee: &Expr, args: &[CallArg]) {
         let Expr::Field { base, name, .. } = unwrap_parens(callee) else {
             return;
         };
-        if !matches!(name.as_str(), "insert" | "contains" | "remove") || args.len() != 1 {
-            return;
-        }
         let Some(elem) = self.set_elem_of_expr(base) else {
             return;
         };
-        let want = self.kind_of_named(&elem, 0);
-        let got = self.kind_of_expr(&args[0].value);
-        let int_to_float_conflict = want == OpKind::Float
-            && got == OpKind::Int
-            && !self.is_untyped_int_const(&args[0].value);
-        if kinds_conflict(&want, &got) || int_to_float_conflict {
-            self.emit_e1002(
-                args[0].value.span(),
-                format!(
-                    "cannot use `{}` (type `{}`) as `{}` value in argument to `{}.{}` on `set[{}]` (HYB-E1002)",
-                    args[0].value.render(),
-                    got.label(),
-                    want.label(),
-                    base.render(),
-                    name,
-                    elem
-                ),
-                "a set's insert/contains/remove take a value of the set's element type",
-            );
+        match name.as_str() {
+            "insert" | "contains" | "remove" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        callee.span(),
+                        format!(
+                            "method `{}` on `set[{}]` takes 1 argument but was called with {} (HYB-E1002)",
+                            name, elem, args.len()
+                        ),
+                        "pass exactly 1 argument of the set element type",
+                    );
+                    return;
+                }
+                let want = self.kind_of_named(&elem, 0);
+                let got = self.kind_of_expr(&args[0].value);
+                let int_to_float_conflict = want == OpKind::Float
+                    && got == OpKind::Int
+                    && !self.is_untyped_int_const(&args[0].value);
+                if kinds_conflict(&want, &got) || int_to_float_conflict {
+                    self.emit_e1002(
+                        args[0].value.span(),
+                        format!(
+                            "cannot use `{}` (type `{}`) as `{}` value in argument to `{}.{}` on `set[{}]` (HYB-E1002)",
+                            args[0].value.render(),
+                            got.label(),
+                            want.label(),
+                            base.render(),
+                            name,
+                            elem
+                        ),
+                        "a set's insert/contains/remove take a value of the set's element type",
+                    );
+                }
+            }
+            "len" => {
+                if !args.is_empty() {
+                    self.emit_e1002(
+                        callee.span(),
+                        format!(
+                            "method `len` on `set[{}]` takes 0 arguments but was called with {} (HYB-E1002)",
+                            elem, args.len()
+                        ),
+                        "call `len()` with no arguments",
+                    );
+                }
+            }
+            "pop" => {
+                self.emit_e1002(
+                    callee.span(),
+                    format!(
+                        "cannot call `.pop()` on `{}` (type `set[{}]`) — `.pop()` is only defined on slices `[]T` (HYB-E1002)",
+                        base.render(), elem
+                    ),
+                    "pop is only defined on slices; use remove to remove elements from a set",
+                );
+            }
+            _ => {
+                self.emit_e1002(
+                    callee.span(),
+                    format!(
+                        "`{}` has no field or method `{}` (type `set[{}]`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                        base.render(),
+                        name,
+                        elem,
+                        base.render(),
+                        name
+                    ),
+                    "declare the method on that type, or call something that exists",
+                );
+            }
         }
     }
 
@@ -3160,6 +3209,14 @@ impl<'a> Collector<'a> {
                 if name == "pop" && args.is_empty() {
                     if let OpKind::Slice(elem) = bk {
                         return Some(vec![*elem]);
+                    }
+                }
+                if let Some(_elem) = self.set_elem_of_expr(base) {
+                    match name.as_str() {
+                        "insert" | "contains" if args.len() == 1 => return Some(vec![OpKind::Bool]),
+                        "remove" if args.len() == 1 => return Some(Vec::new()),
+                        "len" if args.is_empty() => return Some(vec![OpKind::Int]),
+                        _ => {}
                     }
                 }
                 let head = Checker::base_named_type_str(name);
