@@ -158,6 +158,8 @@ def run_bundle(slug: str, live: bool, token_env: str) -> int:
     issue = meta.get("issue")
     expected = meta.get("expected_code", "")
     repro_src = d / "repro.hy"
+    if not repro_src.is_file() or not (d / "fix.patch").is_file():
+        return die("NO-BUNDLE", slug, "missing repro.hy or fix.patch", 2)
     repro_rel = f"automation/land-queue/{slug}/repro.hy"
 
     # ---- 1. BASELINE: the unpatched tree must ACCEPT the repro ----
@@ -221,7 +223,7 @@ def run_bundle(slug: str, live: bool, token_env: str) -> int:
     finally:
         # If anything above raised, leave main clean (the landing path
         # pushed already; a failure path must not leave the tree dirty).
-        pass
+        revert_on_failure()
 
 
 def revert_on_failure() -> None:
