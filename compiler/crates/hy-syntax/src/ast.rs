@@ -239,7 +239,37 @@ impl TypeExpr {
                 ChanDir::Send => format!("chan<- {}", elem.render()),
             },
             TypeExpr::Option { elem, .. } => format!("option[{}]", elem.render()),
-            TypeExpr::Fn { .. } => "fn".to_string(),
+            TypeExpr::Fn {
+                params, results, ..
+            } => {
+                // Render the full signature (`fn(c <-chan int) bool`) rather
+                // than a bare `fn`: this string round-trips through the parser
+                // (`parse_type`, which folds generic type args via `render()`),
+                // and downstream consumers (`parse_generic_type_args`,
+                // `substitute_type_params`) rely on it surviving that trip.
+                let ps = params
+                    .iter()
+                    .map(|p| {
+                        let t = p.ty.render();
+                        if t.is_empty() {
+                            p.name.clone()
+                        } else {
+                            format!("{} {}", p.name, t)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if results.is_empty() {
+                    format!("fn({})", ps)
+                } else {
+                    let rs = results
+                        .iter()
+                        .map(|r| r.render())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    format!("fn({}) {}", ps, rs)
+                }
+            }
         }
     }
 }
@@ -768,6 +798,9 @@ impl Expr {
             } => operand.root_ident(),
             Expr::Paren { inner, .. } => inner.root_ident(),
             Expr::Try { operand, .. } => operand.root_ident(),
+            // `move x` denotes the same binding as `x` for name resolution
+            // (moving/consuming boundary calls resolve their argument root).
+            Expr::Move { operand, .. } => operand.root_ident(),
             _ => None,
         }
     }
@@ -777,11 +810,18 @@ impl Expr {
     /// Distinguished from a slice-of-arrays literal `[][N]T{…}` by the
     /// array `TypeExpr` sharing the literal's opening `[` source position.
     pub fn as_array_lit(&self) -> Option<(Option<&Expr>, &TypeExpr, &TypeExpr)> {
+        // Callers match on `unwrap_parens(value)` and then call this on the
+        // still-parenthesized node, so `([N]T{...})` would otherwise miss the
+        // array-literal shape and fall back to the non-nilable array element.
+        let this = match self {
+            Expr::Paren { inner, .. } => inner.as_ref(),
+            other => other,
+        };
         if let Expr::SliceLit {
             elem: Some(t),
             span,
             ..
-        } = self
+        } = this
         {
             if let TypeExpr::Array {
                 len,
