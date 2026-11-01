@@ -663,24 +663,88 @@ impl<'a> Collector<'a> {
         None
     }
 
+    fn slice_element_type_name_by_name(&self, name: &str) -> Option<String> {
+        let tname = self.lookup_type_name(name)?;
+        if let Some(elem) = tname.strip_prefix("[]") {
+            return Some(elem.to_string());
+        }
+        if tname.starts_with('[') {
+            if let Some(idx) = tname.find(']') {
+                let rest = &tname[idx + 1..];
+                if !rest.trim().is_empty() {
+                    return Some(rest.trim().to_string());
+                }
+            }
+        }
+        None
+    }
+
+    fn map_value_type_name_by_name(&self, name: &str) -> Option<String> {
+        let tname = self.lookup_type_name(name)?;
+        if let Some(after) = tname.strip_prefix("map") {
+            if let Some((_, v)) = Self::strip_leading_bracket_group(after) {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+        None
+    }
+
     fn slice_element_type_name(&self, e: &Expr) -> Option<String> {
         let bare = unwrap_parens(e);
         match bare {
-            Expr::Ident { name, .. } => {
-                if let Some(tname) = self.lookup_type_name(name) {
-                    if let Some(elem) = tname.strip_prefix("[]") {
-                        return Some(elem.to_string());
+            Expr::Ident { name, .. } => self.slice_element_type_name_by_name(name),
+            Expr::SliceLit { elem: Some(t), .. } => {
+                if bare.as_array_lit().is_some() {
+                    None
+                } else {
+                    Some(t.render())
+                }
+            }
+            Expr::Slice { base, .. } => {
+                let bare_base = unwrap_parens(base);
+                if let Some((_, elem, _)) = bare_base.as_array_lit() {
+                    return Some(elem.render());
+                }
+                if let Expr::Ident { name, .. } = bare_base {
+                    if let Some(elem) = self.slice_element_type_name_by_name(name) {
+                        return Some(elem);
                     }
                 }
-                None
+                self.slice_element_type_name(base)
             }
-            Expr::SliceLit { elem: Some(t), .. } => Some(t.render()),
-            Expr::Slice { base, .. } => self.slice_element_type_name(base),
             Expr::Call { callee, args, .. } => {
                 if let Expr::Ident { name, .. } = unwrap_parens(callee) {
                     if name == "make" {
                         if let Some(first) = args.first() {
                             return self.slice_element_type_name(&first.value);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn map_value_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => self.map_value_type_name_by_name(name),
+            Expr::MapLit { value, .. } => Some(value.render()),
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if (name == "make" || name == "new") && !args.is_empty() {
+                        let first_str = args[0].value.render();
+                        if let Some(after) = first_str.strip_prefix("map") {
+                            if let Some((_, v)) = Self::strip_leading_bracket_group(after) {
+                                let trimmed = v.trim();
+                                if !trimmed.is_empty() {
+                                    return Some(trimmed.to_string());
+                                }
+                            }
                         }
                     }
                 }
@@ -824,6 +888,22 @@ impl<'a> Collector<'a> {
     fn place_scalar(&self, p: &Place) -> Option<&'static str> {
         match &p.kind {
             PlaceKind::Ident(n) => self.lookup_scalar(n),
+            PlaceKind::Field { base, name } => {
+                let bk = self.kind_of_place(base);
+                self.struct_field_scalar(&bk, name)
+            }
+            PlaceKind::Index { base, .. } => match &base.kind {
+                PlaceKind::Ident(n) => {
+                    if let Some(elem) = self.slice_element_type_name_by_name(n) {
+                        return canonical_numeric_name(&elem);
+                    }
+                    if let Some(val_ty) = self.map_value_type_name_by_name(n) {
+                        return canonical_numeric_name(&val_ty);
+                    }
+                    None
+                }
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -852,6 +932,39 @@ impl<'a> Collector<'a> {
     fn sized_array_names_differ(&self, a: Option<&str>, b: Option<&str>) -> bool {
         matches!((a, b), (Some(x), Some(y))
             if x != y && is_sized_array_spelling(x) && is_sized_array_spelling(y))
+    }
+
+    fn index_expr_scalar(&self, base: &Expr) -> Option<&'static str> {
+        let bare = unwrap_parens(base);
+        if matches!(self.kind_of_expr(bare), OpKind::Str) {
+            return Some("uint8");
+        }
+        if let Some(elem) = self.slice_element_type_name(bare) {
+            return canonical_numeric_name(&elem);
+        }
+        if let Some(val_ty) = self.map_value_type_name(bare) {
+            return canonical_numeric_name(&val_ty);
+        }
+        None
+    }
+
+    fn field_expr_scalar(&self, base: &Expr, name: &str) -> Option<&'static str> {
+        let bk = self.kind_of_expr(base);
+        self.struct_field_scalar(&bk, name)
+    }
+
+    fn struct_field_scalar(&self, k: &OpKind, field: &str) -> Option<&'static str> {
+        let full_name = self.struct_name(k)?;
+        let base_name = Checker::base_named_type_str(&full_name);
+        let fields = self.ck.structs.get(base_name)?;
+        let subst = self.struct_type_arg_map(&full_name);
+        let (_, ty) = fields.iter().find(|(n, _)| n == field)?;
+        if let TypeExpr::Named { name, .. } = ty {
+            if let Some(sub) = subst.get(name.as_str()) {
+                return canonical_numeric_name(sub);
+            }
+        }
+        self.scalar_of_ty(ty)
     }
     /// #1031 — the exact predeclared numeric spelling of a type expression.
     /// A user-declared struct/enum/alias of that name is not the predeclared
@@ -938,6 +1051,8 @@ impl<'a> Collector<'a> {
                 Some(rs) if rs.len() == 1 => rs[0],
                 _ => None,
             },
+            Expr::Index { base, .. } => self.index_expr_scalar(base),
+            Expr::Field { base, name, .. } => self.field_expr_scalar(base, name),
             _ => None,
         }
     }
@@ -1505,8 +1620,21 @@ impl<'a> Collector<'a> {
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
-                if let Some(elem) = self.slice_element_type_name(val) {
+                let bare_val = unwrap_parens(val);
+                if let Some((_, _, arr_ty)) = bare_val.as_array_lit() {
+                    self.bind_type_name(name, arr_ty.render());
+                } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                } else if let Expr::MapLit { key, value, .. } = bare_val {
+                    self.bind_type_name(name, format!("map[{}]{}", key.render(), value.render()));
+                } else if let Expr::StructLit { ty: Some(t), .. } = bare_val {
+                    self.bind_type_name(name, t.render());
+                } else if let Expr::Call { callee, args, .. } = bare_val {
+                    if let Expr::Ident { name: callee_name, .. } = unwrap_parens(callee) {
+                        if (callee_name == "make" || callee_name == "new") && !args.is_empty() {
+                            self.bind_type_name(name, args[0].value.render());
+                        }
+                    }
                 }
             }
         }
