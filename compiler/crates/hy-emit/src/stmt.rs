@@ -2249,13 +2249,30 @@ impl Emitter {
                 self.hoist_tries_expr(v)?;
             }
         }
-        // Inside a function literal the closure owns the return — plain.
+        // Inside a function literal the closure owns the return. A literal
+        // whose last result is `error` carries its OWN zero-fill list (set in
+        // expr.rs, which replaces `cur_fn_error_returns` for the literal), so a
+        // bare or short `return` is completed to the declared arity exactly as a
+        // top-level error-tail fn is: `fn() (int, error) { return }` must lower
+        // to `return 0, nil`, not the bare `return` Go rejects with `not enough
+        // return values` (Row 13 BUILDABLE).
         if self.fnlit_depth > 0 {
-            let vs = values
+            let mut vs = values
                 .iter()
                 .map(|v| self.emit_expr(v, 0))
                 .collect::<Result<Vec<_>, _>>()?;
-            self.push(&format!("return {}", vs.join(", ")));
+            if let Some(zeros) = &self.cur_fn_error_returns {
+                while vs.len() < zeros.len() {
+                    let i = vs.len();
+                    let z = &zeros[i];
+                    vs.push(if z.is_empty() { "nil".to_string() } else { z.clone() });
+                }
+            }
+            if vs.is_empty() {
+                self.push("return");
+            } else {
+                self.push(&format!("return {}", vs.join(", ")));
+            }
             return Ok(());
         }
         // Inside the main wrapper closure: explicit returns carry `nil` for
