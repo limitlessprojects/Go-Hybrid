@@ -246,6 +246,26 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
                          ["tools/test_orphan.py"])
 
+    def test_non_identifier_module_name_skipped_by_unittest_is_rejected(self):
+        root, text = self.build(
+            "python3 -m unittest discover -s tools -p 'test_job*.py'\n",
+            ["tools/test_job_cli.py", "tools/test_job-hyphen.py", "tools/test_job.dot.py"])
+        (root / "tools/test_job_cli.py").write_text(
+            "import unittest\nclass Control(unittest.TestCase):\n"
+            "    def test_pass(self): pass\n", encoding="utf-8")
+        for orphan in ("tools/test_job-hyphen.py", "tools/test_job.dot.py"):
+            (root / orphan).write_text(
+                "import unittest\nclass Orphan(unittest.TestCase):\n"
+                "    def test_failure(self): self.fail('orphan really ran')\n",
+                encoding="utf-8")
+        skipped = subprocess.run(
+            [sys.executable, "-m", "unittest", "discover", "-s", "tools", "-p", "test_job*.py"],
+            cwd=root, capture_output=True, text=True, timeout=15)
+        self.assertEqual(skipped.returncode, 0, skipped.stderr)
+        self.assertIn("Ran 1 test", skipped.stderr)
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
+                         ["tools/test_job-hyphen.py", "tools/test_job.dot.py"])
+
     # --- explicit-invocation end-to-end (from pr-600, fixes #596) ---
 
     def test_successful_shell_with_disabled_tests_must_fail_registration(self):
