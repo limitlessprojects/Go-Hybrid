@@ -197,7 +197,7 @@ fn single_value_return_and_forwarded_calls_reject_move_foreign_indirect_and_alia
              cb2(minmax(3, 9))\n\
          }\n",
     );
-    assert_only_e2002(
+    assert_e2002(
         "struct box { v int }\n\
          fn (b box) take_one(x int) { _ = b.v\n _ = x }\n\
          fn minmax(a int, b int) (int, int) { return a, b }\n\
