@@ -1984,6 +1984,52 @@ fn update_pre_defer_peers(
                 }
             }
         }
+        Stmt::For {
+            kind: Iterate { vars, expr },
+            ..
+        } => {
+            if !matches!(ck.shape_of_expr(st, expr), TypeShape::Chan(_)) {
+                let shapes = ck.iterate_var_shapes(st, expr, vars.len());
+                let mut refs = Vec::new();
+                expr_referenced_bindings(expr, &mut refs);
+                for (target, shape) in vars.iter().zip(shapes) {
+                    if target == "_" {
+                        continue;
+                    }
+                    if !ck.value_reads_storage_of(st, expr, target) {
+                        sever_peer_node(peers, target);
+                    }
+                    if ck.shape_may_share(&shape) {
+                        for r in &refs {
+                            link_peer_nodes(peers, target, r);
+                        }
+                    }
+                }
+            }
+        }
+        Stmt::Match { subject, arms, .. } => {
+            let mut refs = Vec::new();
+            expr_referenced_bindings(subject, &mut refs);
+            for arm in arms {
+                if let hy_syntax::MatchPattern::Path {
+                    binding: Some(target),
+                    ..
+                } = &arm.pattern
+                {
+                    if target != "_" {
+                        for r in &refs {
+                            let may_share = ck
+                                .lookup_binding(st, r)
+                                .map(|b| ck.shape_may_share(&b.shape))
+                                .unwrap_or(true);
+                            if may_share {
+                                link_peer_nodes(peers, target, r);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -2001,6 +2047,10 @@ fn update_post_defer_watch(
             return;
         }
         let Some(v) = val else {
+            watch.remove(target);
+            if target == deferred_name {
+                *rebound_self = true;
+            }
             return;
         };
         let reads_watched = watch
@@ -2036,7 +2086,49 @@ fn update_post_defer_watch(
                 }
             }
         }
+        Stmt::For {
+            kind: Iterate { vars, expr },
+            ..
+        } => {
+            if !matches!(ck.shape_of_expr(st, expr), TypeShape::Chan(_)) {
+                let shapes = ck.iterate_var_shapes(st, expr, vars.len());
+                for (target, shape) in vars.iter().zip(shapes) {
+                    if ck.shape_may_share(&shape) {
+                        handle_bind(target, Some(expr));
+                    } else {
+                        handle_bind(target, None);
+                    }
+                }
+            }
+        }
+        Stmt::Match { subject, arms, .. } => {
+            for arm in arms {
+                if let hy_syntax::MatchPattern::Path {
+                    binding: Some(target),
+                    ..
+                } = &arm.pattern
+                {
+                    handle_bind(target, Some(subject));
+                }
+            }
+        }
         _ => {}
+    }
+}
+
+fn check_place_moves_watched(
+    place: &hy_syntax::Place,
+    check_expr: &dyn Fn(&Expr, String) -> Option<crate::model::MoveInfo>,
+) -> Option<crate::model::MoveInfo> {
+    match &place.kind {
+        hy_syntax::PlaceKind::Ident(_) => None,
+        hy_syntax::PlaceKind::Index { base, index } => {
+            check_place_moves_watched(base, check_expr).or_else(|| {
+                check_expr(index, format!("the place index `{}`", index.render()))
+            })
+        }
+        hy_syntax::PlaceKind::Field { base, .. }
+        | hy_syntax::PlaceKind::AddrOf { base } => check_place_moves_watched(base, check_expr),
     }
 }
 
@@ -2067,8 +2159,33 @@ fn stmt_moves_watched_binding(
         None
     };
 
+    let check_implicit_send_move =
+        |value: &Expr, span: hy_diag::Span, desc: &str| -> Option<crate::model::MoveInfo> {
+            let inner = crate::model::unwrap_parens(value);
+            let moved_name = match inner {
+                Expr::Ident { name, .. } => Some(name.as_str()),
+                Expr::Field { .. } => inner.root_ident(),
+                _ => None,
+            };
+            if let Some(n) = moved_name {
+                if watch.contains(n) {
+                    return Some(crate::model::MoveInfo {
+                        span,
+                        kind: crate::model::MoveKind::Moved,
+                        desc: desc.to_string(),
+                        moved_name: n.to_string(),
+                    });
+                }
+            }
+            None
+        };
+
     match stmt {
-        Stmt::Task { args, .. } => {
+        Stmt::Task { callee, args, .. } => {
+            let callee_desc = format!("the spawn callee `{}`", callee.render());
+            if let Some(mv) = check_expr(callee, callee_desc) {
+                return Some(mv);
+            }
             for a in args {
                 let desc = format!("the spawn argument `{}`", a.value.render());
                 if let Some(mv) = check_expr(&a.value, desc) {
@@ -2082,6 +2199,10 @@ fn stmt_moves_watched_binding(
             is_move,
             span,
         } => {
+            let chan_desc = format!("the send target `{}`", chan.render());
+            if let Some(mv) = check_expr(chan, chan_desc) {
+                return Some(mv);
+            }
             let desc = format!(
                 "the move-send `{} <- {}`",
                 chan.render(),
@@ -2092,15 +2213,8 @@ fn stmt_moves_watched_binding(
                 }
             );
             if *is_move {
-                if let Expr::Ident { name, .. } = crate::model::unwrap_parens(value) {
-                    if watch.contains(name) {
-                        return Some(crate::model::MoveInfo {
-                            span: *span,
-                            kind: crate::model::MoveKind::Moved,
-                            desc,
-                            moved_name: name.to_string(),
-                        });
-                    }
+                if let Some(mv) = check_implicit_send_move(value, *span, &desc) {
+                    return Some(mv);
                 }
             }
             if let Some(mv) = check_expr(value, desc) {
@@ -2115,7 +2229,14 @@ fn stmt_moves_watched_binding(
                 }
             }
         }
-        Stmt::Assign { values, .. } => {
+        Stmt::Assign {
+            targets, values, ..
+        } => {
+            for t in targets {
+                if let Some(mv) = check_place_moves_watched(t, &check_expr) {
+                    return Some(mv);
+                }
+            }
             for v in values {
                 let desc = format!("the move-assignment `{}`", v.render());
                 if let Some(mv) = check_expr(v, desc) {
@@ -2153,15 +2274,8 @@ fn stmt_moves_watched_binding(
                             }
                         );
                         if *is_move {
-                            if let Expr::Ident { name, .. } = crate::model::unwrap_parens(value) {
-                                if watch.contains(name) {
-                                    return Some(crate::model::MoveInfo {
-                                        span: chan.span().to(value.span()),
-                                        kind: crate::model::MoveKind::Moved,
-                                        desc,
-                                        moved_name: name.to_string(),
-                                    });
-                                }
+                            if let Some(mv) = check_implicit_send_move(value, chan.span().to(value.span()), &desc) {
+                                return Some(mv);
                             }
                         }
                         if let Some(mv) = check_expr(value, desc) {
