@@ -1089,6 +1089,107 @@ impl<'a> Collector<'a> {
         }
         None
     }
+    /// #2875 — the canonical scalar sitting INSIDE a type: the element of a
+    /// slice/array/pointer/option/channel, or the value type of a map
+    /// (`[]int64` -> `int64`, `*int` -> `int`, `map[string]int32` -> `int32`).
+    ///
+    /// `OpKind` collapses every integer width into `Int` and both float widths
+    /// into `Float`, so two COMPOSITE types that differ only in their element
+    /// type carry identical kinds and the kind comparison cannot tell them
+    /// apart — while Go only allows composite assignment between identical
+    /// types (`cannot use a (variable of type []int64) as []int value …`).
+    /// A struct/interface element, an unresolved name and a function type all
+    /// fail open.
+    fn nested_scalar_of_ty(&self, ty: &TypeExpr) -> Option<&'static str> {
+        self.nested_scalar_of_ty_at(ty, 0)
+    }
+
+    fn nested_scalar_of_ty_at(&self, ty: &TypeExpr, depth: usize) -> Option<&'static str> {
+        if depth > 8 {
+            return None;
+        }
+        match ty {
+            // A predeclared spelling wins; otherwise the name may be a `type`
+            // alias of one (`my_i64`), which the text walk below resolves.
+            TypeExpr::Named { name, .. } => self.nested_scalar_of_type_text(name, depth + 1),
+            TypeExpr::Slice { elem, .. }
+            | TypeExpr::Array { elem, .. }
+            | TypeExpr::Pointer { to: elem, .. }
+            | TypeExpr::Option { elem, .. }
+            | TypeExpr::Chan { elem, .. } => self.nested_scalar_of_ty_at(elem, depth + 1),
+            TypeExpr::Map { value, .. } => self.nested_scalar_of_ty_at(value, depth + 1),
+            TypeExpr::Fn { .. } => None,
+        }
+    }
+
+    /// #2875 — the same walk over a DECLARED type TEXT, which is how a local
+    /// binding's type is recorded (`bind_type_name` puts `[]int64` there) and
+    /// how a `type` alias stands in for its target. `[]T`, `[N]T`, `map[K]V`,
+    /// `*T`, `option[T]` and `chan T` are peeled; anything else is either a
+    /// canonical numeric name or fails open.
+    fn nested_scalar_of_type_text(&self, text: &str, depth: usize) -> Option<&'static str> {
+        if depth > 8 {
+            return None;
+        }
+        let t = text.trim();
+        let base = Checker::base_named_type_str(t).to_string();
+        if let Some(target) = self.ck.type_aliases.get(&base) {
+            return self.nested_scalar_of_ty_at(target, depth + 1);
+        }
+        if let Some(rest) = t.strip_prefix('*') {
+            return self.nested_scalar_of_type_text(rest, depth + 1);
+        }
+        if let Some(rest) = t.strip_prefix("option[") {
+            return self.nested_scalar_of_type_text(rest.strip_suffix(']')?, depth + 1);
+        }
+        for prefix in ["chan ", "<-chan ", "chan<- "] {
+            if let Some(rest) = t.strip_prefix(prefix) {
+                return self.nested_scalar_of_type_text(rest, depth + 1);
+            }
+        }
+        if let Some(rest) = t.strip_prefix('[') {
+            let close = rest.find(']')?;
+            return self.nested_scalar_of_type_text(&rest[close + 1..], depth + 1);
+        }
+        if let Some(rest) = t.strip_prefix("map[") {
+            // rfind, so a composite key (`map[[2]int]int64`) cannot confuse it.
+            let close = rest.rfind(']')?;
+            return self.nested_scalar_of_type_text(&rest[close + 1..], depth + 1);
+        }
+        canonical_numeric_name(t)
+    }
+
+    /// #2875 — the nested scalar of a VALUE: its own type when it has one
+    /// (`typed_value_scalar`), otherwise the declared type of the name it
+    /// binds, or the element/value type of a composite literal.
+    fn nested_scalar_of_expr(&self, e: &Expr) -> Option<&'static str> {
+        if let Some(scalar) = self.typed_value_scalar(e) {
+            return Some(scalar);
+        }
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                let text = self.lookup_type_name(name)?;
+                self.nested_scalar_of_type_text(&text, 0)
+            }
+            Expr::SliceLit { elem: Some(t), .. } => self.nested_scalar_of_ty(t),
+            Expr::MapLit { value, .. } => self.nested_scalar_of_ty(value),
+            _ => None,
+        }
+    }
+
+    /// #2875 — the nested scalar of an assignment TARGET (an `Ident` place).
+    /// Composite places beyond a name (a field, an index) are owned by their
+    /// own checks, so they fail open here.
+    fn nested_scalar_of_place(&self, p: &Place) -> Option<&'static str> {
+        if let Some(scalar) = self.place_scalar(p) {
+            return Some(scalar);
+        }
+        let PlaceKind::Ident(_) = &p.kind else {
+            return None;
+        };
+        let text = self.place_type_name(p)?;
+        self.nested_scalar_of_type_text(&text, 0)
+    }
 
     /// #2770 — the canonical numeric spelling of a simple local target, for the
     /// assignment/argument scalar comparison. Non-ident places fail open.
@@ -1822,7 +1923,7 @@ impl<'a> Collector<'a> {
             }
         }
         let result_scalars: Vec<Option<&'static str>> =
-            f.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+            f.results.iter().map(|r| self.nested_scalar_of_ty(&r.ty)).collect();
         let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
@@ -1935,8 +2036,13 @@ impl<'a> Collector<'a> {
                     && vk == OpKind::Int
                     && !self.is_untyped_int_const(&l.values[0]);
                 // #2770: `var h float64 = f` where `f` is a `float32`.
+                // #2875: the same for a composite target — `var b []int = a`
+                // where `a` is a `[]int64`.
                 let scalar_mismatch = matches!(
-                    (self.scalar_of_ty(t), self.typed_value_scalar(&l.values[0])),
+                    (
+                        self.nested_scalar_of_ty(t),
+                        self.nested_scalar_of_expr(&l.values[0])
+                    ),
                     (Some(w), Some(v)) if w != v
                 );
                 // #2771: `var c [4]int = a` where `a` is a `[3]int`.
@@ -1967,8 +2073,12 @@ impl<'a> Collector<'a> {
                         && vk == OpKind::Int
                         && !self.is_untyped_int_const(v);
                     // #2770: concrete numeric type differing under one `OpKind`.
+                    // #2875: and the same inside a composite type.
                     let scalar_mismatch = matches!(
-                        (self.scalar_of_ty(t), self.typed_value_scalar(v)),
+                        (
+                            self.nested_scalar_of_ty(t),
+                            self.nested_scalar_of_expr(v)
+                        ),
                         (Some(w), Some(g)) if w != g
                     );
                     // #2771: sized-array length must match the declared type.
@@ -2025,6 +2135,13 @@ impl<'a> Collector<'a> {
             for (name, val) in l.names.iter().zip(&l.values) {
                 if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                } else if let Expr::AddrOf { operand, .. } = unwrap_parens(val) {
+                    // #2875: `p := &v` — the pointer's base is the operand's
+                    // declared type, so a later `var q *int = p` can compare
+                    // element scalars (`*int64` against `*int`).
+                    if let Some(inner) = self.typed_value_type_name(operand) {
+                        self.bind_type_name(name, format!("*{}", inner));
+                    }
                 }
             }
         }
@@ -2923,7 +3040,7 @@ impl<'a> Collector<'a> {
                     Some(TypeExpr::Named { name, .. }) if name == "error"
                 );
                 let result_scalars: Vec<Option<&'static str>> =
-                    results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+                    results.iter().map(|r| self.nested_scalar_of_ty(&r.ty)).collect();
                 let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
                 let outer = std::mem::replace(&mut self.fn_results, result_kinds);
                 let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
@@ -4714,8 +4831,13 @@ impl<'a> Collector<'a> {
                 && !self.is_untyped_int_const(&a.value);
             // #2770: both sides share `OpKind::Float`/`Int` but differ in the
             // concrete type (`float32` vs `float64`, `int` vs `int64`).
+            // #2875: the same holds inside a composite type (`[]int` vs
+            // `[]int64`), which is what `nested_scalar_*` reaches.
             let scalar_mismatch = matches!(
-                (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
+                (
+                    self.nested_scalar_of_ty(&p.ty),
+                    self.nested_scalar_of_expr(&a.value)
+                ),
                 (Some(w), Some(g)) if w != g
             );
             if kinds_conflict(&want, &got)
@@ -4782,8 +4904,12 @@ impl<'a> Collector<'a> {
                 && got == OpKind::Int
                 && !self.is_untyped_int_const(&a.value);
             // #2770: concrete numeric type differing under one `OpKind`.
+            // #2875: and the same inside a composite type.
             let scalar_mismatch = matches!(
-                (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
+                (
+                    self.nested_scalar_of_ty(&p.ty),
+                    self.nested_scalar_of_expr(&a.value)
+                ),
                 (Some(w), Some(g)) if w != g
             );
             if kinds_conflict(&want, &got)
@@ -4933,7 +5059,7 @@ impl<'a> Collector<'a> {
                     self.check_single_value_position(v, "a return statement", false);
                     let got = self.kind_of_expr(v);
                     if !self.report_return_conflict(v, &got, w, v.span()) {
-                        let got_s = self.typed_value_scalar(v);
+                        let got_s = self.nested_scalar_of_expr(v);
                         self.report_numeric_return_mismatch(got_s, &got, i, v.span());
                     }
                 }
@@ -4965,7 +5091,7 @@ impl<'a> Collector<'a> {
             self.check_single_value_position(v, "a return statement", false);
             let got = self.kind_of_expr(v);
             if !self.report_return_conflict(v, &got, w, v.span()) {
-                let got_s = self.typed_value_scalar(v);
+                let got_s = self.nested_scalar_of_expr(v);
                 self.report_numeric_return_mismatch(got_s, &got, i, v.span());
             }
         }
@@ -5871,8 +5997,12 @@ impl<'a> Collector<'a> {
                     let conflict = (tk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
                         || kinds_conflict(&tk, &vk);
                     // #2770: `g = f` between a `float64` and a `float32` local.
+                    // #2875: `c = a` between a `[]int` and a `[]int64`.
                     let scalar_mismatch = matches!(
-                        (self.place_scalar(target), self.typed_value_scalar(&values[0])),
+                        (
+                            self.nested_scalar_of_place(target),
+                            self.nested_scalar_of_expr(&values[0])
+                        ),
                         (Some(t), Some(v)) if t != v
                     );
                     // #2771: `b = a` between a `[4]int` and a `[3]int`.
@@ -5927,7 +6057,10 @@ impl<'a> Collector<'a> {
                         let conflict = (tpk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
                             || kinds_conflict(&tpk, &vk);
                         let scalar_mismatch = matches!(
-                            (self.place_scalar(t), self.typed_value_scalar(v)),
+                            (
+                                self.nested_scalar_of_place(t),
+                                self.nested_scalar_of_expr(v)
+                            ),
                             (Some(tp), Some(vp)) if tp != vp
                         );
                         if conflict || scalar_mismatch {
@@ -7952,7 +8085,21 @@ impl<'a> Collector<'a> {
                         return;
                     }
                     if let Some((prev_arg, prev_k)) = &first_arg {
-                        let is_compatible = if *prev_k == k {
+                        // #2875: `min(a_i64, b_int)` / `max(a_f32, b_f64)` —
+                        // both operands look like `Int` (or `Float`) to the
+                        // kind model, but Go requires one identical type across
+                        // the operands (`invalid argument: mismatched types
+                        // int64 (previous argument) and int (type of b)`).
+                        let nested_scalar_conflict = matches!(
+                            (
+                                self.nested_scalar_of_expr(prev_arg),
+                                self.nested_scalar_of_expr(&arg.value)
+                            ),
+                            (Some(prev), Some(cur)) if prev != cur
+                        );
+                        let is_compatible = if nested_scalar_conflict {
+                            false
+                        } else if *prev_k == k {
                             true
                         } else if *prev_k == OpKind::Float && k == OpKind::Int {
                             self.is_untyped_int_const(&arg.value)
