@@ -289,6 +289,12 @@ pub(crate) struct FnState {
     pub result_shapes: Vec<TypeShape>,
     /// Declared result types of the function being checked (for constant overflow checks).
     pub result_types: Vec<hy_syntax::TypeExpr>,
+    /// The type parameters of the function being checked (`fn relay[t any](…)`,
+    /// `fn (b box[t]) m()`). A value whose declared type still mentions one of
+    /// them is not instantiated at this site, so its container shape stays
+    /// container-of-`Unknown`; a boundary `move` on such a value fails closed
+    /// (O4.9) instead of being classified from the collapsed shape — issue #2490.
+    pub type_params: HashSet<String>,
     /// Declared named result bindings (`fn f() (out map[string]int)`), in
     /// signature order. A bare `return` reads and returns each named result.
     pub named_results: Vec<String>,
