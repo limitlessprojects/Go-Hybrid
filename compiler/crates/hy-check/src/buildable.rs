@@ -599,23 +599,35 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             match d {
                 Decl::Import { .. } => {}
                 Decl::Const(cd) => {
+                    c.check_reserved_decl_name(&cd.name, cd.span);
                     c.ty_opt(&cd.ty);
                     c.expr(&cd.value);
                 }
                 Decl::Struct(s) => {
+                    c.check_reserved_decl_name(&s.name, s.span);
                     for f in &s.fields {
                         c.ty(&f.ty);
                     }
                 }
                 Decl::Enum(e) => {
+                    c.check_reserved_decl_name(&e.name, e.span);
                     for v in &e.variants {
+                        c.check_reserved_decl_name(&v.name, e.span);
                         if let Some(t) = &v.payload {
                             c.ty(t);
                         }
                     }
                 }
-                Decl::TypeAlias(t) => c.ty(&t.ty),
-                Decl::Fn(f) => c.fn_decl(f),
+                Decl::TypeAlias(t) => {
+                    c.check_reserved_decl_name(&t.name, t.span);
+                    c.ty(&t.ty);
+                }
+                Decl::Fn(f) => {
+                    if f.receiver.is_none() {
+                        c.check_reserved_decl_name(&f.name, f.span);
+                    }
+                    c.fn_decl(f);
+                }
             }
         }
         c.check_imports(file);
@@ -1085,6 +1097,7 @@ impl<'a> Collector<'a> {
         if name == "_" {
             return;
         }
+        self.check_reserved_decl_name(name, span);
         let Some(top) = self.scopes.last_mut() else {
             return;
         };
@@ -1189,6 +1202,53 @@ impl<'a> Collector<'a> {
         );
     }
 
+    /// #728 — user declaration named after a Go primitive type that differs from
+    /// Hybrid's spec primitive, or after an emitter-injected identifier.
+    /// In emitted Go, such declarations shadow Go's built-in type or collide
+    /// with injected names, leading to silent wrong runtime results or build failure.
+    fn check_reserved_decl_name(&mut self, name: &str, span: Span) {
+        if name == "_" {
+            return;
+        }
+        let hy_equiv = match name {
+            "float64" => Some("f64"),
+            "float32" => Some("f32"),
+            "int8" => Some("i8"),
+            "int16" => Some("i16"),
+            "int32" => Some("i32"),
+            "int64" => Some("i64"),
+            "uint8" => Some("u8"),
+            "uint16" => Some("u16"),
+            "uint32" => Some("u32"),
+            "uint64" => Some("u64"),
+            _ => None,
+        };
+        if let Some(hy) = hy_equiv {
+            self.emit_e1002(
+                span,
+                format!(
+                    "identifier `{}` is reserved — Go's primitive type captures the emitter's lowering of `{}` (HYB-E1002)",
+                    name, hy
+                ),
+                &format!(
+                    "use `{}` as the type or conversion, and choose a different identifier for user declarations",
+                    hy
+                ),
+            );
+            return;
+        }
+        if name == "hy_pop" || name == "filepath" {
+            self.emit_e1002(
+                span,
+                format!(
+                    "identifier `{}` is reserved by the runtime emitter (HYB-E1002)",
+                    name
+                ),
+                "choose a different identifier for user declarations",
+            );
+        }
+    }
+
     fn write(&mut self, name: &str) {
         for layer in self.scopes.iter().rev() {
             if let Some(entry) = layer.get(name) {
@@ -1239,6 +1299,7 @@ impl<'a> Collector<'a> {
             .iter()
             .filter_map(|r| r.name.as_deref().map(|name| (name, r.ty.span())));
         for (name, name_span) in receiver.chain(params).chain(results) {
+            self.check_reserved_decl_name(name, name_span);
             if name != "_" && !seen.insert(name) {
                 self.diags.push(
                     Diagnostic::error(
@@ -1376,6 +1437,9 @@ impl<'a> Collector<'a> {
     }
 
     fn local(&mut self, l: &LocalDecl) {
+        for name in &l.names {
+            self.check_reserved_decl_name(name, l.span);
+        }
         // Only the short declaration operator needs freshness checks.
         // Every kind of fn-local declaration emits a Go binding, whose
         // name must be read somewhere in its enclosing function.
