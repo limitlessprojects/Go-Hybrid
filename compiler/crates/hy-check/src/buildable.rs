@@ -94,6 +94,11 @@ pub(crate) enum OpKind {
     /// fail-open in every operand guard, so `op + 1`, `takes_int(op)` and
     /// `var s string = op.unwrap()` all passed and failed `go build`.
     Option(Box<OpKind>),
+    /// #3057 — `set[T]` carries its element kind. `Unknown` here would be
+    /// fail-open in returns and call arguments, letting invalid returns
+    /// (`fn f() int { var s set[int]; return s }`), invalid arguments
+    /// (`take_set(42)`, `take_int(s)`), and mismatched set returns pass check.
+    Set(Box<OpKind>),
     Void,
 }
 
@@ -119,6 +124,7 @@ impl OpKind {
             OpKind::Pointer(inner) => format!("*{}", inner.label()),
             OpKind::Fn(..) => "fn".to_string(),
             OpKind::Option(e) => format!("option[{}]", e.label()),
+            OpKind::Set(e) => format!("set[{}]", e.label()),
             OpKind::Void => "void".to_string(),
         }
     }
@@ -167,7 +173,7 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         (Struct(None), _) | (_, Struct(None)) => false,
         (a, b) if a == b => false,
         // Same container shape: recurse into the element kinds.
-        (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) => {
+        (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) | (Set(a), Set(b)) => {
             kinds_conflict(a, b)
         }
         (Map(k1, v1), Map(k2, v2)) => kinds_conflict(k1, k2) || kinds_conflict(v1, v2),
@@ -292,7 +298,7 @@ fn copy_element_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
         // Struct whose name did not resolve is not evidence of mismatch.
         (Struct(None), _) | (_, Struct(None)) => false,
         (a, b) if a == b => false,
-        (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) | (Pointer(a), Pointer(b)) => {
+        (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) | (Pointer(a), Pointer(b)) | (Set(a), Set(b)) => {
             copy_element_kinds_conflict(a, b)
         }
         (Map(k1, v1), Map(k2, v2)) => {
@@ -314,6 +320,7 @@ fn is_non_nilable(k: &OpKind) -> bool {
             | OpKind::Str
             | OpKind::Struct(_)
             | OpKind::Array(_)
+            | OpKind::Set(_)
     )
 }
 
@@ -390,6 +397,10 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         (Pointer(_), Interface) => false,
         (Pointer(_), _) | (_, Pointer(_)) => true,
 
+        // Set targets: cannot convert to/from non-interface types.
+        (Set(_), other) if !matches!(other, Unknown | Interface) => true,
+        (other, Set(_)) if !matches!(other, Unknown | Interface) => true,
+
         _ => false,
     }
 }
@@ -417,7 +428,7 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         // A struct whose NAME did not resolve cannot have its members looked up.
         OpKind::Struct(None) => false,
         OpKind::Struct(Some(_)) => true,
-        OpKind::Slice(e) | OpKind::Array(e) | OpKind::Chan(e) | OpKind::Pointer(e) => {
+        OpKind::Slice(e) | OpKind::Array(e) | OpKind::Chan(e) | OpKind::Pointer(e) | OpKind::Set(e) => {
             is_fully_resolved(e)
         }
         OpKind::Map(k, v) => is_fully_resolved(k) && is_fully_resolved(v),
@@ -701,18 +712,23 @@ impl<'a> Collector<'a> {
 
     fn bind_kind(&mut self, name: &str, kind: OpKind) {
         if name != "_" {
-            if let Some(top) = self.kind_scopes.last_mut() {
-                top.insert(name.to_string(), kind);
-            }
             // #1031: every binding shadows an outer exact numeric type until
             // `set_scalar` proves otherwise.
             if let Some(top) = self.scalar_scopes.last_mut() {
                 top.insert(name.to_string(), None);
             }
             // Every (re)binding shadows an outer set binding; callers that
-            // know the new binding is a set record it via bind_set_elem.
+            // know the new binding is a set record it via bind_set_elem or
+            // directly if kind is OpKind::Set.
             if let Some(top) = self.set_elem_scopes.last_mut() {
-                top.insert(name.to_string(), None);
+                let elem = match &kind {
+                    OpKind::Set(e) => Some(e.label()),
+                    _ => None,
+                };
+                top.insert(name.to_string(), elem);
+            }
+            if let Some(top) = self.kind_scopes.last_mut() {
+                top.insert(name.to_string(), kind);
             }
         }
     }
@@ -772,10 +788,18 @@ impl<'a> Collector<'a> {
         if !matches!(name.as_str(), "insert" | "contains" | "remove") || args.len() != 1 {
             return;
         }
-        let Some(elem) = self.set_elem_of_expr(base) else {
-            return;
+        let bk = self.kind_of_expr(base);
+        let (want, elem_label) = match bk {
+            OpKind::Set(ref elem) => ((**elem).clone(), elem.label()),
+            _ => {
+                if let Some(elem) = self.set_elem_of_expr(base) {
+                    let want = self.kind_of_named(&elem, 0);
+                    (want, elem)
+                } else {
+                    return;
+                }
+            }
         };
-        let want = self.kind_of_named(&elem, 0);
         let got = self.kind_of_expr(&args[0].value);
         let int_to_float_conflict = want == OpKind::Float
             && got == OpKind::Int
@@ -790,7 +814,7 @@ impl<'a> Collector<'a> {
                     want.label(),
                     base.render(),
                     name,
-                    elem
+                    elem_label
                 ),
                 "a set's insert/contains/remove take a value of the set's element type",
             );
@@ -1943,6 +1967,7 @@ impl<'a> Collector<'a> {
                     vec![*k]
                 }
             }
+            OpKind::Set(e) => vec![*e],
             OpKind::Str => vec![OpKind::Int; n_vars.max(1)],
             _ => vec![OpKind::Unknown; n_vars.max(1)],
         }
@@ -2717,6 +2742,9 @@ impl<'a> Collector<'a> {
             return OpKind::Unknown;
         }
         let name = name.trim();
+        if let Some(inner) = name.strip_prefix("set[").and_then(|r| r.strip_suffix(']')) {
+            return OpKind::Set(Box::new(self.kind_of_type_str(inner, depth + 1)));
+        }
         let base = Checker::base_named_type_str(name);
         if self.ck.structs.contains_key(base) || self.ck.struct_type_params.contains_key(base) {
             return OpKind::Struct(Some(name.to_string()));
@@ -2759,6 +2787,9 @@ impl<'a> Collector<'a> {
         {
             return OpKind::Chan(Box::new(self.kind_of_type_str(rest, depth + 1)));
         }
+        if let Some(rest) = s.strip_prefix("set[").and_then(|r| r.strip_suffix(']')) {
+            return OpKind::Set(Box::new(self.kind_of_type_str(rest, depth + 1)));
+        }
         self.kind_of_named(s, depth)
     }
 
@@ -2778,6 +2809,10 @@ impl<'a> Collector<'a> {
             TypeExpr::Named { name, .. } => {
                 if let Some(arg) = subst.get(name.as_str()) {
                     return self.kind_of_type_str(arg, depth + 1);
+                }
+                if let Some(inner) = name.strip_prefix("set[").and_then(|r| r.strip_suffix(']')) {
+                    let substituted_inner = subst.get(inner).map(|s| s.as_str()).unwrap_or(inner);
+                    return OpKind::Set(Box::new(self.kind_of_type_str(substituted_inner, depth + 1)));
                 }
                 self.kind_of_named(name, depth)
             }
@@ -3154,6 +3189,14 @@ impl<'a> Collector<'a> {
                         "is_some" | "is_none" if args.is_empty() => {
                             return Some(vec![OpKind::Bool])
                         }
+                        _ => {}
+                    }
+                }
+                if let OpKind::Set(_) = &bk {
+                    match name.as_str() {
+                        "insert" | "contains" if args.len() == 1 => return Some(vec![OpKind::Bool]),
+                        "remove" if args.len() == 1 => return Some(Vec::new()),
+                        "len" if args.is_empty() => return Some(vec![OpKind::Int]),
                         _ => {}
                     }
                 }
@@ -6103,8 +6146,10 @@ impl<'a> Collector<'a> {
                     // generic is the common case; `LOWERED_METHOD_INTRINSICS`
                     // covers the other one, a name `hy-emit` lowers to a
                     // prelude call rather than a Go method (only on slices).
-                    let is_lowered = matches!(bk, OpKind::Slice(_))
-                        && LOWERED_METHOD_INTRINSICS.contains(&name.as_str());
+                    let is_lowered = (matches!(bk, OpKind::Slice(_))
+                        && LOWERED_METHOD_INTRINSICS.contains(&name.as_str()))
+                        || (matches!(bk, OpKind::Set(_))
+                            && matches!(name.as_str(), "insert" | "contains" | "remove" | "len"));
                     if is_fully_resolved(&bk) && !is_lowered
                     {
                         self.emit_e1002(
@@ -6119,6 +6164,18 @@ impl<'a> Collector<'a> {
                             ),
                             "declare the method on that type, or call something that exists",
                         );
+                    }
+                    if matches!(bk, OpKind::Set(_)) {
+                        let want = match name.as_str() {
+                            "insert" | "contains" | "remove" => Some(1),
+                            "len" => Some(0),
+                            _ => None,
+                        };
+                        if let Some(want_arity) = want {
+                            if args.len() != want_arity {
+                                self.report_local_arity(&callee.render(), want_arity, args.len(), span);
+                            }
+                        }
                     }
                 }
                 if has_method {
@@ -6307,7 +6364,8 @@ impl<'a> Collector<'a> {
             | OpKind::Str
             | OpKind::Array(_)
             | OpKind::Map(_, _)
-            | OpKind::Chan(_) => {
+            | OpKind::Chan(_)
+            | OpKind::Set(_) => {
                 self.emit_e1002(
                     span,
                     format!(
@@ -6380,6 +6438,7 @@ impl<'a> Collector<'a> {
                         | OpKind::Array(_)
                         | OpKind::Map(_, _)
                         | OpKind::Chan(_)
+                        | OpKind::Set(_)
                 ) || matches!(
                     &ak,
                     OpKind::Pointer(inner) if matches!(**inner, OpKind::Unknown | OpKind::Array(_))
@@ -6453,6 +6512,26 @@ impl<'a> Collector<'a> {
                 let key_arg = &args[1].value;
                 let mk = self.kind_of_expr(map_arg);
                 match &mk {
+                    OpKind::Set(elem) => {
+                        let want = (**elem).clone();
+                        let got = self.kind_of_expr(key_arg);
+                        let int_to_float_conflict = want == OpKind::Float
+                            && got == OpKind::Int
+                            && !self.is_untyped_int_const(key_arg);
+                        if kinds_conflict(&want, &got) || int_to_float_conflict {
+                            self.emit_e2005(
+                                span,
+                                format!(
+                                    "cannot use `{}` (type `{}`) as element type `{}` in `delete` on `set[{}]` (HYB-E2005)",
+                                    key_arg.render(),
+                                    got.label(),
+                                    want.label(),
+                                    elem.label(),
+                                ),
+                                "the second argument to `delete(s, v)` must match the set's element type",
+                            );
+                        }
+                    }
                     // #2474: `delete(s, v)` on a `set[T]` (lowered to
                     // `s.remove(v)`) needs `v` of type `T`.
                     OpKind::Unknown => {
