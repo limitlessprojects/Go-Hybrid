@@ -79,8 +79,14 @@ impl<'a> Checker<'a> {
         // see `c.order` as the declared `[]k`, not an opaque Unknown).
         let base = Self::base_named_type_str(name);
         // User structs in package scope take precedence over predeclared types.
+        // Issue #2483: preserve the full instantiated spelling (`holder[[]int]`,
+        // `fn_box[cb]`, `holder[t]`) rather than collapsing to `base` so
+        // `shape_may_share`, `shape_holds_closure`, `shape_holds_unmovable_leaf`,
+        // `shape_carries_handle`, `shape_is_const_sendable`, and `field_shape`
+        // substitute concrete type arguments instead of seeing raw type-param
+        // names (`Unknown`). For non-generic structs `name == base`.
         if self.structs.contains_key(base) {
-            return TypeShape::Struct(Some(base.to_string()));
+            return TypeShape::Struct(Some(name.to_string()));
         }
         // User type aliases take precedence over predeclared types.
         if let Some(target) = self.type_aliases.get(base) {
@@ -89,11 +95,10 @@ impl<'a> Checker<'a> {
         // #884: the T9 prelude's `set[T]` lowers to a struct wrapping a Go
         // map (`type set[t comparable] struct { m map[t]struct{} }`), so a
         // shallow copy shares that map exactly like any other map-carrying
-        // struct. Without this arm `set[int]` resolved to `Unknown` and
-        // `shape_may_share` said no, which let O5.2/O5.4/T22 be bypassed by
-        // copying first and moving the original.
+        // struct. Preserve `name` (`set[int]`) so `iterate_var_shapes` and
+        // `range_iter` see the element spelling as well.
         if base == "set" {
-            return TypeShape::Struct(Some(base.to_string()));
+            return TypeShape::Struct(Some(name.to_string()));
         }
         match name {
             "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
@@ -142,16 +147,19 @@ impl<'a> Checker<'a> {
             // entry in `self.structs` (the prelude is emitted, not declared),
             // so the field walk below returned false for it. A shallow copy of
             // a set shares the underlying map; say so.
-            TypeShape::Struct(Some(name)) if name == "set" => true,
-            TypeShape::Struct(Some(name)) => self
-                .structs
-                .get(name)
-                .map(|fields| {
-                    fields
-                        .iter()
-                        .any(|(_, ty)| self.shape_may_share_at(&self.shape_of_type(ty), depth + 1))
-                })
-                .unwrap_or(false),
+            TypeShape::Struct(Some(name)) if Self::base_named_type_str(name) == "set" => true,
+            TypeShape::Struct(Some(name)) => {
+                if self.struct_has_unresolved_type_param(name) {
+                    return true;
+                }
+                self.struct_fields_for_sname(name)
+                    .map(|fields| {
+                        fields.iter().any(|(_, ty)| {
+                            self.shape_may_share_at(&self.shape_of_type(ty), depth + 1)
+                        })
+                    })
+                    .unwrap_or(false)
+            }
             _ => false,
         }
     }
@@ -183,8 +191,7 @@ impl<'a> Checker<'a> {
                     || self.shape_carries_handle_at(v, depth + 1)
             }
             TypeShape::Struct(Some(name)) => self
-                .structs
-                .get(name)
+                .struct_fields_for_sname(name)
                 .map(|fields| {
                     fields.iter().any(|(_, ty)| {
                         self.shape_carries_handle_at(&self.shape_of_type(ty), depth + 1)
@@ -198,8 +205,7 @@ impl<'a> Checker<'a> {
     /// Does this struct decl guard something with a `sync.*` lock? (Used for
     /// the contested-04 note: "Tier 0 does not credit locks at spawn sites".)
     pub(crate) fn struct_has_mutex_field(&self, sname: &str) -> bool {
-        self.structs
-            .get(sname)
+        self.struct_fields_for_sname(sname)
             .map(|fields| {
                 fields.iter().any(|(_, ty)| {
                     matches!(
@@ -315,10 +321,9 @@ impl<'a> Checker<'a> {
     pub(crate) fn field_shape(&self, base: &TypeShape, field: &str) -> TypeShape {
         match base {
             TypeShape::Struct(Some(sname)) => self
-                .structs
-                .get(sname)
-                .and_then(|fs| fs.iter().find(|(n, _)| n == field))
-                .map(|(_, t)| self.shape_of_type(t))
+                .struct_fields_for_sname(sname)
+                .and_then(|fs| fs.into_iter().find(|(n, _)| n == field))
+                .map(|(_, t)| self.shape_of_type(&t))
                 .unwrap_or(TypeShape::Unknown),
             TypeShape::Pointer(inner) => self.field_shape(inner, field),
             _ => TypeShape::Unknown,
@@ -457,6 +462,57 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                if let Some((elem_ty, through_ptr)) = self
+                    .ty_of_expr(st, base)
+                    .and_then(|t| self.peel_option_receiver_ty(&t))
+                {
+                    let recv_payload_shape = || {
+                        if through_ptr {
+                            match &recv {
+                                TypeShape::Pointer(inner) => (**inner).clone(),
+                                _ => TypeShape::Unknown,
+                            }
+                        } else {
+                            recv.clone()
+                        }
+                    };
+                    match name.as_str() {
+                        "unwrap" if args.is_empty() => {
+                            let s = self.shape_of_type(&elem_ty);
+                            return if matches!(s, TypeShape::Unknown) {
+                                recv_payload_shape()
+                            } else {
+                                s
+                            };
+                        }
+                        "or" if args.len() == 1 => {
+                            let s = self.shape_of_type(&elem_ty);
+                            if !matches!(s, TypeShape::Unknown) {
+                                return s;
+                            }
+                            let rs = recv_payload_shape();
+                            if !matches!(rs, TypeShape::Unknown) {
+                                return rs;
+                            }
+                            return self.shape_of_expr(st, &args[0].value);
+                        }
+                        "is_some" | "is_none" if args.is_empty() => {
+                            return TypeShape::Primitive;
+                        }
+                        _ => {}
+                    }
+                }
+                if self.is_prelude_set_receiver(&recv) {
+                    match name.as_str() {
+                        "insert" | "contains" if args.len() == 1 => {
+                            return TypeShape::Primitive;
+                        }
+                        "len" if args.is_empty() => {
+                            return TypeShape::Primitive;
+                        }
+                        _ => {}
+                    }
+                }
                 let recv = self.shape_of_expr(st, base);
                 if let Some(t) = receiver_type_name(&recv) {
                     return foreign::method_result(&t, name);
@@ -593,6 +649,33 @@ impl<'a> Checker<'a> {
         cur
     }
 
+    fn peel_option_receiver_ty(&self, ty: &TypeExpr) -> Option<(TypeExpr, bool)> {
+        if self.structs.contains_key("option") {
+            return None;
+        }
+        let mut cur = self.resolve_type_alias(ty);
+        let mut through_ptr = false;
+        if let TypeExpr::Pointer { to, .. } = cur {
+            through_ptr = true;
+            cur = self.resolve_type_alias(&to);
+        }
+        match cur {
+            TypeExpr::Option { elem, .. } => Some((*elem, through_ptr)),
+            _ => None,
+        }
+    }
+
+    fn is_prelude_set_receiver(&self, recv: &TypeShape) -> bool {
+        if self.structs.contains_key("set") {
+            return false;
+        }
+        let inner = match recv {
+            TypeShape::Pointer(inner) => &**inner,
+            other => other,
+        };
+        matches!(inner, TypeShape::Struct(Some(s)) if s == "set" || s.starts_with("set["))
+    }
+
     /// The as-written type of an initializer, when directly available
     /// (literals, aliases, local-fn results). `None` = use the shape render.
     pub(crate) fn ty_of_expr(&self, st: &FnState, expr: &Expr) -> Option<TypeExpr> {
@@ -653,6 +736,9 @@ impl<'a> Checker<'a> {
                             span: *span,
                         });
                     }
+                }
+                if let Some(fields) = self.struct_fields_for_type(&resolved) {
+                    return fields.into_iter().find(|(n, _)| n == name).map(|(_, t)| t);
                 }
                 let sname = Self::base_named_type(&resolved)?;
                 self.structs
@@ -791,6 +877,53 @@ impl<'a> Checker<'a> {
                             .map(|r| r.ty.clone())
                         {
                             return Some(ret);
+                        }
+                    }
+                    if let Some((elem_ty, _)) = self
+                        .ty_of_expr(st, base)
+                        .and_then(|t| self.peel_option_receiver_ty(&t))
+                    {
+                        let is_any =
+                            matches!(&elem_ty, TypeExpr::Named { name: n, .. } if n == "any");
+                        match name.as_str() {
+                            "unwrap" if args.is_empty() => {
+                                if !is_any {
+                                    return Some(elem_ty);
+                                }
+                            }
+                            "or" if args.len() == 1 => {
+                                if !is_any {
+                                    return Some(elem_ty);
+                                }
+                                if let Some(arg_ty) = self.ty_of_expr(st, &args[0].value) {
+                                    return Some(arg_ty);
+                                }
+                            }
+                            "is_some" | "is_none" if args.is_empty() => {
+                                return Some(TypeExpr::Named {
+                                    name: "bool".to_string(),
+                                    span: *span,
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                    let recv_shape = self.shape_of_expr(st, base);
+                    if self.is_prelude_set_receiver(&recv_shape) {
+                        match name.as_str() {
+                            "insert" | "contains" if args.len() == 1 => {
+                                return Some(TypeExpr::Named {
+                                    name: "bool".to_string(),
+                                    span: *span,
+                                });
+                            }
+                            "len" if args.is_empty() => {
+                                return Some(TypeExpr::Named {
+                                    name: "int".to_string(),
+                                    span: *span,
+                                });
+                            }
+                            _ => {}
                         }
                     }
                     let callee_ty = self.ty_of_expr(st, callee)?;

@@ -414,6 +414,10 @@ pub(crate) fn method_result(recv_type: &str, method: &str) -> TypeShape {
         ("serde_json.value" | "serde_json.view", "string") => TypeShape::Str,
         ("flate2.writer", "write") => TypeShape::Primitive,
         ("flate2.writer", "finish") => TypeShape::Slice(Box::new(TypeShape::Primitive)),
+        ("sync.mutex" | "sync.Mutex", "try_lock")
+        | ("sync.rwmutex" | "sync.rw_mutex" | "sync.RWMutex", "try_lock" | "try_rlock") => {
+            TypeShape::Primitive
+        }
         // scalar atomics only ("atomic.int" is receiver_type_name's key for
         // TypeShape::Atomic): load/swap/add yield the scalar. A non-scalar
         // atomic's `load()` / `swap()` returns a pointer / `any` — Unknown,

@@ -608,6 +608,10 @@ pub struct Emitter {
     /// The current (non-main) fn's per-result RETURN texts when its results
     /// end in `error` — E3 propagates via `return <zeros…, err>`.
     cur_fn_error_returns: Option<Vec<String>>,
+    /// Names assigned inside any closure literal of the current fn (#2386):
+    /// a call can run such a closure inside an O8 slot-loan window, so any
+    /// slot loan keyed by one of these names snapshots its key into `hyKeyN`.
+    closure_written: BTreeSet<String>,
     /// Per-fn result shapes, collected eagerly (Batch I): name →
     /// (n_results, ends_in_error, first_result's binding kind, per-param
     /// pointer-base types). Drives the `?` hoist arity (13:
@@ -675,6 +679,7 @@ impl Emitter {
             binding_prefix: "hybrid.program".to_string(),
             export_pub: false,
             cur_fn_error_returns: None,
+            closure_written: BTreeSet::new(),
             fn_shapes: BTreeMap::new(),
             closure_shapes: BTreeMap::new(),
             struct_fields: BTreeMap::new(),
@@ -1089,8 +1094,13 @@ impl Emitter {
                 }
             }
             TypeExpr::Pointer { to, .. } => Self::collect_comparable_in_ty(to, param_names, out),
+            TypeExpr::Array { len, elem, .. } => {
+                if let Some(l) = len {
+                    Self::collect_comparable_in_expr(l, param_names, out);
+                }
+                Self::collect_comparable_in_ty(elem, param_names, out);
+            }
             TypeExpr::Slice { elem, .. }
-            | TypeExpr::Array { elem, .. }
             | TypeExpr::Chan { elem, .. }
             | TypeExpr::Option { elem, .. } => {
                 Self::collect_comparable_in_ty(elem, param_names, out);
@@ -1132,7 +1142,17 @@ impl Emitter {
                     Self::collect_comparable_in_expr(v, param_names, out);
                 }
             }
-            Stmt::Assign { values, .. } | Stmt::Return { values, .. } => {
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                for t in targets {
+                    Self::collect_comparable_in_place(t, param_names, out);
+                }
+                for v in values {
+                    Self::collect_comparable_in_expr(v, param_names, out);
+                }
+            }
+            Stmt::Return { values, .. } => {
                 for v in values {
                     Self::collect_comparable_in_expr(v, param_names, out);
                 }
@@ -1196,10 +1216,37 @@ impl Emitter {
             }
             Stmt::Select { arms, .. } => {
                 for a in arms {
+                    match &a.kind {
+                        SelectArmKind::Recv { chan, .. } => {
+                            Self::collect_comparable_in_expr(chan, param_names, out);
+                        }
+                        SelectArmKind::Send { chan, value, .. } => {
+                            Self::collect_comparable_in_expr(chan, param_names, out);
+                            Self::collect_comparable_in_expr(value, param_names, out);
+                        }
+                        SelectArmKind::Default => {}
+                    }
                     Self::collect_comparable_in_block(&a.body, param_names, out);
                 }
             }
             Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        }
+    }
+
+    fn collect_comparable_in_place(
+        p: &Place,
+        param_names: &BTreeSet<String>,
+        out: &mut BTreeSet<String>,
+    ) {
+        match &p.kind {
+            PlaceKind::Ident(_) => {}
+            PlaceKind::Index { base, index } => {
+                Self::collect_comparable_in_place(base, param_names, out);
+                Self::collect_comparable_in_expr(index, param_names, out);
+            }
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                Self::collect_comparable_in_place(base, param_names, out);
+            }
         }
     }
 
@@ -1355,6 +1402,10 @@ impl Emitter {
         // E3 in an error-result fn (package mode, example 09): the
         // propagation tail returns the zero results + the error.
         self.cur_fn_error_returns = None;
+        self.closure_written.clear();
+        if let Some(body) = &f.body {
+            Self::collect_closure_writes_block(body, false, &mut self.closure_written);
+        }
         if !is_main && !f.results.is_empty() && !main_needs_wrapper {
             let last_is_err = matches!(
                 &f.results.last().unwrap().ty,

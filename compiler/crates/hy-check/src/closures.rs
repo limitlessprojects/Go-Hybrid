@@ -89,13 +89,18 @@ fn push_nested_closure<'a>(
 }
 
 fn mark_nested_overwritten(st: &FnState, name: &str, nested: &mut [NestedClosure<'_>]) {
-    if let Some(top) = st.scopes.last() {
-        if top.contains_key(name) {
-            let depth = st.scopes.len() - 1;
-            for nc in nested.iter_mut() {
-                if depth < nc.saved_scopes.len() && nc.saved_scopes[depth].contains_key(name) {
-                    nc.overwritten.insert((depth, name.to_string()));
-                }
+    if !st.scopes.is_empty() {
+        let depth = st.scopes.len() - 1;
+        for nc in nested.iter_mut() {
+            let is_same_block_redecl = depth < nc.saved_scopes.len()
+                && nc.saved_scopes[depth].contains_key(name)
+                && !nc.overwritten.contains(&(depth, name.to_string()));
+            if is_same_block_redecl {
+                nc.saved_aliases.remove(name);
+            } else if st.env.contains_key(name)
+                || nc.saved_scopes.iter().any(|s| s.contains_key(name))
+            {
+                nc.overwritten.insert((depth, name.to_string()));
             }
         }
     }
@@ -125,7 +130,7 @@ fn sync_nested_moves(st: &FnState, nested: &mut [NestedClosure<'_>]) {
         }
         for (k, v) in &st.aliases {
             if !is_overwritten_in_nc(st, nc, k) && !is_overwritten_in_nc(st, nc, v) {
-                nc.saved_aliases.entry(k.clone()).or_insert_with(|| v.clone());
+                nc.saved_aliases.insert(k.clone(), v.clone());
             }
         }
         for (k, vs) in &st.may_share {
@@ -191,6 +196,16 @@ fn sync_nested_moves(st: &FnState, nested: &mut [NestedClosure<'_>]) {
 fn pop_scope_and_sync(st: &mut FnState, nested: &mut [NestedClosure<'_>]) {
     sync_nested_moves(st, nested);
     st.scope_pop();
+    let popped_depth = st.scopes.len();
+    for nc in nested.iter_mut() {
+        nc.overwritten.retain(|(d, _)| *d < popped_depth || *d < nc.saved_scopes.len());
+        if popped_depth < nc.saved_scopes.len() {
+            let keys: Vec<String> = nc.saved_scopes[popped_depth].keys().cloned().collect();
+            for k in keys {
+                nc.overwritten.insert((popped_depth, k));
+            }
+        }
+    }
     sync_nested_moves(st, nested);
 }
 

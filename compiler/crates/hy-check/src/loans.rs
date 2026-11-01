@@ -719,11 +719,12 @@ impl<'a> Checker<'a> {
         let verb = format!("mutation via `{}`", cr.callee.render());
         let callee_path = walk::expr_path(cr.callee).unwrap_or_else(|| root.to_string());
         if let Some(sname) = recv_sname {
+            let sbase = Self::base_named_type_str(&sname);
             let found_decl = self.file.decls.iter().find_map(|d| match d {
                 hy_syntax::Decl::Fn(f) if f.name == method => {
                     let r = f.receiver.as_ref()?;
                     let b = Self::base_named_type(&r.ty)?;
-                    (b == sname).then_some(f)
+                    (b == sbase).then_some(f)
                 }
                 _ => None,
             });
@@ -2734,8 +2735,47 @@ impl<'a> Checker<'a> {
     /// binding freezes the other (O5.2, `HYB-E3003`) and cannot launder a
     /// non-owned parameter/capture/const across a concurrency boundary
     /// (O5.1 / O5.4, `HYB-E3004`; T22, `HYB-E3006`).
+    fn is_opaque_interproc_call(&self, st: &FnState, callee: &Expr) -> bool {
+        match crate::model::unwrap_parens(callee) {
+            Expr::Ident { name, .. } => self.lookup_binding(st, name).is_some(),
+            Expr::Field { base, name, .. } => {
+                !matches!(crate::model::unwrap_parens(base), Expr::Ident { name: p, .. } if self.lookup_binding(st, p).is_none() && self.known_package(p))
+                    && (!matches!(name.as_str(), "insert" | "contains" | "remove" | "len" | "pop")
+                        || self.method_decls.iter().any(|((_, m), _)| m == name))
+            }
+            Expr::FnLit { .. } => false,
+            _ => true,
+        }
+    }
+
     pub(crate) fn record_callee_param_stores(&self, st: &mut FnState, cr: &CallRef) {
         let Some((slots, body)) = self.resolve_callee_slots_and_body(st, cr) else {
+            if self.is_opaque_interproc_call(st, cr.callee) {
+                let mut roots = Vec::new();
+                if let Expr::Field { base, .. } = crate::model::unwrap_parens(cr.callee) {
+                    collect_ref_roots(base, &mut roots);
+                    collect_addr_of_roots(base, &mut roots);
+                }
+                for a in cr.args {
+                    collect_ref_roots(&a.value, &mut roots);
+                    collect_addr_of_roots(&a.value, &mut roots);
+                }
+                let origin = cr.args.iter().find_map(|a| self.moved_non_owned_origin_in_expr(st, &a.value));
+                for d in &roots {
+                    if self.binding_may_share(st, d) {
+                        for s in &roots {
+                            if d != s && self.binding_may_share(st, s) {
+                                st.share_edge(d, s);
+                            }
+                        }
+                        if let Some(ref o) = origin {
+                            if let Some(db) = st.env_lookup_mut(d) {
+                                db.non_owned_origin.get_or_insert_with(|| o.clone());
+                            }
+                        }
+                    }
+                }
+            }
             return;
         };
         if slots.len() < 2 {
@@ -3047,8 +3087,12 @@ impl<'a> Checker<'a> {
         body: &Block,
         depth: usize,
     ) -> Vec<(usize, usize)> {
-        if depth > 4 || slots.len() < 2 {
-            return Vec::new();
+        if slots.len() < 2 { return Vec::new(); }
+        if depth > 4 {
+            return (0..slots.len()).flat_map(|i| (0..slots.len()).filter(move |&j| i != j).map(move |j| (i, j)))
+                .filter(|&(i, j)| (self.shape_may_share(&slots[i].1) || matches!(slots[i].1, TypeShape::Unknown | TypeShape::Pointer(_)))
+                    && (self.shape_may_share(&slots[j].1) || matches!(slots[j].1, TypeShape::Unknown)))
+                .collect();
         }
         let mut cst = FnState::default();
         let mut aliases: std::collections::HashMap<String, HashSet<usize>> =
@@ -3585,10 +3629,14 @@ impl<'a> Checker<'a> {
                 return;
             }
         }
-        if depth >= 4 {
-            return;
-        }
-        let Some((sub_slots, sub_body)) = self.resolve_callee_slots_and_body(cst, cr) else {
+        let Some((sub_slots, sub_body)) = (depth < 4).then(|| self.resolve_callee_slots_and_body(cst, cr)).flatten() else {
+            if depth >= 4 || self.is_opaque_interproc_call(cst, cr.callee) {
+                let mut s_all: Vec<usize> = cr.args.iter().flat_map(|a| self.expr_slot_origins(cst, &a.value, aliases)).collect();
+                if let Expr::Field { base, .. } = crate::model::unwrap_parens(cr.callee) {
+                    s_all.extend(self.expr_slot_origins(cst, base, aliases));
+                }
+                for &d in &s_all { for &s in &s_all { if d != s { out.insert((d, s)); } } }
+            }
             return;
         };
         if sub_slots.len() < 2 {
@@ -4399,9 +4447,11 @@ impl<'a> Checker<'a> {
                 // A field of a struct declared in this file may hold a function
                 // value (`holder.cb()`), whose target we cannot see.
                 match self.shape_of_expr(st, base) {
-                    TypeShape::Struct(Some(s)) => self.structs.contains_key(&s),
+                    TypeShape::Struct(Some(s)) => {
+                        self.structs.contains_key(Self::base_named_type_str(&s))
+                    }
                     TypeShape::Pointer(inner) => {
-                        matches!(*inner, TypeShape::Struct(Some(ref s)) if self.structs.contains_key(s))
+                        matches!(*inner, TypeShape::Struct(Some(ref s)) if self.structs.contains_key(Self::base_named_type_str(s)))
                     }
                     _ => false,
                 }
@@ -4766,7 +4816,7 @@ impl<'a> Checker<'a> {
         let Some((typed_params, typed_results, body)) =
             self.resolve_call_expr_decl_or_fnlit(st, callee)
         else {
-            return Vec::new();
+            return if self.is_opaque_interproc_call(st, callee) { vec![(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)] } else { Vec::new() };
         };
         let mut cst = st.clone();
         cst.scope_push();
@@ -5300,6 +5350,34 @@ impl<'a> Checker<'a> {
         if name == "_" {
             return;
         }
+        let same_scope_redecl = if let Some(top) = st.scopes.last() {
+            top.contains_key(name)
+        } else {
+            st.env.contains_key(name)
+        };
+        let prev_moved = if same_scope_redecl {
+            self.lookup_binding(st, name).and_then(|b| b.moved.clone())
+        } else {
+            None
+        };
+        let closure_peers: Vec<String> = if same_scope_redecl && !matches!(shape, TypeShape::Closure) {
+            st.may_share
+                .get(name)
+                .into_iter()
+                .flatten()
+                .filter(|c| {
+                    st.closure_defs.contains_key(*c)
+                        || st.closure_fnlits.contains_key(*c)
+                        || matches!(
+                            self.lookup_binding(st, c).map(|b| &b.shape),
+                            Some(TypeShape::Closure)
+                        )
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
         let shadows_outer = st
             .scopes
             .last()
@@ -5310,6 +5388,9 @@ impl<'a> Checker<'a> {
         self.preserve_peers_before_sever(st, name, shadows_outer);
         st.aliases.remove(name);
         st.share_clear(name);
+        for cp in closure_peers {
+            st.share_edge(name, &cp);
+        }
         let non_owned_origin = if immutable {
             Some(format!("`const {}`", name))
         } else {
@@ -5323,7 +5404,7 @@ impl<'a> Checker<'a> {
                 immutable,
                 is_let,
                 managed_taint: managed, // O6.2: born inside `managed {}`
-                moved: None,
+                moved: prev_moved,
                 non_owned_origin,
                 slot_loan: false,
             },
@@ -5776,10 +5857,33 @@ impl<'a> Checker<'a> {
                         b.moved = None; // a fresh value re-owns the binding
                         b.non_owned_origin = info.non_owned;
                     }
+                    let closure_peers: Vec<String> = if !st.closure_defs.contains_key(name)
+                        && !st.closure_fnlits.contains_key(name)
+                    {
+                        st.may_share
+                            .get(name)
+                            .into_iter()
+                            .flatten()
+                            .filter(|c| {
+                                st.closure_defs.contains_key(*c)
+                                    || st.closure_fnlits.contains_key(*c)
+                                    || matches!(
+                                        self.lookup_binding(st, c).map(|b| &b.shape),
+                                        Some(TypeShape::Closure)
+                                    )
+                            })
+                            .cloned()
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     // a rebind re-owns the binding: drop the old alias and
                     // may-share edges, then re-record from the new value (#27)
                     st.aliases.remove(name);
                     st.share_clear(name);
+                    for cp in closure_peers {
+                        st.share_edge(name, &cp);
+                    }
                     if info.reads_self {
                         if !info.prior_shadows.is_empty() {
                             st.shadow_links
@@ -6732,9 +6836,10 @@ impl<'a> Checker<'a> {
                 _ => None,
             };
             if let Some(rname) = recv_base {
+                let rbase = Self::base_named_type_str(&rname).to_string();
                 if let Some(decl) = self
                     .method_decls
-                    .get(&(rname, method_name.clone()))
+                    .get(&(rbase, method_name.clone()))
                     .copied()
                 {
                     if let Some(r) = &decl.receiver {
@@ -6858,7 +6963,8 @@ impl<'a> Checker<'a> {
                             _ => None,
                         };
                         if let Some(decl) = recv_base.and_then(|rb| {
-                            self.method_decls.get(&(rb, method_name.clone())).copied()
+                            let rbase = Self::base_named_type_str(&rb).to_string();
+                            self.method_decls.get(&(rbase, method_name.clone())).copied()
                         }) {
                             match decl.params.get(i) {
                                 Some(p) => {

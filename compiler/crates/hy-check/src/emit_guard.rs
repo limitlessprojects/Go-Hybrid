@@ -122,6 +122,7 @@ impl<'a> Checker<'a> {
                             self.check_default_float_overflow(name, value, Some(st));
                         }
                     }
+                    self.check_slot_loan_rebind(st, stmt);
                     self.bind_closure_local_for_emit_guard(st, l);
                     self.mark_slot_loans_local(st, l);
                 }
@@ -797,15 +798,15 @@ impl<'a> Checker<'a> {
             // `[N]T` is comparable exactly when `T` is.
             TypeShape::Array(elem) => self.incomparable_rec(elem, seen),
             TypeShape::Struct(Some(name)) => {
-                if name == "set" && !self.structs.contains_key("set") {
+                if Self::base_named_type_str(name) == "set" && !self.structs.contains_key("set") {
                     return Some("set");
                 }
                 if seen.iter().any(|n| n == name) {
                     return None; // value cycle — Go rejects the type itself elsewhere
                 }
                 seen.push(name.clone());
-                let fields = self.structs.get(name)?;
-                for (_, ft) in fields {
+                let fields = self.struct_fields_for_sname(name)?;
+                for (_, ft) in &fields {
                     let fs = self.shape_of_type(ft);
                     if let Some(n) = self.incomparable_rec(&fs, seen) {
                         return Some(n);
