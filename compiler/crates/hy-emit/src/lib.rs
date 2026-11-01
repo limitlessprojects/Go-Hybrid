@@ -1549,7 +1549,7 @@ impl Emitter {
             self.push("os.Exit(1)");
             self.indent -= 1;
             self.push("}");
-            if !f.results.is_empty() {
+            if !f.results.is_empty() && !Self::is_main_error_only(f) {
                 // The declared non-error result IS the exit code on the
                 // explicit `return N` path (example 02's `return 1`). The
                 // receiver var mirrors the declared result's name.
@@ -1634,9 +1634,19 @@ impl Emitter {
         parts.join(", ")
     }
 
+    fn is_main_error_only(f: &FnDecl) -> bool {
+        f.name == "main"
+            && f.receiver.is_none()
+            && f.results.len() == 1
+            && matches!(&f.results[0].ty, TypeExpr::Named { name, .. } if name == "error")
+    }
+
     fn main_ret_vars(&self, f: &FnDecl) -> String {
         if f.results.is_empty() {
             "hyErr".to_string()
+        } else if Self::is_main_error_only(f) {
+            let r = &f.results[0];
+            r.name.clone().unwrap_or_else(|| "hyErr".to_string())
         } else {
             // `code` is example-02's named result; unnamed results get a
             // generated receiver var.
@@ -1653,6 +1663,11 @@ impl Emitter {
     /// The wrapper closure's signature: the declared results (named) plus
     /// the hidden `hyErr error` the `?` desugaring returns through.
     fn main_closure_sig(&mut self, f: &FnDecl) -> String {
+        if Self::is_main_error_only(f) {
+            let r = &f.results[0];
+            let n = r.name.as_deref().unwrap_or("hyErr");
+            return format!("({} error)", n);
+        }
         let mut parts: Vec<String> = Vec::new();
         for (i, r) in f.results.iter().enumerate() {
             let n = r.name.clone().unwrap_or_else(|| format!("hyR{}", i));

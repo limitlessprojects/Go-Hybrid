@@ -46,8 +46,8 @@
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
     AssignOp, BinOp, Block, CallArg, Decl, Expr, FieldInit, File, FnDecl, FnResult, ForKind,
-    InterpPart, LitKind, LocalDecl, LocalKind, MatchPattern, Param, Place, PlaceKind, SelectArmKind,
-    Stmt, TypeExpr, UnOp,
+    InterpPart, LitKind, LocalDecl, LocalKind, MatchPattern, Param, Place, PlaceKind, Receiver,
+    SelectArmKind, Stmt, TypeExpr, TypeParam, UnOp,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -1225,20 +1225,60 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn extract_receiver_type_param_names<'b>(ty: &'b TypeExpr, out: &mut Vec<(&'b str, Span)>) {
+        match ty {
+            TypeExpr::Named { name, span } => {
+                if let Some((_, rest)) = name.split_once('[') {
+                    if let Some((inside, _)) = rest.rsplit_once(']') {
+                        for part in inside.split(',') {
+                            let tp = part.trim();
+                            if !tp.is_empty() {
+                                out.push((tp, *span));
+                            }
+                        }
+                    }
+                }
+            }
+            TypeExpr::Pointer { to, .. } => Self::extract_receiver_type_param_names(to, out),
+            _ => {}
+        }
+    }
+
     fn check_signature_bindings(
         &mut self,
-        receiver: Option<&str>,
+        receiver: Option<&Receiver>,
+        type_params: &[TypeParam],
         params: &[Param],
         results: &[FnResult],
         span: Span,
     ) {
         let mut seen = HashSet::new();
-        let receiver = receiver.map(|name| (name, span)).into_iter();
-        let params = params.iter().map(|p| (p.name.as_str(), p.span));
-        let results = results
-            .iter()
-            .filter_map(|r| r.name.as_deref().map(|name| (name, r.ty.span())));
-        for (name, name_span) in receiver.chain(params).chain(results) {
+        let mut bindings: Vec<(&str, Span)> = Vec::new();
+
+        // 1. Function type parameters: `fn id[t any, u comparable]`
+        for tp in type_params {
+            bindings.push((tp.name.as_str(), span));
+        }
+
+        // 2. Receiver: variable name and generic receiver type arguments
+        if let Some(r) = receiver {
+            bindings.push((r.name.as_str(), span));
+            Self::extract_receiver_type_param_names(&r.ty, &mut bindings);
+        }
+
+        // 3. Parameters: `(p1 int, p2 string)`
+        for p in params {
+            bindings.push((p.name.as_str(), p.span));
+        }
+
+        // 4. Named results: `(code int, err error)`
+        for r in results {
+            if let Some(name) = r.name.as_deref() {
+                bindings.push((name, r.ty.span()));
+            }
+        }
+
+        for (name, name_span) in bindings {
             if name != "_" && !seen.insert(name) {
                 self.diags.push(
                     Diagnostic::error(
@@ -1262,18 +1302,41 @@ impl<'a> Collector<'a> {
 
     fn fn_decl(&mut self, f: &FnDecl) {
         if f.receiver.is_none() {
-            if f.name == "main" && (!f.params.is_empty() || !f.type_params.is_empty()) {
-                self.diags.push(
-                    Diagnostic::error(
-                        "HYB-E1002",
-                        self.path.clone(),
-                        f.span,
-                        "`fn main` must have no parameters — Go requires `func main` to have no arguments and no return values (HYB-E1002)".to_string(),
-                    )
-                    .with_notes(vec![
-                        "remove parameters from `fn main()`, or read CLI arguments via `os.args()`".to_string(),
-                    ]),
-                );
+            if f.name == "main" {
+                if !f.params.is_empty() || !f.type_params.is_empty() {
+                    self.diags.push(
+                        Diagnostic::error(
+                            "HYB-E1002",
+                            self.path.clone(),
+                            f.span,
+                            "`fn main` must have no parameters — Go requires `func main` to have no arguments and no return values (HYB-E1002)".to_string(),
+                        )
+                        .with_notes(vec![
+                            "remove parameters from `fn main()`, or read CLI arguments via `os.args()`".to_string(),
+                        ]),
+                    );
+                }
+                let valid_main_results = match f.results.as_slice() {
+                    [] => true,
+                    [r] => match &r.ty {
+                        TypeExpr::Named { name, .. } => name == "int" || name == "error",
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                if !valid_main_results {
+                    self.diags.push(
+                        Diagnostic::error(
+                            "HYB-E1002",
+                            self.path.clone(),
+                            f.span,
+                            "`fn main` result signature is unsupported — Go requires `func main` to have no return values, or return an `int` exit code or `error` (HYB-E1002)".to_string(),
+                        )
+                        .with_notes(vec![
+                            "omit results from `fn main()`, or return a single `int` exit code or `error`".to_string(),
+                        ]),
+                    );
+                }
             } else if f.name == "init"
                 && (!f.params.is_empty() || !f.results.is_empty() || !f.type_params.is_empty())
             {
@@ -1291,7 +1354,8 @@ impl<'a> Collector<'a> {
             }
         }
         self.check_signature_bindings(
-            f.receiver.as_ref().map(|r| r.name.as_str()),
+            f.receiver.as_ref(),
+            &f.type_params,
             &f.params,
             &f.results,
             f.span,
@@ -2296,7 +2360,7 @@ impl<'a> Collector<'a> {
                 body,
                 span,
             } => {
-                self.check_signature_bindings(None, params, results, *span);
+                self.check_signature_bindings(None, &[], params, results, *span);
                 for p in params {
                     self.ty(&p.ty);
                 }
