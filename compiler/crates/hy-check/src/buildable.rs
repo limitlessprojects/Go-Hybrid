@@ -175,6 +175,50 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
     }
 }
 
+/// #2812 — does a type SPELLING mention `tp` as a whole name, including as a
+/// generic type argument (`box[t]`)? Generic type arguments live inside the
+/// `TypeExpr::Named` name string, so this splits them top-level.
+fn type_name_mentions(name: &str, tp: &str) -> bool {
+    if name == tp {
+        return true;
+    }
+    if name.ends_with(']') {
+        if let Some(open) = name.find('[') {
+            let inner = &name[open + 1..name.len() - 1];
+            return split_top_level_type_args(inner)
+                .iter()
+                .any(|a| a.trim() == tp);
+        }
+    }
+    false
+}
+
+/// #2812 — does a type expression mention the type parameter `tp` anywhere
+/// (element, map key/value, pointee, option payload, fn signature, or a
+/// generic type argument)? Go infers type arguments from parameter types
+/// only, so a callee type parameter this predicate finds nowhere is
+/// uninferable at a bare call site.
+fn type_expr_mentions(ty: &hy_syntax::TypeExpr, tp: &str) -> bool {
+    use hy_syntax::TypeExpr;
+    match ty {
+        TypeExpr::Named { name, .. } => type_name_mentions(name, tp),
+        TypeExpr::Pointer { to, .. }
+        | TypeExpr::Slice { elem: to, .. }
+        | TypeExpr::Chan { elem: to, .. }
+        | TypeExpr::Option { elem: to, .. }
+        | TypeExpr::Array { elem: to, .. } => type_expr_mentions(to, tp),
+        TypeExpr::Map { key, value, .. } => {
+            type_expr_mentions(key, tp) || type_expr_mentions(value, tp)
+        }
+        TypeExpr::Fn {
+            params, results, ..
+        } => {
+            params.iter().any(|p| type_expr_mentions(&p.ty, tp))
+                || results.iter().any(|r| type_expr_mentions(r, tp))
+        }
+    }
+}
+
 /// #1031 — the exact Go spelling of a predeclared numeric type, after the
 /// emitter's SPEC→Go primitive mapping (`shapes::go_primitive_name`) and Go's
 /// own identities (`byte` = `uint8`, `rune` = `int32`).
@@ -3367,6 +3411,28 @@ impl<'a> Collector<'a> {
         // Generic instantiations (`id[int](x)`) carry type arguments the
         // parameter list does not describe; leave them to the type checker.
         if !f.type_params.is_empty() {
+            // #2812: a BARE generic call (`name == head`, i.e. no `f[T]`
+            // instantiation) whose type parameter occurs in NO parameter type
+            // cannot be inferred by Go — it infers type arguments from argument
+            // types only, never from the result type or the assignment target —
+            // so an accepted program fails `go build`
+            // (`in call to zero, cannot infer t`).
+            if name == head {
+                if let Some(tp) = f
+                    .type_params
+                    .iter()
+                    .find(|tp| !f.params.iter().any(|p| type_expr_mentions(&p.ty, &tp.name)))
+                {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "cannot infer type argument `{}` for a bare call to `{}` — Go refuses `in call to {}, cannot infer {}` (HYB-E1002)",
+                            tp.name, head, head, tp.name
+                        ),
+                        "Go infers type arguments from argument types only; instantiate explicitly (`f[T](...)`) or make a parameter type mention the type parameter",
+                    );
+                }
+            }
             return;
         }
         // A lone multi-value call IS the whole argument list and expands to one
