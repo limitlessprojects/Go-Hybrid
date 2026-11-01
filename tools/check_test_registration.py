@@ -89,10 +89,12 @@ def python_commands(workflow_text):
 # Directories whose test files this guard covers, and how each is invoked.
 DISCOVER_DIR = "tools"   # referenced through a `unittest discover -p` pattern
 DIRECT_DIRS = ("tests",)  # referenced by literal repo-relative path
+VALID_MODULE_NAME = re.compile(r"[_a-z]\w*\.py$", re.IGNORECASE)
 
 
 def registered_discoveries(workflow_text):
-    """Pair each discovery pattern with its own start directory (repo cwd).
+    """Pair each discovery pattern with its own start directory (repo cwd)
+    and optional top-level directory (-t).
 
     Like the original guard, this reads explicit one-line commands run from
     the repository root; it is not a general shell/YAML or load_tests
@@ -102,36 +104,50 @@ def registered_discoveries(workflow_text):
     for arguments in python_commands(workflow_text):
         if arguments[:3] != ["-m", "unittest", "discover"]:
             continue
-        start, pattern = ".", None
+        start, pattern, top_level = ".", None, None
         for index, argument in enumerate(arguments[3:], 3):
             if argument in ("-s", "--start-directory") and index + 1 < len(arguments):
                 start = arguments[index + 1]
             elif argument in ("-p", "--pattern") and index + 1 < len(arguments):
                 pattern = arguments[index + 1]
+            elif argument in ("-t", "--top-level-directory") and index + 1 < len(arguments):
+                top_level = arguments[index + 1]
             elif argument.startswith("--start-directory="):
                 start = argument.split("=", 1)[1]
             elif argument.startswith("--pattern="):
                 pattern = argument.split("=", 1)[1]
+            elif argument.startswith("--top-level-directory="):
+                top_level = argument.split("=", 1)[1]
         if pattern is not None:
-            discoveries.append((start, pattern))
+            discoveries.append((start, pattern, top_level))
     return discoveries
 
 
 def registered_patterns(workflow_text):
     """Every `-p` pattern the workflow passes to `unittest discover`."""
-    return [pattern for _, pattern in registered_discoveries(workflow_text)]
+    return [pattern for _, pattern, *_ in registered_discoveries(workflow_text)]
 
 
 def is_registered_discover(name, patterns):
     return any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
 
 
-def is_reached_discover(root, relpath, start, pattern):
+def is_reached_discover(root, relpath, start, pattern, top_level=None):
     """Mirror discovery's directory boundary without importing test code."""
     root_dir = Path(root).resolve()
     target = (root_dir / relpath).resolve()
     start_dir = (root_dir / start).resolve()
     if not start_dir.is_dir() or not start_dir.is_relative_to(root_dir) or not target.is_relative_to(start_dir):
+        return False
+    if top_level is not None:
+        top_level_dir = (root_dir / top_level).resolve()
+        if not top_level_dir.is_dir() or not top_level_dir.is_relative_to(root_dir):
+            return False
+        if not start_dir.is_relative_to(top_level_dir):
+            return False
+        if start_dir != top_level_dir and not (start_dir / "__init__.py").is_file():
+            return False
+    if not VALID_MODULE_NAME.match(target.name):
         return False
     if not is_registered_discover(target.name, [pattern]):
         return False
@@ -168,8 +184,8 @@ def unregistered(root, workflow_text):
     discoveries = registered_discoveries(workflow_text)
     missing = []
     for rel in find_test_files(root, DISCOVER_DIR):
-        if not any(is_reached_discover(root, rel, start, pattern)
-                   for start, pattern in discoveries):
+        if not any(is_reached_discover(root, rel, *disc)
+                   for disc in discoveries):
             missing.append((rel, "no `unittest discover -s ... -p ...` invocation reaches it"))
     for directory in DIRECT_DIRS:
         for rel in find_test_files(root, directory):
@@ -198,7 +214,14 @@ def main():
               f"{args.root} ({DISCOVER_DIR}/ or {', '.join(DIRECT_DIRS)}/)",
               file=sys.stderr)
         return 2
-    if not patterns and not any(d in workflow_text for d in DIRECT_DIRS):
+    has_direct = any(
+        arguments and any(
+            arguments[0] == d or arguments[0].startswith(d + "/") or arguments[0].startswith("./" + d + "/")
+            for d in DIRECT_DIRS
+        )
+        for arguments in python_commands(workflow_text)
+    )
+    if not patterns and not has_direct:
         print(f"REGISTRATION CHECK ERROR: {args.workflow} references no test at "
               "all; the guard cannot verify anything", file=sys.stderr)
         return 2

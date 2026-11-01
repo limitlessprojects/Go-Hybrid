@@ -99,6 +99,17 @@ class PatternExtractionTests(unittest.TestCase):
         self.assertFalse(guard.is_registered_direct(
             "tests/test_live.py", "python3 -c 'print(1)' tests/test_live.py\n"))
 
+    def test_top_level_directory_flag_extracted(self):
+        workflow = (
+            "python3 -m unittest discover -s tools/fuzz -p 'test_*.py' -t .\n"
+            "python3 -m unittest discover --start-directory=tools/runner "
+            "--pattern=test_x.py --top-level-directory=tools\n"
+        )
+        self.assertEqual(guard.registered_discoveries(workflow), [
+            ("tools/fuzz", "test_*.py", "."),
+            ("tools/runner", "test_x.py", "tools"),
+        ])
+
     def test_repeated_pattern_uses_the_last_value_like_unittest(self):
         self.assertEqual(guard.registered_patterns(
             "python3 -m unittest discover -s tools -p test_disabled.py -p test_live.py\n"),
@@ -248,6 +259,41 @@ class RegistrationTests(unittest.TestCase):
 
     # --- explicit-invocation end-to-end (from pr-600, fixes #596) ---
 
+    def test_non_identifier_module_is_rejected_by_valid_module_name(self):
+        workflow = "python3 -m unittest discover -s tools -p 'test_*.py'\n"
+        root, text = self.build(
+            workflow,
+            ["tools/test_control.py", "tools/test_bad-name.py", "tools/test_v1.2.py"])
+        missing = guard.unregistered(root, text)
+        self.assertEqual(
+            sorted(rel for rel, _ in missing),
+            ["tools/test_bad-name.py", "tools/test_v1.2.py"])
+
+    def test_top_level_directory_requires_package_start_directory(self):
+        workflow = "python3 -m unittest discover -s tools/fuzz -p 'test_*.py' -t .\n"
+        root, text = self.build(workflow, ["tools/fuzz/test_hyfuzz.py"])
+        # Without __init__.py in start_dir when start_dir != top_level_dir, unittest discover fails
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text)],
+                         ["tools/fuzz/test_hyfuzz.py"])
+        (root / "tools/fuzz/__init__.py").touch()
+        self.assertEqual(guard.unregistered(root, text), [])
+
+    def test_top_level_directory_escaping_root_or_disjoint_is_rejected(self):
+        root, text_escaping = self.build(
+            "python3 -m unittest discover -s tools/fuzz -p 'test_*.py' -t ..\n",
+            ["tools/fuzz/test_hyfuzz.py"])
+        (root / "tools/fuzz/__init__.py").touch()
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text_escaping)],
+                         ["tools/fuzz/test_hyfuzz.py"])
+
+        root, text_disjoint = self.build(
+            "python3 -m unittest discover -s tools/fuzz -p 'test_*.py' -t tools/runner\n",
+            ["tools/fuzz/test_hyfuzz.py"])
+        (root / "tools/fuzz/__init__.py").touch()
+        (root / "tools/runner").mkdir(parents=True, exist_ok=True)
+        self.assertEqual([rel for rel, _ in guard.unregistered(root, text_disjoint)],
+                         ["tools/fuzz/test_hyfuzz.py"])
+
     def test_successful_shell_with_disabled_tests_must_fail_registration(self):
         # The shell succeeds without running either deliberately failing test.
         # The guard must detect the missing execution, not approve the mentions.
@@ -316,6 +362,14 @@ class GuardMisuseTests(unittest.TestCase):
 
     def test_start_directory_escaping_repo_root_is_rejected(self):
         self.assertEqual(self.run_main("python3 -m unittest discover -s .. -p 'test_*.py'\n", ["tools/test_x.py"]), 1)
+
+    def test_workflow_comment_mentioning_direct_dirs_fails_closed_with_misuse_exit_two(self):
+        self.assertEqual(
+            self.run_main("# run tests\npython3 -m py_compile tools/job.py\n", ["tools/test_x.py"]), 2)
+
+    def test_workflow_direct_invocation_under_direct_dirs_passes(self):
+        self.assertEqual(
+            self.run_main("python3 tests/test_real.py\n", ["tests/test_real.py"]), 0)
 
 if __name__ == "__main__":
     unittest.main()
