@@ -46,6 +46,9 @@ TEXT ·spHeadroom(SB), NOSPLIT, $0-8
         MOVQ    OFF_g_stackguard0(BX), AX
         MOVQ    SP, DX
         SUBQ    AX, DX
+        JCC     headroomok
+        XORQ    DX, DX
+headroomok:
         MOVQ    DX, ret+0(FP)
         RET
 
@@ -65,8 +68,9 @@ TEXT ·callFast1(SB), NOSPLIT, $0-24
         MOVQ    OFF_g_stackguard0(BX), DX
         MOVQ    SP, R11
         SUBQ    DX, R11
+        JCS     needsdeep1
         CMPQ    R11, $4096
-        JLT     needsdeep1
+        JCS     needsdeep1
         MOVQ    SP, BX
         SUBQ    $8, SP
         ANDQ    $-16, SP
@@ -89,8 +93,9 @@ TEXT ·callFast2(SB), NOSPLIT, $0-32
         MOVQ    OFF_g_stackguard0(BX), DX
         MOVQ    SP, R11
         SUBQ    DX, R11
+        JCS     needsdeep2
         CMPQ    R11, $4096
-        JLT     needsdeep2
+        JCS     needsdeep2
         MOVQ    SP, BX
         SUBQ    $8, SP
         ANDQ    $-16, SP
@@ -114,8 +119,9 @@ TEXT ·callFast3(SB), NOSPLIT, $0-40
         MOVQ    OFF_g_stackguard0(BX), R11
         MOVQ    SP, R12
         SUBQ    R11, R12
+        JCS     needsdeep3
         CMPQ    R12, $4096
-        JLT     needsdeep3
+        JCS     needsdeep3
         MOVQ    SP, BX
         SUBQ    $8, SP
         ANDQ    $-16, SP
@@ -147,8 +153,9 @@ TEXT ·callFast1S(SB), NOSPLIT, $0-24
         MOVQ    OFF_g_stackguard0(BX), DX
         MOVQ    SP, R11
         SUBQ    DX, R11
+        JCS     needsdeep1s
         CMPQ    R11, $1024
-        JLT     needsdeep1s
+        JCS     needsdeep1s
         MOVQ    SP, BX
         SUBQ    $8, SP
         ANDQ    $-16, SP
@@ -171,8 +178,9 @@ TEXT ·callFast2S(SB), NOSPLIT, $0-32
         MOVQ    OFF_g_stackguard0(BX), DX
         MOVQ    SP, R11
         SUBQ    DX, R11
+        JCS     needsdeep2s
         CMPQ    R11, $1024
-        JLT     needsdeep2s
+        JCS     needsdeep2s
         MOVQ    SP, BX
         SUBQ    $8, SP
         ANDQ    $-16, SP
@@ -196,8 +204,9 @@ TEXT ·callFast3S(SB), NOSPLIT, $0-40
         MOVQ    OFF_g_stackguard0(BX), R11
         MOVQ    SP, R12
         SUBQ    R11, R12
+        JCS     needsdeep3s
         CMPQ    R12, $1024
-        JLT     needsdeep3s
+        JCS     needsdeep3s
         MOVQ    SP, BX
         SUBQ    $8, SP
         ANDQ    $-16, SP
@@ -222,8 +231,9 @@ TEXT ·callFast4S(SB), NOSPLIT, $0-48
         MOVQ    OFF_g_stackguard0(BX), R11
         MOVQ    SP, R12
         SUBQ    R11, R12
+        JCS     needsdeep4s
         CMPQ    R12, $1024
-        JLT     needsdeep4s
+        JCS     needsdeep4s
         MOVQ    SP, BX
         SUBQ    $8, SP
         ANDQ    $-16, SP
@@ -292,8 +302,9 @@ TEXT ·callFast4(SB), NOSPLIT, $0-48
         MOVQ    OFF_g_stackguard0(BX), R11
         MOVQ    SP, R12
         SUBQ    R11, R12
+        JCS     needsdeep4
         CMPQ    R12, $4096
-        JLT     needsdeep4
+        JCS     needsdeep4
         MOVQ    SP, BX
         SUBQ    $8, SP
         ANDQ    $-16, SP
