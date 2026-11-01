@@ -83,6 +83,15 @@ pub(crate) enum OpKind {
     Array(Box<OpKind>),
     Map(Box<OpKind>, Box<OpKind>),
     Chan(Box<OpKind>),
+    /// The builtin generic `set[T]` (SPEC §2.3 T9), carrying its element kind.
+    ///
+    /// `hy-emit` lowers `set[T]` to a synthesized prelude struct, so before
+    /// #2474 it never matched a user-declared struct and fell through to
+    /// `Unknown`. That made `.insert(v)`, `.contains(v)` and `delete(s, v)`
+    /// skip every argument check, and a mismatched element passed `hyb check`
+    /// only to fail `go build`. Member lookups on a set stay fail-open (see
+    /// `is_fully_resolved`); argument checks use the element kind.
+    Set(Box<OpKind>),
     Struct(Option<String>),
     Pointer(Box<OpKind>),
     /// Function kind: result kinds, plus the declared parameter count when the
@@ -110,6 +119,7 @@ impl OpKind {
             OpKind::Array(e) => format!("[N]{}", e.label()),
             OpKind::Map(k, v) => format!("map[{}]{}", k.label(), v.label()),
             OpKind::Chan(e) => format!("chan {}", e.label()),
+            OpKind::Set(e) => format!("set[{}]", e.label()),
             OpKind::Struct(Some(n)) => format!("struct {}", n),
             OpKind::Struct(None) => "struct".to_string(),
             OpKind::Pointer(inner) => format!("*{}", inner.label()),
@@ -162,7 +172,7 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         (Struct(None), _) | (_, Struct(None)) => false,
         (a, b) if a == b => false,
         // Same container shape: recurse into the element kinds.
-        (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) => {
+        (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) | (Set(a), Set(b)) => {
             kinds_conflict(a, b)
         }
         (Map(k1, v1), Map(k2, v2)) => kinds_conflict(k1, k2) || kinds_conflict(v1, v2),
@@ -398,6 +408,11 @@ fn is_fully_resolved(k: &OpKind) -> bool {
             is_fully_resolved(e)
         }
         OpKind::Map(k, v) => is_fully_resolved(k) && is_fully_resolved(v),
+        // #2474: a set's members live on the `hy-emit` prelude struct, which
+        // the kind model does not see, so a member lookup on it cannot claim
+        // absence. This keeps every set member call exactly as fail-open as
+        // it was while sets resolved to `Unknown`.
+        OpKind::Set(_) => false,
         // A fn kind only carries results here, so it is not evidence about
         // members either way.
         OpKind::Fn(..) => false,
@@ -2547,6 +2562,14 @@ impl<'a> Collector<'a> {
         if let Some(target) = self.ck.type_aliases.get(base) {
             return self.kind_of_ty(target, depth + 1);
         }
+        // #2474: the builtin `set[T]` (SPEC §2.3 T9). A user-declared struct
+        // or alias named `set` shadows it and is resolved above, so this only
+        // sees the prelude set. The element kind is what the `.insert` /
+        // `.contains` / `.remove` and `delete(s, v)` argument checks compare
+        // against; an unresolvable element stays `Unknown` and fail-open.
+        if let Some(inner) = name.strip_prefix("set[").and_then(|s| s.strip_suffix(']')) {
+            return OpKind::Set(Box::new(self.kind_of_type_str(inner, depth + 1)));
+        }
         match name {
             // #682 U9-U12: `any` is a resolved interface type, not an
             // unresolved one, so it must not fall through to `Unknown`.
@@ -3548,6 +3571,62 @@ impl<'a> Collector<'a> {
                     "argument types must match declared parameter types",
                 );
             }
+        }
+    }
+
+    /// #2474 — the prelude `set[T]` methods that take an element
+    /// (`insert(v t) bool`, `contains(v t) bool`, `remove(v t)`) are emitted
+    /// as Go methods on a synthesized struct, so neither `method_decls` nor
+    /// `check_method_arg_types` sees them. Check the call here against the
+    /// set's element kind: one argument, assignable to `T`. Go refuses both
+    /// a wrong count and a mismatched element (Row 13, `BUILDABLE`).
+    ///
+    /// Any other member name stays fail-open, exactly as before sets had a
+    /// kind.
+    fn check_set_method_call(&mut self, bk: &OpKind, name: &str, args: &[CallArg], span: Span) {
+        let set_kind = match bk {
+            OpKind::Pointer(inner) => inner.as_ref(),
+            other => other,
+        };
+        let OpKind::Set(elem) = set_kind else {
+            return;
+        };
+        if !matches!(name, "insert" | "contains" | "remove") {
+            return;
+        }
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        if args.len() != 1 {
+            self.emit_e1002(
+                span,
+                format!(
+                    "method `{}` on `{}` takes 1 argument but is called with {} — Go refuses `{} arguments in call to {}` (HYB-E1002)",
+                    name,
+                    set_kind.label(),
+                    args.len(),
+                    if args.is_empty() { "not enough" } else { "too many" },
+                    name
+                ),
+                "set element methods take exactly one element argument (SPEC §2.3 T9)",
+            );
+            return;
+        }
+        let a = &args[0];
+        let got = self.kind_of_expr(&a.value);
+        if kinds_conflict(elem, &got) {
+            self.emit_e1002(
+                a.value.span(),
+                format!(
+                    "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}.{}` — Go refuses mismatched argument types (HYB-E1002)",
+                    a.value.render(),
+                    got.label(),
+                    elem.label(),
+                    set_kind.label(),
+                    name
+                ),
+                "the argument to a set's `insert` / `contains` / `remove` must match its element type (SPEC §2.3 T9)",
+            );
         }
     }
 
@@ -5448,6 +5527,9 @@ impl<'a> Collector<'a> {
                 let has_method = self
                     .struct_base_name(&bk)
                     .is_some_and(|sn| self.ck.method_decls.contains_key(&(sn, name.clone())));
+                if !has_method {
+                    self.check_set_method_call(&bk, name, args, span);
+                }
                 if let Some(fk) = self.struct_field_kind(&bk, name) {
                     if !has_method && !matches!(fk, OpKind::Unknown | OpKind::Fn(..)) {
                         self.emit_e1002(
@@ -5776,6 +5858,9 @@ impl<'a> Collector<'a> {
                         | OpKind::Array(_)
                         | OpKind::Map(_, _)
                         | OpKind::Chan(_)
+                        // SPEC §2.3 T9: `len(s)` on a set is lowered by
+                        // `hy-emit` to the prelude's `len()` method.
+                        | OpKind::Set(_)
                 ) || matches!(
                     &ak,
                     OpKind::Pointer(inner) if matches!(**inner, OpKind::Unknown | OpKind::Array(_))
@@ -5892,6 +5977,25 @@ impl<'a> Collector<'a> {
                                     k_expected.label()
                                 ),
                                 "the second argument to `delete(m, k)` must match the map's key type",
+                            );
+                        }
+                    }
+                    // #2474: SPEC §2.3 T9 `delete(s, v)` on a set. `hy-emit`
+                    // lowers it to the prelude's `remove(v t)`, so `v` must be
+                    // assignable to the element type or `go build` fails.
+                    OpKind::Set(elem) => {
+                        let vk = self.kind_of_expr(key_arg);
+                        if kinds_conflict(elem, &vk) {
+                            self.emit_e2005(
+                                span,
+                                format!(
+                                    "cannot use `{}` (type `{}`) as element type `{}` in `delete` on `{}` (HYB-E2005)",
+                                    key_arg.render(),
+                                    vk.label(),
+                                    elem.label(),
+                                    mk.label()
+                                ),
+                                "the second argument to `delete(s, v)` must match the set's element type",
                             );
                         }
                     }
