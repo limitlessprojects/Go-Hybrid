@@ -1832,6 +1832,7 @@ impl<'a> Collector<'a> {
     fn place(&mut self, p: &Place, op: AssignOp) {
         match &p.kind {
             PlaceKind::Ident(n) => {
+                self.check_type_name_in_value_position(n, p.span);
                 // A bare `x = v` store is the ONE target form Go does not
                 // count as a read; `x++`, `x += 1` and every non-ident
                 // target (`x[k] = v`, `x.f = v`, `&x`) read the root.
