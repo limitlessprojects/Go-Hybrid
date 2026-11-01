@@ -556,10 +556,22 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         let mut fnlits = Vec::new();
         walk::own_fnlits(stmt, &mut fnlits);
         if !fnlits.is_empty() {
+            let mut snap_env = st.env.clone();
+            for layer in &st.scopes {
+                for (k, v) in layer {
+                    snap_env.insert(k.clone(), v.clone());
+                }
+            }
+            let snap_aliases = st.aliases.clone();
+            let snap_share = st.may_share.clone();
             if let Some(top) = st.fnlit_scopes.last_mut() {
                 for fl in fnlits {
                     let sp = fl.span();
-                    top.push((sp.start.line as usize, sp.start.col as usize));
+                    let pos = (sp.start.line as usize, sp.start.col as usize);
+                    top.push(pos);
+                    st.closure_scoped_envs.entry(pos).or_insert_with(|| {
+                        (snap_env.clone(), snap_aliases.clone(), snap_share.clone())
+                    });
                 }
             }
         }
