@@ -851,6 +851,20 @@ impl<'a> Collector<'a> {
                 self.struct_field_scalar(&bk, name)
             }
             Expr::Index { base, .. } => self.slice_elem_scalar(base),
+            Expr::Binary { op, lhs, rhs, .. } => match op {
+                BinOp::Add
+                | BinOp::Sub
+                | BinOp::Mul
+                | BinOp::Div
+                | BinOp::Mod
+                | BinOp::BitOr
+                | BinOp::BitXor
+                | BinOp::BitAnd => self
+                    .expr_scalar_type(lhs)
+                    .or_else(|| self.expr_scalar_type(rhs)),
+                BinOp::Shl | BinOp::Shr => self.expr_scalar_type(lhs),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -3684,6 +3698,19 @@ impl<'a> Collector<'a> {
                         ),
                         "equality operators (`==`, `!=`) require operands of matching type",
                     );
+                } else if let (Some(l_sc), Some(r_sc)) = (self.expr_scalar_type(lhs), self.expr_scalar_type(rhs)) {
+                    if l_sc != r_sc {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "invalid operation `{}` (mismatched types `{}` and `{}`) (HYB-E1002)",
+                                span_expr_label(lhs, op_str, rhs),
+                                l_sc,
+                                r_sc
+                            ),
+                            "equality operators (`==`, `!=`) require operands of matching type",
+                        );
+                    }
                 }
             }
             // B4: `&&` and `||` require `bool` operands.
@@ -3730,6 +3757,19 @@ impl<'a> Collector<'a> {
                         ),
                         "ordered comparisons (`<`, `<=`, `>`, `>=`) require two numeric values or two strings",
                     );
+                } else if let (Some(l_sc), Some(r_sc)) = (self.expr_scalar_type(lhs), self.expr_scalar_type(rhs)) {
+                    if l_sc != r_sc {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "invalid operation `{}` (mismatched types `{}` and `{}`) (HYB-E1002)",
+                                span_expr_label(lhs, op_str, rhs),
+                                l_sc,
+                                r_sc
+                            ),
+                            "ordered comparisons (`<`, `<=`, `>`, `>=`) require operands of matching type",
+                        );
+                    }
                 }
             }
             // B3: `+` accepts numeric+numeric or string+string.
