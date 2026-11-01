@@ -1,8 +1,8 @@
-//! sendability.rs — rule A1c (O4 classes) at spawn/send check-sites, plus
+//! sendability.rs â€” rule A1c (O4 classes) at spawn/send check-sites, plus
 //! the O6 `managed` suppression and lint (HYB-E8001), the O4.9 FAIL-CLOSED
-//! boundary (HYB-E3005, rule FC — human directive 2026-10-13), the O5.4
+//! boundary (HYB-E3005, rule FC â€” human directive 2026-10-13), the O5.4
 //! move-form check (HYB-E3004), the spawn-callee proof (O4.0: the callee
-//! must resolve to a declared top-level `fn` — closure callees share their
+//! must resolve to a declared top-level `fn` â€” closure callees share their
 //! captures with the new task, unknown callees are fail-closed), and the
 //! N1 nil rule at boundaries and known-type sites (HYB-E4001).
 //!
@@ -14,7 +14,7 @@
 //!   * REJECT: a named mutable GC binding (map/slice/struct/pointer-to-
 //!     mutable), `&mutable_struct_binding`, borrow-handles, closures.
 //!   * UNPROVEN (fail-closed, O4.9): a value whose type shape did not
-//!     resolve, or a name that did not resolve — silently passing was the
+//!     resolve, or a name that did not resolve â€” silently passing was the
 //!     Tier-0 default until the human owner ruled it must not. The escape
 //!     hatch is explicit and auditable: `managed` (HYB-E8001, counted by
 //!     --report-managed).
@@ -29,14 +29,14 @@ use hy_syntax::{Expr, LitKind, TypeExpr};
 /// The spawn-callee proof (O4.0): what the checker concluded about the
 /// expression a `task` statement spawns.
 pub(crate) enum CalleeVerdict {
-    /// A declared top-level `fn` — a static call; nothing but the arguments
+    /// A declared top-level `fn` â€” a static call; nothing but the arguments
     /// crosses into the new task.
     Proven,
     /// A closure (a literal, or a closure-typed binding): spawning it
     /// shares its captured environment with the new task (A5).
     Closure(RejectInfo),
     /// Everything else (an unresolvable name, a method value, a computed
-    /// callee) — fail-closed unproven (O4.9).
+    /// callee) â€” fail-closed unproven (O4.9).
     Unproven(String),
 }
 
@@ -44,14 +44,14 @@ pub(crate) enum CalleeVerdict {
 pub(crate) enum Outcome {
     /// Sendable via classes 1-5 (or already-reported use-after-move).
     Ok,
-    /// Resolved via class 6 (managed taint / suppression) — sendable.
+    /// Resolved via class 6 (managed taint / suppression) â€” sendable.
     /// `risky` marks values that are NOT also safe-by-type (mutable GC
-    /// state): only those carry the audit lint and the class-6 site count —
+    /// state): only those carry the audit lint and the class-6 site count â€”
     /// a tainted channel or primitive crossing a site is not the trust
     /// surface an auditor needs named (O6.3: the lint carries WHAT is
     /// shared and WHY it is believed safe).
     Managed { desc: String, risky: bool },
-    /// Not sendable (A1c) — the checker SAW the type and it is mutable GC
+    /// Not sendable (A1c) â€” the checker SAW the type and it is mutable GC
     /// state (or a handle / closure).
     Rejected(RejectInfo),
     /// FAIL-CLOSED (O4.9): the checker could NOT resolve the type or the
@@ -131,7 +131,7 @@ impl<'a> Checker<'a> {
                 value: name.to_string(),
                 ty: self.binding_ty_str(b),
                 notes: vec![format!(
-                    "`{}` is a borrow handle (element view) — borrow loans are function-local and cannot be moved across tasks (O2/O7/O11); only own-handles transfer via `move`",
+                    "`{}` is a borrow handle (element view) â€” borrow loans are function-local and cannot be moved across tasks (O2/O7/O11); only own-handles transfer via `move`",
                     name
                 )],
             }),
@@ -139,7 +139,7 @@ impl<'a> Checker<'a> {
                 value: name.to_string(),
                 ty: self.binding_ty_str(b),
                 notes: vec![format!(
-                    "`{}` is an opaque foreign value ({}) — foreign runtime/synchronization types cannot be moved across tasks (O4/A5)",
+                    "`{}` is an opaque foreign value ({}) â€” foreign runtime/synchronization types cannot be moved across tasks (O4/A5)",
                     name,
                     self.binding_ty_str(b)
                 )],
@@ -464,7 +464,7 @@ impl<'a> Checker<'a> {
 
     pub(crate) fn classify_value(&self, st: &FnState, expr: &Expr) -> Outcome {
         let expr = unwrap_parens(expr);
-        // `move x` — class 3; validate that `x` resolves to a movable shape
+        // `move x` â€” class 3; validate that `x` resolves to a movable shape
         // (never Unknown, Closure, BorrowHandle, or ForeignOpaque).
         if let Expr::Move { operand, .. } = expr {
             let op = unwrap_parens(operand);
@@ -490,7 +490,7 @@ impl<'a> Checker<'a> {
         if matches!(expr, Expr::Lit { .. } | Expr::Interp { .. }) {
             return Outcome::Ok;
         }
-        // closures capture their environment — not sendable in Tier 0
+        // closures capture their environment â€” not sendable in Tier 0
         if matches!(expr, Expr::FnLit { .. }) {
             return Outcome::Rejected(RejectInfo {
                 value: expr.render(),
@@ -500,7 +500,7 @@ impl<'a> Checker<'a> {
                 ],
             });
         }
-        // `&binding` — the pointer shape
+        // `&binding` â€” the pointer shape
         if let Some(operand) = as_addr_of(expr) {
             return self.classify_addr_of(st, expr, operand);
         }
@@ -555,8 +555,20 @@ impl<'a> Checker<'a> {
                 self.outcome_for_shape(&shape, &expr.render())
             }
             // everything else (calls, receives, arithmetic, try, paren):
-            // classify the result shape
+            // classify every forwarded result shape (issue #1174: multi-value
+            // call forwarding `task worker(pair(m))` / `task worker(pair_try(m)?)`
+            // crosses all returned values, not only result 0).
             _ => {
+                if let Some(shapes) = self.forwarded_call_result_shapes(st, expr) {
+                    let rendered = expr.render();
+                    for shape in &shapes {
+                        match self.outcome_for_shape(shape, &rendered) {
+                            Outcome::Ok => {}
+                            other => return other,
+                        }
+                    }
+                    return Outcome::Ok;
+                }
                 let shape = self.shape_of_expr(st, expr);
                 self.outcome_for_shape(&shape, &expr.render())
             }
@@ -566,7 +578,7 @@ impl<'a> Checker<'a> {
     fn classify_ident(&self, st: &FnState, name: &str) -> Outcome {
         let Some(b) = self.lookup_binding(st, name) else {
             // FAIL-CLOSED (O4.9): a name that does not resolve cannot be
-            // proven safe — it used to pass silently; now it is HYB-E3005
+            // proven safe â€” it used to pass silently; now it is HYB-E3005
             // unless the site is `managed`.
             return Outcome::Unproven(UnprovenInfo {
                 value: name.to_string(),
@@ -574,7 +586,7 @@ impl<'a> Checker<'a> {
             });
         };
         if b.moved.is_some() {
-            // already reported at the use site — do not double-report A1c
+            // already reported at the use site â€” do not double-report A1c
             return Outcome::Ok;
         }
         if b.managed_taint {
@@ -611,7 +623,7 @@ impl<'a> Checker<'a> {
                 value: name.to_string(),
                 ty,
                 notes: vec![format!(
-                    "`{}` is a boundary handle — handles cross tasks only via an owned `move` (O11/O13)",
+                    "`{}` is a boundary handle â€” handles cross tasks only via an owned `move` (O11/O13)",
                     name
                 )],
             });
@@ -627,7 +639,7 @@ impl<'a> Checker<'a> {
         }
         if matches!(b.shape, TypeShape::Map(_, _)) {
             notes.push(
-                "as written this also panics in Go — concurrent map writes are a runtime fatal; the checker tells you earlier".to_string(),
+                "as written this also panics in Go â€” concurrent map writes are a runtime fatal; the checker tells you earlier".to_string(),
             );
         }
         Outcome::Rejected(RejectInfo {
@@ -653,7 +665,7 @@ impl<'a> Checker<'a> {
         };
         let Some(b) = self.lookup_binding(st, root) else {
             // FAIL-CLOSED (O4.9): lending through a name that does not
-            // resolve — cannot prove what is behind the `&`.
+            // resolve â€” cannot prove what is behind the `&`.
             return Outcome::Unproven(UnprovenInfo {
                 value: expr.render(),
                 reason: format!("the name `{root}` did not resolve in this scope"),
@@ -677,22 +689,22 @@ impl<'a> Checker<'a> {
             });
         }
         match &b.shape {
-            // `&hits` where hits is atomic-typed — the mediated route (OQ6)
+            // `&hits` where hits is atomic-typed â€” the mediated route (OQ6)
             TypeShape::Atomic => Outcome::Ok,
-            // `&ch` — channels are share-safe by type
+            // `&ch` â€” channels are share-safe by type
             TypeShape::Chan(_) => Outcome::Ok,
             TypeShape::Struct(Some(sname)) => {
                 let contested = self.struct_has_mutex_field(sname);
                 let mut notes = vec![format!(
-                    "`{}` is a mutable struct shared as a live borrow — mutation through it from several tasks is a data race",
+                    "`{}` is a mutable struct shared as a live borrow â€” mutation through it from several tasks is a data race",
                     root
                 )];
                 if contested {
                     notes.push(
-                        "this struct is guarded by sync.mutex — race-free idiomatic Go, but Tier 0 does not credit locks at spawn sites (QUESTIONS.md Q1, reading (c))".to_string(),
+                        "this struct is guarded by sync.mutex â€” race-free idiomatic Go, but Tier 0 does not credit locks at spawn sites (QUESTIONS.md Q1, reading (c))".to_string(),
                     );
                     notes.push(
-                        "an \"externally synchronized\" amendment (checker-verified exclusive access behind a lock) is under discussion for a later tier — this rejection is expected to be revisited; it is tracked, not silent (OQ2)".to_string(),
+                        "an \"externally synchronized\" amendment (checker-verified exclusive access behind a lock) is under discussion for a later tier â€” this rejection is expected to be revisited; it is tracked, not silent (OQ2)".to_string(),
                     );
                 }
                 Outcome::Rejected(RejectInfo {
@@ -706,7 +718,7 @@ impl<'a> Checker<'a> {
                     value: expr.render(),
                     ty: format!("*{}", self.binding_ty_str(b)),
                     notes: vec![format!(
-                        "`&{}` lends the whole mutable {} — a live borrow of mutable shared state, which is not one of the sendable classes (O4)",
+                        "`&{}` lends the whole mutable {} â€” a live borrow of mutable shared state, which is not one of the sendable classes (O4)",
                         root,
                         b.shape.noun()
                     )],
@@ -735,7 +747,7 @@ impl<'a> Checker<'a> {
                 }
                 Outcome::Rejected(mut info) => {
                     info.notes.push(format!(
-                        "`{}` is a live mutable value referenced by the fresh literal `{}` — a fresh literal is sendable only when every reference-typed part is (O4.6 deep sendability)",
+                        "`{}` is a live mutable value referenced by the fresh literal `{}` â€” a fresh literal is sendable only when every reference-typed part is (O4.6 deep sendability)",
                         info.value,
                         expr.render()
                     ));
@@ -762,6 +774,43 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// When `expr` is a multi-result call (or `Try` unwrapping a call with >= 2
+    /// non-error results) forwarded directly into a boundary argument list
+    /// (`task worker(pair(m))`, `task worker(pair_try(m)?)`), return all
+    /// forwarded result shapes so every result is sendability-classified (#1174).
+    fn forwarded_call_result_shapes(&self, st: &FnState, expr: &Expr) -> Option<Vec<TypeShape>> {
+        let (inner, is_try) = match unwrap_parens(expr) {
+            Expr::Try { operand, .. } => (unwrap_parens(operand), true),
+            other => (other, false),
+        };
+        let Expr::Call { callee, args, .. } = inner else {
+            return None;
+        };
+        if matches!(
+            unwrap_parens(callee),
+            Expr::Ident { name, .. }
+                if Self::base_named_type_str(name) == "some"
+                    && self.lookup_binding(st, name).is_none()
+                    && self.lookup_binding(st, Self::base_named_type_str(name)).is_none()
+                    && !self.fns.contains_key(name.as_str())
+                    && !self.fns.contains_key(Self::base_named_type_str(name))
+        ) {
+            return None;
+        }
+        let mut shapes = self.call_result_shapes(st, callee, args)?;
+        if is_try {
+            if shapes.is_empty() {
+                return None;
+            }
+            shapes.pop();
+        }
+        if shapes.len() >= 2 {
+            Some(shapes)
+        } else {
+            None
+        }
+    }
+
     fn outcome_for_shape(&self, shape: &TypeShape, value: &str) -> Outcome {
         if matches!(shape, TypeShape::Unknown) {
             // FAIL-CLOSED (O4.9): an expression whose result type did not
@@ -782,7 +831,7 @@ impl<'a> Checker<'a> {
                 value: value.to_string(),
                 ty: ty.clone(),
                 notes: vec![format!(
-                    "`{}` is a boundary handle — handles cross tasks only via an owned `move` (O11/O13)",
+                    "`{}` is a boundary handle â€” handles cross tasks only via an owned `move` (O11/O13)",
                     value
                 )],
             });
@@ -816,7 +865,7 @@ impl<'a> Checker<'a> {
         )
     }
 
-    /// N1: which shapes have a `nil`? Only the foreign-Go perimeter (N2 —
+    /// N1: which shapes have a `nil`? Only the foreign-Go perimeter (N2 â€”
     /// `ForeignOpaque`; `error` itself resolves to Unknown today, so a nil
     /// whose target is Unknown is UNPROVEN, never silently ok).
     pub(crate) fn is_nilable_shape(t: &TypeShape) -> bool {
@@ -824,7 +873,7 @@ impl<'a> Checker<'a> {
     }
 
     /// The spawn-callee proof (O4.0): a spawn is only proven when the callee
-    /// resolves to a declared top-level `fn` — a static call where nothing
+    /// resolves to a declared top-level `fn` â€” a static call where nothing
     /// but the arguments crosses. A closure callee shares its captured
     /// environment with the new task (A5 reject); an unresolvable callee is
     /// fail-closed unproven (O4.9). Local bindings shadow the fn table.
@@ -834,8 +883,8 @@ impl<'a> Checker<'a> {
                 value,
                 ty: "closure".to_string(),
                 notes: vec![
-                    "the spawned callee is a closure: closures capture their environment, so spawning one shares every capture with the new task (A5) — spawn a declared top-level `fn` instead".to_string(),
-                    "if the closure is the design (an actor loop, a worker body), wrap the site in `managed(\"why this bypass is safe\", \"actor\") { ... }` — the explicit, auditable hatch (HYB-E8001, counted by --report-managed)".to_string(),
+                    "the spawned callee is a closure: closures capture their environment, so spawning one shares every capture with the new task (A5) â€” spawn a declared top-level `fn` instead".to_string(),
+                    "if the closure is the design (an actor loop, a worker body), wrap the site in `managed(\"why this bypass is safe\", \"actor\") { ... }` â€” the explicit, auditable hatch (HYB-E8001, counted by --report-managed)".to_string(),
                 ],
             })
         };
@@ -847,7 +896,7 @@ impl<'a> Checker<'a> {
                         return closure_reject(name.clone());
                     }
                     return CalleeVerdict::Unproven(format!(
-                        "the spawn callee `{}` resolved to a local binding that is not a declared top-level `fn` — the spawn-callee proof (O4.0) only covers declared fns",
+                        "the spawn callee `{}` resolved to a local binding that is not a declared top-level `fn` â€” the spawn-callee proof (O4.0) only covers declared fns",
                         name
                     ));
                 }
@@ -857,7 +906,7 @@ impl<'a> Checker<'a> {
                     || self.type_aliases.contains_key(name.as_str())
                 {
                     return CalleeVerdict::Unproven(format!(
-                        "the spawn callee `{}` resolved to a type name or type parameter that is not a declared top-level `fn` — the spawn-callee proof (O4.0) only covers declared fns",
+                        "the spawn callee `{}` resolved to a type name or type parameter that is not a declared top-level `fn` â€” the spawn-callee proof (O4.0) only covers declared fns",
                         name
                     ));
                 }
@@ -865,12 +914,12 @@ impl<'a> Checker<'a> {
                     return CalleeVerdict::Proven;
                 }
                 CalleeVerdict::Unproven(format!(
-                    "the spawn callee `{}` did not resolve to a declared top-level `fn` — the checker cannot prove what would run in the new task",
+                    "the spawn callee `{}` did not resolve to a declared top-level `fn` â€” the checker cannot prove what would run in the new task",
                     name
                 ))
             }
             _ => CalleeVerdict::Unproven(format!(
-                "the checker can only prove spawns of declared top-level `fn`s — `{}` is a method value or a computed callee, which the spawn-callee proof (O4.0) cannot verify",
+                "the checker can only prove spawns of declared top-level `fn`s â€” `{}` is a method value or a computed callee, which the spawn-callee proof (O4.0) cannot verify",
                 callee.render()
             )),
         }
@@ -893,7 +942,7 @@ impl<'a> Checker<'a> {
                     || self.enums.contains_key(name.as_str())
                     || self.type_aliases.contains_key(name.as_str())
                 {
-                    return None; // shadowed by a local binding or type — not a static fn call
+                    return None; // shadowed by a local binding or type â€” not a static fn call
                 }
                 let f = self.fns.get(name)?;
                 if f.params.len() != argc {
@@ -936,7 +985,7 @@ impl<'a> Checker<'a> {
     /// Could a value of shape `got` legitimately occupy a slot of shape
     /// `want` (channel element on send, or typed target on receive)?
     /// Compares COARSE TypeShape classes only. `Unknown` / unnamed struct /
-    /// foreign-opaque never reject — a false reject is worse than a miss
+    /// foreign-opaque never reject â€” a false reject is worse than a miss
     /// (issue #146).
     pub(crate) fn shape_may_be_elem(got: &TypeShape, want: &TypeShape) -> bool {
         use TypeShape::*;
@@ -971,7 +1020,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Emit HYB-E3011 for a send whose value shape cannot be the channel
-    /// element. A TYPE contract — `managed` does not suppress it.
+    /// element. A TYPE contract â€” `managed` does not suppress it.
     pub(crate) fn emit_chan_elem_mismatch_send(
         &mut self,
         value_shape: &TypeShape,
@@ -1080,14 +1129,14 @@ impl<'a> Checker<'a> {
     /// channel expression resolves to a channel shape. Before this check a
     /// deliberate `noop() <- 1` (void call as target) and the accidental
     /// newline fusion `noop()` / `<-done` (parser) both passed with 0
-    /// diagnostics and emitted Go that failed `go build` — breaking the
+    /// diagnostics and emitted Go that failed `go build` â€” breaking the
     /// accepted-should-emit-buildable-Go contract. A concrete non-channel
     /// is HYB-E3007; an unresolvable shape is fail-closed HYB-E3005
     /// (O4.9). Like E3004/E3006, an ill-typed TARGET is not a sendability
-    /// doubt — `managed` does not suppress it. Returns true when the
+    /// doubt â€” `managed` does not suppress it. Returns true when the
     /// target is a channel (callers then run the value check-site as
     /// usual); false emits the diagnostic and the caller skips the value
-    /// check (the site is ill-typed — no cascade).
+    /// check (the site is ill-typed â€” no cascade).
     fn send_target_shape(&self, st: &FnState, chan: &Expr) -> TypeShape {
         if let Expr::Index { base, .. } = unwrap_parens_and_move(chan) {
             if let TypeShape::Pointer(inner) = self.send_target_shape(st, base) {
@@ -1129,7 +1178,7 @@ impl<'a> Checker<'a> {
                             .any(|d| d.code == "HYB-E3008" && d.span == span)
                         {
                             let msg = format!(
-                                "cannot send to `{}` (`{}`) — channel is receive-only (HYB-E3007)",
+                                "cannot send to `{}` (`{}`) â€” channel is receive-only (HYB-E3007)",
                                 chan.render(),
                                 resolved.render()
                             );
@@ -1149,7 +1198,7 @@ impl<'a> Checker<'a> {
             }
             TypeShape::Unknown => {
                 let msg = format!(
-                    "cannot prove `{}` is a channel — a send target must resolve to `chan T` (O4.9)",
+                    "cannot prove `{}` is a channel â€” a send target must resolve to `chan T` (O4.9)",
                     chan.render()
                 );
                 let notes = vec![
@@ -1163,13 +1212,13 @@ impl<'a> Checker<'a> {
             }
             other => {
                 let msg = format!(
-                    "cannot send to `{}` ({}) — a send target must be a channel (O4)",
+                    "cannot send to `{}` ({}) â€” a send target must be a channel (O4)",
                     chan.render(),
                     other.render()
                 );
                 let notes = vec![
                     "why: `<-` on a non-channel value is not valid Go; the accepted subset only emits buildable Go (issue #77)".to_string(),
-                    "fix: send to a `chan T` binding (`ch := make(chan T, n)` or a `chan T` parameter); note that a statement STARTING with `<-expr` is a RECEIVE — a `<-` on a new line never continues the previous statement".to_string(),
+                    "fix: send to a `chan T` binding (`ch := make(chan T, n)` or a `chan T` parameter); note that a statement STARTING with `<-expr` is a RECEIVE â€” a `<-` on a new line never continues the previous statement".to_string(),
                 ];
                 self.diags.push(
                     Diagnostic::error("HYB-E3007", self.path.clone(), span, msg).with_notes(notes),
@@ -1182,7 +1231,7 @@ impl<'a> Checker<'a> {
     /// Emit HYB-E4001: `nil` flowing into a known non-nilable type (rule N1).
     /// `what` names the target in the message ("the assignment target `m`",
     /// "a parameter of the spawn callee", ...). A TYPE contract, not a
-    /// sendability doubt — `managed` does not suppress it.
+    /// sendability doubt â€” `managed` does not suppress it.
     pub(crate) fn emit_nil_type_error(&mut self, target: &TypeShape, span: Span, what: &str) {
         self.emit_nil_type_error_text(target, target.render(), span, what);
     }
@@ -1204,60 +1253,60 @@ impl<'a> Checker<'a> {
             "why: nil exists only for `error` and foreign Go values (N1/N2); every Hybrid-declared type has a zero value instead (N3)".to_string(),
         ];
         notes.push(match target {
-            TypeShape::Map(_, _) => "fix: use an empty map literal — a zero map reads as empty and auto-allocates on first write (N5)".to_string(),
-            TypeShape::Slice(_) | TypeShape::Array(_) => "fix: use an empty slice literal (`[]T{}`) — observationally identical to Go's nil slice (N4)".to_string(),
+            TypeShape::Map(_, _) => "fix: use an empty map literal â€” a zero map reads as empty and auto-allocates on first write (N5)".to_string(),
+            TypeShape::Slice(_) | TypeShape::Array(_) => "fix: use an empty slice literal (`[]T{}`) â€” observationally identical to Go's nil slice (N4)".to_string(),
             TypeShape::Str => "fix: use the empty string `\"\"`".to_string(),
             TypeShape::Primitive => "fix: use the type's zero value (`0`, `0.0`, `false`)".to_string(),
             TypeShape::Struct(_) => "fix: use the field-wise zero literal (`Type{}`)".to_string(),
-            TypeShape::Chan(_) => "fix: declare the binding without an initializer — the zero channel is the zero value (N3)".to_string(),
+            TypeShape::Chan(_) => "fix: declare the binding without an initializer â€” the zero channel is the zero value (N3)".to_string(),
             TypeShape::Pointer(_) | TypeShape::Closure => "fix: restructure so the value is always valid, or carry absence with `option[T]`".to_string(),
             _ => "fix: use the type's zero value (N3)".to_string(),
         });
         notes.push(
-            "if absence is the meaning, use `option[T]` — its zero value is `none` (N3)"
+            "if absence is the meaning, use `option[T]` â€” its zero value is `none` (N3)"
                 .to_string(),
         );
         self.diags
             .push(Diagnostic::error("HYB-E4001", self.path.clone(), span, msg).with_notes(notes));
     }
 
-    /// Emit HYB-E4003: an UNTYPED nil declaration — `var x = nil` / `x := nil`
+    /// Emit HYB-E4003: an UNTYPED nil declaration â€” `var x = nil` / `x := nil`
     /// / `let x = nil` (no ascription). The E4001 sites all require a declared
     /// type to prove the nil against; with no ascription there is no type at
     /// all, `shape_of_expr(nil)` is Unknown, and the checker used to accept the
-    /// declaration — then the emitter emitted `var x = nil`, which Go rejects
+    /// declaration â€” then the emitter emitted `var x = nil`, which Go rejects
     /// outright (`use of untyped nil in variable declaration`). nil has exactly
     /// two homes (N1): `error` and the foreign-Go perimeter, and both must be
-    /// visible in a DECLARED type — an untyped nil can never name either.
+    /// visible in a DECLARED type â€” an untyped nil can never name either.
     pub(crate) fn emit_untyped_nil_decl_error(&mut self, name: &str, span: Span) {
         let msg = format!(
             "`{}` is declared from an untyped `nil`: Go rejects the emitted declaration (`use of untyped nil in variable declaration`)",
             name
         );
         let notes = vec![
-            "why: nil has exactly two homes (N1) — `error` and the foreign-Go perimeter (N2) — and both must be visible in a DECLARED type; an untyped nil can never name either, so the emitted `var x = nil` fails `go build`".to_string(),
-            "fix: declare the nil home explicitly — `var e error = nil` (error's zero value) or `var h Foreign.handle = nil` at the foreign perimeter (N1/N2)".to_string(),
-            "fix: declare the binding without an initializer — the zero value of the intended type IS the value (N3): `var ch chan int` (zero channel), `var s []int` (zero slice), `var m map[string]int` (zero map)".to_string(),
-            "fix: if absence is the meaning, use `option[T]` — its zero value is `none` (N3)".to_string(),
+            "why: nil has exactly two homes (N1) â€” `error` and the foreign-Go perimeter (N2) â€” and both must be visible in a DECLARED type; an untyped nil can never name either, so the emitted `var x = nil` fails `go build`".to_string(),
+            "fix: declare the nil home explicitly â€” `var e error = nil` (error's zero value) or `var h Foreign.handle = nil` at the foreign perimeter (N1/N2)".to_string(),
+            "fix: declare the binding without an initializer â€” the zero value of the intended type IS the value (N3): `var ch chan int` (zero channel), `var s []int` (zero slice), `var m map[string]int` (zero map)".to_string(),
+            "fix: if absence is the meaning, use `option[T]` â€” its zero value is `none` (N3)".to_string(),
         ];
         self.diags
             .push(Diagnostic::error("HYB-E4003", self.path.clone(), span, msg).with_notes(notes));
     }
 
     /// N1 for composite literals: `job{m: nil}` with a map-typed field used
-    /// to pass the checker — classify_composite has no per-field type
+    /// to pass the checker â€” classify_composite has no per-field type
     /// context, so the bare-nil check at the five direct-flow sites never
     /// saw the nested `nil`. The fix follows the N1 doctrine (a TYPE
     /// contract, emitted even inside `managed`): every literal carries its
     /// own type context (the struct def, the map's value type, the slice's
     /// element type), so a `nil` whose slot resolves to a non-nilable shape
-    /// is a type error right there — boundary or not.
+    /// is a type error right there â€” boundary or not.
     pub(crate) fn check_composite_nils(&mut self, st: &FnState, value: &Expr) {
         match unwrap_parens(value) {
             Expr::StructLit { ty, fields, .. } => {
                 // the literal's own ascription wins; else infer from the env
                 // (an ascribed define `var j jobT = jobT{...}` names the
-                // struct twice — same answer)
+                // struct twice â€” same answer)
                 let sname = ty.as_ref().and_then(|t| match t {
                     hy_syntax::TypeExpr::Named { name, .. } => Some(name.clone()),
                     _ => None,
@@ -1265,7 +1314,7 @@ impl<'a> Checker<'a> {
                 // A struct literal spelled through a type alias (`type
                 // holder_alias = holder; h := holder_alias{m: nil}`) names the
                 // ALIAS here, but `self.structs` is keyed by the real
-                // declaration name — the raw lookup missed, and the nil-field
+                // declaration name â€” the raw lookup missed, and the nil-field
                 // sweep silently skipped every field of an alias-spelled
                 // literal while the same literal spelled directly rejected
                 // (#385, live probe 2026-10-18). Follow the alias chain to its
@@ -1415,7 +1464,7 @@ impl<'a> Checker<'a> {
         let mut unprovens: Vec<UnprovenInfo> = Vec::new();
         let mut managed_descs: Vec<String> = Vec::new();
         let mut moves: Vec<(String, Span)> = Vec::new();
-        // N1 nil type errors (HYB-E4001) — emitted even inside `managed`:
+        // N1 nil type errors (HYB-E4001) â€” emitted even inside `managed`:
         // the hatch covers sendability doubts, not the null-safety contract.
         let mut nil_rejects: Vec<(TypeShape, Span)> = Vec::new();
 
@@ -1437,10 +1486,10 @@ impl<'a> Checker<'a> {
         for (vi, v) in values.iter().enumerate() {
             // N1 for composite literals: a literal that crosses the boundary
             // with nested nils (`task worker(jobT{m: nil})`) is a TYPE error
-            // at its own slot — emitted even inside `managed` (HYB-E4001).
+            // at its own slot â€” emitted even inside `managed` (HYB-E4001).
             self.check_composite_nils(st, v);
             // N1 (rule N): a bare `nil` is not a classifiable sendability
-            // value — it either lands on a type that HAS a nil (error,
+            // value â€” it either lands on a type that HAS a nil (error,
             // foreign; N2) or it is a type error (HYB-E4001). With no
             // resolvable target the fail-closed rule applies (O4.9).
             if Self::is_nil_literal(v) {
@@ -1555,7 +1604,7 @@ impl<'a> Checker<'a> {
             }
 
             // Issue #146: once sendability accepts the value, still reject a
-            // CERTAIN channel-element type mismatch (send only — spawn has
+            // CERTAIN channel-element type mismatch (send only â€” spawn has
             // no element type). Reported only on Outcome::Ok so a value
             // already rejected as non-sendable (HYB-E3002) keeps a single
             // diagnostic (no cascade).
@@ -1639,7 +1688,7 @@ impl<'a> Checker<'a> {
 
         if !rejects.is_empty() || !unprovens.is_empty() {
             if managed {
-                // O6.1: sites inside a managed block are permitted + linted —
+                // O6.1: sites inside a managed block are permitted + linted â€”
                 // this is the explicit, auditable escape hatch that covers
                 // both rejected shapes and (O4.9) unproven ones: what the
                 // hatch cannot do is make the checker CALL it safe.
@@ -1651,7 +1700,7 @@ impl<'a> Checker<'a> {
                 shared.extend(
                     unprovens
                         .iter()
-                        .map(|u| format!("`{}` (unproven — {})", u.value, u.reason)),
+                        .map(|u| format!("`{}` (unproven â€” {})", u.value, u.reason)),
                 );
                 let msg = format!(
                     "spawn/send site inside a `managed` block: {} shared across tasks (unchecked)",
@@ -1659,8 +1708,8 @@ impl<'a> Checker<'a> {
                 );
                 let notes = vec![
                     "the `managed` hatch suppresses the sendability check (O6.1): the contract is Go's DRF-SC discipline with `-race` as the backstop".to_string(),
-                    "managed does not remove Go's own runtime fatals (concurrent map writes are still a runtime fatal) — prefer the channel redesign or add a lock".to_string(),
-                    "counted by --report-managed — the hatch is greppable, auditable, countable (O6.3)".to_string(),
+                    "managed does not remove Go's own runtime fatals (concurrent map writes are still a runtime fatal) â€” prefer the channel redesign or add a lock".to_string(),
+                    "counted by --report-managed â€” the hatch is greppable, auditable, countable (O6.3)".to_string(),
                 ];
                 self.diags.push(
                     Diagnostic::warning("HYB-E8001", self.path.clone(), span, msg)
@@ -1680,18 +1729,18 @@ impl<'a> Checker<'a> {
                 }
                 // O4.9 fail-closed (rule FC): unproven values never silently
                 // pass. Outside a managed block the site does not build until
-                // the value's type is visible to the checker — or the hatch
+                // the value's type is visible to the checker â€” or the hatch
                 // is taken deliberately. The diagnostic teaches the fix (O17).
                 for u in unprovens {
                     let msg = format!(
-                        "`{}` cannot be proven safe {} — its type did not resolve, so the checker cannot verify the share",
+                        "`{}` cannot be proven safe {} â€” its type did not resolve, so the checker cannot verify the share",
                         u.value, site_word
                     );
                     let notes = vec![
                         format!("why: {}", u.reason),
-                        "the checker is fail-closed at boundaries: what it cannot prove, it will not call safe (O4.9) — a wrong silent pass here would void the Tier-0 guarantee for the whole program".to_string(),
+                        "the checker is fail-closed at boundaries: what it cannot prove, it will not call safe (O4.9) â€” a wrong silent pass here would void the Tier-0 guarantee for the whole program".to_string(),
                         "fix: ascribe the type at the declaration (`var x map[string]int = ...`) or route the value through a channel of a known sendable element type".to_string(),
-                        "if the share is genuinely guarded, wrap this site in `managed(\"why this bypass is safe\", \"category\") { ... }` — the explicit, auditable hatch (HYB-E8001, counted by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)".to_string(),
+                        "if the share is genuinely guarded, wrap this site in `managed(\"why this bypass is safe\", \"category\") { ... }` â€” the explicit, auditable hatch (HYB-E8001, counted by --report-managed; categories: mutex, atomic, actor, finalizer, interop, other)".to_string(),
                     ];
                     self.diags.push(
                         Diagnostic::error("HYB-E3005", self.path.clone(), span, msg)
@@ -1704,11 +1753,11 @@ impl<'a> Checker<'a> {
             // block; only non-safe-by-type values are the trust surface
             self.sites_via_managed += 1;
             let msg = format!(
-                "managed value crosses this spawn/send site (class 6 — outside the safety guarantee): {}",
+                "managed value crosses this spawn/send site (class 6 â€” outside the safety guarantee): {}",
                 managed_descs.join(", ")
             );
             let notes = vec![
-                "a value born inside a `managed` block is sendable everywhere but stays outside the §9.2 guarantee for its whole lifetime (O6.2)".to_string(),
+                "a value born inside a `managed` block is sendable everywhere but stays outside the Â§9.2 guarantee for its whole lifetime (O6.2)".to_string(),
                 "counted by --report-managed (O6.3)".to_string(),
             ];
             self.diags.push(
@@ -1716,7 +1765,7 @@ impl<'a> Checker<'a> {
             );
         }
 
-        // N1 (rule N): nil-into-non-nilable is a TYPE error — it fires even
+        // N1 (rule N): nil-into-non-nilable is a TYPE error â€” it fires even
         // inside a `managed` block (the hatch covers sendability doubts, not
         // the null-safety contract).
         let nil_what = if code == "HYB-E3001" {
@@ -1735,7 +1784,7 @@ impl<'a> Checker<'a> {
     }
 
     // -----------------------------------------------------------------------
-    // Channel direction enforcement for `close()` and `for … in` (HYB-E3009, #94)
+    // Channel direction enforcement for `close()` and `for â€¦ in` (HYB-E3009, #94)
     // -----------------------------------------------------------------------
 
     /// Triggered once per file from Pass B (`arith.rs`): walks every declared
@@ -1743,7 +1792,7 @@ impl<'a> Checker<'a> {
     /// ascriptions (`var rc <-chan int = c`) and enforces:
     ///   1. `close(ch)` (including `defer close(ch)` and calls inside closures)
     ///      rejects `<-chan T` (`ChanDir::Recv`) with `HYB-E3009`.
-    ///   2. `for … in ch` rejects `chan<- T` (`ChanDir::Send`) with `HYB-E3009`.
+    ///   2. `for â€¦ in ch` rejects `chan<- T` (`ChanDir::Send`) with `HYB-E3009`.
     ///   3. Value-flow coercion sites (`var`/`const` ascription, assignment,
     ///      call/task/method/closure args, return, struct/slice/map literal
     ///      fields/elements, and channel sends/receives of channel elements)
@@ -2885,7 +2934,7 @@ impl<'a> Checker<'a> {
         let got_str = self.resolve_type_alias(got_ty).render();
         let want_str = self.resolve_type_alias(want_ty).render();
         let msg = format!(
-            "cannot use `{}` (`{}`) where `{}` is required — a unidirectional channel never converts to another direction (only `chan T` narrows) (HYB-E3012)",
+            "cannot use `{}` (`{}`) where `{}` is required â€” a unidirectional channel never converts to another direction (only `chan T` narrows) (HYB-E3012)",
             value_desc, got_str, want_str
         );
         let notes = vec![
@@ -3551,9 +3600,9 @@ impl<'a> Checker<'a> {
                                     .map(|r| Self::substitute_type_params(&r.ty, &subst));
                             }
                             // #4076: a curated foreign call with a directional
-                            // channel result (`time.after` → `<-chan`) must
+                            // channel result (`time.after` â†’ `<-chan`) must
                             // resolve here; otherwise the call falls through
-                            // to the bare package name (→ `None`) and the
+                            // to the bare package name (â†’ `None`) and the
                             // close/send direction checks fail open.
                             if self.known_package(root) {
                                 if let Some(ty) =
@@ -3694,7 +3743,7 @@ impl<'a> Checker<'a> {
             return;
         }
         let msg = format!(
-            "cannot send to `{}` — it is a receive-only channel (`<-chan T`)",
+            "cannot send to `{}` â€” it is a receive-only channel (`<-chan T`)",
             chan.render()
         );
         let notes = vec![
@@ -3714,7 +3763,7 @@ impl<'a> Checker<'a> {
             return;
         }
         let msg = format!(
-            "cannot receive from `{}` — it is a send-only channel (`chan<- T`)",
+            "cannot receive from `{}` â€” it is a send-only channel (`chan<- T`)",
             chan.render()
         );
         let notes = vec![
@@ -3735,12 +3784,12 @@ impl<'a> Checker<'a> {
             return;
         }
         let msg = format!(
-            "cannot close `{}` — it is a receive-only channel (`<-chan T`)",
+            "cannot close `{}` â€” it is a receive-only channel (`<-chan T`)",
             chan.render()
         );
         let notes = vec![
-            "why: the Go spec requires close to operate on a bidirectional or send-only channel — a `<-chan T` has no send capability, so closing it is invalid Go and the emitted program will not build (issue #94)".to_string(),
-            "fix: declare this channel as `chan T` (bidirectional) where the close happens, or pass a `chan<- T` / `chan T` binding to close — receive-only channels are closed by their send-side owner".to_string(),
+            "why: the Go spec requires close to operate on a bidirectional or send-only channel â€” a `<-chan T` has no send capability, so closing it is invalid Go and the emitted program will not build (issue #94)".to_string(),
+            "fix: declare this channel as `chan T` (bidirectional) where the close happens, or pass a `chan<- T` / `chan T` binding to close â€” receive-only channels are closed by their send-side owner".to_string(),
         ];
         self.diags
             .push(Diagnostic::error("HYB-E3009", self.path.clone(), span, msg).with_notes(notes));
@@ -3756,12 +3805,12 @@ impl<'a> Checker<'a> {
             return;
         }
         let msg = format!(
-            "cannot range over `{}` — it is a send-only channel (`chan<- T`)",
+            "cannot range over `{}` â€” it is a send-only channel (`chan<- T`)",
             chan.render()
         );
         let notes = vec![
-            "why: the Go spec requires the range operand to have receive capability — a `chan<- T` can only be sent to, so ranging over it is invalid Go and the emitted program will not build (issue #94)".to_string(),
-            "fix: declare this channel as `chan T` (bidirectional) or `<-chan T` (receive-only) where the range happens — send-only channels are consumed via receives on the other side".to_string(),
+            "why: the Go spec requires the range operand to have receive capability â€” a `chan<- T` can only be sent to, so ranging over it is invalid Go and the emitted program will not build (issue #94)".to_string(),
+            "fix: declare this channel as `chan T` (bidirectional) or `<-chan T` (receive-only) where the range happens â€” send-only channels are consumed via receives on the other side".to_string(),
         ];
         self.diags
             .push(Diagnostic::error("HYB-E3009", self.path.clone(), span, msg).with_notes(notes));
@@ -3833,7 +3882,7 @@ fn unproven_atomic_reason(b: &Binding) -> Option<String> {
     let head = ty.split('[').next().unwrap_or(ty.as_str());
     if crate::foreign::is_unproven_atomic(head) {
         Some(format!(
-            "`{ty}` is not in the Tier-0 scalar atomic set (GUARANTEES.md row 11: `atomic.pointer[T]` / `atomic.value` publish a reference to arbitrary state without proving the pointee is race-free — unproven → rejected)"
+            "`{ty}` is not in the Tier-0 scalar atomic set (GUARANTEES.md row 11: `atomic.pointer[T]` / `atomic.value` publish a reference to arbitrary state without proving the pointee is race-free â€” unproven â†’ rejected)"
         ))
     } else {
         None
