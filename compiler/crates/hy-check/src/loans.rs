@@ -3951,12 +3951,19 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                if let Some(d_root) = dst.value.root_ident() {
-                    if !param_names.contains(d_root) && !src_slots.is_empty() {
+                let mut d_roots: Vec<String> = Vec::new();
+                if let Some(r) = dst.value.root_ident() {
+                    d_roots.push(r.to_string());
+                } else {
+                    collect_ref_roots(&dst.value, &mut d_roots);
+                    collect_addr_of_roots(&dst.value, &mut d_roots);
+                }
+                for d_root in d_roots {
+                    if !param_names.contains(&d_root) && !src_slots.is_empty() {
                         aliases
-                            .entry(d_root.to_string())
+                            .entry(d_root)
                             .or_default()
-                            .extend(src_slots);
+                            .extend(src_slots.iter().copied());
                     }
                 }
                 return;
@@ -4052,16 +4059,24 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            let d_root_opt = match dst_src {
-                CalleeSlotSource::Arg(dst_expr) => dst_expr.root_ident(),
-                CalleeSlotSource::OuterBinding(name) => Some(name.as_str()),
-            };
-            if let Some(d_root) = d_root_opt {
-                if !param_names.contains(d_root) && !src_slots.is_empty() {
+            let mut d_roots: Vec<String> = Vec::new();
+            match dst_src {
+                CalleeSlotSource::Arg(dst_expr) => {
+                    if let Some(r) = dst_expr.root_ident() {
+                        d_roots.push(r.to_string());
+                    } else {
+                        collect_ref_roots(dst_expr, &mut d_roots);
+                        collect_addr_of_roots(dst_expr, &mut d_roots);
+                    }
+                }
+                CalleeSlotSource::OuterBinding(name) => d_roots.push(name.clone()),
+            }
+            for d_root in d_roots {
+                if !param_names.contains(&d_root) && !src_slots.is_empty() {
                     aliases
-                        .entry(d_root.to_string())
+                        .entry(d_root)
                         .or_default()
-                        .extend(src_slots);
+                        .extend(src_slots.iter().copied());
                 }
             }
         }
@@ -8148,6 +8163,19 @@ impl<'a> Checker<'a> {
     }
 
     fn record_call_const_alias_stores(&self, cr: &CallRef, aliases: &mut HashSet<String>) {
+        let insert_dst_roots = |dst_expr: &Expr, aliases: &mut HashSet<String>| {
+            let inner = crate::model::unwrap_parens(dst_expr);
+            if let Some(dst_root) = inner.root_ident() {
+                aliases.insert(dst_root.to_string());
+            } else {
+                let mut roots = Vec::new();
+                collect_ref_roots(inner, &mut roots);
+                collect_addr_of_roots(inner, &mut roots);
+                for r in roots {
+                    aliases.insert(r);
+                }
+            }
+        };
         let callee = crate::model::unwrap_parens(cr.callee);
         match callee {
             Expr::Ident { name, .. } => {
@@ -8155,11 +8183,7 @@ impl<'a> Checker<'a> {
                     if cr.args.len() >= 2
                         && Self::expr_reaches_const_aliases(&cr.args[1].value, aliases)
                     {
-                        if let Some(dst_root) =
-                            crate::model::unwrap_parens(&cr.args[0].value).root_ident()
-                        {
-                            aliases.insert(dst_root.to_string());
-                        }
+                        insert_dst_roots(&cr.args[0].value, aliases);
                     }
                     return;
                 }
@@ -8177,11 +8201,7 @@ impl<'a> Checker<'a> {
                             && src_idx < cr.args.len()
                             && Self::expr_reaches_const_aliases(&cr.args[src_idx].value, aliases)
                         {
-                            if let Some(dst_root) =
-                                crate::model::unwrap_parens(&cr.args[dst_idx].value).root_ident()
-                            {
-                                aliases.insert(dst_root.to_string());
-                            }
+                            insert_dst_roots(&cr.args[dst_idx].value, aliases);
                         }
                     }
                 }
@@ -8225,11 +8245,7 @@ impl<'a> Checker<'a> {
                     for (dst_idx, src_idx) in self.collect_callee_param_stores(&slots, body, 0) {
                         if let (Some(dst_e), Some(src_e)) = (expr_at(dst_idx), expr_at(src_idx)) {
                             if Self::expr_reaches_const_aliases(src_e, aliases) {
-                                if let Some(dst_root) =
-                                    crate::model::unwrap_parens(dst_e).root_ident()
-                                {
-                                    aliases.insert(dst_root.to_string());
-                                }
+                                insert_dst_roots(dst_e, aliases);
                             }
                         }
                     }
@@ -8262,11 +8278,7 @@ impl<'a> Checker<'a> {
                         outer_capture_indices.contains(&src_idx)
                     };
                     if src_reaches {
-                        if let Some(dst_root) =
-                            crate::model::unwrap_parens(&cr.args[dst_idx].value).root_ident()
-                        {
-                            aliases.insert(dst_root.to_string());
-                        }
+                        insert_dst_roots(&cr.args[dst_idx].value, aliases);
                     }
                 }
             }
