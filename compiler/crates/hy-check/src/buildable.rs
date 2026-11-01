@@ -477,6 +477,11 @@ struct Collector<'a> {
     /// binding mutate the per-iteration copy and the collection never sees
     /// them — hy-check rejects those writes instead (#1480).
     copy_var_scopes: Vec<HashSet<String>>,
+    /// Bindings declared with an explicit integer type (`var x u8`) -> the
+    /// canonical Go type (`"uint8"`), scoped like `kind_scopes`. All integer
+    /// types share `OpKind::Int`, so without this `u8 + i8` was accepted and
+    /// failed `go build` with mismatched types (#2712).
+    int_ty_scopes: Vec<HashMap<String, Option<&'static str>>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
     file_untyped_consts: HashSet<String>,
@@ -539,6 +544,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             type_name_scopes: Vec::new(),
             set_elem_scopes: Vec::new(),
             copy_var_scopes: Vec::new(),
+            int_ty_scopes: Vec::new(),
             file_consts: HashMap::new(),
             file_untyped_consts: HashSet::new(),
             fn_results: Vec::new(),
@@ -608,6 +614,7 @@ impl<'a> Collector<'a> {
         self.scalar_scopes.push(HashMap::new());
         self.set_elem_scopes.push(HashMap::new());
         self.copy_var_scopes.push(HashSet::new());
+        self.int_ty_scopes.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
@@ -617,6 +624,7 @@ impl<'a> Collector<'a> {
         self.scalar_scopes.pop();
         self.set_elem_scopes.pop();
         self.copy_var_scopes.pop();
+        self.int_ty_scopes.pop();
     }
 
     fn bind_type_name(&mut self, name: &str, type_name: String) {
@@ -687,7 +695,79 @@ impl<'a> Collector<'a> {
             if let Some(top) = self.set_elem_scopes.last_mut() {
                 top.insert(name.to_string(), None);
             }
+            // Likewise for the explicit integer type (#2712).
+            if let Some(top) = self.int_ty_scopes.last_mut() {
+                top.insert(name.to_string(), None);
+            }
         }
+    }
+
+    /// #2712: record the explicit integer type of a `var x u8` / `let x i64`
+    /// / typed `const` binding. Call after `bind_kind`.
+    fn bind_int_ty(&mut self, name: &str, ty: Option<&TypeExpr>) {
+        if name == "_" {
+            return;
+        }
+        let Some(TypeExpr::Named { name: tn, .. }) = ty else {
+            return;
+        };
+        let Some(go) = canonical_int_ty(tn) else {
+            return;
+        };
+        if let Some(top) = self.int_ty_scopes.last_mut() {
+            top.insert(name.to_string(), Some(go));
+        }
+    }
+
+    /// #2712: the concrete integer type of an operand when it is provable:
+    /// a local declared with an explicit integer type, or an explicit
+    /// conversion `i64(e)`. Anything else (untyped constants, inferred
+    /// bindings, params, fields, calls) is `None` and stays fail-open.
+    fn int_ty_of_name(&self, name: &str) -> Option<&'static str> {
+        for layer in self.int_ty_scopes.iter().rev() {
+            if let Some(t) = layer.get(name) {
+                return *t;
+            }
+        }
+        None
+    }
+
+    fn int_ty_of_expr(&self, e: &Expr) -> Option<&'static str> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.int_ty_of_name(name),
+            Expr::Call { callee, args, .. } if args.len() == 1 => match callee.as_ref() {
+                Expr::Ident { name, .. } if self.lookup_kind(name).is_none() => canonical_int_ty(name),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// #2712: reject two typed integer operands of different concrete types
+    /// (`u8 + i8`, `i32 < i64`, `a += b`, `a = b`). Returns true when it
+    /// emitted a diagnostic.
+    fn check_int_ty_mismatch(
+        &mut self,
+        lhs_ty: Option<&'static str>,
+        rhs: &Expr,
+        label: String,
+        span: Span,
+    ) -> bool {
+        let (Some(l), Some(r)) = (lhs_ty, self.int_ty_of_expr(rhs)) else {
+            return false;
+        };
+        if l == r {
+            return false;
+        }
+        self.emit_e1002(
+            span,
+            format!(
+                "invalid operation `{}` (mismatched types `{}` and `{}`) (HYB-E1002)",
+                label, l, r
+            ),
+            "integer types of different width or signedness do not mix; convert one side explicitly, e.g. `i64(a) + b`",
+        );
+        true
     }
 
     fn bind_set_elem(&mut self, name: &str, elem: Option<String>) {
@@ -1454,6 +1534,7 @@ impl<'a> Collector<'a> {
                 self.set_scalar(name, scalar);
             }
             self.bind_set_elem(name, set_elem);
+            self.bind_int_ty(name, l.ty.as_ref());
             if !track_read {
                 self.exempt(name);
                 continue;
@@ -4346,6 +4427,31 @@ impl<'a> Collector<'a> {
         self.check_single_value_position(rhs, "a binary operation", /*binding_position=*/ false);
         let lk = self.kind_of_expr(lhs);
         let rk = self.kind_of_expr(rhs);
+        // #2712: mixed concrete integer types. Shifts take any integer count
+        // type and `&&`/`||` are bool-only, so they are exempt.
+        let int_op_str = match op {
+            BinOp::Add => Some("+"),
+            BinOp::Sub => Some("-"),
+            BinOp::Mul => Some("*"),
+            BinOp::Div => Some("/"),
+            BinOp::Mod => Some("%"),
+            BinOp::Eq => Some("=="),
+            BinOp::Ne => Some("!="),
+            BinOp::Lt => Some("<"),
+            BinOp::Le => Some("<="),
+            BinOp::Gt => Some(">"),
+            BinOp::Ge => Some(">="),
+            BinOp::BitOr => Some("|"),
+            BinOp::BitXor => Some("^"),
+            BinOp::BitAnd => Some("&"),
+            BinOp::And | BinOp::Or | BinOp::Shl | BinOp::Shr => None,
+        };
+        if let Some(op_str) = int_op_str {
+            let lt = self.int_ty_of_expr(lhs);
+            if self.check_int_ty_mismatch(lt, rhs, span_expr_label(lhs, op_str, rhs), span) {
+                return;
+            }
+        }
         match op {
             // `==` / `!=`: incomparable shapes (slice, map, func) are rejected
             // by `emit_guard.rs` (HYB-E2006). Mismatched concrete operand types
@@ -4567,6 +4673,34 @@ impl<'a> Collector<'a> {
                     "compound assignment operators (`+=`, `-=`, etc.) require exactly one target and one value; write separate statements or use `=` for parallel assignment",
                 );
                 return;
+            }
+        }
+        // #2712: `a = b` / `a += b` between explicitly typed integer locals of
+        // different concrete types. Shifts and `++`/`--` are exempt.
+        if targets.len() == 1
+            && values.len() == 1
+            && !matches!(
+                op,
+                AssignOp::Inc | AssignOp::Dec | AssignOp::ShlAssign | AssignOp::ShrAssign
+            )
+        {
+            if let PlaceKind::Ident(tname) = &target.kind {
+                let op_str = match op {
+                    AssignOp::Assign => "=",
+                    AssignOp::AddAssign => "+=",
+                    AssignOp::SubAssign => "-=",
+                    AssignOp::MulAssign => "*=",
+                    AssignOp::DivAssign => "/=",
+                    AssignOp::ModAssign => "%=",
+                    AssignOp::BitOrAssign => "|=",
+                    AssignOp::BitAndAssign => "&=",
+                    _ => "^=",
+                };
+                let tt = self.int_ty_of_name(tname);
+                let label = format!("{} {} {}", tname, op_str, values[0].render());
+                if self.check_int_ty_mismatch(tt, &values[0], label, span) {
+                    return;
+                }
             }
         }
         match op {
@@ -6362,6 +6496,26 @@ impl<'a> Collector<'a> {
             }
         }
     }
+}
+
+/// #2712: the canonical Go spelling of a Hybrid integer type name, with Go's
+/// aliases folded (`byte` = `uint8`, `rune` = `int32`, see #1165). `usize`,
+/// `isize` and `char` have no fixed Go equivalent here and stay `None`.
+fn canonical_int_ty(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "int" => "int",
+        "uint" => "uint",
+        "uintptr" => "uintptr",
+        "i8" | "int8" => "int8",
+        "i16" | "int16" => "int16",
+        "i32" | "int32" | "rune" => "int32",
+        "i64" | "int64" => "int64",
+        "u8" | "uint8" | "byte" => "uint8",
+        "u16" | "uint16" => "uint16",
+        "u32" | "uint32" => "uint32",
+        "u64" | "uint64" => "uint64",
+        _ => return None,
+    })
 }
 
 fn span_expr_label(lhs: &Expr, op: &str, rhs: &Expr) -> String {
