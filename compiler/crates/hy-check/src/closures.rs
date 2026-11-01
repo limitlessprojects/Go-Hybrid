@@ -40,7 +40,12 @@ pub(crate) fn check_closure_boundaries(ck: &mut Checker<'_>, st: &FnState, body:
         let st_ref = if let Some((s_env, s_aliases, s_share)) = st.closure_scoped_envs.get(&pos) {
             scoped_st = st.clone();
             for (k, v) in s_env {
-                scoped_st.env.insert(k.clone(), v.clone());
+                let mut b = v.clone();
+                if let Some(cur) = scoped_st.env.get(k) {
+                    b.moved = b.moved.or_else(|| cur.moved.clone());
+                    b.non_owned_origin = b.non_owned_origin.or_else(|| cur.non_owned_origin.clone());
+                }
+                scoped_st.env.insert(k.clone(), b);
             }
             for (k, v) in s_aliases {
                 scoped_st.aliases.insert(k.clone(), v.clone());
@@ -51,6 +56,16 @@ pub(crate) fn check_closure_boundaries(ck: &mut Checker<'_>, st: &FnState, body:
                     .entry(k.clone())
                     .or_default()
                     .extend(vs.iter().cloned());
+            }
+            for k in s_env.keys() {
+                let peer_mv = scoped_st
+                    .share_group(k)
+                    .into_iter()
+                    .chain(std::iter::once(crate::freeze::resolve_alias(&scoped_st, k)))
+                    .find_map(|p| scoped_st.env.get(&p).and_then(|b| b.moved.clone()));
+                if let Some((mv, Some(b))) = peer_mv.map(|mv| (mv, scoped_st.env.get_mut(k))) {
+                    b.moved = b.moved.take().or(Some(mv));
+                }
             }
             &scoped_st
         } else {
@@ -781,13 +796,47 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 {
                     overwritten.push(name.clone());
                     let carries = ck.shape_may_share(&shape);
-                    mark_nested_overwritten(st, &name, nested);
+                    if !reads_self {
+                        mark_nested_overwritten(st, &name, nested);
+                    }
+                    let prior_children: Vec<String> = st
+                        .aliases
+                        .iter()
+                        .filter_map(|(k, v)| (reads_self && v == &name && k != &name).then(|| k.clone()))
+                        .collect();
+                    let cur_shares: Vec<String> = st
+                        .may_share
+                        .get(&name)
+                        .filter(|_| reads_self)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default();
+                    let prior_shadow_links = pre_st
+                        .shadow_links
+                        .get(&name)
+                        .filter(|_| reads_self)
+                        .cloned()
+                        .unwrap_or_default();
+                    let outer_depth = pre_st
+                        .scopes
+                        .last()
+                        .is_some_and(|top| !top.contains_key(&name))
+                        .then(|| pre_st.lookup_depth(&name))
+                        .flatten();
                     ck.define_binding(st, &name, shape.clone(), ty, immutable, managed, is_let);
                     if reads_self {
-                        if let Some(pa) = prior_alias {
+                        if !prior_shadow_links.is_empty() {
+                            st.shadow_links.entry(name.clone()).or_default().extend(prior_shadow_links);
+                        }
+                        if let Some(depth) = outer_depth {
+                            st.shadow_links.entry(name.clone()).or_default().insert((name.clone(), depth));
+                        }
+                        if let Some(pa) = prior_alias.filter(|pa| pa != &name) {
                             st.aliases.insert(name.clone(), pa);
                         }
-                        for peer in prior_shares {
+                        for child in prior_children {
+                            st.aliases.insert(child, name.clone());
+                        }
+                        for peer in prior_shares.into_iter().chain(cur_shares) {
                             st.share_edge(&name, &peer);
                         }
                     }
@@ -1243,6 +1292,8 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
     let saved_last_use = std::mem::replace(&mut st.last_use, flat.last_use.clone());
     let saved_loop_end = std::mem::replace(&mut st.loop_end, flat.loop_end.clone());
     let saved_loans = std::mem::take(&mut st.loans);
+    let saved_aliases = st.aliases.clone();
+    let saved_may_share = st.may_share.clone();
     for (stmt, idx) in &flat.stmts {
         let idx = *idx;
         if let Stmt::Break { label: Some(_), span, .. }
@@ -1299,6 +1350,10 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                             });
                         } else {
                             ck.extend_map_slot_loan_to_alias(st, name, val, idx);
+                            if let Expr::Ident { name: src, .. } = crate::model::unwrap_parens(val) {
+                                st.aliases.insert(name.clone(), src.clone());
+                                st.share_edge(name, src);
+                            }
                         }
                     }
                 } else if l.values.len() == 1 && l.names.len() == 2 {
@@ -1366,6 +1421,10 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                                 });
                             } else {
                                 ck.extend_map_slot_loan_to_alias(st, name, v, idx);
+                                if let Expr::Ident { name: src, .. } = crate::model::unwrap_parens(v) {
+                                    st.aliases.insert(name.clone(), src.clone());
+                                    st.share_edge(name, src);
+                                }
                             }
                         }
                     }
@@ -1429,6 +1488,8 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
             _ => {}
         }
     }
+    st.may_share = saved_may_share;
+    st.aliases = saved_aliases;
     st.loans = saved_loans;
     st.loop_end = saved_loop_end;
     st.last_use = saved_last_use;
