@@ -1188,7 +1188,14 @@ impl Emitter {
             if kind != BindingKind::Plain {
                 self.bindings.insert(names[0].clone(), kind);
             }
-            if let Some(Expr::StructLit { ty: Some(t), .. }) = values.first() {
+            // `Parenthesised` is semantically transparent, so `x := (T{…})`
+            // registers exactly the type `x := T{…}` registers. Without the
+            // peel the struct type never reaches `var_struct`, `stats.mu`
+            // then has no shape, and the field call emits Go's lowercase
+            // spelling (`stats.mu.lock()`) — accepted by `hyb check`, refused
+            // by `go build` (rule BUILDABLE).
+            if let Some(Expr::StructLit { ty: Some(t), .. }) = values.first().map(Self::peel_parens)
+            {
                 self.register_var_ty(&names[0], t);
             }
         }

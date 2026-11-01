@@ -1080,6 +1080,58 @@ fn assign_slot_loan_copies_and_stores_back() {
 }
 
 #[test]
+fn struct_binding_type_registers_through_redundant_parentheses() {
+    // #607: `stats := (pool_stats{hits: 1})` is the same binding as
+    // `stats := pool_stats{hits: 1}`. The struct type is what lets the shape
+    // table resolve `stats.mu` to `sync.mutex` and emit `stats.mu.Lock()`;
+    // when the parens stopped `register_var_ty`, `mu` had no shape and the
+    // field call emitted Go's lowercase spelling (`stats.mu.lock()`) — an
+    // accepted program that `go build` rejects (rule BUILDABLE).
+    for init in ["pool_stats{hits: 1}", "(pool_stats{hits: 1})"] {
+        let go = emit(&format!(
+            "import \"sync\"\n\nstruct pool_stats {{\n    mu   sync.mutex\n    hits int\n}}\n\nfn main() {{\n    stats := {}\n    stats.mu.lock()\n    stats.hits = 2\n    stats.mu.unlock()\n    fmt.println(\"hits: {{stats.hits}}\")\n}}\n",
+            init
+        ));
+        assert!(
+            go.contains("stats.mu.Lock()") && go.contains("stats.mu.Unlock()"),
+            "`stats := {}` must still map the field call to Go's exported name:\n{}",
+            init,
+            go
+        );
+        assert!(
+            !go.contains(".lock()") && !go.contains(".unlock()"),
+            "`stats := {}` must not emit an unexported Go method:\n{}",
+            init,
+            go
+        );
+    }
+}
+
+#[test]
+fn foreign_binding_kind_survives_redundant_parentheses() {
+    // #607 reproducer 1 — already green on main once `binding_kind_of` peeled
+    // at entry; pinned here so the two legs of the same rule stay covered.
+    for init in ["http.new_serve_mux()", "(http.new_serve_mux())"] {
+        let go = emit(&format!(
+            "import \"net/http\"\n\nfn main() {{\n    mux := {}\n    mux.handle(\"/ping\", http.handler(fn(w http.response_writer, r *http.request) {{\n        fmt.fprintln(w, \"pong\")\n    }}))\n}}\n",
+            init
+        ));
+        assert!(
+            go.contains("mux.Handle("),
+            "`mux := {}` must still map `handle` -> `Handle`:\n{}",
+            init,
+            go
+        );
+        assert!(
+            !go.contains(".handle("),
+            "`mux := {}` must not emit an unexported Go method:\n{}",
+            init,
+            go
+        );
+    }
+}
+
+#[test]
 fn assign_slot_loan_into_pointer_var_points_at_copy() {
     // A pointer-typed target cannot hold the copied element itself
     // (`cannot use g.nodes[from] (variable of struct type node) as *node`):
