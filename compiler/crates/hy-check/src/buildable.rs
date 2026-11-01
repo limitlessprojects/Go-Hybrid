@@ -1734,10 +1734,16 @@ impl<'a> Collector<'a> {
                         self.check_repeated_bindings(vars, *span);
                         self.expr(expr);
                         let iter_kinds = self.iterate_var_kinds(expr, vars.len());
+                        // #3065 / SPEC LX13: a string ranges over runes, so
+                        // the element binding (the last var) is exactly
+                        // `rune` (= int32), not an untyped int; the width
+                        // checks then catch `var b byte = c` and `n + c`.
+                        let str_elem = matches!(self.kind_of_expr(expr), OpKind::Str)
+                            .then(|| vars.len().saturating_sub(1));
                         // Unread iterate bindings are lowered to `_` at
                         // emission (issue #139); write-only ones still
                         // reject as unused (PR #536).
-                        for (v, k) in vars.iter().zip(iter_kinds) {
+                        for (vi, (v, k)) in vars.iter().zip(iter_kinds).enumerate() {
                             self.define_elidable(v, *span);
                             // #1480: a struct/array element binding is a
                             // per-iteration copy at emission (`for _, x :=
@@ -1753,6 +1759,9 @@ impl<'a> Collector<'a> {
                                 }
                             }
                             self.bind_kind(v, k);
+                            if str_elem == Some(vi) {
+                                self.set_scalar(v, Some("int32"));
+                            }
                         }
                     }
                     ForKind::Infinite => {}
