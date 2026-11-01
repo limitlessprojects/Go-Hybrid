@@ -3242,7 +3242,10 @@ impl<'a> Collector<'a> {
                 let mismatch = tk != OpKind::Unknown
                     && vk != OpKind::Unknown
                     && tk.is_numeric() != vk.is_numeric();
-                if !t_ok || !v_ok || mismatch || kinds_conflict(&tk, &vk) {
+                let int_float_conflict = tk == OpKind::Float
+                    && vk == OpKind::Int
+                    && !self.is_untyped_int_const(val);
+                if !t_ok || !v_ok || mismatch || kinds_conflict(&tk, &vk) || int_float_conflict {
                     self.emit_e1002(
                         span,
                         format!(
@@ -3264,9 +3267,13 @@ impl<'a> Collector<'a> {
                     AssignOp::MulAssign => "*=",
                     _ => "/=",
                 };
+                let int_float_conflict = tk == OpKind::Float
+                    && vk == OpKind::Int
+                    && !self.is_untyped_int_const(val);
                 if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || kinds_conflict(&tk, &vk)
+                    || int_float_conflict
                 {
                     self.emit_e1002(
                         span,
@@ -3566,6 +3573,34 @@ impl<'a> Collector<'a> {
             }
         }
         false
+    }
+
+    fn is_untyped_int_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit {
+                kind: LitKind::Int(_) | LitKind::Char(_),
+                ..
+            } => true,
+            Expr::Ident { name, .. } => {
+                if self.file_consts.contains_key(name) {
+                    return true;
+                }
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        return matches!(self.defines[*id].kind, LocalKind::Const);
+                    }
+                }
+                false
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnOp::Neg)
+                    && self.is_untyped_int_const(operand)
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.is_untyped_int_const(lhs) && self.is_untyped_int_const(rhs)
+            }
+            _ => false,
+        }
     }
 
     fn expr_has_non_const_local(&self, e: &Expr) -> bool {
