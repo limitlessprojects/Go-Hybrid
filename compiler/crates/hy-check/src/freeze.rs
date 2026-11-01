@@ -937,7 +937,7 @@ impl<'a> Checker<'a> {
                     );
                     let desc = format!("the spawn `task {}(...)`", callee.render());
                     let vals: Vec<&hy_syntax::Expr> = args.iter().map(|a| &a.value).collect();
-                    let targets = self.spawn_param_shapes(&replay_st, callee, args.len());
+                    let targets = self.spawn_param_shapes(&replay_st, callee, args);
                     self.check_site(
                         &mut replay_st,
                         *span,

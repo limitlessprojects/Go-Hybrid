@@ -877,7 +877,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             );
             let desc = format!("the spawn `task {}(...)`", callee.render());
             let vals: Vec<&Expr> = args.iter().map(|a| &a.value).collect();
-            let targets = ck.spawn_param_shapes(st, callee, args.len());
+            let targets = ck.spawn_param_shapes(st, callee, args);
             ck.check_site(
                 st,
                 *span,
