@@ -2998,6 +2998,13 @@ impl<'a> Collector<'a> {
                 _ => OpKind::Unknown,
             },
             Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none() && self.is_package_name(pkg) {
+                        if pkg == "os" && (name == "args" || name == "Args") {
+                            return OpKind::Slice(Box::new(OpKind::Str));
+                        }
+                    }
+                }
                 let bk = self.kind_of_expr(base);
                 if let Some(k) = self.struct_field_kind(&bk, name) {
                     return k;
@@ -3142,6 +3149,13 @@ impl<'a> Collector<'a> {
                 None
             }
             Expr::Field { base, name, .. } => {
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none() && self.is_package_name(pkg) {
+                        if let Some(res) = Self::foreign_package_call_result_kinds(pkg, name) {
+                            return Some(res);
+                        }
+                    }
+                }
                 let bk = self.kind_of_expr(base);
                 // #2823: the option payload methods carry a real result kind —
                 // `unwrap()` / `or(d)` yield the payload, `is_some()` /
@@ -4540,6 +4554,222 @@ impl<'a> Collector<'a> {
             }
         }
         false
+    }
+
+    fn is_package_name(&self, pkg: &str) -> bool {
+        self.is_imported_pkg_root(pkg)
+            || crate::foreign::BUILTIN_PACKAGES.contains(&pkg)
+            || crate::foreign::is_curated_package_root(pkg)
+    }
+
+    pub(crate) fn foreign_package_call_result_kinds(pkg: &str, method: &str) -> Option<Vec<OpKind>> {
+        match pkg {
+            "strings" => match method {
+                "contains" | "Contains"
+                | "contains_any" | "ContainsAny"
+                | "contains_rune" | "ContainsRune"
+                | "has_prefix" | "HasPrefix"
+                | "has_suffix" | "HasSuffix"
+                | "equal_fold" | "EqualFold" => Some(vec![OpKind::Bool]),
+
+                "index" | "Index"
+                | "index_any" | "IndexAny"
+                | "index_byte" | "IndexByte"
+                | "index_rune" | "IndexRune"
+                | "last_index" | "LastIndex"
+                | "last_index_any" | "LastIndexAny"
+                | "last_index_byte" | "LastIndexByte"
+                | "count" | "Count" => Some(vec![OpKind::Int]),
+
+                "split" | "Split"
+                | "split_n" | "SplitN"
+                | "split_after" | "SplitAfter"
+                | "split_after_n" | "SplitAfterN"
+                | "fields" | "Fields"
+                | "fields_func" | "FieldsFunc" => Some(vec![OpKind::Slice(Box::new(OpKind::Str))]),
+
+                "join" | "Join"
+                | "repeat" | "Repeat"
+                | "replace" | "Replace"
+                | "replace_all" | "ReplaceAll"
+                | "trim" | "Trim"
+                | "trim_left" | "TrimLeft"
+                | "trim_right" | "TrimRight"
+                | "trim_space" | "TrimSpace"
+                | "trim_prefix" | "TrimPrefix"
+                | "trim_suffix" | "TrimSuffix"
+                | "to_lower" | "ToLower"
+                | "to_upper" | "ToUpper"
+                | "to_title" | "ToTitle"
+                | "clone" | "Clone" => Some(vec![OpKind::Str]),
+
+                _ => None,
+            },
+            "strconv" => match method {
+                "itoa" | "Itoa"
+                | "format_int" | "FormatInt"
+                | "format_uint" | "FormatUint"
+                | "format_bool" | "FormatBool"
+                | "format_float" | "FormatFloat" => Some(vec![OpKind::Str]),
+
+                "atoi" | "Atoi"
+                | "parse_int" | "ParseInt"
+                | "parse_uint" | "ParseUint" => {
+                    Some(vec![OpKind::Int, OpKind::Struct(Some("error".into()))])
+                }
+
+                "parse_float" | "ParseFloat" => {
+                    Some(vec![OpKind::Float, OpKind::Struct(Some("error".into()))])
+                }
+
+                "parse_bool" | "ParseBool" => {
+                    Some(vec![OpKind::Bool, OpKind::Struct(Some("error".into()))])
+                }
+
+                _ => None,
+            },
+            "fmt" => match method {
+                "sprintf" | "Sprintf"
+                | "sprint" | "Sprint"
+                | "sprintln" | "Sprintln" => Some(vec![OpKind::Str]),
+
+                "errorf" | "Errorf" => Some(vec![OpKind::Struct(Some("error".into()))]),
+
+                "print" | "Print"
+                | "println" | "Println"
+                | "printf" | "Printf" => {
+                    Some(vec![OpKind::Int, OpKind::Struct(Some("error".into()))])
+                }
+
+                _ => None,
+            },
+            "os" => match method {
+                "getenv" | "Getenv" => Some(vec![OpKind::Str]),
+                "lookup_env" | "LookupEnv" => Some(vec![OpKind::Str, OpKind::Bool]),
+                "setenv" | "Setenv" | "unsetenv" | "Unsetenv" => {
+                    Some(vec![OpKind::Struct(Some("error".into()))])
+                }
+                "clearenv" | "Clearenv" | "exit" | "Exit" => Some(Vec::new()),
+                _ => None,
+            },
+            "time" => match method {
+                "now" | "Now" => Some(vec![OpKind::Struct(Some("time.Time".into()))]),
+                "since" | "Since" | "until" | "Until" => Some(vec![OpKind::Int]),
+                "sleep" | "Sleep" => Some(Vec::new()),
+                _ => None,
+            },
+            "sort" => match method {
+                "ints" | "Ints"
+                | "strings" | "Strings"
+                | "float64s" | "Float64s" => Some(Vec::new()),
+
+                "ints_are_sorted" | "IntsAreSorted"
+                | "strings_are_sorted" | "StringsAreSorted"
+                | "float64s_are_sorted" | "Float64sAreSorted" => Some(vec![OpKind::Bool]),
+
+                _ => None,
+            },
+            "errors" => match method {
+                "new" | "New" | "unwrap" | "Unwrap" => {
+                    Some(vec![OpKind::Struct(Some("error".into()))])
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    pub(crate) fn foreign_package_call_param_kinds(pkg: &str, method: &str) -> Option<Vec<OpKind>> {
+        match pkg {
+            "strings" => match method {
+                "contains" | "Contains"
+                | "contains_any" | "ContainsAny"
+                | "has_prefix" | "HasPrefix"
+                | "has_suffix" | "HasSuffix"
+                | "equal_fold" | "EqualFold"
+                | "index" | "Index"
+                | "index_any" | "IndexAny"
+                | "last_index" | "LastIndex"
+                | "last_index_any" | "LastIndexAny"
+                | "count" | "Count"
+                | "split" | "Split"
+                | "split_after" | "SplitAfter" => Some(vec![OpKind::Str, OpKind::Str]),
+
+                "trim_space" | "TrimSpace"
+                | "fields" | "Fields"
+                | "to_lower" | "ToLower"
+                | "to_upper" | "ToUpper"
+                | "to_title" | "ToTitle"
+                | "clone" | "Clone" => Some(vec![OpKind::Str]),
+
+                "repeat" | "Repeat" => Some(vec![OpKind::Str, OpKind::Int]),
+
+                "join" | "Join" => Some(vec![OpKind::Slice(Box::new(OpKind::Str)), OpKind::Str]),
+
+                _ => None,
+            },
+            "strconv" => match method {
+                "itoa" | "Itoa" => Some(vec![OpKind::Int]),
+                "atoi" | "Atoi" => Some(vec![OpKind::Str]),
+                "parse_float" | "ParseFloat" => Some(vec![OpKind::Str, OpKind::Int]),
+                "parse_int" | "ParseInt" | "parse_uint" | "ParseUint" => {
+                    Some(vec![OpKind::Str, OpKind::Int, OpKind::Int])
+                }
+                _ => None,
+            },
+            "sort" => match method {
+                "ints" | "Ints" | "ints_are_sorted" | "IntsAreSorted" => {
+                    Some(vec![OpKind::Slice(Box::new(OpKind::Int))])
+                }
+                "strings" | "Strings" | "strings_are_sorted" | "StringsAreSorted" => {
+                    Some(vec![OpKind::Slice(Box::new(OpKind::Str))])
+                }
+                "float64s" | "Float64s" | "float64s_are_sorted" | "Float64sAreSorted" => {
+                    Some(vec![OpKind::Slice(Box::new(OpKind::Float))])
+                }
+                _ => None,
+            },
+            "os" => match method {
+                "getenv" | "Getenv" | "unsetenv" | "Unsetenv" => Some(vec![OpKind::Str]),
+                "setenv" | "Setenv" => Some(vec![OpKind::Str, OpKind::Str]),
+                _ => None,
+            },
+            "errors" => match method {
+                "new" | "New" => Some(vec![OpKind::Str]),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn check_foreign_package_call_arg_types(&mut self, pkg: &str, method: &str, args: &[CallArg]) {
+        let Some(param_kinds) = Self::foreign_package_call_param_kinds(pkg, method) else {
+            return;
+        };
+        for (i, want) in param_kinds.iter().enumerate() {
+            if i >= args.len() {
+                break;
+            }
+            let arg = &args[i].value;
+            let got = self.kind_of_expr(arg);
+            let int_to_float_conflict = *want == OpKind::Float
+                && got == OpKind::Int
+                && !self.is_untyped_int_const(arg);
+            if kinds_conflict(want, &got) || int_to_float_conflict {
+                self.emit_e1002(
+                    arg.span(),
+                    format!(
+                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}.{}` (HYB-E1002)",
+                        arg.render(),
+                        got.label(),
+                        want.label(),
+                        pkg,
+                        method
+                    ),
+                    "argument types must match declared parameter types",
+                );
+            }
+        }
     }
 
     fn is_addressable_expr(&self, e: &Expr) -> bool {
@@ -6030,6 +6260,9 @@ impl<'a> Collector<'a> {
                         let head = Checker::base_named_type_str(name);
                         let assoc_key = format!("{}.{}", pkg, head);
                         self.check_fn_type_arg_arity(&assoc_key, name, span);
+                        if self.is_package_name(pkg) {
+                            self.check_foreign_package_call_arg_types(pkg, name, args);
+                        }
                     }
                 }
                 if let Some(m) = self.method_expr_decl(base, name) {
