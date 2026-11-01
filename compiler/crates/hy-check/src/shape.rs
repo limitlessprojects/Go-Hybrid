@@ -540,6 +540,11 @@ impl<'a> Checker<'a> {
                     .map(|r| self.shape_of_type(&r.ty))
                     .unwrap_or(TypeShape::Unknown)
             }
+            Expr::SliceLit {
+                elem: Some(e),
+                items,
+                ..
+            } if items.is_empty() => TypeShape::Slice(Box::new(self.shape_of_type(e))),
             _ => TypeShape::Unknown,
         }
     }
@@ -818,6 +823,14 @@ impl<'a> Checker<'a> {
             | Expr::Paren { inner: operand, .. } => self.ty_of_expr(st, operand),
             Expr::Call { callee, args, span } => match crate::model::unwrap_parens(callee) {
                 Expr::FnLit { results, .. } => results.first().map(|r| r.ty.clone()),
+                Expr::SliceLit {
+                    elem: Some(e),
+                    items,
+                    ..
+                } if items.is_empty() => Some(TypeExpr::Slice {
+                    elem: e.clone(),
+                    span: *span,
+                }),
                 Expr::Ident { name, .. } => {
                     if let Some(b) = self.lookup_binding(st, name) {
                         if let Some(ty) = &b.ty {

@@ -471,13 +471,23 @@ impl<'a> Checker<'a> {
                 self.classify_composite(st, expr, parts.into_iter())
             }
             Expr::SliceLit { items, .. } => self.classify_composite(st, expr, items.iter()),
-            Expr::Call { callee, args, .. }
+            Expr::Call { callee, args, .. } => {
+                let u = unwrap_parens(callee);
                 if matches!(
-                    unwrap_parens(callee),
+                    u,
                     Expr::Ident { name, .. } if name == "some" && self.lookup_binding(st, name).is_none()
-                ) =>
-            {
-                self.classify_composite(st, expr, args.iter().map(|a| &a.value))
+                ) {
+                    self.classify_composite(st, expr, args.iter().map(|a| &a.value))
+                } else if matches!(
+                    u,
+                    Expr::SliceLit { elem: Some(_), items, .. } if items.is_empty()
+                ) {
+                    // Allocating type conversion produces fresh storage (O4.6 / #2274)
+                    self.classify_composite(st, expr, args.iter().map(|a| &a.value))
+                } else {
+                    let shape = self.shape_of_expr(st, expr);
+                    self.outcome_for_shape(&shape, &expr.render())
+                }
             }
             // field/index/slice reads: classify the read's shape, but honor
             // immutable roots when the resulting value is a value copy (views
