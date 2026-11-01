@@ -25,14 +25,13 @@ use hy_syntax::{
     Stmt,
 };
 
-fn is_slot_loan_expr(e: &Expr) -> bool {
-    if walk::addr_of_index_base_path(e).is_some() {
-        return true;
-    }
-    let Some(inner) = as_addr_of(unwrap_parens(e)) else {
-        return false;
-    };
-    matches!(unwrap_parens(inner), Expr::Index { .. })
+fn is_slot_loan_expr(ck: &Checker<'_>, st: &FnState, e: &Expr) -> bool {
+    let _ = as_addr_of;
+    walk::addr_of_index_base_path(e).is_some_and(|p| {
+        ck.lookup_binding(st, p.split('.').next().unwrap_or(&p)).is_some_and(|b| {
+            matches!(b.shape, TypeShape::Map(..) | TypeShape::Slice(_) | TypeShape::Array(_) | TypeShape::Struct(_) | TypeShape::Pointer(_))
+        })
+    })
 }
 
 impl<'a> Checker<'a> {
@@ -47,7 +46,7 @@ impl<'a> Checker<'a> {
             return;
         }
         for (name, val) in l.names.iter().zip(l.values.iter()) {
-            if is_slot_loan_expr(val) {
+            if is_slot_loan_expr(self, st, val) {
                 if let Some(b) = st.env_lookup_mut(name) {
                     b.slot_loan = true;
                 }
@@ -75,7 +74,7 @@ impl<'a> Checker<'a> {
         }
         for (t, v) in targets.iter().zip(values.iter()) {
             if let PlaceKind::Ident(name) = &t.kind {
-                let is_loan = is_slot_loan_expr(v);
+                let is_loan = is_slot_loan_expr(self, st, v);
                 if let Some(b) = st.env_lookup_mut(name) {
                     b.slot_loan |= is_loan;
                 }
@@ -84,52 +83,88 @@ impl<'a> Checker<'a> {
     }
 
     /// T24 + O8: a live map-slot loan cannot be re-bound to a general
-    /// pointer (`x = &T{}`, `x = p`, `x = nil`, or multi-return `x, ok = f()`).
+    /// pointer (`x = &T{}`, `x = p`, `x = nil`, multi-return `x, ok = f()`,
+    /// or same-scope short redeclaration `x, tag := &T{}, 1` / `x, ok := f()`).
     /// The emitter lowers the loan to a copy of the slot plus a store-back at
     /// its last use, so the re-bind either emits a Go assignment of `*T` to a
     /// `T` variable that cannot build, or — for a pointer-typed binding — makes
     /// the store-back write the new pointee into the map slot. Runs BEFORE
-    /// `mark_slot_loans_assign` so it sees the binding's prior form.
+    /// `process_local` / `mark_slot_loans_assign` so it sees the binding's prior form.
     pub(crate) fn check_slot_loan_rebind(&mut self, st: &FnState, stmt: &Stmt) {
-        let Stmt::Assign {
-            targets,
-            op: AssignOp::Assign,
-            values,
-            ..
-        } = stmt
-        else {
-            return;
-        };
-        if targets.len() == values.len() {
-            for (t, v) in targets.iter().zip(values.iter()) {
-                let PlaceKind::Ident(name) = &t.kind else {
-                    continue;
-                };
-                let Some(b) = self.lookup_binding(st, name) else {
-                    continue;
-                };
-                if !b.slot_loan
-                    || walk::addr_of_index_base_path(v).is_some()
-                    || !self.is_general_pointer_value(st, v)
-                {
-                    continue;
+        match stmt {
+            Stmt::Assign {
+                targets,
+                op: AssignOp::Assign,
+                values,
+                ..
+            } => {
+                if targets.len() == values.len() {
+                    for (t, v) in targets.iter().zip(values.iter()) {
+                        let PlaceKind::Ident(name) = &t.kind else {
+                            continue;
+                        };
+                        let Some(b) = self.lookup_binding(st, name) else {
+                            continue;
+                        };
+                        if !b.slot_loan
+                            || walk::addr_of_index_base_path(v).is_some()
+                            || !self.is_general_pointer_value(st, v)
+                        {
+                            continue;
+                        }
+                        self.emit_slot_loan_rebind_diag(name, &v.render(), t.span);
+                    }
+                } else if values.len() == 1 && targets.len() > 1 {
+                    let shapes = self.multi_value_shapes(st, &values[0], targets.len());
+                    for (t, shape) in targets.iter().zip(shapes.iter()) {
+                        let PlaceKind::Ident(name) = &t.kind else {
+                            continue;
+                        };
+                        let Some(b) = self.lookup_binding(st, name) else {
+                            continue;
+                        };
+                        if !b.slot_loan || !matches!(shape, TypeShape::Pointer(_)) {
+                            continue;
+                        }
+                        self.emit_slot_loan_rebind_diag(name, &values[0].render(), t.span);
+                    }
                 }
-                self.emit_slot_loan_rebind_diag(name, &v.render(), t.span);
             }
-        } else if values.len() == 1 && targets.len() > 1 {
-            let shapes = self.multi_value_shapes(st, &values[0], targets.len());
-            for (t, shape) in targets.iter().zip(shapes.iter()) {
-                let PlaceKind::Ident(name) = &t.kind else {
-                    continue;
-                };
-                let Some(b) = self.lookup_binding(st, name) else {
-                    continue;
-                };
-                if !b.slot_loan || !matches!(shape, TypeShape::Pointer(_)) {
-                    continue;
+            Stmt::Local(l) if l.kind == LocalKind::Define && l.ty.is_none() => {
+                if l.names.len() == l.values.len() {
+                    for (name, v) in l.names.iter().zip(l.values.iter()) {
+                        let Some(b) = Self::current_scope_binding(st, name) else {
+                            continue;
+                        };
+                        if !b.slot_loan
+                            || walk::addr_of_index_base_path(v).is_some()
+                            || !self.is_general_pointer_value(st, v)
+                        {
+                            continue;
+                        }
+                        self.emit_slot_loan_rebind_diag(name, &v.render(), l.span);
+                    }
+                } else if l.values.len() == 1 && l.names.len() > 1 {
+                    let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
+                    for (name, shape) in l.names.iter().zip(shapes.iter()) {
+                        let Some(b) = Self::current_scope_binding(st, name) else {
+                            continue;
+                        };
+                        if !b.slot_loan || !matches!(shape, TypeShape::Pointer(_)) {
+                            continue;
+                        }
+                        self.emit_slot_loan_rebind_diag(name, &l.values[0].render(), l.span);
+                    }
                 }
-                self.emit_slot_loan_rebind_diag(name, &values[0].render(), t.span);
             }
+            _ => {}
+        }
+    }
+
+    fn current_scope_binding<'s>(st: &'s FnState, name: &str) -> Option<&'s crate::model::Binding> {
+        match st.scopes.last() {
+            Some(top) => top.get(name),
+            None => st.env.get(name),
         }
     }
 
@@ -165,9 +200,9 @@ impl<'a> Checker<'a> {
         matches!(self.shape_of_expr(st, v), TypeShape::Pointer(_))
     }
 
-    /// T24: `&x` where `x` is a live slot-loan binding.
+    /// T24: `&x` or `move x` where `x` is a live slot-loan binding.
     pub(crate) fn check_addr_of_loan(&mut self, st: &FnState, uses: &[Use]) {
-        for u in uses.iter().filter(|u| u.via_addr) {
+        for u in uses.iter().filter(|u| u.via_addr || u.via_move) {
             let Some(b) = self.lookup_binding(st, &u.name) else {
                 continue;
             };
@@ -218,7 +253,8 @@ impl<'a> Checker<'a> {
             Stmt::Expr { expr, .. } => {
                 self.check_expr_addr_of_loan_projections(st, expr, include_direct_ident);
             }
-            Stmt::Send { chan, value, .. } => {
+            Stmt::Send { chan, value, is_move, span } => {
+                if *is_move { self.check_addr_of_loan(st, &[Use { name: value.root_ident().unwrap_or("").into(), span: *span, is_write: false, via_move: true, via_addr: false }]); }
                 self.check_expr_addr_of_loan_projections(st, chan, include_direct_ident);
                 self.check_expr_addr_of_loan_projections(st, value, include_direct_ident);
             }

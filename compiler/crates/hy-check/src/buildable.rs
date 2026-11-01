@@ -383,6 +383,7 @@ struct Define {
     used: bool,
     written: bool,
     elidable: bool,
+    is_untyped: bool,
 }
 
 struct Collector<'a> {
@@ -394,13 +395,24 @@ struct Collector<'a> {
     scopes: Vec<HashMap<String, Option<usize>>>,
     /// Parallel lexical scope stack tracking resolved operand kinds (#425).
     kind_scopes: Vec<HashMap<String, OpKind>>,
+    /// `set[T]` bindings -> their element type text (`"int"`), scoped like
+    /// `kind_scopes`. `set[T]` has no OpKind (it lowers to a prelude
+    /// struct), so without this its element type was never checked (#2474).
+    set_elem_scopes: Vec<HashMap<String, Option<String>>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
+    file_untyped_consts: HashSet<String>,
     /// Result kinds of the function whose body is currently being walked
     /// (#577 C9/C10). Empty for a fn declared with no results — which is also
     /// the state outside any body, so `Stmt::Return` can only ever see it
     /// while a body is open. `FnLit` bodies swap it like `fn_decl` does.
     fn_results: Vec<OpKind>,
+    /// Type-parameter names of the function whose body is currently walked
+    /// (`fn new[k comparable, v any]` → {k, v}). A composite literal inside a
+    /// generic signature may spell those parameters (`map[k]v{}`, zero-value
+    /// instantiations) — Go compiles them; bare `k` must NOT hit the
+    /// value-position undeclared-type net. Swapped per body like `fn_results`.
+    fn_type_params: HashSet<String>,
     /// Whether every result of the enclosing signature is named, so Go's
     /// naked `return` is legal (corpus 63).
     fn_results_all_named: bool,
@@ -419,6 +431,12 @@ struct Collector<'a> {
     roots: HashSet<String>,
     diags: Vec<Diagnostic>,
     path: String,
+    /// Composite element slots (items of a typed slice/array literal, keys
+    /// and values of a map literal, and items of an elided slice literal in
+    /// such a slot). hy-emit gives an untyped `[...]` there the EXPECTED
+    /// element type, so only untyped literals OUTSIDE these slots take their
+    /// type from their first item (`infer_slice_head`).
+    elided_slots: HashSet<*const Expr>,
 }
 
 /// Entry point: `check_file` calls this once per file (after the per-fn
@@ -430,8 +448,11 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             ck,
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
+            set_elem_scopes: Vec::new(),
             file_consts: HashMap::new(),
+            file_untyped_consts: HashSet::new(),
             fn_results: Vec::new(),
+            fn_type_params: HashSet::new(),
             fn_results_all_named: false,
             fn_results_error_tail: false,
             loop_depth: 0,
@@ -440,6 +461,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             roots: HashSet::new(),
             diags: Vec::new(),
             path: ck.path.clone(),
+            elided_slots: HashSet::new(),
         };
         for d in &file.decls {
             if let Decl::Const(cd) = d {
@@ -449,6 +471,9 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
                     .map(|t| c.kind_of_ty(t, 0))
                     .unwrap_or_else(|| c.kind_of_expr(&cd.value));
                 c.file_consts.insert(cd.name.clone(), k);
+                if cd.ty.is_none() {
+                    c.file_untyped_consts.insert(cd.name.clone());
+                }
             }
         }
         for d in &file.decls {
@@ -487,11 +512,13 @@ impl<'a> Collector<'a> {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.kind_scopes.push(HashMap::new());
+        self.set_elem_scopes.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.kind_scopes.pop();
+        self.set_elem_scopes.pop();
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -508,6 +535,88 @@ impl<'a> Collector<'a> {
             if let Some(top) = self.kind_scopes.last_mut() {
                 top.insert(name.to_string(), kind);
             }
+            // Every (re)binding shadows an outer set binding; callers that
+            // know the new binding is a set record it via bind_set_elem.
+            if let Some(top) = self.set_elem_scopes.last_mut() {
+                top.insert(name.to_string(), None);
+            }
+        }
+    }
+
+    fn bind_set_elem(&mut self, name: &str, elem: Option<String>) {
+        if name != "_" && elem.is_some() {
+            if let Some(top) = self.set_elem_scopes.last_mut() {
+                top.insert(name.to_string(), elem);
+            }
+        }
+    }
+
+    /// `set[int]` -> `"int"`.
+    fn set_elem_of_ty(ty: &TypeExpr) -> Option<String> {
+        if let TypeExpr::Named { name, .. } = ty {
+            return name
+                .strip_prefix("set[")
+                .and_then(|r| r.strip_suffix(']'))
+                .map(|t| t.to_string());
+        }
+        None
+    }
+
+    /// The element type text of a set-valued expression, when provable.
+    fn set_elem_of_expr(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                for layer in self.set_elem_scopes.iter().rev() {
+                    if let Some(v) = layer.get(name) {
+                        return v.clone();
+                    }
+                }
+                None
+            }
+            Expr::StructLit { ty: Some(t), .. } => Self::set_elem_of_ty(t),
+            // `mk()` where `fn mk() set[T]` — the declared single result.
+            Expr::Call { callee, .. } => match unwrap_parens(callee) {
+                Expr::Ident { name, .. } if self.lookup_kind(name).is_none() => self
+                    .ck
+                    .fns
+                    .get(name.as_str())
+                    .filter(|f| f.results.len() == 1)
+                    .and_then(|f| Self::set_elem_of_ty(&f.results[0].ty)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// #2474: `s.insert(v)` / `s.contains(v)` / `s.remove(v)` on a `set[T]`
+    /// need `v` of type `T`; the prelude's Go signature takes `T`, so a
+    /// mismatched argument passed `hyb check` and failed `go build`.
+    fn check_set_method_arg(&mut self, callee: &Expr, args: &[CallArg]) {
+        let Expr::Field { base, name, .. } = unwrap_parens(callee) else {
+            return;
+        };
+        if !matches!(name.as_str(), "insert" | "contains" | "remove") || args.len() != 1 {
+            return;
+        }
+        let Some(elem) = self.set_elem_of_expr(base) else {
+            return;
+        };
+        let want = self.kind_of_named(&elem, 0);
+        let got = self.kind_of_expr(&args[0].value);
+        if kinds_conflict(&want, &got) {
+            self.emit_e1002(
+                args[0].value.span(),
+                format!(
+                    "cannot use `{}` (type `{}`) as `{}` value in argument to `{}.{}` on `set[{}]` (HYB-E1002)",
+                    args[0].value.render(),
+                    got.label(),
+                    want.label(),
+                    base.render(),
+                    name,
+                    elem
+                ),
+                "a set's insert/contains/remove take a value of the set's element type",
+            );
         }
     }
 
@@ -542,6 +651,7 @@ impl<'a> Collector<'a> {
             used: false,
             written: false,
             elidable: true,
+            is_untyped: false,
         });
         top.insert(name.to_string(), Some(id));
     }
@@ -774,6 +884,7 @@ impl<'a> Collector<'a> {
             self.exempt(&p.name);
             let pk = self.kind_of_ty(&p.ty, 0);
             self.bind_kind(&p.name, pk);
+            self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
         }
         for r in &f.results {
             if let Some(rname) = &r.name {
@@ -790,6 +901,10 @@ impl<'a> Collector<'a> {
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
+        let outer_tp = std::mem::replace(
+            &mut self.fn_type_params,
+            f.type_params.iter().map(|p| p.name.clone()).collect(),
+        );
         let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
         let outer_select = std::mem::replace(&mut self.select_depth, 0);
         self.block_stmts(body);
@@ -798,6 +913,7 @@ impl<'a> Collector<'a> {
         self.fn_results = outer;
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
+        self.fn_type_params = outer_tp;
         self.pop_scope();
     }
 
@@ -923,8 +1039,16 @@ impl<'a> Collector<'a> {
         // tracking; #430's operand-kind inference runs for EVERY name so
         // `kind_of_expr` resolves binding-shaped operands (issue #425).
         let kinds = self.infer_local_kinds(l);
-        for (name, kind) in l.names.iter().zip(kinds) {
+        let set_elems: Vec<Option<String>> = (0..l.names.len())
+            .map(|i| match (&l.ty, l.values.len() == l.names.len()) {
+                (Some(t), _) => Self::set_elem_of_ty(t),
+                (None, true) => self.set_elem_of_expr(&l.values[i]),
+                _ => None,
+            })
+            .collect();
+        for ((name, kind), set_elem) in l.names.iter().zip(kinds).zip(set_elems) {
             self.bind_kind(name, kind);
+            self.bind_set_elem(name, set_elem);
             if !track_read {
                 self.exempt(name);
                 continue;
@@ -956,6 +1080,7 @@ impl<'a> Collector<'a> {
                 used: false,
                 written: false,
                 elidable: false,
+                is_untyped: matches!(l.kind, LocalKind::Const) && l.ty.is_none(),
             });
             top.insert(name.clone(), Some(id));
         }
@@ -1116,13 +1241,26 @@ impl<'a> Collector<'a> {
             }
             Stmt::Task { callee, args, span } => {
                 self.expr(callee);
+                // #887: a spawn argument sits in a single-value position
+                // exactly like a call argument does. Without this,
+                // `task worker(noop())` (void call) and
+                // `task worker(pair())` (two values) passed the checker
+                // and emitted Go that cannot build.
+                //
+                // The #682 U7 exception applies to a spawn exactly as it does
+                // to a call: a lone multi-value call IS the whole argument
+                // list when the callee takes that many parameters, so
+                // `go w(pair())` builds for a 2-param `w`. Rejecting it here
+                // made the checker refuse legal Go. When the shape is taken,
+                // the arity is what decides, and that is checked below.
+                if self.multi_value_arg_count(args).is_none() {
+                    for a in args {
+                        self.check_single_value_position(&a.value, "a spawn argument", false);
+                    }
+                } else {
+                    self.check_multi_value_arg_arity(callee, args, *span);
+                }
                 for a in args {
-                    // #887: a spawn argument sits in a single-value position
-                    // exactly like a call argument does. Without this,
-                    // `task worker(noop())` (void call) and
-                    // `task worker(pair())` (two values) passed the checker
-                    // and emitted Go that cannot build.
-                    self.check_single_value_position(&a.value, "a spawn argument", false);
                     self.expr(&a.value);
                 }
                 match unwrap_parens(callee) {
@@ -1462,10 +1600,12 @@ impl<'a> Collector<'a> {
                     self.check_multi_value_arg_arity(callee, args, *span);
                 }
                 self.check_call_operands(callee, args, *span);
+                self.check_set_method_arg(callee, args);
             }
             Expr::StructLit { ty, fields, span } => {
                 if let Some(t) = ty {
                     self.ty(t);
+                    self.check_value_position_type_name(t);
                 }
                 for f in fields {
                     self.expr(&f.value);
@@ -1475,6 +1615,13 @@ impl<'a> Collector<'a> {
             Expr::SliceLit { elem, items, .. } => {
                 if let Some(t) = elem {
                     self.ty(t);
+                    self.check_value_position_type_name(t);
+                }
+                let in_slot = self.elided_slots.contains(&(e as *const Expr));
+                if elem.is_some() || in_slot {
+                    for i in items {
+                        self.elided_slots.insert(unwrap_parens(i) as *const Expr);
+                    }
                 }
                 for i in items {
                     self.expr(i);
@@ -1483,6 +1630,8 @@ impl<'a> Collector<'a> {
                     self.check_array_lit_items(inner_elem, items);
                 } else if let Some(t) = elem {
                     self.check_slice_lit_items(t, items);
+                } else if !in_slot {
+                    self.check_untyped_slice_lit_items(items);
                 }
             }
             Expr::MapLit {
@@ -1493,6 +1642,12 @@ impl<'a> Collector<'a> {
             } => {
                 self.ty(key);
                 self.ty(value);
+                self.check_value_position_type_name(key);
+                self.check_value_position_type_name(value);
+                for (k, v) in entries {
+                    self.elided_slots.insert(unwrap_parens(k) as *const Expr);
+                    self.elided_slots.insert(unwrap_parens(v) as *const Expr);
+                }
                 for (k, v) in entries {
                     self.expr(k);
                     self.expr(v);
@@ -1517,6 +1672,7 @@ impl<'a> Collector<'a> {
                     self.exempt(&p.name);
                     let pk = self.kind_of_ty(&p.ty, 0);
                     self.bind_kind(&p.name, pk);
+                    self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
                 }
                 for r in results {
                     if let Some(rname) = &r.name {
@@ -2171,7 +2327,30 @@ impl<'a> Collector<'a> {
             },
             Expr::Field { base, name, .. } => {
                 let bk = self.kind_of_expr(base);
-                self.struct_field_kind(&bk, name).unwrap_or(OpKind::Unknown)
+                if let Some(k) = self.struct_field_kind(&bk, name) {
+                    return k;
+                }
+                // #682 U1: a method value (`f := z.add`) is a function value
+                // whose receiver is already bound, so its arity is the
+                // declaration's parameter count — exactly what `OpKind::Fn`'s
+                // count slot carries for closures. Without this the binding
+                // fell through to `Unknown` (fail-open) and `f(1, 2)` reached
+                // emission, where Go refuses `too many arguments in call to f`.
+                let head = Checker::base_named_type_str(name);
+                if let Some(sn) = self.struct_base_name(&bk) {
+                    if let Some(m) = self.ck.method_decls.get(&(sn, head.to_string())) {
+                        if m.type_params.is_empty() {
+                            return OpKind::Fn(
+                                m.results
+                                    .iter()
+                                    .map(|r| self.kind_of_ty(&r.ty, 0))
+                                    .collect(),
+                                Some(m.params.len()),
+                            );
+                        }
+                    }
+                }
+                OpKind::Unknown
             }
             Expr::StructLit { ty, .. } => ty
                 .as_ref()
@@ -2330,6 +2509,56 @@ impl<'a> Collector<'a> {
     /// Fail-open everywhere the kind model cannot prove a mismatch: an
     /// unresolved struct name, an `Unknown` value kind, and an `Unknown`
     /// field type all stay silent.
+    /// Value-position type names in composite literals (`b := Undeclared{}`,
+    /// `xs := []Undeclared{...}`, `m := map[K]Undeclared{...}`). The literal's
+    /// own `ty` routes through `self.ty()` — the `Expr::` side of the
+    /// checker — which resolves arity/instantiation but NOT whether the
+    /// named type exists. A name nothing declares passes `hyb check` with 0
+    /// diagnostics, the emitter prints the literal verbatim, and `go build`
+    /// fails with `undefined: <name>` — Row 13 BUILDABLE. Fail closed with
+    /// the existing BUILDABLE code. Deliberately fail-open for Go predeclared
+    /// / conversion-target names (`int{}`-style scalar literals) and dotted
+    /// foreign/shapes types: those live on a different root (scalar/interface
+    /// composite literals) and their members are emitted verbatim by design.
+    fn check_value_position_type_name(&mut self, ty: &TypeExpr) {
+        let TypeExpr::Named { name, span, .. } = ty else { return };
+        let name = name.trim();
+        if name.is_empty() || name.contains('.') || name != Checker::base_named_type_str(name) {
+            return;
+        }
+        if crate::const_init::is_conversion_type_name(name)
+            || crate::resolve::is_predeclared_type_name(name)
+        {
+            return;
+        }
+        // Prelude types (both a literal-typed element and the prelude carriers)
+        if name == "option" || name == "set" {
+            return;
+        }
+        if self.ck.structs.contains_key(name)
+            || self.ck.enums.contains_key(name)
+            || self.ck.type_aliases.contains_key(name)
+            // Zero-field structs (`struct svc {}`) are recorded as
+            // package-scope names, not in `structs` — same carve-out the
+            // declaration-site checker uses.
+            || self.ck.pkg_names.get(name) == Some(&"struct")
+            // Type parameters of the enclosing generic signature are legal
+            // composite-literal spellings inside it (`fn new[k, v any]` →
+            // `map[k]v{}`; Go generic signatures scope those names locally).
+            || self.fn_type_params.contains(name)
+        {
+            return;
+        }
+        self.emit_e1002(
+            *span,
+            format!(
+                "type `{}` is not declared — Go refuses `undefined: {}` in the emitted composite literal (HYB-E1002)",
+                name, name
+            ),
+            "value-position type names must resolve: declare the struct/enum/alias, or use its declared spelling",
+        );
+    }
+
     fn check_struct_literal(
         &mut self,
         ty: Option<&TypeExpr>,
@@ -2381,7 +2610,12 @@ impl<'a> Collector<'a> {
                 Some((_, fty)) => {
                     let want = self.kind_of_ty_with_subst(fty, &subst, 0);
                     let got = self.kind_of_expr(&f.value);
-                    if kinds_conflict(&want, &got) {
+                    let is_untyped_int_to_float = want == OpKind::Float
+                        && got == OpKind::Int
+                        && self.is_untyped_int_const(&f.value);
+                    let conflict = (want == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float)
+                        || kinds_conflict(&want, &got);
+                    if conflict {
                         self.emit_e1002(
                             f.value.span(),
                             format!(
@@ -2727,7 +2961,10 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            let int_to_float_conflict = want == OpKind::Float
+                && got == OpKind::Int
+                && !self.is_untyped_int_const(&a.value);
+            if kinds_conflict(&want, &got) || int_to_float_conflict {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -2767,7 +3004,10 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            let int_to_float_conflict = want == OpKind::Float
+                && got == OpKind::Int
+                && !self.is_untyped_int_const(&a.value);
+            if kinds_conflict(&want, &got) || int_to_float_conflict {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -2854,7 +3094,7 @@ impl<'a> Collector<'a> {
                 if let Some(res) = self.call_result_kinds(callee, args) {
                     if res.len() == want.len() {
                         for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(r, w, values[0].span());
+                            self.report_return_conflict(&values[0], r, w, values[0].span());
                         }
                         return;
                     }
@@ -2863,7 +3103,7 @@ impl<'a> Collector<'a> {
                         && res.len() + 1 == want.len()
                     {
                         for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(r, w, values[0].span());
+                            self.report_return_conflict(&values[0], r, w, values[0].span());
                         }
                         return;
                     }
@@ -2910,7 +3150,7 @@ impl<'a> Collector<'a> {
             if short_ok {
                 for (v, w) in values.iter().zip(want.iter()) {
                     let got = self.kind_of_expr(v);
-                    self.report_return_conflict(&got, w, v.span());
+                    self.report_return_conflict(v, &got, w, v.span());
                 }
                 return;
             }
@@ -2938,12 +3178,17 @@ impl<'a> Collector<'a> {
         }
         for (v, w) in values.iter().zip(want.iter()) {
             let got = self.kind_of_expr(v);
-            self.report_return_conflict(&got, w, v.span());
+            self.report_return_conflict(v, &got, w, v.span());
         }
     }
 
-    fn report_return_conflict(&mut self, got: &OpKind, want: &OpKind, span: Span) {
-        if !kinds_conflict(want, got) {
+    fn report_return_conflict(&mut self, val: &Expr, got: &OpKind, want: &OpKind, span: Span) {
+        let is_untyped_int_to_float = *want == OpKind::Float
+            && *got == OpKind::Int
+            && self.is_untyped_int_const(val);
+        let conflict = (*want == OpKind::Float && *got == OpKind::Int && !is_untyped_int_to_float)
+            || kinds_conflict(want, got);
+        if !conflict {
             return;
         }
         self.emit_e1002(
@@ -3011,7 +3256,10 @@ impl<'a> Collector<'a> {
                 continue;
             }
             let got = self.kind_of_expr(&extra.value);
-            if kinds_conflict(&elem, &got) {
+            let int_to_float_conflict = elem == OpKind::Float
+                && got == OpKind::Int
+                && !self.is_untyped_int_const(&extra.value);
+            if kinds_conflict(&elem, &got) || int_to_float_conflict {
                 self.emit_e1002(
                     extra.value.span(),
                     format!(
@@ -3093,6 +3341,25 @@ impl<'a> Collector<'a> {
         // "multiple-value ... in single-value context" / "(no value) used as
         // value". Same check a binary operand already runs.
         self.check_single_value_position(operand, "a unary operand", /*binding_position=*/ false);
+        // Issue #1777: `kind_of_expr` maps a nil literal to `Unknown`, and
+        // `Unknown` is permissive in the gates below — so `!nil` and `-nil`
+        // passed check and failed `go build`
+        // (`invalid operation: operator ! not defined on nil`). `&nil` needs
+        // no guard: the literal is not addressable (E1002 loc A).
+        if matches!(op, UnOp::Not | UnOp::Neg) && Checker::is_nil_literal(operand) {
+            let sym = op.render();
+            self.emit_e1002(
+                span,
+                format!(
+                    "invalid operation `{}{}`: nil is not a valid operand of `{}` (HYB-E1002)",
+                    sym,
+                    operand.render(),
+                    sym
+                ),
+                "unary operators are not defined on `nil` — compare the nilable value explicitly instead",
+            );
+            return;
+        }
         let k = self.kind_of_expr(operand);
         match op {
             UnOp::Not => {
@@ -3215,6 +3482,46 @@ impl<'a> Collector<'a> {
 
     /// Family B3/B4/B5 (#425): binary operator operand-kind checks.
     fn check_binary_operands(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr, span: Span) {
+        // Issue #1777: a literal `nil` is not a valid operand of ANY operator
+        // except the equality surface — and equality (`Eq`/`Ne`) is the
+        // deliberate nil-comparison exception (E2006 returns early above).
+        // `kind_of_expr` maps nil to `Unknown` because nil has no single
+        // static type; `Unknown` is then permissive in every per-op gate
+        // below, so `1 << nil`, `nil << 1`, `1 + nil`, `nil && false` all
+        // sailed through to `go build` errors like
+        // `cannot convert nil to type uint` / `untyped nil in shift`.
+        // Ordered comparisons (`<` … `>=`) are already nil-closed
+        // (nil-funnel rejections above) — leave them exactly where they are.
+        if !matches!(
+            op,
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+        ) && (Checker::is_nil_literal(lhs) || Checker::is_nil_literal(rhs))
+        {
+            let op_str = match op {
+                BinOp::Add => "+",
+                BinOp::Sub => "-",
+                BinOp::Mul => "*",
+                BinOp::Div => "/",
+                BinOp::Mod => "%",
+                BinOp::BitAnd => "&",
+                BinOp::BitOr => "|",
+                BinOp::BitXor => "^",
+                BinOp::And => "&&",
+                BinOp::Or => "||",
+                BinOp::Shl => "<<",
+                _ => ">>",
+            };
+            self.emit_e1002(
+                span,
+                format!(
+                    "invalid operation `{}`: nil is not a valid operand of `{}` (HYB-E1002)",
+                    span_expr_label(lhs, op_str, rhs),
+                    op_str
+                ),
+                "`nil` only combines with `==` and `!=`, or as an assignment value for a nilable (error/foreign) type",
+            );
+            return;
+        }
         // #682 U6: an operand must be exactly one value. `two() + 1` is Go's
         // `multiple-value two() (value of type (int, int)) in single-value
         // context`, and the kind inference below would otherwise take the
@@ -3312,7 +3619,9 @@ impl<'a> Collector<'a> {
                 let mismatch = lk != OpKind::Unknown
                     && rk != OpKind::Unknown
                     && lk.is_numeric() != rk.is_numeric();
-                if !l_ok || !r_ok || mismatch {
+                let int_float_conflict = (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs))
+                    || (lk == OpKind::Int && rk == OpKind::Float && !self.is_untyped_int_const(lhs));
+                if !l_ok || !r_ok || mismatch || int_float_conflict {
                     self.emit_e1002(
                         span,
                         format!(
@@ -3333,7 +3642,9 @@ impl<'a> Collector<'a> {
                 let mismatch = lk != OpKind::Unknown
                     && rk != OpKind::Unknown
                     && lk.is_numeric() != rk.is_numeric();
-                if !l_ok || !r_ok || mismatch {
+                let int_float_conflict = (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs))
+                    || (lk == OpKind::Int && rk == OpKind::Float && !self.is_untyped_int_const(lhs));
+                if !l_ok || !r_ok || mismatch || int_float_conflict {
                     self.emit_e1002(
                         span,
                         format!(
@@ -3353,8 +3664,11 @@ impl<'a> Collector<'a> {
                     BinOp::Mul => "*",
                     _ => "/",
                 };
+                let int_float_conflict = (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs))
+                    || (lk == OpKind::Int && rk == OpKind::Float && !self.is_untyped_int_const(lhs));
                 if !matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float)
+                    || int_float_conflict
                 {
                     self.emit_e1002(
                         span,
@@ -3446,7 +3760,12 @@ impl<'a> Collector<'a> {
                     let is_loan_shape = as_addr_of(&values[0])
                         .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }));
                     let vk = self.kind_of_expr(&values[0]);
-                    if !is_loan_shape && kinds_conflict(&tk, &vk) {
+                    let is_untyped_int_to_float = tk == OpKind::Float
+                        && vk == OpKind::Int
+                        && self.is_untyped_int_const(&values[0]);
+                    let conflict = (tk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
+                        || kinds_conflict(&tk, &vk);
+                    if !is_loan_shape && conflict {
                         self.emit_e1002(
                             span,
                             format!(
@@ -3484,7 +3803,12 @@ impl<'a> Collector<'a> {
                         }
                         let tpk = self.kind_of_place(t);
                         let vk = self.kind_of_expr(v);
-                        if kinds_conflict(&tpk, &vk) {
+                        let is_untyped_int_to_float = tpk == OpKind::Float
+                            && vk == OpKind::Int
+                            && self.is_untyped_int_const(v);
+                        let conflict = (tpk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
+                            || kinds_conflict(&tpk, &vk);
+                        if conflict {
                             self.emit_e1002(
                                 v.span(),
                                 format!(
@@ -3532,13 +3856,36 @@ impl<'a> Collector<'a> {
             }
             AssignOp::AddAssign => {
                 let Some(val) = values.first() else { return };
+                // Issue #1777 (belt for the N1-silent shape): nil is
+                // fail-open only in the `Unknown`-target gates — a literal
+                // `nil` as the compound value is a `go build` error for
+                // EVERY operator in this arm (`invalid operation: e += nil`).
+                // Known-shaped targets already reject via E4001 (N1); here we
+                // close the `Unknown`-target gap only, to stay layered.
+                if tk == OpKind::Unknown && Checker::is_nil_literal(val) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid compound assignment `{} {} {}`: nil is not a valid compound-assignment value (HYB-E1002)",
+                            target.render(),
+                            "+=",
+                            val.render()
+                        ),
+                        "`nil` only combines with `==` and `!=`, or as an assignment value for a nilable (error/foreign) type",
+                    );
+                }
                 let vk = self.kind_of_expr(val);
                 let t_ok = matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
                 let v_ok = matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
                 let mismatch = tk != OpKind::Unknown
                     && vk != OpKind::Unknown
                     && tk.is_numeric() != vk.is_numeric();
-                if !t_ok || !v_ok || mismatch || kinds_conflict(&tk, &vk) {
+                let is_untyped_int_to_float = tk == OpKind::Float
+                    && vk == OpKind::Int
+                    && self.is_untyped_int_const(val);
+                let conflict = (tk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
+                    || kinds_conflict(&tk, &vk);
+                if !t_ok || !v_ok || mismatch || conflict {
                     self.emit_e1002(
                         span,
                         format!(
@@ -3554,15 +3901,37 @@ impl<'a> Collector<'a> {
             }
             AssignOp::SubAssign | AssignOp::MulAssign | AssignOp::DivAssign => {
                 let Some(val) = values.first() else { return };
+                if tk == OpKind::Unknown && Checker::is_nil_literal(val) {
+                    let op_sym = match op {
+                        AssignOp::SubAssign => "-=",
+                        AssignOp::MulAssign => "*=",
+                        _ => "/=",
+                    };
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid compound assignment `{} {} {}`: nil is not a valid compound-assignment value (HYB-E1002)",
+                            target.render(),
+                            op_sym,
+                            val.render()
+                        ),
+                        "`nil` only combines with `==` and `!=`, or as an assignment value for a nilable (error/foreign) type",
+                    );
+                }
                 let vk = self.kind_of_expr(val);
                 let op_sym = match op {
                     AssignOp::SubAssign => "-=",
                     AssignOp::MulAssign => "*=",
                     _ => "/=",
                 };
+                let is_untyped_int_to_float = tk == OpKind::Float
+                    && vk == OpKind::Int
+                    && self.is_untyped_int_const(val);
+                let conflict = (tk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
+                    || kinds_conflict(&tk, &vk);
                 if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float)
-                    || kinds_conflict(&tk, &vk)
+                    || conflict
                 {
                     self.emit_e1002(
                         span,
@@ -3585,6 +3954,26 @@ impl<'a> Collector<'a> {
             | AssignOp::ShlAssign
             | AssignOp::ShrAssign => {
                 let Some(val) = values.first() else { return };
+                if tk == OpKind::Unknown && Checker::is_nil_literal(val) {
+                    let op_sym = match op {
+                        AssignOp::ModAssign => "%=",
+                        AssignOp::BitOrAssign => "|=",
+                        AssignOp::BitAndAssign => "&=",
+                        AssignOp::BitXorAssign => "^=",
+                        AssignOp::ShlAssign => "<<=",
+                        _ => ">>=",
+                    };
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid compound assignment `{} {} {}`: nil is not a valid compound-assignment value (HYB-E1002)",
+                            target.render(),
+                            op_sym,
+                            val.render()
+                        ),
+                        "`nil` only combines with `==` and `!=`, or as an assignment value for a nilable (error/foreign) type",
+                    );
+                }
                 let vk = self.kind_of_expr(val);
                 if !matches!(tk, OpKind::Unknown | OpKind::Int)
                     || !matches!(vk, OpKind::Unknown | OpKind::Int)
@@ -3852,6 +4241,50 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn is_untyped_int_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit {
+                kind: LitKind::Int(_) | LitKind::Char(_),
+                ..
+            } => true,
+            Expr::Ident { name, .. } => {
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        let d = &self.defines[*id];
+                        if d.kind == LocalKind::Const && d.is_untyped {
+                            return self.lookup_kind(name) == Some(OpKind::Int);
+                        }
+                        return false;
+                    }
+                }
+                if self.file_untyped_consts.contains(name) {
+                    return self.file_consts.get(name) == Some(&OpKind::Int);
+                }
+                false
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnOp::Neg) && self.is_untyped_int_const(operand)
+            }
+            Expr::Binary { op, lhs, rhs, .. } => {
+                matches!(
+                    op,
+                    BinOp::Add
+                        | BinOp::Sub
+                        | BinOp::Mul
+                        | BinOp::Div
+                        | BinOp::Mod
+                        | BinOp::BitAnd
+                        | BinOp::BitOr
+                        | BinOp::BitXor
+                        | BinOp::Shl
+                        | BinOp::Shr
+                ) && self.is_untyped_int_const(lhs)
+                    && self.is_untyped_int_const(rhs)
+            }
+            _ => false,
+        }
+    }
+
     fn is_non_const_local(&self, name: &str) -> bool {
         for layer in self.scopes.iter().rev() {
             if let Some(entry) = layer.get(name) {
@@ -4002,16 +4435,21 @@ impl<'a> Collector<'a> {
                 }
             }
             let ik = self.kind_of_expr(item);
-            if ik == OpKind::Unknown || ik == expected {
+            if ik == OpKind::Unknown || ik == expected || expected == OpKind::Interface {
                 continue;
             }
             if expected == OpKind::Float
                 && ik == OpKind::Int
-                && crate::const_overflow::const_int_value(item).is_some()
+                && self.is_untyped_int_const(item)
             {
                 continue;
             }
-            if !kinds_conflict(&expected, &ik) {
+            let is_untyped_int_to_float = expected == OpKind::Float
+                && ik == OpKind::Int
+                && self.is_untyped_int_const(item);
+            let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
+                || kinds_conflict(&expected, &ik);
+            if !conflict {
                 continue;
             }
             self.emit_e1002(
@@ -4027,6 +4465,79 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// `[h, a, b]` with no element type lowers to `[]H{h, a, b}`, where `H`
+    /// is what hy-emit infers from the first item (`infer_slice_head`): `int`,
+    /// `float64`, `string`, `bool`, or `rune` for a basic literal (a sign or
+    /// parentheses are transparent), the struct type for a typed struct
+    /// literal. Every later item must be assignable to `H`, exactly as in
+    /// the spelled-out `[]H{...}` — before this check `[1, "a"]`,
+    /// `[1, 2.5]`, `[1, x]` with `x float64`, and `["a", nil]` passed
+    /// `hyb check` and failed `go build` (`cannot use … in array or slice
+    /// literal`). A `nil` first item has no type at all and is refused by
+    /// the emitter (`nil in an untyped slice literal`), so it is rejected
+    /// here too.
+    fn check_untyped_slice_lit_items(&mut self, items: &[Expr]) {
+        let Some((first, rest)) = items.split_first() else {
+            return;
+        };
+        if matches!(
+            unwrap_parens(first),
+            Expr::Lit {
+                kind: LitKind::Nil,
+                ..
+            }
+        ) {
+            // `[nil, …]`: no element type at all — hy-emit refuses it
+            // (`nil in an untyped slice literal`).
+            self.emit_e1002(
+                first.span(),
+                "an untyped slice literal cannot start with `nil` — it has no element type to infer (HYB-E1002)".to_string(),
+                "spell the element type: `[]*T{nil}`, `[]error{nil}`, …",
+            );
+            return;
+        }
+        let Some(head) = untyped_slice_head_ty(first) else {
+            return;
+        };
+        let head_text = head.render();
+        let mut checked = Vec::new();
+        for item in rest {
+            match unwrap_parens(item) {
+                Expr::Lit {
+                    kind: LitKind::Nil,
+                    ..
+                } => {
+                    self.emit_e1002(
+                        item.span(),
+                        format!(
+                            "cannot use `nil` as `{}` value in the untyped slice literal (its element type is inferred from the first item `{}`) (HYB-E1002)",
+                            head_text,
+                            first.render()
+                        ),
+                        "an untyped `[...]` takes its element type from its first item; spell a nilable element type instead (`[]*T{...}`, `[]error{...}`)",
+                    );
+                }
+                // Go accepts an integral float constant in an int slot
+                // (`[]int{1, 2.0}`).
+                Expr::Lit {
+                    kind: LitKind::Float(f),
+                    ..
+                } if head_text == "int"
+                    && f.replace('_', "").parse::<f64>().is_ok_and(|v| v.fract() == 0.0) => {}
+                _ => checked.push(item.clone()),
+            }
+        }
+        let before = self.diags.len();
+        self.check_slice_lit_items(&head, &checked);
+        for d in &mut self.diags[before..] {
+            d.notes.push(format!(
+                "why: the untyped slice literal's element type `{}` is inferred from its first item `{}`; spell the element type (`[]T{{...}}`) when the items differ",
+                head_text,
+                first.render()
+            ));
+        }
+    }
+
     fn check_map_lit_entries(
         &mut self,
         key_ty: &TypeExpr,
@@ -4038,14 +4549,16 @@ impl<'a> Collector<'a> {
         let resolved_val = self.ck.resolve_type_alias(val_ty);
         let exp_val = self.kind_of_ty(&resolved_val, 0);
         for (k, v) in entries {
-            if exp_key != OpKind::Unknown {
+            if exp_key != OpKind::Unknown && exp_key != OpKind::Interface {
                 let kk = self.kind_of_expr(k);
+                let is_untyped_int_to_float = exp_key == OpKind::Float
+                    && kk == OpKind::Int
+                    && self.is_untyped_int_const(k);
+                let conflict = (exp_key == OpKind::Float && kk == OpKind::Int && !is_untyped_int_to_float)
+                    || kinds_conflict(&exp_key, &kk);
                 if kk != OpKind::Unknown
                     && kk != exp_key
-                    && !(exp_key == OpKind::Float
-                        && kk == OpKind::Int
-                        && crate::const_overflow::const_int_value(k).is_some())
-                    && kinds_conflict(&exp_key, &kk)
+                    && conflict
                 {
                     self.emit_e1002(
                         k.span(),
@@ -4059,18 +4572,20 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
-            if exp_val != OpKind::Unknown {
+            if exp_val != OpKind::Unknown && exp_val != OpKind::Interface {
                 let bare_v = unwrap_parens(v);
                 if matches!(bare_v, Expr::Lit { kind: LitKind::Nil, .. }) {
                     continue;
                 }
                 let vk = self.kind_of_expr(v);
+                let is_untyped_int_to_float = exp_val == OpKind::Float
+                    && vk == OpKind::Int
+                    && self.is_untyped_int_const(v);
+                let conflict = (exp_val == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
+                    || kinds_conflict(&exp_val, &vk);
                 if vk != OpKind::Unknown
                     && vk != exp_val
-                    && !(exp_val == OpKind::Float
-                        && vk == OpKind::Int
-                        && crate::const_overflow::const_int_value(v).is_some())
-                    && kinds_conflict(&exp_val, &vk)
+                    && conflict
                 {
                     self.emit_e1002(
                         v.span(),
@@ -4595,7 +5110,27 @@ impl<'a> Collector<'a> {
                 let key_arg = &args[1].value;
                 let mk = self.kind_of_expr(map_arg);
                 match &mk {
-                    OpKind::Unknown => {}
+                    // #2474: `delete(s, v)` on a `set[T]` (lowered to
+                    // `s.remove(v)`) needs `v` of type `T`.
+                    OpKind::Unknown => {
+                        if let Some(elem) = self.set_elem_of_expr(map_arg) {
+                            let want = self.kind_of_named(&elem, 0);
+                            let got = self.kind_of_expr(key_arg);
+                            if kinds_conflict(&want, &got) {
+                                self.emit_e2005(
+                                    span,
+                                    format!(
+                                        "cannot use `{}` (type `{}`) as element type `{}` in `delete` on `set[{}]` (HYB-E2005)",
+                                        key_arg.render(),
+                                        got.label(),
+                                        want.label(),
+                                        elem
+                                    ),
+                                    "the second argument to `delete(s, v)` must match the set's element type",
+                                );
+                            }
+                        }
+                    }
                     OpKind::Map(k_expected, _) => {
                         let kk = self.kind_of_expr(key_arg);
                         if **k_expected != OpKind::Unknown
@@ -5261,5 +5796,32 @@ fn main() {
             "unexpected diagnostics: {:?}",
             r.diagnostics
         );
+    }
+}
+
+/// The element type hy-emit's `infer_slice_head` gives an untyped slice
+/// literal from its first item, or `None` when it infers none.
+fn untyped_slice_head_ty(first: &Expr) -> Option<TypeExpr> {
+    let span = first.span();
+    let named = |n: &str| Some(TypeExpr::Named { name: n.to_string(), span });
+    match first {
+        Expr::Paren { inner, .. } => untyped_slice_head_ty(inner),
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => untyped_slice_head_ty(operand).filter(|t| {
+            matches!(t, TypeExpr::Named { name, .. } if name == "int" || name == "float64")
+        }),
+        Expr::Lit { kind, .. } => match kind {
+            LitKind::Int(_) => named("int"),
+            LitKind::Float(_) => named("float64"),
+            LitKind::Str(_) | LitKind::RawStr(_) => named("string"),
+            LitKind::Bool(_) => named("bool"),
+            LitKind::Char(_) => named("rune"),
+            LitKind::Nil => None,
+        },
+        Expr::StructLit { ty: Some(t), .. } => Some(t.clone()),
+        _ => None,
     }
 }

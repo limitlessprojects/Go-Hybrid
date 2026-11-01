@@ -538,6 +538,39 @@ impl Emitter {
                 "empty `[]` literal — write `[]T{}` with the element type",
             ));
         };
+        // Parentheses and a sign on a numeric literal are transparent:
+        // `[-1, 2]` is `[]int`, `[(2.5), 1]` is `[]float64` — the same head
+        // hy-check's untyped-slice item check infers.
+        let mut first = first;
+        let mut negated = false;
+        loop {
+            match first {
+                Expr::Paren { inner, .. } => first = inner,
+                Expr::Unary {
+                    op: UnOp::Neg,
+                    operand,
+                    ..
+                } => {
+                    negated = true;
+                    first = operand;
+                }
+                _ => break,
+            }
+        }
+        if negated
+            && !matches!(
+                first,
+                Expr::Lit {
+                    kind: LitKind::Int(_) | LitKind::Float(_),
+                    ..
+                }
+            )
+        {
+            return Err(EmitError::unsupported(format!(
+                "untyped slice literal of `-{}` — spell the element type",
+                first.render()
+            )));
+        }
         let elem = match first {
             Expr::Lit { kind, .. } => match kind {
                 LitKind::Int(_) => "int",
@@ -618,8 +651,55 @@ impl Emitter {
                 }
                 None
             }
-            // A zero-arg/method call's result type is the member's result.
-            Expr::Call { callee, .. } => self.type_of_expr(callee),
+            Expr::Try { operand, .. } | Expr::Move { operand, .. } => self.type_of_expr(operand),
+            // A zero-arg/method call's result type is the member's result;
+            // package constructors and user functions returning shape-known
+            // foreign types resolve to their descriptor keys.
+            Expr::Call { callee, .. } => {
+                if let Some(t) = self.type_of_expr(callee) {
+                    return Some(t);
+                }
+                match Self::unwrap_parens(callee) {
+                    Expr::Ident { name, .. } => {
+                        let (fn_head, _) = split_type_args(name);
+                        if !self.local_vars.contains(fn_head) {
+                            if let Some((_, _, Some(BindingKind::ForeignTy(t)), _)) =
+                                self.fn_shapes.get(fn_head)
+                            {
+                                return Some(t);
+                            }
+                        }
+                        None
+                    }
+                    Expr::Field { base, name, .. } => {
+                        if let Expr::Ident { name: pkg, .. } = Self::unwrap_parens(base) {
+                            if self.is_unshadowed_pkg_root(pkg) {
+                                return match (pkg.as_str(), name.as_str()) {
+                                    (
+                                        "time",
+                                        "since"
+                                        | "until"
+                                        | "milliseconds"
+                                        | "seconds"
+                                        | "minutes"
+                                        | "hours"
+                                        | "parse_duration",
+                                    ) => Some("time.duration"),
+                                    ("time", "now" | "parse") => Some("time.time"),
+                                    ("serde_json", "parse" | "new_object" | "new_array") => {
+                                        Some("serde_json.value")
+                                    }
+                                    ("http", "new_serve_mux") => Some("http.serve_mux"),
+                                    ("url", "parse") => Some("url.url"),
+                                    _ => None,
+                                };
+                            }
+                        }
+                        None
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
