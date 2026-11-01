@@ -5182,6 +5182,22 @@ impl<'a> Collector<'a> {
         ik: &OpKind,
         span: Span,
     ) {
+        // #2981: a `set[T]` resolves to `OpKind::Unknown`, which the indexable
+        // arm below treats as fail-open. A set is emitted as a Go struct, so
+        // `s[0]` can never build (`cannot index ... of struct type set[T]`).
+        if let Some(e) = base_expr {
+            if let Some(elem) = self.set_elem_of_expr(e) {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "cannot index `{}` (type `set[{}]`) — indexing requires a slice, array, map, or string (HYB-E1002)",
+                        base_str, elem
+                    ),
+                    "only slices, arrays, maps, and strings can be indexed with `x[i]`",
+                );
+                return;
+            }
+        }
         let indexable = matches!(
             bk,
             OpKind::Unknown
@@ -5331,6 +5347,20 @@ impl<'a> Collector<'a> {
         hi: Option<&Expr>,
         span: Span,
     ) {
+        // #2981: `set[T]` is `OpKind::Unknown` and slices fail-open below, but a
+        // set lowers to a Go struct — `s[lo:hi]` can never build.
+        if let Some(elem) = self.set_elem_of_expr(base) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot slice `{}` (type `set[{}]`) — slicing requires a slice, array, or string (HYB-E1002)",
+                    base.render(),
+                    elem
+                ),
+                "only slices, arrays, and strings support `x[lo:hi]` slicing",
+            );
+            return;
+        }
         let sliceable = matches!(
             bk,
             OpKind::Unknown | OpKind::Slice(_) | OpKind::Array(_) | OpKind::Str
@@ -6404,6 +6434,20 @@ impl<'a> Collector<'a> {
                 if builtins_already_flags_len_cap(op, true) {
                     return;
                 }
+                // #2981: `cap(set[T])` is `OpKind::Unknown` -> fail-open below,
+                // but a set is a Go struct with no capacity.
+                if let Some(elem) = self.set_elem_of_expr(op) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "invalid argument `{}` (type `set[{}]`) for built-in `cap` (HYB-E2005)",
+                            op.render(),
+                            elem
+                        ),
+                        "`cap` accepts a slice, array, or channel — a set has no capacity",
+                    );
+                    return;
+                }
                 let ak = self.kind_of_expr(op);
                 let ok = matches!(
                     ak,
@@ -6430,6 +6474,19 @@ impl<'a> Collector<'a> {
                 }
                 let op = &args[0].value;
                 if builtins_already_flags_close(op) {
+                    return;
+                }
+                // #2981: `close(set[T])` is `OpKind::Unknown` -> fail-open below.
+                if let Some(elem) = self.set_elem_of_expr(op) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "cannot close non-channel `{}` (type `set[{}]`) (HYB-E2005)",
+                            op.render(),
+                            elem
+                        ),
+                        "`close` requires a bidirectional or send-only channel (`chan T` or `chan<- T`)",
+                    );
                     return;
                 }
                 let ak = self.kind_of_expr(op);
@@ -6605,6 +6662,19 @@ impl<'a> Collector<'a> {
                     return; // arity handled by builtins.rs
                 }
                 let op = &args[0].value;
+                // #2981: `clear(set[T])` is `OpKind::Unknown` -> fail-open below.
+                if let Some(elem) = self.set_elem_of_expr(op) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "cannot clear non-slice/map `{}` (type `set[{}]`) (HYB-E2005)",
+                            op.render(),
+                            elem
+                        ),
+                        "`clear` requires a slice or map operand",
+                    );
+                    return;
+                }
                 let ak = self.kind_of_expr(op);
                 if !matches!(ak, OpKind::Unknown | OpKind::Slice(_) | OpKind::Map(_, _)) {
                     self.emit_e2005(
