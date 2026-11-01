@@ -365,8 +365,12 @@ struct Collector<'a> {
     scopes: Vec<HashMap<String, Option<usize>>>,
     /// Parallel lexical scope stack tracking resolved operand kinds (#425).
     kind_scopes: Vec<HashMap<String, OpKind>>,
+    /// Parallel lexical scope stack tracking declared numeric scalar types ("int", "int64", etc.).
+    scalar_scopes: Vec<HashMap<String, &'static str>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
+    /// File-level `const` declared numeric scalar types.
+    file_const_scalars: HashMap<String, &'static str>,
     /// Result kinds of the function whose body is currently being walked
     /// (#577 C9/C10). Empty for a fn declared with no results — which is also
     /// the state outside any body, so `Stmt::Return` can only ever see it
@@ -401,7 +405,9 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             ck,
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
+            scalar_scopes: Vec::new(),
             file_consts: HashMap::new(),
+            file_const_scalars: HashMap::new(),
             fn_results: Vec::new(),
             fn_results_all_named: false,
             fn_results_error_tail: false,
@@ -420,6 +426,14 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
                     .map(|t| c.kind_of_ty(t, 0))
                     .unwrap_or_else(|| c.kind_of_expr(&cd.value));
                 c.file_consts.insert(cd.name.clone(), k);
+                let sc = cd
+                    .ty
+                    .as_ref()
+                    .and_then(|t| c.scalar_of_ty(t))
+                    .or_else(|| c.expr_scalar_type(&cd.value));
+                if let Some(sc) = sc {
+                    c.file_const_scalars.insert(cd.name.clone(), sc);
+                }
             }
         }
         for d in &file.decls {
@@ -458,11 +472,13 @@ impl<'a> Collector<'a> {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.kind_scopes.push(HashMap::new());
+        self.scalar_scopes.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.kind_scopes.pop();
+        self.scalar_scopes.pop();
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -489,6 +505,51 @@ impl<'a> Collector<'a> {
             }
         }
         self.file_consts.get(name).cloned()
+    }
+
+    fn bind_scalar(&mut self, name: &str, scalar: &'static str) {
+        if name != "_" {
+            if let Some(top) = self.scalar_scopes.last_mut() {
+                top.insert(name.to_string(), scalar);
+            }
+        }
+    }
+
+    fn lookup_scalar(&self, name: &str) -> Option<&'static str> {
+        for layer in self.scalar_scopes.iter().rev() {
+            if let Some(s) = layer.get(name) {
+                return Some(*s);
+            }
+        }
+        self.file_const_scalars.get(name).copied()
+    }
+
+    fn scalar_of_ty(&self, ty: &TypeExpr) -> Option<&'static str> {
+        let resolved = self.ck.resolve_type_alias(ty);
+        match &resolved {
+            TypeExpr::Named { name, .. } => {
+                let base = Checker::base_named_type_str(name);
+                canonical_numeric_scalar(base)
+            }
+            _ => None,
+        }
+    }
+
+    fn expr_scalar_type(&self, e: &Expr) -> Option<&'static str> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.lookup_scalar(name),
+            Expr::Call { callee, args, .. } => {
+                if args.len() == 1 && !args[0].spread {
+                    if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                        let base = Checker::base_named_type_str(name);
+                        return canonical_numeric_scalar(base);
+                    }
+                }
+                None
+            }
+            Expr::Unary { operand, .. } => self.expr_scalar_type(operand),
+            _ => None,
+        }
     }
 
     /// A `for`-iterate or `select`-receive binding is elided to `_` at
@@ -745,6 +806,9 @@ impl<'a> Collector<'a> {
             self.exempt(&p.name);
             let pk = self.kind_of_ty(&p.ty, 0);
             self.bind_kind(&p.name, pk);
+            if let Some(sc) = self.scalar_of_ty(&p.ty) {
+                self.bind_scalar(&p.name, sc);
+            }
         }
         for r in &f.results {
             if let Some(rname) = &r.name {
@@ -896,6 +960,21 @@ impl<'a> Collector<'a> {
         let kinds = self.infer_local_kinds(l);
         for (name, kind) in l.names.iter().zip(kinds) {
             self.bind_kind(name, kind);
+        }
+        if let Some(t) = &l.ty {
+            if let Some(sc) = self.scalar_of_ty(t) {
+                for name in &l.names {
+                    self.bind_scalar(name, sc);
+                }
+            }
+        } else if l.names.len() == l.values.len() {
+            for (name, v) in l.names.iter().zip(l.values.iter()) {
+                if let Some(sc) = self.expr_scalar_type(v) {
+                    self.bind_scalar(name, sc);
+                }
+            }
+        }
+        for (name, _kind) in l.names.iter().zip(self.infer_local_kinds(l)) {
             if !track_read {
                 self.exempt(name);
                 continue;
@@ -1488,6 +1567,9 @@ impl<'a> Collector<'a> {
                     self.exempt(&p.name);
                     let pk = self.kind_of_ty(&p.ty, 0);
                     self.bind_kind(&p.name, pk);
+                    if let Some(sc) = self.scalar_of_ty(&p.ty) {
+                        self.bind_scalar(&p.name, sc);
+                    }
                 }
                 for r in results {
                     if let Some(rname) = &r.name {
@@ -2175,16 +2257,41 @@ impl<'a> Collector<'a> {
                 Some((_, fty)) => {
                     let want = self.kind_of_ty_with_subst(fty, &subst, 0);
                     let got = self.kind_of_expr(&f.value);
-                    if kinds_conflict(&want, &got) {
+
+                    let want_sc = self.scalar_of_ty(fty);
+                    let got_sc = self.expr_scalar_type(&f.value);
+
+                    let is_untyped_int = matches!(
+                        crate::const_overflow::const_int_fold_with(
+                            &f.value,
+                            &self.ck.const_values,
+                            0,
+                            None
+                        ),
+                        crate::const_overflow::ConstFold::Val(_)
+                    ) || matches!(unwrap_parens(&f.value), Expr::Lit { kind: LitKind::Int(_), .. });
+
+                    let int_to_float_conflict = want == OpKind::Float
+                        && got == OpKind::Int
+                        && !is_untyped_int;
+
+                    let scalar_mismatch = match (want_sc, got_sc) {
+                        (Some(w), Some(g)) => w != g,
+                        _ => false,
+                    };
+
+                    if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch {
+                        let got_label = got_sc.map(ToString::to_string).unwrap_or_else(|| got.label());
+                        let want_label = want_sc.map(ToString::to_string).unwrap_or_else(|| want.label());
                         self.emit_e1002(
                             f.value.span(),
                             format!(
                                 "cannot use a value of type `{}` for field `{}` of `{}` (declared `{}`) — Go refuses `cannot use ... as {} value in struct literal` (HYB-E1002)",
-                                got.label(),
+                                got_label,
                                 f.name,
                                 full_name,
-                                want.label(),
-                                want.label()
+                                want_label,
+                                want_label
                             ),
                             "the field's declared type is fixed; write an explicit conversion when a conversion is intended",
                         );
@@ -4940,5 +5047,27 @@ fn main() {
             "unexpected diagnostics: {:?}",
             r.diagnostics
         );
+    }
+}
+
+
+pub(crate) fn canonical_numeric_scalar(name: &str) -> Option<&'static str> {
+    match name {
+        "int" => Some("int"),
+        "int8" | "i8" => Some("int8"),
+        "int16" | "i16" => Some("int16"),
+        "int32" | "i32" | "rune" => Some("int32"),
+        "int64" | "i64" => Some("int64"),
+        "uint" => Some("uint"),
+        "uint8" | "u8" | "byte" => Some("uint8"),
+        "uint16" | "u16" => Some("uint16"),
+        "uint32" | "u32" => Some("uint32"),
+        "uint64" | "u64" => Some("uint64"),
+        "uintptr" => Some("uintptr"),
+        "float32" | "f32" => Some("float32"),
+        "float64" | "f64" => Some("float64"),
+        "complex64" => Some("complex64"),
+        "complex128" => Some("complex128"),
+        _ => None,
     }
 }
