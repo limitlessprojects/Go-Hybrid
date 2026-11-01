@@ -1767,7 +1767,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn fn_call_shape_subst(
+    pub(crate) fn fn_call_shape_subst(
         &self,
         st: &FnState,
         f: &hy_syntax::FnDecl,
