@@ -509,6 +509,9 @@ impl Parser {
             self.eat_punct(",");
         }
         self.expect_punct("]")?;
+        if v.is_empty() {
+            return self.err("expected at least one type parameter in type parameter list '[...]'");
+        }
         Ok(v)
     }
 
@@ -3103,6 +3106,14 @@ mod tests {
             }
             e => panic!("generic struct lit, got {}", e.render()),
         }
+    }
+
+    #[test]
+    fn empty_type_params_are_rejected() {
+        let err1 = parse_file("test.hy", "struct box[] {\n    v int\n}\n");
+        assert!(err1.is_err(), "struct box[] must be rejected as malformed");
+        let err2 = parse_file("test.hy", "fn id[]() {}\n");
+        assert!(err2.is_err(), "fn id[] must be rejected as malformed");
     }
 
     #[test]
