@@ -325,6 +325,11 @@ impl<'a> Checker<'a> {
         value: &Expr,
         st: Option<&FnState>,
     ) {
+        if let Some(st) = st {
+            if self.fixed_width_int_ty_of(st, value).is_some() {
+                return;
+            }
+        }
         let (lo, hi) = target_int_range();
         match const_int_fold_with(value, &self.const_values, 0, st) {
             ConstFold::NotConst => return,
