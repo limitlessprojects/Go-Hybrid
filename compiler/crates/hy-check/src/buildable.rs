@@ -736,13 +736,89 @@ impl<'a> Collector<'a> {
         None
     }
 
-    /// The element type text of a set-valued expression, when provable.
+    fn set_elem_from_type_name(tname: &str) -> Option<String> {
+        let s = tname.trim();
+        if let Some(rest) = s.strip_prefix("set[") {
+            if let Some(elem) = rest.strip_suffix(']') {
+                return Some(elem.trim().to_string());
+            }
+        }
+        None
+    }
+
+    fn set_elem_from_collection_type_name(tname: &str) -> Option<String> {
+        let s = tname.trim();
+        if let Some(rest) = s.strip_prefix("[]") {
+            return Self::set_elem_from_type_name(rest);
+        }
+        if s.starts_with('[') {
+            if let Some(close) = s.find(']') {
+                let rest = &s[close + 1..];
+                return Self::set_elem_from_type_name(rest);
+            }
+        }
+        if s.starts_with("map[") {
+            if let Some(close) = s.find(']') {
+                let rest = &s[close + 1..];
+                return Self::set_elem_from_type_name(rest);
+            }
+        }
+        None
+    }
+
+    fn type_name_of_expr(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => self.lookup_type_name(name),
+            Expr::SliceLit { elem: Some(t), .. } => Some(format!("[]{}", t.render())),
+            Expr::MapLit { key, value, .. } => {
+                Some(format!("map[{}]{}", key.render(), value.render()))
+            }
+            Expr::StructLit { ty: Some(t), .. } => Some(t.render()),
+            Expr::Call { callee, .. } => match unwrap_parens(callee) {
+                Expr::Ident { name, .. } => self
+                    .ck
+                    .fns
+                    .get(name.as_str())
+                    .filter(|f| f.results.len() == 1)
+                    .map(|f| f.results[0].ty.render()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The element type text of a set-valued expression, when provable (#2474, #2921).
     fn set_elem_of_expr(&self, e: &Expr) -> Option<String> {
         match unwrap_parens(e) {
             Expr::Ident { name, .. } => {
                 for layer in self.set_elem_scopes.iter().rev() {
                     if let Some(v) = layer.get(name) {
                         return v.clone();
+                    }
+                }
+                if let Some(tname) = self.lookup_type_name(name) {
+                    return Self::set_elem_from_type_name(&tname);
+                }
+                None
+            }
+            Expr::Index { base, .. } => {
+                let base_ty = self.type_name_of_expr(base)?;
+                Self::set_elem_from_collection_type_name(&base_ty)
+            }
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                if let Some(sn) = self.struct_base_name(&bk) {
+                    let base_name = Checker::base_named_type_str(&sn);
+                    if let Some(fields) = self.ck.structs.get(base_name) {
+                        if let Some((_, fty)) = fields.iter().find(|(n, _)| n == name) {
+                            return Self::set_elem_of_ty(fty);
+                        }
+                    }
+                    if let Some(m) = self.ck.method_decls.get(&(sn, name.to_string())) {
+                        if m.results.len() == 1 {
+                            return Self::set_elem_of_ty(&m.results[0].ty);
+                        }
                     }
                 }
                 None
@@ -756,31 +832,66 @@ impl<'a> Collector<'a> {
                     .get(name.as_str())
                     .filter(|f| f.results.len() == 1)
                     .and_then(|f| Self::set_elem_of_ty(&f.results[0].ty)),
+                Expr::Field { base, name, .. } => {
+                    let bk = self.kind_of_expr(base);
+                    if let Some(sn) = self.struct_base_name(&bk) {
+                        if let Some(m) = self.ck.method_decls.get(&(sn, name.to_string())) {
+                            if m.results.len() == 1 {
+                                return Self::set_elem_of_ty(&m.results[0].ty);
+                            }
+                        }
+                    }
+                    None
+                }
                 _ => None,
             },
             _ => None,
         }
     }
 
-    /// #2474: `s.insert(v)` / `s.contains(v)` / `s.remove(v)` on a `set[T]`
+    /// #2474, #2921: `s.insert(v)` / `s.contains(v)` / `s.remove(v)` on a `set[T]`
     /// need `v` of type `T`; the prelude's Go signature takes `T`, so a
     /// mismatched argument passed `hyb check` and failed `go build`.
     fn check_set_method_arg(&mut self, callee: &Expr, args: &[CallArg]) {
         let Expr::Field { base, name, .. } = unwrap_parens(callee) else {
             return;
         };
-        if !matches!(name.as_str(), "insert" | "contains" | "remove") || args.len() != 1 {
-            return;
-        }
         let Some(elem) = self.set_elem_of_expr(base) else {
             return;
         };
+        if !matches!(name.as_str(), "insert" | "contains" | "remove") {
+            return;
+        }
+        if args.len() != 1 {
+            self.emit_e1002(
+                callee.span(),
+                format!(
+                    "wrong number of arguments in call to `set.{}`: expected 1, found {} (HYB-E1002)",
+                    name,
+                    args.len()
+                ),
+                "a set's insert/contains/remove take exactly 1 argument",
+            );
+            return;
+        }
+        if args[0].spread {
+            self.emit_e1002(
+                args[0].value.span(),
+                format!("cannot use `...` in call to `set.{}` (HYB-E1002)", name),
+                "set methods take a single value, not a spread slice",
+            );
+            return;
+        }
         let want = self.kind_of_named(&elem, 0);
         let got = self.kind_of_expr(&args[0].value);
         let int_to_float_conflict = want == OpKind::Float
             && got == OpKind::Int
             && !self.is_untyped_int_const(&args[0].value);
-        if kinds_conflict(&want, &got) || int_to_float_conflict {
+        let scalar_mismatch = matches!(
+            (canonical_numeric_name(&elem), self.typed_value_scalar(&args[0].value)),
+            (Some(w), Some(g)) if w != g
+        );
+        if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch {
             self.emit_e1002(
                 args[0].value.span(),
                 format!(
@@ -1505,7 +1616,9 @@ impl<'a> Collector<'a> {
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
-                if let Some(elem) = self.slice_element_type_name(val) {
+                if let Some(tname) = self.type_name_of_expr(val) {
+                    self.bind_type_name(name, tname);
+                } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
                 }
             }
@@ -1715,6 +1828,14 @@ impl<'a> Collector<'a> {
                             }
                             self.bind_kind(v, k);
                         }
+                        if let Some(elem) = self.set_elem_of_expr(expr) {
+                            if vars.len() == 1 && vars[0] != "_" {
+                                let v = &vars[0];
+                                let s = canonical_numeric_name(&elem);
+                                self.set_scalar(v, s);
+                                self.bind_type_name(v, elem.clone());
+                            }
+                        }
                     }
                     ForKind::Infinite => {}
                 }
@@ -1878,6 +1999,10 @@ impl<'a> Collector<'a> {
     }
 
     fn iterate_var_kinds(&self, expr: &Expr, n_vars: usize) -> Vec<OpKind> {
+        if let Some(elem) = self.set_elem_of_expr(expr) {
+            let ek = self.kind_of_named(&elem, 0);
+            return vec![ek; n_vars.max(1)];
+        }
         match self.kind_of_expr(expr) {
             OpKind::Slice(e) | OpKind::Array(e) | OpKind::Chan(e) => {
                 if n_vars >= 2 {
@@ -3095,6 +3220,15 @@ impl<'a> Collector<'a> {
                         "is_some" | "is_none" if args.is_empty() => {
                             return Some(vec![OpKind::Bool])
                         }
+                        _ => {}
+                    }
+                }
+                // #2921: set methods carry real result kinds — insert/contains yield bool, len yields int, remove is void.
+                if self.set_elem_of_expr(base).is_some() {
+                    match name.as_str() {
+                        "insert" | "contains" if args.len() == 1 => return Some(vec![OpKind::Bool]),
+                        "remove" if args.len() == 1 => return Some(Vec::new()),
+                        "len" if args.is_empty() => return Some(vec![OpKind::Int]),
                         _ => {}
                     }
                 }
@@ -6146,6 +6280,23 @@ impl<'a> Collector<'a> {
     fn check_pointer_method_receiver(&mut self, base: &Expr, name: &str, span: Span) {
         let bk = self.kind_of_expr(base);
         let head = Checker::base_named_type_str(name);
+        // #2921: set methods `insert`, `contains`, `remove` take a pointer receiver `*set[t]`.
+        // A non-addressable receiver (e.g. `m["a"].contains(...)`) cannot have its address taken in Go.
+        if self.set_elem_of_expr(base).is_some() && matches!(head, "insert" | "contains" | "remove") {
+            if !self.is_addressable_value_receiver(base) {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "cannot call pointer method `{}` on `{}` (non-addressable `set` value) — Go refuses taking the address of `{}` (HYB-E1002)",
+                        name,
+                        base.render(),
+                        base.render()
+                    ),
+                    "assign the set to a local variable first (`s := ...; s.method()`)",
+                );
+                return;
+            }
+        }
         if let OpKind::Struct(Some(sn)) = &bk {
             let base_sn = Checker::base_named_type_str(sn);
             if let Some(m) = self
