@@ -726,12 +726,21 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                         format!("the loop header `{}`", expr.render()),
                     );
                     let is_chan = matches!(ck.shape_of_expr(&st, expr), TypeShape::Chan(_));
+                    if !is_chan {
+                        let loop_end = flat.loop_end_of(idx);
+                        ck.extend_view_loans_until(&mut st, expr, loop_end, idx);
+                    }
                     let shapes = ck.iterate_var_shapes(&st, expr, vars.len());
                     for (name, shape) in vars.iter().zip(shapes) {
                         let is_ref = shape.is_reference_alias();
                         let may_share = ck.shape_may_share(&shape);
+                        let carries_borrow_handle =
+                            matches!(crate::loans::field_borrow_kind(&shape), Some("borrow-handle"));
                         ck.define_binding(&mut st, name, shape, None, false, managed, false);
                         if !is_chan {
+                            if carries_borrow_handle || ck.expr_carries_borrow(&st, expr) {
+                                st.borrow_bindings.insert(name.clone());
+                            }
                             if may_share {
                                 ck.record_may_share(&mut st, name, expr);
                             }
