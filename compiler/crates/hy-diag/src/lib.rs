@@ -64,10 +64,20 @@ impl Span {
 
     /// Merge two spans into one covering both.
     pub fn to(self, other: Span) -> Span {
-        Span {
-            start: self.start,
-            end: other.end,
-        }
+        // Neither argument is assumed to precede the other: order the two
+        // starts and the two ends so the merged span always covers both and
+        // is never inverted (`start > end`) or truncated.
+        let start = if (other.start.line, other.start.col) < (self.start.line, self.start.col) {
+            other.start
+        } else {
+            self.start
+        };
+        let end = if (other.end.line, other.end.col) > (self.end.line, self.end.col) {
+            other.end
+        } else {
+            self.end
+        };
+        Span { start, end }
     }
 }
 
@@ -144,6 +154,31 @@ impl Diagnostic {
         span: Span,
         message: impl Into<String>,
     ) -> Self {
+        assert_severity_code_coherence(code, Severity::Error);
+        Self::build(code, Severity::Error, file, span, message)
+    }
+
+    /// A warning diagnostic (lints — E8nnn; can never fail the build).
+    pub fn warning(
+        code: &str,
+        file: impl Into<String>,
+        span: Span,
+        message: impl Into<String>,
+    ) -> Self {
+        assert_severity_code_coherence(code, Severity::Warning);
+        Self::build(code, Severity::Warning, file, span, message)
+    }
+
+    /// Shared body: resolve the code through the registry, attach its
+    /// fix-its, and stamp the caller's severity. The caller is responsible
+    /// for the severity/code coherence assert (see `assert_severity_code_coherence`).
+    fn build(
+        code: &str,
+        severity: Severity,
+        file: impl Into<String>,
+        span: Span,
+        message: impl Into<String>,
+    ) -> Self {
         let reg = Registry::global();
         let entry = reg.lookup(code);
         Diagnostic {
@@ -151,7 +186,7 @@ impl Diagnostic {
                 .map(|e| e.code.clone())
                 .unwrap_or_else(|| code.to_string()),
             name: entry.map(|e| e.name.clone()).unwrap_or_default(),
-            severity: Severity::Error,
+            severity,
             file: file.into(),
             span,
             message: message.into(),
@@ -169,18 +204,6 @@ impl Diagnostic {
                 .unwrap_or_default(),
             tier0_rule: entry.and_then(|e| e.tier0_rule_id.clone()),
         }
-    }
-
-    /// A warning diagnostic (lints — E8nnn; can never fail the build).
-    pub fn warning(
-        code: &str,
-        file: impl Into<String>,
-        span: Span,
-        message: impl Into<String>,
-    ) -> Self {
-        let mut d = Diagnostic::error(code, file, span, message);
-        d.severity = Severity::Warning;
-        d
     }
 
     pub fn with_notes(mut self, notes: Vec<String>) -> Self {
@@ -348,13 +371,17 @@ impl Registry {
     /// Resolve a code by any of its accepted spellings:
     /// `HYB-E3001`, `E3001`, `3001` (case-insensitive), or machine name.
     pub fn lookup(&self, query: &str) -> Option<&RegistryEntry> {
-        let raw = query.trim();
-        let q = raw.to_ascii_uppercase();
-        let q_short = q.trim_start_matches("HYB-");
+        let qu = query.trim().to_ascii_uppercase();
         self.data.codes.iter().find(|c| {
-            let short = c.code.trim_start_matches("HYB-"); // "E3003"
-            let digits = short.trim_start_matches('E'); // "3003"
-            c.code == q || short == q_short || digits == q_short || c.name == raw
+            // Strip each prefix exactly once (unlike `trim_start_matches`,
+            // which strips repeatedly), so a doubled or garbled prefix
+            // (`HYB-HYB-E3003`, `HYB-3003`, `EEE3003`) matches nothing.
+            let short = c.code.strip_prefix("HYB-").unwrap_or(&c.code); // "E3003"
+            let digits = short.strip_prefix('E').unwrap_or(short); // "3003"
+            qu == c.code.to_ascii_uppercase()
+                || qu == short.to_ascii_uppercase()
+                || qu == digits.to_ascii_uppercase()
+                || qu == c.name.to_ascii_uppercase()
         })
     }
 
@@ -400,17 +427,24 @@ impl Registry {
 /// an error, and a non-`E8nnn` code can never be constructed as a warning.
 /// Runs as a debug assert AND is unit-tested in release (`#[test]`).
 pub fn assert_severity_code_coherence(code: &str, severity: Severity) {
-    let is_lint = code.contains("-E8");
+    // Judge by the *resolved* code: every accepted registry spelling or
+    // machine name (`E8001`, `8001`, `hyb-e8001`, `managed-share`) must
+    // classify the same way as the canonical `HYB-Exxxx` form.
+    let canonical = Registry::global()
+        .lookup(code)
+        .map(|e| e.code.clone())
+        .unwrap_or_else(|| code.to_string());
+    let is_lint = canonical.contains("-E8");
     let is_err = severity == Severity::Error;
     debug_assert!(
         !(is_lint && is_err),
         "lint code {} constructed with severity error — lints can never fail the build",
-        code
+        canonical
     );
     debug_assert!(
         !(!is_lint && severity == Severity::Warning),
         "non-lint code {} constructed as a warning — warnings are E8nnn-only",
-        code
+        canonical
     );
 }
 
@@ -521,5 +555,84 @@ mod tests {
     fn severity_coherence_never_panics_for_valid_pairs() {
         assert_severity_code_coherence("HYB-E8001", Severity::Warning);
         assert_severity_code_coherence("HYB-E3001", Severity::Error);
+    }
+
+    #[test]
+    fn span_to_orders_both_arguments_and_never_inverts() {
+        // `self` starts AFTER `other`: the merged span must cover both and be
+        // ordered (2:4-5:8), not the inverted `5:1-2:10`.
+        let merged = Span::new(Pos::new(5, 1), Pos::new(5, 8))
+            .to(Span::new(Pos::new(2, 4), Pos::new(2, 10)));
+        assert_eq!(merged.start, Pos::new(2, 4));
+        assert_eq!(merged.end, Pos::new(5, 8));
+        assert_eq!(merged.to_string(), "2:4-5:8");
+        // ...and the already-ordered case is unchanged.
+        let ordered = Span::new(Pos::new(1, 1), Pos::new(1, 3))
+            .to(Span::new(Pos::new(4, 2), Pos::new(4, 9)));
+        assert_eq!(ordered.start, Pos::new(1, 1));
+        assert_eq!(ordered.end, Pos::new(4, 9));
+    }
+
+    #[test]
+    fn lookup_matches_aliases_case_insensitively_but_not_garbled_prefixes() {
+        let reg = Registry::global();
+        for q in [
+            "HYB-E3003",
+            "E3003",
+            "3003",
+            "e3003",
+            "use-after-move",
+            "USE-AFTER-MOVE",
+        ] {
+            assert_eq!(
+                reg.lookup(q).map(|e| e.code.as_str()),
+                Some("HYB-E3003"),
+                "`{q}` must resolve to HYB-E3003"
+            );
+        }
+        assert_eq!(
+            reg.lookup("Managed-Share").map(|e| e.code.as_str()),
+            Some("HYB-E8001"),
+            "machine names are case-insensitive"
+        );
+        for q in ["HYB-HYB-E3003", "HYB-HYB-3003", "HYB-3003", "EEE3003", "nope-9999"] {
+            assert!(reg.lookup(q).is_none(), "`{q}` must not resolve");
+        }
+    }
+
+    #[test]
+    fn coherence_resolves_every_alias_before_classifying() {
+        // Every accepted spelling of the E8001 lint is a coherent warning...
+        for code in ["HYB-E8001", "E8001", "8001", "hyb-e8001", "managed-share"] {
+            assert_severity_code_coherence(code, Severity::Warning);
+        }
+        // ...and every spelling of a hard Tier-0 error is a coherent error.
+        for code in ["HYB-E3003", "E3003", "3003", "use-after-move"] {
+            assert_severity_code_coherence(code, Severity::Error);
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn lint_code_cannot_be_constructed_as_an_error() {
+        let _ = Diagnostic::error("HYB-E8001", "x.hy", Span::point(Pos::new(1, 1)), "lint as error");
+    }
+
+    #[test]
+    #[should_panic]
+    fn tier0_code_cannot_be_constructed_as_a_warning() {
+        let _ = Diagnostic::warning(
+            "HYB-E3003",
+            "x.hy",
+            Span::point(Pos::new(1, 1)),
+            "error as warning",
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn coherence_rejects_a_lint_spelled_as_an_alias_declared_as_an_error() {
+        // The alias must classify as the E8001 lint, so Error is incoherent.
+        assert_severity_code_coherence("hyb-e8001", Severity::Error);
     }
 }
