@@ -2124,7 +2124,7 @@ impl<'a> Collector<'a> {
                 }
                 self.check_struct_literal(ty.as_ref(), fields, *span);
             }
-            Expr::SliceLit { elem, items, .. } => {
+            Expr::SliceLit { elem, items, span } => {
                 if let Some(t) = elem {
                     self.ty(t);
                     self.check_value_position_type_name(t);
@@ -2138,8 +2138,35 @@ impl<'a> Collector<'a> {
                 for i in items {
                     self.expr(i);
                 }
-                if let Some((_, inner_elem, _)) = e.as_array_lit() {
+                if let Some((len_expr, inner_elem, array_ty)) = e.as_array_lit() {
                     self.check_array_lit_items(inner_elem, items);
+                    if let Some(l_expr) = len_expr {
+                        let target_len = crate::const_overflow::const_int_value(l_expr)
+                            .or_else(|| self.ck.const_int_value_at(l_expr, span.start, 0));
+                        if let Some(n) = target_len {
+                            if (items.len() as i128) < n {
+                                if let Some(reason) = self.ck.no_zero_value_reason(inner_elem, 0) {
+                                    let msg = format!(
+                                        "`{}` has no zero value — array literal `{}` has {} element(s) for length {} (HYB-E4002)",
+                                        inner_elem.render(),
+                                        array_ty.render(),
+                                        items.len(),
+                                        n
+                                    );
+                                    self.diags.push(
+                                        Diagnostic::error("HYB-E4002", self.path.clone(), *span, msg).with_notes(vec![
+                                            format!("why: {}", reason),
+                                            format!(
+                                                "fix: explicitly supply all {} elements in the `{}` array literal",
+                                                n,
+                                                array_ty.render()
+                                            ),
+                                        ]),
+                                    );
+                                }
+                            }
+                        }
+                    }
                 } else if let Some(t) = elem {
                     self.check_slice_lit_items(t, items);
                 } else if !in_slot {
@@ -3193,7 +3220,30 @@ impl<'a> Collector<'a> {
                 }
             }
         }
-        let _ = span;
+        // N3: A struct field whose type has no zero value (e.g. an enum whose first
+        // variant has a payload, or transitively containing such a type) cannot
+        // be elided in a struct literal — it must be explicitly initialized.
+        for (fname, fty) in &declared {
+            if !fields.iter().any(|f| f.name == *fname) {
+                if let Some(reason) = self.ck.no_zero_value_reason(fty, 0) {
+                    let msg = format!(
+                        "`{}` has no zero value — missing field `{}` in `{}` literal must be initialized explicitly (HYB-E4002)",
+                        fty.render(),
+                        fname,
+                        full_name
+                    );
+                    self.diags.push(
+                        Diagnostic::error("HYB-E4002", self.path.clone(), span, msg).with_notes(vec![
+                            format!("why: {}", reason),
+                            format!(
+                                "fix: initialize field `{}` explicitly in the `{}` literal",
+                                fname, full_name
+                            ),
+                        ]),
+                    );
+                }
+            }
+        }
     }
 
     /// #682 U13 — a type conversion takes exactly one argument. Go refuses
