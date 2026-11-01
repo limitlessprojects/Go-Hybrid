@@ -485,6 +485,14 @@ struct Define {
 
 struct Collector<'a> {
     ck: &'a Checker<'a>,
+    /// Nesting depth of the `managed(...)` blocks currently being walked (#2577).
+    ///
+    /// The checker's own counter is out of reach here — `ck` is a shared
+    /// reference, so the #2577 send check cannot raise the depth the boundary
+    /// rules read, and an escape hatch the walk cannot see is a hatch the check
+    /// would report against. The hatch itself is recorded by `--report-managed`
+    /// (HYB-E8001).
+    managed_depth: usize,
     /// One layer per open block/closure. `Some(id)` = a checked define
     /// (`:=`/`let`/`var`/`const`, or a written elidable `for`/`select`
     /// binding); `None` = a name that shadows (params, receivers, named
@@ -561,6 +569,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
     let diags = {
         let mut c = Collector {
             ck,
+            managed_depth: 0,
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
             type_name_scopes: Vec::new(),
@@ -1691,6 +1700,9 @@ impl<'a> Collector<'a> {
                 // or a multi-value call here passed the checker and emitted
                 // `ch <- noop()` / `ch <- pair()`, which Go rejects.
                 self.check_single_value_position(value, "a channel send", false);
+                // #2577: the sent value must also satisfy the channel's element
+                // kind — `var i int; ch <- i` on a `chan float64` was accepted.
+                self.check_send_operand_kinds(chan, value, value.span());
                 self.expr(value);
             }
             Stmt::If {
@@ -1814,7 +1826,16 @@ impl<'a> Collector<'a> {
                     _ => {}
                 }
             }
-            Stmt::Managed { body, .. } => self.block_scoped(body),
+            Stmt::Managed { body, .. } => {
+                // #2577: `managed` is the audited escape hatch, so a check that
+                // argues about what the emitted Go may contain stands down inside
+                // it — the hatch itself is recorded by `--report-managed`
+                // (HYB-E8001). The boundary rules read the same depth, so the send
+                // check has to raise it here too.
+                self.managed_depth += 1;
+                self.block_scoped(body);
+                self.managed_depth -= 1;
+            }
             Stmt::Match { subject, arms, .. } => {
                 self.expr(subject);
                 let subject_kind = self.kind_of_expr(subject);
@@ -1901,6 +1922,9 @@ impl<'a> Collector<'a> {
                     // #887: a channel send in a select arm is also a single-value
                     // position.
                     self.check_single_value_position(value, "a channel send", false);
+                    // #2577: the same element-kind rule as `Stmt::Send` — the
+                    // select arm was the reported bypass, the plain send had it too.
+                    self.check_send_operand_kinds(chan, value, value.span());
                             self.expr(chan);
                             self.expr(value);
                         }
@@ -4185,6 +4209,50 @@ impl<'a> Collector<'a> {
             "a returned value must be assignable to its declared result type; write an explicit conversion when a conversion is intended",
         );
         true
+    }
+
+    /// Channel-send operand kinds (#2577). The sent value must be assignable to
+    /// the element type of the channel, exactly like an assignment target — and
+    /// the assignment helper already knows every shape mismatch Go refuses,
+    /// because `kinds_conflict` is the #682 "value of kind `got` does not satisfy
+    /// a declared type of kind `want`" predicate.
+    ///
+    /// One direction has to be narrowed rather than reused: `(Float, Int)` fails
+    /// open there (an *untyped* int constant is assignable to a float target, and
+    /// the kind model cannot tell it from an `int` variable). A send can tell them
+    /// apart because the checker already tracks untyped constants for the
+    /// assignment rules, so that direction is rejected only when the value is
+    /// provably NOT an untyped int constant.
+    ///
+    /// Both send sites call this: `Stmt::Send` had the same hole as the select arm
+    /// the report described — `var ch chan float64; var i int = 1; ch <- i`
+    /// passed `hyb check` and failed `go build` with `cannot use i (variable of
+    /// type int) as float64 value in send`.
+    fn check_send_operand_kinds(&mut self, chan: &Expr, value: &Expr, span: Span) {
+        if self.managed_depth > 0 {
+            return;
+        }
+        let elem = match self.kind_of_expr(chan) {
+            OpKind::Chan(e) => *e,
+            _ => return,
+        };
+        let got = self.kind_of_expr(value);
+        let untyped_int = self.is_untyped_int_const(value);
+        let conflict =
+            kinds_conflict(&elem, &got) || (elem == OpKind::Float && got == OpKind::Int && !untyped_int);
+        if conflict {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot send a value of type `{}` to `chan {}` — Go refuses `cannot use ... (variable of type {}) as {} value in send` (HYB-E1002)",
+                    got.label(),
+                    elem.label(),
+                    got.label(),
+                    elem.label()
+                ),
+                "the element type of the channel is fixed; write an explicit conversion (`ch <- float64(i)`) when a conversion is intended",
+            );
+        }
     }
 
     /// #682 U7 — a lone multi-value call as the whole argument list is legal
