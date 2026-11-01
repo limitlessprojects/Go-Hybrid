@@ -2961,6 +2961,8 @@ impl<'a> Collector<'a> {
         self.check_single_value_position(rhs, "a binary operation", /*binding_position=*/ false);
         let lk = self.kind_of_expr(lhs);
         let rk = self.kind_of_expr(rhs);
+        let numeric_int_float_conflict = (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs))
+            || (lk == OpKind::Int && rk == OpKind::Float && !self.is_untyped_int_const(lhs));
         match op {
             // `==` / `!=`: incomparable shapes (slice, map, func) are rejected
             // by `emit_guard.rs` (HYB-E2006). Mismatched concrete operand types
@@ -2969,7 +2971,7 @@ impl<'a> Collector<'a> {
                 let op_str = if matches!(op, BinOp::Eq) { "==" } else { "!=" };
                 if !Checker::is_nil_literal(lhs)
                     && !Checker::is_nil_literal(rhs)
-                    && equality_kinds_conflict(&lk, &rk)
+                    && (equality_kinds_conflict(&lk, &rk) || numeric_int_float_conflict)
                 {
                     self.emit_e1002(
                         span,
@@ -3015,7 +3017,7 @@ impl<'a> Collector<'a> {
                 let r_ok = matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
                 let mismatch = lk != OpKind::Unknown
                     && rk != OpKind::Unknown
-                    && lk.is_numeric() != rk.is_numeric();
+                    && (lk.is_numeric() != rk.is_numeric() || numeric_int_float_conflict);
                 if !l_ok || !r_ok || mismatch {
                     self.emit_e1002(
                         span,
@@ -3036,7 +3038,7 @@ impl<'a> Collector<'a> {
                 let r_ok = matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
                 let mismatch = lk != OpKind::Unknown
                     && rk != OpKind::Unknown
-                    && lk.is_numeric() != rk.is_numeric();
+                    && (lk.is_numeric() != rk.is_numeric() || numeric_int_float_conflict);
                 if !l_ok || !r_ok || mismatch {
                     self.emit_e1002(
                         span,
@@ -3059,6 +3061,7 @@ impl<'a> Collector<'a> {
                 };
                 if !matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float)
+                    || numeric_int_float_conflict
                 {
                     self.emit_e1002(
                         span,
@@ -3566,6 +3569,34 @@ impl<'a> Collector<'a> {
             }
         }
         false
+    }
+
+    fn is_untyped_int_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit {
+                kind: LitKind::Int(_) | LitKind::Char(_),
+                ..
+            } => true,
+            Expr::Ident { name, .. } => {
+                if self.file_consts.contains_key(name) {
+                    return true;
+                }
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        return matches!(self.defines[*id].kind, LocalKind::Const);
+                    }
+                }
+                false
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnOp::Neg)
+                    && self.is_untyped_int_const(operand)
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.is_untyped_int_const(lhs) && self.is_untyped_int_const(rhs)
+            }
+            _ => false,
+        }
     }
 
     fn expr_has_non_const_local(&self, e: &Expr) -> bool {
