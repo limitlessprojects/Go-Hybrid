@@ -1109,23 +1109,45 @@ impl Emitter {
 
     /// Binding hints from the defining values (see `BindingKind`).
     fn hint_from_values(&mut self, names: &[String], values: &[Expr]) {
-        let single_hint = if names.len() == 1 && values.len() == 1 && names[0] != "_" {
-            Some(self.binding_kind_of(&values[0]))
+        let hints: Vec<BindingKind> = if names.len() == values.len() {
+            values.iter().map(|v| self.binding_kind_of(v)).collect()
+        } else if values.len() == 1 && !names.is_empty() {
+            vec![self.binding_kind_of(&values[0])]
         } else {
-            None
+            Vec::new()
         };
+        let var_metas: Vec<(Option<TypeExpr>, Option<String>, Option<(String, bool)>)> =
+            if names.len() == values.len() {
+                values
+                    .iter()
+                    .map(|v| self.extract_value_var_meta(v))
+                    .collect()
+            } else {
+                Vec::new()
+            };
         let ptr_flags: Vec<bool> = if names.len() == values.len() {
             values.iter().map(|v| self.expr_is_pointer(v)).collect()
         } else {
             Vec::new()
         };
         self.shadow_local_names(names);
-        if let Some(kind) = single_hint {
-            if kind != BindingKind::Plain {
-                self.bindings.insert(names[0].clone(), kind);
+        for (name, kind) in names.iter().zip(hints) {
+            if name != "_" && kind != BindingKind::Plain {
+                self.bindings.insert(name.clone(), kind);
             }
-            if let Some(Expr::StructLit { ty: Some(t), .. }) = values.first() {
-                self.register_var_ty(&names[0], t);
+        }
+        for (name, (ty, st, vt)) in names.iter().zip(var_metas) {
+            if name == "_" {
+                continue;
+            }
+            if let Some(t) = ty {
+                self.register_var_ty(name, &t);
+            }
+            if let Some(sn) = st {
+                self.var_struct.insert(name.clone(), sn);
+            }
+            if let Some(v) = vt {
+                self.var_ty.insert(name.clone(), v);
             }
         }
         for (name, is_ptr) in names.iter().zip(ptr_flags) {
@@ -1135,19 +1157,101 @@ impl Emitter {
         }
     }
 
+    fn extract_value_var_meta(
+        &self,
+        e: &Expr,
+    ) -> (Option<TypeExpr>, Option<String>, Option<(String, bool)>) {
+        match Self::peel_parens(e) {
+            Expr::Move { operand, .. } => self.extract_value_var_meta(operand),
+            Expr::AddrOf { operand, span }
+            | Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                span,
+            } => {
+                let (ty, st, vt) = self.extract_value_var_meta(operand);
+                let ptr_ty = ty.map(|t| TypeExpr::Pointer {
+                    to: Box::new(t),
+                    span: *span,
+                });
+                let ptr_vt = vt.map(|(k, _)| (k, true));
+                (ptr_ty, st, ptr_vt)
+            }
+            Expr::StructLit { ty: Some(t), .. } => (Some(t.clone()), None, None),
+            Expr::Ident { name, .. } => (
+                None,
+                self.var_struct.get(name).cloned(),
+                self.var_ty.get(name).cloned(),
+            ),
+            Expr::Call {
+                callee, args, span, ..
+            } => {
+                let bare_callee = Self::peel_parens(callee);
+                if matches!(bare_callee, Expr::Ident { name, .. } if name == "new")
+                    && args.len() == 1
+                {
+                    match Self::peel_parens(&args[0].value) {
+                        Expr::StructLit { ty: Some(t), .. } => (
+                            Some(TypeExpr::Pointer {
+                                to: Box::new(t.clone()),
+                                span: *span,
+                            }),
+                            None,
+                            None,
+                        ),
+                        Expr::Ident { name, span: ispan } => (
+                            Some(TypeExpr::Pointer {
+                                to: Box::new(TypeExpr::Named {
+                                    name: name.clone(),
+                                    span: *ispan,
+                                }),
+                                span: *span,
+                            }),
+                            None,
+                            None,
+                        ),
+                        _ => (None, None, None),
+                    }
+                } else {
+                    (None, None, None)
+                }
+            }
+            _ => (None, None, None),
+        }
+    }
+
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
         let e = Self::peel_parens(e);
-        if let Expr::StructLit { ty: Some(t), .. } = e {
-            if let Some(kind) = self.binding_kind_of_ty(t) {
-                return kind;
+        match e {
+            Expr::Ident { name, .. } => {
+                return self
+                    .bindings
+                    .get(name)
+                    .copied()
+                    .unwrap_or(BindingKind::Plain);
             }
+            Expr::Move { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                ..
+            } => {
+                return self.binding_kind_of(operand);
+            }
+            Expr::StructLit { ty: Some(t), .. } => {
+                if let Some(kind) = self.binding_kind_of_ty(t) {
+                    return kind;
+                }
+            }
+            _ => {}
         }
         let (call, args) = match e {
-            Expr::Try { operand, .. } => match operand.as_ref() {
-                Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
+            Expr::Try { operand, .. } => match Self::peel_parens(operand) {
+                Expr::Call { callee, args, .. } => (Self::peel_parens(callee), args.as_slice()),
                 _ => return BindingKind::Plain,
             },
-            Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
+            Expr::Call { callee, args, .. } => (Self::peel_parens(callee), args.as_slice()),
             _ => return BindingKind::Plain,
         };
         if let Expr::Field { base, name, .. } = call {
@@ -1190,15 +1294,47 @@ impl Emitter {
         // so single-var range binds elements/keys rather than channel values.
         if matches!(call, Expr::Ident { name, .. } if name == "make") {
             if let Some(first) = args.first() {
-                if let Expr::StructLit {
-                    ty: Some(TypeExpr::Chan { .. }),
-                    ..
-                } = &first.value
-                {
-                    return BindingKind::Chan;
+                match Self::peel_parens(&first.value) {
+                    Expr::StructLit {
+                        ty: Some(t),
+                        ..
+                    } => {
+                        if self.binding_kind_of_ty(t) == Some(BindingKind::Chan) {
+                            return BindingKind::Chan;
+                        }
+                    }
+                    Expr::Ident { name, span } => {
+                        let ty = TypeExpr::Named {
+                            name: name.clone(),
+                            span: *span,
+                        };
+                        if self.binding_kind_of_ty(&ty) == Some(BindingKind::Chan) {
+                            return BindingKind::Chan;
+                        }
+                    }
+                    _ => {}
                 }
             }
             return BindingKind::Plain;
+        }
+        if matches!(call, Expr::Ident { name, .. } if name == "new") && args.len() == 1 {
+            match Self::peel_parens(&args[0].value) {
+                Expr::StructLit { ty: Some(t), .. } => {
+                    if let Some(kind) = self.binding_kind_of_ty(t) {
+                        return kind;
+                    }
+                }
+                Expr::Ident { name, span } => {
+                    let ty = TypeExpr::Named {
+                        name: name.clone(),
+                        span: *span,
+                    };
+                    if let Some(kind) = self.binding_kind_of_ty(&ty) {
+                        return kind;
+                    }
+                }
+                _ => {}
+            }
         }
         BindingKind::Plain
     }
@@ -1207,11 +1343,11 @@ impl Emitter {
     /// make(chan ...), or a function returning a channel). Channel ranges in
     /// Go permit only one iteration variable and bind the received value directly.
     fn is_channel_expr(&self, e: &Expr) -> bool {
-        match e {
+        match Self::peel_parens(e) {
             Expr::Ident { name, .. } => {
                 matches!(self.bindings.get(name), Some(BindingKind::Chan))
             }
-            Expr::Paren { inner, .. } => self.is_channel_expr(inner),
+            Expr::Move { operand, .. } => self.is_channel_expr(operand),
             Expr::Call { .. } | Expr::Try { .. } => {
                 self.binding_kind_of(e) == BindingKind::Chan
             }
@@ -1227,10 +1363,16 @@ impl Emitter {
             Expr::Ident { name, .. } => {
                 matches!(self.bindings.get(name), Some(BindingKind::Set))
             }
-            Expr::StructLit { ty: Some(t), .. } => match t {
-                TypeExpr::Named { name, .. } => name.starts_with("set[") || name == "set",
-                _ => false,
-            },
+            Expr::Move { operand, .. }
+            | Expr::AddrOf { operand, .. }
+            | Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                ..
+            } => self.is_set_expr(operand),
+            Expr::StructLit { ty: Some(t), .. } => {
+                self.binding_kind_of_ty(t) == Some(BindingKind::Set)
+            }
             Expr::Field { base, name, .. } => {
                 if let Expr::Ident { name: vn, .. } = base.as_ref() {
                     if let Some(sn) = self.var_struct.get(vn) {
