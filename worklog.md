@@ -1243,3 +1243,16 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - Suite trajectory: 297 -> 298 -> 299. Final main b56f04d7, tree clean.
 - NOTE: #2917/#2677/#2836/#2895/#2910 dropped out of Pareto NOW between ticks (authors may have closed/rebased them) — verify status before re-queuing.
 - NEXT TICK QUEUE: #2882 (shadowed E11/E4/E6 try contexts, +253) -> #2914 (receiver methods out of file tables) -> #2614 (capture move-freeze; check dup vs closed #2836) -> #2661 (N5 array zero-init emit) -> #2925 (folded index callees) -> #2807 (N5 pointer/partial zero-init; check overlap w/ #2661) -> #2935 (copy() element types) -> #2934 (builtin range bounds) -> #2907 (nested len fold) -> land-candidate tail (#2911/#2937/#2798/#2926/#2741/#2756/#2781/#2905/#2785/#2923/#2855/#2938) -> #2593 (behind 5, still open) -> #2815 (W-2475 spike).
+
+## Session 49 — 2026-11-02 night I (3 landed; recycle #N, cold build 1 slice; go tarball cache keeps evaporating — re-cached as "go-1.26.9")
+
+- Recycle again: rust 1.99.0 + go1.26.9 reinstalled (tarball cache gone AGAIN — saved under extensionless name this time). Cold rebuild in one 560s slice.
+- Baseline 55c9ac60 (own session-48). scan OK, approve 0/0 (nothing pending; 3864 remaining after scan burn — core burn higher this window).
+- LANDED:
+  34276234 Merge PR #2836 (aswadi, fixes #2613) — closure captures propagate captured ident's moved-state onto the closure binding (post-move closure binds inherit freeze); multi-value rebinds re-establish closure-peer share edges; closure_mutates/closure_defs dropped on rebind. REBASED by author from +218/3f to +63/2f since last tick. New closure_multi_rebind_freeze_2613.rs. 300 suites.
+  d0670d3b Merge PR #2895 (aswadi, fixes #822+#821+#867) — scoped closure envs preserve moved/non_owned_origin (no downgrade) + pull moved from share peers/aliases; self-reading rebinds keep shadow links/outer-depth/shares, skip mark_nested_overwritten. Branch predated #2836 — kept both, both suites re-run green (1+2 passed). New issue_822 suite. 301 suites.
+  9a2b6f21 Merge PR #2951 (nyxlabs29-cyber, fixes #2945, SPEC LX13) — BindingKind::Map in hy-emit; single-var for-in over map emits key-range loop; buildable map-literal classification matches. New for_in_map_binds_key_2945.rs + range_element_mutation_1480 LX13 update. Branch predated #2836/#2895 — kept both (2 sanity suites green). 302 suites.
+- All three: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies + CREDIT posted.
+- Suite trajectory: 299 -> 300 -> 301 -> 302. Final main 9a2b6f21, tree clean.
+- OPEN DEDUPE: #2614 (gttps) same title as landed #2836 (aswadi, fixes #2613) — verify overlap next tick before landing; likely redirect reply if #2836 covers it.
+- NEXT TICK QUEUE: #2958 (option/fn .pop() reject + option method arity, 3y3y3y-huaiji) -> #2960 (method/generic-fn equality guards) -> #2947 (T24 O8 field loans) -> #2959 (foreign const-write args) -> #2882 (shadowed try contexts) -> #2925 (folded index callees) -> #2807/#2661 (N5 zero-init — CHECK OVERLAP, both emit-side) -> #2963 (set[T] typing) -> #2961 (scalar types on field/index assign) -> #2911 -> #2907 -> #2935 -> #2934 -> tail (#2798/#2926/#2741/#2756/#2781/#2905/#2785/#2923/#2855/#2938) -> #2593 -> #2815.
