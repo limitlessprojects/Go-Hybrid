@@ -300,6 +300,11 @@ impl<'a> Checker<'a> {
                             args.len()
                         ),
                     );
+                } else if is_value_literal(&args[0].value) {
+                    self.emit_builtin(
+                        span,
+                        "`delete` requires a map or set first argument — not a literal (HYB-E2005)".to_string(),
+                    );
                 }
             }
             "copy" => {
@@ -408,41 +413,32 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
-            "min" => {
+            "min" | "max" => {
                 if args.is_empty() {
                     self.emit_builtin(
                         span,
-                        "`min` requires at least 1 argument, found 0 (HYB-E2005)".to_string(),
+                        format!("`{name}` requires at least 1 argument, found 0 (HYB-E2005)"),
                     );
-                }
-            }
-            "max" => {
-                if args.is_empty() {
+                } else if args.iter().any(|a| is_nil_literal(&a.value)) {
                     self.emit_builtin(
                         span,
-                        "`max` requires at least 1 argument, found 0 (HYB-E2005)".to_string(),
+                        format!("`{name}` does not accept `nil` — `nil` cannot be ordered (HYB-E2005)"),
                     );
                 }
             }
-            "real" => {
+            "real" | "imag" => {
                 if args.len() != 1 {
                     self.emit_builtin(
                         span,
                         format!(
-                            "`real` requires exactly 1 complex argument, found {} (HYB-E2005)",
+                            "`{name}` requires exactly 1 complex argument, found {} (HYB-E2005)",
                             args.len()
                         ),
                     );
-                }
-            }
-            "imag" => {
-                if args.len() != 1 {
+                } else if is_non_numeric_literal(&args[0].value) {
                     self.emit_builtin(
                         span,
-                        format!(
-                            "`imag` requires exactly 1 complex argument, found {} (HYB-E2005)",
-                            args.len()
-                        ),
+                        format!("`{name}` requires a numeric/complex argument — not a non-numeric literal (HYB-E2005)"),
                     );
                 }
             }
@@ -454,6 +450,11 @@ impl<'a> Checker<'a> {
                             "`complex` requires exactly 2 arguments (real, imag), found {} (HYB-E2005)",
                             args.len()
                         ),
+                    );
+                } else if args.iter().any(|a| is_non_numeric_literal(&a.value)) {
+                    self.emit_builtin(
+                        span,
+                        "`complex` requires numeric arguments — not a non-numeric literal (HYB-E2005)".to_string(),
                     );
                 }
             }
@@ -625,10 +626,10 @@ impl<'a> Checker<'a> {
             return;
         }
         let op = &args[0].value;
-        if is_numeric_or_bool_or_char_literal(op) {
+        if is_numeric_or_bool_or_char_literal(op) || is_nil_literal(op) {
             self.emit_builtin(
                 span,
-                format!("`{name}` does not accept a number/bool/char literal operand (HYB-E2005)"),
+                format!("`{name}` does not accept a number/bool/char/nil literal operand (HYB-E2005)"),
             );
             return;
         }
@@ -1075,6 +1076,20 @@ fn is_string_literal(e: &Expr) -> bool {
         unwrap_parens(e),
         Expr::Lit {
             kind: LitKind::Str(_) | LitKind::RawStr(_),
+            ..
+        }
+    )
+}
+
+fn is_nil_literal(e: &Expr) -> bool {
+    matches!(unwrap_parens(e), Expr::Lit { kind: LitKind::Nil, .. })
+}
+
+fn is_non_numeric_literal(e: &Expr) -> bool {
+    matches!(
+        unwrap_parens(e),
+        Expr::Lit {
+            kind: LitKind::Str(_) | LitKind::RawStr(_) | LitKind::Bool(_) | LitKind::Nil,
             ..
         }
     )
