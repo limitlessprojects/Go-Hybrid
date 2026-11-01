@@ -2025,6 +2025,15 @@ concurrency flags for the A5 lint, API contract extraction) is per-package
 work; promising "any Go package" and delivering broken bindings would be
 the dishonest version. The list grows by Decision Log entries.
 
+**M5a — A foreign call's arity is checked (`HYB-E1002`).** A call to a
+curated package member must pass exactly as many arguments as the Go
+function takes, exactly like a builtin, a conversion, a user `fn`, or a
+method. `time.since()` and `time.now(1)` reject instead of passing `hyb
+check` and failing `go build` with `not enough arguments in call to
+time.Since` (Row 13, BUILDABLE). Variadic targets (`fmt.println`,
+`filepath.join`, `errors.join`) stay exempt, and the check fires only where
+a parameter count is known.
+
 **M6 — Rust crate imports and pinning.** `import "rust/serde_json"`
 resolves the crate through the module manifest (`hybrid.mod`), which pins
 **exact versions** (`serde_json = "1.0.140"` — no ranges; reproducibility
