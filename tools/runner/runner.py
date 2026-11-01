@@ -36,8 +36,10 @@ Stdlib only — must run on a bare Kaggle/Actions image with just python3.
 import argparse
 import datetime
 import json
+import math
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -46,10 +48,35 @@ import time
 UTC = lambda: datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _valid_timeout(timeout):
+    """A subprocess timeout is a positive, finite, non-bool number.
+
+    ``bool`` is a subclass of ``int`` in Python, so ``timeout=True`` would be a
+    silent 1s deadline; ``<= 0`` raises in subprocess and ``NaN``/``inf`` do not
+    bound anything. Reject all of them before spawning.
+    """
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        return False
+    return math.isfinite(timeout) and timeout > 0
+
+
+def _valid_cmd(cmd):
+    """A command is a non-empty string, or a non-empty list of non-empty strings."""
+    if isinstance(cmd, str):
+        return bool(cmd)
+    if isinstance(cmd, list):
+        return bool(cmd) and all(isinstance(a, str) and a for a in cmd)
+    return False
+
+
 def run_cmd(cmd, timeout, cwd=None, env=None):
     """Run one command; return (exit_code, duration_s, tail_of_output). Never raises."""
     start = time.monotonic()
     out_tail = ""
+    if not _valid_cmd(cmd):
+        return 125, 0.0, "<<runner error: invalid cmd {!r}>>".format(cmd)[:4000]
+    if not _valid_timeout(timeout):
+        return 125, 0.0, "<<runner error: invalid timeout {!r}>>".format(timeout)[:4000]
     try:
         p = subprocess.run(
             cmd if isinstance(cmd, list) else ["/bin/sh", "-c", cmd],
@@ -106,13 +133,40 @@ def env_report():
 # Env values that look secret-ish are masked in reports (R10 hygiene).
 # Lesson 2026-10-12: Kaggle embeds ephemeral session JWTs (KAGGLE_DATA_PROXY_TOKEN,
 # KAGGLE_USER_SECRETS_TOKEN) in kernel env; they leaked into committed summaries once.
-_SECRET_KEY = ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "_KEY", "API_KEY", "PAT")
+#
+# A distinctive word may appear anywhere in the key name, but short, collision-prone
+# markers must match a whole name SEGMENT: "PAT" (a raw substring before) also hit
+# "PATH"/"DISPATCH", so GITHUB_PATH, GITHUB_EVENT_PATH, LD_LIBRARY_PATH, PYTHONPATH,
+# GOPATH, GITHUB_DISPATCH_TYPE were redacted; "_KEY"/"API_KEY" had the same shape.
+# Splitting on non-alphanumerics keeps PAT / GITHUB_PAT / GH-PAT masked while leaving
+# *_PATH and *_DISPATCH* intact. The "_KEY" / "API_KEY" entries are covered by the
+# KEY segment.
+_SECRET_NAME_SUBSTRINGS = ("TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
+_SECRET_NAME_SEGMENTS = frozenset({
+    "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "KEY", "PAT", "APIKEY",
+})
+
+# A credential VALUE under an unremarkable name still gets masked: a known GitHub or
+# Kaggle token prefix anywhere in the value marks the whole value secret, so
+# `GIT_URL=https://x-access-token:ghp_...` stops leaking through env.json.
+_SECRET_VALUE_PREFIXES = ("ghp_", "gho_", "ghs_", "ghr_", "github_pat_", "KGAT_")
+
+
+def _is_secret_name(key: str) -> bool:
+    upper = key.upper()
+    if any(s in upper for s in _SECRET_NAME_SUBSTRINGS):
+        return True
+    return any(seg in _SECRET_NAME_SEGMENTS for seg in re.split(r"[^A-Z0-9]+", upper))
+
+
+def _looks_like_token(value) -> bool:
+    return isinstance(value, str) and any(p in value for p in _SECRET_VALUE_PREFIXES)
 
 
 def redact(env: dict) -> dict:
     out = {}
     for k, v in env.items():
-        if any(s in k.upper() for s in _SECRET_KEY):
+        if _is_secret_name(k) or _looks_like_token(v):
             out[k] = "[REDACTED len={}]".format(len(v)) if v else "[EMPTY]"
         else:
             out[k] = v
@@ -197,27 +251,45 @@ def main():
     # sanity: verify we are at the pinned SHA when a repo checkout exists
     sha_ok = True
     unverifiable_pin = False
-    want = job.get("sha")
+    pin_invalid = False
+    want_raw = job.get("sha")
+    if want_raw is None:
+        want = None
+    elif isinstance(want_raw, str):
+        # A hex SHA may be uppercase or whitespace-padded in the job; normalize
+        # before comparing against lowercase `git rev-parse HEAD`.
+        want = want_raw.strip()
+    else:
+        # An int/bool/list "sha" can never match a resolved SHA; fail closed on
+        # the spec instead of comparing mismatched types.
+        want = None
+        pin_invalid = True
+        sha_ok = False
+        record("sha-check", "check", 1, 0.0,
+               "'sha' must be a string, got {}".format(type(want_raw).__name__))
+    pins_head = want is None or want == "" or want.upper() == "HEAD"
     # Linked worktrees and submodules use a .git file, not a directory.
     # Even a broken metadata link or corrupt .git directory inside an ancestor
     # git repository must enter the fail-closed SHA check without walking up to
     # an enclosing parent repository.
-    if os.path.lexists(os.path.join(repo_dir, ".git")):
+    if pin_invalid:
+        pass
+    elif os.path.lexists(os.path.join(repo_dir, ".git")):
         sha_env = dict(os.environ, GIT_CEILING_DIRECTORIES=os.path.dirname(repo_dir))
         code, _, out = run_cmd(["git", "rev-parse", "HEAD"], 10, cwd=repo_dir, env=sha_env)
         at = out.strip()
         if code != 0:
             sha_ok = False
             record("sha-check", "check", 1, 0.0, "failed to resolve HEAD: {}".format(out.strip()))
-        elif want in (None, "HEAD", ""):
+        elif pins_head:
             record("sha-check", "check", 0, 0.0, "job pins HEAD; at {}".format(at[:12]))
-        elif at != want:
+        elif at.lower() != want.lower():
             # shallow clones of a SHA may differ if fetch fell back to a branch; log loudly
             sha_ok = False
             record("sha-check", "check", 1, 0.0, "repo at {} but job pins {}".format(at, want))
         else:
             record("sha-check", "check", 0, 0.0, "at {}".format(at))
-    elif want not in (None, "HEAD", ""):
+    elif not pins_head:
         # A pinned job against a checkout with no .git (e.g. the Kaggle worker's
         # codeload-tarball fallback): there is nothing to verify the pin against,
         # so the job must not run or report ok. Reporting green here would make
@@ -244,8 +316,9 @@ def main():
         for idx, step in enumerate(setup_raw):
             if not isinstance(step, dict):
                 record("setup-{}".format(idx), "setup", 1, 0.0, "step must be an object, got {}".format(type(step).__name__))
-                hard_setup_failed = True
-                break
+                # Fail-soft: a malformed entry is this step's failure, not a reason
+                # to abort the remaining setup (and commands) without 'hard'.
+                continue
             name = step.get("name") or "setup-{}".format(idx)
             cmd = step.get("run")
             if not cmd:
@@ -265,7 +338,8 @@ def main():
     for idx, step in enumerate(commands):
         if not isinstance(step, dict):
             record("cmd-{}".format(idx), "cmd", 1, 0.0, "command step must be an object, got {}".format(type(step).__name__))
-            break
+            # Fail-soft: record the bad entry and keep running the valid commands.
+            continue
         name = step.get("name") or "cmd-{}".format(idx)
         cmd = step.get("run")
         if not cmd:
