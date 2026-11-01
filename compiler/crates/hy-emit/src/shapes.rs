@@ -215,6 +215,21 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
         },
     ),
     (
+        // Canonical snake_case spelling blessed by hy-check/src/foreign.rs
+        // (`is_curated_package_member("sync", "rw_mutex")`).
+        "sync.rw_mutex",
+        TypeShape {
+            members: &[
+                ("lock", method("Lock", None)),
+                ("unlock", method("Unlock", None)),
+                ("try_lock", method("TryLock", None)),
+                ("rlock", method("RLock", None)),
+                ("runlock", method("RUnlock", None)),
+                ("try_rlock", method("TryRLock", None)),
+            ],
+        },
+    ),
+    (
         // Scalar sync/atomic struct types recognized as class-2 sendable by
         // hy-check/src/foreign.rs (SCALAR_ATOMICS).
         "atomic.bool",
@@ -234,13 +249,15 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
                 ("load", method("Load", None)),
                 ("store", method("Store", None)),
                 ("add", method("Add", None)),
+                ("and", method("And", None)),
+                ("or", method("Or", None)),
                 ("swap", method("Swap", None)),
                 ("compare_and_swap", method("CompareAndSwap", None)),
             ],
         },
     ),
     (
-        // 17: atomic.int64 — Go's atomic.Int64 STRUCT (methods Add/Load/
+        // 17: atomic.int64 — Go's atomic.Int64 STRUCT (methods Add/And/Or/Load/
         // Store/Swap/CompareAndSwap with pointer receivers; Go auto-addresses
         // value receivers, so both `var hits atomic.Int64` and `hits *atomic.
         // Int64` call `hits.Add(1)` identically). hy spells the methods
@@ -251,6 +268,8 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
                 ("load", method("Load", None)),
                 ("store", method("Store", None)),
                 ("add", method("Add", None)),
+                ("and", method("And", None)),
+                ("or", method("Or", None)),
                 ("swap", method("Swap", None)),
                 ("compare_and_swap", method("CompareAndSwap", None)),
             ],
@@ -263,6 +282,8 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
                 ("load", method("Load", None)),
                 ("store", method("Store", None)),
                 ("add", method("Add", None)),
+                ("and", method("And", None)),
+                ("or", method("Or", None)),
                 ("swap", method("Swap", None)),
                 ("compare_and_swap", method("CompareAndSwap", None)),
             ],
@@ -275,6 +296,8 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
                 ("load", method("Load", None)),
                 ("store", method("Store", None)),
                 ("add", method("Add", None)),
+                ("and", method("And", None)),
+                ("or", method("Or", None)),
                 ("swap", method("Swap", None)),
                 ("compare_and_swap", method("CompareAndSwap", None)),
             ],
@@ -287,6 +310,8 @@ pub static SHAPES: &[(&str, TypeShape)] = &[
                 ("load", method("Load", None)),
                 ("store", method("Store", None)),
                 ("add", method("Add", None)),
+                ("and", method("And", None)),
+                ("or", method("Or", None)),
                 ("swap", method("Swap", None)),
                 ("compare_and_swap", method("CompareAndSwap", None)),
             ],

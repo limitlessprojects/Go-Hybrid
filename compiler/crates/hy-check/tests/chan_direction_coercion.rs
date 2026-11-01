@@ -145,7 +145,7 @@ fn repro_07_map_store_direction_mismatch_rejects_e3012() {
     let r = check(
         "fn main() {\n\
            var m = map[string]<-chan int{}\n\
-           var ch = make(chan<- int, 1)\n\
+           var ch chan<- int = make(chan int, 1)\n\
            m[\"a\"] = ch\n\
            var v = <-m[\"a\"]\n\
            _ = v\n\
@@ -442,4 +442,30 @@ fn top_level_const_alias_and_inferred_multi_param_generic_enforce_e3012() {
            _ = rc\n\
          }",
     );
+}
+
+
+#[test]
+fn typed_array_and_move_wrapped_chan_dir_repro() {
+    let r = check(
+        "struct holder {\n\
+           ch <-chan int\n\
+         }\n\
+         fn main() {\n\
+           var sc chan<- int = make(chan int, 1)\n\
+           a1 := [1]<-chan int{sc}\n\
+           a2 := [...]<-chan int{sc}\n\
+           a3 := [1]holder{{ch: sc}}\n\
+           a4 := [1][1]<-chan int{{sc}}\n\
+           ch_h := make(chan holder, 1)\n\
+           ch_h <- move {ch: sc}\n\
+           _ = a1\n\
+           _ = a2\n\
+           _ = a3\n\
+           _ = a4\n\
+         }",
+    );
+    assert_eq!(r.verdict, Verdict::Reject);
+    let e3012_count = r.diagnostics.iter().filter(|d| d.code == "HYB-E3012").count();
+    assert_eq!(e3012_count, 5, "expected 5 HYB-E3012 diagnostics, got {:?}", r.diagnostics);
 }

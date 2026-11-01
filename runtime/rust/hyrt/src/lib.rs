@@ -107,8 +107,13 @@ pub extern "C" fn hyrt_stack_alignment_probe() -> u64 {
 use serde_json::{Map, Value as Json};
 use std::sync::Mutex;
 
+struct Slot {
+    gen: u32,
+    val: Option<Json>,
+}
+
 struct Table {
-    slots: Vec<Option<(u32, Json)>>, // (generation, value); None = free
+    slots: Vec<Slot>, // generation-tagged slots; val == None when free
     free: Vec<usize>,
 }
 
@@ -120,6 +125,14 @@ static TABLE: Mutex<Table> = Mutex::new(Table {
 const ERR_TABLE: i32 = 1; // table poisoned / slot invalid
 const ERR_JSON: i32 = 2; // the JSON operation itself failed
 
+fn next_gen(g: u32) -> u32 {
+    if g == u32::MAX {
+        1
+    } else {
+        g + 1
+    }
+}
+
 fn handle_pack(idx: usize, gen: u32) -> u64 {
     ((gen as u64) << 32) | (idx as u64 + 1)
 }
@@ -129,9 +142,12 @@ fn handle_unpack(h: u64) -> Option<(usize, u32)> {
     if h == 0 || h == u64::MAX {
         return None;
     }
-    let idx = (h & 0xFFFF_FFFF) as usize - 1;
+    let raw_idx = (h & 0xFFFF_FFFF) as usize;
     let gen = (h >> 32) as u32;
-    Some((idx, gen))
+    if raw_idx == 0 || gen == 0 {
+        return None;
+    }
+    Some((raw_idx - 1, gen))
 }
 
 fn with_table(f: impl FnOnce(&mut Table) -> Result<(), i32>) -> i32 {
@@ -145,33 +161,32 @@ fn with_table(f: impl FnOnce(&mut Table) -> Result<(), i32>) -> i32 {
 }
 
 fn table_insert(t: &mut Table, v: Json) -> u64 {
-    let gen = 1u32;
     if let Some(idx) = t.free.pop() {
-        t.slots[idx] = Some((gen, v));
+        let gen = t.slots[idx].gen;
+        t.slots[idx].val = Some(v);
         return handle_pack(idx, gen);
     }
-    t.slots.push(Some((gen, v)));
+    let gen = 1u32;
+    t.slots.push(Slot { gen, val: Some(v) });
     handle_pack(t.slots.len() - 1, gen)
 }
 
 fn table_get(t: &Table, h: u64) -> Result<&Json, i32> {
     let (idx, gen) = handle_unpack(h).ok_or(ERR_TABLE)?;
     let slot = t.slots.get(idx).ok_or(ERR_TABLE)?;
-    let (g, v) = slot.as_ref().ok_or(ERR_TABLE)?;
-    if *g != gen {
+    if slot.gen != gen {
         return Err(ERR_TABLE); // stale generation: INVALID, never corrupt
     }
-    Ok(v)
+    slot.val.as_ref().ok_or(ERR_TABLE)
 }
 
 fn table_get_mut(t: &mut Table, h: u64) -> Result<&mut Json, i32> {
     let (idx, gen) = handle_unpack(h).ok_or(ERR_TABLE)?;
     let slot = t.slots.get_mut(idx).ok_or(ERR_TABLE)?;
-    let (g, v) = slot.as_mut().ok_or(ERR_TABLE)?;
-    if *g != gen {
+    if slot.gen != gen {
         return Err(ERR_TABLE);
     }
-    Ok(v)
+    slot.val.as_mut().ok_or(ERR_TABLE)
 }
 
 /// A C-ABI string view: (ptr, len) — Go pins the backing bytes for the call.
@@ -394,16 +409,29 @@ pub extern "C" fn hy_json_set(v: u64, kptr: u64, klen: u64, value: u64) -> i32 {
         Err(e) => return e,
     };
     with_table(|t| {
-        // Remove the value from the table (ownership MOVES into v).
+        // Validate both `value` (live handle) and `v` (distinct live JSON Object)
+        // before removing `value` from the table so a failed `Set` never consumes `value`.
         let (vidx, vgen) = handle_unpack(value).ok_or(ERR_TABLE)?;
+        let (tidx, tgen) = handle_unpack(v).ok_or(ERR_TABLE)?;
+        if vidx == tidx {
+            return Err(ERR_TABLE);
+        }
         {
-            let slot = t.slots.get_mut(vidx).ok_or(ERR_TABLE)?;
-            let (g, _) = slot.as_ref().ok_or(ERR_TABLE)?;
-            if *g != vgen {
+            let vslot = t.slots.get(vidx).ok_or(ERR_TABLE)?;
+            if vslot.val.is_none() || vslot.gen != vgen {
                 return Err(ERR_TABLE);
             }
+            let tslot = t.slots.get(tidx).ok_or(ERR_TABLE)?;
+            if tslot.gen != tgen {
+                return Err(ERR_TABLE);
+            }
+            let tobj = tslot.val.as_ref().ok_or(ERR_TABLE)?;
+            if !tobj.is_object() {
+                return Err(ERR_JSON);
+            }
         }
-        let (_, val) = t.slots[vidx].take().ok_or(ERR_TABLE)?;
+        let val = t.slots[vidx].val.take().ok_or(ERR_TABLE)?;
+        t.slots[vidx].gen = next_gen(t.slots[vidx].gen);
         t.free.push(vidx);
         let obj = table_get_mut(t, v)?.as_object_mut().ok_or(ERR_JSON)?;
         obj.insert(k, val);
@@ -418,7 +446,6 @@ pub extern "C" fn hy_json_value_text(v: u64, out: *mut u8, cap: usize, out_len: 
     if out_len.is_null() {
         return ERR_TABLE;
     }
-    let mut status = 0i32;
     with_table(|t| {
         let text = table_get(t, v)?.to_string();
         let need = text.len();
@@ -426,15 +453,13 @@ pub extern "C" fn hy_json_value_text(v: u64, out: *mut u8, cap: usize, out_len: 
             *out_len = need as u64;
         }
         if out.is_null() || cap < need {
-            status = 3; // TRY_AGAIN with the reported length
-            return Ok(());
+            return Err(3); // TRY_AGAIN with the reported length
         }
         unsafe {
             ptr::copy_nonoverlapping(text.as_ptr(), out, need);
         }
         Ok(())
-    });
-    status
+    })
 }
 
 /// `serde_json.to_string_pretty(v)` — same buffer protocol, pretty form.
@@ -448,7 +473,6 @@ pub extern "C" fn hy_json_to_string_pretty(
     if out_len.is_null() {
         return ERR_TABLE;
     }
-    let mut status = 0i32;
     with_table(|t| {
         let text = serde_json::to_string_pretty(table_get(t, v)?).map_err(|_| ERR_JSON)?;
         let need = text.len();
@@ -456,15 +480,13 @@ pub extern "C" fn hy_json_to_string_pretty(
             *out_len = need as u64;
         }
         if out.is_null() || cap < need {
-            status = 3;
-            return Ok(());
+            return Err(3);
         }
         unsafe {
             ptr::copy_nonoverlapping(text.as_ptr(), out, need);
         }
         Ok(())
-    });
-    status
+    })
 }
 
 /// Release a handle (idempotent; stale generations read INVALID). Go calls
@@ -474,11 +496,10 @@ pub extern "C" fn hy_json_release(h: u64) -> i32 {
     with_table(|t| {
         if let Some((idx, gen)) = handle_unpack(h) {
             if let Some(slot) = t.slots.get_mut(idx) {
-                if let Some((g, _)) = slot.as_ref() {
-                    if *g == gen {
-                        *slot = None;
-                        t.free.push(idx);
-                    }
+                if slot.val.is_some() && slot.gen == gen {
+                    slot.val = None;
+                    slot.gen = next_gen(slot.gen);
+                    t.free.push(idx);
                 }
             }
         }
@@ -493,7 +514,7 @@ pub extern "C" fn hy_json_live_count(out: *mut u64) -> i32 {
         return ERR_TABLE;
     }
     with_table(|t| {
-        let live = t.slots.iter().filter(|s| s.is_some()).count();
+        let live = t.slots.iter().filter(|s| s.val.is_some()).count();
         unsafe {
             *out = live as u64;
         }
@@ -575,4 +596,198 @@ pub extern "C" fn hyrt_abi_word() -> u64 {
     // Bump when an export's signature/semantics changes (E0001-style
     // discipline for the ABI itself). v1: the Batch F/G surface.
     0x68795f61626931 // "hy_abi1"
+}
+
+#[cfg(test)]
+mod json_text_tests {
+    use super::{
+        hy_json_parse, hy_json_release, hy_json_to_string_pretty, hy_json_value_text, ERR_TABLE,
+    };
+    use std::ptr;
+
+    type Serializer = extern "C" fn(u64, *mut u8, usize, *mut u64) -> i32;
+
+    fn rejects_invalid_handles(serialize: Serializer) {
+        for handle in [0, u64::MAX, 0x0000_0001_ffff_ffff] {
+            let mut out = [0xa5; 32];
+            let mut need = 0xfeed;
+            let status = serialize(handle, out.as_mut_ptr(), out.len(), &mut need);
+            eprintln!("handle={handle:#x} status={status} out_len={need:#x}");
+            assert_eq!(
+                status, ERR_TABLE,
+                "invalid handle must return a table error"
+            );
+            assert_eq!(out, [0xa5; 32]);
+            assert_eq!(need, 0xfeed);
+
+            assert_eq!(serialize(handle, ptr::null_mut(), 0, &mut need), ERR_TABLE);
+            assert_eq!(need, 0xfeed);
+        }
+    }
+
+    fn keeps_buffer_protocol(serialize: Serializer, expected: &[u8]) {
+        let raw = br#"{"k":7}"#;
+        let mut handle = 0;
+        assert_eq!(
+            hy_json_parse(raw.as_ptr() as u64, raw.len() as u64, &mut handle),
+            0
+        );
+        let mut need = 0;
+        assert_eq!(serialize(handle, ptr::null_mut(), 0, &mut need), 3);
+        assert_eq!(need as usize, expected.len());
+
+        let mut out = [0xa5; 64];
+        assert_eq!(
+            serialize(handle, out.as_mut_ptr(), expected.len() - 1, &mut need),
+            3
+        );
+        assert_eq!(need as usize, expected.len());
+        assert_eq!(out, [0xa5; 64]);
+
+        assert_eq!(
+            serialize(
+                handle,
+                out.as_mut_ptr().wrapping_add(1),
+                expected.len(),
+                &mut need
+            ),
+            0
+        );
+        assert_eq!(need as usize, expected.len());
+        assert_eq!(&out[1..expected.len() + 1], expected);
+        assert_eq!(out[0], 0xa5);
+        assert!(out[expected.len() + 1..].iter().all(|&b| b == 0xa5));
+
+        let mut guarded = [0xa5; 64];
+        assert_eq!(
+            serialize(handle, guarded.as_mut_ptr(), guarded.len(), ptr::null_mut()),
+            ERR_TABLE
+        );
+        assert_eq!(guarded, [0xa5; 64]);
+        assert_eq!(hy_json_release(handle), 0);
+    }
+
+    #[test]
+    fn compact_rejects_invalid_handles() {
+        rejects_invalid_handles(hy_json_value_text);
+    }
+
+    #[test]
+    fn pretty_rejects_invalid_handles() {
+        rejects_invalid_handles(hy_json_to_string_pretty);
+    }
+
+    #[test]
+    fn compact_preserves_query_short_buffer_and_copy_protocol() {
+        keeps_buffer_protocol(hy_json_value_text, br#"{"k":7}"#);
+    }
+
+    #[test]
+    fn pretty_preserves_query_short_buffer_and_copy_protocol() {
+        keeps_buffer_protocol(hy_json_to_string_pretty, b"{\n  \"k\": 7\n}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slot_reuse_increments_generation_and_ignores_stale_cleanup_release() {
+        let mut doc = 0u64;
+        let mut child = 0u64;
+        assert_eq!(hy_json_new_object(&mut doc), 0);
+        assert_eq!(hy_json_new_array(&mut child), 0);
+        let item = b"ada";
+        assert_eq!(
+            hy_json_array_push_string(child, item.as_ptr() as u64, item.len() as u64),
+            0
+        );
+
+        let key = b"active";
+        // Moving `child` into `doc["active"]` frees `child`'s slot and advances its generation.
+        assert_eq!(
+            hy_json_set(doc, key.as_ptr() as u64, key.len() as u64, child),
+            0
+        );
+
+        // Allocate until `child`'s freed slot index is reused (other unit tests run in
+        // parallel against the global table and may push/pop freelist entries concurrently).
+        let child_idx = handle_unpack(child).map(|(idx, _)| idx);
+        let raw = b"{\"k\":99}";
+        let mut held = Vec::new();
+        let mut next = 0u64;
+        for _ in 0..64 {
+            let mut candidate = 0u64;
+            assert_eq!(
+                hy_json_parse(raw.as_ptr() as u64, raw.len() as u64, &mut candidate),
+                0
+            );
+            if handle_unpack(candidate).map(|(idx, _)| idx) == child_idx {
+                next = candidate;
+                break;
+            }
+            held.push(candidate);
+        }
+        for h in held {
+            assert_eq!(hy_json_release(h), 0);
+        }
+        assert_ne!(next, 0, "freelist should reuse child's slot index");
+        assert_ne!(
+            next, child,
+            "reused slot must carry an incremented generation tag (GUARANTEES row 19)"
+        );
+        assert_eq!(
+            handle_unpack(next).map(|(idx, _)| idx),
+            child_idx,
+            "freelist should reuse the same slot index"
+        );
+
+        // Simulate Go runtime.AddCleanup firing late with the pre-move `child` handle ID:
+        // stale generation release must be a no-op and must NOT destroy `next`.
+        assert_eq!(hy_json_release(child), 0);
+
+        let mut got = 0i64;
+        let k = b"k";
+        assert_eq!(
+            hy_json_get_int(next, k.as_ptr() as u64, k.len() as u64, &mut got),
+            0,
+            "late release of moved handle destroyed the live reused slot"
+        );
+        assert_eq!(got, 99);
+
+        assert_eq!(hy_json_release(next), 0);
+        assert_eq!(hy_json_release(doc), 0);
+    }
+
+    #[test]
+    fn failed_set_on_non_object_does_not_consume_value_handle() {
+        let mut arr = 0u64;
+        let mut child = 0u64;
+        let raw = b"{\"x\":7}";
+        assert_eq!(hy_json_new_array(&mut arr), 0);
+        assert_eq!(
+            hy_json_parse(raw.as_ptr() as u64, raw.len() as u64, &mut child),
+            0
+        );
+
+        let key = b"k";
+        // Setting a key on a JSON array fails with ERR_JSON and must leave `child` intact.
+        assert_eq!(
+            hy_json_set(arr, key.as_ptr() as u64, key.len() as u64, child),
+            ERR_JSON
+        );
+
+        let mut got = 0i64;
+        let x = b"x";
+        assert_eq!(
+            hy_json_get_int(child, x.as_ptr() as u64, x.len() as u64, &mut got),
+            0,
+            "failed hy_json_set must not consume or drop the value handle"
+        );
+        assert_eq!(got, 7);
+
+        assert_eq!(hy_json_release(child), 0);
+        assert_eq!(hy_json_release(arr), 0);
+    }
 }

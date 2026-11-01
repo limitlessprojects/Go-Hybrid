@@ -1,0 +1,2 @@
+#[test]
+fn select_arm_try_hoist_and_main_wrap() { let g = hy_emit::emit_go(&hy_syntax::parse_file("t.hy", "fn ch() (chan int, error) { return make(chan int, 1), nil }\nfn val() (int, error) { return 7, nil }\nfn main() {\n\tc := make(chan int, 1)\n\tselect {\n\t\tv := <-ch()? => { fmt.println(v) }\n\t\tc <- val()? => { fmt.println(0) }\n\t}\n}\n").unwrap()).unwrap(); assert!(g.contains("hyErr := func()") && g.contains("case v := <-hyT0:") && g.contains("case c <- hyT2:"), "{g}"); }

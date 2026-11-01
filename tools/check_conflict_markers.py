@@ -44,6 +44,7 @@ SKIP_DIRS = {".git", "target", "node_modules", ".venv", "__pycache__"}
 # guessed at, so a binary file cannot produce a spurious hit.
 TEXT_EXTS = {
     ".md", ".yml", ".yaml", ".json", ".toml", ".rs", ".go", ".py", ".sh",
+    ".s",  # Go bridge assembly (also covers uppercase .S via lower()).
     ".hy", ".txt", ".cfg", ".ini", ".html", ".css", ".js", ".ts",
 }
 

@@ -9,6 +9,9 @@ Policy (doctrine change 2026-10-24, see AUTOMATION.md):
     - its number is listed in tools/triage_config.json (wildcard_holds +
       drafts_parked) — survives even if labels are lost
     - it is younger than SWEEPER_MIN_AGE_DAYS (default 5)
+    - it was REOPENED inside the window — CONTRIBUTING rule 5 promises a
+      rebased reopen re-enters triage as a fresh arrival, so the age check
+      consults reopen events, not just created_at (#1525)
   Everything older + unprotected is closed as not_planned WITH a written
   reply (the CONTRIBUTING "no silent closes" promise holds) that explains
   the reopen path. Closes never merge; landing stays human/autoland.
@@ -28,8 +31,12 @@ REPO = os.environ.get("GITHUB_REPOSITORY", "limitlessprojects/Go-Hybrid")
 TOK = os.environ.get("GITHUB_TOKEN", "")
 MIN_AGE = int(os.environ.get("SWEEPER_MIN_AGE_DAYS", "5"))
 PROTECTED_LABELS = {"triage:wildcard-hold", "triage:pareto", "triage:keep"}
+# Cap on issue-event pagination consulted for a stale PR whose updated_at
+# looks recent (#1525). Ten pages of 100 is generous for any real thread;
+# beyond that the history is treated as unverifiable and the PR survives.
+MAX_EVENT_PAGES = 10
 
-COMMENT = """Queue sweeper: this PR has been open past the review window ({age} days)
+COMMENT = """Queue sweeper: this PR has been open past the review window ({window} days)
 without a protected label, so it is being closed as **not planned** to keep
 the queue honest — the repo receives a high volume of PRs daily, and a stale
 queue wastes every contributor's time, including yours.
@@ -79,6 +86,55 @@ def config_protected_numbers():
         print(f"  (triage_config.json unreadable: {e} — label protection only)")
     return nums
 
+def github_time(value):
+    """Parse a GitHub ISO-8601 stamp; missing/non-string/naive raises."""
+    if not isinstance(value, str):
+        raise ValueError("missing timestamp")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp has no timezone")
+    return parsed
+
+def recently_reopened(pr, cutoff):
+    """True/False for a reopen inside the window; None if history can't say.
+
+    A reopen is the only recent activity that renews the review window
+    (CONTRIBUTING rule 5), so ordinary comments and pushes must not short-
+    circuit the sweep into protection. An `updated_at` older than the
+    cutoff rules a fresh reopen out without spending a request; otherwise
+    walk the (paginated) issue events, which also cover PRs. None — an
+    unavailable, malformed or over-long history — fails OPEN: unverifiable
+    age is not evidence of staleness, and the PR stays out of the close
+    list with a printed diagnostic so the daily run leaves a trace.
+    """
+    number = pr["number"]
+    try:
+        if github_time(pr.get("updated_at")) < cutoff:
+            return False
+    except ValueError:
+        pass  # A missing/invalid update time cannot rule out a fresh reopen.
+    for page in range(1, MAX_EVENT_PAGES + 1):
+        st, events = api(f"/repos/{REPO}/issues/{number}/events?per_page=100&page={page}")
+        if st != 200 or not isinstance(events, list):
+            print(f"  skipping #{number}: reopen history unavailable (status {st})")
+            return None
+        for event in events:
+            if not isinstance(event, dict) or not isinstance(event.get("event"), str):
+                print(f"  skipping #{number}: malformed reopen history")
+                return None
+            if event["event"] == "reopened":
+                try:
+                    reopened_at = github_time(event.get("created_at"))
+                except ValueError:
+                    print(f"  skipping #{number}: invalid reopen timestamp")
+                    return None
+                if reopened_at >= cutoff:
+                    return True
+        if len(events) < 100:
+            return False
+    print(f"  skipping #{number}: reopen history exceeds {MAX_EVENT_PAGES} pages")
+    return None
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry", action="store_true")
@@ -88,9 +144,9 @@ def main():
     if not TOK:
         print("GITHUB_TOKEN not set"); sys.exit(1)
 
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=args.min_age)).isoformat()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=args.min_age)
     protected_nums = config_protected_numbers()
-    print(f"repo={REPO} min_age={args.min_age}d cutoff={cutoff[:10]} "
+    print(f"repo={REPO} min_age={args.min_age}d cutoff={cutoff.date()} "
           f"config_protected={len(protected_nums)} dry={args.dry}")
 
     prs, page = [], 1
@@ -109,8 +165,15 @@ def main():
             continue
         if p["number"] in protected_nums:
             continue
-        if (p.get("created_at") or "") >= cutoff:
+        try:
+            created_at = github_time(p.get("created_at"))
+        except ValueError:
+            print(f"  skipping #{p['number']}: invalid creation timestamp")
+            continue
+        if created_at >= cutoff:
             continue  # fresh arrival — still inside its review window
+        if recently_reopened(p, cutoff) is not False:
+            continue  # a fresh reopen, or history that cannot disprove one
         due.append(p)
     due = due[: args.max]
     print(f"due for close: {len(due)}")
@@ -123,14 +186,12 @@ def main():
     n = fails = 0
     t0 = time.time()
     for p in due:
-        age = (datetime.now(timezone.utc) -
-               datetime.fromisoformat(p["created_at"].replace("Z", "+00:00"))).days
         st, _ = api(f"/repos/{REPO}/pulls/{p['number']}", "PATCH",
                     {"state": "closed", "state_reason": "not_planned"})
         ok = st in (200, 422)
         if ok:
             cs, _ = api(f"/repos/{REPO}/issues/{p['number']}/comments", "POST",
-                        {"body": COMMENT.format(age=age)})
+                        {"body": COMMENT.format(window=args.min_age)})
             ok = cs in (201, 403, 422)
         if ok: n += 1
         else: fails += 1; print(f"  FAIL #{p['number']} st={st}", flush=True)

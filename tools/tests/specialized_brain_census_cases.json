@@ -1,0 +1,21 @@
+{
+  "schema": "specialized_brain_census_v1",
+  "surfaces": {
+    "tests/checker-corpus/README.md": "**Current registered corpus: 129 programs — ACCEPT 22 · ACCEPT-MANAGED 3 · REJECT 104**\n",
+    "compiler/crates/hy-syntax/tests/parse_all.rs": "assert_eq!(files.len(), 129, \"expected exactly 127 corpus programs\");\n",
+    ".github/workflows/ci.yml": "- name: Checker corpus verdict agreement (129/122 + tripwire)\n",
+    "Makefile": "\t@echo \"corpus verdicts (129/122)\"\n",
+    "README.md": "Passes checker corpus 129/122 programs.\n",
+    "GUARANTEES.md": "  129 programs, each with an EXPECTED-VERDICT header.\n",
+    "compiler/crates/hy-syntax/src/ast.rs": "// checker-corpus/*.hy (129 programs)\n",
+    "tests/checker-corpus/VERDICTS.md": "With this registration the corpus is **129 programs: ACCEPT 22 ·\nACCEPT-MANAGED 3 · REJECT 104** — main.\n"
+  },
+  "expected_replacements": {
+    "compiler/crates/hy-syntax/tests/parse_all.rs": "files.len(), 130, \"expected exactly 130 corpus programs\"",
+    ".github/workflows/ci.yml": "verdict agreement (130/130 + tripwire)",
+    "Makefile": "corpus verdicts (130/130)",
+    "README.md": "checker corpus 130/130",
+    "GUARANTEES.md": "  130 programs, each with an",
+    "compiler/crates/hy-syntax/src/ast.rs": "checker-corpus/*.hy (130 programs)"
+  }
+}
