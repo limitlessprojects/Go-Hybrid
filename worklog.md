@@ -1217,3 +1217,16 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - All five: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88) zero side-shifts, ls-remote==HEAD asserted, written replies posted.
 - Suite trajectory: 290 -> 296. Final main 43030723, tree clean.
 - NEXT TICK QUEUE: #2868 (typed int width through reads) -> #2846 (closure/fn-param call args) -> #2871 (const conversion matrix) -> #2878 (slice conversion element scalars) -> #2882 (shadowed E11/E4/E6 try contexts) -> #2864 (field/index assignment widths) -> #2786 (transitive multi-return pairs) -> #2836/#2723 (carry-over) -> #2824 (superseded by #2838, redirect reply owed) -> #2815 (W-2475 spike) -> #2830 (await rebase) -> wave tail.
+
+## Session 47 — 2026-11-01 night V (tick 487193 rerun: 2 landed + 1 supersede-redirect; full env recycle rebuilt)
+
+- Full recycle (rustc/go/target all gone): rustup 1.99.0 + go1.26.9 restored; go tarball now cached at /home/z/my-project/go1.26.9.tar.gz for next time. Cold target rebuilt in ONE 560s slice (jobs=1, cargo test --workspace --no-run).
+- Baseline on start: d2917dcb (session 46 landed 5 — #2831 rework, #2814, #2888, #2850, #2893; suites 296). NOTE for next tick: verify_pr.sh needs NO outer timeout wrapper — it has internal budgets (cargo 1200/corpus 900/diff 1800); the outer 560s wrapper killed the first #2909 attempt mid-build. Pre-warm target from main repo instead when cold.
+- scan OK (4998 core on entry), approve 4/4 (4996 remaining).
+- LANDED:
+  6c694e91 Merge PR #2909 (ket4min-susan, fixes #2880) — check_test_registration rejects OR-list/pipeline/background masked test invocations; guard skips python cmds whose tail holds | or bare &; unit tests over separator shapes + accept/reject YAML fixtures. 296 suites.
+  2f19c4ab Merge PR #2123 (martiindev710, fixes #1363) — HYB-E3006 via indirect_callee_effect routed through Field/Index/Call/Unary + catch-all callee arms; aliased/indirect calls (arr[0](v), obj.field(v), get_fn()(v)) now reject const->pointer-param writes; new indirect_call_const_write.rs suite. 297 suites. (Branch predated #2909; 3-way merge kept both — battery ran the combined tree.)
+- REDIRECT SENT: #2824 → superseded by #2838 (da28e526), written reply posted (rebase-or-close guidance, no silent close). Session-45-era queue debt cleared.
+- All landed: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88), ls-remote==HEAD asserted, written replies posted (protocol summary + bounty rail pointer).
+- Suite trajectory: 296 -> 297. Final main 2f19c4ab, tree clean.
+- NEXT TICK QUEUE (Pareto order): #2593 (make non-int size args, +143 1-file, cheap) -> #2917 (option match payload bindings) -> #2677 (variadic spread append) -> #2836 (capture move-freeze; NOTE same title as gttps #2614 — likely dup, land one, redirect other) -> #2895 -> #2882 -> #2910 -> #2914 -> #2661 -> land-candidate tail (#2807/#2907/#2911/#2798...) -> #2815 (W-2475 spike) -> #2830 (await rebase).
