@@ -2037,6 +2037,9 @@ impl<'a> Collector<'a> {
         if let Some(target) = self.ck.type_aliases.get(base) {
             return self.kind_of_ty(target, depth + 1);
         }
+        if name.starts_with("set[") || name == "set" {
+            return OpKind::Struct(Some(name.to_string()));
+        }
         match name {
             // #682 U9-U12: `any` is a resolved interface type, not an
             // unresolved one, so it must not fall through to `Unknown`.
@@ -2178,6 +2181,120 @@ impl<'a> Collector<'a> {
     fn struct_base_name(&self, k: &OpKind) -> Option<String> {
         self.struct_name(k)
             .map(|s| Checker::base_named_type_str(&s).to_string())
+    }
+
+    fn set_elem_of_kind(&self, k: &OpKind) -> Option<String> {
+        let name = self.struct_name(k)?;
+        name.strip_prefix("set[")
+            .and_then(|r| r.strip_suffix(']'))
+            .map(|t| t.trim().to_string())
+    }
+
+    fn is_untyped_int_const(&self, expr: &Expr) -> bool {
+        let bare = unwrap_parens(expr);
+        match bare {
+            Expr::Lit {
+                kind: LitKind::Int(_), ..
+            } => true,
+            Expr::Ident { name, .. } => {
+                if self.file_consts.contains_key(name) {
+                    return true;
+                }
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        if matches!(self.defines[*id].kind, LocalKind::Const) {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => self.is_untyped_int_const(operand),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.is_untyped_int_const(lhs) && self.is_untyped_int_const(rhs)
+            }
+            _ => false,
+        }
+    }
+
+    fn check_set_method_call(
+        &mut self,
+        base: &Expr,
+        elem: &str,
+        name: &str,
+        args: &[CallArg],
+        span: Span,
+    ) {
+        match name {
+            "insert" | "contains" | "remove" => {
+                if args.len() != 1 {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "not enough arguments in call to `{}.{}` — set `{}` takes 1 argument (HYB-E1002)",
+                            base.render(),
+                            name,
+                            name
+                        ),
+                        "a set's insert/contains/remove take exactly 1 argument",
+                    );
+                    return;
+                }
+                let arg = &args[0].value;
+                let want = self.kind_of_named(elem, 0);
+                let got = self.kind_of_expr(arg);
+                let is_untyped_int_to_float = want == OpKind::Float
+                    && got == OpKind::Int
+                    && self.is_untyped_int_const(arg);
+                let conflict = (want == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float)
+                    || kinds_conflict(&want, &got);
+                if conflict {
+                    self.emit_e1002(
+                        arg.span(),
+                        format!(
+                            "cannot use `{}` (type `{}`) as `{}` value in argument to `{}.{}` on `set[{}]` (HYB-E1002)",
+                            arg.render(),
+                            got.label(),
+                            want.label(),
+                            base.render(),
+                            name,
+                            elem
+                        ),
+                        "a set's insert/contains/remove take a value of the set's element type",
+                    );
+                }
+            }
+            "len" => {
+                if !args.is_empty() {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "too many arguments in call to `{}.len` — set `len` takes 0 arguments (HYB-E1002)",
+                            base.render()
+                        ),
+                        "a set's len method takes no arguments",
+                    );
+                }
+            }
+            _ => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`{}` has no field or method `{}` (type `set[{}]`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                        base.render(),
+                        name,
+                        elem,
+                        base.render(),
+                        name
+                    ),
+                    "declare the method on that type, or call something that exists",
+                );
+            }
+        }
     }
 
     fn struct_field_kind(&self, k: &OpKind, field: &str) -> Option<OpKind> {
@@ -2426,6 +2543,14 @@ impl<'a> Collector<'a> {
             }
             Expr::Field { base, name, .. } => {
                 let bk = self.kind_of_expr(base);
+                if self.set_elem_of_kind(&bk).is_some() {
+                    match name.as_str() {
+                        "insert" | "contains" => return Some(vec![OpKind::Bool]),
+                        "len" => return Some(vec![OpKind::Int]),
+                        "remove" => return Some(Vec::new()),
+                        _ => return None,
+                    }
+                }
                 if name == "pop" && args.is_empty() {
                     if let OpKind::Slice(elem) = bk {
                         return Some(vec![*elem]);
@@ -4705,6 +4830,10 @@ impl<'a> Collector<'a> {
                     }
                 }
                 let bk = self.kind_of_expr(base);
+                if let Some(elem) = self.set_elem_of_kind(&bk) {
+                    self.check_set_method_call(base, &elem, name, args, span);
+                    return;
+                }
                 // A method has no field entry, so resolve it before the field
                 // lookup: `x.bump()` must reach the arity check even though
                 // `bump` is not a struct field (#577 C9).
@@ -5058,6 +5187,29 @@ impl<'a> Collector<'a> {
                 let map_arg = &args[0].value;
                 let key_arg = &args[1].value;
                 let mk = self.kind_of_expr(map_arg);
+                if let Some(elem) = self.set_elem_of_kind(&mk) {
+                    let want = self.kind_of_named(&elem, 0);
+                    let got = self.kind_of_expr(key_arg);
+                    let is_untyped_int_to_float = want == OpKind::Float
+                        && got == OpKind::Int
+                        && self.is_untyped_int_const(key_arg);
+                    let conflict = (want == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float)
+                        || kinds_conflict(&want, &got);
+                    if conflict {
+                        self.emit_e2005(
+                            span,
+                            format!(
+                                "cannot use `{}` (type `{}`) as element type `{}` in `delete` on `set[{}]` (HYB-E2005)",
+                                key_arg.render(),
+                                got.label(),
+                                want.label(),
+                                elem
+                            ),
+                            "the second argument to `delete(s, v)` must match the set's element type",
+                        );
+                    }
+                    return;
+                }
                 match &mk {
                     // #2474: `delete(s, v)` on a `set[T]` (lowered to
                     // `s.remove(v)`) needs `v` of type `T`.
