@@ -540,6 +540,8 @@ struct Collector<'a> {
     loop_depth: usize,
     /// Lexical nesting depth within `select` statements.
     select_depth: usize,
+    /// Lexical nesting depth within `managed` blocks (O6.1).
+    managed_depth: usize,
     defines: Vec<Define>,
     /// Every identifier mentioned in the file plus every dotted type root —
     /// the import-usage set (the emitter's declared-import header needs it).
@@ -576,6 +578,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             fn_result_scalars: Vec::new(),
             loop_depth: 0,
             select_depth: 0,
+            managed_depth: 0,
             defines: Vec::new(),
             roots: HashSet::new(),
             diags: Vec::new(),
@@ -1364,9 +1367,11 @@ impl<'a> Collector<'a> {
         );
         let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
         let outer_select = std::mem::replace(&mut self.select_depth, 0);
+        let outer_managed = std::mem::replace(&mut self.managed_depth, 0);
         self.block_stmts(body);
         self.loop_depth = outer_loop;
         self.select_depth = outer_select;
+        self.managed_depth = outer_managed;
         self.fn_results = outer;
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
@@ -1692,6 +1697,7 @@ impl<'a> Collector<'a> {
                 // `ch <- noop()` / `ch <- pair()`, which Go rejects.
                 self.check_single_value_position(value, "a channel send", false);
                 self.expr(value);
+                self.check_chan_send_operand_kinds(chan, value);
             }
             Stmt::If {
                 init,
@@ -1814,7 +1820,11 @@ impl<'a> Collector<'a> {
                     _ => {}
                 }
             }
-            Stmt::Managed { body, .. } => self.block_scoped(body),
+            Stmt::Managed { body, .. } => {
+                self.managed_depth += 1;
+                self.block_scoped(body);
+                self.managed_depth -= 1;
+            }
             Stmt::Match { subject, arms, .. } => {
                 self.expr(subject);
                 let subject_kind = self.kind_of_expr(subject);
@@ -1903,6 +1913,7 @@ impl<'a> Collector<'a> {
                     self.check_single_value_position(value, "a channel send", false);
                             self.expr(chan);
                             self.expr(value);
+                            self.check_chan_send_operand_kinds(chan, value);
                         }
                         SelectArmKind::Recv { names, chan } => {
                             self.check_repeated_bindings(names, chan.span());
@@ -2346,9 +2357,11 @@ impl<'a> Collector<'a> {
                 let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
                 let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
                 let outer_select = std::mem::replace(&mut self.select_depth, 0);
+                let outer_managed = std::mem::replace(&mut self.managed_depth, 0);
                 self.block_stmts(body);
                 self.loop_depth = outer_loop;
                 self.select_depth = outer_select;
+                self.managed_depth = outer_managed;
                 self.fn_results = outer;
                 self.fn_results_all_named = outer_named;
                 self.fn_results_error_tail = outer_err;
@@ -5501,6 +5514,47 @@ impl<'a> Collector<'a> {
                     && self.is_untyped_int_const(rhs)
             }
             _ => false,
+        }
+    }
+
+    fn check_chan_send_operand_kinds(&mut self, chan: &Expr, value: &Expr) {
+        if self.managed_depth > 0 {
+            return;
+        }
+        let ck = self.kind_of_expr(chan);
+        let OpKind::Chan(elem) = ck else {
+            return;
+        };
+        let vk = self.kind_of_expr(value);
+        if *elem == OpKind::Unknown || vk == OpKind::Unknown || *elem == OpKind::Interface {
+            return;
+        }
+        let is_untyped_int_to_float = *elem == OpKind::Float
+            && vk == OpKind::Int
+            && self.is_untyped_int_const(value);
+        let conflict = (*elem == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
+            || (*elem == OpKind::Int && vk == OpKind::Float)
+            || kinds_conflict(&elem, &vk);
+        if conflict {
+            let msg = if *elem == OpKind::Float && vk == OpKind::Int {
+                format!(
+                    "cannot use `{}` (variable of type `int`) as `{}` value in send (HYB-E1002)",
+                    value.render(),
+                    elem.label()
+                )
+            } else {
+                format!(
+                    "cannot use `{}` (type `{}`) as `{}` value in send (HYB-E1002)",
+                    value.render(),
+                    vk.label(),
+                    elem.label()
+                )
+            };
+            self.emit_e1002(
+                value.span(),
+                msg,
+                "the value sent to a channel must be assignable to the channel's element type",
+            );
         }
     }
 
