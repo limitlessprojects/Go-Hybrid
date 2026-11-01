@@ -1,6 +1,6 @@
 # STATUS (for the human — 15 lines max)
 
-- Contributor #2771 (2026-11-01): known array lengths now participate in operand compatibility; 20 regressions, pinned workspace 2383/2383 and corpus 130/130 pass. Differential 40/42 accept + 88/88 reject; two runtime builds need uncached `regex`. Full differential/CI/review pending; see `spikes/array-length-2771/RESULTS.md`.
+- Contributor #2771 (2026-11-01): known array lengths now participate in operand compatibility; 20 regressions, pinned workspace 2383/2383, corpus 130/130 and full differential 42/42 accept + 88/88 reject pass on `fec085c`. Final evidence-only update preserves tested code/lockfiles; hosted CI/review pending. See `spikes/array-length-2771/RESULTS.md`.
 
 - Contributor (2026-11-01): PR #2400 integrated with main `7e770ea`; pinned Linux workspace 2097/2097, corpus 130/130, differential 42/42 + 88/88 and all 12 local stages pass. Tested code/lockfile unchanged by final documentation. Hosted CI for the refreshed head, review and any award remain pending. See PLAN.md.
 

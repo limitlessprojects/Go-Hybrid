@@ -39,12 +39,14 @@ No parser, emitter, dependency or lockfile changes were needed.
   built and executed successfully, printing `true`.
 - Test registration, conflict-marker guard, corpus census and `git diff --check`:
   passed. The new Rust integration test file passes rustfmt.
-- Differential loop: **40/42 accept-side build-and-run; 88/88 reject-side**.
-  The two incomplete builds are unchanged corpus cases
-  `12-a7-borrow-by-default.hy` and `13-a7-own-transfer-at-return.hy`; their Rust
-  runtime cannot resolve the uncached `regex` dependency with networking disabled.
-  This is not a clean full differential run. Rerun after fetching the runtime's
-  locked dependencies. Hosted CI and maintainer review remain pending.
+- Final differential loop: **42/42 accept-side build-and-run; 88/88 reject-side**,
+  FULL AGREEMENT. The earlier offline run could not build the Rust runtime for
+  two unchanged corpus cases because `regex` was not cached. After fetching the
+  runtime's locked dependencies, the full compiler workspace, corpus and
+  differential commands were rerun successfully against `fec085c`.
+- This final documentation update leaves the tested source, integration tests,
+  manifests and lockfiles unchanged. Hosted CI and maintainer review remain
+  pending.
 
 The environment's installed Go 1.27.1 was not used for the successful final
 workspace/CLI run: it is rejected by the repository's toolchain pin. The pinned
