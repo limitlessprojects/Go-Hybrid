@@ -397,6 +397,14 @@ impl<'a> Checker<'a> {
                     self.lend_handle_args(st, cr, idx, None);
                 } else {
                     let resolved_callee = crate::freeze::resolve_alias(st, &name);
+                    // Issue #970: the re-binding half of the same invalidation.
+                    // Checked independently of the mutating branch below: a body
+                    // may re-bind a capture without mutating a map.
+                    if st.closure_rebinds.contains_key(&name)
+                        || st.closure_rebinds.contains_key(&resolved_callee)
+                    {
+                        self.check_loan_base_rebind_closure_call(st, cr, idx, &name);
+                    }
                     if st.closure_mutates.contains_key(&name)
                         || st.closure_mutates.contains_key(&resolved_callee)
                     {
@@ -503,6 +511,162 @@ impl<'a> Checker<'a> {
                 self.emit_a3_if_live(st, &r, cr.span, idx, verb);
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // A3, re-binding half (issue #970): HYB-E3105
+    // -----------------------------------------------------------------------
+
+    /// A3 covers MUTATING the loaned container inside the loan window
+    /// (HYB-E3102). Issue #970 is the other half of the same invalidation:
+    /// the loan lowers to a copy-out at the binding plus a store-back into
+    /// `path[key]` at its last use, so RE-BINDING the base binding
+    /// between creation and last use makes the store-back name a container
+    /// the loan was never taken from — the emitted Go then either indexes
+    /// past the end of the new value
+    ///
+    /// ```
+    /// s := xs[0]        // copy-out
+    /// xs = xs[:0]       // re-binding: the loan's index no longer exists
+    /// s.replicas = 5
+    /// xs[0] = s         // store-back -> panic: index out of range
+    /// ```
+    ///
+    /// or silently writes the loan's copy into the WRONG element
+    /// (`xs = xs[1:]`). Reject (HYB-E3105), mirroring A3's wording.
+    ///
+    /// Deliberately narrow, so the rule cannot over-reach:
+    ///   * only WHOLE-value re-binds of the base path (an indexed target is
+    ///     the A3 insert event, checked separately as HYB-E3102);
+    ///   * a re-bind of the base PATH or a PREFIX of it (`f = folder{...}` while
+    ///     the loan is on `f.trail`), never a sibling field (`f.name`);
+    ///   * never through aliases: `q := xs; q = other` re-binds q's own
+    ///     slice header and leaves the emitted store-back's `xs` untouched;
+    ///   * only INSIDE the non-lexical window `(created, effective last use]`;
+    ///   * never a shadowing define (a fresh binding in an inner block dies at
+    ///     block exit and does not change what the store-back names);
+    ///   * not the identity re-slice `xs = xs[:]`, which keeps the same
+    ///     pointer, length and capacity, so the store-back still names the slot.
+    pub(crate) fn check_loan_base_rebind(&mut self, st: &FnState, stmt: &Stmt, idx: usize) {
+        let Stmt::Assign {
+            targets,
+            op: AssignOp::Assign,
+            values,
+            ..
+        } = stmt
+        else {
+            return;
+        };
+        for (i, t) in targets.iter().enumerate() {
+            // A whole-value target only. `xs[0] = v` / `f.trail[0] = v` are
+            // the A3 insert/field-store events and keep their own wording.
+            if !matches!(t.kind, PlaceKind::Ident(_) | PlaceKind::Field { .. }) {
+                continue;
+            }
+            let Some(target_path) = walk::place_path(t) else {
+                continue;
+            };
+            // The RHS that corresponds to this target, when the assignment is
+            // one-to-one (`xs, n = other, 3`); a multi-return unpack has no
+            // per-target RHS, so it can never be the identity re-slice.
+            let rhs = if targets.len() == values.len() {
+                Some(&values[i])
+            } else {
+                None
+            };
+            let hit = st.loans.iter().find_map(|l| {
+                let LoanTarget::MapSlot { binding, path, .. } = &l.target else {
+                    return None;
+                };
+                let eff_last = self.effective_loan_last(st, l);
+                if !walk::rebind_replaces_loan_base(path, &target_path)
+                    || l.created >= idx
+                    || idx > eff_last
+                {
+                    return None;
+                }
+                // A re-bind that copies the SAME header back (`xs = xs`,
+                // `xs = q` where `q` aliases `xs`) leaves the store-back's
+                // base intact and must stay legal. Compare canonical alias
+                // representatives so a genuinely different slice is still
+                // rejected.
+                if rhs.is_some_and(|v| self.rebind_is_noop(st, v, &target_path)) {
+                    return None;
+                }
+                Some((
+                    binding.clone(),
+                    path.clone(),
+                    l.desc.clone(),
+                    l.span,
+                    eff_last,
+                ))
+            });
+            let Some((binding, loan_path, loan_desc, loan_span, loan_last)) = hit else {
+                continue;
+            };
+            self.emit_loan_base_rebind_diag(
+                &binding,
+                &loan_path,
+                &target_path,
+                &loan_desc,
+                loan_span,
+                loan_last,
+                t.span,
+            );
+        }
+    }
+
+    /// True when re-binding `target_path` to `v` copies the SAME slice header
+    /// back, so the store-back still names the slot the loan came from:
+    /// `xs = xs` (a no-op) and `xs = xs[:]` (same pointer, length, capacity).
+    /// Every other right-hand side — including another name that happens to
+    /// alias the base — is treated as a real re-bind: a re-bind through an
+    /// alias is rejected rather than guessed at, since resolving it needs the
+    /// alias map's direction and a wrong guess here would silently drop the
+    /// check the whole rule exists for.
+    fn rebind_is_noop(&self, _st: &FnState, v: &Expr, target_path: &str) -> bool {
+        if walk::is_identity_reslice(v, target_path) {
+            return true;
+        }
+        matches!(unwrap_parens(v), Expr::Ident { name, .. } if name == target_path)
+    }
+
+    /// One invalidation, one diagnostic (same discipline as HYB-E3102).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_loan_base_rebind_diag(
+        &mut self,
+        binding: &str,
+        loan_path: &str,
+        target_path: &str,
+        loan_desc: &str,
+        loan_span: Span,
+        loan_last: usize,
+        span: Span,
+    ) {
+        if self.diags.iter().any(|d| {
+            d.code == "HYB-E3105"
+                && d.span == span
+                && d.message.contains(&format!("loan `{}`", binding))
+        }) {
+            return;
+        }
+        let msg = format!(
+            "re-binding `{}` invalidates the live slot loan `{}`",
+            target_path, binding
+        );
+        let notes = vec![
+            format!(
+                "{} ({}:{}) is a unique loan on a slot of `{}`, live from creation to its last use (O8, non-lexical window ending at statement {})",
+                loan_desc, self.path, loan_span.start, loan_path, loan_last
+            ),
+            format!(
+                "the loan lowers to a copy of the element plus a store-back into `{}` at its last use; after this re-binding that store-back names the NEW value — either an out-of-range panic (`index out of range`) or a silent write into the wrong element",
+                loan_path
+            ),
+            "finish using the loan before re-binding its base, or copy the element out and write the copy back yourself".to_string(),
+        ];
+        self.diags
+            .push(Diagnostic::error("HYB-E3105", self.path.clone(), span, msg).with_notes(notes));
     }
 
     /// Compute the effective inclusive end index of a loan window, extending
@@ -731,6 +895,58 @@ impl<'a> Checker<'a> {
                 self.emit_a3_if_live(st, path, cr.span, idx, &verb);
                 return;
             }
+        }
+    }
+
+    /// Issue #970: a local closure invoked inside a live slot-loan window whose
+    /// body whole-value RE-BINDS a captured base. Mirror of
+    /// `check_a3_closure_call`, which handles the mutating half (HYB-E3102).
+    fn check_loan_base_rebind_closure_call(
+        &mut self,
+        st: &FnState,
+        cr: &CallRef,
+        idx: usize,
+        name: &str,
+    ) {
+        let resolved = crate::freeze::resolve_alias(st, name);
+        let Some(roots) = st
+            .closure_rebinds
+            .get(name)
+            .or_else(|| st.closure_rebinds.get(&resolved))
+        else {
+            return;
+        };
+        if roots.is_empty() {
+            return;
+        }
+        let rebounds: Vec<(String, String, String, Span, usize)> = st
+            .loans
+            .iter()
+            .filter_map(|l| {
+                let LoanTarget::MapSlot { binding, path, .. } = &l.target else {
+                    return None;
+                };
+                let eff_last = self.effective_loan_last(st, l);
+                if !(l.created <= idx && idx <= eff_last) {
+                    return None;
+                }
+                roots
+                    .iter()
+                    .find(|r| walk::rebind_replaces_loan_base(path, r))
+                    .map(|r| (binding.clone(), path.clone(), r.clone(), l.span, eff_last))
+            })
+            .collect();
+        for (binding, loan_path, root, loan_span, loan_last) in rebounds {
+            let desc = format!("the closure `{}` called here", cr.callee.render());
+            self.emit_loan_base_rebind_diag(
+                &binding,
+                &loan_path,
+                &root,
+                &desc,
+                loan_span,
+                loan_last,
+                cr.span,
+            );
         }
     }
 
@@ -1145,6 +1361,15 @@ impl<'a> Checker<'a> {
                         .or_default()
                         .extend(roots);
                 }
+                // Issue #970: the same body may also whole-value RE-BIND a
+                // capture — the A3 invalidation's other half (HYB-E3105).
+                let rebinds = self.collect_rebind_roots(st, body, &bound);
+                if !rebinds.is_empty() {
+                    st.closure_rebinds
+                        .entry(name.to_string())
+                        .or_default()
+                        .extend(rebinds);
+                }
                 let mut cap_bound = bound;
                 let mut caps = Vec::new();
                 collect_capture_idents_block(body, &mut cap_bound, &mut caps);
@@ -1184,6 +1409,19 @@ impl<'a> Checker<'a> {
                             .extend(roots);
                     }
                 }
+                let inherited_rebinds = st
+                    .closure_rebinds
+                    .get(src)
+                    .or_else(|| st.closure_rebinds.get(&resolved))
+                    .cloned();
+                if let Some(roots) = inherited_rebinds {
+                    if !roots.is_empty() {
+                        st.closure_rebinds
+                            .entry(name.to_string())
+                            .or_default()
+                            .extend(roots);
+                    }
+                }
             }
             Expr::Call { callee, args, .. } => {
                 if !matches!(self.shape_of_expr(st, value), TypeShape::Closure) {
@@ -1214,6 +1452,100 @@ impl<'a> Checker<'a> {
             }
             _ => {}
         }
+    }
+
+    /// Issue #970: every CAPTURED base path this block whole-value RE-BINDS
+    /// (`xs = xs[:0]`, `f.trail = []svc{}`). Sibling of `collect_mutation_roots`
+    /// but records whole-value rebinds rather than store-through targets, and
+    /// keeps the same shadow/alias discipline so a closure-local `q` that is
+    /// merely a copy is not mistaken for a capture.
+    fn collect_rebind_roots(
+        &self,
+        st: &FnState,
+        body: &Block,
+        bound: &HashSet<String>,
+    ) -> HashSet<String> {
+        let mut out = HashSet::new();
+        let mut shadow_stack: Vec<HashSet<String>> = vec![bound.clone()];
+        let mut alias_stack: Vec<std::collections::HashMap<String, String>> =
+            vec![std::collections::HashMap::new()];
+        let mut locals_stack: Vec<HashSet<String>> = vec![HashSet::new()];
+        let flat = walk::flatten(body);
+        for (stmt, idx) in &flat.stmts {
+            if let Some(evs) = flat.events.get(idx) {
+                for ev in evs {
+                    match ev {
+                        walk::ScopeEvent::Push => {
+                            shadow_stack.push(shadow_stack.last().unwrap().clone());
+                            alias_stack.push(alias_stack.last().unwrap().clone());
+                            locals_stack.push(HashSet::new());
+                        }
+                        walk::ScopeEvent::Pop => {
+                            if shadow_stack.len() > 1 {
+                                shadow_stack.pop();
+                                alias_stack.pop();
+                                locals_stack.pop();
+                            }
+                        }
+                        walk::ScopeEvent::MatchBind { name, .. } => {
+                            alias_stack.last_mut().unwrap().remove(*name);
+                            shadow_stack.last_mut().unwrap().insert(name.to_string());
+                            locals_stack.last_mut().unwrap().insert(name.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let shadows = shadow_stack.last_mut().unwrap();
+            let aliases = alias_stack.last_mut().unwrap();
+            let locals = locals_stack.last_mut().unwrap();
+            match stmt {
+                Stmt::Local(l) => {
+                    for name in &l.names {
+                        locals.insert(name.clone());
+                        aliases.remove(name.as_str());
+                        shadows.insert(name.clone());
+                    }
+                }
+                Stmt::Assign { targets, .. } => {
+                    for t in targets {
+                        // Whole-value targets only (A3 owns the indexed ones).
+                        let PlaceKind::Ident(name) = &t.kind else {
+                            continue;
+                        };
+                        // A closure-LOCAL rebind is not a capture: the outer
+                        // storage keeps its own value, so no loan is disturbed.
+                        if locals.contains(name.as_str()) {
+                            continue;
+                        }
+                        if !shadows.contains(name.as_str()) {
+                            out.insert(name.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+            // Nested fn literals in this block rebind through their own capture.
+            let mut fnlit_values: Vec<&Expr> = Vec::new();
+            match stmt {
+                Stmt::Local(l) => fnlit_values.extend(l.values.iter()),
+                Stmt::Assign { values, .. } => fnlit_values.extend(values.iter()),
+                _ => {}
+            }
+            for v in fnlit_values {
+                if let Expr::FnLit { params, results, body: fb, .. } = unwrap_parens(v) {
+                    let mut inner_bound: HashSet<String> =
+                        params.iter().map(|p| p.name.clone()).collect();
+                    inner_bound.extend(results.iter().filter_map(|r| r.name.clone()));
+                    for ir in self.collect_rebind_roots(st, fb, &inner_bound) {
+                        if !shadows.contains(&ir) {
+                            out.insert(ir);
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Every base path this block may store through or delete: index-assign

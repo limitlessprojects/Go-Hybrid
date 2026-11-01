@@ -636,6 +636,14 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 span,
             } => {
                 ck.process_assign(&mut st, targets, *op, values, *span, idx);
+                // Issue #970 / A3 (re-binding half): a whole-value re-bind of a
+                // live slice-element loan's base invalidates the loan — the
+                // store-back would name a container the loan was never taken
+                // from (HYB-E3105). Runs on the PRE-assignment environment: the
+                // loans registered by this very statement are excluded by their
+                // `created` index, and the target's old shape is what the loan
+                // was taken from.
+                ck.check_loan_base_rebind(&st, stmt, idx);
                 ck.record_assign_borrow_aliases(&mut st, targets, *op, values);
                 ck.mark_slot_loans_assign(&mut st, targets, *op, values);
             }
