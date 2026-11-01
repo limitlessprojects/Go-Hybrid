@@ -762,6 +762,21 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// Check if a Place refers to a set[T] variable.
+    fn set_elem_of_place(&self, p: &Place) -> Option<String> {
+        match &p.kind {
+            PlaceKind::Ident(name) => {
+                for layer in self.set_elem_scopes.iter().rev() {
+                    if let Some(v) = layer.get(name) {
+                        return v.clone();
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// #2474: `s.insert(v)` / `s.contains(v)` / `s.remove(v)` on a `set[T]`
     /// need `v` of type `T`; the prelude's Go signature takes `T`, so a
     /// mismatched argument passed `hyb check` and failed `go build`.
@@ -4482,6 +4497,35 @@ impl<'a> Collector<'a> {
             );
             return;
         }
+        if let Some(elem) = self.set_elem_of_expr(operand) {
+            match op {
+                UnOp::Not => {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "operator `!` not defined on `{}` (type `set[{}]`) (HYB-E1002)",
+                            operand.render(),
+                            elem
+                        ),
+                        "unary `!` requires a boolean operand",
+                    );
+                    return;
+                }
+                UnOp::Neg => {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "operator `-` not defined on `{}` (type `set[{}]`) (HYB-E1002)",
+                            operand.render(),
+                            elem
+                        ),
+                        "unary `-` is only defined on integer and floating-point values",
+                    );
+                    return;
+                }
+                UnOp::Addr => {}
+            }
+        }
         let k = self.kind_of_expr(operand);
         match op {
             UnOp::Not => {
@@ -4650,6 +4694,57 @@ impl<'a> Collector<'a> {
         // call's FIRST result and silently accept it as an int.
         self.check_single_value_position(lhs, "a binary operation", /*binding_position=*/ false);
         self.check_single_value_position(rhs, "a binary operation", /*binding_position=*/ false);
+
+        // Issue #2989: binary operators (+, -, *, <, etc.) are not defined on set[T].
+        // (== and != are handled separately by emit_guard.rs).
+        if !matches!(op, BinOp::Eq | BinOp::Ne) {
+            let op_str = match op {
+                BinOp::Add => "+",
+                BinOp::Sub => "-",
+                BinOp::Mul => "*",
+                BinOp::Div => "/",
+                BinOp::Mod => "%",
+                BinOp::BitAnd => "&",
+                BinOp::BitOr => "|",
+                BinOp::BitXor => "^",
+                BinOp::And => "&&",
+                BinOp::Or => "||",
+                BinOp::Shl => "<<",
+                BinOp::Shr => ">>",
+                BinOp::Lt => "<",
+                BinOp::Le => "<=",
+                BinOp::Gt => ">",
+                BinOp::Ge => ">=",
+                BinOp::Eq | BinOp::Ne => unreachable!(),
+            };
+            if let Some(elem) = self.set_elem_of_expr(lhs) {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "operator `{}` not defined on `{}` (type `set[{}]`) (HYB-E1002)",
+                        op_str,
+                        lhs.render(),
+                        elem
+                    ),
+                    "binary operators cannot be applied to `set` values",
+                );
+                return;
+            }
+            if let Some(elem) = self.set_elem_of_expr(rhs) {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "operator `{}` not defined on `{}` (type `set[{}]`) (HYB-E1002)",
+                        op_str,
+                        rhs.render(),
+                        elem
+                    ),
+                    "binary operators cannot be applied to `set` values",
+                );
+                return;
+            }
+        }
+
         let lk = self.kind_of_expr(lhs);
         let rk = self.kind_of_expr(rhs);
         match op {
@@ -4874,6 +4969,49 @@ impl<'a> Collector<'a> {
             return;
         };
         let tk = self.kind_of_place(target);
+        if op != AssignOp::Assign {
+            if let Some(elem) = self.set_elem_of_place(target) {
+                let op_str = match op {
+                    AssignOp::Inc => "++",
+                    AssignOp::Dec => "--",
+                    AssignOp::AddAssign => "+=",
+                    AssignOp::SubAssign => "-=",
+                    AssignOp::MulAssign => "*=",
+                    AssignOp::DivAssign => "/=",
+                    AssignOp::ModAssign => "%=",
+                    AssignOp::BitAndAssign => "&=",
+                    AssignOp::BitOrAssign => "|=",
+                    AssignOp::BitXorAssign => "^=",
+                    AssignOp::ShlAssign => "<<=",
+                    AssignOp::ShrAssign => ">>=",
+                    _ => "=",
+                };
+                if matches!(op, AssignOp::Inc | AssignOp::Dec) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid operation `{}{}` (non-numeric type `set[{}]`) (HYB-E1002)",
+                            target.render(),
+                            op_str,
+                            elem
+                        ),
+                        "`++` and `--` require a numeric variable or place",
+                    );
+                } else {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "invalid compound assignment: operator `{}` not defined on `{}` (type `set[{}]`) (HYB-E1002)",
+                            op_str,
+                            target.render(),
+                            elem
+                        ),
+                        "compound assignment operators are not defined on `set[T]`",
+                    );
+                }
+                return;
+            }
+        }
         if op != AssignOp::Assign && op != AssignOp::Inc && op != AssignOp::Dec {
             if targets.len() != 1 || values.len() != 1 {
                 self.emit_e1002(
@@ -6404,6 +6542,18 @@ impl<'a> Collector<'a> {
                 if builtins_already_flags_len_cap(op, true) {
                     return;
                 }
+                if let Some(elem) = self.set_elem_of_expr(op) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "invalid argument `{}` (type `set[{}]`) for built-in `cap` (HYB-E2005)",
+                            op.render(),
+                            elem
+                        ),
+                        "`cap` accepts a slice, array, or channel — sets have no capacity",
+                    );
+                    return;
+                }
                 let ak = self.kind_of_expr(op);
                 let ok = matches!(
                     ak,
@@ -6430,6 +6580,18 @@ impl<'a> Collector<'a> {
                 }
                 let op = &args[0].value;
                 if builtins_already_flags_close(op) {
+                    return;
+                }
+                if let Some(elem) = self.set_elem_of_expr(op) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "cannot close non-channel `{}` (type `set[{}]`) (HYB-E2005)",
+                            op.render(),
+                            elem
+                        ),
+                        "`close` requires a bidirectional or send-only channel (`chan T` or `chan<- T`)",
+                    );
                     return;
                 }
                 let ak = self.kind_of_expr(op);
@@ -6524,7 +6686,17 @@ impl<'a> Collector<'a> {
                 }
                 let slice_arg = &args[0].value;
                 let sk = self.kind_of_expr(slice_arg);
-                if !matches!(sk, OpKind::Unknown | OpKind::Slice(_)) {
+                if let Some(elem) = self.set_elem_of_expr(slice_arg) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "first argument to `append` must be a slice, found `{}` (type `set[{}]`) (HYB-E2005)",
+                            slice_arg.render(),
+                            elem
+                        ),
+                        "the first argument to `append(xs, ...)` must be a slice (`[]T`)",
+                    );
+                } else if !matches!(sk, OpKind::Unknown | OpKind::Slice(_)) {
                     self.emit_e2005(
                         span,
                         format!(
@@ -6545,6 +6717,18 @@ impl<'a> Collector<'a> {
                 let dk = self.kind_of_expr(dst_arg);
                 let sk = self.kind_of_expr(src_arg);
 
+                if let Some(elem) = self.set_elem_of_expr(dst_arg) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "arguments to `copy` must be slices, found `{}` (type `set[{}]`) (HYB-E2005)",
+                            dst_arg.render(),
+                            elem
+                        ),
+                        "the arguments to `copy(dst, src)` must be slices",
+                    );
+                    return;
+                }
                 if !matches!(dk, OpKind::Unknown | OpKind::Slice(_)) {
                     self.emit_e2005(
                         span,
@@ -6558,6 +6742,18 @@ impl<'a> Collector<'a> {
                     return;
                 }
 
+                if let Some(elem) = self.set_elem_of_expr(src_arg) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "arguments to `copy` must be slices, found `{}` (type `set[{}]`) (HYB-E2005)",
+                            src_arg.render(),
+                            elem
+                        ),
+                        "the arguments to `copy(dst, src)` must be slices",
+                    );
+                    return;
+                }
                 if !matches!(sk, OpKind::Unknown | OpKind::Slice(_) | OpKind::Str) {
                     self.emit_e2005(
                         span,
@@ -6605,6 +6801,18 @@ impl<'a> Collector<'a> {
                     return; // arity handled by builtins.rs
                 }
                 let op = &args[0].value;
+                if let Some(elem) = self.set_elem_of_expr(op) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "cannot clear non-slice/map `{}` (type `set[{}]`) (HYB-E2005)",
+                            op.render(),
+                            elem
+                        ),
+                        "`clear` requires a slice or map operand",
+                    );
+                    return;
+                }
                 let ak = self.kind_of_expr(op);
                 if !matches!(ak, OpKind::Unknown | OpKind::Slice(_) | OpKind::Map(_, _)) {
                     self.emit_e2005(
@@ -6622,6 +6830,18 @@ impl<'a> Collector<'a> {
                 let mut first_arg: Option<(&Expr, OpKind)> = None;
                 let mut first_typed_scalar: Option<(&Expr, &'static str)> = None;
                 for arg in args {
+                    if let Some(elem) = self.set_elem_of_expr(&arg.value) {
+                        self.emit_e2005(
+                            span,
+                            format!(
+                                "invalid argument `{}` (type `set[{}]`) for `{name}`: type has no order (HYB-E2005)",
+                                arg.value.render(),
+                                elem
+                            ),
+                            "the arguments to `min` and `max` must have ordered type (integers, floats, or strings)",
+                        );
+                        return;
+                    }
                     let k = self.kind_of_expr(&arg.value);
                     if matches!(k, OpKind::Unknown | OpKind::Void) {
                         continue;
