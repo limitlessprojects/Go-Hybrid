@@ -19,15 +19,20 @@
 //! emitter can lower is never rejected here.
 
 use crate::model::Checker;
+use crate::resolve::is_predeclared_type_name;
 use hy_diag::Diagnostic;
-use hy_syntax::{Block, Decl, Expr, ForKind, InterpPart, Place, PlaceKind, SelectArmKind, Stmt};
+use hy_syntax::{
+    Block, Decl, Expr, FieldInit, ForKind, InterpPart, Place, PlaceKind, SelectArmKind, Stmt,
+    TypeExpr,
+};
+use std::collections::HashMap;
 
 /// Whether the expression sits in a composite element slot, where the
 /// emitter inherits the head from the enclosing literal's type.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Slot {
+#[derive(Clone, Copy)]
+enum Slot<'t> {
     Free,
-    Element,
+    Element(&'t TypeExpr),
 }
 
 impl<'a> Checker<'a> {
@@ -35,13 +40,50 @@ impl<'a> Checker<'a> {
         let file = self.file;
         for d in &file.decls {
             match d {
-                Decl::Const(c) => self.elided_expr(&c.value, Slot::Free),
+                Decl::Const(c) => {
+                    if let Some(ty) = &c.ty {
+                        self.elided_type(ty);
+                    }
+                    self.elided_expr(&c.value, Slot::Free);
+                }
+                Decl::Struct(s) => s.fields.iter().for_each(|f| self.elided_type(&f.ty)),
+                Decl::TypeAlias(a) => self.elided_type(&a.ty),
+                Decl::Enum(e) => e.variants.iter().filter_map(|v| v.payload.as_ref()).for_each(|p| self.elided_type(p)),
                 Decl::Fn(f) => {
+                    if let Some(r) = &f.receiver {
+                        self.elided_type(&r.ty);
+                    }
+                    f.params.iter().for_each(|p| self.elided_type(&p.ty));
+                    f.results.iter().for_each(|r| self.elided_type(&r.ty));
                     if let Some(b) = &f.body {
                         self.elided_block(b);
                     }
                 }
-                _ => {}
+                Decl::Import { .. } => {}
+            }
+        }
+    }
+
+    fn elided_type(&mut self, ty: &TypeExpr) {
+        match ty {
+            TypeExpr::Named { .. } => {}
+            TypeExpr::Pointer { to, .. }
+            | TypeExpr::Slice { elem: to, .. }
+            | TypeExpr::Chan { elem: to, .. }
+            | TypeExpr::Option { elem: to, .. } => self.elided_type(to),
+            TypeExpr::Array { len, elem, .. } => {
+                if let Some(l) = len {
+                    self.elided_expr(l, Slot::Free);
+                }
+                self.elided_type(elem);
+            }
+            TypeExpr::Map { key, value, .. } => {
+                self.elided_type(key);
+                self.elided_type(value);
+            }
+            TypeExpr::Fn { params, results, .. } => {
+                params.iter().for_each(|p| self.elided_type(&p.ty));
+                results.iter().for_each(|r| self.elided_type(r));
             }
         }
     }
@@ -55,6 +97,9 @@ impl<'a> Checker<'a> {
     fn elided_stmt(&mut self, s: &Stmt) {
         match s {
             Stmt::Local(l) => {
+                if let Some(ty) = &l.ty {
+                    self.elided_type(ty);
+                }
                 for v in &l.values {
                     self.elided_expr(v, Slot::Free);
                 }
@@ -155,13 +200,118 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn elided_expr(&mut self, e: &Expr, slot: Slot) {
+    fn is_valid_elided_struct_head_name(&self, full_name: &str, fields_empty: bool) -> bool {
+        let base = Self::base_named_type_str(full_name);
+        if base.is_empty()
+            || (!self.structs.contains_key(base) && is_predeclared_type_name(base))
+            || self.enums.contains_key(base)
+        {
+            return false;
+        }
+        if base == "set" {
+            return fields_empty;
+        }
+        if base.contains('.') {
+            return !matches!(
+                base,
+                "http.handler"
+                    | "http.response_writer"
+                    | "io.reader"
+                    | "io.writer"
+                    | "io.closer"
+                    | "io.read_closer"
+                    | "context.context"
+                    | "fmt.stringer"
+            );
+        }
+        self.structs.contains_key(base)
+    }
+
+    fn check_elided_struct_fields(&mut self, full_name: &str, fields: &[FieldInit]) {
+        let sname = Self::base_named_type_str(full_name).to_string();
+        let Some(declared) = self.structs.get(&sname).cloned() else {
+            return;
+        };
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for f in fields {
+            if f.name.is_empty() {
+                continue;
+            }
+            let n = seen.entry(f.name.clone()).or_insert(0);
+            *n += 1;
+            if *n == 2 {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E1002",
+                        self.path.clone(),
+                        f.span,
+                        format!(
+                            "duplicate field `{}` in `{}` literal — Go refuses `duplicate field name {} in struct literal` (HYB-E1002)",
+                            f.name, full_name, f.name
+                        ),
+                    )
+                    .with_notes(vec![
+                        "each field may be set at most once in one struct literal".to_string(),
+                    ]),
+                );
+            }
+        }
+        for f in fields {
+            if !f.name.is_empty() && !declared.iter().any(|(n, _)| n == &f.name) {
+                self.diags.push(
+                    Diagnostic::error(
+                        "HYB-E1002",
+                        self.path.clone(),
+                        f.span,
+                        format!(
+                            "unknown field `{}` in `{}` literal — Go refuses `unknown field {} in struct literal of type {}` (HYB-E1002)",
+                            f.name, full_name, f.name, full_name
+                        ),
+                    )
+                    .with_notes(vec![
+                        "a struct literal may only name fields the struct declares".to_string(),
+                    ]),
+                );
+            }
+        }
+    }
+
+    fn check_elided_struct_head(&mut self, slot: Slot<'_>, fields: &[FieldInit], span: hy_diag::Span) {
+        let Slot::Element(exp) = slot else {
+            self.push_elided_diag(span);
+            return;
+        };
+        if let TypeExpr::Pointer { to, .. } = exp {
+            if let TypeExpr::Named { name, .. } = self.resolve_type_alias(to) {
+                if self.is_valid_elided_struct_head_name(&name, fields.is_empty()) {
+                    self.check_elided_struct_fields(&name, fields);
+                    return;
+                }
+            }
+            self.push_elided_diag(span);
+            return;
+        }
+        match self.resolve_type_alias(exp) {
+            TypeExpr::Slice { .. } | TypeExpr::Array { .. } | TypeExpr::Map { .. }
+                if fields.is_empty() => {}
+            TypeExpr::Named { name, .. }
+                if self.is_valid_elided_struct_head_name(&name, fields.is_empty()) =>
+            {
+                self.check_elided_struct_fields(&name, fields);
+            }
+            _ => self.push_elided_diag(span),
+        }
+    }
+
+    fn elided_expr(&mut self, e: &Expr, slot: Slot<'_>) {
         match e {
             // `emit_expr_exp` peels parentheses before filling the head.
             Expr::Paren { inner, .. } => self.elided_expr(inner, slot),
             Expr::StructLit { ty, fields, span } => {
-                if ty.is_none() && slot == Slot::Free {
-                    self.push_elided_diag(*span);
+                if let Some(t) = ty {
+                    self.elided_type(t);
+                } else {
+                    self.check_elided_struct_head(slot, fields, *span);
                 }
                 // Field values are emitted without an expected type.
                 for f in fields {
@@ -169,23 +319,36 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::SliceLit { elem, items, .. } => {
-                // A typed slice/array literal hands its items the element
-                // type; an untyped `[...]` does so only when it itself sits
-                // in an element slot (`emit_expr_exp` recursion). Otherwise
-                // its items are emitted with no expected type.
-                let item_slot = if elem.is_some() || slot == Slot::Element {
-                    Slot::Element
+                if let Some(t) = elem {
+                    self.elided_type(t);
+                }
+                let item_slot = if let Some((_, inner_elem, _)) = e.as_array_lit() {
+                    Slot::Element(inner_elem)
+                } else if let Some(t) = elem.as_deref() {
+                    Slot::Element(t)
                 } else {
-                    Slot::Free
+                    match slot {
+                        Slot::Element(TypeExpr::Slice { elem: inner, .. } | TypeExpr::Array { elem: inner, .. }) => {
+                            Slot::Element(inner)
+                        }
+                        _ => Slot::Free,
+                    }
                 };
                 for i in items {
                     self.elided_expr(i, item_slot);
                 }
             }
-            Expr::MapLit { entries, .. } => {
+            Expr::MapLit {
+                key,
+                value,
+                entries,
+                ..
+            } => {
+                self.elided_type(key);
+                self.elided_type(value);
                 for (k, v) in entries {
-                    self.elided_expr(k, Slot::Element);
-                    self.elided_expr(v, Slot::Element);
+                    self.elided_expr(k, Slot::Element(key));
+                    self.elided_expr(v, Slot::Element(value));
                 }
             }
             Expr::Ident { .. } | Expr::Lit { .. } => {}
@@ -225,7 +388,16 @@ impl<'a> Checker<'a> {
                     self.elided_expr(&a.value, Slot::Free);
                 }
             }
-            Expr::FnLit { body, .. } => self.elided_block(body),
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => {
+                params.iter().for_each(|p| self.elided_type(&p.ty));
+                results.iter().for_each(|r| self.elided_type(&r.ty));
+                self.elided_block(body);
+            }
         }
     }
 
