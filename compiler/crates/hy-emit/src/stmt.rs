@@ -725,6 +725,10 @@ impl Emitter {
     }
 
     fn hoist_tries_call(&mut self, callee: &Expr, args: &[CallArg]) -> Result<(), EmitError> {
+        // `(recv().method)(fallible()?)` is a Field callee wearing parentheses;
+        // matching the raw expression sent it down the generic arm and skipped
+        // the evaluation-order hoist (#1991 cause 5).
+        let callee = Self::peel_parens(callee);
         let any_arg_has_try = args.iter().any(|a| Self::expr_has_hoistable_try(&a.value));
         if any_arg_has_try {
             let mut inner = callee;

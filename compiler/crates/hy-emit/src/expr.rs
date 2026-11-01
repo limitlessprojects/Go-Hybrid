@@ -841,6 +841,12 @@ impl Emitter {
         callee: &Expr,
         args: &[CallArg],
     ) -> Result<String, EmitError> {
+        // A parenthesized selector callee — `(p.mu.lock)()`, `(fmt.println)(x)`,
+        // `(box.new)(3)` — is the same call as its unparenthesized spelling.
+        // hy-check peels parentheses before classifying the callee, so emission
+        // must peel too: otherwise the package gate, the M4 normalization, the
+        // `.pop()` prelude and the assoc-fn mangling are all skipped (#1991).
+        let callee = Self::unwrap_parens(callee);
         // --- make(...): the first argument is a TYPE (bug-#2 fix) ---
         if matches!(callee, Expr::Ident { name, .. } if name == "make") {
             return self.emit_make(args);
