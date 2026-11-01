@@ -91,7 +91,7 @@ def scan_managed_lines(src: str) -> list[int]:
 def audit(hyb, prog):
     r = subprocess.run(
         [hyb, "check", prog, "--json", "--report-managed"],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True, text=True, encoding="utf-8", timeout=120,
     )
     # Fail closed on a checker failure (issue #53): a rejected or malformed
     # program has no trustworthy managed-block inventory. Treating that as
