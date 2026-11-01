@@ -766,9 +766,34 @@ impl<'a> Collector<'a> {
             (Some(TypeExpr::Fn { params, .. }), _) => params,
             (Some(_), _) => return None,
             (None, Some(Expr::FnLit { params, .. })) => params,
+            (None, Some(Expr::Field { base, name, .. })) => {
+                return self.method_value_params(base, name);
+            }
             _ => return None,
         };
         Some(Self::normalize_fn_params(raw))
+    }
+
+    /// A method value bound to a local (`g := a.add`): the receiver is
+    /// already bound, so the parameters are the method's declared ones.
+    /// Fields shadow nothing here (Go forbids a field and method with the
+    /// same name); generic methods and generic (instantiated) receivers fail
+    /// open because their parameter types depend on type arguments.
+    fn method_value_params(&self, base: &Expr, name: &str) -> Option<Vec<Param>> {
+        let bk = self.kind_of_expr(base);
+        if self.struct_field_kind(&bk, name).is_some() {
+            return None;
+        }
+        let sn = self.struct_base_name(&bk)?;
+        let m = self.ck.method_decls.get(&(sn, name.to_string()))?;
+        let generic_recv = m
+            .receiver
+            .as_ref()
+            .is_some_and(|r| r.ty.render().contains('['));
+        if !m.type_params.is_empty() || generic_recv {
+            return None;
+        }
+        Some(Self::normalize_fn_params(&m.params))
     }
 
     /// `parse_params` stores a parameter without a type as `Named("")`.
