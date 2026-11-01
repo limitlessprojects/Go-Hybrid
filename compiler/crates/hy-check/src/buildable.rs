@@ -668,21 +668,35 @@ impl<'a> Collector<'a> {
     }
 
     fn pointer_base_underlying_key_of_named(&self, name: &str) -> Option<String> {
+        self.pointer_base_underlying_key_of_named_depth(name, 0)
+    }
+
+    fn pointer_base_underlying_key_of_named_depth(&self, name: &str, depth: usize) -> Option<String> {
+        if depth > 8 {
+            return None;
+        }
         let base = Checker::base_named_type_str(name);
         if let Some(alias_ty) = self.ck.type_aliases.get(base) {
-            self.pointer_base_underlying_key_of_ty(alias_ty)
+            self.pointer_base_underlying_key_of_ty_depth(alias_ty, depth + 1)
         } else {
             None
         }
     }
 
     fn pointer_base_underlying_key_of_ty(&self, ty: &TypeExpr) -> Option<String> {
+        self.pointer_base_underlying_key_of_ty_depth(ty, 0)
+    }
+
+    fn pointer_base_underlying_key_of_ty_depth(&self, ty: &TypeExpr, depth: usize) -> Option<String> {
+        if depth > 8 {
+            return None;
+        }
         match ty {
-            TypeExpr::Pointer { to, .. } => self.underlying_type_key(to),
+            TypeExpr::Pointer { to, .. } => self.underlying_type_key_depth(to, depth + 1),
             TypeExpr::Named { name, .. } => {
                 let base = Checker::base_named_type_str(name);
                 if let Some(alias_ty) = self.ck.type_aliases.get(base) {
-                    self.pointer_base_underlying_key_of_ty(alias_ty)
+                    self.pointer_base_underlying_key_of_ty_depth(alias_ty, depth + 1)
                 } else {
                     None
                 }
@@ -692,6 +706,13 @@ impl<'a> Collector<'a> {
     }
 
     fn underlying_type_key(&self, ty: &TypeExpr) -> Option<String> {
+        self.underlying_type_key_depth(ty, 0)
+    }
+
+    fn underlying_type_key_depth(&self, ty: &TypeExpr, depth: usize) -> Option<String> {
+        if depth > 8 {
+            return None;
+        }
         match ty {
             TypeExpr::Named { name, .. } => {
                 let base = Checker::base_named_type_str(name);
@@ -705,30 +726,30 @@ impl<'a> Collector<'a> {
                     return Some(format!("struct:{}", base));
                 }
                 if let Some(alias_ty) = self.ck.type_aliases.get(base) {
-                    return self.underlying_type_key(alias_ty);
+                    return self.underlying_type_key_depth(alias_ty, depth + 1);
                 }
                 Some(base.to_string())
             }
             TypeExpr::Slice { elem, .. } => {
-                let elem_key = self.underlying_type_key(elem)?;
+                let elem_key = self.underlying_type_key_depth(elem, depth + 1)?;
                 Some(format!("[]{}", elem_key))
             }
             TypeExpr::Array { len, elem, .. } => {
-                let elem_key = self.underlying_type_key(elem)?;
+                let elem_key = self.underlying_type_key_depth(elem, depth + 1)?;
                 let len_str = len.as_ref().map(|l| l.render()).unwrap_or_default();
                 Some(format!("[{}]{}", len_str, elem_key))
             }
             TypeExpr::Pointer { to, .. } => {
-                let to_key = self.underlying_type_key(to)?;
+                let to_key = self.underlying_type_key_depth(to, depth + 1)?;
                 Some(format!("*{}", to_key))
             }
             TypeExpr::Map { key, value, .. } => {
-                let k_key = self.underlying_type_key(key)?;
-                let v_key = self.underlying_type_key(value)?;
+                let k_key = self.underlying_type_key_depth(key, depth + 1)?;
+                let v_key = self.underlying_type_key_depth(value, depth + 1)?;
                 Some(format!("map[{}]{}", k_key, v_key))
             }
             TypeExpr::Chan { dir, elem, .. } => {
-                let elem_key = self.underlying_type_key(elem)?;
+                let elem_key = self.underlying_type_key_depth(elem, depth + 1)?;
                 let prefix = match dir {
                     ChanDir::Both => "chan ",
                     ChanDir::Recv => "<-chan ",
@@ -824,42 +845,49 @@ impl<'a> Collector<'a> {
     }
 
     fn underlying_type_key_of_str(&self, s: &str) -> Option<String> {
+        self.underlying_type_key_of_str_depth(s, 0)
+    }
+
+    fn underlying_type_key_of_str_depth(&self, s: &str, depth: usize) -> Option<String> {
+        if depth > 8 {
+            return None;
+        }
         let s = s.trim();
         if let Some(elem) = s.strip_prefix("[]") {
-            let elem_key = self.underlying_type_key_of_str(elem)?;
+            let elem_key = self.underlying_type_key_of_str_depth(elem, depth + 1)?;
             return Some(format!("[]{}", elem_key));
         }
         if s.starts_with('[') {
             if let Some(close) = s.find(']') {
                 let len_str = s[1..close].trim();
                 let elem = &s[close + 1..];
-                let elem_key = self.underlying_type_key_of_str(elem)?;
+                let elem_key = self.underlying_type_key_of_str_depth(elem, depth + 1)?;
                 return Some(format!("[{}]{}", len_str, elem_key));
             }
         }
         if let Some(to) = s.strip_prefix('*') {
-            let to_key = self.underlying_type_key_of_str(to)?;
+            let to_key = self.underlying_type_key_of_str_depth(to, depth + 1)?;
             return Some(format!("*{}", to_key));
         }
         if s.starts_with("map[") {
             if let Some(close) = s.find(']') {
                 let k = &s[4..close];
                 let v = &s[close + 1..];
-                let k_key = self.underlying_type_key_of_str(k)?;
-                let v_key = self.underlying_type_key_of_str(v)?;
+                let k_key = self.underlying_type_key_of_str_depth(k, depth + 1)?;
+                let v_key = self.underlying_type_key_of_str_depth(v, depth + 1)?;
                 return Some(format!("map[{}]{}", k_key, v_key));
             }
         }
         if let Some(elem) = s.strip_prefix("chan<- ") {
-            let elem_key = self.underlying_type_key_of_str(elem)?;
+            let elem_key = self.underlying_type_key_of_str_depth(elem, depth + 1)?;
             return Some(format!("chan<- {}", elem_key));
         }
         if let Some(elem) = s.strip_prefix("<-chan ") {
-            let elem_key = self.underlying_type_key_of_str(elem)?;
+            let elem_key = self.underlying_type_key_of_str_depth(elem, depth + 1)?;
             return Some(format!("<-chan {}", elem_key));
         }
         if let Some(elem) = s.strip_prefix("chan ") {
-            let elem_key = self.underlying_type_key_of_str(elem)?;
+            let elem_key = self.underlying_type_key_of_str_depth(elem, depth + 1)?;
             return Some(format!("chan {}", elem_key));
         }
         let base = Checker::base_named_type_str(s);
@@ -873,7 +901,7 @@ impl<'a> Collector<'a> {
             return Some(format!("struct:{}", base));
         }
         if let Some(alias_ty) = self.ck.type_aliases.get(base) {
-            return self.underlying_type_key(alias_ty);
+            return self.underlying_type_key_depth(alias_ty, depth + 1);
         }
         None
     }
