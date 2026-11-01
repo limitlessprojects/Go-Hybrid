@@ -687,14 +687,25 @@ impl<'a> Checker<'a> {
                 let Some(decl) = self.fns.get(name) else {
                     continue;
                 };
-                match decl.params.get(i) {
-                    Some(p) => {
-                        if self.fn_mutates_param(decl, &p.name, 0) {
-                            conflict_paths.push(arg_path);
-                        }
+                if cr.args.len() == 1 && decl.params.len() > 1 {
+                    if decl.params.iter().any(|p| {
+                        let ps = self.shape_of_type(&p.ty);
+                        (self.shape_may_share(&ps)
+                            || matches!(ps, TypeShape::Unknown | TypeShape::Pointer(_)))
+                            && self.fn_mutates_param(decl, &p.name, 0)
+                    }) {
+                        conflict_paths.push(arg_path);
                     }
-                    // argument beyond the signature — fail closed
-                    None => conflict_paths.push(arg_path),
+                } else {
+                    match decl.params.get(i) {
+                        Some(p) => {
+                            if self.fn_mutates_param(decl, &p.name, 0) {
+                                conflict_paths.push(arg_path);
+                            }
+                        }
+                        // argument beyond the signature — fail closed
+                        None => conflict_paths.push(arg_path),
+                    }
                 }
             }
         }
@@ -799,19 +810,31 @@ impl<'a> Checker<'a> {
                     }
                 }
                 for (i, a) in cr.args.iter().enumerate() {
-                    let Some(arg_path) = walk::expr_path(&a.value) else {
-                        continue;
-                    };
-                    if !live.iter().any(|p| a3_paths_conflict(st, p, &arg_path)) {
-                        continue;
-                    };
-                    let mutates = match decl.params.get(i) {
-                        Some(p) => self.fn_mutates_param(decl, &p.name, 0),
-                        None => true,
-                    };
-                    if mutates {
-                        self.emit_a3_if_live(st, &arg_path, cr.span, idx, &verb);
-                        return;
+                    let mut aroots = Vec::new();
+                    if self.expr_or_multi_call_may_share(st, &a.value) {
+                        collect_ref_roots(&a.value, &mut aroots);
+                    }
+                    for arg_path in walk::expr_path(&a.value).into_iter().chain(aroots) {
+                        if !live.iter().any(|p| a3_paths_conflict(st, p, &arg_path)) {
+                            continue;
+                        }
+                        let mutates = if cr.args.len() == 1 && decl.params.len() > 1 {
+                            decl.params.iter().any(|p| {
+                                let ps = self.shape_of_type(&p.ty);
+                                (self.shape_may_share(&ps)
+                                    || matches!(ps, TypeShape::Unknown | TypeShape::Pointer(_)))
+                                    && self.fn_mutates_param(decl, &p.name, 0)
+                            })
+                        } else {
+                            match decl.params.get(i) {
+                                Some(p) => self.fn_mutates_param(decl, &p.name, 0),
+                                None => true,
+                            }
+                        };
+                        if mutates {
+                            self.emit_a3_if_live(st, &arg_path, cr.span, idx, &verb);
+                            return;
+                        }
                     }
                 }
                 return;
@@ -1078,6 +1101,15 @@ impl<'a> Checker<'a> {
                     return false;
                 }
                 if let Some(decl) = self.fns.get(name) {
+                    if cr.args.len() == 1 && decl.params.len() > 1 {
+                        return arg_root_is_param(&cr.args[0])
+                            && decl.params.iter().any(|p| {
+                                let ps = self.shape_of_type(&p.ty);
+                                (self.shape_may_share(&ps)
+                                    || matches!(ps, TypeShape::Unknown | TypeShape::Pointer(_)))
+                                    && self.fn_mutates_param(decl, &p.name, depth + 1)
+                            });
+                    }
                     for (i, a) in cr.args.iter().enumerate() {
                         if !arg_root_is_param(a) {
                             continue;
@@ -3215,7 +3247,14 @@ impl<'a> Checker<'a> {
                         params.iter().map(|p| p.name.clone()).collect();
                     bound.extend(results.iter().filter_map(|r| r.name.clone()));
                     for (i, p) in params.iter().enumerate() {
-                        if let Some(arg) = cr.args.get(i) {
+                        let arg_opt = cr.args.get(i).or_else(|| {
+                            if cr.args.len() == 1 && params.len() > 1 {
+                                cr.args.first()
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(arg) = arg_opt {
                             slots.push((
                                 p.name.clone(),
                                 self.shape_of_type(&p.ty),
@@ -3234,7 +3273,14 @@ impl<'a> Checker<'a> {
                     decl.params.iter().map(|p| p.name.clone()).collect();
                 bound.extend(decl.results.iter().filter_map(|r| r.name.clone()));
                 for (i, p) in decl.params.iter().enumerate() {
-                    if let Some(arg) = cr.args.get(i) {
+                    let arg_opt = cr.args.get(i).or_else(|| {
+                        if cr.args.len() == 1 && decl.params.len() > 1 {
+                            cr.args.first()
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(arg) = arg_opt {
                         slots.push((
                             p.name.clone(),
                             self.shape_of_type(&p.ty),
@@ -3300,7 +3346,14 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 for (i, p) in decl.params.iter().enumerate() {
-                    if let Some(arg) = cr.args.get(i) {
+                    let arg_opt = cr.args.get(i).or_else(|| {
+                        if cr.args.len() == 1 && decl.params.len() > 1 {
+                            cr.args.first()
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(arg) = arg_opt {
                         slots.push((
                             p.name.clone(),
                             self.shape_of_type(&p.ty),
@@ -3323,7 +3376,14 @@ impl<'a> Checker<'a> {
                     params.iter().map(|p| p.name.clone()).collect();
                 bound.extend(results.iter().filter_map(|r| r.name.clone()));
                 for (i, p) in params.iter().enumerate() {
-                    if let Some(arg) = cr.args.get(i) {
+                    let arg_opt = cr.args.get(i).or_else(|| {
+                        if cr.args.len() == 1 && params.len() > 1 {
+                            cr.args.first()
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(arg) = arg_opt {
                         slots.push((
                             p.name.clone(),
                             self.shape_of_type(&p.ty),
@@ -7700,6 +7760,29 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// True when `expr` (or any return slot of a multi-value call expression)
+    /// may carry shared reference storage (`shape_may_share` or `Unknown`).
+    fn expr_or_multi_call_may_share(&self, st: &FnState, expr: &Expr) -> bool {
+        let inner = crate::model::unwrap_parens(expr);
+        let sh = self.shape_of_expr(st, inner);
+        if self.shape_may_share(&sh) || matches!(sh, TypeShape::Unknown) {
+            return true;
+        }
+        let call_expr = match inner {
+            Expr::Try { operand, .. } => crate::model::unwrap_parens(operand),
+            other => other,
+        };
+        if let Expr::Call { callee, .. } = call_expr {
+            if let Some(results) = self.call_result_tys(st, callee) {
+                return results.iter().any(|ty| {
+                    let s = self.shape_of_type(ty);
+                    self.shape_may_share(&s) || matches!(s, TypeShape::Unknown)
+                });
+            }
+        }
+        false
+    }
+
     /// Resolve a call argument expression to a `const` root when the argument
     /// passes mutable reference storage (map, slice, pointer, `&const_val`, or
     /// a struct/array carrying reference fields) backed by that `const` (#188).
@@ -7732,8 +7815,7 @@ impl<'a> Checker<'a> {
             }
             return None;
         }
-        let arg_shape = self.shape_of_expr(st, inner);
-        if !(self.shape_may_share(&arg_shape) || matches!(arg_shape, TypeShape::Unknown)) {
+        if !self.expr_or_multi_call_may_share(st, inner) {
             return None;
         }
         let mut roots = Vec::new();
@@ -7904,10 +7986,17 @@ impl<'a> Checker<'a> {
                 if let Some(hy_syntax::TypeExpr::Fn { params, .. }) =
                     self.ty_of_expr(st, callee_expr).map(|t| self.resolve_type_alias(&t))
                 {
-                    let is_ptr = params.get(i).is_some_and(|p| {
-                        matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
-                            || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_))
-                    });
+                    let is_ptr = if cr.args.len() == 1 && params.len() > 1 {
+                        params.iter().any(|p| {
+                            matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                                || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_))
+                        })
+                    } else {
+                        params.get(i).is_some_and(|p| {
+                            matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                                || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_))
+                        })
+                    };
                     (is_ptr, true)
                 } else if matches!(self.shape_of_expr(st, callee_expr), TypeShape::Closure) {
                     (false, true)
@@ -7921,13 +8010,27 @@ impl<'a> Checker<'a> {
                     if declared.contains(name) {
                         (false, true)
                     } else if let Some(decl) = self.fns.get(name) {
-                        match decl.params.get(i) {
-                            Some(p) => {
-                                let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
-                                    || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_));
-                                (is_ptr, self.fn_mutates_const_param(decl, &p.name, 0))
+                        if cr.args.len() == 1 && decl.params.len() > 1 {
+                            let is_ptr = decl.params.iter().any(|p| {
+                                matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                                    || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_))
+                            });
+                            let mutates = decl.params.iter().any(|p| {
+                                let ps = self.shape_of_type(&p.ty);
+                                (self.shape_may_share(&ps)
+                                    || matches!(ps, TypeShape::Unknown | TypeShape::Pointer(_)))
+                                    && self.fn_mutates_const_param(decl, &p.name, 0)
+                            });
+                            (is_ptr, mutates)
+                        } else {
+                            match decl.params.get(i) {
+                                Some(p) => {
+                                    let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                                        || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_));
+                                    (is_ptr, self.fn_mutates_const_param(decl, &p.name, 0))
+                                }
+                                None => (false, true),
                             }
-                            None => (false, true),
                         }
                     } else if self.lookup_binding(st, name).is_some() {
                         indirect_callee_effect(callee)
@@ -7967,13 +8070,27 @@ impl<'a> Checker<'a> {
                             let rbase = Self::base_named_type_str(rb).to_string();
                             self.method_decls.get(&(rbase, method_name.clone())).copied()
                         }) {
-                            match decl.params.get(i) {
-                                Some(p) => {
-                                    let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
-                                        || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_));
-                                    (is_ptr, self.fn_mutates_const_param(decl, &p.name, 0))
+                            if cr.args.len() == 1 && decl.params.len() > 1 {
+                                let is_ptr = decl.params.iter().any(|p| {
+                                    matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                                        || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_))
+                                });
+                                let mutates = decl.params.iter().any(|p| {
+                                    let ps = self.shape_of_type(&p.ty);
+                                    (self.shape_may_share(&ps)
+                                        || matches!(ps, TypeShape::Unknown | TypeShape::Pointer(_)))
+                                        && self.fn_mutates_const_param(decl, &p.name, 0)
+                                });
+                                (is_ptr, mutates)
+                            } else {
+                                match decl.params.get(i) {
+                                    Some(p) => {
+                                        let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                                            || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_));
+                                        (is_ptr, self.fn_mutates_const_param(decl, &p.name, 0))
+                                    }
+                                    None => (false, true),
                                 }
-                                None => (false, true),
                             }
                         } else if let Some(field_fn_ptr) = recv_base.as_ref().and_then(|rb| {
                             self.structs.get(rb).and_then(|fields| {
@@ -7997,16 +8114,37 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                Expr::FnLit { params, body, .. } => match params.get(i) {
-                    Some(p) => {
-                        let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
-                            || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_));
-                        let mut aliases = HashSet::new();
-                        aliases.insert(p.name.clone());
-                        (is_ptr, self.block_mutates_const_param(body, &mut aliases, 0))
+                Expr::FnLit { params, body, .. } => {
+                    if cr.args.len() == 1 && params.len() > 1 {
+                        let is_ptr = params.iter().any(|p| {
+                            matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                                || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_))
+                        });
+                        let mutates = params.iter().any(|p| {
+                            let ps = self.shape_of_type(&p.ty);
+                            if !(self.shape_may_share(&ps)
+                                || matches!(ps, TypeShape::Unknown | TypeShape::Pointer(_)))
+                            {
+                                return false;
+                            }
+                            let mut aliases = HashSet::new();
+                            aliases.insert(p.name.clone());
+                            self.block_mutates_const_param(body, &mut aliases, 0)
+                        });
+                        (is_ptr, mutates)
+                    } else {
+                        match params.get(i) {
+                            Some(p) => {
+                                let is_ptr = matches!(p.ty, hy_syntax::TypeExpr::Pointer { .. })
+                                    || matches!(self.shape_of_type(&p.ty), TypeShape::Pointer(_));
+                                let mut aliases = HashSet::new();
+                                aliases.insert(p.name.clone());
+                                (is_ptr, self.block_mutates_const_param(body, &mut aliases, 0))
+                            }
+                            None => (false, true),
+                        }
                     }
-                    None => (false, true),
-                },
+                }
                 Expr::Index { .. } | Expr::Call { .. } | Expr::Unary { .. } => {
                     let (is_ptr, _) = indirect_callee_effect(callee);
                     (is_ptr, true)
@@ -8572,6 +8710,15 @@ impl<'a> Checker<'a> {
                     return false;
                 }
                 if let Some(decl) = self.fns.get(name) {
+                    if cr.args.len() == 1 && decl.params.len() > 1 {
+                        return arg_reaches_alias(&cr.args[0])
+                            && decl.params.iter().any(|p| {
+                                let ps = self.shape_of_type(&p.ty);
+                                (self.shape_may_share(&ps)
+                                    || matches!(ps, TypeShape::Unknown | TypeShape::Pointer(_)))
+                                    && self.fn_mutates_const_param(decl, &p.name, depth + 1)
+                            });
+                    }
                     for (i, a) in cr.args.iter().enumerate() {
                         if !arg_reaches_alias(a) {
                             continue;
@@ -8619,6 +8766,19 @@ impl<'a> Checker<'a> {
                     return true;
                 }
                 if !matching.is_empty() {
+                    if cr.args.len() == 1 && matching.iter().any(|d| d.params.len() > 1) {
+                        if !arg_reaches_alias(&cr.args[0]) {
+                            return false;
+                        }
+                        return matching.iter().any(|d| {
+                            d.params.iter().any(|p| {
+                                let ps = self.shape_of_type(&p.ty);
+                                (self.shape_may_share(&ps)
+                                    || matches!(ps, TypeShape::Unknown | TypeShape::Pointer(_)))
+                                    && self.fn_mutates_const_param(d, &p.name, depth + 1)
+                            })
+                        });
+                    }
                     for (i, a) in cr.args.iter().enumerate() {
                         if !arg_reaches_alias(a) {
                             continue;
@@ -8652,15 +8812,28 @@ impl<'a> Checker<'a> {
                         inner_aliases.remove(name);
                     }
                 }
-                for (i, a) in cr.args.iter().enumerate() {
-                    if !arg_reaches_alias(a) {
-                        continue;
-                    }
-                    match params.get(i) {
-                        Some(p) => {
-                            inner_aliases.insert(p.name.clone());
+                if cr.args.len() == 1 && params.len() > 1 {
+                    if arg_reaches_alias(&cr.args[0]) {
+                        for p in params {
+                            let ps = self.shape_of_type(&p.ty);
+                            if self.shape_may_share(&ps)
+                                || matches!(ps, TypeShape::Unknown | TypeShape::Pointer(_))
+                            {
+                                inner_aliases.insert(p.name.clone());
+                            }
                         }
-                        None => return true,
+                    }
+                } else {
+                    for (i, a) in cr.args.iter().enumerate() {
+                        if !arg_reaches_alias(a) {
+                            continue;
+                        }
+                        match params.get(i) {
+                            Some(p) => {
+                                inner_aliases.insert(p.name.clone());
+                            }
+                            None => return true,
+                        }
                     }
                 }
                 if inner_aliases.is_empty() {
