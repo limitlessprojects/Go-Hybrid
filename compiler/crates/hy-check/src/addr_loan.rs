@@ -26,12 +26,31 @@ use hy_syntax::{
 };
 
 fn is_slot_loan_expr(ck: &Checker<'_>, st: &FnState, e: &Expr) -> bool {
-    let _ = as_addr_of;
-    walk::addr_of_index_base_path(e).is_some_and(|p| {
-        ck.lookup_binding(st, p.split('.').next().unwrap_or(&p)).is_some_and(|b| {
-            matches!(b.shape, TypeShape::Map(..) | TypeShape::Slice(_) | TypeShape::Array(_) | TypeShape::Struct(_) | TypeShape::Pointer(_))
+    let Some(inner) = as_addr_of(unwrap_parens(e)) else {
+        return false;
+    };
+    let path_has_loan_base = |base: &Expr| {
+        walk::expr_path(base).is_some_and(|p| {
+            ck.lookup_binding(st, p.split('.').next().unwrap_or(&p))
+                .is_some_and(|b| {
+                    matches!(
+                        b.shape,
+                        TypeShape::Map(..)
+                            | TypeShape::Slice(_)
+                            | TypeShape::Array(_)
+                            | TypeShape::Struct(_)
+                            | TypeShape::Pointer(_)
+                    )
+                })
         })
-    })
+    };
+    match unwrap_parens(inner) {
+        Expr::Index { base, .. } => {
+            matches!(ck.shape_of_expr(st, base), TypeShape::Map(..)) || path_has_loan_base(base)
+        }
+        Expr::Field { base, .. } => path_has_loan_base(base),
+        _ => false,
+    }
 }
 
 fn is_slot_loan_or_alias_expr(
@@ -135,7 +154,7 @@ impl<'a> Checker<'a> {
                             continue;
                         };
                         if !b.slot_loan
-                            || walk::addr_of_index_base_path(v).is_some()
+                            || is_slot_loan_expr(self, st, v)
                             || !self.is_general_pointer_value(st, v)
                         {
                             continue;
@@ -165,7 +184,7 @@ impl<'a> Checker<'a> {
                             continue;
                         };
                         if !b.slot_loan
-                            || walk::addr_of_index_base_path(v).is_some()
+                            || is_slot_loan_expr(self, st, v)
                             || !self.is_general_pointer_value(st, v)
                         {
                             continue;
@@ -222,15 +241,10 @@ impl<'a> Checker<'a> {
         self.diags.push(d);
     }
 
-    /// A value that is a general Go pointer (or `nil`), not another loan.
+    /// A value that is a general Go pointer (or `nil`) or a pointer-typed loan alias.
     fn is_general_pointer_value(&self, st: &FnState, v: &hy_syntax::Expr) -> bool {
         if Checker::is_nil_literal(v) {
             return true;
-        }
-        if let hy_syntax::Expr::Ident { name, .. } = unwrap_parens(v) {
-            if self.lookup_binding(st, name).is_some_and(|b| b.slot_loan) {
-                return false;
-            }
         }
         matches!(self.shape_of_expr(st, v), TypeShape::Pointer(_))
     }
@@ -340,6 +354,18 @@ impl<'a> Checker<'a> {
             }
             Stmt::Match { subject, arms, .. } => {
                 self.check_expr_addr_of_loan_projections(st, subject, include_direct_ident);
+                let subject_is_loan = subject
+                    .root_ident()
+                    .or_else(|| match unwrap_parens(subject) {
+                        Expr::Call { callee, args, .. }
+                            if matches!(unwrap_parens(callee), Expr::Ident { name, .. } if name == "some")
+                                && args.len() == 1 =>
+                        {
+                            args[0].value.root_ident()
+                        }
+                        _ => None,
+                    })
+                    .is_some_and(|r| self.lookup_binding(st, r).is_some_and(|b| b.slot_loan));
                 for arm in arms {
                     if let Some(g) = &arm.guard {
                         let mut arm_st = st.clone();
@@ -349,8 +375,17 @@ impl<'a> Checker<'a> {
                         } = &arm.pattern
                         {
                             self.bind_match_arm(&mut arm_st, b, subject, false);
+                            if subject_is_loan {
+                                if let Some(bound) = arm_st.env_lookup_mut(b) {
+                                    bound.slot_loan = true;
+                                }
+                            }
                         }
-                        self.check_expr_addr_of_loan_projections(&arm_st, g, include_direct_ident);
+                        self.check_expr_addr_of_loan_projections(
+                            &arm_st,
+                            g,
+                            include_direct_ident || subject_is_loan,
+                        );
                     }
                 }
             }
@@ -598,9 +633,10 @@ impl<'a> Checker<'a> {
         self.diags.push(d);
     }
 
-    /// The `&m[k]` shape whose base resolves to a map: the address-of a map
-    /// index expression, which Go refuses (`cannot take address of m[k]`).
-    /// Only map bases qualify — slice/array elements are addressable.
+    /// The `&m[k]` or `&m[k].field` / `&m[k].arr[i]` shape whose value chain
+    /// is rooted at a map index expression, which Go refuses (`cannot take
+    /// address of m[k]`). Only map bases qualify — slice/array elements and
+    /// pointer dereferences are addressable.
     fn map_slot_borrow_span(&self, st: &FnState, e: &Expr) -> Option<Span> {
         let (operand, span) = match unwrap_parens(e) {
             Expr::AddrOf { operand, span } => (operand.as_ref(), *span),
@@ -611,11 +647,25 @@ impl<'a> Checker<'a> {
             } => (operand.as_ref(), *span),
             _ => return None,
         };
-        match unwrap_parens(operand) {
-            Expr::Index { base, .. } if matches!(self.shape_of_expr(st, base), TypeShape::Map(..)) => {
-                Some(span)
-            }
-            _ => None,
+        if self.is_map_slot_or_projection(st, operand) {
+            Some(span)
+        } else {
+            None
+        }
+    }
+
+    fn is_map_slot_or_projection(&self, st: &FnState, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Index { base, .. } => match self.shape_of_expr(st, base) {
+                TypeShape::Map(..) => true,
+                TypeShape::Array(_) => self.is_map_slot_or_projection(st, base),
+                _ => false,
+            },
+            Expr::Field { base, .. } => match self.shape_of_expr(st, base) {
+                TypeShape::Struct(_) => self.is_map_slot_or_projection(st, base),
+                _ => false,
+            },
+            _ => false,
         }
     }
 
@@ -853,6 +903,41 @@ fn main() {
             loop_codes.contains(&"HYB-E3104".to_string()),
             "got {:?}",
             loop_codes
+        );
+    }
+
+    #[test]
+    fn field_loan_and_map_projection_borrow_enforce_t24_e3104() {
+        let field_rebind = error_codes(
+            r#"struct acct { bal int }
+struct holder { a acct }
+fn main() {
+    h := holder{a: acct{bal: 1}}
+    n := &h.a
+    n = &acct{bal: 2}
+    fmt.println(n.bal)
+}
+"#,
+        );
+        assert!(
+            field_rebind.contains(&"HYB-E3104".to_string()),
+            "got {:?}",
+            field_rebind
+        );
+
+        let map_proj_arg = error_codes(
+            r#"struct acct { bal int }
+fn touch(p *int) { _ = p }
+fn main() {
+    m := map[string]acct{"a": acct{bal: 1}}
+    touch(&m["a"].bal)
+}
+"#,
+        );
+        assert!(
+            map_proj_arg.contains(&"HYB-E3104".to_string()),
+            "got {:?}",
+            map_proj_arg
         );
     }
 }
