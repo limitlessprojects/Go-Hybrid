@@ -512,7 +512,8 @@ fn array_call_copy_control() {
 fn clone_arr(a [2]int) [2]int { return a }
 fn worker(xs []int) {}
 fn main() { var a [2]int
- xs := clone_arr(a)[:]
+ c := clone_arr(a)
+ xs := c[:]
  task worker(move xs)
  a[0] = 1 }
 "#,
@@ -645,7 +646,8 @@ fn main() {
     a[0] = 1
 }
 "#,
-        None,
+        // Go rejects slicing the unaddressable call result (#2789).
+        Some("HYB-E1002"),
     );
 }
 

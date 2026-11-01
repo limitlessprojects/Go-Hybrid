@@ -881,6 +881,19 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #2782 — two TYPED values whose canonical numeric types differ (`int`
+    /// vs `int64`, `float64` vs `float32`). The scalar helpers return `None`
+    /// for an untyped constant, so `x: 1` / `y: 3.14` stay assignable, and
+    /// `byte`/`uint8` (or `rune`/`int32`) share one canonical name so the
+    /// genuine aliases never conflict.
+    fn scalar_names_conflict(
+        &self,
+        want: Option<&'static str>,
+        got: Option<&'static str>,
+    ) -> bool {
+        matches!((want, got), (Some(w), Some(g)) if w != g)
+    }
+
     /// #1031 — the type a `x := v` / `var x = v` binding takes from its
     /// initializer: Go's default type for an untyped numeric literal (`int`,
     /// `float64`), or the initializer's own type when it is typed.
@@ -1607,7 +1620,17 @@ impl<'a> Collector<'a> {
                 self.pop_scope();
             }
             Stmt::Return { values, span } => {
-                for v in values {
+                for (i, v) in values.iter().enumerate() {
+                    // SPEC E3 zero-value return placeholder (`return _, err`):
+                    // in a function whose results end in `error`, `hy-emit`
+                    // lowers `_` in a return slot (`i < fn_results.len()`) to
+                    // the result type's zero value (`examples/09-go-imports-hybrid`).
+                    if self.fn_results_error_tail
+                        && i < self.fn_results.len()
+                        && matches!(v, Expr::Ident { name, .. } if name == "_")
+                    {
+                        continue;
+                    }
                     self.expr(v);
                 }
                 self.check_return(values, *span);
@@ -3112,8 +3135,15 @@ impl<'a> Collector<'a> {
                     let is_untyped_int_to_float = want == OpKind::Float
                         && got == OpKind::Int
                         && self.is_untyped_int_const(&f.value);
+                    // #2782: `want`/`got` both collapse to `Int`/`Float`, but
+                    // the field's own Go spelling may differ from the typed
+                    // initializer's (`int` into `int64`, `float64` into
+                    // `float32`) — Go refuses that in a struct literal.
+                    let scalar_mismatch =
+                        self.scalar_names_conflict(self.scalar_of_ty(fty), self.typed_value_scalar(&f.value));
                     let conflict = (want == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float)
-                        || kinds_conflict(&want, &got);
+                        || kinds_conflict(&want, &got)
+                        || scalar_mismatch;
                     if conflict {
                         self.emit_e1002(
                             f.value.span(),
@@ -3761,6 +3791,17 @@ impl<'a> Collector<'a> {
     ///
     /// Fail-open: an `Unknown` first argument or an `Unknown` element kind
     /// carries no claim, so only a proven mismatch is reported.
+    /// #2796 — the destination element type of `append`'s first argument,
+    /// canonicalised to its Go numeric name (`i64` → `int64`, `f32` →
+    /// `float32`, `byte` → `uint8`) so it can be compared against
+    /// `typed_value_scalar`. `None` when the spelling is not a predeclared
+    /// numeric type, so user types and unknown shapes fail open.
+    fn append_dest_scalar(&self, first: &Expr) -> Option<&'static str> {
+        self.slice_element_type_name(first)
+            .as_deref()
+            .and_then(canonical_numeric_name)
+    }
+
     fn check_append_elements(&mut self, args: &[CallArg]) {
         let Some(first) = args.first() else { return };
         let elem = match self.kind_of_expr(&first.value) {
@@ -3856,14 +3897,35 @@ impl<'a> Collector<'a> {
             let int_to_float_conflict = elem == OpKind::Float
                 && got == OpKind::Int
                 && !self.is_untyped_int_const(&extra.value);
-            if kinds_conflict(&elem, &got) || int_to_float_conflict {
+            // #2796: `OpKind` collapses every integer width into `Int` and
+            // both float widths into `Float`, so a TYPED element of another
+            // concrete numeric type (`int` into `[]int64`, `float32` into
+            // `[]float64`) passed here and failed `go build` (`cannot use y
+            // (variable of type int) as int64 value in argument to append`).
+            let dst_elem_ty = self.slice_element_type_name(&first.value);
+            let dst_scalar = self.append_dest_scalar(&first.value);
+            let got_scalar = self.typed_value_scalar(&extra.value);
+            let scalar_mismatch = matches!((dst_scalar, got_scalar), (Some(d), Some(g)) if d != g);
+            if kinds_conflict(&elem, &got) || int_to_float_conflict || scalar_mismatch {
+                let dst_label = match dst_elem_ty.as_deref() {
+                    Some(d) => format!("[]{}", d),
+                    None => self.kind_of_expr(&first.value).label().to_string(),
+                };
+                let got_label = match got_scalar {
+                    Some(s) => s.to_string(),
+                    None => got.label().to_string(),
+                };
+                let elem_label = match dst_scalar {
+                    Some(d) => d.to_string(),
+                    None => elem.label().to_string(),
+                };
                 self.emit_e1002(
                     extra.value.span(),
                     format!(
                         "cannot append a value of type `{}` to a `{}` — Go refuses `cannot use ... as {} value in argument to append` (HYB-E1002)",
-                        got.label(),
-                        self.kind_of_expr(&first.value).label(),
-                        elem.label()
+                        got_label,
+                        dst_label,
+                        elem_label
                     ),
                     "the appended values must be assignable to the slice's element type",
                 );
@@ -4763,6 +4825,26 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #2789: whether an array-typed operand is NOT addressable in Go:
+    /// a composite literal, a call or conversion result, a map index
+    /// expression, or an element/field of such a value. Variables, slice
+    /// elements and anything reached through a pointer are addressable.
+    fn array_operand_unaddressable(&self, e: &Expr) -> bool {
+        match unwrap_parens(e) {
+            Expr::SliceLit { .. } | Expr::Call { .. } => true,
+            Expr::Index { base, .. } => match self.kind_of_expr(base) {
+                OpKind::Map(_, _) => true,
+                OpKind::Array(_) => self.array_operand_unaddressable(base),
+                _ => false,
+            },
+            Expr::Field { base, .. } => match self.kind_of_expr(base) {
+                OpKind::Struct(_) => self.array_operand_unaddressable(base),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     /// Family C2 (#425, #708): `base[lo:hi]` requires a slice, array, or string,
     /// and constant bounds on constant strings must satisfy `0 <= lo <= hi <= len(base)`.
     fn check_slice_kind(
@@ -4789,6 +4871,22 @@ impl<'a> Collector<'a> {
                     bk.label()
                 ),
                 "only slices, arrays, and strings support `x[lo:hi]` slicing",
+            );
+            return;
+        }
+        // #2789: Go spec, Slice expressions — "If the sliced operand is an
+        // array, it must be addressable." `[3]int{..}[0:2]`, `arr()[1:]` and
+        // `m["a"][:2]` (map of arrays) passed `hyb check` and failed `go
+        // build` (`cannot slice unaddressable value`). Slices, strings and
+        // pointers to arrays are unaffected.
+        if matches!(bk, OpKind::Array(_)) && self.array_operand_unaddressable(base) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot slice unaddressable array value `{}` — Go refuses `cannot slice unaddressable value` (HYB-E1002)",
+                    base.render()
+                ),
+                "only an addressable array can be sliced: bind the array to a variable first (`a := ...; a[lo:hi]`)",
             );
             return;
         }
@@ -5470,21 +5568,24 @@ impl<'a> Collector<'a> {
                             }
                         }
                     }
-                } else if name == "pop" {
+                } else if name == "pop" && !has_method {
                     self.check_slice_pop_operands(base, &bk, args, span);
                     // `pop` is also a built-in slice operation, so this branch
                     // is entered before the missing-member check below. A
-                    // struct or pointer only has `.pop()` if it declares the
-                    // method; without one Go refuses the call with
+                    // struct, pointer, or interface only has `.pop()` if it
+                    // declares the method; without one Go refuses the call with
                     // "<base>.pop undefined (type ... has no field or method pop)".
-                    if !has_method && matches!(bk, OpKind::Struct(_) | OpKind::Pointer(_)) {
+                    if matches!(
+                        bk,
+                        OpKind::Struct(_) | OpKind::Pointer(_) | OpKind::Interface
+                    ) {
                         self.emit_e1002(
                             span,
                             format!(
                                 "`{}` has no field or method `pop` (HYB-E1002)",
                                 base.render()
                             ),
-                            "a struct or pointer supports `.pop()` only when it declares a `pop` method; `pop` is a built-in only on slices",
+                            "a struct, pointer, or interface supports `.pop()` only when it declares a `pop` method; `pop` is a built-in only on slices",
                         );
                     }
                 } else if !has_method {
@@ -5500,8 +5601,10 @@ impl<'a> Collector<'a> {
                     // invisible to the kind model rather than absent. A foreign
                     // generic is the common case; `LOWERED_METHOD_INTRINSICS`
                     // covers the other one, a name `hy-emit` lowers to a
-                    // prelude call rather than a Go method.
-                    if is_fully_resolved(&bk) && !LOWERED_METHOD_INTRINSICS.contains(&name.as_str())
+                    // prelude call rather than a Go method (only on slices).
+                    let is_lowered = matches!(bk, OpKind::Slice(_))
+                        && LOWERED_METHOD_INTRINSICS.contains(&name.as_str());
+                    if is_fully_resolved(&bk) && !is_lowered
                     {
                         self.emit_e1002(
                             span,

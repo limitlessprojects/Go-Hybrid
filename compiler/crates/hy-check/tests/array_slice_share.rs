@@ -284,7 +284,8 @@ fn slice_of_returned_array_does_not_alias_the_argument() {
          fn main() {\n\
              var a [4]int\n\
              a[0] = 7\n\
-             s := clone(a)[:]\n\
+             c := clone(a)\n\
+             s := c[:]\n\
              done := make(chan bool, 1)\n\
              task worker(move s, done)\n\
              a[0] = 9\n\
