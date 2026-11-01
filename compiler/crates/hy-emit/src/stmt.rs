@@ -2024,8 +2024,10 @@ impl Emitter {
             }
         }
         // When set, the inclusive-range arm asks us to inject
-        // `cont = v != hi` as the first body statement (see #322).
-        let mut inclusive_stop: Option<(String, String, String)> = None;
+        // `cont = ctrl != hi` as the first body statement, plus (when the
+        // author named the variable) a fresh `v := ctrl` binding, so a write
+        // to `v` in the body cannot steer the loop (see #322, #2153).
+        let mut inclusive_stop: Option<(String, String, String, Option<String>)> = None;
         let head = match kind {
             ForKind::Infinite => "for {".to_string(),
             ForKind::While { cond } => {
@@ -2056,24 +2058,34 @@ impl Emitter {
                     var.clone()
                 };
                 if *inclusive {
-                    // Issue #322: `for v := lo; v <= hi; v++` wraps past the
-                    // type maximum (int8 127..=127 never stops). Emit a
-                    // continue-safe form that still runs the body once at
-                    // `hi` and exits even when `continue` hits the post:
+                    // Issues #322 + #2153: the stop flag must not read the
+                    // author's loop variable, because the body is allowed to
+                    // write it (`i += 1` is the common skip-next idiom) and
+                    // then the flag keeps the loop alive past `hi` — the loop
+                    // runs off the end of the sequence (index out of range /
+                    // runaway). Drive the loop from an internal index that the
+                    // body cannot name, and bind the author's variable fresh
+                    // each iteration. The count is then exactly `lo..=hi` and
+                    // never wraps past the type maximum (#322):
                     //   hyLo := lo; hyHi := hi
-                    //   for v, cont := hyLo, hyLo <= hyHi; cont; v++ {
-                    //       cont = v != hyHi
+                    //   for hyIdx, cont := hyLo, hyLo <= hyHi; cont; hyIdx++ {
+                    //       cont = hyIdx != hyHi
+                    //       v := hyIdx
                     //       body
                     //   }
                     let lo_once = self.next_temp("hyLo");
                     let hi_once = self.next_temp("hyHi");
                     let cont = self.next_temp("hyCont");
+                    let idx = self.next_temp("hyIdx");
                     self.push(&format!("{} := {}", lo_once, lo_t));
                     self.push(&format!("{} := {}", hi_once, hi_t));
-                    inclusive_stop = Some((cont.clone(), v.clone(), hi_once.clone()));
+                    // `for _ in a..=b` keeps no binding: the index carries the
+                    // count on its own.
+                    let user = if var == "_" { None } else { Some(v.clone()) };
+                    inclusive_stop = Some((cont.clone(), idx.clone(), hi_once.clone(), user));
                     format!(
                         "for {}, {} := {}, {} <= {}; {}; {}++ {{",
-                        v, cont, lo_once, lo_once, hi_once, cont, v
+                        idx, cont, lo_once, lo_once, hi_once, cont, idx
                     )
                 } else if (!Self::expr_mentions_ident(hi, &v) || !var_in_scope)
                     && !Self::expr_has_call_or_recv(hi)
@@ -2202,9 +2214,20 @@ impl Emitter {
         // value and the loop exits instead of wrapping past the type maximum.
         // The body itself goes through emit_block_body so terminator flushes
         // and the loan-frame sentinel machinery apply unchanged.
-        if let Some((cont, v, hi_once)) = &inclusive_stop {
+        if let Some((cont, ctrl, hi_once, user)) = &inclusive_stop {
             self.indent += 1;
-            self.push(&format!("{} = {} != {}", cont, v, hi_once));
+            self.push(&format!("{} = {} != {}", cont, ctrl, hi_once));
+            if let Some(u) = user {
+                // Bind the author's variable from the internal index: a write
+                // to it in the body then steers only the body's own copy, not
+                // the loop (issue #2153).
+                self.push(&format!("{} := {}", u, ctrl));
+                // Go rejects a local nobody reads; the binding exists to keep
+                // the name and its value available to the body.
+                if !crate::rangebind::body_reads(body, u) {
+                    self.push(&format!("_ = {}", u));
+                }
+            }
             self.indent -= 1;
         }
         let body_r = self.emit_block_body(&body.stmts);
