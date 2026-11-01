@@ -220,6 +220,8 @@ fn canonical_numeric_name(name: &str) -> Option<&'static str> {
         "uintptr" => "uintptr",
         "float32" | "f32" => "float32",
         "float64" | "f64" => "float64",
+        "complex64" | "c64" => "complex64",
+        "complex128" | "c128" => "complex128",
         _ => return None,
     })
 }
@@ -1474,6 +1476,9 @@ impl<'a> Collector<'a> {
                 let int_float_conflict = want == OpKind::Float
                     && vk == OpKind::Int
                     && !self.is_untyped_int_const(&l.values[0]);
+                let complex_conflict = want == OpKind::Complex
+                    && matches!(vk, OpKind::Int | OpKind::Float)
+                    && !self.is_untyped_numeric_const(&l.values[0]);
                 // #2770: `var h float64 = f` where `f` is a `float32`.
                 let scalar_mismatch = matches!(
                     (self.scalar_of_ty(t), self.typed_value_scalar(&l.values[0])),
@@ -1482,6 +1487,7 @@ impl<'a> Collector<'a> {
                 // #2771: `var c [4]int = a` where `a` is a `[3]int`.
                 if kinds_conflict(&want, &vk)
                     || int_float_conflict
+                    || complex_conflict
                     || scalar_mismatch
                     || self.sized_array_names_differ(
                         Some(t.render().as_str()),
@@ -1506,6 +1512,9 @@ impl<'a> Collector<'a> {
                     let int_float_conflict = want == OpKind::Float
                         && vk == OpKind::Int
                         && !self.is_untyped_int_const(v);
+                    let complex_conflict = want == OpKind::Complex
+                        && matches!(vk, OpKind::Int | OpKind::Float)
+                        && !self.is_untyped_numeric_const(v);
                     // #2770: concrete numeric type differing under one `OpKind`.
                     let scalar_mismatch = matches!(
                         (self.scalar_of_ty(t), self.typed_value_scalar(v)),
@@ -1514,6 +1523,7 @@ impl<'a> Collector<'a> {
                     // #2771: sized-array length must match the declared type.
                     if kinds_conflict(&want, &vk)
                         || int_float_conflict
+                        || complex_conflict
                         || scalar_mismatch
                         || self.sized_array_names_differ(
                             Some(t.render().as_str()),
@@ -3350,6 +3360,9 @@ impl<'a> Collector<'a> {
                     let is_untyped_int_to_float = want == OpKind::Float
                         && got == OpKind::Int
                         && self.is_untyped_int_const(&f.value);
+                    let is_untyped_to_complex = want == OpKind::Complex
+                        && matches!(got, OpKind::Int | OpKind::Float)
+                        && self.is_untyped_numeric_const(&f.value);
                     // #2782: `want`/`got` both collapse to `Int`/`Float`, but
                     // the field's own Go spelling may differ from the typed
                     // initializer's (`int` into `int64`, `float64` into
@@ -3357,6 +3370,7 @@ impl<'a> Collector<'a> {
                     let scalar_mismatch =
                         self.scalar_names_conflict(self.scalar_of_ty(fty), self.typed_value_scalar(&f.value));
                     let conflict = (want == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float)
+                        || (want == OpKind::Complex && matches!(got, OpKind::Int | OpKind::Float) && !is_untyped_to_complex)
                         || kinds_conflict(&want, &got)
                         || scalar_mismatch;
                     if conflict {
@@ -3947,6 +3961,9 @@ impl<'a> Collector<'a> {
             let int_to_float_conflict = want == OpKind::Float
                 && got == OpKind::Int
                 && !self.is_untyped_int_const(&a.value);
+            let complex_conflict = want == OpKind::Complex
+                && matches!(got, OpKind::Int | OpKind::Float)
+                && !self.is_untyped_numeric_const(&a.value);
             // #2770: both sides share `OpKind::Float`/`Int` but differ in the
             // concrete type (`float32` vs `float64`, `int` vs `int64`).
             let scalar_mismatch = matches!(
@@ -3955,6 +3972,7 @@ impl<'a> Collector<'a> {
             );
             if kinds_conflict(&want, &got)
                 || int_to_float_conflict
+                || complex_conflict
                 || scalar_mismatch
                 || self.sized_array_names_differ(
                     Some(p.ty.render().as_str()),
@@ -4003,6 +4021,9 @@ impl<'a> Collector<'a> {
             let int_to_float_conflict = want == OpKind::Float
                 && got == OpKind::Int
                 && !self.is_untyped_int_const(&a.value);
+            let complex_conflict = want == OpKind::Complex
+                && matches!(got, OpKind::Int | OpKind::Float)
+                && !self.is_untyped_numeric_const(&a.value);
             // #2770: concrete numeric type differing under one `OpKind`.
             let scalar_mismatch = matches!(
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
@@ -4010,6 +4031,7 @@ impl<'a> Collector<'a> {
             );
             if kinds_conflict(&want, &got)
                 || int_to_float_conflict
+                || complex_conflict
                 || scalar_mismatch
                 || self.sized_array_names_differ(
                     Some(p.ty.render().as_str()),
@@ -4186,7 +4208,11 @@ impl<'a> Collector<'a> {
         let is_untyped_int_to_float = *want == OpKind::Float
             && *got == OpKind::Int
             && self.is_untyped_int_const(val);
+        let is_untyped_to_complex = *want == OpKind::Complex
+            && matches!(*got, OpKind::Int | OpKind::Float)
+            && self.is_untyped_numeric_const(val);
         let conflict = (*want == OpKind::Float && *got == OpKind::Int && !is_untyped_int_to_float)
+            || (*want == OpKind::Complex && matches!(*got, OpKind::Int | OpKind::Float) && !is_untyped_to_complex)
             || kinds_conflict(want, got);
         if !conflict {
             return false;
@@ -4515,7 +4541,7 @@ impl<'a> Collector<'a> {
                 }
             }
             UnOp::Neg => {
-                if !matches!(k, OpKind::Unknown | OpKind::Int | OpKind::Float) {
+                if !matches!(k, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Complex) {
                     self.emit_e1002(
                         span,
                         format!(
@@ -4702,8 +4728,15 @@ impl<'a> Collector<'a> {
                         || (lk == OpKind::Int
                             && rk == OpKind::Float
                             && !self.is_untyped_int_const(lhs));
+                    let complex_conflict = (lk == OpKind::Complex
+                        && matches!(rk, OpKind::Int | OpKind::Float)
+                        && !self.is_untyped_numeric_const(rhs))
+                        || (rk == OpKind::Complex
+                            && matches!(lk, OpKind::Int | OpKind::Float)
+                            && !self.is_untyped_numeric_const(lhs));
                     if equality_kinds_conflict(&lk, &rk)
                         || int_float_conflict
+                        || complex_conflict
                         || self.scalar_conflict(lhs, rhs)
                         || self.sized_array_names_differ(
                             self.typed_value_type_name(lhs).as_deref(),
@@ -4800,12 +4833,17 @@ impl<'a> Collector<'a> {
                 let r_ok = matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str | OpKind::Complex);
                 let mismatch = lk != OpKind::Unknown
                     && rk != OpKind::Unknown
-                    && (lk.is_numeric() != rk.is_numeric()
-                        || (lk == OpKind::Complex && rk == OpKind::Str)
-                        || (lk == OpKind::Str && rk == OpKind::Complex));
+                    && ((lk == OpKind::Str && rk != OpKind::Str)
+                        || (rk == OpKind::Str && lk != OpKind::Str));
                 let int_float_conflict = (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs))
                     || (lk == OpKind::Int && rk == OpKind::Float && !self.is_untyped_int_const(lhs));
-                if !l_ok || !r_ok || mismatch || int_float_conflict || self.scalar_conflict(lhs, rhs) {
+                let complex_conflict = (lk == OpKind::Complex
+                    && matches!(rk, OpKind::Int | OpKind::Float)
+                    && !self.is_untyped_numeric_const(rhs))
+                    || (rk == OpKind::Complex
+                        && matches!(lk, OpKind::Int | OpKind::Float)
+                        && !self.is_untyped_numeric_const(lhs));
+                if !l_ok || !r_ok || mismatch || int_float_conflict || complex_conflict || self.scalar_conflict(lhs, rhs) {
                     self.emit_e1002(
                         span,
                         format!(
@@ -4827,9 +4865,16 @@ impl<'a> Collector<'a> {
                 };
                 let int_float_conflict = (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs))
                     || (lk == OpKind::Int && rk == OpKind::Float && !self.is_untyped_int_const(lhs));
+                let complex_conflict = (lk == OpKind::Complex
+                    && matches!(rk, OpKind::Int | OpKind::Float)
+                    && !self.is_untyped_numeric_const(rhs))
+                    || (rk == OpKind::Complex
+                        && matches!(lk, OpKind::Int | OpKind::Float)
+                        && !self.is_untyped_numeric_const(lhs));
                 if !matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Complex)
                     || !matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Complex)
                     || int_float_conflict
+                    || complex_conflict
                     || self.scalar_conflict(lhs, rhs)
                 {
                     self.emit_e1002(
@@ -4927,7 +4972,11 @@ impl<'a> Collector<'a> {
                     let is_untyped_int_to_float = tk == OpKind::Float
                         && vk == OpKind::Int
                         && self.is_untyped_int_const(&values[0]);
+                    let is_untyped_to_complex = tk == OpKind::Complex
+                        && matches!(vk, OpKind::Int | OpKind::Float)
+                        && self.is_untyped_numeric_const(&values[0]);
                     let conflict = (tk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
+                        || (tk == OpKind::Complex && matches!(vk, OpKind::Int | OpKind::Float) && !is_untyped_to_complex)
                         || kinds_conflict(&tk, &vk);
                     // #2770: `g = f` between a `float64` and a `float32` local.
                     let scalar_mismatch = matches!(
@@ -4983,7 +5032,11 @@ impl<'a> Collector<'a> {
                         let is_untyped_int_to_float = tpk == OpKind::Float
                             && vk == OpKind::Int
                             && self.is_untyped_int_const(v);
+                        let is_untyped_to_complex = tpk == OpKind::Complex
+                            && matches!(vk, OpKind::Int | OpKind::Float)
+                            && self.is_untyped_numeric_const(v);
                         let conflict = (tpk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
+                            || (tpk == OpKind::Complex && matches!(vk, OpKind::Int | OpKind::Float) && !is_untyped_to_complex)
                             || kinds_conflict(&tpk, &vk);
                         let scalar_mismatch = matches!(
                             (self.place_scalar(t), self.typed_value_scalar(v)),
@@ -5056,15 +5109,20 @@ impl<'a> Collector<'a> {
                     );
                 }
                 let vk = self.kind_of_expr(val);
-                let t_ok = matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
-                let v_ok = matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
+                let t_ok = matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str | OpKind::Complex);
+                let v_ok = matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str | OpKind::Complex);
                 let mismatch = tk != OpKind::Unknown
                     && vk != OpKind::Unknown
-                    && tk.is_numeric() != vk.is_numeric();
+                    && ((tk == OpKind::Str && vk != OpKind::Str)
+                        || (vk == OpKind::Str && tk != OpKind::Str));
                 let is_untyped_int_to_float = tk == OpKind::Float
                     && vk == OpKind::Int
                     && self.is_untyped_int_const(val);
+                let is_untyped_to_complex = tk == OpKind::Complex
+                    && matches!(vk, OpKind::Int | OpKind::Float)
+                    && self.is_untyped_numeric_const(val);
                 let conflict = (tk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
+                    || (tk == OpKind::Complex && matches!(vk, OpKind::Int | OpKind::Float) && !is_untyped_to_complex)
                     || kinds_conflict(&tk, &vk);
                 let scalar_mismatch = matches!(
                     (self.place_scalar(target), self.typed_value_scalar(val)),
@@ -5112,14 +5170,18 @@ impl<'a> Collector<'a> {
                 let is_untyped_int_to_float = tk == OpKind::Float
                     && vk == OpKind::Int
                     && self.is_untyped_int_const(val);
+                let is_untyped_to_complex = tk == OpKind::Complex
+                    && matches!(vk, OpKind::Int | OpKind::Float)
+                    && self.is_untyped_numeric_const(val);
                 let conflict = (tk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
+                    || (tk == OpKind::Complex && matches!(vk, OpKind::Int | OpKind::Float) && !is_untyped_to_complex)
                     || kinds_conflict(&tk, &vk);
                 let scalar_mismatch = matches!(
                     (self.place_scalar(target), self.typed_value_scalar(val)),
                     (Some(tp), Some(vp)) if tp != vp
                 );
-                if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float)
-                    || !matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float)
+                if !matches!(tk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Complex)
+                    || !matches!(vk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Complex)
                     || conflict
                     || scalar_mismatch
                 {
@@ -5523,6 +5585,50 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn is_untyped_numeric_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit {
+                kind: LitKind::Int(_) | LitKind::Char(_) | LitKind::Float(_),
+                ..
+            } => true,
+            Expr::Ident { name, .. } => {
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        let d = &self.defines[*id];
+                        if d.kind == LocalKind::Const && d.is_untyped {
+                            return matches!(self.lookup_kind(name), Some(OpKind::Int | OpKind::Float));
+                        }
+                        return false;
+                    }
+                }
+                if self.file_untyped_consts.contains(name) {
+                    return matches!(self.file_consts.get(name), Some(OpKind::Int | OpKind::Float));
+                }
+                false
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnOp::Neg) && self.is_untyped_numeric_const(operand)
+            }
+            Expr::Binary { op, lhs, rhs, .. } => {
+                matches!(
+                    op,
+                    BinOp::Add
+                        | BinOp::Sub
+                        | BinOp::Mul
+                        | BinOp::Div
+                        | BinOp::Mod
+                        | BinOp::BitAnd
+                        | BinOp::BitOr
+                        | BinOp::BitXor
+                        | BinOp::Shl
+                        | BinOp::Shr
+                ) && self.is_untyped_numeric_const(lhs)
+                    && self.is_untyped_numeric_const(rhs)
+            }
+            _ => false,
+        }
+    }
+
     fn is_non_const_local(&self, name: &str) -> bool {
         for layer in self.scopes.iter().rev() {
             if let Some(entry) = layer.get(name) {
@@ -5635,7 +5741,11 @@ impl<'a> Collector<'a> {
             let is_untyped_int_to_float = expected == OpKind::Float
                 && ik == OpKind::Int
                 && self.is_untyped_int_const(item);
+            let is_untyped_to_complex = expected == OpKind::Complex
+                && matches!(ik, OpKind::Int | OpKind::Float)
+                && self.is_untyped_numeric_const(item);
             let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
+                || (expected == OpKind::Complex && matches!(ik, OpKind::Int | OpKind::Float) && !is_untyped_to_complex)
                 || kinds_conflict(&expected, &ik)
                 || scalar_mismatch;
             if !conflict {
@@ -5714,10 +5824,20 @@ impl<'a> Collector<'a> {
             {
                 continue;
             }
+            if expected == OpKind::Complex
+                && matches!(ik, OpKind::Int | OpKind::Float)
+                && self.is_untyped_numeric_const(item)
+            {
+                continue;
+            }
             let is_untyped_int_to_float = expected == OpKind::Float
                 && ik == OpKind::Int
                 && self.is_untyped_int_const(item);
+            let is_untyped_to_complex = expected == OpKind::Complex
+                && matches!(ik, OpKind::Int | OpKind::Float)
+                && self.is_untyped_numeric_const(item);
             let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
+                || (expected == OpKind::Complex && matches!(ik, OpKind::Int | OpKind::Float) && !is_untyped_to_complex)
                 || kinds_conflict(&expected, &ik)
                 || scalar_mismatch;
             if !conflict {
@@ -5832,7 +5952,11 @@ impl<'a> Collector<'a> {
                 let is_untyped_int_to_float = exp_key == OpKind::Float
                     && kk == OpKind::Int
                     && self.is_untyped_int_const(k);
+                let is_untyped_to_complex = exp_key == OpKind::Complex
+                    && matches!(kk, OpKind::Int | OpKind::Float)
+                    && self.is_untyped_numeric_const(k);
                 let conflict = (exp_key == OpKind::Float && kk == OpKind::Int && !is_untyped_int_to_float)
+                    || (exp_key == OpKind::Complex && matches!(kk, OpKind::Int | OpKind::Float) && !is_untyped_to_complex)
                     || kinds_conflict(&exp_key, &kk)
                     || scalar_mismatch;
                 if kk != OpKind::Unknown && conflict {
@@ -5860,7 +5984,11 @@ impl<'a> Collector<'a> {
                 let is_untyped_int_to_float = exp_val == OpKind::Float
                     && vk == OpKind::Int
                     && self.is_untyped_int_const(v);
+                let is_untyped_to_complex = exp_val == OpKind::Complex
+                    && matches!(vk, OpKind::Int | OpKind::Float)
+                    && self.is_untyped_numeric_const(v);
                 let conflict = (exp_val == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
+                    || (exp_val == OpKind::Complex && matches!(vk, OpKind::Int | OpKind::Float) && !is_untyped_to_complex)
                     || kinds_conflict(&exp_val, &vk)
                     || scalar_mismatch;
                 if vk != OpKind::Unknown && conflict {
