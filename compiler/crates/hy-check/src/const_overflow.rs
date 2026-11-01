@@ -1262,7 +1262,7 @@ pub(crate) fn const_int_fold_with(
 /// The width is recovered from the range itself, so this needs no second
 /// table of type widths: `u8` is `0..=255`, so the span is 255 and the width
 /// is 8 bits; `i64` is `-2^63..=2^63-1`, span `2^64-1`, width 64.
-fn wrap_into(v: i128, lo: i128, hi: i128) -> i128 {
+pub(crate) fn wrap_into(v: i128, lo: i128, hi: i128) -> i128 {
     let span = hi.wrapping_sub(lo);
     // `span + 1` is 2^bits; its trailing-zero count IS the width.
     let bits = (span as u128).wrapping_add(1).trailing_zeros();
