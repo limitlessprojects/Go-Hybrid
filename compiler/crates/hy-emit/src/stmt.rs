@@ -2376,13 +2376,12 @@ impl Emitter {
         for a in arms {
             let kind = match &a.pattern {
                 MatchPattern::Path { segments, binding } if segments == &["some"] => {
+                    // A bindingless `some:` arm never reads the payload, so
+                    // lower it exactly like `some(_):` (the `"_"` binding
+                    // suppresses every `:= hyMatchN.val` the emitters guard).
                     match binding {
                         Some(v) => ArmKind::Some(v.clone()),
-                        None => {
-                            return Err(EmitError::unsupported(
-                                "`some` pattern without a binding — write `some(v):`",
-                            ));
-                        }
+                        None => ArmKind::Some("_".to_string()),
                     }
                 }
                 MatchPattern::Path {

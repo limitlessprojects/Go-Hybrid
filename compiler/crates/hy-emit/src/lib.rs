@@ -1571,15 +1571,12 @@ impl Emitter {
                     None => self.push_raw(&format!(" {} {{\n", ty)),
                 }
             }
-            2 => {
+            _ => {
+                // Any count >= 2 parenthesizes. `result_list_text` already
+                // names unnamed entries, so a 3-result fn (and beyond) is
+                // just a longer list, not a new shape.
                 let results = self.result_list_text(&f.results);
                 self.push_raw(&format!(" ({}) {{\n", results));
-            }
-            n => {
-                return Err(EmitError::unsupported(format!(
-                    "functions with {} results (max 2: value + error)",
-                    n
-                )));
             }
         }
         // emit_block_body supplies ONE level for the block it emits (the

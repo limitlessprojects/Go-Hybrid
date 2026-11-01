@@ -999,7 +999,10 @@ identity: `errors.is(err, sentinel)`. `errors.as` is `[TBD]` post-MVP
 **E3 — The try operator `?` (postfix, calls only).** `v := f(args)?` where
 `f`'s type is `(T, error) …` binds `v` to `T` and, on error, returns the
 error from the enclosing function immediately. With multiple non-error
-results, `x, y := f()?` binds both. The desugaring (the checker expands this
+results, `x, y := f()?` binds both. The non-error result count is not capped
+at one: a `fn` may declare any number of results (with or without a trailing
+`error`), and the emitter lowers the whole parenthesized list. The desugaring
+(the checker expands this
 before loan checking, so `?` is never a checker special case):
 
 ```hy

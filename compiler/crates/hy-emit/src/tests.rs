@@ -998,6 +998,42 @@ fn match_guarded_then_unguarded_some_still_chains() {
 }
 
 #[test]
+fn three_result_fn_emits_parenthesized_result_list() {
+    // The emitter used to cap results at 2 (value + error). A 3-result fn
+    // passed `hyb check` and was then refused with a "not yet supported".
+    let go = emit(
+        "fn f() (int, int, int) {\n    return 1, 2, 3\n}\nfn main() {\n    a, b, c := f()\n    fmt.println(\"{a} {b} {c}\")\n}\n",
+    );
+    assert!(go.contains("func f() (int, int, int) {"), ":\n{}", go);
+    assert!(go.contains("a, b, c := f()"), ":\n{}", go);
+}
+
+#[test]
+fn three_result_fn_with_trailing_error_lowers_try() {
+    let go = emit(
+        "fn f() (int, int, error) {\n    return 1, 2, nil\n}\nfn main() {\n    a, b, e := f()\n    if e != nil { fmt.println(\"err\") }\n    fmt.println(\"{a} {b}\")\n}\n",
+    );
+    assert!(go.contains("func f() (int, int, error) {"), ":\n{}", go);
+    assert!(go.contains("a, b, e := f()"), ":\n{}", go);
+}
+
+#[test]
+fn bindingless_some_arm_lowers_like_some_underscore() {
+    // `some:` (no binding) used to pass `hyb check` and then be refused with
+    // "write `some(v):`". It reads no payload, so it lowers like `some(_):`.
+    let go = emit(
+        "fn get() option[int] {\n    return some(3)\n}\nfn main() {\n    match get() {\n        some: fmt.println(\"hit\")\n        _: fmt.println(\"miss\")\n    }\n}\n",
+    );
+    assert!(go.contains("if hyMatch0.ok {"), ":\n{}", go);
+    assert!(go.contains("fmt.Println(\"hit\")"), ":\n{}", go);
+    assert!(
+        !go.contains(":= hyMatch0.val"),
+        "a bindingless `some:` must not read the payload:\n{}",
+        go
+    );
+}
+
+#[test]
 fn match_guarded_some_with_wildcard_fallback() {
     // Issue #204: with guarded some arms and wildcard, failed guard must fall through to wildcard.
     let go = emit(
