@@ -135,8 +135,13 @@ def surface_edits(issue_no: int, slug: str, why: str) -> list[tuple]:
         mm = re.search(pattern, src, flags)
         if not mm:
             raise RuntimeError(f"census surface not found in {path}: {pattern}")
-        old, cur = mm.group(0), int(mm.group(1))
-        edits.append((path, old, old.replace(str(cur), str(t1), 1)))
+        old = mm.group(0)
+        # Dual-number surfaces (`(\d+)/\d+` in ci.yml/Makefile/README.md and
+        # `files.len(), (\d+), "expected exactly \d+ corpus programs"` in
+        # parse_all.rs) state the corpus total twice inside `old`. Replacing
+        # every digit run in the matched span updates both numbers in lockstep
+        # and repairs any previously drifted denominator.
+        edits.append((path, old, re.sub(r"\d+", str(t1), old)))
 
     bump("compiler/crates/hy-syntax/tests/parse_all.rs",
          r"files\.len\(\),\s*(\d+),\s*\"expected exactly \d+ corpus programs\"")

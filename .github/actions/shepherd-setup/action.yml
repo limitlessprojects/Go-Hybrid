@@ -28,6 +28,7 @@ runs:
         set -eo pipefail
         rustup toolchain install "$RUST_VER" --profile minimal --no-self-update
         rustup default "$RUST_VER"
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
         rustc --version
       env:
         RUST_VER: ${{ inputs.rust-version }}
@@ -38,8 +39,9 @@ runs:
           ~/.cargo/registry
           ~/.cargo/git
           ~/.cache/go-build
-          target
-        key: shepherd-${{ runner.os }}-go${{ inputs.go-version }}-rust${{ inputs.rust-version }}-${{ hashFiles('Cargo.lock', '**/go.sum') }}
+          compiler/target
+          runtime/rust/hyrt/target
+        key: shepherd-${{ runner.os }}-go${{ inputs.go-version }}-rust${{ inputs.rust-version }}-${{ hashFiles('compiler/Cargo.lock', 'runtime/rust/hyrt/Cargo.lock', '**/go.sum') }}
         restore-keys: |
           shepherd-${{ runner.os }}-go${{ inputs.go-version }}-rust${{ inputs.rust-version }}-
           shepherd-${{ runner.os }}-

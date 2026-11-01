@@ -228,6 +228,47 @@ fn phantom_sync_rwmutex_method_is_rejected_but_real_ones_accept() {
     assert_eq!(good.verdict, Verdict::Accept, "got {:?}", good.diagnostics);
 }
 
+#[test]
+fn pointer_and_snake_case_sync_mutex_receivers_enforce_surface() {
+    for decl in [
+        "mu *sync.mutex",
+        "mu sync.rw_mutex",
+        "mu *sync.rw_mutex",
+        "mu *sync.rwmutex",
+    ] {
+        let bad = check(&format!(
+            "struct stats {{\n    {decl}\n    n int\n}}\n\
+             fn main() {{\n    var s stats\n    s.mu.totally_fake()\n    fmt.println(\"n={{s.n}}\")\n}}\n"
+        ));
+        assert_eq!(
+            bad.verdict,
+            Verdict::Reject,
+            "phantom method on `{decl}` must reject, got {:?}",
+            bad.diagnostics
+        );
+        assert!(
+            codes(&bad).iter().any(|c| c == "HYB-E1002"),
+            "expected HYB-E1002 for `{decl}`, got {:?}",
+            codes(&bad)
+        );
+    }
+
+    let good = check(
+        "struct stats {\n\
+             rw sync.rw_mutex\n\
+             n int\n\
+         }\n\
+         fn main() {\n\
+             var s stats\n\
+             s.rw.rlock()\n\
+             v := s.n\n\
+             s.rw.runlock()\n\
+             fmt.println(\"v={v}\")\n\
+         }\n",
+    );
+    assert_eq!(good.verdict, Verdict::Accept, "got {:?}", good.diagnostics);
+}
+
 
 // --- Atomics stay fail-open (learned in review) --------------------------
 //

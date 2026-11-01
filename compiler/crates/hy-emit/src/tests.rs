@@ -3053,3 +3053,18 @@ fn main() {}
     assert!(go6.contains("func read_url() int {"));
     assert!(go6.contains("func read_u_r_l() int {"));
 }
+
+#[test]
+fn utf8_byte_escapes_emit_exact_utf8_strings_issue_1199() {
+    let src = "fn main() {\n    value := 7\n    s1 := \"\\xc3\\xa9\"\n    s2 := \"\\303\\251\"\n    s3 := \"\\xe4\\xb8\\xad\"\n    s4 := \"\\xf0\\x9f\\x99\\x82\"\n    s5 := \"prefix:\\xc3\\xa9:{value}\"\n    c1 := '\\xe9'\n    c2 := '\\u{e9}'\n    fmt.println(len(s1), s1 == \"é\", s2 == \"é\", s3 == \"中\", s4 == \"🙂\", s5 == \"prefix:é:7\", c1 == c2)\n}\n";
+    let go = emit(src);
+    assert!(go.contains("s1 := \"é\""), "expected s1 := \"é\", got:\n{}", go);
+    assert!(go.contains("s2 := \"é\""), "expected s2 := \"é\", got:\n{}", go);
+    assert!(go.contains("s3 := \"中\""), "expected s3 := \"中\", got:\n{}", go);
+    assert!(go.contains("s4 := \"🙂\""), "expected s4 := \"🙂\", got:\n{}", go);
+    assert!(
+        go.contains("fmt.Sprintf(\"prefix:é:%v\", value)"),
+        "expected interpolated prefix:é:%v, got:\n{}",
+        go
+    );
+}
