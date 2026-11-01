@@ -458,13 +458,19 @@ impl<'a> Checker<'a> {
     ) {
         let last = loop_end.unwrap_or(idx);
         for a in cr.args {
-            if let Some(name) = a.value.root_ident() {
-                let arg_is_handle = self.shape_of_expr(st, &a.value).is_handle();
-                if let Some(b) = self.lookup_binding(st, name) {
+            let mut names: Vec<String> = Vec::new();
+            if let Some(n) = a.value.root_ident() {
+                names.push(n.to_string());
+            } else {
+                collect_ref_roots(&a.value, &mut names);
+            }
+            let arg_is_handle = self.shape_of_expr(st, &a.value).is_handle();
+            for name in names {
+                if let Some(b) = self.lookup_binding(st, &name) {
                     if (b.shape.is_handle() || arg_is_handle) && b.moved.is_none() {
                         st.loans.push(Loan {
                             target: LoanTarget::Handle {
-                                handle: name.to_string(),
+                                handle: name.clone(),
                             },
                             created: idx,
                             last,
@@ -4326,18 +4332,24 @@ impl<'a> Checker<'a> {
                 }
                 Resolved::Package { pkg, method } => {
                     if foreign::package_mode(&pkg, &method) == CallMode::Borrow {
-                        for a in cr.args {
-                            if let Some(root) = a.value.root_ident() {
+                            for a in cr.args {
+                                let mut arg_roots: Vec<String> = Vec::new();
+                                if let Some(r) = a.value.root_ident() {
+                                    arg_roots.push(r.to_string());
+                                } else {
+                                    collect_ref_roots(&a.value, &mut arg_roots);
+                                }
                                 let arg_is_handle = self.shape_of_expr(st, &a.value).is_handle();
-                                if self
-                                    .lookup_binding(st, root)
-                                    .map(|b| b.shape.is_handle() || arg_is_handle)
-                                    .unwrap_or(false)
-                                {
-                                    roots.push(root.to_string());
+                                for root in arg_roots {
+                                    if self
+                                        .lookup_binding(st, &root)
+                                        .map(|b| b.shape.is_handle() || arg_is_handle)
+                                        .unwrap_or(false)
+                                    {
+                                        roots.push(root);
+                                    }
                                 }
                             }
-                        }
                     }
                 }
                 _ => {}
