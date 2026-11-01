@@ -214,3 +214,20 @@ fn controls_untouched() {
         "struct pair { n int } fn main() { p := pair{ n: 1 } x := int8(p.n) _ = x }",
     );
 }
+
+#[test]
+fn issue_1707_complex_conversion_target_validated() {
+    // Non-numeric constants converted to complex64 / complex128 must reject (fixes #1707).
+    rejects_with_e6006("fn main() { c := complex64(\"hello\") _ = c }");
+    rejects_with_e6006("fn main() { c := complex64(true) _ = c }");
+    rejects_with_e6006("fn main() { c := complex64(nil) _ = c }");
+    rejects_with_e6006("fn main() { c := complex128(\"hello\") _ = c }");
+    rejects_with_e6006("fn main() { c := complex128(true) _ = c }");
+    rejects_with_e6006("fn main() { c := complex128(nil) _ = c }");
+
+    // Valid numeric conversions to complex types stay accepted.
+    accepts_without_e6006("fn main() { c := complex64(1) _ = c }");
+    accepts_without_e6006("fn main() { c := complex64(2.5) _ = c }");
+    accepts_without_e6006("fn main() { c := complex128(100) _ = c }");
+    accepts_without_e6006("fn main() { c := complex128(3.14159) _ = c }");
+}
