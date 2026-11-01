@@ -35,6 +35,14 @@ pub(crate) const BUILTIN_PACKAGES: &[&str] = &[
     "sort",
     "strconv",
     "errors",
+    "url",
+    "bufio",
+    "json",
+    "hex",
+    "path",
+    "filepath",
+    "sha3",
+    "regex",
 ];
 
 /// How a call uses its receiver / arguments (O7 handle modes + O13 consume).
@@ -97,6 +105,13 @@ pub(crate) fn foreign_named_type(name: &str) -> Option<TypeShape> {
         "serde_json.value" => Some(TypeShape::OwnHandle("serde_json.value".into())),
         "serde_json.view" => Some(TypeShape::BorrowHandle("serde_json.view".into())),
         "flate2.writer" => Some(TypeShape::OwnHandle("flate2.writer".into())),
+        "url.values" | "url.Values" => Some(TypeShape::Map(
+            Box::new(TypeShape::Str),
+            Box::new(TypeShape::Slice(Box::new(TypeShape::Str))),
+        )),
+        "json.raw_message" | "json.RawMessage" => {
+            Some(TypeShape::Slice(Box::new(TypeShape::Primitive)))
+        }
         _ => {
             let root = name.split('.').next().unwrap_or("");
             if BUILTIN_PACKAGES.contains(&root) {
@@ -182,6 +197,32 @@ pub(crate) fn package_result(pkg: &str, method: &str) -> TypeShape {
         ("atomic", "load_pointer" | "swap_pointer" | "compare_and_swap_pointer" | "value" | "pointer") => TypeShape::Unknown,
         ("errors", "new" | "wrap" | "New" | "Wrap") => TypeShape::ForeignOpaque("error".into()),
         ("errors", "is" | "Is") => TypeShape::Primitive,
+        ("url", "parse_query" | "ParseQuery") => TypeShape::Map(
+            Box::new(TypeShape::Str),
+            Box::new(TypeShape::Slice(Box::new(TypeShape::Str))),
+        ),
+        ("url", "parse" | "parse_request_uri" | "Parse" | "ParseRequestURI") => {
+            TypeShape::ForeignOpaque("url.url".into())
+        }
+        (
+            "url",
+            "query_escape" | "query_unescape" | "path_escape" | "path_unescape" | "join_path"
+            | "QueryEscape" | "QueryUnescape" | "PathEscape" | "PathUnescape" | "JoinPath",
+        ) => TypeShape::Str,
+        ("json", "marshal" | "marshal_indent" | "Marshal" | "MarshalIndent") => {
+            TypeShape::Slice(Box::new(TypeShape::Primitive))
+        }
+        ("json", "valid" | "Valid") => TypeShape::Primitive,
+        ("bufio", "new_scanner" | "NewScanner") => TypeShape::ForeignOpaque("bufio.scanner".into()),
+        ("bufio", "new_reader" | "new_reader_size" | "NewReader" | "NewReaderSize") => {
+            TypeShape::ForeignOpaque("bufio.reader".into())
+        }
+        ("bufio", "new_writer" | "new_writer_size" | "NewWriter" | "NewWriterSize") => {
+            TypeShape::ForeignOpaque("bufio.writer".into())
+        }
+        ("regex", "compile" | "must_compile" | "Compile" | "MustCompile") => {
+            TypeShape::ForeignOpaque("regex.regexp".into())
+        }
         _ if pkg == "atomic" => TypeShape::Primitive,
         _ => TypeShape::Unknown,
     }
