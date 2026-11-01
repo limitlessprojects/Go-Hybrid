@@ -137,7 +137,7 @@ impl<'a> Checker<'a> {
         }
         if shape.is_reference_alias()
             || shape.is_handle()
-            || matches!(shape, TypeShape::Closure)
+            || matches!(shape, TypeShape::Closure | TypeShape::ForeignOpaque(_))
         {
             return true;
         }
@@ -155,7 +155,9 @@ impl<'a> Checker<'a> {
                 self.struct_fields_for_sname(name)
                     .map(|fields| {
                         fields.iter().any(|(_, ty)| {
-                            self.shape_may_share_at(&self.shape_of_type(ty), depth + 1)
+                            let (resolved, fshape) = (self.resolve_type_alias(ty), self.shape_of_type(ty));
+                            self.shape_may_share_at(&fshape, depth + 1)
+                                || matches!((&resolved, &fshape), (TypeExpr::Named { name, .. }, TypeShape::Unknown) if name.contains('.'))
                         })
                     })
                     .unwrap_or(false)
@@ -424,7 +426,7 @@ impl<'a> Checker<'a> {
             }
             Expr::Field { base, name, .. } => {
                 // package call (`serde_json.parse`) vs method call (`doc.array`)
-                if let Expr::Ident { name: b, .. } = &**base {
+                if let Expr::Ident { name: b, .. } = crate::model::unwrap_parens(base) {
                     if self.lookup_binding(st, b).is_none() && self.known_package(b) {
                         return foreign::package_result(b, name);
                     }
@@ -1998,9 +2000,22 @@ impl<'a> Checker<'a> {
                                     .collect(),
                             );
                         }
+                        if self.known_package(root) {
+                            if root == "httptest" && matches!(head, "get" | "post" | "Get" | "Post") {
+                                return Some(vec![TypeShape::Primitive, TypeShape::Str, TypeShape::Primitive]);
+                            }
+                            if matches!((root.as_str(), head), ("strings", "cut" | "Cut") | ("net", "split_host_port" | "SplitHostPort")) {
+                                return Some(vec![TypeShape::Str, TypeShape::Str, TypeShape::Primitive]);
+                            }
+                            let res = foreign::package_result(root, head);
+                            if !matches!(res, TypeShape::Unknown) { return Some(vec![res, TypeShape::Primitive]); }
+                        }
                     }
                 }
                 let recv = self.shape_of_expr(st, base);
+                if let Some(res) = receiver_type_name(&recv).map(|t| foreign::method_result(&t, head)).filter(|r| !matches!(r, TypeShape::Unknown)) {
+                    return Some(vec![res, TypeShape::Primitive]);
+                }
                 let recv_base = self
                     .ty_of_expr(st, base)
                     .map(|t| self.resolve_type_alias(&t))
