@@ -108,3 +108,15 @@ fn shadowing_drops_the_outer_integer_type() {
         "    if true {\n        b := a\n        fmt.println(a + b)\n    }",
     ));
 }
+
+#[test]
+fn rejects_typed_var_initializer_of_other_integer_type() {
+    // Go: cannot use a (variable of type int32) as uint8 value in variable declaration
+    assert_rejects(&wrap("    var a i32 = 1", "    var b u8 = a\n    fmt.println(b)"));
+    assert_rejects(&wrap("    var a u8 = 1", "    var b u16 = u8(a)\n    fmt.println(b)"));
+}
+
+#[test]
+fn accepts_typed_var_initializer_of_same_or_converted_type() {
+    assert_accepts(&wrap("    var a i32 = 1", "    var b i32 = a\n    var c u8 = u8(a)\n    var d byte = c\n    var e u8 = 7\n    fmt.println(b, c, d, e)"));
+}

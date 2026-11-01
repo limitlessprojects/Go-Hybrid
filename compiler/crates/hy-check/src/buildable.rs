@@ -1498,6 +1498,22 @@ impl<'a> Collector<'a> {
         // set (Define|Let|Var|Const) drives which locals get unused-read
         // tracking; #430's operand-kind inference runs for EVERY name so
         // `kind_of_expr` resolves binding-shaped operands (issue #425).
+        // #2712: `var b u8 = a` where `a` is an integer local of a different
+        // explicit type (or `u16(x)` into a `u8`). Go: `cannot use a (variable
+        // of type int32) as uint8 value in variable declaration`. Checked
+        // before the names bind, so `var a u8 = a` sees the outer `a`.
+        let decl_int_ty = match l.ty.as_ref() {
+            Some(TypeExpr::Named { name, .. }) => canonical_int_ty(name),
+            _ => None,
+        };
+        if let Some(lt) = decl_int_ty {
+            if l.values.len() == l.names.len() {
+                for (name, v) in l.names.iter().zip(&l.values) {
+                    let label = format!("var {} {} = {}", name, lt, v.render());
+                    self.check_int_ty_mismatch(Some(lt), v, label, l.span);
+                }
+            }
+        }
         let kinds = self.infer_local_kinds(l);
         let scalars = self.infer_local_scalars(l);
         let set_elems: Vec<Option<String>> = (0..l.names.len())
