@@ -3047,10 +3047,11 @@ impl<'a> Checker<'a> {
             }
 
             let mut src_roots = Vec::new();
+            let mut src_addr_roots = Vec::new();
             let src_origin = match src_src {
                 CalleeSlotSource::Arg(src_expr) => {
                     collect_ref_roots(src_expr, &mut src_roots);
-                    collect_addr_of_roots(src_expr, &mut src_roots);
+                    self.collect_borrowed_roots(st, src_expr, &mut src_addr_roots);
                     let mut move_ops = Vec::new();
                     crate::model::collect_move_operands(src_expr, &mut move_ops);
                     for (op, _) in move_ops {
@@ -3088,6 +3089,11 @@ impl<'a> Checker<'a> {
                             || (is_addr_arg && self.lookup_binding(st, s).is_some())
                             || self.lookup_binding(st, s).is_some_and(|b| b.immutable) || matches!(src_src, CalleeSlotSource::Arg(e) if self.expr_slices_addressable_array(st, e, s)))
                     {
+                        st.share_edge(d, s);
+                    }
+                }
+                for s in &src_addr_roots {
+                    if d != s && self.lookup_binding(st, s).is_some() {
                         st.share_edge(d, s);
                     }
                 }
