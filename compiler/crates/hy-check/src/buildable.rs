@@ -1936,10 +1936,11 @@ impl<'a> Collector<'a> {
                 }
             }
             OpKind::Map(k, v) => {
+                // SPEC LX13: single-var `for k in m` binds the KEY (#2945).
                 if n_vars >= 2 {
                     vec![*k, *v]
                 } else {
-                    vec![*v]
+                    vec![*k]
                 }
             }
             OpKind::Str => vec![OpKind::Int; n_vars.max(1)],
