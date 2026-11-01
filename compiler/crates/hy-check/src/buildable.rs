@@ -498,6 +498,8 @@ struct Collector<'a> {
     /// `kind_scopes`. `set[T]` has no OpKind (it lowers to a prelude
     /// struct), so without this its element type was never checked (#2474).
     set_elem_scopes: Vec<HashMap<String, Option<String>>>,
+    /// `option[T]` bindings -> their element TypeExpr, scoped like `kind_scopes` (#2915).
+    option_elem_scopes: Vec<HashMap<String, Option<TypeExpr>>>,
     /// One layer per open scope, tracking `for ... in` element bindings
     /// whose kind is copy-semantics storage (`struct`/`array`). The emitter
     /// lowers them to Go's `for _, x := range xs`, so writes through the
@@ -565,6 +567,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             kind_scopes: Vec::new(),
             type_name_scopes: Vec::new(),
             set_elem_scopes: Vec::new(),
+            option_elem_scopes: Vec::new(),
             copy_var_scopes: Vec::new(),
             file_consts: HashMap::new(),
             file_untyped_consts: HashSet::new(),
@@ -634,6 +637,7 @@ impl<'a> Collector<'a> {
         self.type_name_scopes.push(HashMap::new());
         self.scalar_scopes.push(HashMap::new());
         self.set_elem_scopes.push(HashMap::new());
+        self.option_elem_scopes.push(HashMap::new());
         self.copy_var_scopes.push(HashSet::new());
     }
 
@@ -643,6 +647,7 @@ impl<'a> Collector<'a> {
         self.type_name_scopes.pop();
         self.scalar_scopes.pop();
         self.set_elem_scopes.pop();
+        self.option_elem_scopes.pop();
         self.copy_var_scopes.pop();
     }
 
@@ -714,6 +719,9 @@ impl<'a> Collector<'a> {
             if let Some(top) = self.set_elem_scopes.last_mut() {
                 top.insert(name.to_string(), None);
             }
+            if let Some(top) = self.option_elem_scopes.last_mut() {
+                top.insert(name.to_string(), None);
+            }
         }
     }
 
@@ -762,6 +770,69 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn bind_option_elem(&mut self, name: &str, elem: Option<TypeExpr>) {
+        if name != "_" && elem.is_some() {
+            if let Some(top) = self.option_elem_scopes.last_mut() {
+                top.insert(name.to_string(), elem);
+            }
+        }
+    }
+
+    /// `option[int]` -> `TypeExpr::Named("int")`.
+    fn option_elem_of_ty(ty: &TypeExpr) -> Option<TypeExpr> {
+        match ty {
+            TypeExpr::Option { elem, .. } => Some((**elem).clone()),
+            _ => None,
+        }
+    }
+
+    /// The element TypeExpr of an option-valued expression, when provable (#2915).
+    fn option_elem_of_expr(&self, e: &Expr) -> Option<TypeExpr> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                for layer in self.option_elem_scopes.iter().rev() {
+                    if let Some(v) = layer.get(name) {
+                        return v.clone();
+                    }
+                }
+                None
+            }
+            Expr::Call { callee, .. } => match unwrap_parens(callee) {
+                Expr::Ident { name, .. } if self.lookup_kind(name).is_none() => self
+                    .ck
+                    .fns
+                    .get(name.as_str())
+                    .filter(|f| f.results.len() == 1)
+                    .and_then(|f| Self::option_elem_of_ty(&f.results[0].ty)),
+                Expr::Field { base, name, .. } => {
+                    let bk = self.kind_of_expr(base);
+                    if let Some(sn) = self.struct_base_name(&bk) {
+                        if let Some(m) = self.ck.method_decls.get(&(sn, name.to_string())) {
+                            if m.results.len() == 1 {
+                                return Self::option_elem_of_ty(&m.results[0].ty);
+                            }
+                        }
+                    }
+                    None
+                }
+                _ => None,
+            },
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                if let Some(sn) = self.struct_base_name(&bk) {
+                    let base_name = Checker::base_named_type_str(&sn);
+                    if let Some(fields) = self.ck.structs.get(base_name) {
+                        if let Some((_, fty)) = fields.iter().find(|(n, _)| n == name) {
+                            return Self::option_elem_of_ty(fty);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// #2474: `s.insert(v)` / `s.contains(v)` / `s.remove(v)` on a `set[T]`
     /// need `v` of type `T`; the prelude's Go signature takes `T`, so a
     /// mismatched argument passed `hyb check` and failed `go build`.
@@ -793,6 +864,84 @@ impl<'a> Collector<'a> {
                     elem
                 ),
                 "a set's insert/contains/remove take a value of the set's element type",
+            );
+        }
+    }
+
+    /// #2915: the argument of `option[T].or(default)` must match `T`;
+    /// the prelude's Go signature takes `T`, so a mismatched argument passed
+    /// `hyb check` and failed `go build`.
+    fn check_option_or_arg(&mut self, callee: &Expr, args: &[CallArg]) {
+        let Expr::Field { base, name, .. } = unwrap_parens(callee) else {
+            return;
+        };
+        if name != "or" {
+            return;
+        }
+        let bk = self.kind_of_expr(base);
+        let OpKind::Option(want) = bk else {
+            return;
+        };
+        if args.len() != 1 {
+            let msg = if args.is_empty() {
+                format!(
+                    "`{}.or` takes 1 argument but is called with 0 — Go refuses `not enough arguments in call to {}.or` (HYB-E1002)",
+                    base.render(),
+                    base.render()
+                )
+            } else {
+                format!(
+                    "`{}.or` takes 1 argument but is called with {} — Go refuses `too many arguments in call to {}.or` (HYB-E1002)",
+                    base.render(),
+                    args.len(),
+                    base.render()
+                )
+            };
+            self.emit_e1002(
+                callee.span(),
+                msg,
+                "`option[T].or` takes exactly 1 default-value argument of type `T`",
+            );
+            return;
+        }
+        if args[0].spread {
+            self.emit_e1002(
+                args[0].span,
+                format!(
+                    "cannot use `...` in call to non-variadic `{}.or` — Go refuses `cannot use ... in call to non-variadic` (HYB-E1002)",
+                    base.render()
+                ),
+                "`...` (variadic spread) is only allowed on the variadic built-in `append`; `.or` is not variadic",
+            );
+            return;
+        }
+        if *want == OpKind::Unknown {
+            return;
+        }
+        let got = self.kind_of_expr(&args[0].value);
+        if got == OpKind::Unknown {
+            return;
+        }
+        let int_to_float_conflict = *want == OpKind::Float
+            && got == OpKind::Int
+            && !self.is_untyped_int_const(&args[0].value);
+        let opt_elem_ty = self.option_elem_of_expr(base);
+        let scalar_mismatch = opt_elem_ty
+            .as_ref()
+            .and_then(|t| self.scalar_of_ty(t))
+            .map(|w| self.scalar_names_conflict(Some(w), self.typed_value_scalar(&args[0].value)))
+            .unwrap_or(false);
+        if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch {
+            self.emit_e1002(
+                args[0].value.span(),
+                format!(
+                    "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}.or` — Go refuses mismatched argument types (HYB-E1002)",
+                    args[0].value.render(),
+                    got.label(),
+                    want.label(),
+                    base.render()
+                ),
+                "the default value argument to `option[T].or` must match the option's payload type",
             );
         }
     }
@@ -1296,6 +1445,7 @@ impl<'a> Collector<'a> {
             let ps = self.scalar_of_ty(&p.ty);
             self.set_scalar(&p.name, ps);
             self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
+            self.bind_option_elem(&p.name, Self::option_elem_of_ty(&p.ty));
             self.bind_type_name(&p.name, p.ty.render());
         }
         for r in &f.results {
@@ -1305,6 +1455,8 @@ impl<'a> Collector<'a> {
                 self.bind_kind(rname, rk);
                 let rs = self.scalar_of_ty(&r.ty);
                 self.set_scalar(rname, rs);
+                self.bind_set_elem(rname, Self::set_elem_of_ty(&r.ty));
+                self.bind_option_elem(rname, Self::option_elem_of_ty(&r.ty));
                 self.bind_type_name(rname, r.ty.render());
             }
         }
@@ -1498,6 +1650,13 @@ impl<'a> Collector<'a> {
                 _ => None,
             })
             .collect();
+        let option_elems: Vec<Option<TypeExpr>> = (0..l.names.len())
+            .map(|i| match (&l.ty, l.values.len() == l.names.len()) {
+                (Some(t), _) => Self::option_elem_of_ty(t),
+                (None, true) => self.option_elem_of_expr(&l.values[i]),
+                _ => None,
+            })
+            .collect();
         if let Some(t) = &l.ty {
             let tname = t.render();
             for name in &l.names {
@@ -1510,8 +1669,8 @@ impl<'a> Collector<'a> {
                 }
             }
         }
-        for (((name, kind), scalar), set_elem) in
-            l.names.iter().zip(kinds).zip(scalars).zip(set_elems)
+        for ((((name, kind), scalar), set_elem), option_elem) in
+            l.names.iter().zip(kinds).zip(scalars).zip(set_elems).zip(option_elems)
         {
             // #1031: a same-scope `:=` re-define keeps the EXISTING variable
             // (and its type) in Go, so only a fresh binding takes the
@@ -1525,6 +1684,7 @@ impl<'a> Collector<'a> {
                 self.set_scalar(name, scalar);
             }
             self.bind_set_elem(name, set_elem);
+            self.bind_option_elem(name, option_elem);
             if !track_read {
                 self.exempt(name);
                 continue;
@@ -1788,7 +1948,22 @@ impl<'a> Collector<'a> {
                             }
                             if let Some(b) = binding {
                                 self.define_elidable(b, subject.span());
-                                self.bind_kind(b, OpKind::Unknown);
+                                if segments.as_slice() == ["some"] {
+                                    if let OpKind::Option(elem) = &subject_kind {
+                                        self.bind_kind(b, (**elem).clone());
+                                        if let Some(ty) = self.option_elem_of_expr(subject) {
+                                            let s = self.scalar_of_ty(&ty);
+                                            self.set_scalar(b, s);
+                                            self.bind_type_name(b, ty.render());
+                                            self.bind_set_elem(b, Self::set_elem_of_ty(&ty));
+                                            self.bind_option_elem(b, Self::option_elem_of_ty(&ty));
+                                        }
+                                    } else {
+                                        self.bind_kind(b, OpKind::Unknown);
+                                    }
+                                } else {
+                                    self.bind_kind(b, OpKind::Unknown);
+                                }
                             }
                         }
                         MatchPattern::Lit(lit) => {
@@ -2184,6 +2359,7 @@ impl<'a> Collector<'a> {
                 }
                 self.check_call_operands(callee, args, *span);
                 self.check_set_method_arg(callee, args);
+                self.check_option_or_arg(callee, args);
             }
             Expr::StructLit { ty, fields, span } => {
                 if let Some(t) = ty {
@@ -2260,6 +2436,7 @@ impl<'a> Collector<'a> {
                     let ps = self.scalar_of_ty(&p.ty);
                     self.set_scalar(&p.name, ps);
                     self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
+                    self.bind_option_elem(&p.name, Self::option_elem_of_ty(&p.ty));
                     self.bind_type_name(&p.name, p.ty.render());
                 }
                 for r in results {
@@ -2269,6 +2446,8 @@ impl<'a> Collector<'a> {
                         self.bind_kind(rname, rk);
                         let rs = self.scalar_of_ty(&r.ty);
                         self.set_scalar(rname, rs);
+                        self.bind_set_elem(rname, Self::set_elem_of_ty(&r.ty));
+                        self.bind_option_elem(rname, Self::option_elem_of_ty(&r.ty));
                         self.bind_type_name(rname, r.ty.render());
                     }
                 }
