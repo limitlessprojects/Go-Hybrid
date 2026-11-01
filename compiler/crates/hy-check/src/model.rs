@@ -729,6 +729,9 @@ pub(crate) struct Checker<'a> {
     /// An A5 escape site (`HYB-E3013`) inside `managed` is the declared escape
     /// hatch and is permitted, so the check reads this counter.
     pub managed_depth: usize,
+    /// W-016 M3 / Issue #2585: bindings holding closures (or slices/arrays of closures)
+    /// that write captured mutable bindings -> the first captured binding name written.
+    pub e3013_closure_captures: HashMap<String, String>,
 }
 
 /// Row 14 (discussion #4): the CLOSED category set — the invariant a
@@ -768,6 +771,7 @@ impl<'a> Checker<'a> {
             managed_audit: Vec::new(),
             closure_bound: Vec::new(),
             managed_depth: 0,
+            e3013_closure_captures: HashMap::new(),
         }
     }
 
