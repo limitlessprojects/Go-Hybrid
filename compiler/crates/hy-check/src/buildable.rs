@@ -142,16 +142,20 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         (Unknown, _) | (_, Unknown) => false,
         // An interface target accepts ANY value (`var a any = 1; a = "str"`
         // builds), so `Interface` on the `want` side is never a conflict.
-        // `Interface` on the `got` side is fail-open too: assigning an `any` to
-        // a concrete type needs a type assertion the kind model does not track,
-        // so it must not be rejected on kind evidence alone.
         //
-        // Without this arm the U16 assignment check and the U9-U12 interface
-        // classification contradict each other: `a` of type `any` resolves to
-        // `Interface`, and `Interface` vs `Str` falls through to the mismatch
-        // arm below, so every assignment to an `any` target would be rejected.
-        // The accept-side corpus controls caught exactly that.
-        (Interface, _) | (_, Interface) => false,
+        // `Interface` on the `got` side IS a conflict with any CONCRETE target:
+        // Hybrid has no type-assertion syntax (`x.(T)`, type switch), so an
+        // `any` value can never become concrete and Go refuses the emitted code
+        // with `need type assertion` (Row 13 BUILDABLE, #2962). `Unknown` stays
+        // fail-open via the first arm.
+        //
+        // Keeping the `want = Interface` half is what makes the U16 assignment
+        // check and the U9-U12 interface classification agree: an `any` target
+        // accepts everything. Comparisons do not come through here — they use
+        // the symmetric `equality_kinds_conflict`, whose AND keeps `any == int`
+        // accepted (one direction is always `want = Interface`).
+        (Interface, _) => false,
+        (_, Interface) => !matches!(want, Unknown),
         // No value is involved; a count check owns that case.
         (Void, _) | (_, Void) => false,
         // An untyped int constant is assignable to a float target
