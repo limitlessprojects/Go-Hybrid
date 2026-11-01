@@ -807,7 +807,11 @@ impl<'a> Checker<'a> {
         match unwrap_parens(callee) {
             Expr::FnLit { .. } => closure_reject(callee.render()),
             Expr::Ident { name, .. } => {
-                if let Some(b) = self.lookup_binding(st, name) {
+                let head = Self::base_named_type_str(name);
+                if let Some(b) = self
+                    .lookup_binding(st, name)
+                    .or_else(|| self.lookup_binding(st, head))
+                {
                     if matches!(b.shape, TypeShape::Closure) {
                         return closure_reject(name.clone());
                     }
@@ -816,7 +820,7 @@ impl<'a> Checker<'a> {
                         name
                     ));
                 }
-                if self.fns.contains_key(name) {
+                if self.fns.contains_key(name.as_str()) || self.fns.contains_key(head) {
                     return CalleeVerdict::Proven;
                 }
                 CalleeVerdict::Unproven(format!(
@@ -842,14 +846,28 @@ impl<'a> Checker<'a> {
     ) -> Option<Vec<TypeShape>> {
         match unwrap_parens(callee) {
             Expr::Ident { name, .. } => {
-                if self.lookup_binding(st, name).is_some() {
+                let head = Self::base_named_type_str(name);
+                if self.lookup_binding(st, name).is_some()
+                    || self.lookup_binding(st, head).is_some()
+                {
                     return None; // shadowed by a local binding — not a static fn call
                 }
-                let f = self.fns.get(name)?;
+                let f = self.fns.get(name.as_str()).or_else(|| self.fns.get(head))?;
                 if f.params.len() != argc {
                     return None;
                 }
-                Some(f.params.iter().map(|p| self.shape_of_type(&p.ty)).collect())
+                let mut subst = std::collections::HashMap::new();
+                if let Some((_, explicit_args)) = Self::parse_generic_type_args(name) {
+                    for (tp, arg) in f.type_params.iter().zip(explicit_args.iter()) {
+                        subst.insert(tp.name.clone(), arg.clone());
+                    }
+                }
+                Some(
+                    f.params
+                        .iter()
+                        .map(|p| self.shape_of_type(&Self::substitute_type_params(&p.ty, &subst)))
+                        .collect(),
+                )
             }
             Expr::FnLit { params, .. } => {
                 if params.len() != argc {
