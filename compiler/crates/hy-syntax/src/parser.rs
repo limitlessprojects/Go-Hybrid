@@ -608,6 +608,49 @@ impl Parser {
         Ok(params)
     }
 
+    /// Does the current token inside a parenthesized result list start a
+    /// `name Type` pair rather than an unnamed `Type`?
+    fn is_named_result(&self) -> bool {
+        let Tok::Ident(name) = self.cur() else {
+            return false;
+        };
+        if (name == "map" || name == "option") && matches!(self.nth(1), Tok::Punct("[")) {
+            return false;
+        }
+        match self.nth(1) {
+            Tok::Ident(_) | Tok::Punct("*") | Tok::Kw("chan") | Tok::Kw("fn") => true,
+            Tok::Punct("<-") => matches!(self.nth(2), Tok::Kw("chan")),
+            Tok::Punct("[") => {
+                // Distinguish a named slice/array result (`items []T`,
+                // `arr [4]T`, `arr [...]T`) from an unnamed generic return
+                // type (`box[T]`): after the matching `]`, a generic return
+                // type is immediately followed by `,` or `)` (or `.`), whereas
+                // a slice/array type is followed by its element type `T`.
+                let mut k = self.pos + 1;
+                let mut depth = 0usize;
+                while k < self.toks.len() {
+                    match &self.toks[k].tok {
+                        Tok::Punct("[") => depth += 1,
+                        Tok::Punct("]") => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return !matches!(
+                                    self.toks.get(k + 1).map(|t| &t.tok),
+                                    Some(Tok::Punct("," | ")" | ".")) | Some(Tok::Eof) | None
+                                );
+                            }
+                        }
+                        Tok::Eof => return false,
+                        _ => {}
+                    }
+                    k += 1;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     /// Result: bare type, or parenthesized list with optional names
     /// (`(total int, err error)` / `(int, error)` / `(code int)`).
     fn parse_results(&mut self) -> PResult<Vec<FnResult>> {
@@ -615,9 +658,7 @@ impl Parser {
             self.bump();
             let mut results = Vec::new();
             while !self.at_punct(")") && !self.at_eof() {
-                let named =
-                    matches!(self.cur(), Tok::Ident(_)) && matches!(self.nth(1), Tok::Ident(_));
-                if named {
+                if self.is_named_result() {
                     let name = self.expect_ident()?;
                     let ty = self.parse_type()?;
                     results.push(FnResult {
@@ -734,8 +775,14 @@ impl Parser {
                 let params = self.parse_params()?;
                 self.expect_punct(")")?;
                 let mut results = Vec::new();
-                while self.is_type_start() && self.same_line_as_prev() {
-                    results.push(self.parse_type()?);
+                if self.same_line_as_prev() && self.at_punct("(") {
+                    for r in self.parse_results()? {
+                        results.push(r.ty);
+                    }
+                } else {
+                    while self.is_type_start() && self.same_line_as_prev() {
+                        results.push(self.parse_type()?);
+                    }
                 }
                 TypeExpr::Fn {
                     params,
@@ -1531,96 +1578,38 @@ impl Parser {
     }
 
     /// Recovery/loop lookahead: does a new select arm start here?
-    fn looks_like_select_arm_head(&self) -> bool {
+    fn looks_like_select_arm_head(&mut self) -> bool {
         if self.at_select_default() {
             return true;
         }
-        match self.cur() {
-            Tok::Punct("<-") => true,
-            Tok::Ident(_) => match self.nth(1) {
-                Tok::Punct("<-") => true, // send arm: ch <- v:
-                // recv-define arm: v := <-ch: — a `:`/`=>` must terminate the
-                // channel expression, otherwise this is an arm-BODY statement
-                // (`v := <-m` inside a bare-recv arm's body, recv_target.rs).
-                Tok::Punct(":=") => {
-                    matches!(self.nth(2), Tok::Punct("<-")) && self.recv_arm_terminator_after(2)
+        if !matches!(self.cur(), Tok::Punct("<-" | "(") | Tok::Ident(_)) {
+            return false;
+        }
+        let saved_pos = self.pos;
+        let saved_diags = self.diags.len();
+        let is_arm_head = if self.at_punct("<-") {
+            matches!(self.parse_expr(true), Ok(Expr::Receive { .. }))
+                && matches!(self.cur(), Tok::Punct(":" | "=>"))
+        } else {
+            match self.parse_stmt() {
+                Ok(Stmt::Local(l))
+                    if l.kind == LocalKind::Define
+                        && l.values.len() == 1
+                        && matches!(l.values.first(), Some(Expr::Receive { .. })) =>
+                {
+                    matches!(self.cur(), Tok::Punct(":" | "=>"))
                 }
-                Tok::Punct(",") => {
-                    // recv-define arm: a, b := <-ch:
-                    let mut k = 1;
-                    loop {
-                        match self.nth(k) {
-                            Tok::Punct(",") if matches!(self.nth(k + 1), Tok::Ident(_)) => k += 2,
-                            _ => break,
-                        }
-                    }
-                    // after the walk k lands on `:=` (the last name was at k-1)
-                    matches!(self.nth(k), Tok::Punct(":="))
-                        && matches!(self.nth(k + 1), Tok::Punct("<-"))
-                        && self.recv_arm_terminator_after(k + 1)
-                }
+                Ok(Stmt::Send { .. })
+                | Ok(Stmt::Expr {
+                    expr: Expr::Receive { .. },
+                    ..
+                }) => matches!(self.cur(), Tok::Punct(":" | "=>")),
                 _ => false,
-            },
-            _ => false,
-        }
-    }
-
-    /// Lookahead from the `<-` at offset `arrow_at`: skip the channel
-    /// expression (identifier with postfix selector/index/paren chains) and
-    /// require the select-arm terminator `:` or `=>`. Body statements like
-    /// `v := <-m` end in anything else (next statement's token), so they are
-    /// not arm heads.
-    fn recv_arm_terminator_after(&self, arrow_at: usize) -> bool {
-        let mut k = arrow_at + 1;
-        // channel expression head
-        match self.nth(k) {
-            Tok::Ident(_) => k += 1,
-            _ => return false,
-        }
-        // postfix chains: .name, [expr], (args)
-        loop {
-            match self.nth(k) {
-                Tok::Punct(".") if matches!(self.nth(k + 1), Tok::Ident(_)) => k += 2,
-                Tok::Punct("[") => {
-                    let mut depth = 0i32;
-                    loop {
-                        match self.nth(k) {
-                            Tok::Punct("[") => depth += 1,
-                            Tok::Punct("]") => {
-                                depth -= 1;
-                                if depth == 0 {
-                                    k += 1;
-                                    break;
-                                }
-                            }
-                            Tok::Eof => return false,
-                            _ => {}
-                        }
-                        k += 1;
-                    }
-                }
-                Tok::Punct("(") => {
-                    let mut depth = 0i32;
-                    loop {
-                        match self.nth(k) {
-                            Tok::Punct("(") => depth += 1,
-                            Tok::Punct(")") => {
-                                depth -= 1;
-                                if depth == 0 {
-                                    k += 1;
-                                    break;
-                                }
-                            }
-                            Tok::Eof => return false,
-                            _ => {}
-                        }
-                        k += 1;
-                    }
-                }
-                _ => break,
             }
-        }
-        matches!(self.nth(k), Tok::Punct(":" | "=>"))
+        };
+        self.pos = saved_pos;
+        self.diags.truncate(saved_diags);
+        is_arm_head
     }
 
     fn place_of(&mut self, e: Expr) -> PResult<Place> {
