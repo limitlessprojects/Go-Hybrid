@@ -3437,9 +3437,71 @@ impl<'a> Collector<'a> {
         for extra in &args[1..] {
             // `append(a, b...)` — a variadic spread passes the whole slice, so
             // the argument's kind is the SLICE type, not an element. Go accepts
-            // it (for a matching element type), so it must not be compared
-            // against the element kind.
+            // it only when the element types match (or appending a string to []byte).
             if extra.spread {
+                let src_k = self.kind_of_expr(&extra.value);
+                match &src_k {
+                    OpKind::Slice(src_elem) => {
+                        let is_untyped_int_to_float = elem == OpKind::Float
+                            && **src_elem == OpKind::Int;
+                        if kinds_conflict(&elem, src_elem) || is_untyped_int_to_float {
+                            self.emit_e1002(
+                                extra.value.span(),
+                                format!(
+                                    "cannot use `{}` (value of type `{}`) as `{}` value in argument to append — Go refuses `cannot use ... as {} value in argument to append` (HYB-E1002)",
+                                    extra.value.render(),
+                                    src_k.label(),
+                                    self.kind_of_expr(&first.value).label(),
+                                    self.kind_of_expr(&first.value).label()
+                                ),
+                                "the appended slice's element type must be assignable to the destination slice's element type",
+                            );
+                            continue;
+                        }
+                        let src_elem_scalar = self.slice_elem_scalar(&extra.value);
+                        if let (Some(d), Some(s)) = (dst_elem_scalar, src_elem_scalar) {
+                            if d != s {
+                                self.emit_e1002(
+                                    extra.value.span(),
+                                    format!(
+                                        "cannot use `{}` (slice of type `[]{}`) as `[]{}` value in argument to append (HYB-E1002)",
+                                        extra.value.render(),
+                                        s,
+                                        d
+                                    ),
+                                    "the appended slice's element type must match the destination slice's element type",
+                                );
+                            }
+                        }
+                    }
+                    OpKind::Str => {
+                        let is_byte_slice = matches!(elem, OpKind::Int)
+                            && matches!(dst_elem_scalar, Some("byte") | Some("uint8"));
+                        if !is_byte_slice {
+                            self.emit_e1002(
+                                extra.value.span(),
+                                format!(
+                                    "cannot use `{}` (value of type `string`) as `{}` value in argument to append (HYB-E1002)",
+                                    extra.value.render(),
+                                    self.kind_of_expr(&first.value).label()
+                                ),
+                                "variadic append of string is only allowed when destination is `[]byte`",
+                            );
+                        }
+                    }
+                    OpKind::Unknown => {}
+                    _ => {
+                        self.emit_e1002(
+                            extra.value.span(),
+                            format!(
+                                "cannot use `...` on non-slice argument `{}` (type `{}`) in call to append (HYB-E1002)",
+                                extra.value.render(),
+                                src_k.label()
+                            ),
+                            "`append(s, x...)` requires `x` to be a slice or a string (when appending to `[]byte`)",
+                        );
+                    }
+                }
                 continue;
             }
             let got = self.kind_of_expr(&extra.value);
