@@ -1726,6 +1726,15 @@ impl Parser {
                     span: self.span_from(start),
                 })
             }
+            Tok::Punct("^") => {
+                self.bump();
+                let operand = Box::new(self.parse_unary(lit)?);
+                Ok(Expr::Unary {
+                    op: UnOp::BitNot,
+                    operand,
+                    span: self.span_from(start),
+                })
+            }
             Tok::Punct("<-") if !matches!(self.nth(1), Tok::Kw("chan")) => {
                 self.bump();
                 let chan = Box::new(self.parse_unary(lit)?);
