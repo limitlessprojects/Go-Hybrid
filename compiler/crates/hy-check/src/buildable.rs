@@ -4342,6 +4342,38 @@ impl<'a> Collector<'a> {
                 }
                 continue;
             }
+            // #1681 — a bare `nil` element is only assignable when the
+            // destination slice's element type is itself nil-able (pointer,
+            // slice, array, map, chan, func, interface). Go refuses
+            // `append(xs, nil)` on a scalar slice with
+            // `cannot use nil as int value in argument to append`, so catch
+            // it before the kind model, which maps nil to `OpKind::Unknown`
+            // (fail-open). Unresolved destinations stay silent.
+            if Self::nil_is_expr(&extra.value) {
+                let elem_nilable = matches!(
+                    &elem,
+                    OpKind::Slice(_)
+                        | OpKind::Array(_)
+                        | OpKind::Map(_, _)
+                        | OpKind::Chan(_)
+                        | OpKind::Fn(_, _)
+                        | OpKind::Pointer(_)
+                        | OpKind::Interface
+                        | OpKind::Unknown
+                );
+                if !elem_nilable {
+                    self.emit_e1002(
+                        extra.value.span(),
+                        format!(
+                            "cannot use `nil` as `{}` value in argument to append — Go rejects `cannot use nil as {} value in argument to append` (HYB-E1002)",
+                            elem.label(),
+                            elem.label()
+                        ),
+                        "untyped `nil` is only assignable to nil-able types (pointer, slice, map, chan, func, interface)",
+                    );
+                }
+                continue;
+            }
             let got = self.kind_of_expr(&extra.value);
             let int_to_float_conflict = elem == OpKind::Float
                 && got == OpKind::Int
@@ -7104,6 +7136,36 @@ mod operand_kind_tests {
                 error_codes(&r)
             );
         }
+    }
+
+    #[test]
+    fn accepts_append_onto_nil_struct_field_slice_1681() {
+        // #1681: `append` onto a zero-value (nil) slice held in a struct
+        // field must stay accepted — a nil slice is a usable zero value,
+        // exactly as for a bare binding; do not fold this into the E2005
+        // misuse net. The nil-ness arises from the zero literal `rec{}`,
+        // not a spelled `nil`: upstream rule N1 rejects an explicit
+        // `rec{ xs: nil }` with HYB-E4001 (nil has exactly two homes —
+        // error and foreign Go — see callee_and_nil.rs), asserted below.
+        let src = "struct rec { xs []int }\nfn main() {\n    r := rec{}\n    r.xs = append(r.xs, 1)\n    fmt.println(r.xs)\n}\n";
+        let r = check(src);
+        assert_eq!(r.verdict, Verdict::Accept, "expected accept for:\n{src}\ndiagnostics: {:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn spelled_nil_struct_field_is_e4001_n1_upstream() {
+        // Upstream N1 (rebase onto main c891004): an explicitly spelled nil
+        // in a non-nilable struct-field slot is a TYPE error (HYB-E4001),
+        // not an append concern — nil has exactly two homes (error, foreign
+        // Go). Recorded so the #1681 acceptance above cannot be read as
+        // endorsing the spelled-nil form.
+        let src = "struct rec { xs []int }\nfn main() {\n    r := rec{ xs: nil }\n    fmt.println(r.xs)\n}\n";
+        let r = check(src);
+        assert!(
+            r.diagnostics.iter().any(|d| d.code == "HYB-E4001"),
+            "expected HYB-E4001 for `rec{{ xs: nil }}`, got {:?}",
+            r.diagnostics
+        );
     }
 
     #[test]
