@@ -1801,6 +1801,7 @@ impl<'a> Collector<'a> {
                 for a in args {
                     self.expr(&a.value);
                 }
+                self.check_variadic_spread_operands(callee, args, *span);
                 match unwrap_parens(callee) {
                     Expr::Ident { name, .. } => {
                         self.check_user_fn_arity(name, args, *span);
@@ -5860,8 +5861,76 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn check_variadic_spread_operands(&mut self, callee: &Expr, args: &[CallArg], _span: Span) {
+        let bare = unwrap_parens(callee);
+        let is_append = matches!(bare, Expr::Ident { name, .. } if name == "append");
+        if is_append {
+            for (i, a) in args.iter().enumerate() {
+                if a.spread && i < args.len() - 1 {
+                    self.emit_e1002(
+                        a.span,
+                        format!(
+                            "cannot use `...` on non-final argument `{}` in `append` (HYB-E1002)",
+                            a.value.render()
+                        ),
+                        "in `append(s, elems...)`, `...` can only be applied to the final argument",
+                    );
+                }
+            }
+            return;
+        }
+
+        // If the callee is an imported package member (e.g. fmt.println, fmt.sprintf),
+        // Go package functions may be variadic; fail-open for foreign calls.
+        if let Expr::Field { base, .. } = bare {
+            if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                if self.is_imported_pkg_root(pkg) {
+                    return;
+                }
+            }
+        }
+
+        for a in args {
+            if a.spread {
+                let callee_name = match bare {
+                    Expr::Ident { name, .. } => name.clone(),
+                    Expr::Field { base, name, .. } => format!("{}.{}", base.render(), name),
+                    _ => callee.render(),
+                };
+                let is_builtin = matches!(
+                    bare,
+                    Expr::Ident { name, .. } if matches!(
+                        name.as_str(),
+                        "len" | "cap" | "close" | "delete" | "clear" | "copy"
+                            | "min" | "max" | "new" | "make" | "panic" | "recover"
+                            | "real" | "imag" | "complex" | "print" | "println"
+                    )
+                );
+                let (msg, note) = if is_builtin {
+                    (
+                        format!(
+                            "invalid operation: invalid use of `...` with built-in `{}` (HYB-E1002)",
+                            callee_name
+                        ),
+                        format!("built-in `{}` is non-variadic and cannot be called with `...`", callee_name),
+                    )
+                } else {
+                    (
+                        format!(
+                            "cannot use `...` in call to non-variadic `{}` (HYB-E1002)",
+                            callee_name
+                        ),
+                        format!("`{}` is not a variadic function; remove `...` from the call argument", callee_name),
+                    )
+                };
+                self.emit_e1002(a.span, msg, &note);
+            }
+        }
+    }
+
     /// Family D1 & Family E (#425): non-function call check + binding-shaped builtin arg checks.
     fn check_call_operands(&mut self, callee: &Expr, args: &[CallArg], span: Span) {
+        self.check_variadic_spread_operands(callee, args, span);
         let bare = unwrap_parens(callee);
         match bare {
             // `[]byte("ok")` / `[]rune(s)`: parser encodes slice and array type conversions as
