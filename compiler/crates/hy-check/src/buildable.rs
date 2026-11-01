@@ -135,6 +135,25 @@ impl OpKind {
 /// NOTE: open PR #620 introduces this same helper for return-statement
 /// checking. Whichever of the two lands second should drop one copy — the two
 /// are textually identical on purpose.
+/// #2899 — the rendered type text of a kind, for a type-parameter binding.
+/// Widths collapse (`Int` -> `int`), which is enough to compare FAMILIES; an
+/// unresolved kind has no text and drops the binding.
+fn kind_to_type_text(k: &OpKind) -> Option<String> {
+    Some(match k {
+        OpKind::Int => "int".to_string(),
+        OpKind::Float => "float64".to_string(),
+        OpKind::Bool => "bool".to_string(),
+        OpKind::Str => "string".to_string(),
+        OpKind::Slice(e) => format!("[]{}", kind_to_type_text(e)?),
+        OpKind::Array(e) => format!("[...]{}", kind_to_type_text(e)?),
+        OpKind::Pointer(e) => format!("*{}", kind_to_type_text(e)?),
+        OpKind::Map(k, v) => format!("map[{}]{}", kind_to_type_text(k)?, kind_to_type_text(v)?),
+        OpKind::Chan(e) => format!("chan {}", kind_to_type_text(e)?),
+        OpKind::Option(e) => format!("option[{}]", kind_to_type_text(e)?),
+        _ => return None,
+    })
+}
+
 fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
     use OpKind::*;
     match (want, got) {
@@ -3021,6 +3040,112 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #2899 — the type-parameter bindings of a generic call, as the rendered
+    /// type texts `kind_of_ty_with_subst` expects.
+    ///
+    /// Explicit type arguments (`id[int](3)`) win; otherwise each declared
+    /// parameter type is matched structurally against the argument's kind
+    /// (`t`, `[]t`, `[N]t`, `*t`, `map[k]v`, `chan t`, `option[t]`). A parameter
+    /// bound to two different kinds — Go resolves `pick(1, 2.5)` to `float64`,
+    /// which the kind model cannot see — bound only to `Unknown`, or never bound
+    /// is dropped, so the result stays fail-open exactly as before.
+    fn generic_call_subst(
+        &self,
+        callee_name: &str,
+        f: &hy_syntax::FnDecl,
+        args: &[CallArg],
+    ) -> HashMap<String, String> {
+        if f.type_params.is_empty() {
+            return HashMap::new();
+        }
+        let names: Vec<&str> = f.type_params.iter().map(|p| p.name.as_str()).collect();
+        let mut bound: HashMap<String, Option<String>> = HashMap::new();
+        if let Some(open) = callee_name.find('[') {
+            if callee_name.ends_with(']') {
+                let inner = &callee_name[open + 1..callee_name.len() - 1];
+                let spelled = split_top_level_type_args(inner);
+                if spelled.len() == names.len() {
+                    for (n, t) in names.iter().zip(spelled.iter()) {
+                        bound.insert((*n).to_string(), Some(t.to_string()));
+                    }
+                }
+            }
+        }
+        if bound.is_empty() && f.params.len() == args.len() {
+            for (p, a) in f.params.iter().zip(args.iter()) {
+                let got = self.kind_of_expr(&a.value);
+                self.bind_generic_params(&p.ty, &got, &names, &mut bound, 0);
+            }
+        }
+        bound
+            .into_iter()
+            .filter_map(|(name, text)| text.map(|t| (name, t)))
+            .collect()
+    }
+
+    /// #2899 — match one declared parameter type against one argument kind and
+    /// record every type parameter it mentions. Two different kinds for one
+    /// parameter and an `Unknown` argument both drop the binding.
+    fn bind_generic_params(
+        &self,
+        ty: &TypeExpr,
+        got: &OpKind,
+        names: &[&str],
+        out: &mut HashMap<String, Option<String>>,
+        depth: usize,
+    ) {
+        if depth > 8 {
+            return;
+        }
+        match ty {
+            TypeExpr::Named { name, .. } if names.iter().any(|n| *n == name.as_str()) => {
+                let text = kind_to_type_text(got);
+                match out.get_mut(name.as_str()) {
+                    Some(entry) => {
+                        if entry.as_deref() != text.as_deref() {
+                            *entry = None;
+                        }
+                    }
+                    None => {
+                        out.insert(name.clone(), text);
+                    }
+                }
+            }
+            TypeExpr::Slice { elem, .. } => {
+                if let OpKind::Slice(inner) = got {
+                    self.bind_generic_params(elem, inner, names, out, depth + 1);
+                }
+            }
+            TypeExpr::Array { elem, .. } => {
+                if let OpKind::Array(inner) = got {
+                    self.bind_generic_params(elem, inner, names, out, depth + 1);
+                }
+            }
+            TypeExpr::Pointer { to, .. } => {
+                if let OpKind::Pointer(inner) = got {
+                    self.bind_generic_params(to, inner, names, out, depth + 1);
+                }
+            }
+            TypeExpr::Map { key, value, .. } => {
+                if let OpKind::Map(k, v) = got {
+                    self.bind_generic_params(key, k, names, out, depth + 1);
+                    self.bind_generic_params(value, v, names, out, depth + 1);
+                }
+            }
+            TypeExpr::Chan { elem, .. } => {
+                if let OpKind::Chan(inner) = got {
+                    self.bind_generic_params(elem, inner, names, out, depth + 1);
+                }
+            }
+            TypeExpr::Option { elem, .. } => {
+                if let OpKind::Option(inner) = got {
+                    self.bind_generic_params(elem, inner, names, out, depth + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn call_result_kinds(&self, callee: &Expr, args: &[CallArg]) -> Option<Vec<OpKind>> {
         let bare = unwrap_parens(callee);
         match bare {
@@ -3073,10 +3198,25 @@ impl<'a> Collector<'a> {
                 }
                 let head = Checker::base_named_type_str(name);
                 if let Some(f) = self.ck.fns.get(name.as_str()).or_else(|| self.ck.fns.get(head)) {
+                    // #2899: a generic callee's result type mentions its own type
+                    // parameters (`fn id[t any](v t) t`), which `kind_of_ty`
+                    // resolves to `Unknown` — and every operand guard treats
+                    // `Unknown` as fail-open, so `var s string = id(3)` passed.
+                    // Bind the parameters first (spelled out, or structurally
+                    // from the arguments) and substitute them into the results.
+                    let subst = self.generic_call_subst(name, f, args);
+                    if subst.is_empty() {
+                        return Some(
+                            f.results
+                                .iter()
+                                .map(|r| self.kind_of_ty(&r.ty, 0))
+                                .collect(),
+                        );
+                    }
                     return Some(
                         f.results
                             .iter()
-                            .map(|r| self.kind_of_ty(&r.ty, 0))
+                            .map(|r| self.kind_of_ty_with_subst(&r.ty, &subst, 0))
                             .collect(),
                     );
                 }
