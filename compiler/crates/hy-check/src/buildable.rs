@@ -2889,6 +2889,9 @@ impl<'a> Collector<'a> {
                 if name == "true" || name == "false" {
                     return OpKind::Bool;
                 }
+                if name == "none" {
+                    return OpKind::Option(Box::new(OpKind::Unknown));
+                }
                 let head = Checker::base_named_type_str(name);
                 if let Some(f) = self.ck.fns.get(name.as_str()).or_else(|| self.ck.fns.get(head)) {
                     return OpKind::Fn(
