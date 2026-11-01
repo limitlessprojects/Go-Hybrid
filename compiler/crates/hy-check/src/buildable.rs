@@ -77,6 +77,7 @@ pub(crate) enum OpKind {
     Interface,
     Int,
     Float,
+    Complex,
     Bool,
     Str,
     Slice(Box<OpKind>),
@@ -108,6 +109,7 @@ impl OpKind {
             OpKind::Interface => "any".to_string(),
             OpKind::Int => "int".to_string(),
             OpKind::Float => "float64".to_string(),
+            OpKind::Complex => "complex128".to_string(),
             OpKind::Bool => "bool".to_string(),
             OpKind::Str => "string".to_string(),
             OpKind::Slice(e) => format!("[]{}", e.label()),
@@ -163,6 +165,9 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         // an untyped constant from an `int` variable, so this direction must
         // stay allowed or the check would reject buildable programs.
         (Float, Int) => false,
+        // An untyped int or float constant is assignable to a complex target
+        // (`var c complex128 = 1` and `var c complex128 = 1.5` build).
+        (Complex, Int) | (Complex, Float) => false,
         // A struct whose name did not resolve is not evidence of a mismatch.
         (Struct(None), _) | (_, Struct(None)) => false,
         (a, b) if a == b => false,
@@ -310,6 +315,7 @@ fn is_non_nilable(k: &OpKind) -> bool {
         k,
         OpKind::Int
             | OpKind::Float
+            | OpKind::Complex
             | OpKind::Bool
             | OpKind::Str
             | OpKind::Struct(_)
@@ -340,6 +346,11 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         (Bool, other) if !matches!(other, Unknown | Bool) => true,
         // Bool argument: bool cannot convert to anything (except bool or interface).
         (other, Bool) if !matches!(other, Unknown | Bool | Interface) => true,
+
+        // Complex targets and arguments:
+        // Complex cannot convert to or from Str, Bool, Slice, Array, Map, Chan, Struct.
+        (Complex, Str | Bool | Slice(_) | Array(_) | Map(_, _) | Chan(_) | Struct(_)) => true,
+        (Str | Bool | Slice(_) | Array(_) | Map(_, _) | Chan(_) | Struct(_), Complex) => true,
 
         // Numeric targets (Int, Float): can convert between Int and Float.
         // Cannot convert Str, Slice, Array, Map, Chan, Struct to numeric.
@@ -412,7 +423,7 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         // kind model (it may hold anything), so a member lookup on it cannot
         // claim absence — same fail-open as `kinds_conflict`'s Interface arm.
         OpKind::Interface => false,
-        OpKind::Int | OpKind::Float | OpKind::Bool | OpKind::Str => true,
+        OpKind::Int | OpKind::Float | OpKind::Complex | OpKind::Bool | OpKind::Str => true,
         OpKind::Void => false,
         // A struct whose NAME did not resolve cannot have its members looked up.
         OpKind::Struct(None) => false,
@@ -2731,6 +2742,7 @@ impl<'a> Collector<'a> {
             "bool" => OpKind::Bool,
             "string" => OpKind::Str,
             "float32" | "float64" | "f32" | "f64" => OpKind::Float,
+            "complex64" | "complex128" => OpKind::Complex,
             "int" | "uint" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
             | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "usize"
             | "isize" | "uintptr" | "byte" | "rune" | "char" => OpKind::Int,
@@ -2936,6 +2948,8 @@ impl<'a> Collector<'a> {
                     let rk = self.kind_of_expr(rhs);
                     if lk == OpKind::Str && rk == OpKind::Str {
                         OpKind::Str
+                    } else if lk == OpKind::Complex || rk == OpKind::Complex {
+                        OpKind::Complex
                     } else if lk.is_numeric() && rk.is_numeric() {
                         if lk == OpKind::Float || rk == OpKind::Float {
                             OpKind::Float
@@ -2949,7 +2963,9 @@ impl<'a> Collector<'a> {
                 BinOp::Sub | BinOp::Mul | BinOp::Div => {
                     let lk = self.kind_of_expr(lhs);
                     let rk = self.kind_of_expr(rhs);
-                    if lk.is_numeric() && rk.is_numeric() {
+                    if lk == OpKind::Complex || rk == OpKind::Complex {
+                        OpKind::Complex
+                    } else if lk.is_numeric() && rk.is_numeric() {
                         if lk == OpKind::Float || rk == OpKind::Float {
                             OpKind::Float
                         } else {
@@ -3108,6 +3124,7 @@ impl<'a> Collector<'a> {
                     "new" => return Some(vec![OpKind::Pointer(Box::new(OpKind::Unknown))]),
                     "delete" | "close" | "clear" | "panic" => return Some(Vec::new()),
                     "recover" => return Some(vec![OpKind::Interface]),
+                    "complex" => return Some(vec![OpKind::Complex]),
                     "min" | "max" => {
                         let res_kind = args
                             .iter()
@@ -4779,11 +4796,13 @@ impl<'a> Collector<'a> {
             }
             // B3: `+` accepts numeric+numeric or string+string.
             BinOp::Add => {
-                let l_ok = matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
-                let r_ok = matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str);
+                let l_ok = matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str | OpKind::Complex);
+                let r_ok = matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Str | OpKind::Complex);
                 let mismatch = lk != OpKind::Unknown
                     && rk != OpKind::Unknown
-                    && lk.is_numeric() != rk.is_numeric();
+                    && (lk.is_numeric() != rk.is_numeric()
+                        || (lk == OpKind::Complex && rk == OpKind::Str)
+                        || (lk == OpKind::Str && rk == OpKind::Complex));
                 let int_float_conflict = (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs))
                     || (lk == OpKind::Int && rk == OpKind::Float && !self.is_untyped_int_const(lhs));
                 if !l_ok || !r_ok || mismatch || int_float_conflict || self.scalar_conflict(lhs, rhs) {
@@ -4808,8 +4827,8 @@ impl<'a> Collector<'a> {
                 };
                 let int_float_conflict = (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs))
                     || (lk == OpKind::Int && rk == OpKind::Float && !self.is_untyped_int_const(lhs));
-                if !matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float)
-                    || !matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float)
+                if !matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Complex)
+                    || !matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float | OpKind::Complex)
                     || int_float_conflict
                     || self.scalar_conflict(lhs, rhs)
                 {
