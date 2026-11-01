@@ -686,6 +686,18 @@ impl<'a> Checker<'a> {
         cur
     }
 
+    /// Alias-resolve `ty`, auto-dereferencing a pointer to an array (`pa[i]`, `pa[a:b]`).
+    fn resolve_indexable_ty(&self, ty: &TypeExpr) -> TypeExpr {
+        let resolved = self.resolve_type_alias(ty);
+        if let TypeExpr::Pointer { to, .. } = &resolved {
+            let inner = self.resolve_type_alias(to);
+            if matches!(inner, TypeExpr::Array { .. }) {
+                return inner;
+            }
+        }
+        resolved
+    }
+
     fn peel_option_receiver_ty(&self, ty: &TypeExpr) -> Option<(TypeExpr, bool)> {
         if self.structs.contains_key("option") {
             return None;
@@ -785,11 +797,39 @@ impl<'a> Checker<'a> {
             }
             Expr::Index { base, .. } => {
                 let base_ty = self.ty_of_expr(st, base)?;
-                match self.resolve_type_alias(&base_ty) {
+                match self.resolve_indexable_ty(&base_ty) {
                     TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => Some(*elem),
                     TypeExpr::Map { value, .. } => Some(*value),
                     _ => None,
                 }
+            }
+            Expr::Slice { base, span, .. } => {
+                let base_ty = self.ty_of_expr(st, base)?;
+                match self.resolve_indexable_ty(&base_ty) {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+                        Some(TypeExpr::Slice { elem, span: *span })
+                    }
+                    _ => None,
+                }
+            }
+            Expr::Receive { chan, .. } => {
+                let chan_ty = self.ty_of_expr(st, chan)?;
+                match self.resolve_type_alias(&chan_ty) {
+                    TypeExpr::Chan { elem, .. } => Some(*elem),
+                    _ => None,
+                }
+            }
+            Expr::AddrOf { operand, span }
+            | Expr::Unary {
+                op: hy_syntax::UnOp::Addr,
+                operand,
+                span,
+            } => {
+                let inner = self.ty_of_expr(st, operand)?;
+                Some(TypeExpr::Pointer {
+                    to: Box::new(inner),
+                    span: *span,
+                })
             }
             Expr::StructLit { ty, .. } => ty.clone(),
             Expr::MapLit {
@@ -860,7 +900,25 @@ impl<'a> Checker<'a> {
                         });
                     }
                     if name == "make" {
-                        return args.first().and_then(|a| self.ty_of_expr(st, &a.value));
+                        return args.first().and_then(|a| {
+                            let arg = crate::model::unwrap_parens(&a.value);
+                            if let Expr::Ident {
+                                name: tname,
+                                span: tspan,
+                            } = arg
+                            {
+                                let base = Self::base_named_type_str(tname);
+                                if self.lookup_binding(st, tname).is_none()
+                                    && self.type_aliases.contains_key(base)
+                                {
+                                    return Some(TypeExpr::Named {
+                                        name: tname.clone(),
+                                        span: *tspan,
+                                    });
+                                }
+                            }
+                            self.ty_of_expr(st, arg)
+                        });
                     }
                     if args.len() == 1 {
                         let is_type_name = crate::const_overflow::fixed_width_int_range(name).is_some()
@@ -1405,8 +1463,17 @@ impl<'a> Checker<'a> {
         let v = crate::model::unwrap_parens(value);
         if n_names == 2 {
             if let Expr::Index { base, .. } = v {
-                if let Some(TypeExpr::Map { value: val_ty, .. }) = self.ty_of_expr(st, base) {
-                    return vec![Some(*val_ty), None];
+                if let Some(base_ty) = self.ty_of_expr(st, base) {
+                    if let TypeExpr::Map { value: val_ty, .. } = self.resolve_type_alias(&base_ty) {
+                        return vec![Some(*val_ty), None];
+                    }
+                }
+            }
+            if let Expr::Receive { chan, .. } = v {
+                if let Some(chan_ty) = self.ty_of_expr(st, chan) {
+                    if let TypeExpr::Chan { elem, .. } = self.resolve_type_alias(&chan_ty) {
+                        return vec![Some(*elem), None];
+                    }
                 }
             }
         }
