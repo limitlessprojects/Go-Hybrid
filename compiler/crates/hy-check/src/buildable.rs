@@ -504,6 +504,13 @@ struct Collector<'a> {
     /// binding mutate the per-iteration copy and the collection never sees
     /// them — hy-check rejects those writes instead (#1480).
     copy_var_scopes: Vec<HashSet<String>>,
+    /// #2901 — `fn`-typed bindings reached through an index (`fs[0]`, `m["a"]`)
+    /// carry their parameter list only in the declared `TypeExpr`, which the
+    /// rendered `type_name_scopes` text cannot express (`[]fn(int) int` renders
+    /// as `[]fn`). Scoped like `set_elem_scopes`, storing the type of the
+    /// INDEXED RESULT (`b[k]`: the element type for a slice, the value type for
+    /// a map) so a call through `b[k](...)` can check its arguments.
+    indexed_ty_scopes: Vec<HashMap<String, Option<TypeExpr>>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
     file_untyped_consts: HashSet<String>,
@@ -565,6 +572,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             kind_scopes: Vec::new(),
             type_name_scopes: Vec::new(),
             set_elem_scopes: Vec::new(),
+            indexed_ty_scopes: Vec::new(),
             copy_var_scopes: Vec::new(),
             file_consts: HashMap::new(),
             file_untyped_consts: HashSet::new(),
@@ -634,6 +642,7 @@ impl<'a> Collector<'a> {
         self.type_name_scopes.push(HashMap::new());
         self.scalar_scopes.push(HashMap::new());
         self.set_elem_scopes.push(HashMap::new());
+        self.indexed_ty_scopes.push(HashMap::new());
         self.copy_var_scopes.push(HashSet::new());
     }
 
@@ -643,6 +652,7 @@ impl<'a> Collector<'a> {
         self.type_name_scopes.pop();
         self.scalar_scopes.pop();
         self.set_elem_scopes.pop();
+        self.indexed_ty_scopes.pop();
         self.copy_var_scopes.pop();
     }
 
@@ -714,7 +724,68 @@ impl<'a> Collector<'a> {
             if let Some(top) = self.set_elem_scopes.last_mut() {
                 top.insert(name.to_string(), None);
             }
+            // #2901: same for the indexed-result type (`indexed_ty_scopes`).
+            if let Some(top) = self.indexed_ty_scopes.last_mut() {
+                top.insert(name.to_string(), None);
+            }
         }
+    }
+
+    /// #2901 — record the declared type of `name[k]` (slice element / map
+    /// value) so a call through `name[k](...)` can reach its parameter list.
+    fn bind_indexed_ty(&mut self, name: &str, ty: Option<TypeExpr>) {
+        if name != "_" && ty.is_some() {
+            if let Some(top) = self.indexed_ty_scopes.last_mut() {
+                top.insert(name.to_string(), ty);
+            }
+        }
+    }
+
+    /// #2901 — the type of `b[k]` when the collection's declared type states it.
+    fn indexed_ty_of_ty(ty: &TypeExpr) -> Option<TypeExpr> {
+        match ty {
+            TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => Some((**elem).clone()),
+            TypeExpr::Map { value, .. } => Some((**value).clone()),
+            _ => None,
+        }
+    }
+
+    /// #2901 — the type of `b[k]` when the initializer of `b` states it
+    /// (`fs := []fn(int) int{...}`, `m := map[string]fn(int) int{...}`, or a
+    /// copy of an already-known binding).
+    fn indexed_ty_of_expr(&self, e: &Expr) -> Option<TypeExpr> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.lookup_indexed_ty(name),
+            Expr::SliceLit { elem: Some(t), .. } => Some((**t).clone()),
+            Expr::MapLit { value, .. } => Some((**value).clone()),
+            Expr::Slice { base, .. } => self.indexed_ty_of_expr(base),
+            Expr::Call { callee, args, .. } => match unwrap_parens(callee) {
+                Expr::Ident { name, .. } if name == "make" => args
+                    .first()
+                    .and_then(|a| self.indexed_ty_of_expr(&a.value)),
+                // `mk()` where `fn mk() []fn(int) int`.
+                Expr::Ident { name, .. } if self.lookup_kind(name).is_none() => {
+                    let head = Checker::base_named_type_str(name);
+                    self.ck
+                        .fns
+                        .get(name.as_str())
+                        .or_else(|| self.ck.fns.get(head))
+                        .filter(|f| f.type_params.is_empty() && f.results.len() == 1)
+                        .and_then(|f| Self::indexed_ty_of_ty(&f.results[0].ty))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn lookup_indexed_ty(&self, name: &str) -> Option<TypeExpr> {
+        for layer in self.indexed_ty_scopes.iter().rev() {
+            if let Some(v) = layer.get(name) {
+                return v.clone();
+            }
+        }
+        None
     }
 
     fn bind_set_elem(&mut self, name: &str, elem: Option<String>) {
@@ -1297,6 +1368,7 @@ impl<'a> Collector<'a> {
             self.set_scalar(&p.name, ps);
             self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
             self.bind_type_name(&p.name, p.ty.render());
+            self.bind_indexed_ty(&p.name, Self::indexed_ty_of_ty(&p.ty));
         }
         for r in &f.results {
             if let Some(rname) = &r.name {
@@ -1498,6 +1570,16 @@ impl<'a> Collector<'a> {
                 _ => None,
             })
             .collect();
+        // #2901: the declared type of `name[k]`, so a call through
+        // `name[k](...)` can reach its parameter list. Computed here and bound
+        // in the loop below (after `bind_kind` shadows the outer binding).
+        let indexed_tys: Vec<Option<TypeExpr>> = (0..l.names.len())
+            .map(|i| match (&l.ty, l.values.len() == l.names.len()) {
+                (Some(t), _) => Self::indexed_ty_of_ty(t),
+                (None, true) => self.indexed_ty_of_expr(&l.values[i]),
+                _ => None,
+            })
+            .collect();
         if let Some(t) = &l.ty {
             let tname = t.render();
             for name in &l.names {
@@ -1510,8 +1592,13 @@ impl<'a> Collector<'a> {
                 }
             }
         }
-        for (((name, kind), scalar), set_elem) in
-            l.names.iter().zip(kinds).zip(scalars).zip(set_elems)
+        for ((((name, kind), scalar), set_elem), indexed_ty) in l
+            .names
+            .iter()
+            .zip(kinds)
+            .zip(scalars)
+            .zip(set_elems)
+            .zip(indexed_tys)
         {
             // #1031: a same-scope `:=` re-define keeps the EXISTING variable
             // (and its type) in Go, so only a fresh binding takes the
@@ -1525,6 +1612,7 @@ impl<'a> Collector<'a> {
                 self.set_scalar(name, scalar);
             }
             self.bind_set_elem(name, set_elem);
+            self.bind_indexed_ty(name, indexed_ty);
             if !track_read {
                 self.exempt(name);
                 continue;
@@ -2261,6 +2349,7 @@ impl<'a> Collector<'a> {
                     self.set_scalar(&p.name, ps);
                     self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
                     self.bind_type_name(&p.name, p.ty.render());
+                    self.bind_indexed_ty(&p.name, Self::indexed_ty_of_ty(&p.ty));
                 }
                 for r in results {
                     if let Some(rname) = &r.name {
@@ -3119,7 +3208,21 @@ impl<'a> Collector<'a> {
                 }
                 None
             }
-            _ => None,
+            // #2901: any other callee expression that yields a fn value — the
+            // result of another call (`mk()(...)`) or an indexed element
+            // (`fs[0](...)`, `m["a"](...)`) — contributes the fn's declared
+            // result kind. Without this the call's result stayed `Unknown`, so
+            // `var s string = mk()(1)`, `x + "a"` and `var s string =
+            // m["a"](1)` all passed `hyb check` and failed `go build`.
+            //
+            // Only the SINGLE-result shape is reported: a multi-result fn type
+            // already has a dedicated diagnostic (T23's `HYB-E2002` counts the
+            // values), and translating it here would add a second diagnostic
+            // for one defect (`fns[0](3, 9)` in a 1-result `return`).
+            _ => match self.kind_of_expr(callee) {
+                OpKind::Fn(res, _) if res.len() == 1 => Some(res),
+                _ => None,
+            },
         }
     }
 
@@ -5802,6 +5905,118 @@ impl<'a> Collector<'a> {
     }
 
     /// Family D1 & Family E (#425): non-function call check + binding-shaped builtin arg checks.
+    /// #2901 — the declared `fn` type of a callee reached through an index, a
+    /// struct field or another call. `None` when the shape is out of reach, so
+    /// an unresolved callee stays fail-open.
+    fn fn_value_ty_of_callee(&self, callee: &Expr) -> Option<TypeExpr> {
+        fn is_fn(t: &TypeExpr) -> bool {
+            matches!(t, TypeExpr::Fn { .. })
+        }
+        match unwrap_parens(callee) {
+            // `mk()(...)` — the declared single result of `mk` is the fn type.
+            Expr::Call { callee: inner, .. } => match unwrap_parens(inner) {
+                Expr::Ident { name, .. } if self.lookup_kind(name).is_none() => {
+                    let head = Checker::base_named_type_str(name);
+                    self.ck
+                        .fns
+                        .get(name.as_str())
+                        .or_else(|| self.ck.fns.get(head))
+                        .filter(|f| f.type_params.is_empty() && f.results.len() == 1)
+                        .map(|f| f.results[0].ty.clone())
+                        .filter(is_fn)
+                }
+                _ => None,
+            },
+            // `fs[0](...)` / `m["a"](...)` — the indexed element's type.
+            Expr::Index { base, .. } => match unwrap_parens(base) {
+                Expr::Ident { name, .. } => self.lookup_indexed_ty(name).filter(is_fn),
+                _ => None,
+            },
+            // `v.cb(...)` — the declared struct field type.
+            Expr::Field { base, name, .. } => {
+                let full = self.struct_name(&self.kind_of_expr(base))?;
+                let base_name = Checker::base_named_type_str(&full);
+                self.ck
+                    .structs
+                    .get(base_name)?
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, t)| t.clone())
+                    .filter(is_fn)
+            }
+            _ => None,
+        }
+    }
+
+    /// #2901 — arity for a call whose callee is not an `Ident` (`mk()(1, 2)`,
+    /// `fs[0](1, 2)`). The `OpKind::Fn` count slot already carries the declared
+    /// parameter count for all three callee shapes, because `kind_of_ty` reads
+    /// it straight off the `TypeExpr::Fn`.
+    fn check_fn_value_arity(&mut self, callee: &Expr, args: &[CallArg], span: Span) {
+        let OpKind::Fn(_, Some(want)) = self.kind_of_expr(callee) else {
+            return;
+        };
+        if want != args.len() && self.multi_value_arg_count(args).is_none() {
+            self.report_local_arity(&callee.render(), want, args.len(), span);
+        }
+    }
+
+    /// #2901 — the parameter types of a `fn(...)` type, ready for
+    /// `kind_of_ty`. The parser reads every parameter word as a NAME and leaves
+    /// `ty` empty for the unnamed spelling (`fn(int) int` parses as
+    /// `Param { name: "int", ty: Named { name: "" } }`), so that shape is
+    /// normalised here: the name holding the type spelling becomes the type.
+    /// Anything still unresolved stays `Unknown`, which keeps the argument
+    /// check fail-open.
+    fn fn_ty_param_types(ty: &TypeExpr) -> Vec<TypeExpr> {
+        let TypeExpr::Fn { params, .. } = ty else {
+            return Vec::new();
+        };
+        params
+            .iter()
+            .map(|p| match &p.ty {
+                TypeExpr::Named { name, span } if name.trim().is_empty() => TypeExpr::Named {
+                    name: p.name.clone(),
+                    span: *span,
+                },
+                other => other.clone(),
+            })
+            .collect()
+    }
+
+    /// #2901 — argument types for a call whose callee is not an `Ident`: the
+    /// declared `fn` type states the parameter list (`mk()("a")`,
+    /// `fs[0]("a")`, `v.cb("a")`).
+    fn check_fn_value_arg_types(&mut self, callee: &Expr, args: &[CallArg]) {
+        let Some(ty) = self.fn_value_ty_of_callee(callee) else {
+            return;
+        };
+        let params = Self::fn_ty_param_types(&ty);
+        if params.len() != args.len() || self.multi_value_arg_count(args).is_some() {
+            return;
+        }
+        for (p, a) in params.iter().zip(args.iter()) {
+            let want = self.kind_of_ty(p, 0);
+            let got = self.kind_of_expr(&a.value);
+            let int_to_float_conflict = want == OpKind::Float
+                && got == OpKind::Int
+                && !self.is_untyped_int_const(&a.value);
+            if kinds_conflict(&want, &got) || int_to_float_conflict {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
+                        a.value.render(),
+                        got.label(),
+                        want.label(),
+                        callee.render()
+                    ),
+                    "argument types must match the callee's declared parameter types",
+                );
+            }
+        }
+    }
+
     fn check_call_operands(&mut self, callee: &Expr, args: &[CallArg], span: Span) {
         let bare = unwrap_parens(callee);
         match bare {
@@ -6009,6 +6224,9 @@ impl<'a> Collector<'a> {
                                 self.report_local_arity(&callee.render(), want, args.len(), span);
                             }
                         }
+                        // #2901: the declared field type also states the
+                        // parameter types, so `v.cb("a")` must be refused.
+                        self.check_fn_value_arg_types(callee, args);
                     }
                 } else if name == "pop" && !has_method {
                     self.check_slice_pop_operands(base, &bk, args, span);
@@ -6068,18 +6286,29 @@ impl<'a> Collector<'a> {
                 }
             }
             _ => {
-                let ck = self.kind_of_expr(bare);
-                if !matches!(ck, OpKind::Unknown | OpKind::Fn(..)) {
-                    self.emit_e1002(
-                        span,
-                        format!(
-                            "cannot call `{}` (type `{}`): `{}` is not a function (HYB-E1002)",
-                            callee.render(),
-                            ck.label(),
-                            ck.label()
-                        ),
-                        "only functions, methods, closures, and type conversions can be called",
-                    );
+                let ck = self.kind_of_expr(callee);
+                match &ck {
+                    // #2901: a callee shape that yields a fn value — the result
+                    // of another call (`mk()(1, 2)`), an indexed element
+                    // (`fs[0](1, 2)`) — is callable, and its declared parameter
+                    // count rides on the kind.
+                    OpKind::Fn(..) => {
+                        self.check_fn_value_arity(callee, args, span);
+                        self.check_fn_value_arg_types(callee, args);
+                    }
+                    ck if !matches!(ck, OpKind::Unknown) => {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "cannot call `{}` (type `{}`): `{}` is not a function (HYB-E1002)",
+                                callee.render(),
+                                ck.label(),
+                                ck.label()
+                            ),
+                            "only functions, methods, closures, and type conversions can be called",
+                        );
+                    }
+                    _ => {}
                 }
             }
         }
