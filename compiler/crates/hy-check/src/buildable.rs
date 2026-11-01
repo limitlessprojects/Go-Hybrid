@@ -686,8 +686,43 @@ impl<'a> Collector<'a> {
                 }
                 None
             }
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let head = match &bk {
+                    OpKind::Struct(s) => s.as_deref(),
+                    OpKind::Pointer(inner) => match &**inner {
+                        OpKind::Struct(s) => s.as_deref(),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(sname) = head {
+                    let base_name = Checker::base_named_type_str(sname);
+                    if let Some(fields) = self.ck.structs.get(base_name) {
+                        for (fname, fty) in fields {
+                            if fname == name {
+                                if let TypeExpr::Slice { elem, .. } = fty {
+                                    return Some(elem.render());
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
             _ => None,
         }
+    }
+
+    fn slice_elem_scalar(&self, e: &Expr) -> Option<&'static str> {
+        let elem_t = self.slice_element_type_name(e)?;
+        if let Some(sc) = canonical_numeric_name(&elem_t) {
+            return Some(sc);
+        }
+        if let Some(alias) = self.ck.type_aliases.get(elem_t.as_str()) {
+            return canonical_numeric_name(&alias.render());
+        }
+        None
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -6514,25 +6549,46 @@ impl<'a> Collector<'a> {
 
                 match (&dk, &sk) {
                     (OpKind::Slice(dst_elem), OpKind::Slice(src_elem)) => {
-                        if copy_element_kinds_conflict(dst_elem, src_elem) {
+                        let kind_conflict = copy_element_kinds_conflict(dst_elem, src_elem);
+                        let scalar_conflict = self.scalar_names_conflict(
+                            self.slice_elem_scalar(dst_arg),
+                            self.slice_elem_scalar(src_arg),
+                        );
+                        if kind_conflict || scalar_conflict {
+                            let dst_label = self
+                                .slice_element_type_name(dst_arg)
+                                .unwrap_or_else(|| dst_elem.label());
+                            let src_label = self
+                                .slice_element_type_name(src_arg)
+                                .unwrap_or_else(|| src_elem.label());
                             self.emit_e1002(
                                 span,
                                 format!(
                                     "arguments to `copy` have different element types: `{}` and `{}` (HYB-E1002)",
-                                    dst_elem.label(),
-                                    src_elem.label()
+                                    dst_label,
+                                    src_label
                                 ),
                                 "arguments to `copy` must have identical element types",
                             );
                         }
                     }
                     (OpKind::Slice(dst_elem), OpKind::Str) => {
-                        if !matches!(**dst_elem, OpKind::Unknown | OpKind::Int) {
+                        let elem_t = self.slice_element_type_name(dst_arg);
+                        let is_byte = self.slice_elem_scalar(dst_arg) == Some("uint8")
+                            || elem_t.as_deref() == Some("byte")
+                            || elem_t.as_deref() == Some("uint8");
+                        let conflict = if let Some(ref _t) = elem_t {
+                            !is_byte
+                        } else {
+                            !matches!(**dst_elem, OpKind::Unknown | OpKind::Int)
+                        };
+                        if conflict {
+                            let label = elem_t.unwrap_or_else(|| dst_elem.label());
                             self.emit_e1002(
                                 span,
                                 format!(
                                     "cannot copy string into slice with element type `{}` (HYB-E1002)",
-                                    dst_elem.label()
+                                    label
                                 ),
                                 "copying from a string requires a byte slice destination (`[]byte`)",
                             );
