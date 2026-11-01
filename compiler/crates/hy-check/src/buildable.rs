@@ -1675,6 +1675,8 @@ impl<'a> Collector<'a> {
             for (name, val) in l.names.iter().zip(&l.values) {
                 if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                } else if let Expr::MapLit { key, value, .. } = unwrap_parens(val) {
+                    self.bind_type_name(name, format!("map[{}]{}", key.render(), value.render()));
                 }
             }
         }
@@ -6343,6 +6345,22 @@ impl<'a> Collector<'a> {
     /// Check method selection too: task callees and bound method values do
     /// not pass through the ordinary call-arity checker (#656).
     fn check_pointer_method_receiver(&mut self, base: &Expr, name: &str, span: Span) {
+        if let Some(elem) = self.set_elem_of_expr(base) {
+            if matches!(name, "insert" | "contains" | "remove") && !self.is_addressable_value_receiver(base) {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "cannot select pointer method `{}` on `{}` (non-addressable `set[{}]` value) — Go refuses taking the address of `{}` (HYB-E1002)",
+                        name,
+                        base.render(),
+                        elem,
+                        base.render()
+                    ),
+                    "assign the value to a local variable first (`v := ...; v.method()`), store `*T` pointers, or declare a value receiver `(self T)`",
+                );
+            }
+            return;
+        }
         let bk = self.kind_of_expr(base);
         let head = Checker::base_named_type_str(name);
         if let OpKind::Struct(Some(sn)) = &bk {
