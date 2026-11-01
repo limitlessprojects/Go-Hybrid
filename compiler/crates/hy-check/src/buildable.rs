@@ -3346,9 +3346,12 @@ impl<'a> Collector<'a> {
         // For slices, arrays, and strings, the index must be an integer.
         self.check_single_value_position(index, "an index expression", /*binding_position=*/ false);
         if let OpKind::Map(key_kind, _) = bk {
+            let int_float_conflict = **key_kind == OpKind::Float
+                && *ik == OpKind::Int
+                && !self.is_untyped_int_const(index);
             if **key_kind != OpKind::Unknown
                 && *ik != OpKind::Unknown
-                && kinds_conflict(key_kind, ik)
+                && (kinds_conflict(key_kind, ik) || int_float_conflict)
             {
                 self.emit_e1002(
                     index.span(),
@@ -3744,12 +3747,15 @@ impl<'a> Collector<'a> {
         for (k, v) in entries {
             if exp_key != OpKind::Unknown {
                 let kk = self.kind_of_expr(k);
+                let int_float_conflict = exp_key == OpKind::Float
+                    && kk == OpKind::Int
+                    && !self.is_untyped_int_const(k);
                 if kk != OpKind::Unknown
                     && kk != exp_key
                     && !(exp_key == OpKind::Float
                         && kk == OpKind::Int
                         && crate::const_overflow::const_int_value(k).is_some())
-                    && kinds_conflict(&exp_key, &kk)
+                    && (kinds_conflict(&exp_key, &kk) || int_float_conflict)
                 {
                     self.emit_e1002(
                         k.span(),
@@ -3769,12 +3775,15 @@ impl<'a> Collector<'a> {
                     continue;
                 }
                 let vk = self.kind_of_expr(v);
+                let int_float_conflict = exp_val == OpKind::Float
+                    && vk == OpKind::Int
+                    && !self.is_untyped_int_const(v);
                 if vk != OpKind::Unknown
                     && vk != exp_val
                     && !(exp_val == OpKind::Float
                         && vk == OpKind::Int
                         && crate::const_overflow::const_int_value(v).is_some())
-                    && kinds_conflict(&exp_val, &vk)
+                    && (kinds_conflict(&exp_val, &vk) || int_float_conflict)
                 {
                     self.emit_e1002(
                         v.span(),
@@ -4134,6 +4143,33 @@ impl<'a> Collector<'a> {
     /// selection on a pointer or addressable struct.
     /// Non-addressable: map index (`m[k]`), function/method call result
     /// (`make_t()`), and struct literal (`T{}`).
+    fn is_untyped_int_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit {
+                kind: LitKind::Int(_) | LitKind::Char(_),
+                ..
+            } => true,
+            Expr::Ident { name, .. } => {
+                if let Some(k) = self.file_consts.get(name) {
+                    return *k == OpKind::Int;
+                }
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        return matches!(self.defines[*id].kind, LocalKind::Const);
+                    }
+                }
+                false
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnOp::Neg) && self.is_untyped_int_const(operand)
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.is_untyped_int_const(lhs) && self.is_untyped_int_const(rhs)
+            }
+            _ => false,
+        }
+    }
+
     fn is_addressable_value_receiver(&self, e: &Expr) -> bool {
         match unwrap_parens(e) {
             Expr::Ident { .. } => true,
