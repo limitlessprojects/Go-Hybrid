@@ -303,6 +303,14 @@ fn copy_element_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
     }
 }
 
+/// Symmetrical element kind conflict check for variadic spread `append(dst, src...)`.
+///
+/// In Go, `append(dst, src...)` requires `dst` and `src` to have identical element types
+/// (except for appending a string to a byte slice).
+fn append_element_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
+    copy_element_kinds_conflict(a, b)
+}
+
 /// Non-nilable types in Go and Hybrid cannot be compared to untyped nil (SPEC §3.1 N1).
 /// Nilable types: pointer, interface, slice, map, channel, function.
 fn is_non_nilable(k: &OpKind) -> bool {
@@ -4263,7 +4271,11 @@ impl<'a> Collector<'a> {
                         let kind_mismatch = elem != *extra_elem
                             && !matches!(elem, OpKind::Unknown)
                             && !matches!(*extra_elem, OpKind::Unknown);
-                        if kinds_conflict(&elem, &extra_elem) || kind_mismatch || ty_mismatch {
+                        if kinds_conflict(&elem, &extra_elem)
+                            || append_element_kinds_conflict(&elem, &extra_elem)
+                            || kind_mismatch
+                            || ty_mismatch
+                        {
                             let (d_label, s_label) = match (dst_elem_ty, src_elem_ty) {
                                 (Some(d), Some(s)) => (format!("[]{}", d), format!("[]{}", s)),
                                 _ => (
