@@ -69,254 +69,200 @@ pub struct TypeShape {
     pub members: &'static [(&'static str, Member)],
 }
 
+const HTTP_REQUEST_MEMBERS: &[(&str, Member)] = &[
+    ("method", field("Method", None)),
+    ("url", field("URL", Some("url.url"))),
+    ("header", field("Header", Some("http.header"))),
+    ("host", field("Host", None)),
+    ("remote_addr", field("RemoteAddr", None)),
+    ("request_uri", field("RequestURI", None)),
+    ("proto", field("Proto", None)),
+    ("content_length", field("ContentLength", None)),
+    ("body", field("Body", None)),
+    ("form", field("Form", Some("url.values"))),
+    ("post_form", field("PostForm", Some("url.values"))),
+    ("user_agent", method("UserAgent", None)),
+    ("referer", method("Referer", None)),
+    ("form_value", method("FormValue", None)),
+    ("post_form_value", method("PostFormValue", None)),
+    ("path_value", method("PathValue", None)),
+    ("parse_form", method("ParseForm", None)),
+    ("context", method("Context", None)),
+    ("clone", method("Clone", Some("http.request"))),
+];
+
+const URL_URL_MEMBERS: &[(&str, Member)] = &[
+    ("scheme", field("Scheme", None)),
+    ("opaque", field("Opaque", None)),
+    ("path", field("Path", None)),
+    ("raw_path", field("RawPath", None)),
+    ("raw_query", field("RawQuery", None)),
+    ("fragment", field("Fragment", None)),
+    ("raw_fragment", field("RawFragment", None)),
+    ("force_query", field("ForceQuery", None)),
+    ("host", field("Host", None)),
+    ("query", method0("Query", Some("url.values"))),
+    ("string", method("String", None)),
+    ("escaped_path", method("EscapedPath", None)),
+    ("hostname", method("Hostname", None)),
+    ("port", method("Port", None)),
+    ("is_abs", method("IsAbs", None)),
+    ("request_uri", method("RequestURI", None)),
+    ("parse", method("Parse", Some("url.url"))),
+    ("join_path", method("JoinPath", Some("url.url"))),
+];
+
+const URL_VALUES_MEMBERS: &[(&str, Member)] = &[
+    ("get", method("Get", None)),
+    ("set", method("Set", None)),
+    ("add", method("Add", None)),
+    ("del", method("Del", None)),
+    ("has", method("Has", None)),
+    ("encode", method("Encode", None)),
+];
+
+const HTTP_RESPONSE_WRITER_MEMBERS: &[(&str, Member)] = &[
+    ("header", method0("Header", Some("http.header"))),
+    ("write", method("Write", None)),
+    ("write_header", method("WriteHeader", None)),
+];
+
+const HTTP_HEADER_MEMBERS: &[(&str, Member)] = &[
+    ("get", method("Get", None)),
+    ("set", method("Set", None)),
+    ("add", method("Add", None)),
+    ("del", method("Del", None)),
+    ("values", method("Values", None)),
+    ("clone", method("Clone", Some("http.header"))),
+    ("write", method("Write", None)),
+];
+
+const HTTP_HANDLER_MEMBERS: &[(&str, Member)] = &[("serve_http", method("ServeHTTP", None))];
+
+const HTTP_SERVE_MUX_MEMBERS: &[(&str, Member)] = &[
+    ("handle", method("Handle", None)),
+    ("handle_func", method("HandleFunc", None)),
+    ("serve_http", method("ServeHTTP", None)),
+];
+
+const TIME_DURATION_MEMBERS: &[(&str, Member)] = &[
+    ("milliseconds", method0("Milliseconds", None)),
+    ("microseconds", method0("Microseconds", None)),
+    ("nanoseconds", method0("Nanoseconds", None)),
+    ("seconds", method0("Seconds", None)),
+    ("minutes", method0("Minutes", None)),
+    ("hours", method0("Hours", None)),
+    ("string", method("String", None)),
+    ("abs", method("Abs", Some("time.duration"))),
+    ("truncate", method("Truncate", Some("time.duration"))),
+    ("round", method("Round", Some("time.duration"))),
+];
+
+const TIME_TIME_MEMBERS: &[(&str, Member)] = &[
+    ("sub", method("Sub", Some("time.duration"))),
+    ("add", method("Add", Some("time.time"))),
+    ("before", method("Before", None)),
+    ("after", method("After", None)),
+    ("equal", method("Equal", None)),
+    ("is_zero", method("IsZero", None)),
+    ("unix", method("Unix", None)),
+    ("unix_milli", method("UnixMilli", None)),
+    ("unix_micro", method("UnixMicro", None)),
+    ("unix_nano", method("UnixNano", None)),
+    ("utc", method("UTC", Some("time.time"))),
+    ("local", method("Local", Some("time.time"))),
+    ("format", method("Format", None)),
+    ("string", method("String", None)),
+    ("truncate", method("Truncate", Some("time.time"))),
+    ("round", method("Round", Some("time.time"))),
+];
+
+const SERDE_JSON_VALUE_MEMBERS: &[(&str, Member)] = &[
+    ("array", method("Array", None)),
+    ("int", method("Int", None)),
+    ("string", method("String", None)),
+    ("set", method("Set", None)),
+    ("push_string", method("PushString", None)),
+];
+
+const SYNC_MUTEX_MEMBERS: &[(&str, Member)] = &[
+    ("lock", method("Lock", None)),
+    ("unlock", method("Unlock", None)),
+    ("try_lock", method("TryLock", None)),
+];
+
+const SYNC_RWMUTEX_MEMBERS: &[(&str, Member)] = &[
+    ("lock", method("Lock", None)),
+    ("unlock", method("Unlock", None)),
+    ("try_lock", method("TryLock", None)),
+    ("rlock", method("RLock", None)),
+    ("runlock", method("RUnlock", None)),
+    ("try_rlock", method("TryRLock", None)),
+];
+
+const SYNC_WAIT_GROUP_MEMBERS: &[(&str, Member)] = &[
+    ("add", method("Add", None)),
+    ("done", method("Done", None)),
+    ("wait", method("Wait", None)),
+];
+
+const SYNC_ONCE_MEMBERS: &[(&str, Member)] = &[("do", method("Do", None))];
+
+const STRINGS_BUILDER_MEMBERS: &[(&str, Member)] = &[
+    ("write", method("Write", None)),
+    ("write_byte", method("WriteByte", None)),
+    ("write_rune", method("WriteRune", None)),
+    ("write_string", method("WriteString", None)),
+    ("string", method("String", None)),
+    ("len", method("Len", None)),
+    ("cap", method("Cap", None)),
+    ("reset", method("Reset", None)),
+    ("grow", method("Grow", None)),
+];
+
+const ATOMIC_BOOL_MEMBERS: &[(&str, Member)] = &[
+    ("load", method("Load", None)),
+    ("store", method("Store", None)),
+    ("swap", method("Swap", None)),
+    ("compare_and_swap", method("CompareAndSwap", None)),
+];
+
+const ATOMIC_INT_MEMBERS: &[(&str, Member)] = &[
+    ("load", method("Load", None)),
+    ("store", method("Store", None)),
+    ("add", method("Add", None)),
+    ("and", method("And", None)),
+    ("or", method("Or", None)),
+    ("swap", method("Swap", None)),
+    ("compare_and_swap", method("CompareAndSwap", None)),
+];
+
 /// The curated table. Keys are hy type names; every entry names its pinning
 /// example. `http.header` rides along (response_writer.header's result) so
 /// the chain continues if an example needs it.
 pub static SHAPES: &[(&str, TypeShape)] = &[
-    (
-        // 06: r.method, r.url (fields on *http.Request)
-        "http.request",
-        TypeShape {
-            members: &[
-                ("method", field("Method", None)),
-                ("url", field("URL", Some("url.url"))),
-                ("header", field("Header", Some("http.header"))),
-                ("host", field("Host", None)),
-                ("remote_addr", field("RemoteAddr", None)),
-                ("body", field("Body", None)),
-            ],
-        },
-    ),
-    (
-        // 06: r.url.path (field), r.url.query (zero-arg METHOD — Go parses
-        // RawQuery on every Query() call; the hy surface hides that).
-        "url.url",
-        TypeShape {
-            members: &[
-                ("path", field("Path", None)),
-                ("raw_path", field("RawPath", None)),
-                ("raw_query", field("RawQuery", None)),
-                ("host", field("Host", None)),
-                ("query", method0("Query", Some("url.values"))),
-            ],
-        },
-    ),
-    (
-        // 06: r.url.query.get("a") — url.Values.Get (first value for a key).
-        "url.values",
-        TypeShape {
-            members: &[
-                ("get", method("Get", None)),
-                ("set", method("Set", None)),
-                ("has", method("Has", None)),
-                ("encode", method("Encode", None)),
-            ],
-        },
-    ),
-    (
-        // 06: w as http.ResponseWriter — header()/write/writeHeader.
-        "http.response_writer",
-        TypeShape {
-            members: &[
-                ("header", method0("Header", Some("http.header"))),
-                ("write", method("Write", None)),
-                ("write_header", method("WriteHeader", None)),
-            ],
-        },
-    ),
-    (
-        // http.Header — the result of w.header(); get/set/add.
-        "http.header",
-        TypeShape {
-            members: &[
-                ("get", method("Get", None)),
-                ("set", method("Set", None)),
-                ("add", method("Add", None)),
-            ],
-        },
-    ),
-    (
-        // 06: next.serve_http(w, r) — the http.Handler interface's method.
-        "http.handler",
-        TypeShape {
-            members: &[("serve_http", method("ServeHTTP", None))],
-        },
-    ),
-    (
-        // 06: mux.handle(path, handler) / mux.handle_func.
-        "http.serve_mux",
-        TypeShape {
-            members: &[
-                ("handle", method("Handle", None)),
-                ("handle_func", method("HandleFunc", None)),
-                ("serve_http", method("ServeHTTP", None)),
-            ],
-        },
-    ),
-    (
-        // 10: dt.milliseconds — hy spells Duration's methods property-style;
-        // Go requires the call parens (MethodZero).
-        "time.duration",
-        TypeShape {
-            members: &[
-                ("milliseconds", method0("Milliseconds", None)),
-                ("microseconds", method0("Microseconds", None)),
-                ("nanoseconds", method0("Nanoseconds", None)),
-                ("seconds", method0("Seconds", None)),
-                ("minutes", method0("Minutes", None)),
-                ("hours", method0("Hours", None)),
-            ],
-        },
-    ),
-    (
-        // 10: t0 from time.now() — typed so since(t0) chains cleanly; no
-        // members the pinned surface uses yet.
-        "time.time",
-        TypeShape { members: &[] },
-    ),
-    (
-        // 05: methods on a serde_json handle value (all Methods — Go's
-        // binding spells them as value-receiver calls).
-        "serde_json.value",
-        TypeShape {
-            members: &[
-                ("array", method("Array", None)),
-                ("int", method("Int", None)),
-                ("string", method("String", None)),
-                ("set", method("Set", None)),
-                ("push_string", method("PushString", None)),
-            ],
-        },
-    ),
-    (
-        // 18: sync.Mutex — value methods on a user-struct field
-        // (`stats.mu.lock()` → `stats.mu.Lock()`).
-        "sync.mutex",
-        TypeShape {
-            members: &[
-                ("lock", method("Lock", None)),
-                ("unlock", method("Unlock", None)),
-                ("try_lock", method("TryLock", None)),
-            ],
-        },
-    ),
-    (
-        // sync.RWMutex rides along for the pool family (rlock/runlock).
-        "sync.rwmutex",
-        TypeShape {
-            members: &[
-                ("lock", method("Lock", None)),
-                ("unlock", method("Unlock", None)),
-                ("try_lock", method("TryLock", None)),
-                ("rlock", method("RLock", None)),
-                ("runlock", method("RUnlock", None)),
-                ("try_rlock", method("TryRLock", None)),
-            ],
-        },
-    ),
-    (
-        // Canonical snake_case spelling blessed by hy-check/src/foreign.rs
-        // (`is_curated_package_member("sync", "rw_mutex")`).
-        "sync.rw_mutex",
-        TypeShape {
-            members: &[
-                ("lock", method("Lock", None)),
-                ("unlock", method("Unlock", None)),
-                ("try_lock", method("TryLock", None)),
-                ("rlock", method("RLock", None)),
-                ("runlock", method("RUnlock", None)),
-                ("try_rlock", method("TryRLock", None)),
-            ],
-        },
-    ),
-    (
-        // Scalar sync/atomic struct types recognized as class-2 sendable by
-        // hy-check/src/foreign.rs (SCALAR_ATOMICS).
-        "atomic.bool",
-        TypeShape {
-            members: &[
-                ("load", method("Load", None)),
-                ("store", method("Store", None)),
-                ("swap", method("Swap", None)),
-                ("compare_and_swap", method("CompareAndSwap", None)),
-            ],
-        },
-    ),
-    (
-        "atomic.int32",
-        TypeShape {
-            members: &[
-                ("load", method("Load", None)),
-                ("store", method("Store", None)),
-                ("add", method("Add", None)),
-                ("and", method("And", None)),
-                ("or", method("Or", None)),
-                ("swap", method("Swap", None)),
-                ("compare_and_swap", method("CompareAndSwap", None)),
-            ],
-        },
-    ),
-    (
-        // 17: atomic.int64 — Go's atomic.Int64 STRUCT (methods Add/And/Or/Load/
-        // Store/Swap/CompareAndSwap with pointer receivers; Go auto-addresses
-        // value receivers, so both `var hits atomic.Int64` and `hits *atomic.
-        // Int64` call `hits.Add(1)` identically). hy spells the methods
-        // lowercase; the shape table carries the exact Go names.
-        "atomic.int64",
-        TypeShape {
-            members: &[
-                ("load", method("Load", None)),
-                ("store", method("Store", None)),
-                ("add", method("Add", None)),
-                ("and", method("And", None)),
-                ("or", method("Or", None)),
-                ("swap", method("Swap", None)),
-                ("compare_and_swap", method("CompareAndSwap", None)),
-            ],
-        },
-    ),
-    (
-        "atomic.uint32",
-        TypeShape {
-            members: &[
-                ("load", method("Load", None)),
-                ("store", method("Store", None)),
-                ("add", method("Add", None)),
-                ("and", method("And", None)),
-                ("or", method("Or", None)),
-                ("swap", method("Swap", None)),
-                ("compare_and_swap", method("CompareAndSwap", None)),
-            ],
-        },
-    ),
-    (
-        "atomic.uint64",
-        TypeShape {
-            members: &[
-                ("load", method("Load", None)),
-                ("store", method("Store", None)),
-                ("add", method("Add", None)),
-                ("and", method("And", None)),
-                ("or", method("Or", None)),
-                ("swap", method("Swap", None)),
-                ("compare_and_swap", method("CompareAndSwap", None)),
-            ],
-        },
-    ),
-    (
-        "atomic.uintptr",
-        TypeShape {
-            members: &[
-                ("load", method("Load", None)),
-                ("store", method("Store", None)),
-                ("add", method("Add", None)),
-                ("and", method("And", None)),
-                ("or", method("Or", None)),
-                ("swap", method("Swap", None)),
-                ("compare_and_swap", method("CompareAndSwap", None)),
-            ],
-        },
-    ),
+    ("http.request", TypeShape { members: HTTP_REQUEST_MEMBERS }),
+    ("url.url", TypeShape { members: URL_URL_MEMBERS }),
+    ("url.values", TypeShape { members: URL_VALUES_MEMBERS }),
+    ("http.response_writer", TypeShape { members: HTTP_RESPONSE_WRITER_MEMBERS }),
+    ("http.header", TypeShape { members: HTTP_HEADER_MEMBERS }),
+    ("http.handler", TypeShape { members: HTTP_HANDLER_MEMBERS }),
+    ("http.serve_mux", TypeShape { members: HTTP_SERVE_MUX_MEMBERS }),
+    ("time.duration", TypeShape { members: TIME_DURATION_MEMBERS }),
+    ("time.time", TypeShape { members: TIME_TIME_MEMBERS }),
+    ("serde_json.value", TypeShape { members: SERDE_JSON_VALUE_MEMBERS }),
+    ("sync.mutex", TypeShape { members: SYNC_MUTEX_MEMBERS }),
+    ("sync.rwmutex", TypeShape { members: SYNC_RWMUTEX_MEMBERS }),
+    ("sync.rw_mutex", TypeShape { members: SYNC_RWMUTEX_MEMBERS }),
+    ("sync.wait_group", TypeShape { members: SYNC_WAIT_GROUP_MEMBERS }),
+    ("sync.once", TypeShape { members: SYNC_ONCE_MEMBERS }),
+    ("strings.builder", TypeShape { members: STRINGS_BUILDER_MEMBERS }),
+    ("atomic.bool", TypeShape { members: ATOMIC_BOOL_MEMBERS }),
+    ("atomic.int32", TypeShape { members: ATOMIC_INT_MEMBERS }),
+    ("atomic.int64", TypeShape { members: ATOMIC_INT_MEMBERS }),
+    ("atomic.uint32", TypeShape { members: ATOMIC_INT_MEMBERS }),
+    ("atomic.uint64", TypeShape { members: ATOMIC_INT_MEMBERS }),
+    ("atomic.uintptr", TypeShape { members: ATOMIC_INT_MEMBERS }),
 ];
 
 /// Result shapes for binding-value methods: (descriptor type, method) →
@@ -329,6 +275,9 @@ pub static METHOD_RESULTS: &[(&str, &str, (u8, bool))] = &[
     ("serde_json.value", "string", (1, true)),
     ("serde_json.value", "set", (0, true)),
     ("serde_json.value", "push_string", (0, true)),
+    ("http.request", "parse_form", (0, true)),
+    ("http.header", "write", (0, true)),
+    ("strings.builder", "write_byte", (0, true)),
 ];
 
 pub fn lookup_method_results(ty: &str, name: &str) -> Option<(u8, bool)> {
@@ -377,26 +326,28 @@ pub struct ParamDesc {
     pub pointer: bool,
 }
 
+const HTTP_HANDLER_PARAMS: &[ParamDesc] = &[
+    ParamDesc {
+        name: "w",
+        ty_key: "http.response_writer",
+        go: "http.ResponseWriter",
+        pointer: false,
+    },
+    ParamDesc {
+        name: "r",
+        ty_key: "http.request",
+        go: "http.Request",
+        pointer: true,
+    },
+];
+
 pub static CONVERSIONS: &[(&str, Conversion)] = &[(
     // Pinned by example 06. http.Handler is an INTERFACE — a bare func
     // literal does not implement it; Go's conversion type is HandlerFunc.
     "http.handler",
     Conversion {
         go: "http.HandlerFunc",
-        params: &[
-            ParamDesc {
-                name: "w",
-                ty_key: "http.response_writer",
-                go: "http.ResponseWriter",
-                pointer: false,
-            },
-            ParamDesc {
-                name: "r",
-                ty_key: "http.request",
-                go: "http.Request",
-                pointer: true,
-            },
-        ],
+        params: HTTP_HANDLER_PARAMS,
         propagate: Some("w"),
     },
 )];
@@ -525,6 +476,7 @@ pub static RUST_CRATES: &[RustCrateDesc] = &[
 pub static RUST_TYPES: &[(&str, &str, &str)] = &[
     // (hy type, binding root, Go type)
     ("serde_json.value", "jsonbinding", "Value"),
+    ("serde_json.Value", "jsonbinding", "Value"),
 ];
 
 pub fn lookup_rust_type(hy_ty: &str) -> Option<(&'static str, &'static str)> {
@@ -575,9 +527,7 @@ pub fn import_path_of(root: &str) -> String {
         // path is `atomic`, but the PATH is sync/atomic (the naive last-
         // segment import `"atomic"` is not in std).
         "atomic" => "sync/atomic".to_string(),
-        "filepath" => "path/filepath".to_string(),
         "json" => "encoding/json".to_string(),
-        "url" => "net/url".to_string(),
         "sha3binding" => "hybrid.program/sha3binding".to_string(),
         "jsonbinding" => "hybrid.program/jsonbinding".to_string(),
         "regexbinding" => "hybrid.program/regexbinding".to_string(),
