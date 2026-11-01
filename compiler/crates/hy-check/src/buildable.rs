@@ -690,6 +690,37 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #2921: Resolves the element type text when indexing a slice, array, or map.
+    fn index_element_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    if let Some(elem) = tname.strip_prefix("[]") {
+                        return Some(elem.to_string());
+                    }
+                    if let Some(rest) = tname.strip_prefix("map[") {
+                        let mut depth = 1;
+                        for (i, c) in rest.char_indices() {
+                            if c == '[' {
+                                depth += 1;
+                            } else if c == ']' {
+                                depth -= 1;
+                                if depth == 0 {
+                                    return Some(rest[i + 1..].trim().to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Expr::SliceLit { elem: Some(t), .. } => Some(t.render()),
+            Expr::MapLit { value, .. } => value.as_ref().map(|t| t.render()),
+            _ => self.slice_element_type_name(e),
+        }
+    }
+
     /// A name that shadows checked defines but is not itself checked.
     fn exempt(&mut self, name: &str) {
         if name != "_" {
@@ -758,42 +789,144 @@ impl<'a> Collector<'a> {
                     .and_then(|f| Self::set_elem_of_ty(&f.results[0].ty)),
                 _ => None,
             },
+            Expr::Index { base, .. } => {
+                if let Some(elem_ty) = self.index_element_type_name(base) {
+                    if let Some(inner) = elem_ty
+                        .strip_prefix("set[")
+                        .and_then(|r| r.strip_suffix(']'))
+                    {
+                        return Some(inner.to_string());
+                    }
+                }
+                None
+            }
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let full_name = self.struct_name(&bk)?;
+                let base_name = Checker::base_named_type_str(&full_name);
+                let fields = self.ck.structs.get(base_name)?;
+                let (_, ty) = fields.iter().find(|(n, _)| n == name)?;
+                Self::set_elem_of_ty(ty)
+            }
             _ => None,
         }
     }
 
-    /// #2474: `s.insert(v)` / `s.contains(v)` / `s.remove(v)` on a `set[T]`
-    /// need `v` of type `T`; the prelude's Go signature takes `T`, so a
-    /// mismatched argument passed `hyb check` and failed `go build`.
-    fn check_set_method_arg(&mut self, callee: &Expr, args: &[CallArg]) {
+    /// #2474, #2921: `set[T]` methods: validate method names, addressability, arity, and argument types.
+    fn check_set_method_call(&mut self, callee: &Expr, args: &[CallArg], span: Span) {
         let Expr::Field { base, name, .. } = unwrap_parens(callee) else {
             return;
         };
-        if !matches!(name.as_str(), "insert" | "contains" | "remove") || args.len() != 1 {
-            return;
-        }
         let Some(elem) = self.set_elem_of_expr(base) else {
             return;
         };
-        let want = self.kind_of_named(&elem, 0);
-        let got = self.kind_of_expr(&args[0].value);
-        let int_to_float_conflict = want == OpKind::Float
-            && got == OpKind::Int
-            && !self.is_untyped_int_const(&args[0].value);
-        if kinds_conflict(&want, &got) || int_to_float_conflict {
-            self.emit_e1002(
-                args[0].value.span(),
-                format!(
-                    "cannot use `{}` (type `{}`) as `{}` value in argument to `{}.{}` on `set[{}]` (HYB-E1002)",
-                    args[0].value.render(),
-                    got.label(),
-                    want.label(),
-                    base.render(),
-                    name,
-                    elem
-                ),
-                "a set's insert/contains/remove take a value of the set's element type",
-            );
+        let set_label = format!("set[{}]", elem);
+        match name.as_str() {
+            "insert" | "contains" | "remove" => {
+                if !self.is_addressable_value_receiver(base) {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "cannot select pointer method `{}` on `{}` (non-addressable `{}` value) — Go refuses taking the address of `{}` (HYB-E1002)",
+                            name,
+                            base.render(),
+                            set_label,
+                            base.render()
+                        ),
+                        "assign the set to a local variable first (`s := ...; s.method()`)",
+                    );
+                    return;
+                }
+                if args.len() != 1 {
+                    let msg = if args.is_empty() {
+                        format!(
+                            "method `{}` on `{}` takes 1 argument but is called with 0 — Go refuses `not enough arguments in call to {}.{}` (HYB-E1002)",
+                            name,
+                            set_label,
+                            base.render(),
+                            name
+                        )
+                    } else {
+                        format!(
+                            "method `{}` on `{}` takes 1 argument but is called with {} — Go refuses `too many arguments in call to {}.{}` (HYB-E1002)",
+                            name,
+                            set_label,
+                            args.len(),
+                            base.render(),
+                            name
+                        )
+                    };
+                    self.emit_e1002(
+                        span,
+                        msg,
+                        format!(
+                            "`{}.{}` expects exactly 1 argument matching the set element type",
+                            base.render(),
+                            name
+                        ),
+                    );
+                } else {
+                    let want = self.kind_of_named(&elem, 0);
+                    let got = self.kind_of_expr(&args[0].value);
+                    let int_to_float_conflict = want == OpKind::Float
+                        && got == OpKind::Int
+                        && !self.is_untyped_int_const(&args[0].value);
+                    if kinds_conflict(&want, &got) || int_to_float_conflict {
+                        self.emit_e1002(
+                            args[0].value.span(),
+                            format!(
+                                "cannot use `{}` (type `{}`) as `{}` value in argument to `{}.{}` on `{}` (HYB-E1002)",
+                                args[0].value.render(),
+                                got.label(),
+                                want.label(),
+                                base.render(),
+                                name,
+                                set_label
+                            ),
+                            "a set's insert/contains/remove take a value of the set's element type",
+                        );
+                    }
+                }
+            }
+            "len" => {
+                if !args.is_empty() {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "method `len` on `{}` takes 0 arguments but is called with {} — Go refuses `too many arguments in call to {}.len` (HYB-E1002)",
+                            set_label,
+                            args.len(),
+                            base.render()
+                        ),
+                        format!("`{}.len` takes no arguments", base.render()),
+                    );
+                }
+            }
+            "pop" => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "cannot call `.pop()` on `{}` (type `{}`) — `.pop()` is only defined on slices `[]T` (HYB-E1002)",
+                        base.render(),
+                        set_label
+                    ),
+                    "`.pop()` is a slice operation (`[]T`); sets do not support `.pop()`",
+                );
+            }
+            _ => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`{}` has no field or method `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                        base.render(),
+                        name,
+                        set_label,
+                        base.render(),
+                        name
+                    ),
+                    "set[T] only provides `.insert(v)`, `.contains(v)`, `.remove(v)`, and `.len()`",
+                );
+            }
         }
     }
 
@@ -1927,6 +2060,10 @@ impl<'a> Collector<'a> {
     }
 
     fn iterate_var_kinds(&self, expr: &Expr, n_vars: usize) -> Vec<OpKind> {
+        if let Some(elem) = self.set_elem_of_expr(expr) {
+            let elem_kind = self.kind_of_named(&elem, 0);
+            return vec![elem_kind; n_vars.max(1)];
+        }
         match self.kind_of_expr(expr) {
             OpKind::Slice(e) | OpKind::Array(e) | OpKind::Chan(e) => {
                 if n_vars >= 2 {
@@ -2232,7 +2369,7 @@ impl<'a> Collector<'a> {
                     self.check_multi_value_arg_arity(callee, args, *span);
                 }
                 self.check_call_operands(callee, args, *span);
-                self.check_set_method_arg(callee, args);
+                self.check_set_method_call(callee, args, *span);
                 self.check_option_method_arg(callee, args);
             }
             Expr::StructLit { ty, fields, span } => {
@@ -3153,6 +3290,14 @@ impl<'a> Collector<'a> {
                         "is_some" | "is_none" if args.is_empty() => {
                             return Some(vec![OpKind::Bool])
                         }
+                        _ => {}
+                    }
+                }
+                if let Some(_elem) = self.set_elem_of_expr(base) {
+                    match name.as_str() {
+                        "insert" | "contains" if args.len() == 1 => return Some(vec![OpKind::Bool]),
+                        "len" if args.is_empty() => return Some(vec![OpKind::Int]),
+                        "remove" if args.len() == 1 => return Some(Vec::new()),
                         _ => {}
                     }
                 }
