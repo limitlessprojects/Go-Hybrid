@@ -735,11 +735,12 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                             if may_share {
                                 ck.record_may_share(&mut st, name, expr);
                             }
-                            if is_ref {
-                                if let Some(root) = expr.root_ident() {
-                                    if ck.lookup_binding(&st, root).is_some() {
-                                        st.aliases.insert(name.clone(), root.to_string());
-                                    }
+                            if let Some(root) = expr.root_ident() {
+                                if is_ref && ck.lookup_binding(&st, root).is_some() {
+                                    st.aliases.insert(name.clone(), root.to_string());
+                                }
+                                if may_share && ck.binding_may_share(&st, root) {
+                                    st.share_edge(name, root);
                                 }
                             }
                             if let Some(b) = st.env_lookup_mut(name) {
