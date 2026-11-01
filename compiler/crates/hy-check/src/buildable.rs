@@ -5181,6 +5181,20 @@ impl<'a> Collector<'a> {
         ik: &OpKind,
         span: Span,
     ) {
+        if let Some(base_e) = base_expr {
+            if let Some(elem) = self.set_elem_of_expr(base_e) {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "cannot index `{}` (type `set[{}]`) — indexing requires a slice, array, map, or string (HYB-E1002)",
+                        base_str,
+                        elem
+                    ),
+                    "only slices, arrays, maps, and strings can be indexed with `x[i]`",
+                );
+                return;
+            }
+        }
         let indexable = matches!(
             bk,
             OpKind::Unknown
@@ -5330,6 +5344,18 @@ impl<'a> Collector<'a> {
         hi: Option<&Expr>,
         span: Span,
     ) {
+        if let Some(elem) = self.set_elem_of_expr(base) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot slice `{}` (type `set[{}]`) — slicing requires a slice, array, or string (HYB-E1002)",
+                    base.render(),
+                    elem
+                ),
+                "only slices, arrays, and strings support `x[lo:hi]` slicing",
+            );
+            return;
+        }
         let sliceable = matches!(
             bk,
             OpKind::Unknown | OpKind::Slice(_) | OpKind::Array(_) | OpKind::Str
@@ -6403,6 +6429,18 @@ impl<'a> Collector<'a> {
                 if builtins_already_flags_len_cap(op, true) {
                     return;
                 }
+                if let Some(elem) = self.set_elem_of_expr(op) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "invalid argument `{}` (type `set[{}]`) for built-in `cap` (HYB-E2005)",
+                            op.render(),
+                            elem
+                        ),
+                        "`cap` accepts a slice, array, or channel — maps, strings, and sets have no capacity",
+                    );
+                    return;
+                }
                 let ak = self.kind_of_expr(op);
                 let ok = matches!(
                     ak,
@@ -6429,6 +6467,18 @@ impl<'a> Collector<'a> {
                 }
                 let op = &args[0].value;
                 if builtins_already_flags_close(op) {
+                    return;
+                }
+                if let Some(elem) = self.set_elem_of_expr(op) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "cannot close non-channel `{}` (type `set[{}]`) (HYB-E2005)",
+                            op.render(),
+                            elem
+                        ),
+                        "`close` requires a bidirectional or send-only channel (`chan T` or `chan<- T`)",
+                    );
                     return;
                 }
                 let ak = self.kind_of_expr(op);
@@ -6541,6 +6591,30 @@ impl<'a> Collector<'a> {
                 }
                 let dst_arg = &args[0].value;
                 let src_arg = &args[1].value;
+                if let Some(elem) = self.set_elem_of_expr(dst_arg) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "first argument to `copy` must be a slice, found `{}` (type `set[{}]`) (HYB-E2005)",
+                            dst_arg.render(),
+                            elem
+                        ),
+                        "the first argument to `copy(dst, src)` must be a slice (`[]T`)",
+                    );
+                    return;
+                }
+                if let Some(elem) = self.set_elem_of_expr(src_arg) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "second argument to `copy` must be a slice or string, found `{}` (type `set[{}]`) (HYB-E2005)",
+                            src_arg.render(),
+                            elem
+                        ),
+                        "the second argument to `copy(dst, src)` must be a slice (`[]T`) or string",
+                    );
+                    return;
+                }
                 let dk = self.kind_of_expr(dst_arg);
                 let sk = self.kind_of_expr(src_arg);
 
@@ -6604,6 +6678,18 @@ impl<'a> Collector<'a> {
                     return; // arity handled by builtins.rs
                 }
                 let op = &args[0].value;
+                if let Some(elem) = self.set_elem_of_expr(op) {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "cannot clear non-slice/map `{}` (type `set[{}]`) (HYB-E2005)",
+                            op.render(),
+                            elem
+                        ),
+                        "`clear` requires a slice or map operand",
+                    );
+                    return;
+                }
                 let ak = self.kind_of_expr(op);
                 if !matches!(ak, OpKind::Unknown | OpKind::Slice(_) | OpKind::Map(_, _)) {
                     self.emit_e2005(
