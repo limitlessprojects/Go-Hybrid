@@ -155,6 +155,7 @@ impl<'a> Checker<'a> {
                         }
                     }
                     self.check_slot_loan_rebind(st, stmt);
+                    self.rebind_closure_assign_for_emit_guard(st, targets, *op, values);
                     self.mark_slot_loans_assign(st, targets, *op, values);
                 }
             }
@@ -384,6 +385,78 @@ impl<'a> Checker<'a> {
                 if rhs_slot_loan {
                     if let Some(b) = st.env_lookup_mut(name) {
                         b.slot_loan = true;
+                    }
+                }
+            }
+        } else if l.values.len() == 1 && l.names.len() > 1 {
+            let shapes = self.multi_value_shapes(st, &l.values[0], l.names.len());
+            let tys = self.multi_value_tys(st, &l.values[0], l.names.len());
+            let resolved: Vec<(String, TypeShape, Option<TypeExpr>)> = l
+                .names
+                .iter()
+                .zip(shapes)
+                .zip(tys)
+                .map(|((name, shape), ty)| {
+                    let (shape, ty) = match (&l.ty, shape) {
+                        (Some(t), TypeShape::Unknown) => (self.shape_of_type(t), Some(t.clone())),
+                        (_, s) => (s, ty.or_else(|| l.ty.clone())),
+                    };
+                    (name.clone(), shape, ty)
+                })
+                .collect();
+            for (name, shape, ty) in resolved {
+                self.define_binding(st, &name, shape, ty, immutable, false, is_let);
+            }
+        }
+    }
+
+    fn rebind_closure_assign_for_emit_guard(
+        &self,
+        st: &mut FnState,
+        targets: &[Place],
+        op: AssignOp,
+        values: &[Expr],
+    ) {
+        if op != AssignOp::Assign {
+            return;
+        }
+        if values.len() == targets.len() {
+            let rhs_info: Vec<(TypeShape, Option<TypeExpr>)> = values
+                .iter()
+                .map(|v| (self.shape_of_expr(st, v), self.ty_of_expr(st, v)))
+                .collect();
+            for (t, (shape, ty)) in targets.iter().zip(rhs_info) {
+                let PlaceKind::Ident(name) = &t.kind else {
+                    continue;
+                };
+                if name == "_" {
+                    continue;
+                }
+                if let Some(b) = st.env_lookup_mut(name) {
+                    if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
+                        b.shape = shape;
+                    }
+                    if ty.is_some() || b.ty.is_none() {
+                        b.ty = ty;
+                    }
+                }
+            }
+        } else if values.len() == 1 && targets.len() > 1 {
+            let shapes = self.multi_value_shapes(st, &values[0], targets.len());
+            let tys = self.multi_value_tys(st, &values[0], targets.len());
+            for ((t, shape), ty) in targets.iter().zip(shapes).zip(tys) {
+                let PlaceKind::Ident(name) = &t.kind else {
+                    continue;
+                };
+                if name == "_" {
+                    continue;
+                }
+                if let Some(b) = st.env_lookup_mut(name) {
+                    if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
+                        b.shape = shape;
+                    }
+                    if ty.is_some() || b.ty.is_none() {
+                        b.ty = ty;
                     }
                 }
             }
