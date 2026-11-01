@@ -77,6 +77,7 @@ pub(crate) enum OpKind {
     Interface,
     Int,
     Float,
+    Complex,
     Bool,
     Str,
     Slice(Box<OpKind>),
@@ -99,7 +100,7 @@ pub(crate) enum OpKind {
 
 impl OpKind {
     fn is_numeric(&self) -> bool {
-        matches!(self, OpKind::Int | OpKind::Float)
+        matches!(self, OpKind::Int | OpKind::Float | OpKind::Complex)
     }
 
     fn label(&self) -> String {
@@ -108,6 +109,7 @@ impl OpKind {
             OpKind::Interface => "any".to_string(),
             OpKind::Int => "int".to_string(),
             OpKind::Float => "float64".to_string(),
+            OpKind::Complex => "complex128".to_string(),
             OpKind::Bool => "bool".to_string(),
             OpKind::Str => "string".to_string(),
             OpKind::Slice(e) => format!("[]{}", e.label()),
@@ -215,6 +217,8 @@ fn canonical_numeric_name(name: &str) -> Option<&'static str> {
         "uintptr" => "uintptr",
         "float32" | "f32" => "float32",
         "float64" | "f64" => "float64",
+        "complex64" | "c64" => "complex64",
+        "complex128" | "c128" | "complex" => "complex128",
         _ => return None,
     })
 }
@@ -310,6 +314,7 @@ fn is_non_nilable(k: &OpKind) -> bool {
         k,
         OpKind::Int
             | OpKind::Float
+            | OpKind::Complex
             | OpKind::Bool
             | OpKind::Str
             | OpKind::Struct(_)
@@ -322,7 +327,7 @@ fn is_non_nilable(k: &OpKind) -> bool {
 /// In Go, type conversions `T(x)` require compatible types:
 /// - A struct cannot be converted from a non-struct (or unrelated struct).
 /// - A bool cannot be converted to or from any other type.
-/// - Numeric types (int, float) cannot convert to/from string, slice, map, chan, struct.
+/// - Numeric types (int, float, complex) cannot convert to/from string, slice, map, chan, struct.
 /// - Strings can only convert to/from integer (rune), byte/rune slices, or strings.
 /// - Maps and channels cannot convert to/from scalars.
 fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
@@ -341,38 +346,38 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         // Bool argument: bool cannot convert to anything (except bool or interface).
         (other, Bool) if !matches!(other, Unknown | Bool | Interface) => true,
 
-        // Numeric targets (Int, Float): can convert between Int and Float.
+        // Numeric targets (Int, Float, Complex): can convert between Int, Float, and Complex.
         // Cannot convert Str, Slice, Array, Map, Chan, Struct to numeric.
-        (Int | Float, Str | Slice(_) | Array(_) | Map(_, _) | Chan(_) | Struct(_)) => true,
+        (Int | Float | Complex, Str | Slice(_) | Array(_) | Map(_, _) | Chan(_) | Struct(_)) => true,
 
         // String target: can convert from Int (rune/byte code point) or Slice(Int) (byte/rune slice) or Str.
-        // Cannot convert from Float, Bool, Map, Chan, Struct, Array, or non-int Slice.
-        (Str, Float | Bool | Map(_, _) | Chan(_) | Struct(_) | Array(_)) => true,
+        // Cannot convert from Float, Complex, Bool, Map, Chan, Struct, Array, or non-int Slice.
+        (Str, Float | Complex | Bool | Map(_, _) | Chan(_) | Struct(_) | Array(_)) => true,
         (Str, Slice(elem)) if !matches!(**elem, Unknown | Int) => true,
 
         // Slice target: can convert from Str (to []byte/[]rune), or Slice of identical element type.
         // Direct array-to-slice conversion `[]T(arr)` is invalid in Go (must write `arr[:]`).
-        // Cannot convert from Int, Float, Bool, Map, Chan, Struct, Array.
-        (Slice(_), Int | Float | Bool | Map(_, _) | Chan(_) | Struct(_) | Array(_)) => true,
+        // Cannot convert from Int, Float, Complex, Bool, Map, Chan, Struct, Array.
+        (Slice(_), Int | Float | Complex | Bool | Map(_, _) | Chan(_) | Struct(_) | Array(_)) => true,
         (Slice(elem), Str) if !matches!(**elem, Unknown | Int) => true,
         (Slice(a), Slice(b)) => a != b && **a != Unknown && **b != Unknown,
 
         // Array target: cannot convert from Str directly, or from non-container.
         // In Go 1.20+, slice-to-array conversion [N]T(slice) requires matching element types.
-        (Array(_), Int | Float | Bool | Str | Map(_, _) | Chan(_) | Struct(_)) => true,
+        (Array(_), Int | Float | Complex | Bool | Str | Map(_, _) | Chan(_) | Struct(_)) => true,
         (Array(a), Array(b)) | (Array(a), Slice(b)) => a != b && **a != Unknown && **b != Unknown,
 
-        // Map target: cannot convert from Int, Float, Bool, Str, Slice, Array, Chan, Struct.
+        // Map target: cannot convert from Int, Float, Complex, Bool, Str, Slice, Array, Chan, Struct.
         // Converting between maps requires matching key and value types.
-        (Map(_, _), Int | Float | Bool | Str | Slice(_) | Array(_) | Chan(_) | Struct(_)) => true,
+        (Map(_, _), Int | Float | Complex | Bool | Str | Slice(_) | Array(_) | Chan(_) | Struct(_)) => true,
         (Map(k1, v1), Map(k2, v2)) => {
             (k1 != k2 && **k1 != Unknown && **k2 != Unknown)
                 || (v1 != v2 && **v1 != Unknown && **v2 != Unknown)
         }
 
-        // Chan target: cannot convert from Int, Float, Bool, Str, Slice, Array, Map, Struct.
+        // Chan target: cannot convert from Int, Float, Complex, Bool, Str, Slice, Array, Map, Struct.
         // Converting between channels requires matching element types.
-        (Chan(_), Int | Float | Bool | Str | Slice(_) | Array(_) | Map(_, _) | Struct(_)) => true,
+        (Chan(_), Int | Float | Complex | Bool | Str | Slice(_) | Array(_) | Map(_, _) | Struct(_)) => true,
         (Chan(a), Chan(b)) => a != b && **a != Unknown && **b != Unknown,
 
         // Pointer targets and arguments: Go only converts between pointers.
@@ -412,7 +417,7 @@ fn is_fully_resolved(k: &OpKind) -> bool {
         // kind model (it may hold anything), so a member lookup on it cannot
         // claim absence — same fail-open as `kinds_conflict`'s Interface arm.
         OpKind::Interface => false,
-        OpKind::Int | OpKind::Float | OpKind::Bool | OpKind::Str => true,
+        OpKind::Int | OpKind::Float | OpKind::Complex | OpKind::Bool | OpKind::Str => true,
         OpKind::Void => false,
         // A struct whose NAME did not resolve cannot have its members looked up.
         OpKind::Struct(None) => false,
@@ -892,6 +897,33 @@ impl<'a> Collector<'a> {
                 return None;
             }
             return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+        }
+        match name.as_str() {
+            "complex" => {
+                if let Some(first) = args.first() {
+                    if let Some(s) = self.typed_value_scalar(&first.value) {
+                        if s == "float32" {
+                            return Some(vec![Some("complex64")]);
+                        } else if s == "float64" {
+                            return Some(vec![Some("complex128")]);
+                        }
+                    }
+                }
+                return Some(vec![Some("complex128")]);
+            }
+            "real" | "imag" => {
+                if let Some(first) = args.first() {
+                    if let Some(s) = self.typed_value_scalar(&first.value) {
+                        if s == "complex64" {
+                            return Some(vec![Some("float32")]);
+                        } else if s == "complex128" {
+                            return Some(vec![Some("float64")]);
+                        }
+                    }
+                }
+                return Some(vec![Some("float64")]);
+            }
+            _ => {}
         }
         if args.len() == 1
             && !self.ck.structs.contains_key(name.as_str())
@@ -2680,6 +2712,7 @@ impl<'a> Collector<'a> {
             "bool" => OpKind::Bool,
             "string" => OpKind::Str,
             "float32" | "float64" | "f32" | "f64" => OpKind::Float,
+            "complex64" | "complex128" | "c64" | "c128" => OpKind::Complex,
             "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32" | "i64" | "int64" | "u8"
             | "uint8" | "u16" | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "usize"
             | "isize" | "uintptr" | "byte" | "rune" | "char" => OpKind::Int,
@@ -3057,6 +3090,8 @@ impl<'a> Collector<'a> {
                     "new" => return Some(vec![OpKind::Pointer(Box::new(OpKind::Unknown))]),
                     "delete" | "close" | "clear" | "panic" => return Some(Vec::new()),
                     "recover" => return Some(vec![OpKind::Interface]),
+                    "complex" => return Some(vec![OpKind::Complex]),
+                    "real" | "imag" => return Some(vec![OpKind::Float]),
                     // #2823: `some(v)` produces `option[kind(v)]`.
                     "some" if !self.ck.fns.contains_key("some") => {
                         let payload = args
@@ -6271,7 +6306,7 @@ impl<'a> Collector<'a> {
         // spread argument is legal.
         if matches!(
             name,
-            "len" | "cap" | "close" | "delete" | "min" | "max" | "clear" | "copy"
+            "len" | "cap" | "close" | "delete" | "min" | "max" | "clear" | "copy" | "complex" | "real" | "imag"
         ) && args.iter().any(|a| a.spread)
         {
             self.emit_e1002(
@@ -6603,6 +6638,82 @@ impl<'a> Collector<'a> {
                         }
                     } else {
                         first_arg = Some((&arg.value, k));
+                    }
+                }
+            }
+            "real" | "imag" => {
+                if args.len() != 1 {
+                    return; // arity handled by builtins.rs
+                }
+                let op = &args[0].value;
+                let ak = self.kind_of_expr(op);
+                let scalar = self.typed_value_scalar(op);
+                let is_complex = ak == OpKind::Complex
+                    || scalar.map_or(false, |s| s == "complex64" || s == "complex128");
+                if ak != OpKind::Unknown && !is_complex {
+                    self.emit_e2005(
+                        span,
+                        format!(
+                            "invalid argument `{}` (type `{}`) for `{name}`: argument must have complex type (HYB-E2005)",
+                            op.render(),
+                            ak.label()
+                        ),
+                        "`real` and `imag` require a `complex64` or `complex128` argument",
+                    );
+                }
+            }
+            "complex" => {
+                if args.len() != 2 {
+                    return; // arity handled by builtins.rs
+                }
+                let r_op = &args[0].value;
+                let i_op = &args[1].value;
+                let r_k = self.kind_of_expr(r_op);
+                let i_k = self.kind_of_expr(i_op);
+                let r_scalar = self.typed_value_scalar(r_op);
+                let i_scalar = self.typed_value_scalar(i_op);
+
+                let r_is_float_compatible = r_k == OpKind::Float || (r_k == OpKind::Int && self.is_untyped_int_const(r_op));
+                let i_is_float_compatible = i_k == OpKind::Float || (i_k == OpKind::Int && self.is_untyped_int_const(i_op));
+
+                if r_k != OpKind::Unknown && !r_is_float_compatible {
+                    self.emit_e2005(
+                        args[0].value.span(),
+                        format!(
+                            "invalid argument `{}` (type `{}`) for `complex`: real argument must have floating-point type (HYB-E2005)",
+                            r_op.render(),
+                            r_k.label()
+                        ),
+                        "`complex` requires floating-point arguments (`float32` or `float64`)",
+                    );
+                    return;
+                }
+                if i_k != OpKind::Unknown && !i_is_float_compatible {
+                    self.emit_e2005(
+                        args[1].value.span(),
+                        format!(
+                            "invalid argument `{}` (type `{}`) for `complex`: imag argument must have floating-point type (HYB-E2005)",
+                            i_op.render(),
+                            i_k.label()
+                        ),
+                        "`complex` requires floating-point arguments (`float32` or `float64`)",
+                    );
+                    return;
+                }
+
+                if let (Some(r_s), Some(i_s)) = (r_scalar, i_scalar) {
+                    if r_s != i_s {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "invalid operation `complex({}, {})`: mismatched types `{}` and `{}` (HYB-E1002)",
+                                r_op.render(),
+                                i_op.render(),
+                                r_s,
+                                i_s
+                            ),
+                            "arguments to `complex` must have the same floating-point type (`float32` or `float64`)",
+                        );
                     }
                 }
             }
