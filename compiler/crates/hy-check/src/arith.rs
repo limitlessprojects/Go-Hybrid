@@ -6,12 +6,22 @@
 //! should-emit-buildable-Go contract requires a checker diagnostic
 //! (HYB-E6001) for that narrow literal case. Non-constant zero divisors
 //! stay out of scope — Go accepts them and panics at run time.
+//!
+//! Issue #2426: Go folds more divisors to a constant zero than the literal
+//! spellings above, and each one is still `invalid operation: division by
+//! zero` at compile time. The folds below now cover the five gaps the report
+//! names: an integer conversion of a constant float zero (`int(0.0)`,
+//! `i64(1.5 - 1.5)`, `const fz = 0.0; int(fz)`, aliases of integer types),
+//! `len()` of concatenated constant strings, `len`/`cap` of `[0]T` arrays,
+//! `real`/`imag` selected from a constant `complex(re, im)`, and an untyped
+//! `0.0` divisor on an integer dividend (where Go converts the untyped
+//! constant to the dividend's type, making the divisor the integer zero).
 
 use crate::model::{unwrap_parens, Checker};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{
-    AssignOp, BinOp, Expr, ForKind, InterpPart, LitKind, Place, PlaceKind, SelectArmKind,
-    Stmt, UnOp,
+    AssignOp, BinOp, Expr, ForKind, InterpPart, LitKind, Place, PlaceKind, SelectArmKind, Stmt,
+    TypeExpr, UnOp,
 };
 
 impl<'a> Checker<'a> {
@@ -64,7 +74,16 @@ impl<'a> Checker<'a> {
                             &self.const_values,
                             st,
                             &self.zd_defined,
-                        ))
+                            &self.type_aliases,
+                        )
+                        // `x /= 0.0` on an integer target: Go converts the untyped
+                        // constant to the target's type, so the divisor is the
+                        // integer zero (#2426).
+                        || (is_float_literal_zero(&values[0])
+                            && targets
+                                .first()
+                                .map(|t| self.int_typed_place_target(t, st))
+                                .unwrap_or(false)))
                 {
                     self.emit_const_zero_divisor(*span, assign_op_txt(*op));
                 }
@@ -204,10 +223,31 @@ impl<'a> Checker<'a> {
                     // the literal twin. Shadow-checked against the live env;
                     // names defined inside a deep-walked closure body fail open
                     // (`self.zd_defined`). Runtime divisors stay out of scope.
-                    if divisor_int_fold_is_zero(rhs, &self.const_values, st, &self.zd_defined)
-                        || is_float_literal_zero(rhs) && is_const_expr(lhs)
-                        || divisor_float_fold_is_zero(rhs, &self.const_values, st, &self.zd_defined)
-                            && is_const_map_expr(lhs, &self.const_values, st, &self.zd_defined)
+                    if divisor_int_fold_is_zero(
+                        rhs,
+                        &self.const_values,
+                        st,
+                        &self.zd_defined,
+                        &self.type_aliases,
+                    ) || is_float_literal_zero(rhs) && is_const_expr(lhs)
+                        // `x / 0.0` on an integer dividend: the untyped constant
+                        // converts to the dividend's type, so the divisor is the
+                        // integer zero. A `float64` dividend keeps IEEE-754
+                        // division at run time (#2426).
+                        || is_float_literal_zero(rhs) && self.int_typed_dividend_at(lhs, st, 0)
+                        || divisor_float_fold_is_zero(
+                            rhs,
+                            &self.const_values,
+                            st,
+                            &self.zd_defined,
+                            &self.type_aliases,
+                        ) && is_const_map_expr(
+                            lhs,
+                            &self.const_values,
+                            st,
+                            &self.zd_defined,
+                            &self.type_aliases,
+                        )
                     {
                         self.emit_const_zero_divisor(*span, bin_op_txt(*op));
                     }
@@ -650,9 +690,46 @@ fn stmt_defined_names(stmt: &Stmt, out: &mut std::collections::HashSet<String>) 
     }
 }
 
+/// Byte length of a constant string expression: literals, named const strings,
+/// and concatenations of them. Go folds the concatenation first and the length
+/// second, so `len("" + "")` and chained string constants are compile-time `0`
+/// (#2426).
+fn const_str_len_bytes(
+    e: &Expr,
+    consts: &std::collections::HashMap<String, &Expr>,
+    defined: &std::collections::HashSet<String>,
+    depth: u32,
+) -> Option<i128> {
+    if depth > 16 {
+        return None;
+    }
+    match unwrap_parens(e) {
+        Expr::Lit {
+            kind: LitKind::Str(s) | LitKind::RawStr(s),
+            ..
+        } => Some(s.len() as i128),
+        Expr::Ident { name, .. } if !defined.contains(name) => {
+            let v = consts.get(name.as_str())?;
+            const_str_len_bytes(v, consts, defined, depth + 1)
+        }
+        Expr::Binary {
+            op: BinOp::Add,
+            lhs,
+            rhs,
+            ..
+        } => {
+            let l = const_str_len_bytes(lhs, consts, defined, depth + 1)?;
+            let r = const_str_len_bytes(rhs, consts, defined, depth + 1)?;
+            l.checked_add(r)
+        }
+        _ => None,
+    }
+}
+
 /// `len("abc")` — Go evaluates the length of a constant string at compile
 /// time (spec: constant expression). Named const strings resolve through
-/// the same map. The length is the BYTE length (Go `len` on a string).
+/// the same map, and so do constant concatenations of them. The length is
+/// the BYTE length (Go `len` on a string).
 fn const_len_str_value(
     e: &Expr,
     consts: &std::collections::HashMap<String, &Expr>,
@@ -665,26 +742,7 @@ fn const_len_str_value(
     if let Expr::Call { callee, args, .. } = unwrap_parens(e) {
         if let Expr::Ident { name, .. } = unwrap_parens(callee) {
             if name == "len" && args.len() == 1 && !args[0].spread {
-                let a = unwrap_parens(&args[0].value);
-                let s: Option<&String> = match a {
-                    Expr::Lit {
-                        kind: LitKind::Str(s) | LitKind::RawStr(s),
-                        ..
-                    } => Some(s),
-                    Expr::Ident { name: n, .. } if !defined.contains(n) => {
-                        consts.get(n.as_str()).and_then(|v| match unwrap_parens(v) {
-                            Expr::Lit {
-                                kind: LitKind::Str(s) | LitKind::RawStr(s),
-                                ..
-                            } => Some(s),
-                            _ => None,
-                        })
-                    }
-                    _ => None,
-                };
-                if let Some(s) = s {
-                    return Some(s.len() as i128);
-                }
+                return const_str_len_bytes(&args[0].value, consts, defined, depth + 1);
             }
         }
     }
@@ -701,6 +759,7 @@ fn divisor_int_fold(
     consts: &std::collections::HashMap<String, &Expr>,
     st: &crate::model::FnState,
     defined: &std::collections::HashSet<String>,
+    aliases: &std::collections::HashMap<String, TypeExpr>,
     depth: u32,
 ) -> crate::const_overflow::ConstFold {
     use crate::const_overflow::{const_int_fold_with, ConstFold};
@@ -708,7 +767,14 @@ fn divisor_int_fold(
         return ConstFold::NotConst;
     }
     let bare = unwrap_parens(e);
+    // `len("abc")`, and now `len("" + "")` / `len(<named const string>)` (#2426).
     if let Some(n) = const_len_str_value(bare, consts, defined, depth) {
+        return ConstFold::Val(n);
+    }
+    // `len([0]int{})`, `cap([0]int{})`, `len(a)` for `var a [0]int` (#2426): Go
+    // folds `len`/`cap` of a fixed-size array to its constant length, so a
+    // zero-length array is a constant zero divisor.
+    if let Some(n) = const_len_cap_value(bare, st, defined, aliases, depth) {
         return ConstFold::Val(n);
     }
     match bare {
@@ -717,17 +783,92 @@ fn divisor_int_fold(
                 return ConstFold::NotConst;
             }
             if let Some(v) = consts.get(name.as_str()) {
-                return divisor_int_fold(v, consts, st, defined, depth + 1);
+                return divisor_int_fold(v, consts, st, defined, aliases, depth + 1);
             }
             ConstFold::NotConst
         }
         Expr::Binary { op, lhs, rhs, .. } => {
-            let l = divisor_int_fold(lhs, consts, st, defined, depth + 1);
-            let r = divisor_int_fold(rhs, consts, st, defined, depth + 1);
+            let l = divisor_int_fold(lhs, consts, st, defined, aliases, depth + 1);
+            let r = divisor_int_fold(rhs, consts, st, defined, aliases, depth + 1);
             crate::const_overflow::fold_bin(*op, l, r)
+        }
+        Expr::Call { args, .. } if args.len() == 1 && !args[0].spread => {
+            // `int(0.0)`, `uint8(-0.0)`, `i64(1.5 - 1.5)`, `const fz = 0.0;
+            // int(fz)`: Go folds the float constant and converts it, so the
+            // divisor IS the integer zero `const_int_fold_with` refuses to see.
+            // The alias spelling (`type my_int = int; x / my_int(0)`) misses the
+            // shared conversion table for the same reason (#2426).
+            if let Some(arg) = int_conversion_arg(bare, aliases) {
+                if matches!(
+                    crate::const_overflow::const_float_fold_with(arg, consts, 0, Some(st)),
+                    Some(f) if f == 0.0
+                ) {
+                    return ConstFold::Val(0);
+                }
+                return divisor_int_fold(arg, consts, st, defined, aliases, depth + 1);
+            }
+            // `real(complex(0, 5))` / `imag(complex(5, 0))` — the report names
+            // both folders, and the int side starts here (#2426).
+            if let Some(part) = complex_component(bare) {
+                return divisor_int_fold(part, consts, st, defined, aliases, depth + 1);
+            }
+            const_int_fold_with(e, consts, depth, Some(st))
         }
         _ => const_int_fold_with(e, consts, depth, Some(st)),
     }
+}
+
+/// The argument of an integer conversion, when the callee names a predeclared
+/// integer type or a file-level alias chain that ends at one (`int(0.0)`,
+/// `my_int(7)`) (#2426).
+fn int_conversion_arg<'e>(
+    e: &'e Expr,
+    aliases: &std::collections::HashMap<String, TypeExpr>,
+) -> Option<&'e Expr> {
+    if let Expr::Call { callee, args, .. } = unwrap_parens(e) {
+        if args.len() == 1 && !args[0].spread {
+            if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                if is_int_conversion_name(name, aliases) {
+                    return Some(unwrap_parens(&args[0].value));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Is `name` an integer type — a predeclared spelling Go treats as an integer
+/// conversion, or a file-level alias that resolves to one? (#2426)
+fn is_int_conversion_name(name: &str, aliases: &std::collections::HashMap<String, TypeExpr>) -> bool {
+    if crate::emit_guard::is_int_primitive_type_name(name) {
+        return true;
+    }
+    match aliases.get(name) {
+        Some(ty) => match resolve_alias_type(ty, aliases) {
+            TypeExpr::Named { name: target, .. } => {
+                crate::emit_guard::is_int_primitive_type_name(&target)
+            }
+            _ => false,
+        },
+        None => false,
+    }
+}
+
+/// Follow `type a = b` chains with a depth cap. Anything that is not a named
+/// type — or a name with no alias entry — comes back unchanged.
+fn resolve_alias_type(ty: &TypeExpr, aliases: &std::collections::HashMap<String, TypeExpr>) -> TypeExpr {
+    let mut cur: TypeExpr = ty.clone();
+    for _ in 0..8 {
+        let next: Option<TypeExpr> = match &cur {
+            TypeExpr::Named { name, .. } => aliases.get(name).cloned(),
+            _ => None,
+        };
+        match next {
+            Some(t) => cur = t,
+            None => break,
+        }
+    }
+    cur
 }
 
 fn divisor_int_fold_is_zero(
@@ -735,11 +876,86 @@ fn divisor_int_fold_is_zero(
     consts: &std::collections::HashMap<String, &Expr>,
     st: &crate::model::FnState,
     defined: &std::collections::HashSet<String>,
+    aliases: &std::collections::HashMap<String, TypeExpr>,
 ) -> bool {
     matches!(
-        divisor_int_fold(e, consts, st, defined, 0),
+        divisor_int_fold(e, consts, st, defined, aliases, 0),
         crate::const_overflow::ConstFold::Val(0)
     )
+}
+
+/// `real(complex(re, im))` -> `re`, `imag(complex(re, im))` -> `im`: Go evaluates
+/// the selected component of a constant complex value at compile time, so a zero
+/// component is a constant zero divisor (#2426).
+fn complex_component(e: &Expr) -> Option<&Expr> {
+    if let Expr::Call { callee, args, .. } = unwrap_parens(e) {
+        if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+            if (name == "real" || name == "imag") && args.len() == 1 && !args[0].spread {
+                if let Expr::Call {
+                    callee: inner,
+                    args: inner_args,
+                    ..
+                } = unwrap_parens(&args[0].value)
+                {
+                    if let Expr::Ident { name: inner_name, .. } = unwrap_parens(inner) {
+                        if inner_name == "complex" && inner_args.len() == 2 {
+                            return Some(if name == "real" {
+                                unwrap_parens(&inner_args[0].value)
+                            } else {
+                                unwrap_parens(&inner_args[1].value)
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// `len`/`cap` of a fixed-size array is a Go constant, so a zero-length array is
+/// a constant zero divisor. Both spellings the report names are covered: the
+/// typed array literal (`len([0]int{})`) and a binding declared with an array
+/// type (`var a [0]int; x / len(a)`). Neither operand contains a call or a
+/// channel receive, which is what makes the Go rule apply (#2426).
+fn const_len_cap_value(
+    e: &Expr,
+    st: &crate::model::FnState,
+    defined: &std::collections::HashSet<String>,
+    aliases: &std::collections::HashMap<String, TypeExpr>,
+    depth: u32,
+) -> Option<i128> {
+    if depth > 16 {
+        return None;
+    }
+    if let Expr::Call { callee, args, .. } = unwrap_parens(e) {
+        if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+            if (name == "len" || name == "cap") && args.len() == 1 && !args[0].spread {
+                let operand = unwrap_parens(&args[0].value);
+                // `[N]T{}` — the parser keeps the array type on the literal.
+                if let Some((Some(len_expr), _, _)) = operand.as_array_lit() {
+                    if let Some(n) = const_eval_int(len_expr) {
+                        return Some(n);
+                    }
+                }
+                // `len(a)` where `a` was declared `[N]T`.
+                if let Expr::Ident { name: n, .. } = operand {
+                    if !defined.contains(n) {
+                        if let Some(ty) = st.env_lookup(n).and_then(|b| b.ty.as_ref()) {
+                            if let TypeExpr::Array {
+                                len: Some(len_expr),
+                                ..
+                            } = resolve_alias_type(ty, aliases)
+                            {
+                                return const_eval_int(&len_expr);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Float-conversion zero leaves: `float64(0)`, `f64(1 - 1)` — the float
@@ -749,6 +965,7 @@ fn divisor_float_conv_zero(
     consts: &std::collections::HashMap<String, &Expr>,
     st: &crate::model::FnState,
     defined: &std::collections::HashSet<String>,
+    aliases: &std::collections::HashMap<String, TypeExpr>,
     depth: u32,
 ) -> bool {
     if depth > 16 {
@@ -759,7 +976,7 @@ fn divisor_float_conv_zero(
             if let Expr::Ident { name, .. } = unwrap_parens(callee) {
                 if matches!(name.as_str(), "f32" | "f64" | "float32" | "float64") {
                     let a = &args[0].value;
-                    if divisor_int_fold_is_zero(a, consts, st, defined) {
+                    if divisor_int_fold_is_zero(a, consts, st, defined, aliases) {
                         return true;
                     }
                     if matches!(
@@ -780,8 +997,17 @@ fn divisor_float_fold_is_zero(
     consts: &std::collections::HashMap<String, &Expr>,
     st: &crate::model::FnState,
     defined: &std::collections::HashSet<String>,
+    aliases: &std::collections::HashMap<String, TypeExpr>,
 ) -> bool {
-    if divisor_float_conv_zero(e, consts, st, defined, 0) {
+    // `real(complex(0, 5))` / `imag(complex(5, 0))`: the selected component of a
+    // constant complex value is a constant, so a zero component is a constant
+    // zero divisor on this side too (#2426).
+    if let Some(part) = complex_component(e) {
+        if divisor_float_fold_is_zero(part, consts, st, defined, aliases) {
+            return true;
+        }
+    }
+    if divisor_float_conv_zero(e, consts, st, defined, aliases, 0) {
         return true;
     }
     matches!(
@@ -797,12 +1023,13 @@ fn is_const_map_expr(
     consts: &std::collections::HashMap<String, &Expr>,
     st: &crate::model::FnState,
     defined: &std::collections::HashSet<String>,
+    aliases: &std::collections::HashMap<String, TypeExpr>,
 ) -> bool {
     if is_const_expr(e) {
         return true;
     }
     !matches!(
-        divisor_int_fold(e, consts, st, defined, 0),
+        divisor_int_fold(e, consts, st, defined, aliases, 0),
         crate::const_overflow::ConstFold::NotConst
     ) || crate::const_overflow::const_float_fold_with(e, consts, 0, Some(st)).is_some()
 }
