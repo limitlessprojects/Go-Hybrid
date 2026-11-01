@@ -839,6 +839,48 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #2861 — the canonical scalar of a slice's element, read from the
+    /// DECLARED type text (`[]int32` / `[2]int32` -> `int32`). `OpKind`
+    /// collapses every integer width into `Int` and both float widths into
+    /// `Float`, so `[]int32` and `[]int64` carry the same kind and the kind
+    /// comparison in `conversion_kinds_conflict` cannot tell them apart —
+    /// while Go requires the element types of a slice conversion to be
+    /// IDENTICAL. `rune`/`int32` and `byte`/`uint8` share one canonical name
+    /// on purpose, so the genuine aliases stay convertible.
+    fn slice_element_scalar_of_type_text(&self, ty_text: &str) -> Option<&'static str> {
+        let rest = ty_text.trim().strip_prefix('[')?;
+        let close = rest.find(']')?;
+        canonical_numeric_name(rest[close + 1..].trim())
+    }
+
+    /// #2861 — the declared type text of a binding, with `type` aliases
+    /// resolved (`int_slice_a` -> `[]int32`).
+    fn declared_type_text(&self, name: &str) -> Option<String> {
+        let mut cur = self.lookup_type_name(name)?;
+        for _ in 0..8 {
+            let base = Checker::base_named_type_str(&cur).to_string();
+            let Some(target) = self.ck.type_aliases.get(&base) else {
+                break;
+            };
+            cur = target.render();
+        }
+        Some(cur)
+    }
+
+    /// #2861 — the canonical scalar of the element of a slice VALUE: the
+    /// declared type of a name (`var a []int32`, `var a int_slice_a`) or the
+    /// element of a slice literal. Anything else fails open.
+    fn slice_element_scalar_of_expr(&self, e: &Expr) -> Option<&'static str> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => {
+                let text = self.declared_type_text(name)?;
+                self.slice_element_scalar_of_type_text(&text)
+            }
+            Expr::SliceLit { elem: Some(t), .. } => self.scalar_of_ty(t),
+            _ => None,
+        }
+    }
+
     /// #2771 — the declared Go spelling of a simple local assignment target.
     fn place_type_name(&self, p: &Place) -> Option<String> {
         match &p.kind {
@@ -853,6 +895,42 @@ impl<'a> Collector<'a> {
         matches!((a, b), (Some(x), Some(y))
             if x != y && is_sized_array_spelling(x) && is_sized_array_spelling(y))
     }
+
+    /// #2861 — the canonical scalar of the element of the TARGET type name,
+    /// following `type` aliases (`int_slice_b` -> `[]int64`).
+    fn slice_element_scalar_of_type_name(&self, name: &str) -> Option<&'static str> {
+        if let Some(scalar) = self.slice_element_scalar_of_type_text(name) {
+            return Some(scalar);
+        }
+        let mut cur = name.to_string();
+        for _ in 0..8 {
+            let base = Checker::base_named_type_str(&cur).to_string();
+            let target = self.ck.type_aliases.get(&base)?;
+            cur = target.render();
+            if let Some(scalar) = self.slice_element_scalar_of_type_text(&cur) {
+                return Some(scalar);
+            }
+        }
+        None
+    }
+
+    /// #2861 — both element scalars of a slice-to-slice conversion, when the
+    /// two are known AND differ (`[]int32` -> `[]int64`, `[]float32` ->
+    /// `[]float64`, `[]int32` -> `[]uint32`). `None` means "no provable
+    /// conflict": an unresolved side stays fail-open.
+    fn slice_element_scalar_mismatch(
+        &self,
+        target_scalar: Option<&'static str>,
+        arg: &Expr,
+    ) -> Option<(&'static str, &'static str)> {
+        let target = target_scalar?;
+        let got = self.slice_element_scalar_of_expr(arg)?;
+        if target == got {
+            return None;
+        }
+        Some((target, got))
+    }
+
     /// #1031 — the exact predeclared numeric spelling of a type expression.
     /// A user-declared struct/enum/alias of that name is not the predeclared
     /// type, so it fails open.
@@ -3399,6 +3477,32 @@ impl<'a> Collector<'a> {
                 note,
             );
         }
+        // #2861: the kind comparison above gives up on `[]int32` -> `[]int64`,
+        // `[]float32` -> `[]float64` and `[]int32` -> `[]uint32`, because both
+        // elements are `Int` or `Float`. Go requires the element types to be
+        // IDENTICAL, and a `type` alias of the target (`int_slice_b`) is
+        // followed so an aliased conversion is checked too.
+        if matches!(k, OpKind::Slice(_)) && matches!(arg_k, OpKind::Slice(_)) {
+            let target_scalar = self.slice_element_scalar_of_type_name(name);
+            if let Some((target, got)) = self.slice_element_scalar_mismatch(target_scalar, arg) {
+                self.emit_e1002(
+                    arg.span(),
+                    format!(
+                        "cannot convert `{}` (type `{}`) to type `{}` — Go refuses `cannot convert {} (variable of type {}) to type {}` (HYB-E1002)",
+                        arg.render(),
+                        arg_k.label(),
+                        name,
+                        arg.render(),
+                        arg_k.label(),
+                        name
+                    ),
+                    &format!(
+                        "a slice conversion requires the two slice types to have identical element types: `{}` and `{}` are different types (aliases such as `byte`/`uint8` or `rune`/`int32` are the same type)",
+                        target, got
+                    ),
+                );
+            }
+        }
     }
 
     /// #682 U6/U8 — the number of values a call expression produces, when it is
@@ -5900,7 +6004,13 @@ impl<'a> Collector<'a> {
                 // `go build` (`cannot convert ... to type ...`, Row 13 BUILDABLE).
                 if let OpKind::Slice(arg_elem) = &ak {
                     let target_elem = self.kind_of_ty(elem_ty, 0);
-                    if copy_element_kinds_conflict(&target_elem, arg_elem) {
+                    // #2861: the element KINDS give up on `[]int32` -> `[]int64`
+                    // (both `Int`), so the declared scalars decide as well.
+                    let scalar_mismatch =
+                        self.slice_element_scalar_mismatch(self.scalar_of_ty(elem_ty), arg);
+                    if copy_element_kinds_conflict(&target_elem, arg_elem)
+                        || scalar_mismatch.is_some()
+                    {
                         self.emit_e1002(
                             arg.span(),
                             format!(
@@ -5912,7 +6022,13 @@ impl<'a> Collector<'a> {
                                 ak.label(),
                                 target_str
                             ),
-                            "a slice conversion requires the two slice types to have identical element types",
+                            &match scalar_mismatch {
+                                Some((target, got)) => format!(
+                                    "a slice conversion requires the two slice types to have identical element types: `{}` and `{}` are different types (aliases such as `byte`/`uint8` or `rune`/`int32` are the same type)",
+                                    target, got
+                                ),
+                                None => "a slice conversion requires the two slice types to have identical element types".to_string(),
+                            },
                         );
                     }
                 }
