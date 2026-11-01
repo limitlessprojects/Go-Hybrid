@@ -3517,6 +3517,20 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #2997 — `pkg.member` where `pkg` is a curated foreign package root not
+    /// shadowed by a local, parameter or file constant.
+    fn is_curated_foreign_callee(&self, callee: &Expr) -> bool {
+        match unwrap_parens(callee) {
+            Expr::Field { base, .. } => matches!(
+                unwrap_parens(base),
+                Expr::Ident { name: pkg, .. }
+                    if self.lookup_kind(pkg).is_none()
+                        && crate::foreign::is_curated_package_root(pkg)
+            ),
+            _ => false,
+        }
+    }
+
     /// #682 U6/U8 — the number of values a call expression produces, when it is
     /// knowable and is NOT exactly one.
     ///
@@ -3531,6 +3545,12 @@ impl<'a> Collector<'a> {
     fn non_single_value_count(&self, e: &Expr) -> Option<usize> {
         match unwrap_parens(e) {
             Expr::Call { callee, args, .. } => {
+                // #2997: curated foreign package calls now carry result kinds,
+                // but their multi-value shape in a single-value position is
+                // already T23's (HYB-E2002) claim; keep it there.
+                if self.is_curated_foreign_callee(callee) {
+                    return None;
+                }
                 let res = self.call_result_kinds(callee, args)?;
                 if res.len() == 1 {
                     None
@@ -4083,7 +4103,17 @@ impl<'a> Collector<'a> {
         // rejecting the count.
         if values.len() == 1 {
             if let Expr::Call { callee, args, .. } = unwrap_parens(&values[0]) {
-                if let Some(res) = self.call_result_kinds(callee, args) {
+                // #2997: curated foreign package calls now carry result kinds,
+                // but a count mismatch there (`return strconv.parse_int(..)` in
+                // a 1-result fn) is already reported by T23 (HYB-E2002), so
+                // only the positional comparison is used for them.
+                let foreign = self.is_curated_foreign_callee(callee);
+                let fn_results_error_tail = self.fn_results_error_tail;
+                if let Some(res) = self.call_result_kinds(callee, args).filter(|res| {
+                    !foreign
+                        || res.len() == want.len()
+                        || (!res.is_empty() && fn_results_error_tail && res.len() + 1 == want.len())
+                }) {
                     let res_scalars = self.call_result_scalars(callee, args);
                     if res.len() == want.len() {
                         for (i, (r, w)) in res.iter().zip(want.iter()).enumerate() {
