@@ -1121,3 +1121,20 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - All nine landings: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88) zero side-shifts, ls-remote==HEAD asserted, written replies posted. #2292/#2291 replies note the mechanical sweep cost (3 Yumihariii PRs swept not-planned; all superseded by green landings within the hour).
 - Suite trajectory: 241 -> 249. Final main c8b8eee, tree clean.
 - NEXT TICK QUEUE: #2670 (await rebase; high priority — gttps, base predates #2664) -> #1694 (tools release script, behind 0) -> #2400 (ub3dqy build constraints) -> #2593 (await rebase+pick of 3 options) -> #2677 (await rebase) -> #2581/#2622 (await fixes) -> #2517 (await rebase) -> #2300/#2494/#2321 -> wave tail #2083/#2082/#2080/#2077/#1856/#2078/#2075/#2076/#2074/#2073/#1893/#1855/#1914 -> #1811 (await one-hunk).
+
+## Session 41 — 2026-11-01 late afternoon (tick 487193: 8 landed, 1 rebase ask)
+
+- Sandbox recycled (21st; toolchains re-restored — /tmp/go.tgz cache survived, no re-download). Baseline ddaf15d (own session-40). Scan OK; approve 6/6. Fresh wave: aswadi pair + Dimany4 A5/eq pair + ket4min-susan A5 closer + ocakciomursel-pixel C10 pair.
+- LANDED (Pareto top-down):
+  b620133 Merge PR #2579 (aswadi, closes #2578) — check_claims_links fails closed on zero claims rows (no-claims-rows kind); tools pytest 8+4 subtests; +2 hyb suites. 251 suites.
+  ead75fa Merge PR #2729 (Dimany4, partially addresses #2724) — escape-site bypasses: named closure bindings resolve to lambdas + in-place builtin mutations as A5 writes (HYB-E3013); remaining two vectors documented unreachable; #2724 stays open. 252 suites.
+  3352ef2 Merge PR #2727 (aswadi, fixes #2308 + #854) — walk_stmt_param_stores iterates For bodies to a fixpoint with scope barriers (loop-carried param stores + alias leaks). 253 suites.
+  6dfe43c Merge PR #2721 (Dimany4, fixes #2719) — ==/!= typed int vs typed float rejected; ten-operator mismatched-types matrix complete. 254 suites.
+  c918af7 Merge PR #1694 (honru09, supersedes swept #124) — package_release.sh unsets CARGO_TARGET_DIR/HYB_RUNTIME_DIR/HYB_CARGO_BIN (stale staticlib could ship); tools pytest 4; CI line registered. 254 suites.
+  b666b86 Merge PR #2400 (ub3dqy, refs #1900) — hyb generate filters IgnoredGoFiles siblings per dir (build-constraint generators no longer block package inference); no Fixes: line in body so no closing keyword — offered to confirm #1900 close on request. 255 suites.
+  7f43b13 Merge PR #2300 (ocakciomursel-pixel, fixes #1031) — typed numeric returns into different-numeric named results rejected (C10 #577 follow-up). 256 suites.
+  24c1cf6 Merge PR #2494 (ocakciomursel-pixel, fixes #2490) — call_shape substitutes generic type args before shaping returns (raw T-parameter shape passed before). 257 suites.
+- REBASE ASK (conflict, not landed): #2726 (ket4min-susan, A5 foreign-escape capture writes #2724) — builtins.rs conflicts with landed #2729 (author's own main-merge predates it); reply explains complementary intent + keep-both resolution guidance.
+- All eight landings: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88) zero side-shifts, ls-remote==HEAD asserted, written replies posted.
+- Suite trajectory: 249 -> 257. Final main 24c1cf6, tree clean.
+- NEXT TICK QUEUE: #2321 (defer mutations on named returns, behind — verify) -> #2670 (await rebase, gttps) -> #2726 (await rebase) -> #2593 (await rebase+pick) -> #2677 (await rebase) -> #2581/#2622 (await fixes) -> #2517 (await rebase) -> wave tail #2083/#2082/#2080/#2077/#1856/#2078/#2075/#2076/#2074/#2073/#1893/#1855/#1914 -> #1811 (await one-hunk).

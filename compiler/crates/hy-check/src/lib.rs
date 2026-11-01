@@ -314,7 +314,7 @@ fn build_tables(ck: &mut Checker<'_>) {
                 }
                 ck.check_expr_emit_guard(&FnState::default(), &c.value);
                 ck.check_composite_nils(&FnState::default(), &c.value);
-                ck.check_expr_builtin_args(&c.value);
+                ck.check_expr_builtin_args(&FnState::default(), &c.value);
                 ck.check_const_multi_value(&c.value);
                 let b = ck.const_binding(c);
                 ck.consts.insert(c.name.clone(), b);
@@ -361,9 +361,15 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     // first segments stay exempt (resolve.rs Field arm).
     ck.check_fn_undefined_names(f);
 
-    // environment seed: receiver + params
+    // environment seed: receiver + params + active generic type parameters
     let mut st = FnState::default();
+    for tp in &f.type_params {
+        st.type_params.insert(tp.name.clone());
+    }
     if let Some(r) = &f.receiver {
+        for rtp in ck.receiver_type_params(&r.ty) {
+            st.type_params.insert(rtp);
+        }
         let base_shape = ck.shape_of_type(&r.ty);
         let (shape, ty) = if r.is_pointer {
             (
@@ -883,6 +889,14 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                     call,
                     format!("the deferred call `defer {}`", call.render()),
                 );
+                let arg_borrows = match crate::model::unwrap_parens(call) {
+                    Expr::Call { args, .. } => args
+                        .iter()
+                        .map(|a| ck.expr_is_return_borrow(&st, &a.value))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                st.deferred_calls.push((call.clone(), arg_borrows));
             }
 
             // If-init Locals and blocks: already covered by the flat walk

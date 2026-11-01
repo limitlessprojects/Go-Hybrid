@@ -175,6 +175,41 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
     }
 }
 
+/// #1031 — the exact Go spelling of a predeclared numeric type, after the
+/// emitter's SPEC→Go primitive mapping (`shapes::go_primitive_name`) and Go's
+/// own identities (`byte` = `uint8`, `rune` = `int32`).
+///
+/// `OpKind` collapses every integer width into `Int` and both float widths
+/// into `Float`, and `kinds_conflict` must allow `(Float, Int)` because an
+/// untyped int constant is assignable to a float result. A TYPED numeric
+/// value falls through exactly that gap: `n := 3; return n` from
+/// `fn f() float64`, or an `int` param returned from `fn f() int64`, passes
+/// the kind check and then fails `go build` with `cannot use n (variable of
+/// type int) as float64 value in return statement`. This name lets the return
+/// check compare exact types when — and only when — both sides are provably
+/// typed.
+///
+/// `None` for anything that is not a predeclared numeric spelling, and for
+/// `usize`/`isize`/`char`, which have no fixed Go spelling (fail-open).
+fn canonical_numeric_name(name: &str) -> Option<&'static str> {
+    Some(match name.trim() {
+        "int" => "int",
+        "int8" | "i8" => "int8",
+        "int16" | "i16" => "int16",
+        "int32" | "i32" | "rune" => "int32",
+        "int64" | "i64" => "int64",
+        "uint" => "uint",
+        "uint8" | "u8" | "byte" => "uint8",
+        "uint16" | "u16" => "uint16",
+        "uint32" | "u32" => "uint32",
+        "uint64" | "u64" => "uint64",
+        "uintptr" => "uintptr",
+        "float32" | "f32" => "float32",
+        "float64" | "f64" => "float64",
+        _ => return None,
+    })
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -430,6 +465,8 @@ struct Collector<'a> {
     scopes: Vec<HashMap<String, Option<usize>>>,
     /// Parallel lexical scope stack tracking resolved operand kinds (#425).
     kind_scopes: Vec<HashMap<String, OpKind>>,
+    /// Parallel lexical scope stack tracking declared concrete type names (#2738).
+    type_name_scopes: Vec<HashMap<String, String>>,
     /// `set[T]` bindings -> their element type text (`"int"`), scoped like
     /// `kind_scopes`. `set[T]` has no OpKind (it lowers to a prelude
     /// struct), so without this its element type was never checked (#2474).
@@ -462,6 +499,16 @@ struct Collector<'a> {
     /// (`return v` in a `(value, error)` fn emits `return v, nil`, the E3
     /// sugar; corpus 13).
     fn_results_error_tail: bool,
+    /// #1031 — parallel scope stack: the exact predeclared numeric type of a
+    /// binding when it is provably TYPED (a typed param/result/declaration, or
+    /// a `:=` whose initializer gives it Go's default type). Every binding
+    /// site goes through `bind_kind`, which records `None` first, so an
+    /// unclassified inner binding never inherits an outer binding's type.
+    scalar_scopes: Vec<HashMap<String, Option<&'static str>>>,
+    /// #1031 — exact predeclared numeric type of each result of the enclosing
+    /// signature (`None` = not a predeclared numeric spelling). Swapped
+    /// together with `fn_results`.
+    fn_result_scalars: Vec<Option<&'static str>>,
     /// Lexical nesting depth within loops (`for` / `loop`).
     loop_depth: usize,
     /// Lexical nesting depth within `select` statements.
@@ -489,6 +536,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             ck,
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
+            type_name_scopes: Vec::new(),
             set_elem_scopes: Vec::new(),
             copy_var_scopes: Vec::new(),
             file_consts: HashMap::new(),
@@ -497,6 +545,8 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             fn_type_params: HashSet::new(),
             fn_results_all_named: false,
             fn_results_error_tail: false,
+            scalar_scopes: Vec::new(),
+            fn_result_scalars: Vec::new(),
             loop_depth: 0,
             select_depth: 0,
             defines: Vec::new(),
@@ -554,6 +604,8 @@ impl<'a> Collector<'a> {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.kind_scopes.push(HashMap::new());
+        self.type_name_scopes.push(HashMap::new());
+        self.scalar_scopes.push(HashMap::new());
         self.set_elem_scopes.push(HashMap::new());
         self.copy_var_scopes.push(HashSet::new());
     }
@@ -561,8 +613,54 @@ impl<'a> Collector<'a> {
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.kind_scopes.pop();
+        self.type_name_scopes.pop();
+        self.scalar_scopes.pop();
         self.set_elem_scopes.pop();
         self.copy_var_scopes.pop();
+    }
+
+    fn bind_type_name(&mut self, name: &str, type_name: String) {
+        if name != "_" {
+            if let Some(top) = self.type_name_scopes.last_mut() {
+                top.insert(name.to_string(), type_name);
+            }
+        }
+    }
+
+    fn lookup_type_name(&self, name: &str) -> Option<String> {
+        for layer in self.type_name_scopes.iter().rev() {
+            if let Some(t) = layer.get(name) {
+                return Some(t.clone());
+            }
+        }
+        None
+    }
+
+    fn slice_element_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    if let Some(elem) = tname.strip_prefix("[]") {
+                        return Some(elem.to_string());
+                    }
+                }
+                None
+            }
+            Expr::SliceLit { elem: Some(t), .. } => Some(t.render()),
+            Expr::Slice { base, .. } => self.slice_element_type_name(base),
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            return self.slice_element_type_name(&first.value);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -578,6 +676,11 @@ impl<'a> Collector<'a> {
         if name != "_" {
             if let Some(top) = self.kind_scopes.last_mut() {
                 top.insert(name.to_string(), kind);
+            }
+            // #1031: every binding shadows an outer exact numeric type until
+            // `set_scalar` proves otherwise.
+            if let Some(top) = self.scalar_scopes.last_mut() {
+                top.insert(name.to_string(), None);
             }
             // Every (re)binding shadows an outer set binding; callers that
             // know the new binding is a set record it via bind_set_elem.
@@ -665,6 +768,175 @@ impl<'a> Collector<'a> {
                 "a set's insert/contains/remove take a value of the set's element type",
             );
         }
+    }
+
+    /// #1031 — record the exact numeric type of a binding that `bind_kind`
+    /// just made in the current scope.
+    fn set_scalar(&mut self, name: &str, scalar: Option<&'static str>) {
+        if name != "_" {
+            if let Some(top) = self.scalar_scopes.last_mut() {
+                top.insert(name.to_string(), scalar);
+            }
+        }
+    }
+
+    /// #1031 — the exact numeric type of a binding, if provably typed. A name
+    /// that is not a binding (e.g. a file-level const, which may be untyped)
+    /// stays `None`.
+    fn lookup_scalar(&self, name: &str) -> Option<&'static str> {
+        for layer in self.scalar_scopes.iter().rev() {
+            if let Some(s) = layer.get(name) {
+                return *s;
+            }
+        }
+        None
+    }
+
+    /// #1031 — the exact predeclared numeric spelling of a type expression.
+    /// A user-declared struct/enum/alias of that name is not the predeclared
+    /// type, so it fails open.
+    fn scalar_of_ty(&self, ty: &TypeExpr) -> Option<&'static str> {
+        let TypeExpr::Named { name, .. } = ty else {
+            return None;
+        };
+        if self.ck.structs.contains_key(name.as_str())
+            || self.ck.enums.contains_key(name.as_str())
+            || self.ck.type_aliases.contains_key(name.as_str())
+        {
+            return None;
+        }
+        canonical_numeric_name(name)
+    }
+
+    /// #1031 — exact result types of a call whose callee is provably known:
+    /// a non-generic top-level function, or a predeclared numeric conversion
+    /// `T(x)`. A local binding of the callee name shadows both (fail-open).
+    fn call_result_scalars(
+        &self,
+        callee: &Expr,
+        args: &[CallArg],
+    ) -> Option<Vec<Option<&'static str>>> {
+        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+            return None;
+        };
+        if self
+            .scopes
+            .iter()
+            .any(|layer| layer.contains_key(name.as_str()))
+        {
+            return None;
+        }
+        if let Some(fd) = self.ck.fns.get(name.as_str()) {
+            if fd.receiver.is_some() || !fd.type_params.is_empty() {
+                return None;
+            }
+            return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+        }
+        if args.len() == 1
+            && !self.ck.structs.contains_key(name.as_str())
+            && !self.ck.enums.contains_key(name.as_str())
+            && !self.ck.type_aliases.contains_key(name.as_str())
+        {
+            if let Some(s) = canonical_numeric_name(name) {
+                return Some(vec![Some(s)]);
+            }
+        }
+        None
+    }
+
+    /// #1031 — the exact numeric type of a value that is provably TYPED.
+    /// Literals are untyped constants (assignable to any numeric type), so
+    /// they are deliberately `None` here.
+    fn typed_value_scalar(&self, e: &Expr) -> Option<&'static str> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.lookup_scalar(name),
+            // Typed arithmetic keeps its operand type: in any program that
+            // builds, both operands share one type or one is an untyped
+            // constant, so the typed side names the result type. A shift's
+            // result takes the type of its left operand alone.
+            Expr::Binary { op, lhs, rhs, .. } => match op {
+                BinOp::Add
+                | BinOp::Sub
+                | BinOp::Mul
+                | BinOp::Div
+                | BinOp::Mod
+                | BinOp::BitOr
+                | BinOp::BitXor
+                | BinOp::BitAnd => self
+                    .typed_value_scalar(lhs)
+                    .or_else(|| self.typed_value_scalar(rhs)),
+                BinOp::Shl | BinOp::Shr => self.typed_value_scalar(lhs),
+                _ => None,
+            },
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => self.typed_value_scalar(operand),
+            Expr::Call { callee, args, .. } => match self.call_result_scalars(callee, args) {
+                Some(rs) if rs.len() == 1 => rs[0],
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// #1031 — the type a `x := v` / `var x = v` binding takes from its
+    /// initializer: Go's default type for an untyped numeric literal (`int`,
+    /// `float64`), or the initializer's own type when it is typed.
+    fn initializer_scalar(&self, e: &Expr) -> Option<&'static str> {
+        match unwrap_parens(e) {
+            Expr::Lit {
+                kind: LitKind::Int(_),
+                ..
+            } => Some("int"),
+            Expr::Lit {
+                kind: LitKind::Float(_),
+                ..
+            } => Some("float64"),
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => match unwrap_parens(operand) {
+                Expr::Lit {
+                    kind: LitKind::Int(_),
+                    ..
+                } => Some("int"),
+                Expr::Lit {
+                    kind: LitKind::Float(_),
+                    ..
+                } => Some("float64"),
+                _ => self.typed_value_scalar(operand),
+            },
+            other => self.typed_value_scalar(other),
+        }
+    }
+
+    /// #1031 — exact numeric types for the names of a local declaration.
+    fn infer_local_scalars(&self, l: &LocalDecl) -> Vec<Option<&'static str>> {
+        let n = l.names.len();
+        if let Some(ty) = &l.ty {
+            return vec![self.scalar_of_ty(ty); n];
+        }
+        // An untyped `const c = 3` stays an untyped constant: assignable to
+        // any numeric result, so it must not be pinned to `int`.
+        if l.kind == LocalKind::Const {
+            return vec![None; n];
+        }
+        if n == l.values.len() {
+            return l.values.iter().map(|v| self.initializer_scalar(v)).collect();
+        }
+        if n >= 2 && l.values.len() == 1 {
+            if let Expr::Call { callee, args, .. } = unwrap_parens(&l.values[0]) {
+                if let Some(rs) = self.call_result_scalars(callee, args) {
+                    if rs.len() == n {
+                        return rs;
+                    }
+                }
+            }
+        }
+        vec![None; n]
     }
 
     fn lookup_kind(&self, name: &str) -> Option<OpKind> {
@@ -931,13 +1203,19 @@ impl<'a> Collector<'a> {
             self.exempt(&p.name);
             let pk = self.kind_of_ty(&p.ty, 0);
             self.bind_kind(&p.name, pk);
+            let ps = self.scalar_of_ty(&p.ty);
+            self.set_scalar(&p.name, ps);
             self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
+            self.bind_type_name(&p.name, p.ty.render());
         }
         for r in &f.results {
             if let Some(rname) = &r.name {
                 self.exempt(rname);
                 let rk = self.kind_of_ty(&r.ty, 0);
                 self.bind_kind(rname, rk);
+                let rs = self.scalar_of_ty(&r.ty);
+                self.set_scalar(rname, rs);
+                self.bind_type_name(rname, r.ty.render());
             }
         }
         for r in &f.results {
@@ -945,6 +1223,9 @@ impl<'a> Collector<'a> {
                 self.exempt(name);
             }
         }
+        let result_scalars: Vec<Option<&'static str>> =
+            f.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+        let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
@@ -960,6 +1241,7 @@ impl<'a> Collector<'a> {
         self.fn_results = outer;
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
+        self.fn_result_scalars = outer_scalars;
         self.fn_type_params = outer_tp;
         self.pop_scope();
     }
@@ -1092,6 +1374,7 @@ impl<'a> Collector<'a> {
         // tracking; #430's operand-kind inference runs for EVERY name so
         // `kind_of_expr` resolves binding-shaped operands (issue #425).
         let kinds = self.infer_local_kinds(l);
+        let scalars = self.infer_local_scalars(l);
         let set_elems: Vec<Option<String>> = (0..l.names.len())
             .map(|i| match (&l.ty, l.values.len() == l.names.len()) {
                 (Some(t), _) => Self::set_elem_of_ty(t),
@@ -1099,8 +1382,32 @@ impl<'a> Collector<'a> {
                 _ => None,
             })
             .collect();
-        for ((name, kind), set_elem) in l.names.iter().zip(kinds).zip(set_elems) {
+        if let Some(t) = &l.ty {
+            let tname = t.render();
+            for name in &l.names {
+                self.bind_type_name(name, tname.clone());
+            }
+        } else if l.values.len() == l.names.len() {
+            for (name, val) in l.names.iter().zip(&l.values) {
+                if let Some(elem) = self.slice_element_type_name(val) {
+                    self.bind_type_name(name, format!("[]{}", elem));
+                }
+            }
+        }
+        for (((name, kind), scalar), set_elem) in
+            l.names.iter().zip(kinds).zip(scalars).zip(set_elems)
+        {
+            // #1031: a same-scope `:=` re-define keeps the EXISTING variable
+            // (and its type) in Go, so only a fresh binding takes the
+            // initializer's type; a re-define becomes unknown (fail-open).
+            let fresh = !self
+                .scalar_scopes
+                .last()
+                .is_some_and(|top| top.contains_key(name.as_str()));
             self.bind_kind(name, kind);
+            if fresh || l.ty.is_some() {
+                self.set_scalar(name, scalar);
+            }
             self.bind_set_elem(name, set_elem);
             if !track_read {
                 self.exempt(name);
@@ -1723,6 +2030,13 @@ impl<'a> Collector<'a> {
                     unwrap_parens(callee),
                     Expr::Ident { name, .. } if name == "new" || name == "make"
                 );
+                if type_first_arg {
+                    if let Some(first_arg) = args.first() {
+                        if let Expr::Ident { name, span } = unwrap_parens(&first_arg.value) {
+                            self.check_named_type_instantiation(name, *span);
+                        }
+                    }
+                }
                 for (i, a) in args.iter().enumerate() {
                     if type_first_arg && i == 0 {
                         continue;
@@ -1781,8 +2095,10 @@ impl<'a> Collector<'a> {
                 key,
                 value,
                 entries,
+                span,
                 ..
             } => {
+                self.check_map_key_comparable(key, *span);
                 self.ty(key);
                 self.ty(value);
                 self.check_value_position_type_name(key);
@@ -1815,13 +2131,19 @@ impl<'a> Collector<'a> {
                     self.exempt(&p.name);
                     let pk = self.kind_of_ty(&p.ty, 0);
                     self.bind_kind(&p.name, pk);
+                    let ps = self.scalar_of_ty(&p.ty);
+                    self.set_scalar(&p.name, ps);
                     self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
+                    self.bind_type_name(&p.name, p.ty.render());
                 }
                 for r in results {
                     if let Some(rname) = &r.name {
                         self.exempt(rname);
                         let rk = self.kind_of_ty(&r.ty, 0);
                         self.bind_kind(rname, rk);
+                        let rs = self.scalar_of_ty(&r.ty);
+                        self.set_scalar(rname, rs);
+                        self.bind_type_name(rname, r.ty.render());
                     }
                 }
                 for r in results {
@@ -1839,6 +2161,9 @@ impl<'a> Collector<'a> {
                     results.last().map(|r| &r.ty),
                     Some(TypeExpr::Named { name, .. }) if name == "error"
                 );
+                let result_scalars: Vec<Option<&'static str>> =
+                    results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+                let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
                 let outer = std::mem::replace(&mut self.fn_results, result_kinds);
                 let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
                 let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
@@ -1850,6 +2175,7 @@ impl<'a> Collector<'a> {
                 self.fn_results = outer;
                 self.fn_results_all_named = outer_named;
                 self.fn_results_error_tail = outer_err;
+                self.fn_result_scalars = outer_scalars;
                 self.pop_scope();
             }
             Expr::Paren { inner, .. } => self.expr(inner),
@@ -1876,7 +2202,8 @@ impl<'a> Collector<'a> {
                 }
                 self.ty(elem);
             }
-            TypeExpr::Map { key, value, .. } => {
+            TypeExpr::Map { key, value, span } => {
+                self.check_map_key_comparable(key, *span);
                 self.ty(key);
                 self.ty(value);
             }
@@ -2003,7 +2330,7 @@ impl<'a> Collector<'a> {
         if trimmed.starts_with("map[") {
             return Some("map");
         }
-        if trimmed.starts_with("func(") || trimmed.starts_with("fn(") {
+        if trimmed.starts_with("func(") || trimmed.starts_with("fn(") || trimmed == "fn" || trimmed == "func" {
             return Some("function");
         }
         if trimmed.starts_with("set[") || trimmed == "set" {
@@ -2039,6 +2366,26 @@ impl<'a> Collector<'a> {
         None
     }
 
+    fn check_map_key_comparable(&mut self, key: &TypeExpr, span: Span) {
+        let noun = match key {
+            TypeExpr::Slice { .. } => Some("slice"),
+            TypeExpr::Map { .. } => Some("map"),
+            TypeExpr::Fn { .. } => Some("function"),
+            _ => self.incomparable_type_noun(&key.render()),
+        };
+        if let Some(noun) = noun {
+            let key_ty_str = key.render();
+            self.emit_e1002(
+                span,
+                format!(
+                    "invalid map key type `{}`: {} is not comparable (HYB-E1002)",
+                    key_ty_str, noun
+                ),
+                "map key types must be comparable (primitives, pointers, strings, or structs without slice/map fields)",
+            );
+        }
+    }
+
     fn check_named_type_instantiation(&mut self, name: &str, span: Span) {
         let name = name.trim();
         if let Some(rest) = name
@@ -2063,6 +2410,17 @@ impl<'a> Collector<'a> {
         if let Some(after_map) = name.strip_prefix("map") {
             if let Some((k, v)) = Self::strip_leading_bracket_group(after_map) {
                 if !v.trim().is_empty() {
+                    let k_trimmed = k.trim();
+                    if let Some(noun) = self.incomparable_type_noun(k_trimmed) {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "invalid map key type `{}`: {} is not comparable (HYB-E1002)",
+                                k_trimmed, noun
+                            ),
+                            "map key types must be comparable (primitives, pointers, strings, or structs without slice/map fields)",
+                        );
+                    }
                     self.check_named_type_instantiation(k, span);
                     self.check_named_type_instantiation(v, span);
                     return;
@@ -3205,9 +3563,13 @@ impl<'a> Collector<'a> {
         if values.len() == 1 {
             if let Expr::Call { callee, args, .. } = unwrap_parens(&values[0]) {
                 if let Some(res) = self.call_result_kinds(callee, args) {
+                    let res_scalars = self.call_result_scalars(callee, args);
                     if res.len() == want.len() {
-                        for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(&values[0], r, w, values[0].span());
+                        for (i, (r, w)) in res.iter().zip(want.iter()).enumerate() {
+                            if !self.report_return_conflict(&values[0], r, w, values[0].span()) {
+                                let got_s = res_scalars.as_ref().and_then(|rs| rs.get(i).copied().flatten());
+                                self.report_numeric_return_mismatch(got_s, r, i, values[0].span());
+                            }
                         }
                         return;
                     }
@@ -3215,8 +3577,11 @@ impl<'a> Collector<'a> {
                         && self.fn_results_error_tail
                         && res.len() + 1 == want.len()
                     {
-                        for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(&values[0], r, w, values[0].span());
+                        for (i, (r, w)) in res.iter().zip(want.iter()).enumerate() {
+                            if !self.report_return_conflict(&values[0], r, w, values[0].span()) {
+                                let got_s = res_scalars.as_ref().and_then(|rs| rs.get(i).copied().flatten());
+                                self.report_numeric_return_mismatch(got_s, r, i, values[0].span());
+                            }
                         }
                         return;
                     }
@@ -3261,9 +3626,12 @@ impl<'a> Collector<'a> {
             let short_ok = nv < nw
                 && ((nv == 0 && self.fn_results_all_named) || self.fn_results_error_tail);
             if short_ok {
-                for (v, w) in values.iter().zip(want.iter()) {
+                for (i, (v, w)) in values.iter().zip(want.iter()).enumerate() {
                     let got = self.kind_of_expr(v);
-                    self.report_return_conflict(v, &got, w, v.span());
+                    if !self.report_return_conflict(v, &got, w, v.span()) {
+                        let got_s = self.typed_value_scalar(v);
+                        self.report_numeric_return_mismatch(got_s, &got, i, v.span());
+                    }
                 }
                 return;
             }
@@ -3289,20 +3657,58 @@ impl<'a> Collector<'a> {
             );
             return;
         }
-        for (v, w) in values.iter().zip(want.iter()) {
+        for (i, (v, w)) in values.iter().zip(want.iter()).enumerate() {
             let got = self.kind_of_expr(v);
-            self.report_return_conflict(v, &got, w, v.span());
+            if !self.report_return_conflict(v, &got, w, v.span()) {
+                let got_s = self.typed_value_scalar(v);
+                self.report_numeric_return_mismatch(got_s, &got, i, v.span());
+            }
         }
     }
 
-    fn report_return_conflict(&mut self, val: &Expr, got: &OpKind, want: &OpKind, span: Span) {
+    /// #1031 — a TYPED numeric value returned into a result of a different
+    /// numeric type (`int` → `float64`, `int` → `int64`, `float32` →
+    /// `float64`, ...). `kinds_conflict` cannot see these: `OpKind` collapses
+    /// the widths, and `(Float, Int)` must stay legal for untyped constants.
+    /// Go has no implicit numeric conversion for typed values, so the emitted
+    /// `return` fails `go build`. Fires only when both exact types are known
+    /// and the kind check has not already reported this value.
+    fn report_numeric_return_mismatch(
+        &mut self,
+        got: Option<&'static str>,
+        got_kind: &OpKind,
+        idx: usize,
+        span: Span,
+    ) {
+        let Some(got) = got else { return };
+        let Some(want) = self.fn_result_scalars.get(idx).copied().flatten() else {
+            return;
+        };
+        if got == want {
+            return;
+        }
+        if let Some(want_kind) = self.fn_results.get(idx) {
+            if kinds_conflict(want_kind, got_kind) {
+                return;
+            }
+        }
+        self.emit_e1002(
+            span,
+            format!(
+                "cannot return a value of type `{got}` from a function declaring `{want}` — Go refuses `cannot use ... (variable of type {got}) as {want} value in return statement` (HYB-E1002)"
+            ),
+            "Go has no implicit conversion between typed numeric values; write an explicit conversion (`float64(n)`) when a conversion is intended",
+        );
+    }
+
+    fn report_return_conflict(&mut self, val: &Expr, got: &OpKind, want: &OpKind, span: Span) -> bool {
         let is_untyped_int_to_float = *want == OpKind::Float
             && *got == OpKind::Int
             && self.is_untyped_int_const(val);
         let conflict = (*want == OpKind::Float && *got == OpKind::Int && !is_untyped_int_to_float)
             || kinds_conflict(want, got);
         if !conflict {
-            return;
+            return false;
         }
         self.emit_e1002(
             span,
@@ -3314,6 +3720,7 @@ impl<'a> Collector<'a> {
             ),
             "a returned value must be assignable to its declared result type; write an explicit conversion when a conversion is intended",
         );
+        true
     }
 
     /// #682 U7 — a lone multi-value call as the whole argument list is legal
@@ -3361,11 +3768,88 @@ impl<'a> Collector<'a> {
             _ => return,
         };
         for extra in &args[1..] {
-            // `append(a, b...)` — a variadic spread passes the whole slice, so
-            // the argument's kind is the SLICE type, not an element. Go accepts
-            // it (for a matching element type), so it must not be compared
-            // against the element kind.
+            // `append(a, b...)` — a variadic spread passes the whole slice (or string
+            // into `[]byte`). Go requires the spread operand's element type to match
+            // the destination slice element type (issue #2738).
             if extra.spread {
+                let got = self.kind_of_expr(&extra.value);
+                match got {
+                    OpKind::Unknown => {}
+                    OpKind::Slice(extra_elem) => {
+                        let dst_elem_ty = self.slice_element_type_name(&first.value);
+                        let src_elem_ty = self.slice_element_type_name(&extra.value);
+                        let ty_mismatch = match (&dst_elem_ty, &src_elem_ty) {
+                            (Some(d), Some(s)) => {
+                                crate::const_overflow::canonical_int_type_name(d)
+                                    != crate::const_overflow::canonical_int_type_name(s)
+                            }
+                            _ => false,
+                        };
+                        let kind_mismatch = elem != *extra_elem
+                            && !matches!(elem, OpKind::Unknown)
+                            && !matches!(*extra_elem, OpKind::Unknown);
+                        if kinds_conflict(&elem, &extra_elem) || kind_mismatch || ty_mismatch {
+                            let (d_label, s_label) = match (dst_elem_ty, src_elem_ty) {
+                                (Some(d), Some(s)) => (format!("[]{}", d), format!("[]{}", s)),
+                                _ => (
+                                    self.kind_of_expr(&first.value).label().to_string(),
+                                    format!("[]{}", extra_elem.label()),
+                                ),
+                            };
+                            self.emit_e1002(
+                                extra.value.span(),
+                                format!(
+                                    "cannot use `{}` (type `{}`) as `{}` value in argument to append (HYB-E1002)",
+                                    extra.value.render(),
+                                    s_label,
+                                    d_label
+                                ),
+                                "elements of the spread slice must match the destination slice element type",
+                            );
+                        }
+                    }
+                    OpKind::Str => {
+                        let dst_elem_ty = self.slice_element_type_name(&first.value);
+                        let is_byte_slice = matches!(elem, OpKind::Int)
+                            && dst_elem_ty.as_deref().map_or(false, |t| {
+                                matches!(crate::const_overflow::canonical_int_type_name(t), "uint8")
+                            });
+                        let cannot_be_byte = !matches!(elem, OpKind::Int | OpKind::Unknown)
+                            || (matches!(elem, OpKind::Int)
+                                && dst_elem_ty.as_deref().map_or(false, |t| {
+                                    !matches!(
+                                        crate::const_overflow::canonical_int_type_name(t),
+                                        "uint8"
+                                    )
+                                }));
+                        if cannot_be_byte && !is_byte_slice {
+                            let d_label = dst_elem_ty
+                                .map(|d| format!("[]{}", d))
+                                .unwrap_or_else(|| self.kind_of_expr(&first.value).label().to_string());
+                            self.emit_e1002(
+                                extra.value.span(),
+                                format!(
+                                    "cannot use `{}` (type `string`) as `{}` value in argument to append (HYB-E1002)",
+                                    extra.value.render(),
+                                    d_label
+                                ),
+                                "string elements can only be appended to a byte slice (`[]byte`)",
+                            );
+                        }
+                    }
+                    _ => {
+                        self.emit_e1002(
+                            extra.value.span(),
+                            format!(
+                                "cannot use `{}` (type `{}`) as `{}` value in argument to append (HYB-E1002)",
+                                extra.value.render(),
+                                got.label(),
+                                self.kind_of_expr(&first.value).label()
+                            ),
+                            "a spread argument to `append` must be a slice (or string for `[]byte`)",
+                        );
+                    }
+                }
                 continue;
             }
             let got = self.kind_of_expr(&extra.value);
@@ -3692,7 +4176,20 @@ impl<'a> Collector<'a> {
                         "untyped nil cannot be compared with untyped nil",
                     );
                 } else if !lhs_is_nil && !rhs_is_nil {
-                    if equality_kinds_conflict(&lk, &rk) {
+                    // #2719: a typed integer and a typed float are different
+                    // types, so Go refuses `a == b` (`mismatched types int and
+                    // float64`). An untyped numeric constant adapts to the other
+                    // operand (`int_var == 1.0` / `float_var == 1` build), so the
+                    // conflict needs the side that must convert to be a genuine
+                    // non-constant value. Mirrors the arithmetic and ordered-
+                    // comparison arms above.
+                    let int_float_conflict = (lk == OpKind::Float
+                        && rk == OpKind::Int
+                        && !self.is_untyped_int_const(rhs))
+                        || (lk == OpKind::Int
+                            && rk == OpKind::Float
+                            && !self.is_untyped_int_const(lhs));
+                    if equality_kinds_conflict(&lk, &rk) || int_float_conflict {
                         self.emit_e1002(
                             span,
                             format!(
@@ -4857,6 +5354,31 @@ impl<'a> Collector<'a> {
                         ),
                         "slice type conversions require a string (for `[]byte`/`[]rune`) or compatible slice operand",
                     );
+                }
+                // #2725: a slice-to-slice conversion must keep the element type
+                // identical (Go §Conversions). `conversion_kinds_conflict` already
+                // has that arm for the *named* conversion path, but a slice-literal
+                // conversion (`[]string(xs)`) reaches HERE instead, and the checks
+                // above only verified the operand WAS a slice. So `[]string([]int)`,
+                // `[]int([]float64)` and `[]bool([]int)` were accepted and failed
+                // `go build` (`cannot convert ... to type ...`, Row 13 BUILDABLE).
+                if let OpKind::Slice(arg_elem) = &ak {
+                    let target_elem = self.kind_of_ty(elem_ty, 0);
+                    if copy_element_kinds_conflict(&target_elem, arg_elem) {
+                        self.emit_e1002(
+                            arg.span(),
+                            format!(
+                                "cannot convert `{}` (type `{}`) to `{}` — Go refuses `cannot convert {} (variable of type {}) to type {}` (HYB-E1002)",
+                                arg.render(),
+                                ak.label(),
+                                target_str,
+                                arg.render(),
+                                ak.label(),
+                                target_str
+                            ),
+                            "a slice conversion requires the two slice types to have identical element types",
+                        );
+                    }
                 }
             }
             Expr::Ident { name, .. } => {

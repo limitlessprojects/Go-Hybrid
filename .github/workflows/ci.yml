@@ -55,6 +55,7 @@ jobs:
           python3 -m unittest discover -s tools -p test_runner_env_report.py -v
           python3 -m unittest discover -s tools -p test_check_versions.py -v
           python3 -m unittest discover -s tools -p test_differential_reject_rule.py -v
+          python3 -m unittest discover -s tools -p test_package_release.py -v
           python3 -m unittest discover -s tools -p test_corpus_harness.py -v
           python3 -m unittest discover -s tools -p test_extract_offsets.py -v
           # Suites that had drifted out of this list: a merged regression test

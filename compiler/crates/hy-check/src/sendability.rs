@@ -98,6 +98,18 @@ impl<'a> Checker<'a> {
                 risky: !b.shape.is_sendable_by_type(),
             };
         }
+        if b.ty
+            .as_ref()
+            .is_some_and(|ty| self.ty_mentions_value_type_param(ty, &st.type_params, 0))
+        {
+            return Outcome::Unproven(UnprovenInfo {
+                value: name.to_string(),
+                reason: format!(
+                    "its type `{}` depends on an unconstrained generic type parameter, which may instantiate to a closure, borrow handle, or non-movable synchronization type (O4.9)",
+                    self.binding_ty_str(b)
+                ),
+            });
+        }
         match &b.shape {
             TypeShape::Unknown => Outcome::Unproven(UnprovenInfo {
                 value: name.to_string(),
@@ -474,7 +486,10 @@ impl<'a> Checker<'a> {
             Expr::Call { callee, args, .. }
                 if matches!(
                     unwrap_parens(callee),
-                    Expr::Ident { name, .. } if name == "some" && self.lookup_binding(st, name).is_none()
+                    Expr::Ident { name, .. }
+                        if Self::base_named_type_str(name) == "some"
+                            && self.lookup_binding(st, name).is_none()
+                            && self.lookup_binding(st, Self::base_named_type_str(name)).is_none()
                 ) =>
             {
                 self.classify_composite(st, expr, args.iter().map(|a| &a.value))
