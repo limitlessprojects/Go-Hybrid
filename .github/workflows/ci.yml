@@ -38,6 +38,7 @@ jobs:
           python3 -m unittest discover -s tools -p test_author_repro_verdict.py -v
           python3 -m unittest discover -s tools -p test_shepherd_gate.py -v
           python3 -m unittest discover -s tools -p test_shepherd_verify_assert.py -v
+          python3 -m unittest discover -s tools -p test_triage_bot.py -v
           python3 -m unittest discover -s tools -p test_queue_sweeper.py -v
           python3 -m unittest discover -s tools -p test_check_corpus_census.py -v
           python3 -m unittest discover -s tools/fuzz -p 'test_hyfuzz.py'
