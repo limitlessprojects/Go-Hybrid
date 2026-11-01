@@ -72,8 +72,9 @@ pub(crate) enum OpKind {
     /// those four classes through.
     ///
     /// Assigning *to* an `Interface` target stays legal (an interface accepts
-    /// any value), and assigning *from* one stays fail-open because type
-    /// assertions are not modelled.
+    /// any value), but assigning *from* one into a concrete type is a
+    /// conflict (#2962): Hybrid has no type-assertion syntax, so an `any`
+    /// value can never become concrete and such programs cannot build.
     Interface,
     Int,
     Float,
@@ -142,18 +143,43 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
         (Unknown, _) | (_, Unknown) => false,
         // An interface target accepts ANY value (`var a any = 1; a = "str"`
         // builds), so `Interface` on the `want` side is never a conflict.
-        // `Interface` on the `got` side is fail-open too: assigning an `any` to
-        // a concrete type needs a type assertion the kind model does not track,
-        // so it must not be rejected on kind evidence alone.
         //
         // Without this arm the U16 assignment check and the U9-U12 interface
         // classification contradict each other: `a` of type `any` resolves to
         // `Interface`, and `Interface` vs `Str` falls through to the mismatch
         // arm below, so every assignment to an `any` target would be rejected.
         // The accept-side corpus controls caught exactly that.
-        (Interface, _) | (_, Interface) => false,
+        (Interface, _) => false,
         // No value is involved; a count check owns that case.
         (Void, _) | (_, Void) => false,
+        // #2962: `Interface` on the `got` side used to fail open here —
+        // "assigning an `any` to a concrete type needs a type assertion the
+        // kind model does not track". But Hybrid has NO type-assertion syntax
+        // (`x.(T)`, type switch): an `any` value — a declared `any` or
+        // `recover()` — can never become concrete, so each concrete target
+        // below is a guaranteed `go build` failure (`need type assertion`),
+        // which Row 13 (BUILDABLE) says the checker must refuse. Explicit
+        // conversions `int(a)` are a different site (#2482 / PR #2484);
+        // equality (`a == 5`) stays legal via `equality_kinds_conflict`'s
+        // both-directions rule, since `(Interface, concrete)` remains false.
+        (
+            Int
+            | Float
+            | Bool
+            | Str
+            | Slice(_)
+            | Array(_)
+            | Map(_, _)
+            | Chan(_)
+            | Struct(Some(_))
+            | Pointer(_)
+            | Fn(..)
+            | Option(_),
+            Interface,
+        ) => true,
+        // The only remaining `got = Interface` wants are the unresolved side
+        // (`Struct(None)`): no claim, fail open.
+        (_, Interface) => false,
         // An untyped int constant is assignable to a float target
         // (`var f float64 = 1` builds). The kind model cannot tell an untyped
         // constant from an `int` variable, so this direction must stay allowed
