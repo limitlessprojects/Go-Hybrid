@@ -76,6 +76,22 @@ class RunnerFailureTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual([s['name'] for s in summary['steps']], ['first', 'later'])
 
+    def test_non_dict_command_entry_is_fail_soft(self):
+        # A malformed entry is recorded and skipped; the valid command after it runs.
+        code, summary = self.run_job([], [42, step('later', 'print(1)')])
+        self.assertEqual(code, 1)
+        self.assertFalse(summary['ok'])
+        self.assertEqual([(s['name'], s['exit']) for s in summary['steps']],
+                         [('cmd-0', 1), ('later', 0)])
+
+    def test_non_dict_setup_entry_is_fail_soft(self):
+        # Same contract for setup: a non-dict entry must not silently skip commands.
+        code, summary = self.run_job([step('ok', 'print(1)'), 42], [step('command', 'print(2)')])
+        self.assertEqual(code, 1)
+        self.assertFalse(summary['ok'])
+        self.assertEqual([(s['name'], s['exit']) for s in summary['steps']],
+                         [('ok', 0), ('setup-1', 1), ('command', 0)])
+
     def test_hard_setup_timeout_stops_commands_and_records_timeout(self):
         code, summary = self.run_job([step('required', 'import time; time.sleep(60)', True, 0.1)],
                                      [step('must-not-run', 'print(1)')])
@@ -349,6 +365,106 @@ class WorktreeShaTests(unittest.TestCase):
         self.assertFalse(setup_ran)
         self.assertFalse(command_ran)
         self.assertIn('failed to resolve HEAD', summary['steps'][0]['out_tail'])
+
+
+class RedactTests(unittest.TestCase):
+    def test_path_and_dispatch_names_are_preserved_in_full(self):
+        env = {
+            'GITHUB_PATH': '/tmp/gh_path',
+            'GITHUB_EVENT_PATH': '/tmp/event.json',
+            'LD_LIBRARY_PATH': '/usr/lib',
+            'PYTHONPATH': '/opt/py',
+            'GOPATH': '/go',
+            'GITHUB_DISPATCH_TYPE': 'workflow_dispatch',
+        }
+        self.assertEqual(runner.redact(env), env)
+
+    def test_true_pat_key_segments_are_masked(self):
+        for name in ('PAT', 'GITHUB_PAT', 'GH-PAT', 'MY_PAT'):
+            with self.subTest(name=name):
+                self.assertTrue(runner.redact({name: 'secret'})[name].startswith('[REDACTED'))
+
+    def test_credential_names_are_still_masked(self):
+        for name in ('GITHUB_TOKEN', 'DB_PASSWORD', 'AWS_SECRET_ACCESS_KEY',
+                     'MY_API_KEY', 'KAGGLE_DATA_PROXY_TOKEN'):
+            with self.subTest(name=name):
+                self.assertTrue(runner.redact({name: 'value'})[name].startswith('[REDACTED'))
+
+    def test_token_values_under_unremarkable_names_are_masked(self):
+        out = runner.redact({
+            'GIT_URL': 'https://x-access-token:ghp_abcdef@github.com/o/r.git',
+            'KAGGLE_NOTE': 'KGAT_0123456789',
+            'PLAIN': 'hello',
+        })
+        self.assertTrue(out['GIT_URL'].startswith('[REDACTED'))
+        self.assertTrue(out['KAGGLE_NOTE'].startswith('[REDACTED'))
+        self.assertEqual(out['PLAIN'], 'hello')
+
+    def test_empty_secret_value_is_marked_empty(self):
+        self.assertEqual(runner.redact({'GITHUB_TOKEN': ''})['GITHUB_TOKEN'], '[EMPTY]')
+
+
+class RunCmdValidationTests(unittest.TestCase):
+    def test_invalid_timeouts_return_runner_error(self):
+        for timeout in (True, False, 0, -1, float('nan'), float('inf')):
+            with self.subTest(timeout=timeout):
+                code, _, tail = runner.run_cmd([sys.executable, '-c', 'pass'], timeout)
+                self.assertEqual(code, 125)
+                self.assertIn('runner error', tail)
+
+    def test_invalid_cmd_returns_runner_error(self):
+        for cmd in (None, 42, '', [], [42], {'run': 'true'}):
+            with self.subTest(cmd=cmd):
+                code, _, tail = runner.run_cmd(cmd, 10)
+                self.assertEqual(code, 125)
+                self.assertIn('runner error', tail)
+
+
+class ShaPinTests(unittest.TestCase):
+    HEAD = 'abcdef0123456789abcdef0123456789abcdef01'
+
+    def run_with_fake_head(self, sha_value):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            repo = root / 'repo'
+            repo.mkdir()
+            (repo / '.git').mkdir()  # presence only; the git probe is faked below
+            job_path = root / 'job.json'
+            results = root / 'results'
+            job_path.write_text(json.dumps({
+                'job': 'sha', 'sha': sha_value,
+                'commands': [step('command', 'print(1)')],
+            }), encoding='utf-8')
+
+            def fake_run(cmd, timeout, cwd=None, env=None):
+                if isinstance(cmd, list) and cmd[:1] == ['git']:
+                    return 0, 0.0, self.HEAD
+                return 0, 0.0, ''
+
+            argv = ['runner.py', str(job_path), '--results-dir', str(results),
+                    '--repo-dir', str(repo)]
+            with patch.object(sys, 'argv', argv), patch.dict(os.environ), \
+                    patch.object(runner, 'env_report', return_value={'test': True}), \
+                    patch.object(runner, 'run_cmd', side_effect=fake_run), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as stopped:
+                    runner.main()
+            summary = json.loads((results / 'summary.json').read_text(encoding='utf-8'))
+            return stopped.exception.code, summary
+
+    def test_uppercase_and_padded_sha_pin_matches(self):
+        code, summary = self.run_with_fake_head('  ' + self.HEAD.upper() + '\n')
+        self.assertEqual(code, 0)
+        self.assertTrue(summary['ok'])
+        self.assertEqual([(s['name'], s['exit']) for s in summary['steps']],
+                         [('sha-check', 0), ('command', 0)])
+
+    def test_nonstring_sha_pin_fails_closed(self):
+        code, summary = self.run_with_fake_head(12345)
+        self.assertEqual(code, 1)
+        self.assertFalse(summary['ok'])
+        self.assertEqual([(s['name'], s['exit']) for s in summary['steps']], [('sha-check', 1)])
+        self.assertIn('must be a string', summary['steps'][0]['out_tail'])
 
 
 if __name__ == '__main__':
