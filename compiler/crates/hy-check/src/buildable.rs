@@ -1692,6 +1692,7 @@ impl<'a> Collector<'a> {
                 // `ch <- noop()` / `ch <- pair()`, which Go rejects.
                 self.check_single_value_position(value, "a channel send", false);
                 self.expr(value);
+                self.check_send_operands(chan, value);
             }
             Stmt::If {
                 init,
@@ -1903,6 +1904,7 @@ impl<'a> Collector<'a> {
                     self.check_single_value_position(value, "a channel send", false);
                             self.expr(chan);
                             self.expr(value);
+                            self.check_send_operands(chan, value);
                         }
                         SelectArmKind::Recv { names, chan } => {
                             self.check_repeated_bindings(names, chan.span());
@@ -2867,6 +2869,63 @@ impl<'a> Collector<'a> {
     fn struct_base_name(&self, k: &OpKind) -> Option<String> {
         self.struct_name(k)
             .map(|s| Checker::base_named_type_str(&s).to_string())
+    }
+
+    fn is_untyped_int_const(&self, expr: &Expr) -> bool {
+        let bare = unwrap_parens(expr);
+        match bare {
+            Expr::Lit {
+                kind: LitKind::Int(_), ..
+            } => true,
+            Expr::Ident { name, .. } => {
+                if self.file_consts.contains_key(name) {
+                    return true;
+                }
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        if matches!(self.defines[*id].kind, LocalKind::Const) {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => self.is_untyped_int_const(operand),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.is_untyped_int_const(lhs) && self.is_untyped_int_const(rhs)
+            }
+            _ => false,
+        }
+    }
+
+    fn check_send_operands(&mut self, chan: &Expr, value: &Expr) {
+        let ck = self.kind_of_expr(chan);
+        let OpKind::Chan(elem) = ck else {
+            return;
+        };
+        let vk = self.kind_of_expr(value);
+        let is_untyped_int_to_float = *elem == OpKind::Float
+            && vk == OpKind::Int
+            && self.is_untyped_int_const(value);
+        let int_float_conflict = (*elem == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
+            || (*elem == OpKind::Int && vk == OpKind::Float);
+        if int_float_conflict {
+            self.emit_e1002(
+                value.span(),
+                format!(
+                    "cannot use `{}` (type `{}`) as `{}` value in send — Go refuses `cannot use ... as {} value in send` (HYB-E1002)",
+                    value.render(),
+                    vk.label(),
+                    elem.label(),
+                    elem.label()
+                ),
+                "the sent value must be assignable to the channel's element type; write an explicit conversion when a conversion is intended",
+            );
+        }
     }
 
     fn struct_field_kind(&self, k: &OpKind, field: &str) -> Option<OpKind> {
