@@ -76,10 +76,25 @@ impl Emitter {
                 Expr::StructLit {
                     ty: None, fields, ..
                 } => {
-                    if let TypeExpr::Pointer { to, .. } = exp {
+                    let resolved_exp = self.n5_resolve_alias(exp);
+                    if let TypeExpr::Pointer { to, .. } = &resolved_exp {
+                        if fields.is_empty() {
+                            if let Some(ptr_init) = self.n5_ptr_zero_init(to) {
+                                return Ok(if min_prec > 50 {
+                                    format!("({})", ptr_init)
+                                } else {
+                                    ptr_init
+                                });
+                            }
+                        }
                         let body = self.struct_lit_body(to, fields)?;
                         let s = format!("&{}{{{}}}", self.type_text(to), body);
                         return Ok(if min_prec > 50 { format!("({})", s) } else { s });
+                    }
+                    if fields.is_empty() {
+                        if let Some(init) = self.n5_zero_init(exp) {
+                            return Ok(init);
+                        }
                     }
                     let head = self.type_text(exp);
                     let body = self.struct_lit_body(exp, fields)?;
@@ -87,12 +102,39 @@ impl Emitter {
                 }
                 Expr::SliceLit {
                     elem: None, items, ..
-                } => match exp {
-                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+                } => match self.n5_resolve_alias(exp) {
+                    TypeExpr::Slice { elem, .. } => {
                         let head = self.type_text(exp);
                         let mut parts = Vec::new();
                         for i in items {
-                            parts.push(self.emit_expr_exp(i, 0, Some(elem))?);
+                            parts.push(self.emit_expr_exp(i, 0, Some(&elem))?);
+                        }
+                        return Ok(format!("{}{{{}}}", head, parts.join(", ")));
+                    }
+                    TypeExpr::Array { len, elem, .. } => {
+                        if let (true, Some(init)) = (items.is_empty(), self.n5_zero_init(exp)) {
+                            return Ok(init);
+                        }
+                        let head = self.type_text(exp);
+                        let mut parts = Vec::new();
+                        for i in items {
+                            parts.push(self.emit_expr_exp(i, 0, Some(&elem))?);
+                        }
+                        if let Some(init) = self.n5_zero_init(&elem) {
+                            if let Some(Expr::Lit {
+                                kind: LitKind::Int(n),
+                                ..
+                            }) = len.as_deref()
+                            {
+                                let count = super::constconv::parse_int(n).unwrap_or(0).max(0) as usize;
+                                parts.resize(count.max(parts.len()), init);
+                            } else if len.is_some() {
+                                let count = parts.len();
+                                return Ok(format!(
+                                    "func() (hyArr {head}) {{ hyArr = {head}{{{}}}; for i := {count}; i < len(hyArr); i++ {{ hyArr[i] = {init} }}; return hyArr }}()",
+                                    parts.join(", ")
+                                ));
+                            }
                         }
                         return Ok(format!("{}{{{}}}", head, parts.join(", ")));
                     }
@@ -151,6 +193,11 @@ impl Emitter {
             }
 
             Expr::Unary { op, operand, .. } => {
+                if matches!(op, UnOp::Addr) {
+                    if let Some(ptr_init) = self.n5_addr_of_empty_array(operand) {
+                        return Ok(ptr_init);
+                    }
+                }
                 let o = self.emit_expr(operand, ATOM)?;
                 if matches!(op, UnOp::Neg) && o.starts_with('-') {
                     Ok(format!("-({})", o))
@@ -160,6 +207,9 @@ impl Emitter {
             }
 
             Expr::AddrOf { operand, .. } => {
+                if let Some(ptr_init) = self.n5_addr_of_empty_array(operand) {
+                    return Ok(ptr_init);
+                }
                 let o = self.emit_expr(operand, ATOM)?;
                 Ok(format!("&{}", o))
             }
@@ -230,6 +280,13 @@ impl Emitter {
                             "channel type is not a value expression — construct a channel with `make(chan T)`",
                         ));
                     }
+                    if fields.is_empty()
+                        && matches!(self.n5_resolve_alias(t), TypeExpr::Array { .. })
+                    {
+                        if let Some(init) = self.n5_zero_init(t) {
+                            return Ok(init);
+                        }
+                    }
                     let head = self.type_text(t);
                     let body = self.struct_lit_body(t, fields)?;
                     Ok(format!("{}{{{}}}", head, body))
@@ -252,8 +309,21 @@ impl Emitter {
                     for i in items {
                         parts.push(self.emit_expr_exp(i, 0, Some(inner_elem))?);
                     }
-                    if let (Some(Expr::Lit { kind: LitKind::Int(n), .. }), Some(init)) = (len, self.n5_zero_init(inner_elem)) {
-                        parts.resize(n.replace('_', "").parse().unwrap_or(0).max(parts.len()), init);
+                    if let Some(init) = self.n5_zero_init(inner_elem) {
+                        if let Some(Expr::Lit {
+                            kind: LitKind::Int(n),
+                            ..
+                        }) = len
+                        {
+                            let count = super::constconv::parse_int(n).unwrap_or(0).max(0) as usize;
+                            parts.resize(count.max(parts.len()), init);
+                        } else if len.is_some() {
+                            let count = parts.len();
+                            return Ok(format!(
+                                "func() (hyArr {head}) {{ hyArr = {head}{{{}}}; for i := {count}; i < len(hyArr); i++ {{ hyArr[i] = {init} }}; return hyArr }}()",
+                                parts.join(", ")
+                            ));
+                        }
                     }
                     return Ok(format!("{}{{{}}}", head, parts.join(", ")));
                 }
@@ -531,7 +601,7 @@ impl Emitter {
         ty: &TypeExpr,
         fields: &[FieldInit],
     ) -> Result<String, EmitError> {
-        let body = self.field_inits(fields)?;
+        let body = self.field_inits(Some(ty), fields)?;
         let extra = self.n5_missing_fields(ty, fields);
         if extra.is_empty() {
             return Ok(body);
@@ -544,10 +614,21 @@ impl Emitter {
         Ok(parts.join(", "))
     }
 
-    fn field_inits(&mut self, fields: &[FieldInit]) -> Result<String, EmitError> {
+    fn field_inits(
+        &mut self,
+        struct_ty: Option<&TypeExpr>,
+        fields: &[FieldInit],
+    ) -> Result<String, EmitError> {
+        let decl_fields = struct_ty.and_then(|ty| match self.n5_resolve_alias(ty) {
+            TypeExpr::Named { name, .. } => self.n5_structs.get(&name).cloned(),
+            _ => None,
+        });
         let mut parts = Vec::new();
         for f in fields {
-            let v = self.emit_expr(&f.value, 0)?;
+            let exp_ty = decl_fields
+                .as_ref()
+                .and_then(|ds| ds.iter().find(|d| d.name == f.name).map(|d| &d.ty));
+            let v = self.emit_expr_exp(&f.value, 0, exp_ty)?;
             parts.push(format!("{}: {}", f.name, v));
         }
         Ok(parts.join(", "))
@@ -858,11 +939,15 @@ impl Emitter {
     ) -> Result<String, EmitError> {
         let callee = Self::unwrap_parens(raw_callee);
         // --- make(...): the first argument is a TYPE (bug-#2 fix) ---
-        if matches!(callee, Expr::Ident { name, .. } if name == "make") {
+        let bare_callee = Self::unwrap_parens(callee);
+        if matches!(bare_callee, Expr::Ident { name, .. } if name == "make")
+            && !self.local_vars.contains("make")
+            && !self.fn_shapes.contains_key("make")
+        {
             return self.emit_make(args);
         }
         // --- new(T) whose zero value allocates maps (N5, issue #645) ---
-        let is_new = matches!(callee, Expr::Ident { name, .. } if name == "new");
+        let is_new = matches!(bare_callee, Expr::Ident { name, .. } if name == "new");
         if is_new && !self.local_vars.contains("new") && !self.fn_shapes.contains_key("new") {
             if let Some(alloc) = self.n5_new(args) {
                 return Ok(alloc);
@@ -983,14 +1068,7 @@ impl Emitter {
             }
         }
 
-        let mut bare_callee = callee;
-        while let Expr::Paren { inner, .. } = bare_callee {
-            bare_callee = inner;
-        }
-        if matches!(bare_callee, Expr::Ident { name, .. } if name == "make") {
-            return self.emit_make(args);
-        }
-        if matches!(bare_callee, Expr::Ident { name, .. } if name == "new") && args.len() == 1 {
+        if is_new && args.len() == 1 && !self.local_vars.contains("new") && !self.fn_shapes.contains_key("new") {
             return self.emit_new(&args[0]);
         }
 
@@ -1145,6 +1223,10 @@ impl Emitter {
         let elem = match first_val {
             Expr::SliceLit { elem: Some(t), items, .. } if items.is_empty() && first_val.as_array_lit().is_none() => Some(t.as_ref().clone()),
             Expr::Ident { name, span } => match self.n5_resolve_alias(&TypeExpr::Named { name: name.clone(), span: *span }) {
+                TypeExpr::Slice { elem, .. } => Some(*elem),
+                _ => None,
+            },
+            Expr::StructLit { ty: Some(t), fields, .. } if fields.is_empty() => match self.n5_resolve_alias(t) {
                 TypeExpr::Slice { elem, .. } => Some(*elem),
                 _ => None,
             },
