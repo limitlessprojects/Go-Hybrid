@@ -730,6 +730,13 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn place_scalar_type(&self, p: &Place) -> Option<&'static str> {
+        match &p.kind {
+            PlaceKind::Ident(name) => self.lookup_scalar(name),
+            _ => None,
+        }
+    }
+
     /// A `for`-iterate or `select`-receive binding is elided to `_` at
     /// emission when completely untouched, but if the body assigns to it
     /// (`v = ...`) without ever reading it, the emitter must keep the binding
@@ -3431,6 +3438,19 @@ impl<'a> Collector<'a> {
                         ),
                         "`+` requires two numeric operands or two strings; use string interpolation `\"{x}{s}\"` to format mixed values",
                     );
+                } else if let (Some(l_sc), Some(r_sc)) = (self.expr_scalar_type(lhs), self.expr_scalar_type(rhs)) {
+                    if l_sc != r_sc {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "invalid operation `{}` (mismatched types `{}` and `{}`) (HYB-E1002)",
+                                span_expr_label(lhs, "+", rhs),
+                                l_sc,
+                                r_sc
+                            ),
+                            "`+` on typed numeric operands requires matching types",
+                        );
+                    }
                 }
             }
             // `-`, `*`, `/` require numeric operands.
@@ -3454,6 +3474,19 @@ impl<'a> Collector<'a> {
                         ),
                         "arithmetic `-`, `*`, `/` require numeric operands",
                     );
+                } else if let (Some(l_sc), Some(r_sc)) = (self.expr_scalar_type(lhs), self.expr_scalar_type(rhs)) {
+                    if l_sc != r_sc {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "invalid operation `{}` (mismatched types `{}` and `{}`) (HYB-E1002)",
+                                span_expr_label(lhs, op_str, rhs),
+                                l_sc,
+                                r_sc
+                            ),
+                            "arithmetic operators on typed numeric operands require matching types",
+                        );
+                    }
                 }
             }
             // `%`, bitwise, and shifts require integer operands.
@@ -3485,9 +3518,23 @@ impl<'a> Collector<'a> {
                         ),
                         "modulo, bitwise, and shift operators require integer operands",
                     );
+                } else if matches!(op, BinOp::Mod | BinOp::BitOr | BinOp::BitXor | BinOp::BitAnd) {
+                    if let (Some(l_sc), Some(r_sc)) = (self.expr_scalar_type(lhs), self.expr_scalar_type(rhs)) {
+                        if l_sc != r_sc {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "invalid operation `{}` (mismatched types `{}` and `{}`) (HYB-E1002)",
+                                    span_expr_label(lhs, op_str, rhs),
+                                    l_sc,
+                                    r_sc
+                                ),
+                                "modulo and bitwise operators on typed integer operands require matching types",
+                            );
+                        }
+                    }
                 }
-            }
-        }
+            }        }
     }
 
     /// Family B6 (#425): `s++`, `s--`, and compound assignment operand checks.
@@ -3637,6 +3684,20 @@ impl<'a> Collector<'a> {
                         ),
                         "`+=` requires two numeric values or two strings of matching types",
                     );
+                } else if let (Some(t_sc), Some(v_sc)) = (self.place_scalar_type(target), self.expr_scalar_type(val)) {
+                    if t_sc != v_sc {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "invalid operation `{} += {}` (mismatched types `{}` and `{}`) (HYB-E1002)",
+                                target.render(),
+                                val.render(),
+                                t_sc,
+                                v_sc
+                            ),
+                            "`+=` on typed numeric operands requires matching types",
+                        );
+                    }
                 }
             }
             AssignOp::SubAssign | AssignOp::MulAssign | AssignOp::DivAssign => {
@@ -3663,6 +3724,21 @@ impl<'a> Collector<'a> {
                         ),
                         "`-=`, `*=`, `/=` require numeric operands of matching types",
                     );
+                } else if let (Some(t_sc), Some(v_sc)) = (self.place_scalar_type(target), self.expr_scalar_type(val)) {
+                    if t_sc != v_sc {
+                        self.emit_e1002(
+                            span,
+                            format!(
+                                "invalid compound assignment `{} {} {}` on `{}` and `{}` (HYB-E1002)",
+                                target.render(),
+                                op_sym,
+                                val.render(),
+                                t_sc,
+                                v_sc
+                            ),
+                            "compound assignment operators on typed numeric operands require matching types",
+                        );
+                    }
                 }
             }
             AssignOp::ModAssign
@@ -3687,9 +3763,31 @@ impl<'a> Collector<'a> {
                         ),
                         "integer compound assignment operators require integer operands",
                     );
+                } else if matches!(op, AssignOp::ModAssign | AssignOp::BitOrAssign | AssignOp::BitAndAssign | AssignOp::BitXorAssign) {
+                    if let (Some(t_sc), Some(v_sc)) = (self.place_scalar_type(target), self.expr_scalar_type(val)) {
+                        let op_sym = match op {
+                            AssignOp::ModAssign => "%=",
+                            AssignOp::BitOrAssign => "|=",
+                            AssignOp::BitAndAssign => "&=",
+                            _ => "^=",
+                        };
+                        if t_sc != v_sc {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "invalid integer compound assignment `{} {} {}` on `{}` and `{}` (HYB-E1002)",
+                                    target.render(),
+                                    op_sym,
+                                    val.render(),
+                                    t_sc,
+                                    v_sc
+                                ),
+                                "integer compound assignment operators require matching operand types",
+                            );
+                        }
+                    }
                 }
-            }
-        }
+            }        }
     }
 
     /// Family C1 (#425, #708): `base[index]` requires a slice, array, map, or string,
