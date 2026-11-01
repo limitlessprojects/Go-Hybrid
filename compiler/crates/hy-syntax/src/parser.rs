@@ -372,6 +372,10 @@ impl Parser {
         if self.at_kw("type") {
             return self.parse_type_alias();
         }
+        if self.at_kw("region") {
+            let r = self.parse_region_decl()?
+            return Ok(Decl::Region(r));
+        }
         if self.at_kw("fn") {
             let f = self.parse_fn_decl(is_pub)?;
             return Ok(Decl::Fn(f));
@@ -510,6 +514,18 @@ impl Parser {
         }
         self.expect_punct("]")?;
         Ok(v)
+    }
+
+    fn parse_region_decl(&mut self) -> PResult<RegionDecl> {
+        let start = self.pos;
+        self.bump(); // region
+        let name = self.expect_ident()?;
+        let block = self.parse_block()?;
+        Ok(RegionDecl {
+            name,
+            block,
+            span: self.span_from(start),
+        })
     }
 
     fn parse_fn_decl(&mut self, is_pub: bool) -> PResult<FnDecl> {

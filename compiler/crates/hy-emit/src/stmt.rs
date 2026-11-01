@@ -59,6 +59,27 @@ impl Emitter {
             Stmt::For { kind, body, .. } => self.emit_for(kind, body),
             Stmt::Return { values, .. } => self.emit_return(values),
             Stmt::Task { callee, args, .. } => {
+                if self.model.is_region_cancelled(&callee.name) {
+                    // Handle cancellation logic here, e.g., skip task execution
+                    return Ok(());
+                }
+                // task → go (spawn sites were checked by Tier-0; emission is
+                // a plain goroutine). Route through emit_call so argument
+                // variadic spread (`...`), pointer parameter auto-addressing,
+                // and package/shape normalization match
+                self.emit_call(callee, args, false)?;
+                self.push(&format!("go {}({})", self.emit_expr(callee, 0)?, self.emit_args(args, 0)?));
+                Ok(())
+            },
+            Stmt::Region { name, block, .. } => {
+                // Emit region logic here
+                self.push(&format!("func {}() {{", name));
+                self.indent += 1;
+                let block_res = self.emit_block_body(&block.stmts);
+                self.indent -= 1;
+                self.push("}");
+                block_res
+            },
                 // task → go (spawn sites were checked by Tier-0; emission is
                 // a plain goroutine). Route through emit_call so argument
                 // variadic spread (`...`), pointer parameter auto-addressing,

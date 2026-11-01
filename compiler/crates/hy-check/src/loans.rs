@@ -124,6 +124,11 @@ fn root_ident_span(expr: &Expr) -> Option<Span> {
 }
 
 impl<'a> Checker<'a> {
+    /// Processes cancellation logic for regions.
+    pub fn process_region_cancellation(&mut self, region_name: &str) {
+        self.model.cancel_region(region_name);
+    }
+
     fn resolve_call(&self, st: &FnState, cr: &CallRef) -> Resolved {
         match cr.callee {
             Expr::Field { base, name, .. } => {
