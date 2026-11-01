@@ -852,11 +852,89 @@ impl<'a> Collector<'a> {
         None
     }
 
-    /// #2770 — the canonical numeric spelling of a simple local target, for the
-    /// assignment/argument scalar comparison. Non-ident places fail open.
+    fn elem_scalar_from_type_name(tname: &str) -> Option<&'static str> {
+        let trimmed = tname.trim();
+        if let Some(elem) = trimmed.strip_prefix("[]") {
+            return canonical_numeric_name(elem);
+        }
+        if trimmed.starts_with('[') {
+            if let Some(idx) = trimmed.find(']') {
+                return canonical_numeric_name(&trimmed[idx + 1..]);
+            }
+        }
+        if trimmed.starts_with("map[") {
+            if let Some(idx) = trimmed.rfind(']') {
+                return canonical_numeric_name(&trimmed[idx + 1..]);
+            }
+        }
+        None
+    }
+
+    fn struct_field_scalar(&self, k: &OpKind, field: &str) -> Option<&'static str> {
+        let full_name = self.struct_name(k)?;
+        let base_name = Checker::base_named_type_str(&full_name);
+        let fields = self.ck.structs.get(base_name)?;
+        let subst = self.struct_type_arg_map(&full_name);
+        let (_, ty) = fields.iter().find(|(n, _)| n == field)?;
+        if let TypeExpr::Named { name, .. } = ty {
+            if let Some(subst_str) = subst.get(name.as_str()) {
+                return canonical_numeric_name(subst_str);
+            }
+        }
+        self.scalar_of_ty(ty)
+    }
+
+    fn place_elem_scalar(&self, base: &Place) -> Option<&'static str> {
+        match &base.kind {
+            PlaceKind::Ident(n) => {
+                if let Some(tname) = self.lookup_type_name(n) {
+                    Self::elem_scalar_from_type_name(&tname)
+                } else {
+                    None
+                }
+            }
+            PlaceKind::Field { base: fbase, name: fname } => {
+                let bk = self.kind_of_place(fbase);
+                let full_name = self.struct_name(&bk)?;
+                let base_name = Checker::base_named_type_str(&full_name);
+                let fields = self.ck.structs.get(base_name)?;
+                let subst = self.struct_type_arg_map(&full_name);
+                let (_, f_ty) = fields.iter().find(|(n, _)| n == fname)?;
+                match f_ty {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+                        if let TypeExpr::Named { name, .. } = elem.as_ref() {
+                            if let Some(subst_elem) = subst.get(name.as_str()) {
+                                return canonical_numeric_name(subst_elem);
+                            }
+                        }
+                        self.scalar_of_ty(elem)
+                    }
+                    TypeExpr::Map { value, .. } => {
+                        if let TypeExpr::Named { name, .. } = value.as_ref() {
+                            if let Some(subst_val) = subst.get(name.as_str()) {
+                                return canonical_numeric_name(subst_val);
+                            }
+                        }
+                        self.scalar_of_ty(value)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// #2770 / #2859 — the canonical numeric spelling of a target, for the
+    /// assignment/argument scalar comparison. Supports identifiers, struct fields,
+    /// and indexed slices/arrays/maps.
     fn place_scalar(&self, p: &Place) -> Option<&'static str> {
         match &p.kind {
             PlaceKind::Ident(n) => self.lookup_scalar(n),
+            PlaceKind::Field { base, name } => {
+                let bk = self.kind_of_place(base);
+                self.struct_field_scalar(&bk, name)
+            }
+            PlaceKind::Index { base, .. } => self.place_elem_scalar(base),
             _ => None,
         }
     }
@@ -944,12 +1022,61 @@ impl<'a> Collector<'a> {
         None
     }
 
-    /// #1031 — the exact numeric type of a value that is provably TYPED.
+    fn expr_elem_scalar(&self, base: &Expr) -> Option<&'static str> {
+        let bare = unwrap_parens(base);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    Self::elem_scalar_from_type_name(&tname)
+                } else {
+                    None
+                }
+            }
+            Expr::SliceLit { elem: Some(t), .. } => self.scalar_of_ty(t),
+            Expr::Slice { base: sbase, .. } => self.expr_elem_scalar(sbase),
+            Expr::Field { base: fbase, name: fname, .. } => {
+                let bk = self.kind_of_expr(fbase);
+                let full_name = self.struct_name(&bk)?;
+                let base_name = Checker::base_named_type_str(&full_name);
+                let fields = self.ck.structs.get(base_name)?;
+                let subst = self.struct_type_arg_map(&full_name);
+                let (_, f_ty) = fields.iter().find(|(n, _)| n == fname)?;
+                match f_ty {
+                    TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } => {
+                        if let TypeExpr::Named { name, .. } = elem.as_ref() {
+                            if let Some(subst_elem) = subst.get(name.as_str()) {
+                                return canonical_numeric_name(subst_elem);
+                            }
+                        }
+                        self.scalar_of_ty(elem)
+                    }
+                    TypeExpr::Map { value, .. } => {
+                        if let TypeExpr::Named { name, .. } = value.as_ref() {
+                            if let Some(subst_val) = subst.get(name.as_str()) {
+                                return canonical_numeric_name(subst_val);
+                            }
+                        }
+                        self.scalar_of_ty(value)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// #1031 / #2859 — the exact numeric type of a value that is provably TYPED.
     /// Literals are untyped constants (assignable to any numeric type), so
-    /// they are deliberately `None` here.
+    /// they are deliberately `None` here. Supports identifiers, struct fields,
+    /// and indexed slices/arrays/maps.
     fn typed_value_scalar(&self, e: &Expr) -> Option<&'static str> {
         match unwrap_parens(e) {
             Expr::Ident { name, .. } => self.lookup_scalar(name),
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                self.struct_field_scalar(&bk, name)
+            }
+            Expr::Index { base, .. } => self.expr_elem_scalar(base),
             // Typed arithmetic keeps its operand type: in any program that
             // builds, both operands share one type or one is an untyped
             // constant, so the typed side names the result type. A shift's
