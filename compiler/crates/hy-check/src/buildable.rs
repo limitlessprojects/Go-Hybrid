@@ -233,6 +233,38 @@ fn is_sized_array_spelling(s: &str) -> bool {
     !head.is_empty() && head.chars().all(|c| c.is_ascii_digit())
 }
 
+/// #2858 — the element type text of an indexable type text: `[]T`, `[N]T`,
+/// `*[N]T` and `map[K]T` give `T`; `string` gives `byte`.
+fn element_type_text(t: &str) -> Option<String> {
+    let t = t.trim();
+    if t == "string" {
+        return Some("byte".to_string());
+    }
+    let t = if t.starts_with("*[") { &t[1..] } else { t };
+    let rest = if let Some(r) = t.strip_prefix("map[") {
+        r
+    } else if let Some(r) = t.strip_prefix('[') {
+        r
+    } else {
+        return None;
+    };
+    let mut depth = 1usize;
+    for (i, ch) in rest.char_indices() {
+        match ch {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    let elem = rest[i + 1..].trim();
+                    return (!elem.is_empty()).then(|| elem.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -938,6 +970,86 @@ impl<'a> Collector<'a> {
                 Some(rs) if rs.len() == 1 => rs[0],
                 _ => None,
             },
+            // #2858 — a typed value read through an element, map value,
+            // string byte or struct field keeps its declared numeric type.
+            Expr::Index { .. } | Expr::Field { .. } => self
+                .expr_type_text(e)
+                .and_then(|t| self.scalar_of_type_text(&t)),
+            _ => None,
+        }
+    }
+
+    /// #2858 — the predeclared numeric spelling of a rendered type, unless a
+    /// user declaration of that name shadows it (fail-open, like
+    /// `scalar_of_ty`).
+    fn scalar_of_type_text(&self, t: &str) -> Option<&'static str> {
+        let t = t.trim();
+        if self.ck.structs.contains_key(t)
+            || self.ck.enums.contains_key(t)
+            || self.ck.type_aliases.contains_key(t)
+        {
+            return None;
+        }
+        canonical_numeric_name(t)
+    }
+
+    /// #2858 — the declared type text of a local binding, read only from the
+    /// SAME scope layer that holds the binding itself, so an inner rebinding
+    /// that recorded no type text never inherits an outer one.
+    fn binding_type_text(&self, name: &str) -> Option<String> {
+        let i = self
+            .kind_scopes
+            .iter()
+            .rposition(|layer| layer.contains_key(name))?;
+        self.type_name_scopes.get(i)?.get(name).cloned()
+    }
+
+    /// #2858 — the rendered type of a value when it is provable from local
+    /// declarations: typed bindings, typed composite literals, string
+    /// literals, and index / field reads through them. Anything else is
+    /// `None` (fail-open).
+    fn expr_type_text(&self, e: &Expr) -> Option<String> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.binding_type_text(name).or_else(|| {
+                if !self.kind_scopes.iter().any(|l| l.contains_key(name.as_str())) {
+                    return None;
+                }
+                match self.kind_of_expr(e) {
+                    OpKind::Str => Some("string".to_string()),
+                    k => self.struct_name(&k),
+                }
+            }),
+            Expr::Lit {
+                kind: LitKind::Str(_) | LitKind::RawStr(_),
+                ..
+            } => Some("string".to_string()),
+            Expr::StructLit { ty: Some(t), .. } => Some(t.render()),
+            Expr::MapLit { key, value, .. } => {
+                Some(format!("map[{}]{}", key.render(), value.render()))
+            }
+            Expr::SliceLit { elem: Some(t), .. } => {
+                if let Some((_, inner, _)) = e.as_array_lit() {
+                    return Some(format!("[]{}", inner.render()));
+                }
+                Some(format!("[]{}", t.render()))
+            }
+            Expr::Index { base, .. } => {
+                let bt = self.expr_type_text(base)?;
+                element_type_text(&bt)
+            }
+            Expr::Field { base, name, .. } => {
+                let bt = self.expr_type_text(base)?;
+                let sname = bt.trim().trim_start_matches('*');
+                // Generic structs need type-argument substitution; fail open.
+                if sname.contains('[') {
+                    return None;
+                }
+                let fields = self.ck.structs.get(sname)?;
+                fields
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, ty)| ty.render())
+            }
             _ => None,
         }
     }
@@ -1507,6 +1619,11 @@ impl<'a> Collector<'a> {
             for (name, val) in l.names.iter().zip(&l.values) {
                 if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                } else if matches!(unwrap_parens(val), Expr::MapLit { .. }) {
+                    // #2858: `m := map[K]V{...}` keeps its value type text.
+                    if let Some(t) = self.expr_type_text(val) {
+                        self.bind_type_name(name, t);
+                    }
                 }
             }
         }
