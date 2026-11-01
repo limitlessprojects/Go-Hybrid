@@ -214,3 +214,29 @@ fn controls_untouched() {
         "struct pair { n int } fn main() { p := pair{ n: 1 } x := int8(p.n) _ = x }",
     );
 }
+
+
+// ---------------------------------------------------------------- complex target regression (issue #1770)
+
+#[test]
+fn complex_conversion_target_rejects_non_numeric() {
+    rejects_with_e6006("fn main() { x := complex64(\"x\") _ = x }");
+    rejects_with_e6006("fn main() { x := complex128(true) _ = x }");
+    rejects_with_e6006("fn main() { x := complex64(nil) _ = x }");
+    rejects_with_e6006("fn main() { x := c64(\"x\") _ = x }");
+    rejects_with_e6006("fn main() { x := c128(nil) _ = x }");
+}
+
+#[test]
+fn complex_conversion_target_accepts_numeric() {
+    accepts_without_e6006("fn main() { x := complex64(1) _ = x }");
+    accepts_without_e6006("fn main() { x := complex128(1.5) _ = x }");
+    accepts_without_e6006("fn main() { x := c64(42) _ = x }");
+    accepts_without_e6006("fn main() { x := c128(3.14) _ = x }");
+}
+
+#[test]
+fn complex64_overflow_rejects() {
+    rejects_with_e6006("fn main() { x := complex64(1e40) _ = x }");
+    rejects_with_e6006("fn main() { x := c64(1e40) _ = x }");
+}
