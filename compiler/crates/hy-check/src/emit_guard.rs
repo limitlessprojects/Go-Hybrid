@@ -2151,7 +2151,7 @@ impl<'a> Checker<'a> {
     ///
     /// `None` means "not provably a fixed-width integer". This predicate
     /// gates a diagnostic, so an unknown shape must fail open.
-    fn fixed_width_int_ty_of(&self, st: &FnState, e: &Expr) -> Option<(String, i128, i128)> {
+    pub(crate) fn fixed_width_int_ty_of(&self, st: &FnState, e: &Expr) -> Option<(String, i128, i128)> {
         let e = unwrap_parens(e);
         if let Some(ty) = self.ty_of_expr(st, e) {
             if let TypeExpr::Named { name, .. } = self.resolve_type_alias(&ty) {
