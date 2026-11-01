@@ -88,8 +88,11 @@ pub(crate) enum OpKind {
     /// Function kind: result kinds, plus the declared parameter count when the
     /// signature is known (`None` = unknown, e.g. a `fn`-typed value whose
     /// declaration is out of reach). The count is what closes the
-    /// closure/method-value arity bypass (#577 C9).
-    Fn(Vec<OpKind>, Option<usize>),
+    /// closure/method-value arity bypass (#577 C9). #2901: the slot carries
+    /// the parameter KINDS (its length is the count), so a call through a
+    /// fn value reached by index, field or call result (`fs[0]("a")`,
+    /// `v.cb("a")`, `mk()(1, 2)`) can check its arguments, not only arity.
+    Fn(Vec<OpKind>, Option<Vec<OpKind>>),
     /// #2823 — `option[T]` carries its payload kind. `Unknown` here would be
     /// fail-open in every operand guard, so `op + 1`, `takes_int(op)` and
     /// `var s string = op.unwrap()` all passed and failed `go build`.
@@ -2656,9 +2659,35 @@ impl<'a> Collector<'a> {
                     .iter()
                     .map(|r| self.kind_of_ty(r, depth + 1))
                     .collect(),
-                Some(params.len()),
+                Some(self.param_kinds(params, depth + 1)),
             ),
         }
+    }
+
+    /// #2901 — parameter kinds of a signature. The parser stores a type-only
+    /// parameter (`fn(int) int`) as name `int` with an empty type, and a
+    /// grouped one (`fn(a, b int)`) with an empty type that the next typed
+    /// parameter supplies; normalize both before kinding.
+    fn param_kinds(&self, params: &[Param], depth: usize) -> Vec<OpKind> {
+        let empty = |p: &Param| matches!(&p.ty, TypeExpr::Named { name, .. } if name.is_empty());
+        if params.iter().all(|p| empty(p)) {
+            return params
+                .iter()
+                .map(|p| self.kind_of_named(&p.name, depth))
+                .collect();
+        }
+        let mut out = vec![OpKind::Unknown; params.len()];
+        let mut carry: Option<OpKind> = None;
+        for (i, p) in params.iter().enumerate().rev() {
+            if empty(p) {
+                out[i] = carry.clone().unwrap_or(OpKind::Unknown);
+            } else {
+                let k = self.kind_of_ty(&p.ty, depth);
+                carry = Some(k.clone());
+                out[i] = k;
+            }
+        }
+        out
     }
 
     fn kind_of_named(&self, name: &str, depth: usize) -> OpKind {
@@ -2845,7 +2874,7 @@ impl<'a> Collector<'a> {
                             .iter()
                             .map(|r| self.kind_of_ty(&r.ty, 0))
                             .collect(),
-                        Some(f.params.len()),
+                        Some(self.param_kinds(&f.params, 0)),
                     );
                 }
                 OpKind::Unknown
@@ -2966,7 +2995,7 @@ impl<'a> Collector<'a> {
                                     .iter()
                                     .map(|r| self.kind_of_ty(&r.ty, 0))
                                     .collect(),
-                                Some(m.params.len()),
+                                Some(self.param_kinds(&m.params, 0)),
                             );
                         }
                     }
@@ -2980,7 +3009,11 @@ impl<'a> Collector<'a> {
                             .iter()
                             .map(|r| self.kind_of_ty(&r.ty, 0))
                             .collect(),
-                        Some(m.params.len() + 1),
+                        Some(
+                            std::iter::once(OpKind::Unknown)
+                                .chain(self.param_kinds(&m.params, 0))
+                                .collect(),
+                        ),
                     );
                 }
                 OpKind::Unknown
@@ -3011,7 +3044,7 @@ impl<'a> Collector<'a> {
                     .iter()
                     .map(|r| self.kind_of_ty(&r.ty, 0))
                     .collect(),
-                Some(params.len()),
+                Some(self.param_kinds(&params, 0)),
             ),
             Expr::Call { callee, args, .. } => match self.call_result_kinds(callee, args) {
                 Some(res) if res.is_empty() => OpKind::Void,
@@ -3119,7 +3152,43 @@ impl<'a> Collector<'a> {
                 }
                 None
             }
+            // #2901: `fs[0](1)`, `m["a"](1)`, `mk()(1)` — the callee's own
+            // kind is a fn value whose result kinds are known.
+            Expr::Index { .. } | Expr::Call { .. } => match self.kind_of_expr(bare) {
+                OpKind::Fn(res, _) => Some(res),
+                _ => None,
+            },
             _ => None,
+        }
+    }
+
+    /// #2901 — argument kinds for a call through a fn VALUE whose parameter
+    /// kinds are known from its declared `fn(...)` type. Same rule set as
+    /// `check_user_fn_arg_types`, at the precision of the kind model.
+    fn check_fn_value_arg_kinds(&mut self, callee: &str, params: &[OpKind], args: &[CallArg]) {
+        for (want, a) in params.iter().zip(args.iter()) {
+            let got = self.kind_of_expr(&a.value);
+            if let OpKind::Pointer(inner) = want {
+                if !kinds_conflict(inner, &got) && self.is_addressable_value_receiver(&a.value) {
+                    continue;
+                }
+            }
+            let int_to_float_conflict = *want == OpKind::Float
+                && got == OpKind::Int
+                && !self.is_untyped_int_const(&a.value);
+            if kinds_conflict(want, &got) || int_to_float_conflict {
+                self.emit_e1002(
+                    a.value.span(),
+                    format!(
+                        "cannot use `{}` (value of type `{}`) as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
+                        a.value.render(),
+                        got.label(),
+                        want.label(),
+                        callee
+                    ),
+                    "argument types must match declared parameter types",
+                );
+            }
         }
     }
 
@@ -5923,8 +5992,8 @@ impl<'a> Collector<'a> {
                         // A local bound to a closure or fn-typed value carries
                         // its declared parameter count, so the call's arity is
                         // checkable (#577 C9).
-                        OpKind::Fn(_, Some(want)) if want != args.len() => {
-                            self.report_local_arity(name, want, args.len(), span)
+                        OpKind::Fn(_, Some(ref ps)) if ps.len() != args.len() => {
+                            self.report_local_arity(name, ps.len(), args.len(), span)
                         }
                         OpKind::Fn(..) | OpKind::Unknown => {}
                         _ => self.emit_e1002(
@@ -6004,9 +6073,12 @@ impl<'a> Collector<'a> {
                     // `u.cb(1, 2)` where `cb fn(x int) int` — the field type
                     // states the count.
                     if !has_method {
-                        if let OpKind::Fn(_, Some(want)) = fk {
-                            if want != args.len() {
-                                self.report_local_arity(&callee.render(), want, args.len(), span);
+                        if let OpKind::Fn(_, Some(ps)) = fk {
+                            if ps.len() != args.len() {
+                                self.report_local_arity(&callee.render(), ps.len(), args.len(), span);
+                            } else {
+                                // #2901: `v.cb("a")` where `cb fn(int) int`.
+                                self.check_fn_value_arg_kinds(&callee.render(), &ps, args);
                             }
                         }
                     }
@@ -6069,6 +6141,19 @@ impl<'a> Collector<'a> {
             }
             _ => {
                 let ck = self.kind_of_expr(bare);
+                // #2901: a fn value reached through an index, a map read or a
+                // call result (`fs[0]("a")`, `m["a"](1, 2)`, `mk()(1, 2)`)
+                // carries its declared parameter kinds — check the call
+                // against them instead of skipping it.
+                if let OpKind::Fn(_, Some(ps)) = &ck {
+                    if self.multi_value_arg_count(args).is_none() {
+                        if ps.len() != args.len() {
+                            self.report_local_arity(&callee.render(), ps.len(), args.len(), span);
+                        } else {
+                            self.check_fn_value_arg_kinds(&callee.render(), ps, args);
+                        }
+                    }
+                }
                 if !matches!(ck, OpKind::Unknown | OpKind::Fn(..)) {
                     self.emit_e1002(
                         span,
