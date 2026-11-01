@@ -2170,6 +2170,7 @@ impl<'a> Collector<'a> {
                         "an `any` value must be asserted to a concrete type before its fields can be read",
                     );
                 }
+                self.check_field_selector(base, name, *span);
                 // #778: a Field BASE is a QUALIFIER position, not a value
                 // position, so the type-name check must not fire on it. Two
                 // legal spellings put a type name there:
@@ -6107,18 +6108,21 @@ impl<'a> Collector<'a> {
                         && LOWERED_METHOD_INTRINSICS.contains(&name.as_str());
                     if is_fully_resolved(&bk) && !is_lowered
                     {
-                        self.emit_e1002(
-                            span,
-                            format!(
-                                "`{}` has no field or method `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
-                                base.render(),
-                                name,
-                                bk.label(),
-                                base.render(),
-                                name
-                            ),
-                            "declare the method on that type, or call something that exists",
-                        );
+                        let needle = format!("{}.{} undefined", base.render(), name);
+                        if !self.diags.iter().any(|d| d.code == "HYB-E1002" && d.message.contains(&needle)) {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "`{}` has no field or method `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                                    base.render(),
+                                    name,
+                                    bk.label(),
+                                    base.render(),
+                                    name
+                                ),
+                                "declare the method on that type, or call something that exists",
+                            );
+                        }
                     }
                 }
                 if has_method {
@@ -6197,6 +6201,47 @@ impl<'a> Collector<'a> {
                 _ => false,
             },
             _ => false,
+        }
+    }
+
+    fn check_field_selector(&mut self, base: &Expr, name: &str, span: Span) {
+        if let Expr::Ident { name: ident_name, .. } = unwrap_parens(base) {
+            if self.is_imported_pkg_root(ident_name)
+                || self.ck.enums.contains_key(ident_name.as_str())
+                || self.ck.structs.contains_key(ident_name.as_str())
+                || self.ck.type_aliases.contains_key(ident_name.as_str())
+            {
+                return;
+            }
+        }
+        let bk = self.kind_of_expr(base);
+        if !is_fully_resolved(&bk) {
+            return;
+        }
+        let is_lowered = matches!(bk, OpKind::Slice(_)) && LOWERED_METHOD_INTRINSICS.contains(&name);
+        if is_lowered {
+            return;
+        }
+        let has_field = self.struct_field_kind(&bk, name).is_some();
+        let has_method = self
+            .struct_base_name(&bk)
+            .is_some_and(|sn| self.ck.method_decls.contains_key(&(sn, name.to_string())));
+        if !has_field && !has_method {
+            if self.diags.iter().any(|d| d.span == span && d.code == "HYB-E1002") {
+                return;
+            }
+            self.emit_e1002(
+                span,
+                format!(
+                    "`{}` has no field or method `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                    base.render(),
+                    name,
+                    bk.label(),
+                    base.render(),
+                    name
+                ),
+                "declare the field on the struct, or declare a method on that type",
+            );
         }
     }
 
