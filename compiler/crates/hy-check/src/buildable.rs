@@ -2592,7 +2592,7 @@ impl<'a> Collector<'a> {
                 if let Some(res) = self.call_result_kinds(callee, args) {
                     if res.len() == want.len() {
                         for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(r, w, values[0].span());
+                            self.report_return_conflict(r, w, values[0].span(), None);
                         }
                         return;
                     }
@@ -2601,7 +2601,7 @@ impl<'a> Collector<'a> {
                         && res.len() + 1 == want.len()
                     {
                         for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(r, w, values[0].span());
+                            self.report_return_conflict(r, w, values[0].span(), None);
                         }
                         return;
                     }
@@ -2648,7 +2648,7 @@ impl<'a> Collector<'a> {
             if short_ok {
                 for (v, w) in values.iter().zip(want.iter()) {
                     let got = self.kind_of_expr(v);
-                    self.report_return_conflict(&got, w, v.span());
+                    self.report_return_conflict(&got, w, v.span(), Some(v));
                 }
                 return;
             }
@@ -2676,12 +2676,17 @@ impl<'a> Collector<'a> {
         }
         for (v, w) in values.iter().zip(want.iter()) {
             let got = self.kind_of_expr(v);
-            self.report_return_conflict(&got, w, v.span());
+            self.report_return_conflict(&got, w, v.span(), Some(v));
         }
     }
 
-    fn report_return_conflict(&mut self, got: &OpKind, want: &OpKind, span: Span) {
-        if !kinds_conflict(want, got) {
+    fn report_return_conflict(&mut self, got: &OpKind, want: &OpKind, span: Span, val_expr: Option<&Expr>) {
+        let is_untyped_int_to_float = *want == OpKind::Float
+            && *got == OpKind::Int
+            && val_expr.is_some_and(|e| self.is_untyped_int_const(e));
+        let conflict = (*want == OpKind::Float && *got == OpKind::Int && !is_untyped_int_to_float)
+            || kinds_conflict(want, got);
+        if !conflict {
             return;
         }
         self.emit_e1002(
@@ -4134,6 +4139,33 @@ impl<'a> Collector<'a> {
     /// selection on a pointer or addressable struct.
     /// Non-addressable: map index (`m[k]`), function/method call result
     /// (`make_t()`), and struct literal (`T{}`).
+    fn is_untyped_int_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit {
+                kind: LitKind::Int(_) | LitKind::Char(_),
+                ..
+            } => true,
+            Expr::Ident { name, .. } => {
+                if let Some(k) = self.file_consts.get(name) {
+                    return *k == OpKind::Int;
+                }
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        return matches!(self.defines[*id].kind, LocalKind::Const);
+                    }
+                }
+                false
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnOp::Neg) && self.is_untyped_int_const(operand)
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.is_untyped_int_const(lhs) && self.is_untyped_int_const(rhs)
+            }
+            _ => false,
+        }
+    }
+
     fn is_addressable_value_receiver(&self, e: &Expr) -> bool {
         match unwrap_parens(e) {
             Expr::Ident { .. } => true,
