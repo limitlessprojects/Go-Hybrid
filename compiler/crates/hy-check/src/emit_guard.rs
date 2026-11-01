@@ -995,10 +995,22 @@ impl<'a> Checker<'a> {
 
     /// Walk a type expression checking every array length inside it.
     pub(crate) fn check_type_expr(&mut self, ty: &TypeExpr) {
-        self.check_type_expr_with_state(None, ty);
+        self.check_type_expr_inner(None, ty, /*names=*/ true);
     }
 
     pub(crate) fn check_type_expr_with_state(&mut self, st: Option<&FnState>, ty: &TypeExpr) {
+        self.check_type_expr_inner(st, ty, /*names=*/ true);
+    }
+
+    /// The RECEIVER position keeps its own `HYB-E2007` arm (issue #1575): an
+    /// undeclared receiver type is reported there with a receiver-specific
+    /// message, so the general unknown-type walk stays out of it and a single
+    /// mistake produces a single diagnostic.
+    pub(crate) fn check_receiver_type_expr(&mut self, ty: &TypeExpr) {
+        self.check_type_expr_inner(None, ty, /*names=*/ false);
+    }
+
+    fn check_type_expr_inner(&mut self, st: Option<&FnState>, ty: &TypeExpr, names: bool) {
         match ty {
             TypeExpr::Array { len, elem, span } => {
                 if let Some(len) = len {
@@ -1021,28 +1033,147 @@ impl<'a> Checker<'a> {
                         ),
                     );
                 }
-                self.check_type_expr_with_state(st, elem);
+                self.check_type_expr_inner(st, elem, names);
             }
             TypeExpr::Pointer { to, .. }
             | TypeExpr::Slice { elem: to, .. }
             | TypeExpr::Option { elem: to, .. }
-            | TypeExpr::Chan { elem: to, .. } => self.check_type_expr_with_state(st, to),
+            | TypeExpr::Chan { elem: to, .. } => self.check_type_expr_inner(st, to, names),
             TypeExpr::Map { key, value, .. } => {
-                self.check_type_expr_with_state(st, key);
-                self.check_type_expr_with_state(st, value);
+                self.check_type_expr_inner(st, key, names);
+                self.check_type_expr_inner(st, value, names);
             }
             TypeExpr::Fn {
                 params, results, ..
             } => {
+                // `parse_params` serves both a declaration's parameter list and
+                // a `fn(...)` TYPE. In the type form every entry is a type, but
+                // the parser parks a bare ident in `name` with the empty-name
+                // sentinel in `ty` — there is no way to tell `fn(missing)` from
+                // `fn(a int)`'s shared name at parse time. Go's own rule
+                // resolves it: the list is NAMED if any entry carries a type
+                // (`fn(a, b int)`), and a list where no entry carries one is a
+                // list of unnamed parameter TYPES (`fn(int, missing)`).
+                let named = params.iter().any(|p| {
+                    !matches!(&p.ty, TypeExpr::Named { name, .. } if name.is_empty())
+                });
                 for p in params {
-                    self.check_type_expr_with_state(st, &p.ty);
+                    if named {
+                        self.check_type_expr_inner(st, &p.ty, names);
+                    } else if names {
+                        self.check_named_type_declared(&p.name, p.span);
+                    }
                 }
                 for r in results {
-                    self.check_type_expr_with_state(st, r);
+                    self.check_type_expr_inner(st, r, names);
                 }
             }
-            TypeExpr::Named { .. } => {}
+            TypeExpr::Named { name, span } => {
+                if names {
+                    self.check_named_type_declared(name, *span);
+                }
+            }
         }
+    }
+
+    /// Issue #1583: a NAMED type in a declaration that resolves to nothing.
+    ///
+    /// The type walker recursed through every constructor and matched the
+    /// leaf with `TypeExpr::Named { .. } => {}`, so it never asked whether the
+    /// name exists. `struct s { a missing }`, `var x missing`,
+    /// `fn f(p missing)`, `fn f() missing`, `type t = missing`, `[]missing`,
+    /// `map[missing]int`, `map[string]missing`, `chan missing`,
+    /// `option[missing]`, `[2]missing`, `box[missing]`, `const c missing = 1`
+    /// and `fn(missing)` all passed `hyb check` with 0 diagnostics and then
+    /// failed `go build` with `undefined: missing` (Row 13 BUILDABLE).
+    ///
+    /// Only a BARE name is judged here. A dotted name is foreign/Go-side
+    /// (`serde_json.value`, `sync.mutex`) and belongs to the foreign tables,
+    /// and the receiver position keeps its own E2007 arm (#1575).
+    fn check_named_type_declared(&mut self, name: &str, span: Span) {
+        if name.contains('.') {
+            return;
+        }
+        // Generic arguments are folded into the name by the parser
+        // (`box[int]`), so the base is everything before the first `[`.
+        let base = name.split('[').next().unwrap_or(name).trim();
+        if base.is_empty() || base == "_" {
+            return;
+        }
+        if !self.is_known_type_name(base) {
+            self.diags.push(
+                Diagnostic::error(
+                    "HYB-E1002",
+                    self.path.clone(),
+                    span,
+                    format!(
+                        "unknown type `{}` — nothing in this file declares it, and Go has no predeclared type by that name (Go: `undefined: {}`) (HYB-E1002)",
+                        base, base
+                    ),
+                )
+                .with_notes(vec![
+                    format!(
+                        "why: the emitter writes the type name into the generated Go verbatim, so the module fails `go build` with `undefined: {}` (issue #1583, GUARANTEES row 13 BUILDABLE)",
+                        base
+                    ),
+                    format!(
+                        "fix: declare it (`struct {} {{ … }}`, `enum {}`, `type {} = …`), use a predeclared type (`int`, `string`, `error`, `any`, …), or spell a foreign type with its package prefix (`serde_json.value`)",
+                        base, base, base
+                    ),
+                ]),
+            );
+            return;
+        }
+        // `box[missing]` — the base resolves, an argument may not.
+        if let Some(open) = name.find('[') {
+            if let Some(inner) = name[open + 1..].strip_suffix(']') {
+                for arg in crate::buildable::split_top_level_type_args(inner) {
+                    let arg = arg.trim();
+                    if !arg.is_empty() {
+                        self.check_named_type_declared(arg, span);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every type name this check accepts.
+    fn is_known_type_name(&self, name: &str) -> bool {
+        // The prelude types the emitter injects into every module.
+        if name == "option" || name == "set" {
+            return true;
+        }
+        if Self::is_predeclared_type_name(name) {
+            return true;
+        }
+        if self.structs.contains_key(name)
+            || self.pkg_names.get(name) == Some(&"struct")
+            || self.enums.contains_key(name)
+            || self.type_aliases.contains_key(name)
+        {
+            return true;
+        }
+        // A generic parameter is declared at the struct or fn it belongs to.
+        // A file-wide union is deliberately coarse: it can only fail OPEN
+        // (accept a type parameter used outside its declaration), never
+        // reject a legal program.
+        self.struct_type_params
+            .values()
+            .any(|tps| tps.iter().any(|tp| tp.name == name))
+            || self
+                .fns
+                .values()
+                .any(|f| f.type_params.iter().any(|tp| tp.name == name))
+    }
+
+    /// Go's predeclared TYPE names (plus the SPEC conversion spellings the
+    /// emitter translates). Builtin FUNCTIONS are not types and are not here.
+    fn is_predeclared_type_name(name: &str) -> bool {
+        crate::const_init::is_conversion_type_name(name)
+            || matches!(
+                name,
+                "error" | "any" | "comparable" | "uintptr" | "complex64" | "complex128"
+            )
     }
 
     pub(crate) fn eval_array_len_const(&self, len: &Expr) -> Option<usize> {
