@@ -1138,3 +1138,20 @@ Session-18 (2026-10-30, full-throttle merge day — cron re-pointed to this queu
 - All eight landings: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88) zero side-shifts, ls-remote==HEAD asserted, written replies posted.
 - Suite trajectory: 249 -> 257. Final main 24c1cf6, tree clean.
 - NEXT TICK QUEUE: #2321 (defer mutations on named returns, behind — verify) -> #2670 (await rebase, gttps) -> #2726 (await rebase) -> #2593 (await rebase+pick) -> #2677 (await rebase) -> #2581/#2622 (await fixes) -> #2517 (await rebase) -> wave tail #2083/#2082/#2080/#2077/#1856/#2078/#2075/#2076/#2074/#2073/#1893/#1855/#1914 -> #1811 (await one-hunk).
+
+## Session 42 — 2026-11-01 evening (tick 487193: 9 landed, 0 gate-fails)
+
+- Sandbox recycled (22nd; toolchains re-restored, go.tgz cache hit again). Baseline e3af322 (own session-41). Scan OK; approve 4/4. Fresh wave: seven score-9 land-candidates — Dimany4/alexrayyandev/aswadi/dextermos-dev checker burst + W-013 spike + ket4min-susan E11 alignment + ocakciomursel-pixel P0 defer.
+- LANDED (Pareto top-down):
+  bc2a754 Merge PR #2744 (Dimany4, fixes #2725) — slice conversions with mismatched element kinds rejected (Row 13). 258 suites.
+  c6149e8 Merge PR #2748 (alexrayyandev, fixes #2733) — uncomparable key types (slices/maps/fns) in map types + literals rejected (Row 13). 259 suites. Author's first landing.
+  aa51dbb Merge PR #2743 (aswadi, fixes #1905) — T23 HYB-E2002 enforced in match arm guards + closure if-init (correct binding scope). 261 suites.
+  319cbdd Merge PR #2747 (dextermos-dev, fixes #2738) — mismatched slice/string elements in variadic append(a, b...) rejected (Go spec + Row 13). 262 suites. Author's first landing.
+  3b99d0f Merge PR #1855 (harmweber787-png, closes #345) — W-013 translation validation feasibility spike (validator.py 240 + pytest 4+3 subtests in worktree; proposal credit @MyTH-zyxeon in merge msg). 262 suites.
+  5e48df1 Merge PR #2752 (ket4min-susan, fixes #2751) — try_context aligned with emitter E3/E11 lowering (http.handler return-fn propagation + const/type no longer inherit try-context). 263 suites.
+  752bca1 Merge PR #2549 (dextermos-dev, closes #2512) — radix-prefix range bounds (0o5..0o6 escaped as non-const) + induction var mutation in single-iteration loops. 264 suites.
+  b68003f Merge PR #2321 (ocakciomursel-pixel, closes #2319, P0) — post-return defer mutations on named results: shared-return races + loan escape + eager arg provenance + const laundering (loans.rs +624, 4 matrices 585 lines). 265 suites.
+  0cf58a2 Merge PR #2726 (ket4min-susan, fixes #2724) — all four A5 foreign-escape bypasses closed (rebased over landed #2729, integrating it); #2724 closes, superseding #2729's partial note. 269 suites.
+- All nine: merge gate CLEAN, tripwire not fired, differential FULL (42/42+88/88) zero side-shifts, ls-remote==HEAD asserted, written replies posted. Two first-time contributors landed (alexrayyandev, dextermos-dev x2).
+- Suite trajectory: 257 -> 269. Final main 0cf58a2, tree clean.
+- NEXT TICK QUEUE: #2670 (await rebase — head unchanged since ask) -> #2593 (await rebase+pick) -> #2677 (await rebase) -> #2581/#2622 (await fixes) -> #2517 (await rebase) -> #2664's #2670 follow-ups -> wave tail #2083/#2082/#2080/#2077/#1856/#2078/#2075/#2076/#2074/#2073/#1893/#1855/#1914 -> #1811 (await one-hunk).
