@@ -332,6 +332,11 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         (Pointer(_), Interface) => false,
         (Pointer(_), _) | (_, Pointer(_)) => true,
 
+        // Same container family: Go needs identical element (key/value) types,
+        // so recurse the way `kinds_conflict` does (#1840).
+        (Slice(a), Slice(b)) | (Chan(a), Chan(b)) => kinds_conflict(a, b),
+        (Map(k1, v1), Map(k2, v2)) => kinds_conflict(k1, k2) || kinds_conflict(v1, v2),
+
         _ => false,
     }
 }
