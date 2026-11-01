@@ -563,6 +563,19 @@ impl<'a> Collector<'a> {
             Expr::Ident { name, .. } => self.lookup_slice_elem_scalar(name),
             Expr::SliceLit { elem: Some(t), .. } => self.scalar_of_ty(&self.ck.resolve_type_alias(t)),
             Expr::Slice { base, .. } => self.slice_elem_scalar(base),
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let full_name = self.struct_name(&bk)?;
+                let base_name = Checker::base_named_type_str(&full_name);
+                let fields = self.ck.structs.get(base_name)?;
+                let (_, ty) = fields.iter().find(|(n, _)| n == name)?;
+                let resolved = self.ck.resolve_type_alias(ty);
+                if let TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } = &resolved {
+                    self.scalar_of_ty(&self.ck.resolve_type_alias(elem))
+                } else {
+                    None
+                }
+            }
             Expr::Call { callee, args, .. } => {
                 if let Expr::Ident { name, .. } = unwrap_parens(callee) {
                     if name == "make" {
@@ -728,6 +741,11 @@ impl<'a> Collector<'a> {
                 None
             }
             Expr::Unary { operand, .. } => self.expr_scalar_type(operand),
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                self.struct_field_scalar(&bk, name)
+            }
+            Expr::Index { base, .. } => self.slice_elem_scalar(base),
             _ => None,
         }
     }
@@ -735,6 +753,37 @@ impl<'a> Collector<'a> {
     fn place_scalar_type(&self, p: &Place) -> Option<&'static str> {
         match &p.kind {
             PlaceKind::Ident(name) => self.lookup_scalar(name),
+            PlaceKind::Field { base, name } => {
+                let bk = self.kind_of_place(base);
+                self.struct_field_scalar(&bk, name)
+            }
+            PlaceKind::Index { base, .. } => match &base.kind {
+                PlaceKind::Ident(name) => self.lookup_slice_elem_scalar(name),
+                PlaceKind::Field {
+                    base: fbase,
+                    name: fname,
+                } => {
+                    let bk = self.kind_of_place(fbase);
+                    let full_name = self.struct_name(&bk)?;
+                    let base_name = Checker::base_named_type_str(&full_name);
+                    let fields = self.ck.structs.get(base_name)?;
+                    let (_, ty) = fields.iter().find(|(n, _)| n == fname)?;
+                    let resolved = self.ck.resolve_type_alias(ty);
+                    if let TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } = &resolved
+                    {
+                        self.scalar_of_ty(&self.ck.resolve_type_alias(elem))
+                    } else {
+                        None
+                    }
+                }
+                _ => {
+                    if let Some(e) = place_as_expr(base) {
+                        self.slice_elem_scalar(&e)
+                    } else {
+                        None
+                    }
+                }
+            },
             _ => None,
         }
     }
@@ -997,7 +1046,7 @@ impl<'a> Collector<'a> {
                 self.bind_scalar(&p.name, sc);
             }
             let resolved = self.ck.resolve_type_alias(&p.ty);
-            if let TypeExpr::Slice { elem, .. } = &resolved {
+            if let TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } = &resolved {
                 if let Some(sc) = self.scalar_of_ty(&self.ck.resolve_type_alias(elem)) {
                     self.bind_slice_elem_scalar(&p.name, sc);
                 }
@@ -1176,7 +1225,7 @@ impl<'a> Collector<'a> {
                 }
             }
             let resolved = self.ck.resolve_type_alias(t);
-            if let TypeExpr::Slice { elem, .. } = &resolved {
+            if let TypeExpr::Slice { elem, .. } | TypeExpr::Array { elem, .. } = &resolved {
                 if let Some(sc) = self.scalar_of_ty(&self.ck.resolve_type_alias(elem)) {
                     for name in &l.names {
                         self.bind_slice_elem_scalar(name, sc);
@@ -2171,6 +2220,14 @@ impl<'a> Collector<'a> {
             .iter()
             .find(|(n, _)| n == field)
             .map(|(_, ty)| self.kind_of_ty_with_subst(ty, &subst, 0))
+    }
+
+    fn struct_field_scalar(&self, k: &OpKind, field: &str) -> Option<&'static str> {
+        let full_name = self.struct_name(k)?;
+        let base_name = Checker::base_named_type_str(&full_name);
+        let fields = self.ck.structs.get(base_name)?;
+        let (_, ty) = fields.iter().find(|(n, _)| n == field)?;
+        self.scalar_of_ty(ty)
     }
 
     pub(crate) fn kind_of_expr(&self, e: &Expr) -> OpKind {
