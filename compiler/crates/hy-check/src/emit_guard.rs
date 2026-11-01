@@ -544,8 +544,8 @@ impl<'a> Checker<'a> {
                 let val_ty = *value.clone();
                 self.check_map_literal_duplicate_keys(entries, Some(st));
                 for (k, v) in entries {
-                    self.check_const_overflow_init("map literal key", &key_ty, k, None);
-                    self.check_const_overflow_init("map literal value", &val_ty, v, None);
+                    self.check_const_overflow_init("map literal key", &key_ty, k, Some(st));
+                    self.check_const_overflow_init("map literal value", &val_ty, v, Some(st));
                     self.check_expr_emit_guard(st, k);
                     self.check_expr_emit_guard(st, v);
                 }
@@ -730,7 +730,7 @@ impl<'a> Checker<'a> {
                         &format!("parameter `{}`", p_name),
                         &resolved_ty,
                         &a.value,
-                        None,
+                        Some(st),
                     );
                 }
             }
@@ -789,15 +789,58 @@ impl<'a> Checker<'a> {
     /// a function VALUE (Go: `helper == helper` compares funcs —
     /// `shape_of_expr` only models fn names in call position).
     fn equality_shape(&self, st: &FnState, e: &Expr) -> TypeShape {
-        if let Expr::Ident { name, .. } = unwrap_parens(e) {
-            if !name.is_empty()
-                && self.lookup_binding(st, name).is_none()
-                && self.fns.contains_key(name.as_str())
-            {
-                return TypeShape::Closure;
-            }
+        self.equality_shape_depth(st, e, 0)
+    }
+
+    fn equality_shape_depth(&self, st: &FnState, e: &Expr, depth: usize) -> TypeShape {
+        if depth > 16 {
+            return TypeShape::Unknown;
         }
-        self.shape_of_expr(st, e)
+        let bare = crate::model::unwrap_parens_and_move(e);
+        match bare {
+            Expr::Ident { name, .. } if !name.is_empty() && self.lookup_binding(st, name).is_none() => {
+                let head = Self::base_named_type_str(name);
+                if self.fns.contains_key(name.as_str()) || self.fns.contains_key(head) {
+                    return TypeShape::Closure;
+                }
+                if let Some(val) = self.const_values.get(name.as_str()) {
+                    return self.equality_shape_depth(st, val, depth + 1);
+                }
+            }
+            Expr::Field { base, name, .. } => {
+                let head = Self::base_named_type_str(name);
+                if let Expr::Ident { name: pkg, .. } = crate::model::unwrap_parens_and_move(base) {
+                    if !pkg.is_empty() && self.lookup_binding(st, pkg).is_none() {
+                        let pkg_base = Self::base_named_type_str(pkg);
+                        if self.fns.contains_key(&format!("{pkg}.{name}"))
+                            || self.fns.contains_key(&format!("{pkg}.{head}"))
+                            || self.fns.contains_key(&format!("{pkg_base}.{head}"))
+                        {
+                            return TypeShape::Closure;
+                        }
+                    }
+                }
+                let recv_struct = match self.shape_of_expr(st, base) {
+                    TypeShape::Struct(Some(s)) => Some(Self::base_named_type_str(&s).to_string()),
+                    TypeShape::Pointer(inner) => match *inner {
+                        TypeShape::Struct(Some(s)) => {
+                            Some(Self::base_named_type_str(&s).to_string())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(s) = recv_struct {
+                    if self.method_decls.contains_key(&(s.clone(), name.clone()))
+                        || self.method_decls.contains_key(&(s, head.to_string()))
+                    {
+                        return TypeShape::Closure;
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.shape_of_expr(st, bare)
     }
 
     /// `Some(noun)` when a `==` over this shape is provably illegal in
@@ -914,11 +957,21 @@ impl<'a> Checker<'a> {
             TypeExpr::Pointer { .. } => {
                 Some("a pointer receiver may point at most one level (`**T` is not a Go receiver)")
             }
-            TypeExpr::Named { name, .. } if self.type_aliases.contains_key(name) => {
+            TypeExpr::Named { name, .. }
+                if self.type_aliases.contains_key(name.as_str())
+                    || self
+                        .type_aliases
+                        .contains_key(Self::base_named_type_str(name)) =>
+            {
                 Some("a method receiver must be a defined (named) type, not a type alias")
             }
+            TypeExpr::Named { name, .. } if name.contains('.') => {
+                Some("a method receiver must be a local type defined in this package, not an imported or qualified type")
+            }
             TypeExpr::Named { name, .. }
-                if !self.structs.contains_key(name) && is_primitive_receiver(name) =>
+                if !self.structs.contains_key(Self::base_named_type_str(name))
+                    && (is_primitive_receiver(Self::base_named_type_str(name))
+                        || Self::base_named_type_str(name) == "set") =>
             {
                 Some("a method receiver must be a defined (named) type, not a primitive or interface")
             }
@@ -2425,7 +2478,7 @@ impl<'a> Checker<'a> {
         if depth > 16 {
             return None;
         }
-        match unwrap_parens(expr) {
+        match crate::model::unwrap_parens_and_move(expr) {
             Expr::Lit { kind, .. } => match kind {
                 LitKind::Int(s) => match parse_int_lit(s) {
                     Some(ConstInt::Value(v)) => Some(ConstKeyVal::Int(v)),
@@ -2593,22 +2646,80 @@ impl<'a> Checker<'a> {
             }
             Expr::Call { callee, args, .. } => {
                 if args.len() == 1 && !args[0].spread {
-                    if let Expr::Ident { name, .. } = callee.as_ref() {
+                    if let Expr::Ident { name, .. } = crate::model::unwrap_parens_and_move(callee) {
+                        if self.fns.contains_key(name.as_str())
+                            || st.is_some_and(|s| s.env_lookup(name).is_some())
+                        {
+                            return None;
+                        }
+                        if name == "len" {
+                            return self
+                                .const_string_len_at(&args[0].value, expr.span().start, depth + 1)
+                                .or_else(|| {
+                                    self.const_array_len_at(
+                                        &args[0].value,
+                                        expr.span().start,
+                                        depth + 1,
+                                    )
+                                })
+                                .map(ConstKeyVal::Int);
+                        }
                         let arg_val = self.fold_const_key(&args[0].value, st, depth + 1)?;
-                        match name.as_str() {
-                            "int" | "i8" | "int8" | "i16" | "int16" | "i32" | "int32"
-                            | "i64" | "int64" | "uint" | "u8" | "uint8" | "byte" | "u16"
-                            | "uint16" | "u32" | "uint32" | "u64" | "uint64" | "rune"
-                            | "uintptr" => match arg_val {
-                                ConstKeyVal::Int(_) => Some(arg_val),
+                        if let Some(target) = self.resolve_int_conversion_name(name) {
+                            return match arg_val {
+                                ConstKeyVal::Int(v) => {
+                                    Some(ConstKeyVal::Int(wrap_int_conversion(v, &target)))
+                                }
+                                ConstKeyVal::Float(bits) => {
+                                    let f = f64::from_bits(bits);
+                                    if f.is_finite()
+                                        && f.fract() == 0.0
+                                        && f >= (i64::MIN as f64)
+                                        && f <= (i64::MAX as f64)
+                                    {
+                                        Some(ConstKeyVal::Int(wrap_int_conversion(
+                                            f as i128, &target,
+                                        )))
+                                    } else {
+                                        None
+                                    }
+                                }
                                 _ => None,
-                            },
+                            };
+                        }
+                        let conv_target = self
+                            .type_aliases
+                            .get(name.as_str())
+                            .and_then(|ty| match self.resolve_type_alias(ty) {
+                                TypeExpr::Named { name: n, .. } => Some(n),
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| name.clone());
+                        match conv_target.as_str() {
                             "string" => match arg_val {
                                 ConstKeyVal::Str(_) => Some(arg_val),
                                 _ => None,
                             },
                             "bool" => match arg_val {
                                 ConstKeyVal::Bool(_) => Some(arg_val),
+                                _ => None,
+                            },
+                            "float64" | "f64" => match arg_val {
+                                ConstKeyVal::Float(_) => Some(arg_val),
+                                ConstKeyVal::Int(v) => {
+                                    Some(ConstKeyVal::Float((v as f64).to_bits()))
+                                }
+                                _ => None,
+                            },
+                            "float32" | "f32" => match arg_val {
+                                ConstKeyVal::Float(bits) => {
+                                    let f = (f64::from_bits(bits) as f32) as f64;
+                                    Some(ConstKeyVal::Float(f.to_bits()))
+                                }
+                                ConstKeyVal::Int(v) => {
+                                    let f = (v as f32) as f64;
+                                    Some(ConstKeyVal::Float(f.to_bits()))
+                                }
                                 _ => None,
                             },
                             _ => None,
@@ -2634,7 +2745,7 @@ fn wrap_int_conversion(v: i128, target: &str) -> i128 {
     match target {
         "i8" | "int8" => (v as i8) as i128,
         "i16" | "int16" => (v as i16) as i128,
-        "i32" | "int32" | "rune" => (v as i32) as i128,
+        "i32" | "int32" | "rune" | "char" => (v as i32) as i128,
         "i64" | "int64" | "int" | "isize" => (v as i64) as i128,
         "u8" | "uint8" | "byte" => (v as u8) as i128,
         "u16" | "uint16" => (v as u16) as i128,
@@ -2779,6 +2890,7 @@ fn is_int_primitive_type_name(name: &str) -> bool {
             | "uint64"
             | "byte"
             | "rune"
+            | "char"
     )
 }
 
