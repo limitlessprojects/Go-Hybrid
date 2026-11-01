@@ -616,18 +616,18 @@ impl<'a> Scan<'a> {
             return;
         }
         let msg = format!(
-            "type `{}` is shadowed here by a local value named `{}` — Go would read the type              position as the variable and reject the emitted module (`{} (local variable) is              not a type`) (HYB-E1001)",
+            "type `{}` is shadowed here by a local value named `{}` — Go would read the type position as the variable and reject the emitted module (`{} (local variable) is not a type`) (HYB-E1001)",
             head, head, head
         );
         self.diags.push(
             hy_diag::Diagnostic::error("HYB-E1001", self.path.to_string(), span, msg).with_notes(
                 vec![
                     format!(
-                        "why: a local, parameter, or loop/arm binding named `{}` is in scope, and                          the emitted Go keeps both spellings, so the type name resolves to it",
+                        "why: a local, parameter, or loop/arm binding named `{}` is in scope, and the emitted Go keeps both spellings, so the type name resolves to it",
                         head
                     ),
                     format!(
-                        "fix: rename the local value (e.g. `{}_v`), or move the type use out of                          its scope",
+                        "fix: rename the local value (e.g. `{}_v`), or move the type use out of its scope",
                         head
                     ),
                 ],
