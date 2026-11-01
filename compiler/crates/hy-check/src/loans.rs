@@ -529,6 +529,16 @@ impl<'a> Checker<'a> {
         self.emit_a3_if_live(st, path, span, idx, verb);
     }
 
+    pub(crate) fn is_slot_loan_expr(e: &Expr) -> bool {
+        if walk::addr_of_index_base_path(e).is_some() {
+            return true;
+        }
+        let Some(inner) = as_addr_of(unwrap_parens(e)) else {
+            return false;
+        };
+        matches!(unwrap_parens(inner), Expr::Index { .. })
+    }
+
     /// Extend any live `LoanTarget::MapSlot` window when a slot-loan binding
     /// (or an existing alias of one) is copied into `alias_name` (`p := s` or `p = s`).
     pub(crate) fn extend_map_slot_loan_to_alias(
@@ -3544,9 +3554,12 @@ impl<'a> Checker<'a> {
                             (shape, ty, origins)
                         })
                         .collect();
+                    let can_mark_loan = matches!(l.kind, LocalKind::Define | LocalKind::Let)
+                        && l.ty.is_none();
                     for ((name, v), (shape, ty, origins)) in
                         l.names.iter().zip(l.values.iter()).zip(rhs_info)
                     {
+                        let is_loan = can_mark_loan && Self::is_slot_loan_expr(v);
                         cst.env_define(
                             name,
                             Binding {
@@ -3557,7 +3570,7 @@ impl<'a> Checker<'a> {
                                 managed_taint: false,
                                 moved: None,
                                 non_owned_origin: None,
-                                slot_loan: false,
+                                slot_loan: is_loan,
                             },
                         );
                         cst.closure_defs.remove(name);
@@ -3600,6 +3613,9 @@ impl<'a> Checker<'a> {
                 targets, values, ..
             } => {
                 if targets.len() == values.len() {
+                    let all_ident_targets = targets
+                        .iter()
+                        .all(|t| matches!(&t.kind, PlaceKind::Ident(_)));
                     let rhs_info: Vec<(TypeShape, Option<hy_syntax::TypeExpr>, HashSet<usize>)> =
                         values
                             .iter()
@@ -3615,17 +3631,53 @@ impl<'a> Checker<'a> {
                     {
                         match &t.kind {
                             PlaceKind::Ident(name) => {
-                                if let Some(b) = cst.env_lookup_mut(name) {
-                                    if !matches!(v_shape, TypeShape::Unknown) || b.ty.is_none() {
-                                        b.shape = v_shape;
-                                    }
-                                    if v_ty.is_some() || b.ty.is_none() {
-                                        b.ty = v_ty;
-                                    }
-                                }
+                                let is_new_loan = all_ident_targets && Self::is_slot_loan_expr(v);
+                                let active_slot_loan = cst
+                                    .env_lookup_mut(name)
+                                    .map(|b| {
+                                        let was_loan = b.slot_loan && !is_new_loan;
+                                        if was_loan {
+                                            if !matches!(
+                                                v_shape,
+                                                TypeShape::Unknown | TypeShape::Pointer(_)
+                                            ) && matches!(b.shape, TypeShape::Pointer(_))
+                                            {
+                                                b.shape = TypeShape::Pointer(Box::new(
+                                                    v_shape.clone(),
+                                                ));
+                                            }
+                                        } else {
+                                            if !matches!(v_shape, TypeShape::Unknown)
+                                                || b.ty.is_none()
+                                            {
+                                                b.shape = v_shape.clone();
+                                            }
+                                            if v_ty.is_some() || b.ty.is_none() {
+                                                b.ty = v_ty;
+                                            }
+                                        }
+                                        b.slot_loan |= is_new_loan;
+                                        was_loan
+                                    })
+                                    .unwrap_or(false);
                                 cst.closure_defs.remove(name);
                                 self.record_closure_mutations(cst, name, v);
-                                if src_slots.is_empty() {
+                                if active_slot_loan {
+                                    let tgt_shares = self.shape_may_share(&v_shape)
+                                        || matches!(v_shape, TypeShape::Unknown);
+                                    if tgt_shares && !src_slots.is_empty() {
+                                        if let Some(dst_slots) = aliases.get(name).cloned() {
+                                            for d in &dst_slots {
+                                                for s in &src_slots {
+                                                    if d != s {
+                                                        out.insert((*d, *s));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        aliases.entry(name.clone()).or_default().extend(src_slots);
+                                    }
+                                } else if src_slots.is_empty() {
                                     aliases.remove(name);
                                 } else {
                                     aliases.insert(name.clone(), src_slots);
@@ -3667,7 +3719,23 @@ impl<'a> Checker<'a> {
                         let src_slots = if carries { raw.clone() } else { HashSet::new() };
                         match &t.kind {
                             PlaceKind::Ident(name) => {
-                                if src_slots.is_empty() {
+                                let active_slot_loan = self
+                                    .lookup_binding(cst, name)
+                                    .is_some_and(|b| b.slot_loan);
+                                if active_slot_loan {
+                                    if !src_slots.is_empty() {
+                                        if let Some(dst_slots) = aliases.get(name).cloned() {
+                                            for d in &dst_slots {
+                                                for s in &src_slots {
+                                                    if d != s {
+                                                        out.insert((*d, *s));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        aliases.entry(name.clone()).or_default().extend(src_slots);
+                                    }
+                                } else if src_slots.is_empty() {
                                     aliases.remove(name);
                                 } else {
                                     aliases.insert(name.clone(), src_slots);
@@ -4174,9 +4242,17 @@ impl<'a> Checker<'a> {
         } else {
             return;
         };
+        let can_mark_slot_loan = matches!(l.kind, LocalKind::Define | LocalKind::Let)
+            && l.ty.is_none()
+            && l.names.len() == l.values.len();
         for (name, (value, shape)) in l.names.iter().zip(values) {
             if name == "_" {
                 continue;
+            }
+            if can_mark_slot_loan && Self::is_slot_loan_expr(value) {
+                if let Some(b) = st.env_lookup_mut(name) {
+                    b.slot_loan = true;
+                }
             }
             let borrow_slot = field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown);
             if (l.names.len() == l.values.len() || borrow_slot) && self.expr_carries_borrow(st, value) {
@@ -4238,19 +4314,30 @@ impl<'a> Checker<'a> {
             } else {
                 return;
             };
+            let all_ident_targets = values.len() == targets.len()
+                && targets.iter().all(|t| matches!(&t.kind, PlaceKind::Ident(_)));
             for (t, (v, shape)) in targets.iter().zip(shaped_values) {
                 let carries_borrow = self.expr_carries_borrow(st, v);
                 if let PlaceKind::Ident(name) = &t.kind {
                     if name == "_" {
                         continue;
                     }
+                    let is_new_slot_loan = all_ident_targets && Self::is_slot_loan_expr(v);
+                    if is_new_slot_loan {
+                        if let Some(b) = st.env_lookup_mut(name) {
+                            b.slot_loan = true;
+                        }
+                    }
+                    let is_slot_loan = is_new_slot_loan
+                        || self.lookup_binding(st, name).is_some_and(|b| b.slot_loan);
                     let borrow_slot =
                         field_borrow_kind(&shape).is_some() || matches!(shape, TypeShape::Unknown);
                     let inner = unwrap_parens(v);
                     let is_borrow = as_addr_of(inner).is_some()
                         || contains_addr_of_in_literal(inner)
                         || matches!(inner, Expr::Ident { name: src, .. } if st.borrow_bindings.contains(src));
-                    if (values.len() == targets.len() || borrow_slot) && (is_borrow || carries_borrow)
+                    if (values.len() == targets.len() || borrow_slot || is_slot_loan)
+                        && (is_borrow || carries_borrow || is_slot_loan)
                     {
                         st.borrow_bindings.insert(name.clone());
                     } else {
@@ -6184,12 +6271,14 @@ impl<'a> Checker<'a> {
             // pre-assignment environment.
             struct AssignRhsInfo {
                 is_fresh_copy: bool,
+                active_slot_loan: bool,
                 shape: TypeShape,
                 ty: Option<hy_syntax::TypeExpr>,
                 non_owned: Option<String>,
                 reads_self: bool,
                 shadowed_origin: Option<String>,
                 prior_alias: Option<String>,
+                prior_children: Vec<String>,
                 prior_shares: Vec<String>,
                 prior_shadows: HashSet<(String, usize)>,
             }
@@ -6208,51 +6297,86 @@ impl<'a> Checker<'a> {
                             .and_then(|b| b.non_owned_origin.clone())
                             .or_else(|| self.moved_non_owned_origin_in_expr(st, other)),
                     };
-                    let (reads_self, shadowed_origin, prior_alias, prior_shares, prior_shadows) =
-                        match &t.kind {
-                            PlaceKind::Ident(name) => {
-                                let rs = self.value_reads_storage_of(st, v, name);
-                                let so = if self.shape_may_share(&shape) && rs {
-                                    self.non_owned_origin_of(st, name).map(|(o, via_share)| {
-                                        if via_share && !o.starts_with("a may-share peer of ") {
-                                            format!("a may-share peer of {}", o)
+                    let (
+                        active_slot_loan,
+                        reads_self,
+                        shadowed_origin,
+                        prior_alias,
+                        prior_children,
+                        prior_shares,
+                        prior_shadows,
+                    ) = match &t.kind {
+                        PlaceKind::Ident(name) => {
+                            let active_loan = self
+                                .lookup_binding(st, name)
+                                .is_some_and(|b| b.slot_loan)
+                                && !Self::is_slot_loan_expr(v);
+                            let rs = active_loan || self.value_reads_storage_of(st, v, name);
+                            let so = if (active_loan || self.shape_may_share(&shape)) && rs {
+                                self.non_owned_origin_of(st, name).map(|(o, via_share)| {
+                                    if via_share && !o.starts_with("a may-share peer of ") {
+                                        format!("a may-share peer of {}", o)
+                                    } else {
+                                        o
+                                    }
+                                })
+                            } else {
+                                None
+                            };
+                            let pa = if rs {
+                                st.aliases.get(name).cloned()
+                            } else {
+                                None
+                            };
+                            let pc = if rs {
+                                st.aliases
+                                    .iter()
+                                    .filter_map(|(k, val)| {
+                                        if val == name && k != name {
+                                            Some(k.clone())
                                         } else {
-                                            o
+                                            None
                                         }
                                     })
-                                } else {
-                                    None
-                                };
-                                let pa = if rs {
-                                    st.aliases.get(name).cloned()
-                                } else {
-                                    None
-                                };
-                                let ps = if rs {
-                                    st.may_share
-                                        .get(name)
-                                        .map(|s| s.iter().cloned().collect())
-                                        .unwrap_or_default()
-                                } else {
-                                    Vec::new()
-                                };
-                                let psh = if rs {
-                                    st.shadow_links.get(name).cloned().unwrap_or_default()
-                                } else {
-                                    HashSet::new()
-                                };
-                                (rs, so, pa, ps, psh)
-                            }
-                            _ => (false, None, None, Vec::new(), HashSet::new()),
-                        };
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            };
+                            let ps = if rs {
+                                st.may_share
+                                    .get(name)
+                                    .map(|s| s.iter().cloned().collect())
+                                    .unwrap_or_default()
+                            } else {
+                                Vec::new()
+                            };
+                            let psh = if rs {
+                                st.shadow_links.get(name).cloned().unwrap_or_default()
+                            } else {
+                                HashSet::new()
+                            };
+                            (active_loan, rs, so, pa, pc, ps, psh)
+                        }
+                        _ => (
+                            false,
+                            false,
+                            None,
+                            None,
+                            Vec::new(),
+                            Vec::new(),
+                            HashSet::new(),
+                        ),
+                    };
                     AssignRhsInfo {
                         is_fresh_copy: self.call_returns_fresh_copy(st, v),
+                        active_slot_loan,
                         shape,
                         ty,
                         non_owned,
                         reads_self,
                         shadowed_origin,
                         prior_alias,
+                        prior_children,
                         prior_shares,
                         prior_shadows,
                     }
@@ -6278,20 +6402,35 @@ impl<'a> Checker<'a> {
                     }
 
                     if let Some(b) = st.env_lookup_mut(name) {
-                        if !matches!(info.shape, TypeShape::Unknown) || b.ty.is_none() {
-                            b.shape = info.shape;
-                        }
-                        if info.ty.is_some()
-                            || b.ty.is_none()
-                            || matches!(
-                                b.ty.as_ref().map(|t| self.resolve_type_alias(t)),
-                                Some(hy_syntax::TypeExpr::Fn { .. })
-                            )
-                        {
-                            b.ty = info.ty;
+                        if info.active_slot_loan {
+                            if !matches!(
+                                info.shape,
+                                TypeShape::Unknown | TypeShape::Pointer(_)
+                            ) && matches!(b.shape, TypeShape::Pointer(_))
+                            {
+                                b.shape = TypeShape::Pointer(Box::new(info.shape.clone()));
+                            }
+                            if !matches!(b.ty, Some(hy_syntax::TypeExpr::Pointer { .. }))
+                                && (info.ty.is_some() || b.ty.is_none())
+                            {
+                                b.ty = info.ty.clone();
+                            }
+                        } else {
+                            if !matches!(info.shape, TypeShape::Unknown) || b.ty.is_none() {
+                                b.shape = info.shape.clone();
+                            }
+                            if info.ty.is_some()
+                                || b.ty.is_none()
+                                || matches!(
+                                    b.ty.as_ref().map(|t| self.resolve_type_alias(t)),
+                                    Some(hy_syntax::TypeExpr::Fn { .. })
+                                )
+                            {
+                                b.ty = info.ty.clone();
+                            }
                         }
                         b.moved = None; // a fresh value re-owns the binding
-                        b.non_owned_origin = info.non_owned;
+                        b.non_owned_origin = info.non_owned.clone();
                     }
                     let closure_peers: Vec<String> = if !st.closure_defs.contains_key(name)
                         && !st.closure_fnlits.contains_key(name)
@@ -6327,17 +6466,56 @@ impl<'a> Checker<'a> {
                                 .or_default()
                                 .extend(info.prior_shadows);
                         }
-                        if let Some(pa) = info.prior_alias {
-                            if &pa != name {
-                                st.aliases.insert(name.clone(), pa);
+                        if let Some(pa) = &info.prior_alias {
+                            if pa != name {
+                                st.aliases.insert(name.clone(), pa.clone());
                             }
                         }
-                        for peer in info.prior_shares {
-                            st.share_edge(name, &peer);
+                        for child in &info.prior_children {
+                            if child != name {
+                                st.aliases.insert(child.clone(), name.clone());
+                            }
+                        }
+                        for peer in &info.prior_shares {
+                            st.share_edge(name, peer);
                         }
                     }
-                    if !info.is_fresh_copy { self.record_storage_from_snapshot(st, &pre_st, name, v, &overwritten, false, false); }
+                    if !info.is_fresh_copy {
+                        self.record_storage_from_snapshot(
+                            st,
+                            &pre_st,
+                            name,
+                            v,
+                            &overwritten,
+                            false,
+                            false,
+                        );
+                    }
                     self.record_move_const_and_a3_loans(st, name, v, idx);
+                    if info.active_slot_loan {
+                        let new_peers: Vec<String> = st
+                            .may_share
+                            .get(name)
+                            .map(|s| s.iter().cloned().collect())
+                            .unwrap_or_default();
+                        for prior in info.prior_shares.iter().chain(info.prior_alias.iter()) {
+                            for np in &new_peers {
+                                st.share_edge(prior, np);
+                            }
+                            if let Some(orig) = &info.non_owned {
+                                let peer_orig = if orig.starts_with("a may-share peer of ") {
+                                    orig.clone()
+                                } else {
+                                    format!("a may-share peer of {}", orig)
+                                };
+                                if let Some(pb) = st.env_lookup_mut(prior) {
+                                    if pb.non_owned_origin.is_none() {
+                                        pb.non_owned_origin = Some(peer_orig);
+                                    }
+                                }
+                            }
+                        }
+                    }
                     // rebind may create a fresh alias — ident copies AND
                     // call results that hand back argument storage (#38)
 
@@ -6373,10 +6551,14 @@ impl<'a> Checker<'a> {
                     continue;
                 }
                 if let PlaceKind::Ident(name) = &t.kind {
+                    let active_slot_loan = self
+                        .lookup_binding(st, name)
+                        .is_some_and(|b| b.slot_loan);
                     let may_share = self.shape_may_share(&shape);
-                    let reads_self = may_share
-                        && (self.value_reads_storage_of(st, &values[0], name)
-                            || ref_roots.iter().any(|r| r == name));
+                    let reads_self = active_slot_loan
+                        || (may_share
+                            && (self.value_reads_storage_of(st, &values[0], name)
+                                || ref_roots.iter().any(|r| r == name)));
                     let prior_alias = if reads_self {
                         st.aliases.get(name).cloned()
                     } else {
@@ -6424,11 +6606,24 @@ impl<'a> Checker<'a> {
                         self.preserve_peers_before_sever(st, name, false);
                     }
                     if let Some(b) = st.env_lookup_mut(name) {
-                        if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
-                            b.shape = shape.clone();
-                        }
-                        if ty.is_some() || b.ty.is_none() {
-                            b.ty = ty;
+                        if active_slot_loan {
+                            if !matches!(shape, TypeShape::Unknown | TypeShape::Pointer(_))
+                                && matches!(b.shape, TypeShape::Pointer(_))
+                            {
+                                b.shape = TypeShape::Pointer(Box::new(shape.clone()));
+                            }
+                            if !matches!(b.ty, Some(hy_syntax::TypeExpr::Pointer { .. }))
+                                && (ty.is_some() || b.ty.is_none())
+                            {
+                                b.ty = ty;
+                            }
+                        } else {
+                            if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
+                                b.shape = shape.clone();
+                            }
+                            if ty.is_some() || b.ty.is_none() {
+                                b.ty = ty;
+                            }
                         }
                         b.moved = None;
                         b.non_owned_origin = if may_share {
@@ -6456,8 +6651,8 @@ impl<'a> Checker<'a> {
                                 st.aliases.insert(child, name.clone());
                             }
                         }
-                        for peer in prior_shares {
-                            st.share_edge(name, &peer);
+                        for peer in &prior_shares {
+                            st.share_edge(name, peer);
                         }
                     }
                     self.record_multi_value_share_and_alias(st, name, &shape, &values[0]);
@@ -6490,6 +6685,18 @@ impl<'a> Checker<'a> {
                     }
                     if may_share {
                         self.record_move_const_and_a3_loans(st, name, &values[0], idx);
+                    }
+                    if active_slot_loan {
+                        let new_peers: Vec<String> = st
+                            .may_share
+                            .get(name)
+                            .map(|s| s.iter().cloned().collect())
+                            .unwrap_or_default();
+                        for prior in &prior_shares {
+                            for np in &new_peers {
+                                st.share_edge(prior, np);
+                            }
+                        }
                     }
                 } else {
                     let root = t.root();
@@ -6859,22 +7066,99 @@ impl<'a> Checker<'a> {
                                 if name == "_" {
                                     continue;
                                 }
-                                if !self.value_reads_storage_of(&cst, v, name) {
+                                let active_slot_loan = self
+                                    .lookup_binding(&cst, name)
+                                    .is_some_and(|b| b.slot_loan)
+                                    && !Self::is_slot_loan_expr(v);
+                                let reads_self = active_slot_loan
+                                    || self.value_reads_storage_of(&cst, v, name);
+                                let prior_alias = if reads_self {
+                                    cst.aliases.get(name).cloned()
+                                } else {
+                                    None
+                                };
+                                let prior_children: Vec<String> = if reads_self {
+                                    cst.aliases
+                                        .iter()
+                                        .filter_map(|(k, val)| {
+                                            if val == name && k != name {
+                                                Some(k.clone())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect()
+                                } else {
+                                    Vec::new()
+                                };
+                                let prior_shares: Vec<String> = if reads_self {
+                                    cst.may_share
+                                        .get(name)
+                                        .map(|s| s.iter().cloned().collect())
+                                        .unwrap_or_default()
+                                } else {
+                                    Vec::new()
+                                };
+                                if !reads_self {
                                     self.preserve_peers_before_sever(&mut cst, name, false);
                                 }
                                 if let Some(b) = cst.env_lookup_mut(name) {
-                                    if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
-                                        b.shape = shape;
-                                    }
-                                    if ty.is_some() || b.ty.is_none() {
-                                        b.ty = ty;
+                                    if active_slot_loan {
+                                        if !matches!(
+                                            shape,
+                                            TypeShape::Unknown | TypeShape::Pointer(_)
+                                        ) && matches!(b.shape, TypeShape::Pointer(_))
+                                        {
+                                            b.shape = TypeShape::Pointer(Box::new(shape));
+                                        }
+                                        if !matches!(
+                                            b.ty,
+                                            Some(hy_syntax::TypeExpr::Pointer { .. })
+                                        ) && (ty.is_some() || b.ty.is_none())
+                                        {
+                                            b.ty = ty;
+                                        }
+                                    } else {
+                                        if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
+                                            b.shape = shape;
+                                        }
+                                        if ty.is_some() || b.ty.is_none() {
+                                            b.ty = ty;
+                                        }
                                     }
                                 }
                                 cst.aliases.remove(name);
                                 cst.share_clear(name);
+                                if reads_self {
+                                    if let Some(pa) = &prior_alias {
+                                        if pa != name {
+                                            cst.aliases.insert(name.clone(), pa.clone());
+                                        }
+                                    }
+                                    for child in &prior_children {
+                                        if child != name {
+                                            cst.aliases.insert(child.clone(), name.clone());
+                                        }
+                                    }
+                                    for peer in &prior_shares {
+                                        cst.share_edge(name, peer);
+                                    }
+                                }
                                 self.record_may_share(&mut cst, name, v);
                                 self.record_move_const_and_a3_loans(&mut cst, name, v, 0);
                                 self.record_alias(&mut cst, name, v);
+                                if active_slot_loan {
+                                    let new_peers: Vec<String> = cst
+                                        .may_share
+                                        .get(name)
+                                        .map(|s| s.iter().cloned().collect())
+                                        .unwrap_or_default();
+                                    for prior in prior_shares.iter().chain(prior_alias.iter()) {
+                                        for np in &new_peers {
+                                            cst.share_edge(prior, np);
+                                        }
+                                    }
+                                }
                                 cst.closure_mutates.remove(name);
                                 cst.closure_defs.remove(name);
                                 cst.closure_fnlits.remove(name);
@@ -6897,22 +7181,101 @@ impl<'a> Checker<'a> {
                                 continue;
                             }
                             if let PlaceKind::Ident(name) = &t.kind {
+                                let active_slot_loan = self
+                                    .lookup_binding(&cst, name)
+                                    .is_some_and(|b| b.slot_loan);
+                                let reads_self = active_slot_loan
+                                    || self.value_reads_storage_of(&cst, &values[0], name);
+                                let prior_alias = if reads_self {
+                                    cst.aliases.get(name).cloned()
+                                } else {
+                                    None
+                                };
+                                let prior_children: Vec<String> = if reads_self {
+                                    cst.aliases
+                                        .iter()
+                                        .filter_map(|(k, val)| {
+                                            if val == name && k != name {
+                                                Some(k.clone())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect()
+                                } else {
+                                    Vec::new()
+                                };
+                                let prior_shares: Vec<String> = if reads_self {
+                                    cst.may_share
+                                        .get(name)
+                                        .map(|s| s.iter().cloned().collect())
+                                        .unwrap_or_default()
+                                } else {
+                                    Vec::new()
+                                };
+                                if !reads_self {
+                                    self.preserve_peers_before_sever(&mut cst, name, false);
+                                }
                                 if let Some(b) = cst.env_lookup_mut(name) {
-                                    if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
-                                        b.shape = shape.clone();
-                                    }
-                                    if ty.is_some() || b.ty.is_none() {
-                                        b.ty = ty;
+                                    if active_slot_loan {
+                                        if !matches!(
+                                            shape,
+                                            TypeShape::Unknown | TypeShape::Pointer(_)
+                                        ) && matches!(b.shape, TypeShape::Pointer(_))
+                                        {
+                                            b.shape = TypeShape::Pointer(Box::new(shape.clone()));
+                                        }
+                                        if !matches!(
+                                            b.ty,
+                                            Some(hy_syntax::TypeExpr::Pointer { .. })
+                                        ) && (ty.is_some() || b.ty.is_none())
+                                        {
+                                            b.ty = ty;
+                                        }
+                                    } else {
+                                        if !matches!(shape, TypeShape::Unknown) || b.ty.is_none() {
+                                            b.shape = shape.clone();
+                                        }
+                                        if ty.is_some() || b.ty.is_none() {
+                                            b.ty = ty;
+                                        }
                                     }
                                 }
                                 cst.aliases.remove(name);
                                 cst.share_clear(name);
+                                if reads_self {
+                                    if let Some(pa) = &prior_alias {
+                                        if pa != name {
+                                            cst.aliases.insert(name.clone(), pa.clone());
+                                        }
+                                    }
+                                    for child in &prior_children {
+                                        if child != name {
+                                            cst.aliases.insert(child.clone(), name.clone());
+                                        }
+                                    }
+                                    for peer in &prior_shares {
+                                        cst.share_edge(name, peer);
+                                    }
+                                }
                                 self.record_multi_value_share_and_alias(
                                     &mut cst,
                                     name,
                                     &shape,
                                     &values[0],
                                 );
+                                if active_slot_loan {
+                                    let new_peers: Vec<String> = cst
+                                        .may_share
+                                        .get(name)
+                                        .map(|s| s.iter().cloned().collect())
+                                        .unwrap_or_default();
+                                    for prior in prior_shares.iter().chain(prior_alias.iter()) {
+                                        for np in &new_peers {
+                                            cst.share_edge(prior, np);
+                                        }
+                                    }
+                                }
                             } else {
                                 let root = t.root();
                                 if !root.is_empty() && self.binding_may_share(&cst, root) {
@@ -7107,8 +7470,9 @@ impl<'a> Checker<'a> {
                 ),
             };
             let is_fresh_copy = self.call_returns_fresh_copy(&pre_st, value);
-                let shadowed_const = !is_fresh_copy && self.shape_may_share(&shape)
-                && self.value_reads_storage_of(&pre_st, value, name)
+            let reads_self = !is_fresh_copy && self.value_reads_storage_of(&pre_st, value, name);
+            let shadowed_const = reads_self
+                && self.shape_may_share(&shape)
                 && self
                     .const_write_root(
                         &pre_st,
@@ -7118,7 +7482,45 @@ impl<'a> Checker<'a> {
                         },
                     )
                     .is_some();
+            let prior_alias = if reads_self {
+                pre_st.aliases.get(name).cloned()
+            } else {
+                None
+            };
+            let prior_children: Vec<String> = if reads_self {
+                pre_st
+                    .aliases
+                    .iter()
+                    .filter_map(|(k, v)| if v == name && k != name { Some(k.clone()) } else { None })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let prior_shares: Vec<String> = if reads_self {
+                pre_st
+                    .may_share
+                    .get(name)
+                    .map(|s| s.iter().cloned().collect())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             self.define_binding(st, name, shape, ty, immutable || shadowed_const, false, is_let);
+            if reads_self {
+                if let Some(pa) = prior_alias {
+                    if pa != *name {
+                        st.aliases.insert(name.clone(), pa);
+                    }
+                }
+                for child in prior_children {
+                    if child != *name {
+                        st.aliases.insert(child, name.clone());
+                    }
+                }
+                for peer in prior_shares {
+                    st.share_edge(name, &peer);
+                }
+            }
             if move_operand_ident(value).is_none() && !is_fresh_copy {
                 self.record_storage_from_snapshot(st, &pre_st, name, value, &overwritten, true, false);
             }
