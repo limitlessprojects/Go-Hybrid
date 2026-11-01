@@ -797,36 +797,93 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// #2915: `opt.or(default)` on an `option[T]` needs `default` of type `T`.
-    fn check_option_method_arg(&mut self, callee: &Expr, args: &[CallArg]) {
+    /// #2915, #2955: Option method calls: validate method names, arity, and arguments on `option[T]`.
+    fn check_option_method_call(&mut self, callee: &Expr, args: &[CallArg], span: Span) {
         let Expr::Field { base, name, .. } = unwrap_parens(callee) else {
             return;
         };
-        if name != "or" || args.len() != 1 {
-            return;
-        }
         let bk = self.kind_of_expr(base);
-        let OpKind::Option(elem) = bk else {
+        let OpKind::Option(elem) = &bk else {
             return;
         };
-        let want = *elem;
-        let got = self.kind_of_expr(&args[0].value);
-        let int_to_float_conflict = want == OpKind::Float
-            && got == OpKind::Int
-            && !self.is_untyped_int_const(&args[0].value);
-        if kinds_conflict(&want, &got) || int_to_float_conflict {
-            self.emit_e1002(
-                args[0].value.span(),
-                format!(
-                    "cannot use `{}` (type `{}`) as `{}` value in argument to `{}.or` on `option[{}]` (HYB-E1002)",
-                    args[0].value.render(),
-                    got.label(),
-                    want.label(),
-                    base.render(),
-                    want.label()
-                ),
-                "argument to `option.or` must match the option payload type",
-            );
+        let opt_label = bk.label();
+        match name.as_str() {
+            "unwrap" | "is_some" | "is_none" => {
+                if !args.is_empty() {
+                    self.emit_e1002(
+                        span,
+                        format!(
+                            "method `{}` on `{}` takes 0 arguments but is called with {} — Go refuses `too many arguments in call to {}.{}` (HYB-E1002)",
+                            name,
+                            opt_label,
+                            args.len(),
+                            base.render(),
+                            name
+                        ),
+                        "method takes no arguments",
+                    );
+                }
+            }
+            "or" => {
+                if args.len() != 1 {
+                    let msg = if args.is_empty() {
+                        format!(
+                            "method `or` on `{}` takes 1 argument but is called with 0 — Go refuses `not enough arguments in call to {}.or` (HYB-E1002)",
+                            opt_label,
+                            base.render()
+                        )
+                    } else {
+                        format!(
+                            "method `or` on `{}` takes 1 argument but is called with {} — Go refuses `too many arguments in call to {}.or` (HYB-E1002)",
+                            opt_label,
+                            args.len(),
+                            base.render()
+                        )
+                    };
+                    self.emit_e1002(
+                        span,
+                        msg,
+"argument to `option.or` must match the option payload type",
+                    );
+                } else {
+                    let want = (**elem).clone();
+                    let got = self.kind_of_expr(&args[0].value);
+                    let int_to_float_conflict = want == OpKind::Float
+                        && got == OpKind::Int
+                        && !self.is_untyped_int_const(&args[0].value);
+                    if kinds_conflict(&want, &got) || int_to_float_conflict {
+                        self.emit_e1002(
+                            args[0].value.span(),
+                            format!(
+                                "cannot use `{}` (type `{}`) as `{}` value in argument to `{}.or` on `{}` (HYB-E1002)",
+                                args[0].value.render(),
+                                got.label(),
+                                want.label(),
+                                base.render(),
+                                opt_label
+                            ),
+                            "argument to `option.or` must match the option payload type",
+                        );
+                    }
+                }
+            }
+            "pop" => {
+                // Handled in check_slice_pop_operands with a dedicated slice-pop diagnostic.
+            }
+            _ => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`{}` has no field or method `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                        base.render(),
+                        name,
+                        opt_label,
+                        base.render(),
+                        name
+                    ),
+                    "option[T] only provides `.unwrap()`, `.or(default)`, `.is_some()`, and `.is_none()`",
+                );
+            }
         }
     }
 
@@ -2234,7 +2291,7 @@ impl<'a> Collector<'a> {
                 }
                 self.check_call_operands(callee, args, *span);
                 self.check_set_method_arg(callee, args);
-                self.check_option_method_arg(callee, args);
+                self.check_option_method_call(callee, args, *span);
             }
             Expr::StructLit { ty, fields, span } => {
                 if let Some(t) = ty {
@@ -6307,7 +6364,9 @@ impl<'a> Collector<'a> {
             | OpKind::Str
             | OpKind::Array(_)
             | OpKind::Map(_, _)
-            | OpKind::Chan(_) => {
+            | OpKind::Chan(_)
+            | OpKind::Option(_)
+            | OpKind::Fn(..) => {
                 self.emit_e1002(
                     span,
                     format!(
