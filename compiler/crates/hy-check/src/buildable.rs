@@ -819,12 +819,25 @@ impl<'a> Collector<'a> {
         None
     }
 
-    /// #2770 — the canonical numeric spelling of a simple local target, for the
-    /// assignment/argument scalar comparison. Non-ident places fail open.
+    /// #2770/#2854 — the canonical numeric spelling of an assignment TARGET,
+    /// for the assignment/compound-assignment scalar comparison.
+    ///
+    /// `#1031` resolved only an `Ident` place, because the scalar side table is
+    /// keyed by binding name. A struct FIELD or an INDEX place carries its type
+    /// in the declared model instead, so `s.n = b32` (`n int64`) and
+    /// `m["k"] = b32` (`map[string]int64`) were accepted and then failed
+    /// `go build` (`cannot use b32 (variable of type int32) as int64 value in
+    /// assignment`). Everything unresolvable still fails open.
     fn place_scalar(&self, p: &Place) -> Option<&'static str> {
         match &p.kind {
             PlaceKind::Ident(n) => self.lookup_scalar(n),
-            _ => None,
+            // `s.n`, `s.a.b`, or `p.n` through a pointer base.
+            PlaceKind::Field { base, name } => {
+                self.struct_field_scalar(&self.kind_of_place(base), name)
+            }
+            // `m["k"]` or `xs[i]`.
+            PlaceKind::Index { base, .. } => self.index_place_scalar(base),
+            PlaceKind::AddrOf { .. } => None,
         }
     }
 
@@ -853,6 +866,55 @@ impl<'a> Collector<'a> {
         matches!((a, b), (Some(x), Some(y))
             if x != y && is_sized_array_spelling(x) && is_sized_array_spelling(y))
     }
+
+    /// #2854 — the exact numeric spelling of a struct field, read from the
+    /// declared field `TypeExpr` (a generic instantiation resolves through the
+    /// same substitution `struct_field_kind` applies). An unresolved struct, an
+    /// absent field, a type parameter, and an alias all fail open.
+    fn struct_field_scalar(&self, k: &OpKind, field: &str) -> Option<&'static str> {
+        let full_name = self.struct_name(k)?;
+        let base_name = Checker::base_named_type_str(&full_name);
+        let ty = self
+            .ck
+            .structs
+            .get(base_name)?
+            .iter()
+            .find(|(n, _)| n == field)
+            .map(|(_, ty)| ty)?;
+        if let TypeExpr::Named { name, .. } = ty {
+            let subst = self.struct_type_arg_map(&full_name);
+            if let Some(arg) = subst.get(name.as_str()) {
+                return canonical_numeric_name(arg);
+            }
+        }
+        self.scalar_of_ty(ty)
+    }
+
+    /// #2854 — the exact numeric spelling of an index target's element type,
+    /// read from the DECLARED type text recorded for the base binding
+    /// (`bind_type_name`). The kind model collapses both numeric widths into
+    /// `Int`/`Float`, so that text is the only place the `int64` of a
+    /// `map[string]int64` survives. `[]T`, `[N]T` and `map[K]V` are the shapes
+    /// read; anything else — a nested index, an unannotated binding, a struct
+    /// or alias element — fails open.
+    fn index_place_scalar(&self, base: &Place) -> Option<&'static str> {
+        let PlaceKind::Ident(name) = &base.kind else {
+            return None;
+        };
+        let ty = self.lookup_type_name(name)?;
+        if let Some(rest) = ty.strip_prefix('[') {
+            // `[]T` and `[N]T` both name the element after the closing bracket.
+            let close = rest.find(']')?;
+            return canonical_numeric_name(&rest[close + 1..]);
+        }
+        if let Some(rest) = ty.strip_prefix("map[") {
+            // rfind, so a `map[[2]int]int64` key does not confuse the split.
+            let close = rest.rfind(']')?;
+            return canonical_numeric_name(&rest[close + 1..]);
+        }
+        None
+    }
+
     /// #1031 — the exact predeclared numeric spelling of a type expression.
     /// A user-declared struct/enum/alias of that name is not the predeclared
     /// type, so it fails open.
@@ -1507,6 +1569,11 @@ impl<'a> Collector<'a> {
             for (name, val) in l.names.iter().zip(&l.values) {
                 if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                } else if let Expr::MapLit { key, value, .. } = unwrap_parens(val) {
+                    // #2854: `m := map[string]int64{}` — the DECLARED map type
+                    // is what lets an index assignment (`m["k"] = b32`) compare
+                    // concrete numeric widths, which the kind model collapses.
+                    self.bind_type_name(name, format!("map[{}]{}", key.render(), value.render()));
                 }
             }
         }
