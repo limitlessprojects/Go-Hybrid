@@ -24,6 +24,7 @@ Stdlib only. Token: --token-file, $GITHUB_TOKEN, or /home/z/my-project/.gh_token
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -168,6 +169,42 @@ def jaccard(a, b):
     return len(a & b) / len(a | b)
 
 
+_CONVENTIONAL_PREFIX_RE = re.compile(r"^[a-z0-9_-]+(?:\([^)]*\))?!?:\s*", re.IGNORECASE)
+_ISSUE_REF_RE = re.compile(
+    r"(?:\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?)\s*:?\s*#(\d+)\b|\(#(\d+)\))",
+    re.IGNORECASE,
+)
+
+
+def is_test_path(p):
+    return (
+        "tests/" in p or "/tests/" in p or p.startswith("tests/")
+        or "/corpus" in p or p.endswith("_reject.hy") or p.endswith("_accept.hy")
+        or p.endswith("_test.go") or p.endswith("_test.rs")
+        or Path(p).name.startswith("test_")
+    )
+
+
+def normalize_title(title):
+    if not title:
+        return ""
+    s = _CONVENTIONAL_PREFIX_RE.sub("", title.strip())
+    s = re.sub(r"\s*\(#\d+\)\s*$", "", s)
+    s = re.sub(r"\s*\(\s*(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?)\s+#\d+\s*\)\s*$", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s*[-–—]?\s*\b(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?)\s+#\d+\s*$", "", s, flags=re.IGNORECASE)
+    return " ".join(s.lower().split())
+
+
+def extract_issue_refs(*texts):
+    refs = set()
+    for txt in texts:
+        if not txt:
+            continue
+        for m in _ISSUE_REF_RE.finditer(txt):
+            refs.add(int(m.group(1) or m.group(2)))
+    return sorted(refs)
+
+
 def age_days(iso, now):
     return round((now - datetime.fromisoformat(iso.replace("Z", "+00:00"))).total_seconds() / 86400, 1)
 
@@ -229,6 +266,7 @@ def collect(cfg, gh, args):
             "head_sha": pr["head"]["sha"][:12],
             "files": len(paths),
             "paths_sample": sorted(paths)[:12],
+            "issue_refs": extract_issue_refs(pr.get("title"), pr.get("body"), full.get("body")),
             "additions": adds,
             "deletions": dels,
             "behind_by": behind_by,
@@ -272,13 +310,25 @@ def classify(cfg, items):
         return x
 
     sets = [set(i["paths_sample"]) for i in items]  # sample keeps it cheap; sample=12 paths
+    src_sets = [{p for p in s if not is_test_path(p)} for s in sets]
+    norm_titles = [normalize_title(i.get("title", "")) for i in items]
+    issue_sets = [
+        set(i.get("issue_refs") or extract_issue_refs(i.get("title"), i.get("body")))
+        for i in items
+    ]
     for a in range(len(items)):
         for b in range(a + 1, len(items)):
-            if not sets[a] or not sets[b]:
-                continue
-            inter = len(sets[a] & sets[b])
-            union = len(sets[a] | sets[b])
-            if union and inter / union >= cfg["dup_jaccard"]:
+            is_dup = False
+            if sets[a] and sets[b]:
+                inter = len(sets[a] & sets[b])
+                union = len(sets[a] | sets[b])
+                if union and inter / union >= cfg["dup_jaccard"]:
+                    is_dup = True
+            if not is_dup and norm_titles[a] and norm_titles[a] == norm_titles[b]:
+                is_dup = True
+            if not is_dup and (issue_sets[a] & issue_sets[b]) and (src_sets[a] & src_sets[b]):
+                is_dup = True
+            if is_dup:
                 parent[find(a)] = find(b)
     clusters = {}
     for i, it in enumerate(items):
@@ -286,7 +336,7 @@ def classify(cfg, items):
     for members in clusters.values():
         if len(members) < 2:
             continue
-        members.sort(key=lambda x: (-x["additions"], x["number"]))
+        members.sort(key=lambda x: (x["number"], -x["additions"]))
         primary = members[0]
         for m in members[1:]:
             m["dup_of"] = primary["number"]
@@ -365,7 +415,7 @@ def classify(cfg, items):
 def merge_gate(items, main_sha, top_k):
     """Worktree merge gate on the top-K land-candidates. Returns per-PR verdicts."""
     cands = sorted([i for i in items if i["bucket"] == "LAND-CANDIDATE"],
-                   key=lambda x: (-x["score"], x["additions"]))[:top_k]
+                   key=lambda x: (-x["score"], x["number"]))[:top_k]
     repo = Path(__file__).resolve().parent.parent
     verdicts = {}
     for it in cands:
@@ -400,7 +450,7 @@ def render_board(cfg, items, clusters, verdicts, now_s):
     buckets = {}
     for it in items:
         buckets.setdefault(it["bucket"], []).append(it)
-    cand = sorted(buckets.get("LAND-CANDIDATE", []), key=lambda x: (-x["score"], x["additions"]))
+    cand = sorted(buckets.get("LAND-CANDIDATE", []), key=lambda x: (-x["score"], x["number"]))
     pareto = cand[:cfg["pareto_n"]]
     L = ["# Triage Board", "", "Generated %s by `tools/triage_bot.py scan` — review-first automation." % now_s,
          "The bot never merges and never closes. Buckets: %s." % ", ".join(
