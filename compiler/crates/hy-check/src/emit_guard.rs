@@ -770,6 +770,7 @@ impl<'a> Checker<'a> {
                     "set" => "struct containing map cannot be compared",
                     "slice" => "slice can only be compared to nil",
                     "function value" => "func can only be compared to nil",
+                    "data-carrying enum" => "data-carrying enum has no == in Hybrid (SPEC §2.5 T16)",
                     _ => "cannot be compared",
                 }
             ),
@@ -778,6 +779,7 @@ impl<'a> Checker<'a> {
                 "set" => "fix: compare membership (`a.has(x)`) or length (`len(a) == len(b)`) instead of whole-set equality".to_string(),
                 "slice" => "fix: compare lengths or elements pairwise — whole-slice equality has no Go meaning".to_string(),
                 "function value" => "fix: a function value is only comparable to `nil` — compare behaviour (call both) instead".to_string(),
+                "data-carrying enum" => "fix: compare data-carrying enums with a `match` expression or inspect variant fields directly (SPEC §2.5 T16)".to_string(),
                 _ => "fix: compare the comparable fields individually — the struct carries an incomparable field".to_string(),
             },
         ];
@@ -829,6 +831,12 @@ impl<'a> Checker<'a> {
                     if let Some(n) = self.incomparable_rec(&fs, seen) {
                         return Some(n);
                     }
+                }
+                None
+            }
+            TypeShape::Enum(Some(name)) => {
+                if self.is_data_carrying_enum(name) {
+                    return Some("data-carrying enum");
                 }
                 None
             }
