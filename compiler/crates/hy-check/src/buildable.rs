@@ -3716,6 +3716,7 @@ impl<'a> Collector<'a> {
     fn check_array_lit_items(&mut self, elem_ty: &TypeExpr, items: &[Expr]) {
         let resolved_ty = self.ck.resolve_type_alias(elem_ty);
         let expected = self.kind_of_ty(&resolved_ty, 0);
+        let exp_scalar = self.scalar_of_ty(&resolved_ty);
         if expected == OpKind::Unknown {
             return;
         }
@@ -3752,7 +3753,12 @@ impl<'a> Collector<'a> {
                 }
             }
             let ik = self.kind_of_expr(item);
-            if ik == OpKind::Unknown || ik == expected {
+            let item_scalar = self.expr_scalar_type(item);
+            let scalar_mismatch = matches!(
+                (exp_scalar, item_scalar),
+                (Some(e), Some(i)) if e != i
+            );
+            if !scalar_mismatch && (ik == OpKind::Unknown || ik == expected) {
                 continue;
             }
             if expected == OpKind::Float
@@ -3761,12 +3767,15 @@ impl<'a> Collector<'a> {
             {
                 continue;
             }
+            if !kinds_conflict(&expected, &ik) && !scalar_mismatch {
+                continue;
+            }
             self.emit_e1002(
                 item.span(),
                 format!(
                     "cannot use `{}` (type `{}`) as `{}` value in array literal (HYB-E1002)",
                     item.render(),
-                    ik.label(),
+                    item_scalar.map(ToString::to_string).unwrap_or_else(|| ik.label()),
                     elem_ty.render()
                 ),
                 "every element of an array composite literal `[N]T{...}` / `[...]T{...}` must be assignable to the element type `T`",
@@ -3777,6 +3786,7 @@ impl<'a> Collector<'a> {
     fn check_slice_lit_items(&mut self, elem_ty: &TypeExpr, items: &[Expr]) {
         let resolved_ty = self.ck.resolve_type_alias(elem_ty);
         let expected = self.kind_of_ty(&resolved_ty, 0);
+        let exp_scalar = self.scalar_of_ty(&resolved_ty);
         if expected == OpKind::Unknown {
             return;
         }
@@ -3813,7 +3823,12 @@ impl<'a> Collector<'a> {
                 }
             }
             let ik = self.kind_of_expr(item);
-            if ik == OpKind::Unknown || ik == expected {
+            let item_scalar = self.expr_scalar_type(item);
+            let scalar_mismatch = matches!(
+                (exp_scalar, item_scalar),
+                (Some(e), Some(i)) if e != i
+            );
+            if !scalar_mismatch && (ik == OpKind::Unknown || ik == expected) {
                 continue;
             }
             if expected == OpKind::Float
@@ -3822,7 +3837,7 @@ impl<'a> Collector<'a> {
             {
                 continue;
             }
-            if !kinds_conflict(&expected, &ik) {
+            if !kinds_conflict(&expected, &ik) && !scalar_mismatch {
                 continue;
             }
             self.emit_e1002(
@@ -3830,7 +3845,7 @@ impl<'a> Collector<'a> {
                 format!(
                     "cannot use `{}` (type `{}`) as `{}` value in slice literal (HYB-E1002)",
                     item.render(),
-                    ik.label(),
+                    item_scalar.map(ToString::to_string).unwrap_or_else(|| ik.label()),
                     elem_ty.render()
                 ),
                 "every element of a slice composite literal `[]T{...}` must be assignable to the element type `T`",
@@ -3846,24 +3861,34 @@ impl<'a> Collector<'a> {
     ) {
         let resolved_key = self.ck.resolve_type_alias(key_ty);
         let exp_key = self.kind_of_ty(&resolved_key, 0);
+        let exp_key_sc = self.scalar_of_ty(&resolved_key);
         let resolved_val = self.ck.resolve_type_alias(val_ty);
         let exp_val = self.kind_of_ty(&resolved_val, 0);
+        let exp_val_sc = self.scalar_of_ty(&resolved_val);
         for (k, v) in entries {
             if exp_key != OpKind::Unknown {
                 let kk = self.kind_of_expr(k);
+                let k_sc = self.expr_scalar_type(k);
+                let scalar_mismatch = matches!(
+                    (exp_key_sc, k_sc),
+                    (Some(e), Some(s)) if e != s
+                );
+                let is_untyped_int_to_float = exp_key == OpKind::Float
+                    && kk == OpKind::Int
+                    && crate::const_overflow::const_int_value(k).is_some();
+                let conflict = (exp_key == OpKind::Float && kk == OpKind::Int && !is_untyped_int_to_float)
+                    || kinds_conflict(&exp_key, &kk)
+                    || scalar_mismatch;
                 if kk != OpKind::Unknown
-                    && kk != exp_key
-                    && !(exp_key == OpKind::Float
-                        && kk == OpKind::Int
-                        && crate::const_overflow::const_int_value(k).is_some())
-                    && kinds_conflict(&exp_key, &kk)
+                    && (kk != exp_key || scalar_mismatch)
+                    && conflict
                 {
                     self.emit_e1002(
                         k.span(),
                         format!(
                             "cannot use `{}` (type `{}`) as `{}` value in map key (HYB-E1002)",
                             k.render(),
-                            kk.label(),
+                            k_sc.map(ToString::to_string).unwrap_or_else(|| kk.label()),
                             key_ty.render()
                         ),
                         "every key of a map composite literal `map[K]V{...}` must be assignable to the key type `K`",
@@ -3876,19 +3901,27 @@ impl<'a> Collector<'a> {
                     continue;
                 }
                 let vk = self.kind_of_expr(v);
+                let v_sc = self.expr_scalar_type(v);
+                let scalar_mismatch = matches!(
+                    (exp_val_sc, v_sc),
+                    (Some(e), Some(s)) if e != s
+                );
+                let is_untyped_int_to_float = exp_val == OpKind::Float
+                    && vk == OpKind::Int
+                    && crate::const_overflow::const_int_value(v).is_some();
+                let conflict = (exp_val == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
+                    || kinds_conflict(&exp_val, &vk)
+                    || scalar_mismatch;
                 if vk != OpKind::Unknown
-                    && vk != exp_val
-                    && !(exp_val == OpKind::Float
-                        && vk == OpKind::Int
-                        && crate::const_overflow::const_int_value(v).is_some())
-                    && kinds_conflict(&exp_val, &vk)
+                    && (vk != exp_val || scalar_mismatch)
+                    && conflict
                 {
                     self.emit_e1002(
                         v.span(),
                         format!(
                             "cannot use `{}` (type `{}`) as `{}` value in map value (HYB-E1002)",
                             v.render(),
-                            vk.label(),
+                            v_sc.map(ToString::to_string).unwrap_or_else(|| vk.label()),
                             val_ty.render()
                         ),
                         "every value of a map composite literal `map[K]V{...}` must be assignable to the value type `V`",
