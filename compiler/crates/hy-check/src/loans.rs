@@ -1694,7 +1694,7 @@ impl<'a> Checker<'a> {
             let mut overwritten = Vec::new();
             for info in resolved {
                 overwritten.push(info.name.clone());
-                let is_view = matches!(info.shape, TypeShape::BorrowHandle(_));
+                let is_view = matches!(field_borrow_kind(&info.shape), Some("borrow-handle"));
                 let carries = self.shape_may_share(&info.shape);
                 self.define_binding(st, &info.name, info.shape.clone(), info.ty, immutable, managed, is_let);
                 if is_view {
@@ -1934,7 +1934,7 @@ impl<'a> Checker<'a> {
                 } else {
                     HashSet::new()
                 };
-                let is_view = matches!(shape, TypeShape::BorrowHandle(_));
+                let is_view = matches!(field_borrow_kind(&shape), Some("borrow-handle"));
                 let outer_depth = if pre_st
                     .scopes
                     .last()
@@ -2189,6 +2189,10 @@ impl<'a> Checker<'a> {
     pub(crate) fn expr_carries_borrow(&self, st: &FnState, e: &Expr) -> bool {
         let inner = unwrap_parens(e);
         if as_addr_of(inner).is_some() || contains_addr_of_in_literal(inner) {
+            return true;
+        }
+        let shape = self.shape_of_expr(st, inner);
+        if matches!(field_borrow_kind(&shape), Some("borrow-handle")) {
             return true;
         }
         if !self.expr_has_borrow_shape(st, inner) {
@@ -4320,8 +4324,12 @@ impl<'a> Checker<'a> {
     /// Extend call-scoped borrow loans opened by the calls inside `value`
     /// to the last use of the view binding `name` (the A2 non-lexical
     /// window for define-stored element views).
-    fn extend_call_loans_to_view(&self, st: &mut FnState, value: &Expr, name: &str, idx: usize) {
+    pub(crate) fn extend_call_loans_to_view(&self, st: &mut FnState, value: &Expr, name: &str, idx: usize) {
         let view_last = st.last_use.get(name).copied().unwrap_or(idx).max(idx);
+        self.extend_view_loans_until(st, value, view_last, idx);
+    }
+
+    pub(crate) fn extend_view_loans_until(&self, st: &mut FnState, value: &Expr, view_last: usize, idx: usize) {
         let mut calls = Vec::new();
         walk::expr_calls(value, &mut calls);
         let mut roots = Vec::new();
@@ -4358,19 +4366,16 @@ impl<'a> Checker<'a> {
         for loan in st.loans.iter_mut() {
             if let LoanTarget::Handle { handle } = &loan.target {
                 if loan.created == idx && loan.last == idx && roots.iter().any(|r| r == handle) {
-                    loan.last = view_last;
+                    loan.last = loan.last.max(view_last);
                 }
             }
         }
         let mut ref_roots = Vec::new();
         collect_ref_roots(value, &mut ref_roots);
         for src in ref_roots {
-            if src == name {
-                continue;
-            }
             let is_borrow_src = self
                 .lookup_binding(st, &src)
-                .map(|b| matches!(b.shape, TypeShape::BorrowHandle(_)))
+                .map(|b| matches!(field_borrow_kind(&b.shape), Some("borrow-handle")))
                 .unwrap_or(false);
             if is_borrow_src {
                 let group = st.share_group(&src);
@@ -6430,7 +6435,7 @@ impl<'a> Checker<'a> {
                     } else {
                         self.extend_map_slot_loan_to_alias(st, name, v, idx);
                     }
-                    if matches!(self.shape_of_expr(st, v), TypeShape::BorrowHandle(_)) {
+                    if matches!(field_borrow_kind(&self.shape_of_expr(st, v)), Some("borrow-handle")) {
                         self.extend_call_loans_to_view(st, v, name, idx);
                     }
                 }
@@ -6503,7 +6508,8 @@ impl<'a> Checker<'a> {
                 if matches!(t.kind, PlaceKind::Field { .. }) {
                     let shape = self.shape_of_expr(st, v);
                     let is_borrow = as_addr_of(v).is_some()
-                        || field_borrow_kind(&shape).is_some();
+                        || field_borrow_kind(&shape).is_some()
+                        || self.expr_carries_borrow(st, v);
                     if is_borrow {
                         self.emit_a6_field_borrow_error(t);
                     }
@@ -6513,7 +6519,8 @@ impl<'a> Checker<'a> {
             let shapes = self.multi_value_shapes(st, &values[0], targets.len());
             for (t, shape) in targets.iter().zip(shapes.iter()) {
                 if matches!(t.kind, PlaceKind::Field { .. })
-                    && field_borrow_kind(shape).is_some()
+                    && (field_borrow_kind(shape).is_some()
+                        || self.expr_carries_borrow(st, &values[0]))
                 {
                     self.emit_a6_field_borrow_error(t);
                 }
@@ -6935,6 +6942,9 @@ impl<'a> Checker<'a> {
                                 b.non_owned_origin = Some(origin);
                             }
                         }
+                    }
+                    if matches!(field_borrow_kind(&shape), Some("borrow-handle")) {
+                        self.extend_call_loans_to_view(st, &values[0], name, idx);
                     }
                     if may_share {
                         self.record_move_const_and_a3_loans(st, name, &values[0], idx);
@@ -8920,10 +8930,9 @@ impl<'a> Checker<'a> {
                         .loans
                         .iter()
                         .any(|l| matches!(&l.target, LoanTarget::MapSlot { binding, .. } if binding == &name))
-                    || st
-                        .env
-                        .get(&name)
-                        .is_some_and(|b| matches!(b.shape, TypeShape::BorrowHandle(_)));
+                    || self
+                        .lookup_binding(st, &name)
+                        .is_some_and(|b| matches!(field_borrow_kind(&b.shape), Some("borrow-handle")));
                 if is_loan_escape {
                     let msg = "a borrow cannot be returned from a function".to_string();
                     let notes = vec![
@@ -8972,9 +8981,16 @@ impl<'a> Checker<'a> {
                 _ => false,
             };
             // O2/LOAN-ESCAPE: a borrow returned from a function
+            let multi_borrow_handle = values.len() == 1
+                && st.result_shapes.len() > 1
+                && self
+                    .multi_value_shapes(st, v, st.result_shapes.len())
+                    .iter()
+                    .any(|s| matches!(field_borrow_kind(s), Some("borrow-handle")));
             if as_addr_of(v).is_some()
                 || contains_addr_of_in_literal(v)
                 || is_bound_borrow
+                || multi_borrow_handle
                 || self.expr_carries_borrow(st, v)
             {
                 emitted_slots.insert(slot);
@@ -9411,7 +9427,7 @@ impl<'a> Checker<'a> {
     }
 }
 
-fn field_borrow_kind(shape: &TypeShape) -> Option<&'static str> {
+pub(crate) fn field_borrow_kind(shape: &TypeShape) -> Option<&'static str> {
     match shape {
         TypeShape::BorrowHandle(_) => Some("borrow-handle"),
         TypeShape::Pointer(inner) if !matches!(**inner, TypeShape::Atomic) => Some("pointer"),

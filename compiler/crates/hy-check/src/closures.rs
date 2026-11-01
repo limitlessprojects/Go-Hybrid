@@ -866,6 +866,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 if let Some(v) = l.values.first() {
                     ck.link_multi_value_return_aliases(st, v, &l.names);
                 }
+                ck.record_local_borrow_aliases(st, l);
             }
             sync_nested_moves(st, nested);
         }
@@ -1206,12 +1207,15 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
             sync_nested_moves(st, nested);
             collect_stmt_direct_fnlits(stmt, st, nested);
             ck.process_closure_assign(st, targets, *op, values);
+            ck.record_assign_borrow_aliases(st, targets, *op, values);
             sync_nested_moves(st, nested);
             if targets.len() == values.len() {
                 for (t, v) in targets.iter().zip(values.iter()) {
                     if matches!(t.kind, hy_syntax::PlaceKind::Field { .. }) {
+                        let shape = ck.shape_of_expr(st, v);
                         let is_borrow = crate::model::as_addr_of(v).is_some()
-                            || matches!(ck.shape_of_expr(st, v), TypeShape::BorrowHandle(_));
+                            || crate::loans::field_borrow_kind(&shape).is_some()
+                            || ck.expr_carries_borrow(st, v);
                         if is_borrow {
                             ck.emit_a6_field_borrow_error(t);
                         }
@@ -1221,7 +1225,8 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 let shapes = ck.multi_value_shapes(st, &values[0], targets.len());
                 for (t, shape) in targets.iter().zip(shapes.iter()) {
                     if matches!(t.kind, hy_syntax::PlaceKind::Field { .. })
-                        && matches!(shape, TypeShape::BorrowHandle(_))
+                        && (crate::loans::field_borrow_kind(shape).is_some()
+                            || ck.expr_carries_borrow(st, &values[0]))
                     {
                         ck.emit_a6_field_borrow_error(t);
                     }
