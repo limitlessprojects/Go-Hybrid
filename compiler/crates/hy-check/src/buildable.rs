@@ -1201,7 +1201,17 @@ impl<'a> Collector<'a> {
                     }
                     ForKind::Range { var, lo, hi, .. } => {
                         self.expr(lo);
+                        self.check_single_value_position(
+                            lo,
+                            "a range bound",
+                            /*binding_position=*/ false,
+                        );
                         self.expr(hi);
+                        self.check_single_value_position(
+                            hi,
+                            "a range bound",
+                            /*binding_position=*/ false,
+                        );
                         // The loop head always reads the counter.
                         self.exempt(var);
                         self.bind_kind(var, OpKind::Int);
@@ -1471,6 +1481,11 @@ impl<'a> Collector<'a> {
                 for p in parts {
                     if let InterpPart::Expr(x) = p {
                         self.expr(x);
+                        self.check_single_value_position(
+                            x,
+                            "string interpolation",
+                            /*binding_position=*/ false,
+                        );
                     }
                 }
             }
