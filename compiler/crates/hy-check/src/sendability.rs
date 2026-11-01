@@ -21,7 +21,7 @@
 
 use crate::model::{as_addr_of, unwrap_parens, unwrap_parens_and_move, Binding, Checker, FnState, MoveKind, TypeShape};
 use hy_diag::{Diagnostic, Span};
-use hy_syntax::{Expr, LitKind, TypeExpr};
+use hy_syntax::{CallArg, Expr, LitKind, TypeExpr};
 
 /// The spawn-callee proof (O4.0): what the checker concluded about the
 /// expression a `task` statement spawns.
@@ -519,7 +519,58 @@ impl<'a> Checker<'a> {
                 }
                 self.outcome_for_shape(&shape, &expr.render())
             }
-            // everything else (calls, receives, arithmetic, try, paren):
+            // multi-return call forwarding at boundaries: every forwarded return shape
+            // must satisfy sendability (HYB-E3001 / HYB-E3005).
+            Expr::Call { .. } | Expr::Try { .. } => {
+                let (call_callee, call_args, is_try) = match expr {
+                    Expr::Call { callee, args, .. } => (Some(callee), Some(args), false),
+                    Expr::Try { operand, .. } => match unwrap_parens(operand) {
+                        Expr::Call { callee, args, .. } => (Some(callee), Some(args), true),
+                        _ => (None, None, true),
+                    },
+                    _ => (None, None, false),
+                };
+                if let (Some(c), Some(a)) = (call_callee, call_args) {
+                    if let Some(results) = self.call_result_shapes(st, c, a) {
+                        let check_results = if is_try {
+                            let len = results.len().saturating_sub(1);
+                            &results[..len]
+                        } else {
+                            &results[..]
+                        };
+                        if check_results.len() > 1 {
+                            let tys = self.call_result_tys(st, c);
+                            let mut unproven_info = None;
+                            for (idx, res_shape) in check_results.iter().enumerate() {
+                                let val_render = expr.render();
+                                match self.outcome_for_shape(res_shape, &val_render) {
+                                    Outcome::Rejected(mut info) => {
+                                        if let Some(ref t_list) = tys {
+                                            if let Some(t) = t_list.get(idx) {
+                                                info.ty = t.render();
+                                            }
+                                        }
+                                        return Outcome::Rejected(info);
+                                    }
+                                    Outcome::Unproven(info) => {
+                                        if unproven_info.is_none() {
+                                            unproven_info = Some(info);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if let Some(info) = unproven_info {
+                                return Outcome::Unproven(info);
+                            }
+                            return Outcome::Ok;
+                        }
+                    }
+                }
+                let shape = self.shape_of_expr(st, expr);
+                self.outcome_for_shape(&shape, &expr.render())
+            }
+            // everything else (receives, arithmetic, paren):
             // classify the result shape
             _ => {
                 let shape = self.shape_of_expr(st, expr);
@@ -807,7 +858,8 @@ impl<'a> Checker<'a> {
         match unwrap_parens(callee) {
             Expr::FnLit { .. } => closure_reject(callee.render()),
             Expr::Ident { name, .. } => {
-                if let Some(b) = self.lookup_binding(st, name) {
+                let head = Self::base_named_type_str(name);
+                if let Some(b) = self.lookup_binding(st, name).or_else(|| self.lookup_binding(st, head)) {
                     if matches!(b.shape, TypeShape::Closure) {
                         return closure_reject(name.clone());
                     }
@@ -816,7 +868,7 @@ impl<'a> Checker<'a> {
                         name
                     ));
                 }
-                if self.fns.contains_key(name) {
+                if self.fns.contains_key(name.as_str()) || self.fns.contains_key(head) {
                     return CalleeVerdict::Proven;
                 }
                 CalleeVerdict::Unproven(format!(
@@ -838,21 +890,54 @@ impl<'a> Checker<'a> {
         &self,
         st: &FnState,
         callee: &Expr,
-        argc: usize,
+        args: &[CallArg],
     ) -> Option<Vec<TypeShape>> {
         match unwrap_parens(callee) {
             Expr::Ident { name, .. } => {
-                if self.lookup_binding(st, name).is_some() {
+                let head = Self::base_named_type_str(name);
+                if self.lookup_binding(st, name).is_some() || self.lookup_binding(st, head).is_some() {
                     return None; // shadowed by a local binding — not a static fn call
                 }
-                let f = self.fns.get(name)?;
+                let f = self.fns.get(name.as_str()).or_else(|| self.fns.get(head))?;
+                let argc = args.len();
                 if f.params.len() != argc {
-                    return None;
+                    let matches_multi = if argc == 1 {
+                        let v = unwrap_parens(&args[0].value);
+                        let (call_expr, is_try) = match v {
+                            Expr::Try { operand, .. } => (unwrap_parens(operand), true),
+                            other => (other, false),
+                        };
+                        if let Expr::Call { callee: c, args: a, .. } = call_expr {
+                            if let Some(res) = self.call_result_shapes(st, c, a) {
+                                let avail = if is_try {
+                                    res.len().saturating_sub(1)
+                                } else {
+                                    res.len()
+                                };
+                                avail == f.params.len()
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if !matches_multi {
+                        return None;
+                    }
                 }
-                Some(f.params.iter().map(|p| self.shape_of_type(&p.ty)).collect())
+                let subst = self.fn_call_shape_subst(st, f, name, None, args);
+                Some(
+                    f.params
+                        .iter()
+                        .map(|p| self.shape_of_type_with_subst(&p.ty, &subst, 0))
+                        .collect(),
+                )
             }
             Expr::FnLit { params, .. } => {
-                if params.len() != argc {
+                if params.len() != args.len() {
                     return None;
                 }
                 Some(params.iter().map(|p| self.shape_of_type(&p.ty)).collect())
@@ -870,14 +955,24 @@ impl<'a> Checker<'a> {
                     },
                     _ => None,
                 };
+                let head = Self::base_named_type_str(method_name);
                 let f = recv_base.and_then(|rb| {
-                    let base = Self::base_named_type_str(&rb).to_string();
-                    self.method_decls.get(&(base, method_name.clone())).copied()
+                    let base_name = Self::base_named_type_str(&rb).to_string();
+                    self.method_decls
+                        .get(&(base_name.clone(), method_name.clone()))
+                        .or_else(|| self.method_decls.get(&(base_name, head.to_string())))
+                        .copied()
                 })?;
-                if f.params.len() != argc {
+                if f.params.len() != args.len() {
                     return None;
                 }
-                Some(f.params.iter().map(|p| self.shape_of_type(&p.ty)).collect())
+                let subst = self.fn_call_shape_subst(st, f, method_name, Some(base), args);
+                Some(
+                    f.params
+                        .iter()
+                        .map(|p| self.shape_of_type_with_subst(&p.ty, &subst, 0))
+                        .collect(),
+                )
             }
             _ => None,
         }
@@ -2955,7 +3050,16 @@ impl<'a> Checker<'a> {
         env: &ChanDirEnv,
     ) -> Option<Vec<hy_syntax::TypeExpr>> {
         use hy_syntax::TypeExpr;
-        match unwrap_parens(expr) {
+        let unwrapped = unwrap_parens(expr);
+        if let Expr::Try { operand, .. } = unwrapped {
+            let mut inner = self.dir_multi_ty_of_call(operand, env)?;
+            if inner.is_empty() {
+                return None;
+            }
+            inner.pop();
+            return Some(inner);
+        }
+        match unwrapped {
             Expr::Receive { chan, span } => {
                 let chan_ty = self.dir_ty_of_expr(chan, env)?;
                 if let TypeExpr::Chan { elem, .. } = self.resolve_type_alias(&chan_ty) {

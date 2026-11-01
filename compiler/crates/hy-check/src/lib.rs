@@ -654,7 +654,7 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
                 );
                 let desc = format!("the spawn `task {}(...)`", callee.render());
                 let vals: Vec<&Expr> = args.iter().map(|a| &a.value).collect();
-                let targets = ck.spawn_param_shapes(&st, callee, args.len());
+                let targets = ck.spawn_param_shapes(&st, callee, args);
                 ck.check_site(
                     &mut st,
                     *span,
