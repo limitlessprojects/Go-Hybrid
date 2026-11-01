@@ -6321,6 +6321,12 @@ impl<'a> Checker<'a> {
             false,
         );
 
+        if roots.iter().any(|r| self.lookup_binding(st, r).is_some_and(|b| b.slot_loan)) {
+            if let Some(b) = st.env_lookup_mut(name) {
+                b.slot_loan = true;
+            }
+        }
+
         if reads_self {
             if !prior_shadow_links.is_empty() {
                 st.shadow_links
