@@ -47,9 +47,98 @@ fn block_reads(b: &Block, target: &str) -> bool {
     false
 }
 
+fn folded_name_reads(name: &str, target: &str, check_head: bool) -> bool {
+    let Some(open) = name.find('[') else {
+        return check_head && name == target;
+    };
+    if check_head && &name[..open] == target {
+        return true;
+    }
+    let bracket = &name[open..];
+    let bytes = bracket.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' {
+                        i = (i + 2).min(bytes.len());
+                    } else if bytes[i] == b'"' {
+                        i += 1;
+                        break;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            b'`' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'`' {
+                    i += 1;
+                }
+                i = (i + 1).min(bytes.len());
+            }
+            b'\'' => {
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' {
+                        i = (i + 2).min(bytes.len());
+                    } else if bytes[i] == b'\'' {
+                        i += 1;
+                        break;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            c if c.is_ascii_alphabetic() || c == b'_' => {
+                let start = i;
+                i += 1;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                let prev_non_ws = bracket[..start]
+                    .as_bytes()
+                    .iter()
+                    .rev()
+                    .find(|&&b| !b.is_ascii_whitespace())
+                    .copied();
+                if prev_non_ws != Some(b'.') && &bracket[start..i] == target {
+                    return true;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    false
+}
+
+fn type_arg_expr_reads(mut e: &Expr, target: &str) -> bool {
+    while let Expr::Paren { inner, .. } = e {
+        e = inner;
+    }
+    match e {
+        Expr::Ident { name, .. } => folded_name_reads(name, target, false),
+        Expr::StructLit { ty, fields, .. } if fields.is_empty() => {
+            ty.as_ref().is_some_and(|t| ty_reads(t, target))
+        }
+        Expr::SliceLit { elem, items, .. } if items.is_empty() => {
+            elem.as_ref().is_some_and(|t| ty_reads(t, target))
+        }
+        Expr::MapLit {
+            key,
+            value,
+            entries,
+            ..
+        } if entries.is_empty() => ty_reads(key, target) || ty_reads(value, target),
+        other => expr_reads(other, target),
+    }
+}
+
 fn ty_reads(t: &TypeExpr, target: &str) -> bool {
     match t {
-        TypeExpr::Named { .. } => false,
+        TypeExpr::Named { name, .. } => folded_name_reads(name, target, false),
         TypeExpr::Pointer { to, .. } => ty_reads(to, target),
         TypeExpr::Slice { elem, .. }
         | TypeExpr::Chan { elem, .. }
@@ -69,7 +158,7 @@ fn ty_reads(t: &TypeExpr, target: &str) -> bool {
 
 pub(crate) fn expr_reads(e: &Expr, target: &str) -> bool {
     match e {
-        Expr::Ident { name, .. } => name == target,
+        Expr::Ident { name, .. } => folded_name_reads(name, target, true),
         Expr::Lit { .. } => false,
         Expr::Interp { parts, .. } => parts.iter().any(|p| match p {
             InterpPart::Expr(x) => expr_reads(x, target),
@@ -87,8 +176,28 @@ pub(crate) fn expr_reads(e: &Expr, target: &str) -> bool {
                 || lo.as_ref().is_some_and(|x| expr_reads(x, target))
                 || hi.as_ref().is_some_and(|x| expr_reads(x, target))
         }
-        Expr::Field { base, .. } => expr_reads(base, target),
+        Expr::Field { base, name, .. } => {
+            expr_reads(base, target) || folded_name_reads(name, target, false)
+        }
         Expr::Call { callee, args, .. } => {
+            let mut bare_callee = callee.as_ref();
+            while let Expr::Paren { inner, .. } = bare_callee {
+                bare_callee = inner;
+            }
+            if matches!(bare_callee, Expr::Ident { name, .. } if name == "make")
+                && target != "make"
+            {
+                return args
+                    .first()
+                    .is_some_and(|a| type_arg_expr_reads(&a.value, target))
+                    || args.iter().skip(1).any(|a| expr_reads(&a.value, target));
+            }
+            if matches!(bare_callee, Expr::Ident { name, .. } if name == "new")
+                && args.len() == 1
+                && target != "new"
+            {
+                return type_arg_expr_reads(&args[0].value, target);
+            }
             expr_reads(callee, target) || args.iter().any(|a| expr_reads(&a.value, target))
         }
         Expr::StructLit { ty, fields, .. } => {
@@ -135,11 +244,14 @@ pub(crate) fn expr_reads(e: &Expr, target: &str) -> bool {
 
 fn place_reads(p: &hy_syntax::Place, target: &str) -> bool {
     match &p.kind {
-        PlaceKind::Ident(n) => n == target,
+        PlaceKind::Ident(n) => folded_name_reads(n, target, true),
         PlaceKind::Index { base, index } => {
             place_reads(base, target) || expr_reads(index, target)
         }
-        PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => place_reads(base, target),
+        PlaceKind::Field { base, field } => {
+            place_reads(base, target) || folded_name_reads(field, target, false)
+        }
+        PlaceKind::AddrOf { base } => place_reads(base, target),
     }
 }
 
@@ -254,6 +366,18 @@ fn stmt_reads(s: &Stmt, target: &str) -> bool {
                         MatchPattern::Path { segments, .. } if segments == &["none"]
                     ) || matches!(&a.pattern, MatchPattern::Wildcard)
                 });
+            let has_some_arm = arms.iter().any(|a| {
+                matches!(
+                    &a.pattern,
+                    MatchPattern::Path {
+                        segments,
+                        binding: Some(_),
+                    } if segments == &["some"]
+                )
+            });
+            if !is_option_match || !has_some_arm {
+                return false;
+            }
             let simple_none_wild = arms.iter().all(|a| {
                 matches!(&a.pattern, MatchPattern::Path { segments, binding: Some(_) } if segments == &["some"])
                     || a.guard.is_none()
