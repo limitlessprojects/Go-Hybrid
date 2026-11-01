@@ -3105,7 +3105,7 @@ impl<'a> Collector<'a> {
                         return Some(vec![first]);
                     }
                     "make" => return Some(vec![self.make_kind(args)]),
-                    "new" => return Some(vec![OpKind::Pointer(Box::new(OpKind::Unknown))]),
+                    "new" => return Some(vec![self.new_kind(args)]),
                     "delete" | "close" | "clear" | "panic" => return Some(Vec::new()),
                     "recover" => return Some(vec![OpKind::Interface]),
                     "min" | "max" => {
@@ -3198,6 +3198,54 @@ impl<'a> Collector<'a> {
             ),
             Expr::Ident { name, .. } => self.kind_of_named(name, 0),
             _ => OpKind::Unknown,
+        }
+    }
+
+    fn new_kind(&self, args: &[CallArg]) -> OpKind {
+        let Some(first) = args.first() else {
+            return OpKind::Pointer(Box::new(OpKind::Unknown));
+        };
+        let elem = self.kind_of_type_expr_val(&first.value);
+        OpKind::Pointer(Box::new(elem))
+    }
+
+    fn kind_of_type_expr_val(&self, expr: &Expr) -> OpKind {
+        let bare = unwrap_parens(expr);
+        if let Some((_len, elem, _ty)) = bare.as_array_lit() {
+            return OpKind::Array(Box::new(self.kind_of_ty(elem, 0)));
+        }
+        match bare {
+            Expr::StructLit { ty: Some(t), .. } => self.kind_of_ty(t, 0),
+            Expr::SliceLit { elem: Some(t), .. } => {
+                OpKind::Slice(Box::new(self.kind_of_ty(t, 0)))
+            }
+            Expr::MapLit { key, value, .. } => OpKind::Map(
+                Box::new(self.kind_of_ty(key, 0)),
+                Box::new(self.kind_of_ty(value, 0)),
+            ),
+            Expr::Ident { name, .. } => self.kind_of_named(name, 0),
+            Expr::Field { .. } => {
+                if let Some(dotted) = Self::expr_to_dotted_name(bare) {
+                    self.kind_of_named(&dotted, 0)
+                } else {
+                    OpKind::Unknown
+                }
+            }
+            Expr::Index { base, .. } => self.kind_of_type_expr_val(base),
+            _ => OpKind::Unknown,
+        }
+    }
+
+    fn expr_to_dotted_name(expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Ident { name, .. } => Some(name.clone()),
+            Expr::Field { base, name, .. } => {
+                let mut prefix = Self::expr_to_dotted_name(unwrap_parens(base))?;
+                prefix.push('.');
+                prefix.push_str(name);
+                Some(prefix)
+            }
+            _ => None,
         }
     }
 
