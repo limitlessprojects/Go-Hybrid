@@ -974,6 +974,30 @@ impl<'a> Checker<'a> {
             );
         }
 
+        // -- C2: a method whose name collides with a field of the same struct
+        // (`type counter struct { n int }` + `func (c counter) n()`). Go refuses
+        // this with "field and method with the same name", so an accepted
+        // Hybrid program would emit unbuildable Go (issue #1119).
+        if let Some(fields) = self.structs.get(&base) {
+            if fields.iter().any(|(name, _)| name == &f.name) {
+                let msg = format!(
+                    "method `{}.{}` has the same name as a field of `{}` — Go refuses \"field and method with the same name\" (HYB-E1002)",
+                    base, f.name, base
+                );
+                self.diags.push(
+                    Diagnostic::error("HYB-E1002", self.path.clone(), f.span, msg).with_notes(vec![
+                        format!(
+                            "why: Go rejects a method and a struct field sharing one name on the same receiver type, so an accepted Hybrid program would emit unbuildable Go (issue #1119)"
+                        ),
+                        format!(
+                            "fix: rename the method `{}` (the field `{}.{}` keeps its name), or rename the field",
+                            f.name, base, f.name
+                        ),
+                    ]),
+                );
+            }
+        }
+
         // Method type parameters: Go forbids type parameters on methods (`method must have no type parameters`).
         if !f.type_params.is_empty() {
             let msg = format!(
