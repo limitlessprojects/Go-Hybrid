@@ -1578,6 +1578,10 @@ impl<'a> Collector<'a> {
                     ForKind::Iterate { vars, expr } => {
                         self.check_repeated_bindings(vars, *span);
                         self.expr(expr);
+                        // `for x in two_slices()` — the range expression is
+                        // one value; the iterator-kind walk would otherwise
+                        // read the first result and accept it (#1863).
+                        self.check_single_value_position(expr, "a for-in range", /*binding_position=*/ false);
                         let iter_kinds = self.iterate_var_kinds(expr, vars.len());
                         // Unread iterate bindings are lowered to `_` at
                         // emission (issue #139); write-only ones still
