@@ -254,3 +254,120 @@ fn if_without_a_boundary_keeps_the_single_store_back_after_it() {
         "the store-back stays after the `if`:\n{go}"
     );
 }
+
+#[test]
+fn alias_move_in_branch_flushes_loan_before_spawn_issue_830() {
+    let go = emit(
+        "    m := map[string]item{\"a\": item{x: 0}}
+    alias := m
+    done := make(chan bool, 1)
+    n := &m[\"a\"]
+    if len(m) == 1 {
+        n.x = 7
+        task worker(move alias, done)
+    } else {
+        done <- true
+    }
+    <-done
+    fmt.println(\"done\")
+",
+    );
+    assert!(
+        between(&go, "n.x = 7", "go worker(alias, done)").contains("m[\"a\"] = n"),
+        "store-back must flush before `go worker(alias, done)`:\n{go}"
+    );
+    assert!(
+        !between(&go, "go worker(alias, done)", "<-done").contains("}\n\tm[\"a\"] = n"),
+        "store-back must not run after the `if` once `alias` has been moved:\n{go}"
+    );
+}
+
+#[test]
+fn alias_delete_in_branch_does_not_resurrect_key_issue_830() {
+    let go = emit(
+        "    m := map[string]item{\"a\": item{x: 0}}
+    alias := m
+    n := &m[\"a\"]
+    if len(m) > 5 {
+        n.x = 1
+    } else {
+        delete(alias, \"a\")
+    }
+    fmt.println(len(m))
+",
+    );
+    assert!(
+        !between(&go, "delete(alias, \"a\")", "fmt.Println(len(m))").contains("m[\"a\"] = n"),
+        "store-back after `delete(alias, \"a\")` would resurrect the deleted key:\n{go}"
+    );
+}
+
+#[test]
+fn header_use_followed_by_branch_read_flushes_before_read_issue_830() {
+    let go = emit(
+        "    m := map[string]item{\"a\": item{x: 0}}
+    n := &m[\"a\"]
+    n.x = 7
+    if n.x == 7 {
+        fmt.println(m[\"a\"].x)
+    }
+",
+    );
+    assert!(
+        between(&go, "if n.x == 7 {", "fmt.Println(m[\"a\"].x)").contains("m[\"a\"] = n"),
+        "header use of `n` must flush `m[\"a\"] = n` before reading `m[\"a\"].x` in the branch:\n{go}"
+    );
+}
+
+#[test]
+fn else_if_cond_reads_base_after_inherited_loan_flushes_first_issue_830() {
+    let go = emit(
+        "    m := map[string]item{\"a\": item{x: 0}}
+    done := make(chan bool, 1)
+    n := &m[\"a\"]
+    n.x = 7
+    if len(m) > 5 {
+        n.x = 8
+        done <- true
+    } else if m[\"a\"].x == 7 {
+        task worker(move m, done)
+    } else {
+        done <- true
+    }
+    <-done
+    fmt.println(\"done\")
+",
+    );
+    assert!(
+        between(&go, "} else {", "if m[\"a\"].x == 7 {").contains("m[\"a\"] = n"),
+        "else branch must flush `m[\"a\"] = n` before evaluating `else if m[\"a\"].x == 7`:\n{go}"
+    );
+    assert!(
+        !between(&go, "go worker(m, done)", "<-done").contains("m[\"a\"] = n"),
+        "store-back must not follow `go worker(m, done)`:\n{go}"
+    );
+}
+
+#[test]
+fn for_loop_zero_trip_preserves_pre_loop_write_issue_830() {
+    let go = emit(
+        "    m := map[string]item{\"a\": item{x: 0}}
+    n := &m[\"a\"]
+    n.x = 7
+    for i in 0..0 {
+        n.x = 8
+        fmt.println(m[\"a\"].x)
+    }
+    fmt.println(m[\"a\"].x)
+",
+    );
+    assert!(
+        between(&go, "n.x = 7", "for i := 0; i < 0; i++").contains("m[\"a\"] = n"),
+        "pre-loop write `n.x = 7` must be flushed before a potentially 0-trip `for` loop:\n{go}"
+    );
+    assert!(
+        between(&go, "n.x = 8", "fmt.Println(m[\"a\"].x)").contains("m[\"a\"] = n"),
+        "in-loop write `n.x = 8` must still be flushed before reading `m[\"a\"].x` inside the loop:\n{go}"
+    );
+}
+
