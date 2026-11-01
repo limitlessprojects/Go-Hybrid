@@ -690,6 +690,69 @@ impl<'a> Collector<'a> {
         }
     }
 
+    fn map_key_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    if let Some(rest) = tname.strip_prefix("map[") {
+                        if let Some(idx) = rest.find(']') {
+                            return Some(rest[..idx].to_string());
+                        }
+                    }
+                }
+                None
+            }
+            Expr::MapLit { key, .. } => Some(key.render()),
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            return self.map_key_type_name(&first.value);
+                        }
+                    }
+                }
+                None
+            }
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let head = match &bk {
+                    OpKind::Struct(s) => s.as_deref(),
+                    OpKind::Pointer(inner) => match &**inner {
+                        OpKind::Struct(s) => s.as_deref(),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(sname) = head {
+                    let base_name = Checker::base_named_type_str(sname);
+                    if let Some(fields) = self.ck.structs.get(base_name) {
+                        for (fname, fty) in fields {
+                            if fname == name {
+                                if let TypeExpr::Map { key, .. } = fty {
+                                    return Some(key.render());
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn map_key_scalar(&self, e: &Expr) -> Option<&'static str> {
+        let kt = self.map_key_type_name(e)?;
+        if let Some(sc) = canonical_numeric_name(&kt) {
+            return Some(sc);
+        }
+        if let Some(aliased) = self.ck.type_aliases.get(kt.as_str()) {
+            return canonical_numeric_name(&aliased.render());
+        }
+        None
+    }
+
     /// A name that shadows checked defines but is not itself checked.
     fn exempt(&mut self, name: &str) {
         if name != "_" {
@@ -1507,6 +1570,9 @@ impl<'a> Collector<'a> {
             for (name, val) in l.names.iter().zip(&l.values) {
                 if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
+                }
+                if let Some(kt) = self.map_key_type_name(val) {
+                    self.bind_type_name(name, format!("map[{}]{{}}", kt));
                 }
             }
         }
@@ -5155,16 +5221,30 @@ impl<'a> Collector<'a> {
                 let is_untyped_int_to_float = **key_kind == OpKind::Float
                     && *ik == OpKind::Int
                     && self.is_untyped_int_const(index);
+                let scalar_mismatch = base_expr
+                    .and_then(|be| self.map_key_scalar(be))
+                    .is_some_and(|wanted| {
+                        self.scalar_names_conflict(Some(wanted), self.typed_value_scalar(index))
+                    });
                 let conflict = (**key_kind == OpKind::Float && *ik == OpKind::Int && !is_untyped_int_to_float)
-                    || kinds_conflict(key_kind, ik);
+                    || kinds_conflict(key_kind, ik)
+                    || scalar_mismatch;
                 if conflict {
+                    let ik_label = self
+                        .typed_value_scalar(index)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| ik.label());
+                    let want_label = base_expr
+                        .and_then(|be| self.map_key_scalar(be))
+                        .map(str::to_string)
+                        .unwrap_or_else(|| key_kind.label());
                     self.emit_e1002(
                         index.span(),
                         format!(
                             "cannot use `{}` (type `{}`) as `{}` value in map index on `{}` (HYB-E1002)",
                             index.render(),
-                            ik.label(),
-                            key_kind.label(),
+                            ik_label,
+                            want_label,
                             bk.label()
                         ),
                         "map index expression must match the map's key type",
@@ -6423,18 +6503,30 @@ impl<'a> Collector<'a> {
                         let is_untyped_int_to_float = **k_expected == OpKind::Float
                             && kk == OpKind::Int
                             && self.is_untyped_int_const(key_arg);
+                        let scalar_mismatch = self
+                            .map_key_scalar(map_arg)
+                            .is_some_and(|wanted| {
+                                self.scalar_names_conflict(Some(wanted), self.typed_value_scalar(key_arg))
+                            });
                         if **k_expected != OpKind::Unknown
                             && kk != OpKind::Unknown
-                            && kk != **k_expected
-                            && !is_untyped_int_to_float
+                            && ((kk != **k_expected && !is_untyped_int_to_float) || scalar_mismatch)
                         {
+                            let kk_label = self
+                                .typed_value_scalar(key_arg)
+                                .map(str::to_string)
+                                .unwrap_or_else(|| kk.label());
+                            let want_label = self
+                                .map_key_scalar(map_arg)
+                                .map(str::to_string)
+                                .unwrap_or_else(|| k_expected.label());
                             self.emit_e2005(
                                 span,
                                 format!(
                                     "cannot use `{}` (type `{}`) as key type `{}` in `delete` (HYB-E2005)",
                                     key_arg.render(),
-                                    kk.label(),
-                                    k_expected.label()
+                                    kk_label,
+                                    want_label
                                 ),
                                 "the second argument to `delete(m, k)` must match the map's key type",
                             );
