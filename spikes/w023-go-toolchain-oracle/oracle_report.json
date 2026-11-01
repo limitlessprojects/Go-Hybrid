@@ -1,0 +1,391 @@
+{
+  "cases": 180,
+  "clean_accepts": 88,
+  "clean_rejects": 38,
+  "corpus_audit": {
+    "accept_built": 17,
+    "accept_disagreement_rate": 0.0,
+    "accept_disagreements": [],
+    "accept_total": 17,
+    "corpus_dir": "tests/checker-corpus",
+    "corpus_total": 61,
+    "reject_rejected": 44,
+    "reject_total": 44,
+    "verdict_mismatches": []
+  },
+  "failures": [
+    {
+      "case_index": 1,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:4:6: declared and not used: x",
+      "kind": "buildable_decl",
+      "source_head": "fn main() {\n    var x = true\n}\n"
+    },
+    {
+      "case_index": 5,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:8:17: too many arguments in call to add",
+      "kind": "call_and_return",
+      "source_head": "fn add(a int, b int) int {\n    return a + b\n}\nfn main() {\n    v := add(1, 2, 3)\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 6,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:5:11: -5 (untyped int constant) overflows uint8",
+      "kind": "const_overflow",
+      "source_head": "fn main() {\n    var x uint8 = 1\n    y := x + -5\n    _ = y\n}\n"
+    },
+    {
+      "case_index": 11,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:8:11: not enough arguments in call to add",
+      "kind": "call_and_return",
+      "source_head": "fn add(a int, b int) int {\n    return a + b\n}\nfn main() {\n    v := add(1)\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 13,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:4:6: declared and not used: x",
+      "kind": "buildable_decl",
+      "source_head": "fn main() {\n    var x int = 1\n}\n"
+    },
+    {
+      "case_index": 19,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:4:6: declared and not used: x",
+      "kind": "buildable_decl",
+      "source_head": "fn main() {\n    var x int = 1\n}\n"
+    },
+    {
+      "case_index": 30,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:5:11: 70000 (untyped int constant) overflows int16",
+      "kind": "const_overflow",
+      "source_head": "fn main() {\n    var x int16 = 1\n    y := x + 70000\n    _ = y\n}\n"
+    },
+    {
+      "case_index": 34,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:5:11: invalid argument: x (variable of type int) for built-in len",
+      "kind": "shift_and_len",
+      "source_head": "fn main() {\n    x := 10\n    n := len(x)\n    _ = n\n}\n"
+    },
+    {
+      "case_index": 40,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:5:11: invalid argument: x (variable of type int) for built-in len",
+      "kind": "shift_and_len",
+      "source_head": "fn main() {\n    x := 10\n    n := len(x)\n    _ = n\n}\n"
+    },
+    {
+      "case_index": 44,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:5:9: invalid argument: index -1 (constant of type int) must not be negative",
+      "kind": "index_and_bounds",
+      "source_head": "fn main() {\n    s := []int{10, 20}\n    v := s[-1]\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 46,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:5:11: invalid argument: x (variable of type int) for built-in len",
+      "kind": "shift_and_len",
+      "source_head": "fn main() {\n    x := 10\n    n := len(x)\n    _ = n\n}\n"
+    },
+    {
+      "case_index": 47,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:8:17: too many arguments in call to add",
+      "kind": "call_and_return",
+      "source_head": "fn add(a int, b int) int {\n    return a + b\n}\nfn main() {\n    v := add(1, 2, 3)\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 50,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:5:9: invalid argument: index -2 (constant of type int) must not be negative",
+      "kind": "index_and_bounds",
+      "source_head": "fn main() {\n    s := []int{10, 20}\n    v := s[-2]\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 53,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:8:17: too many arguments in call to add",
+      "kind": "call_and_return",
+      "source_head": "fn add(a int, b int) int {\n    return a + b\n}\nfn main() {\n    v := add(1, 2, 3)\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 54,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:7:6: cannot use k (untyped int constant 70000) as int16 value in assignment (overflows)",
+      "kind": "const_overflow",
+      "source_head": "const k = 70000\nfn main() {\n    var x int16 = 1\n    x = k\n    _ = x\n}\n"
+    },
+    {
+      "case_index": 55,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:4:6: declared and not used: x",
+      "kind": "buildable_decl",
+      "source_head": "fn main() {\n    var x = \"ok\"\n}\n"
+    },
+    {
+      "case_index": 59,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:4:9: cannot use \"not-an-int\" (untyped string constant) as int value in return statement",
+      "kind": "call_and_return",
+      "source_head": "fn bad() int {\n    return \"not-an-int\"\n}\nfn main() {\n    v := bad()\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 68,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:5:9: invalid argument: index -1 (constant of type int) must not be negative",
+      "kind": "index_and_bounds",
+      "source_head": "fn main() {\n    s := []int{10, 20}\n    v := s[-1]\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 71,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:8:11: not enough arguments in call to add",
+      "kind": "call_and_return",
+      "source_head": "fn add(a int, b int) int {\n    return a + b\n}\nfn main() {\n    v := add(1)\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 73,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:4:6: declared and not used: x",
+      "kind": "buildable_decl",
+      "source_head": "fn main() {\n    var x = 1\n}\n"
+    },
+    {
+      "case_index": 76,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:4:7: invalid operation: shifted operand 1.5 (untyped float constant) must be integer",
+      "kind": "shift_and_len",
+      "source_head": "fn main() {\n    x := 1.5 << 2\n    _ = x\n}\n"
+    },
+    {
+      "case_index": 77,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:4:9: cannot use \"not-an-int\" (untyped string constant) as int value in return statement",
+      "kind": "call_and_return",
+      "source_head": "fn bad() int {\n    return \"not-an-int\"\n}\nfn main() {\n    v := bad()\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 80,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:5:9: invalid argument: index -1 (constant of type int) must not be negative",
+      "kind": "index_and_bounds",
+      "source_head": "fn main() {\n    s := []int{10, 20}\n    v := s[-1:1]\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 88,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:5:11: invalid argument: x (variable of type int) for built-in len",
+      "kind": "shift_and_len",
+      "source_head": "fn main() {\n    x := 10\n    n := len(x)\n    _ = n\n}\n"
+    },
+    {
+      "case_index": 89,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:8:11: not enough arguments in call to add",
+      "kind": "call_and_return",
+      "source_head": "fn add(a int, b int) int {\n    return a + b\n}\nfn main() {\n    v := add(1)\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 91,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:4:6: declared and not used: x",
+      "kind": "buildable_decl",
+      "source_head": "fn main() {\n    var x string = \"ok\"\n}\n"
+    },
+    {
+      "case_index": 95,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:8:17: too many arguments in call to add",
+      "kind": "call_and_return",
+      "source_head": "fn add(a int, b int) int {\n    return a + b\n}\nfn main() {\n    v := add(1, 2, 3)\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 96,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:7:6: cannot use 300 (untyped int constant) as narrow value in assignment (overflows)",
+      "kind": "const_overflow",
+      "source_head": "type narrow = uint8\nfn main() {\n    var x narrow = 1\n    x = 300\n    _ = x\n}\n"
+    },
+    {
+      "case_index": 98,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:5:9: invalid argument: index -1 (constant of type int) must not be negative",
+      "kind": "index_and_bounds",
+      "source_head": "fn main() {\n    s := []int{10, 20}\n    v := s[-1:1]\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 107,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:4:9: cannot use \"not-an-int\" (untyped string constant) as int value in return statement",
+      "kind": "call_and_return",
+      "source_head": "fn bad() int {\n    return \"not-an-int\"\n}\nfn main() {\n    v := bad()\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 108,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:5:11: 70000 (untyped int constant) overflows uint8",
+      "kind": "const_overflow",
+      "source_head": "fn main() {\n    var x uint8 = 1\n    y := x + 70000\n    _ = y\n}\n"
+    },
+    {
+      "case_index": 109,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:4:6: declared and not used: x",
+      "kind": "buildable_decl",
+      "source_head": "fn main() {\n    var x int = 42\n}\n"
+    },
+    {
+      "case_index": 110,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:5:9: invalid argument: index -2 (constant of type int) must not be negative",
+      "kind": "index_and_bounds",
+      "source_head": "fn main() {\n    s := []int{10, 20}\n    v := s[-2]\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 112,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:5:11: invalid argument: x (variable of type int) for built-in len",
+      "kind": "shift_and_len",
+      "source_head": "fn main() {\n    x := 10\n    n := len(x)\n    _ = n\n}\n"
+    },
+    {
+      "case_index": 119,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:4:9: cannot use \"not-an-int\" (untyped string constant) as int value in return statement",
+      "kind": "call_and_return",
+      "source_head": "fn bad() int {\n    return \"not-an-int\"\n}\nfn main() {\n    v := bad()\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 125,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:8:17: too many arguments in call to add",
+      "kind": "call_and_return",
+      "source_head": "fn add(a int, b int) int {\n    return a + b\n}\nfn main() {\n    v := add(1, 2, 3)\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 126,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:7:6: cannot use k (untyped int constant 70000) as int8 value in assignment (overflows)",
+      "kind": "const_overflow",
+      "source_head": "const k = 70000\nfn main() {\n    var x int8 = 1\n    x = k\n    _ = x\n}\n"
+    },
+    {
+      "case_index": 131,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:8:17: too many arguments in call to add",
+      "kind": "call_and_return",
+      "source_head": "fn add(a int, b int) int {\n    return a + b\n}\nfn main() {\n    v := add(1, 2, 3)\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 134,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:5:9: invalid argument: index -1 (constant of type int) must not be negative",
+      "kind": "index_and_bounds",
+      "source_head": "fn main() {\n    s := []int{10, 20}\n    v := s[-1]\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 137,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:4:9: cannot use \"not-an-int\" (untyped string constant) as int value in return statement",
+      "kind": "call_and_return",
+      "source_head": "fn bad() int {\n    return \"not-an-int\"\n}\nfn main() {\n    v := bad()\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 142,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:5:11: invalid argument: x (variable of type int) for built-in len",
+      "kind": "shift_and_len",
+      "source_head": "fn main() {\n    x := 10\n    n := len(x)\n    _ = n\n}\n"
+    },
+    {
+      "case_index": 143,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:8:11: not enough arguments in call to add",
+      "kind": "call_and_return",
+      "source_head": "fn add(a int, b int) int {\n    return a + b\n}\nfn main() {\n    v := add(1)\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 146,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:5:9: invalid argument: index -1 (constant of type int) must not be negative",
+      "kind": "index_and_bounds",
+      "source_head": "fn main() {\n    s := []int{10, 20}\n    v := s[-1]\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 152,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:5:9: invalid argument: index -1 (constant of type int) must not be negative",
+      "kind": "index_and_bounds",
+      "source_head": "fn main() {\n    s := []int{10, 20}\n    v := s[-1:1]\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 155,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:8:17: too many arguments in call to add",
+      "kind": "call_and_return",
+      "source_head": "fn add(a int, b int) int {\n    return a + b\n}\nfn main() {\n    v := add(1, 2, 3)\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 156,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:7:6: cannot use 70000 (untyped int constant) as narrow value in assignment (overflows)",
+      "kind": "const_overflow",
+      "source_head": "type narrow = int8\nfn main() {\n    var x narrow = 1\n    x = 70000\n    _ = x\n}\n"
+    },
+    {
+      "case_index": 161,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:8:17: too many arguments in call to add",
+      "kind": "call_and_return",
+      "source_head": "fn add(a int, b int) int {\n    return a + b\n}\nfn main() {\n    v := add(1, 2, 3)\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 162,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:5:11: 70000 (untyped int constant) overflows uint8",
+      "kind": "const_overflow",
+      "source_head": "fn main() {\n    var x uint8 = 1\n    y := x + 70000\n    _ = y\n}\n"
+    },
+    {
+      "case_index": 163,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:4:6: declared and not used: x",
+      "kind": "buildable_decl",
+      "source_head": "fn main() {\n    var x string = \"ok\"\n}\n"
+    },
+    {
+      "case_index": 164,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:5:9: invalid argument: index -2 (constant of type int) must not be negative",
+      "kind": "index_and_bounds",
+      "source_head": "fn main() {\n    s := []int{10, 20}\n    v := s[-2]\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 173,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:4:9: cannot use \"not-an-int\" (untyped string constant) as int value in return statement",
+      "kind": "call_and_return",
+      "source_head": "fn bad() int {\n    return \"not-an-int\"\n}\nfn main() {\n    v := bad()\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 174,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:5:11: 70000 (untyped int constant) overflows int16",
+      "kind": "const_overflow",
+      "source_head": "fn main() {\n    var x int16 = 1\n    y := x + 70000\n    _ = y\n}\n"
+    },
+    {
+      "case_index": 176,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:5:9: invalid argument: index -1 (constant of type int) must not be negative",
+      "kind": "index_and_bounds",
+      "source_head": "fn main() {\n    s := []int{10, 20}\n    v := s[-1:1]\n    _ = v\n}\n"
+    },
+    {
+      "case_index": 179,
+      "failure": "ORACLE_BUILD_FAIL: .\\oracle_out.exe.go:8:11: not enough arguments in call to add",
+      "kind": "call_and_return",
+      "source_head": "fn add(a int, b int) int {\n    return a + b\n}\nfn main() {\n    v := add(1)\n    _ = v\n}\n"
+    }
+  ],
+  "oracle_build_enabled": true,
+  "oracle_checked": 142,
+  "oracle_disagreements": 54,
+  "per_family": {
+    "buildable_decl": {
+      "checker_accepted": 23,
+      "checker_rejected": 7,
+      "generated": 30,
+      "oracle_failed": 8,
+      "oracle_residual_rate": 0.347826
+    },
+    "call_and_return": {
+      "checker_accepted": 30,
+      "checker_rejected": 0,
+      "generated": 30,
+      "oracle_failed": 19,
+      "oracle_residual_rate": 0.633333
+    },
+    "const_overflow": {
+      "checker_accepted": 26,
+      "checker_rejected": 4,
+      "generated": 30,
+      "oracle_failed": 9,
+      "oracle_residual_rate": 0.346154
+    },
+    "equality_compare": {
+      "checker_accepted": 21,
+      "checker_rejected": 9,
+      "generated": 30,
+      "oracle_failed": 0,
+      "oracle_residual_rate": 0.0
+    },
+    "index_and_bounds": {
+      "checker_accepted": 17,
+      "checker_rejected": 13,
+      "generated": 30,
+      "oracle_failed": 11,
+      "oracle_residual_rate": 0.647059
+    },
+    "shift_and_len": {
+      "checker_accepted": 25,
+      "checker_rejected": 5,
+      "generated": 30,
+      "oracle_failed": 7,
+      "oracle_residual_rate": 0.28
+    }
+  },
+  "seed": 20261018,
+  "strategy": "go-decidable"
+}

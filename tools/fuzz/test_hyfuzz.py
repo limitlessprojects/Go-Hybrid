@@ -148,9 +148,18 @@ class FuzzArtifactTests(unittest.TestCase):
         self.assertEqual(metadata["failure"], "UNEXPECTED exit=23")
         self.assertEqual(metadata["source_file"], saved.name)
         self.assertEqual(metadata["source_sha256"], hashlib.sha256(saved.read_bytes()).hexdigest())
-        replay = subprocess.run(
-            [str(self.checker), "check", str(saved)], capture_output=True, timeout=5,
-        )
+        try:
+            replay = subprocess.run(
+                [str(self.checker), "check", str(saved)], capture_output=True, timeout=5,
+            )
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 193:
+                replay = subprocess.run(
+                    [sys.executable, str(self.checker), "check", str(saved)],
+                    capture_output=True, timeout=5,
+                )
+            else:
+                raise
         self.assertEqual(replay.returncode, 23)
         self.assertIn(str(saved), stdout)
 
@@ -180,6 +189,8 @@ class FuzzArtifactTests(unittest.TestCase):
         self.assertEqual(code, 1, stdout + stderr)
         self.assertIn("UNEXPECTED exit=23", stdout)
         self.assertFalse(self.destination.exists())
+
+
 class NestGenerationTests(unittest.TestCase):
     def test_branch_heavy_seed_keeps_one_deep_path(self):
         source = hyfuzz.gen_nest(random.Random(9498))
@@ -260,6 +271,135 @@ class FuzzInputValidationTests(unittest.TestCase):
             ]), patch.object(hyfuzz, "check_one", return_value=(None, True)):
                 # Returns cleanly without exiting with error
                 hyfuzz.main()
+
+
+class GoToolchainOracleTests(unittest.TestCase):
+    def test_oracle_one_accepts_clean_build_and_flags_build_failures(self):
+        with tempfile.TemporaryDirectory() as workdir:
+            with patch.object(
+                hyfuzz.subprocess, "run",
+                return_value=subprocess.CompletedProcess([], 0, "built out\n", ""),
+            ):
+                self.assertEqual(
+                    hyfuzz.oracle_one("hyb", "fn main() {}", workdir, 1),
+                    (None, True),
+                )
+            with patch.object(
+                hyfuzz.subprocess, "run",
+                return_value=subprocess.CompletedProcess(
+                    [], 1, "",
+                    "go build failed:\n# command-line-arguments\n./out.go:4:6: declared and not used: x\n",
+                ),
+            ):
+                bad, built = hyfuzz.oracle_one("hyb", "fn main() { var x int = 1 }", workdir, 1)
+                self.assertFalse(built)
+                self.assertEqual(
+                    bad,
+                    "ORACLE_BUILD_FAIL: ./out.go:4:6: declared and not used: x",
+                )
+
+    def test_oracle_one_timeout_and_ice_are_detected(self):
+        with tempfile.TemporaryDirectory() as workdir:
+            with patch.object(
+                hyfuzz.subprocess, "run",
+                side_effect=subprocess.TimeoutExpired("hyb", 1),
+            ):
+                self.assertEqual(
+                    hyfuzz.oracle_one("hyb", "fn main() {}", workdir, 1),
+                    ("ORACLE_HANG", False),
+                )
+            with patch.object(
+                hyfuzz.subprocess, "run",
+                return_value=subprocess.CompletedProcess([], 1, "", "thread 'main' panicked at emit"),
+            ):
+                bad, built = hyfuzz.oracle_one("hyb", "fn main() {}", workdir, 1)
+                self.assertFalse(built)
+                self.assertTrue(bad.startswith("ORACLE_ICE:"))
+
+    def test_gen_go_decidable_is_deterministic_and_covers_all_families(self):
+        rng_a = random.Random(20261018)
+        rng_b = random.Random(20261018)
+        seq_a = [hyfuzz.gen_go_decidable(rng_a) for _ in range(24)]
+        seq_b = [hyfuzz.gen_go_decidable(rng_b) for _ in range(24)]
+        self.assertEqual(seq_a, seq_b)
+        for fam in hyfuzz.GO_DECIDABLE_FAMILIES:
+            got_fam, src = hyfuzz.gen_go_decidable(random.Random(7), fam)
+            self.assertEqual(got_fam, fam)
+            self.assertIn("fn main()", src)
+
+    def test_oracle_negative_controls_are_registered(self):
+        names = [name for name, _ in hyfuzz.ORACLE_NEGATIVE_CONTROLS]
+        self.assertEqual(
+            names,
+            [
+                "slice_runtime_oob",
+                "runtime_unary_neg_min_int8",
+                "array_len_300_int8",
+            ],
+        )
+        for _, src in hyfuzz.ORACLE_NEGATIVE_CONTROLS:
+            self.assertIn("fn main()", src)
+
+
+    def test_invariant_4_oracle_build_catches_accepted_unbuildable_case_and_writes_report(self):
+        with tempfile.TemporaryDirectory() as root:
+            corpus = Path(root, "corpus")
+            corpus.mkdir()
+            Path(corpus, "01-ok.hy").write_text(
+                "// EXPECTED-VERDICT: ACCEPT\nfn main() {}\n", encoding="utf-8"
+            )
+            Path(corpus, "02-rej.hy").write_text(
+                "// EXPECTED-VERDICT: REJECT HYB-E6002\nfn main() { var x int8 = 300 }\n",
+                encoding="utf-8",
+            )
+            report_path = Path(root, "oracle_report.json")
+
+            def fake_run(cmd, **kwargs):
+                subcmd = cmd[1]
+                hy_file = Path(cmd[2])
+                text = hy_file.read_text(encoding="utf-8")
+                if subcmd == "check":
+                    if "EXPECTED-VERDICT: REJECT" in text:
+                        return subprocess.CompletedProcess(cmd, 1, "", "")
+                    return subprocess.CompletedProcess(cmd, 0, "", "")
+                if subcmd == "build":
+                    # Simulate accepted-but-unbuildable on unused `var x`
+                    if "var x" in text and "_ = x" not in text:
+                        return subprocess.CompletedProcess(
+                            cmd, 1, "",
+                            "go build failed:\n./out.go:4:6: declared and not used: x\n",
+                        )
+                    return subprocess.CompletedProcess(cmd, 0, "built\n", "")
+                return subprocess.CompletedProcess(cmd, 2, "", "unknown subcmd")
+
+            output = io.StringIO()
+            with patch.object(sys, "argv", [
+                "hyfuzz.py",
+                "--hyb", sys.executable,
+                "--corpus", str(corpus),
+                "--strategy", "go-decidable",
+                "--oracle-build",
+                "--audit-corpus",
+                "--seed", "20261018",
+                "--cases", "12",
+                "--max-failures", "0",
+                "--oracle-report", str(report_path),
+            ]), patch.object(hyfuzz.subprocess, "run", side_effect=fake_run), \
+                 contextlib.redirect_stdout(output), \
+                 self.assertRaises(SystemExit) as failure:
+                hyfuzz.main()
+
+            self.assertEqual(failure.exception.code, 1)
+            self.assertIn("ORACLE_BUILD_FAIL", output.getvalue())
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(report["corpus_audit"]["corpus_total"], 2)
+            self.assertEqual(report["corpus_audit"]["accept_built"], 1)
+            self.assertEqual(report["corpus_audit"]["reject_rejected"], 1)
+            self.assertEqual(report["corpus_audit"]["accept_disagreement_rate"], 0.0)
+            self.assertGreater(report["oracle_disagreements"], 0)
+            self.assertGreater(
+                report["per_family"]["buildable_decl"]["oracle_failed"], 0
+            )
 
 
 if __name__ == "__main__":
