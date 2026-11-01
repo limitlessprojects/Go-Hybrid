@@ -490,6 +490,10 @@ impl<'a> Checker<'a> {
                         if Self::base_named_type_str(name) == "some"
                             && self.lookup_binding(st, name).is_none()
                             && self.lookup_binding(st, Self::base_named_type_str(name)).is_none()
+                            && !self.fns.contains_key(name.as_str())
+                            && !self.fns.contains_key(Self::base_named_type_str(name))
+                            && !self.type_aliases.contains_key(name.as_str())
+                            && !self.type_aliases.contains_key(Self::base_named_type_str(name))
                 ) =>
             {
                 self.classify_composite(st, expr, args.iter().map(|a| &a.value))

@@ -284,7 +284,14 @@ impl<'a> Checker<'a> {
     }
 
     fn check_builtin_call(&mut self, name: &str, args: &[hy_syntax::CallArg], span: Span) {
-        if self.fns.contains_key(name) {
+        let head = Self::base_named_type_str(name);
+        if self.fns.contains_key(name)
+            || self.fns.contains_key(head)
+            || self.type_aliases.contains_key(name)
+            || self.type_aliases.contains_key(head)
+            || self.structs.contains_key(name)
+            || self.structs.contains_key(head)
+        {
             return;
         }
         match name {

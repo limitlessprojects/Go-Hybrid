@@ -920,13 +920,18 @@ impl<'a> Collector<'a> {
         {
             return None;
         }
-        if let Some(fd) = self.ck.fns.get(name.as_str()) {
+        let head = Checker::base_named_type_str(name);
+        if let Some(fd) = self.ck.fns.get(name.as_str()).or_else(|| self.ck.fns.get(head)) {
             if fd.receiver.is_some() || !fd.type_params.is_empty() {
                 return None;
             }
             return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
         }
-        if name == "min" || name == "max" {
+        if (name == "min" || name == "max")
+            && !self.ck.structs.contains_key(name.as_str())
+            && !self.ck.enums.contains_key(name.as_str())
+            && !self.ck.type_aliases.contains_key(name.as_str())
+        {
             let res_scalar = args
                 .iter()
                 .find_map(|a| self.typed_value_scalar(&a.value));
@@ -3095,6 +3100,26 @@ impl<'a> Collector<'a> {
                     }
                     return None;
                 }
+                let head = Checker::base_named_type_str(name);
+                if let Some(f) = self.ck.fns.get(name.as_str()).or_else(|| self.ck.fns.get(head)) {
+                    return Some(
+                        f.results
+                            .iter()
+                            .map(|r| self.kind_of_ty(&r.ty, 0))
+                            .collect(),
+                    );
+                }
+                if args.len() == 1
+                    && (self.ck.type_aliases.contains_key(name.as_str())
+                        || self.ck.type_aliases.contains_key(head)
+                        || self.ck.structs.contains_key(name.as_str())
+                        || self.ck.structs.contains_key(head))
+                {
+                    let conv = self.kind_of_named(name, 0);
+                    if !matches!(conv, OpKind::Unknown | OpKind::Struct(_)) {
+                        return Some(vec![conv]);
+                    }
+                }
                 match name.as_str() {
                     "len" | "cap" | "copy" => return Some(vec![OpKind::Int]),
                     "append" => {
@@ -3129,15 +3154,6 @@ impl<'a> Collector<'a> {
                 let conv = self.kind_of_named(name, 0);
                 if !matches!(conv, OpKind::Unknown | OpKind::Struct(_)) {
                     return Some(vec![conv]);
-                }
-                let head = Checker::base_named_type_str(name);
-                if let Some(f) = self.ck.fns.get(name.as_str()).or_else(|| self.ck.fns.get(head)) {
-                    return Some(
-                        f.results
-                            .iter()
-                            .map(|r| self.kind_of_ty(&r.ty, 0))
-                            .collect(),
-                    );
                 }
                 None
             }
@@ -5999,12 +6015,23 @@ impl<'a> Collector<'a> {
                     }
                 } else {
                     self.check_fn_type_arg_arity(name, name, span);
-                    self.check_builtin_operand_kinds(name, args, span);
-                    self.check_conversion_arity(name, args, span);
-                    // #682 U5: `append`'s appended values must be assignable
-                    // to the slice's element type.
-                    if name == "append" {
-                        self.check_append_elements(args);
+                    let head = Checker::base_named_type_str(name);
+                    let shadowed_by_fn =
+                        self.ck.fns.contains_key(name.as_str()) || self.ck.fns.contains_key(head);
+                    let shadowed_by_type = self.ck.type_aliases.contains_key(name.as_str())
+                        || self.ck.type_aliases.contains_key(head)
+                        || self.ck.structs.contains_key(name.as_str())
+                        || self.ck.structs.contains_key(head);
+                    if !shadowed_by_fn && !shadowed_by_type {
+                        self.check_builtin_operand_kinds(name, args, span);
+                        // #682 U5: `append`'s appended values must be assignable
+                        // to the slice's element type.
+                        if name == "append" {
+                            self.check_append_elements(args);
+                        }
+                    }
+                    if !shadowed_by_fn {
+                        self.check_conversion_arity(name, args, span);
                     }
                     self.check_user_fn_arity(name, args, span);
                     self.check_user_fn_arg_types(name, args);
