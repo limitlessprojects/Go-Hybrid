@@ -142,9 +142,13 @@ impl<'a> Checker<'a> {
                     self.check_expr_emit_guard(st, v);
                     self.check_slot_loan_operand_addressable(st, v);
                 }
-                // `x <<= -1` — the compound form of HYB-E6005.
+                // `x <<= -1` — the compound form of HYB-E6005; the width half
+                // (`a <<= 8` on an `int8`) is #2714.
                 if matches!(op, AssignOp::ShlAssign | AssignOp::ShrAssign) && values.len() == 1 {
                     self.check_negative_shift(&values[0], *span);
+                    if let Some(t) = targets.first() {
+                        self.check_assign_shift_width(st, t, &values[0], *span);
+                    }
                 }
                 if deep {
                     for (t, v) in targets.iter().zip(values.iter()) {
@@ -417,7 +421,10 @@ impl<'a> Checker<'a> {
                 self.check_expr_emit_guard(st, rhs);
                 match op {
                     BinOp::Eq | BinOp::Ne => self.check_equality(st, lhs, rhs, *span),
-                    BinOp::Shl | BinOp::Shr => self.check_negative_shift(rhs, *span),
+                    BinOp::Shl | BinOp::Shr => {
+                        self.check_negative_shift(rhs, *span);
+                        self.check_binary_shift_width(st, lhs, rhs, *span);
+                    }
                     _ => {}
                 }
                 self.check_binary_const_overflow(st, *op, lhs, rhs);
@@ -860,6 +867,95 @@ impl<'a> Checker<'a> {
                 "fix: shift by a non-negative constant (shift the other operand instead: `1 << n` with `n >= 0`)".to_string(),
             ]),
         );
+    }
+
+    /// #2714: a constant shift count that reaches or exceeds the bit width of a
+    /// typed integer operand is a compile error in Go — `a << 8` on an `int8`
+    /// is `invalid operation: a << 8 (shift count 8 >= 8)`. `check_negative_shift`
+    /// owns the negative half (HYB-E6005); this owns the width half (HYB-E1002),
+    /// so an accepted program can no longer emit the unbuildable shift.
+    fn check_shift_width(&mut self, ty_name: &str, lo: i128, hi: i128, rhs: &Expr, span: Span) {
+        let Some(v) = const_int_value(rhs) else {
+            return; // a non-constant count is legal; only a constant count is a compile error
+        };
+        if v < 0 {
+            return; // negative counts are HYB-E6005's job
+        }
+        // `hi - lo + 1` is 2^bits; its trailing-zero count is the width
+        // (u8 -> 256 -> 8, i64 -> 2^64 -> 64) — the same span trick as `wrap_into`.
+        let bits = (((hi - lo) as u128).wrapping_add(1)).trailing_zeros();
+        if bits == 0 || bits > 64 || v < bits as i128 {
+            return;
+        }
+        self.diags.push(
+            Diagnostic::error(
+                "HYB-E1002",
+                self.path.clone(),
+                span,
+                format!(
+                    "shift by constant `{}` reaches the width of `{}` ({} bits) — Go refuses `invalid operation: shift count {} >= {}` (HYB-E1002)",
+                    rhs.render(),
+                    ty_name,
+                    bits,
+                    v,
+                    bits
+                ),
+            )
+            .with_notes(vec![
+                format!(
+                    "why: `{}` holds {} bits, so shifting it by the constant `{}` is a compile error in Go; an accepted Hybrid program would emit unbuildable Go (Row 13 BUILDABLE, issue #2714)",
+                    ty_name, bits, v
+                ),
+                format!(
+                    "fix: shift `{}` by a constant below {}, or widen it to a larger integer type",
+                    ty_name, bits
+                ),
+            ]),
+        );
+    }
+
+    /// The width half of the shift guard for a binary shift `lhs << rhs` /
+    /// `lhs >> rhs`: resolve the left operand's typed integer type, then check
+    /// its constant count.
+    fn check_binary_shift_width(&mut self, st: &FnState, lhs: &Expr, rhs: &Expr, span: Span) {
+        // A shift whose LEFT operand is a constant is a *constant shift*: Go
+        // folds it and range-checks the RESULT, which the typed-constant
+        // overflow pass already owns (HYB-E6002 — `u8(1) << 9`, `i64(1) << 63`).
+        // The `shift count >= width` rule applies only to a NON-constant left
+        // operand (`var a uint8 = 1; a << 9`).
+        if const_int_value(lhs).is_some() {
+            return;
+        }
+        if let Expr::Ident { name, .. } = unwrap_parens(lhs) {
+            // A local/param binding shadows a file-level const of the same name,
+            // making the operand a value; only an unshadowed file-level const is
+            // the constant shift the overflow pass folds.
+            let shadowed_by_binding = st.env_lookup(name).is_some();
+            let is_file_const = self
+                .file
+                .decls
+                .iter()
+                .any(|d| matches!(d, hy_syntax::Decl::Const(c) if c.name == *name));
+            if !shadowed_by_binding && is_file_const {
+                return;
+            }
+        }
+        if let Some((ty_name, lo, hi)) = self.fixed_width_int_ty_of(st, lhs) {
+            self.check_shift_width(&ty_name, lo, hi, rhs, span);
+        }
+    }
+
+    /// The width half of the shift guard for a compound shift `t <<= rhs` /
+    /// `t >>= rhs`: the target's declared type is the left operand's type.
+    fn check_assign_shift_width(&mut self, st: &FnState, t: &Place, rhs: &Expr, span: Span) {
+        let Some(ty) = self.place_target_ty(st, t) else {
+            return;
+        };
+        if let TypeExpr::Named { name, .. } = self.resolve_type_alias(&ty) {
+            if let Some((lo, hi)) = fixed_width_int_range(&name) {
+                self.check_shift_width(&name, lo, hi, rhs, span);
+            }
+        }
     }
 
     // ------------------------------------------------------------------
