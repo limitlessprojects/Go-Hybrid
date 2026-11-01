@@ -219,6 +219,32 @@ fn equality_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
     kinds_conflict(a, b) && kinds_conflict(b, a)
 }
 
+/// Symmetrical conflict check for built-in `copy(dst, src)` element types.
+///
+/// In Go, `copy(dst, src)` requires both slices to have identical element types
+/// (except for copying a string into a byte slice).
+/// Unlike assignment or return, `copy` operates on existing slice values where untyped
+/// constant adaptability does not apply: `copy([]float64, []int)` and `copy([]any, []int)`
+/// are compile-time errors in Go.
+fn copy_element_kinds_conflict(a: &OpKind, b: &OpKind) -> bool {
+    use OpKind::*;
+    match (a, b) {
+        // Fail-open: unresolved kinds carry no claim.
+        (Unknown, _) | (_, Unknown) => false,
+        // Struct whose name did not resolve is not evidence of mismatch.
+        (Struct(None), _) | (_, Struct(None)) => false,
+        (a, b) if a == b => false,
+        (Slice(a), Slice(b)) | (Array(a), Array(b)) | (Chan(a), Chan(b)) | (Pointer(a), Pointer(b)) => {
+            copy_element_kinds_conflict(a, b)
+        }
+        (Map(k1, v1), Map(k2, v2)) => {
+            copy_element_kinds_conflict(k1, k2) || copy_element_kinds_conflict(v1, v2)
+        }
+        (Fn(..), Fn(..)) => false,
+        _ => true,
+    }
+}
+
 /// Non-nilable types in Go and Hybrid cannot be compared to untyped nil (SPEC §3.1 N1).
 /// Nilable types: pointer, interface, slice, map, channel, function.
 fn is_non_nilable(k: &OpKind) -> bool {
@@ -258,27 +284,51 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         (other, Bool) if !matches!(other, Unknown | Bool | Interface) => true,
 
         // Numeric targets (Int, Float): can convert between Int and Float.
-        // Cannot convert Str, Slice, Map, Chan, Struct to numeric.
-        (Int | Float, Str | Slice(_) | Map(_, _) | Chan(_) | Struct(_)) => true,
+        // Cannot convert Str, Slice, Array, Map, Chan, Struct to numeric.
+        (Int | Float, Str | Slice(_) | Array(_) | Map(_, _) | Chan(_) | Struct(_)) => true,
 
-        // String target: can convert from Int (rune/byte code point) or Slice (byte/rune slice) or Str.
-        // Cannot convert from Float, Bool, Map, Chan, Struct.
-        (Str, Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
+        // String target: can convert from Int (rune/byte code point) or Slice(Int) (byte/rune slice) or Str.
+        // Cannot convert from Float, Bool, Map, Chan, Struct, Array, or non-int Slice.
+        (Str, Float | Bool | Map(_, _) | Chan(_) | Struct(_) | Array(_)) => true,
+        (Str, Slice(elem)) if !matches!(**elem, Unknown | Int) => true,
 
-        // Slice target: can convert from Str (to []byte/[]rune), or Slice/Array.
-        // Cannot convert from Int, Float, Bool, Map, Chan, Struct.
-        (Slice(_), Int | Float | Bool | Map(_, _) | Chan(_) | Struct(_)) => true,
+        // Slice target: can convert from Str (to []byte/[]rune), or Slice of identical element type.
+        // Direct array-to-slice conversion `[]T(arr)` is invalid in Go (must write `arr[:]`).
+        // Cannot convert from Int, Float, Bool, Map, Chan, Struct, Array.
+        (Slice(_), Int | Float | Bool | Map(_, _) | Chan(_) | Struct(_) | Array(_)) => true,
+        (Slice(elem), Str) if !matches!(**elem, Unknown | Int) => true,
+        (Slice(a), Slice(b)) => a != b && **a != Unknown && **b != Unknown,
 
-        // Map target: cannot convert from Int, Float, Bool, Str, Slice, Chan, Struct.
-        (Map(_, _), Int | Float | Bool | Str | Slice(_) | Chan(_) | Struct(_)) => true,
+        // Array target: cannot convert from Str directly, or from non-container.
+        // In Go 1.20+, slice-to-array conversion [N]T(slice) requires matching element types.
+        (Array(_), Int | Float | Bool | Str | Map(_, _) | Chan(_) | Struct(_)) => true,
+        (Array(a), Array(b)) | (Array(a), Slice(b)) => a != b && **a != Unknown && **b != Unknown,
 
-        // Chan target: cannot convert from Int, Float, Bool, Str, Slice, Map, Struct.
-        (Chan(_), Int | Float | Bool | Str | Slice(_) | Map(_, _) | Struct(_)) => true,
+        // Map target: cannot convert from Int, Float, Bool, Str, Slice, Array, Chan, Struct.
+        // Converting between maps requires matching key and value types.
+        (Map(_, _), Int | Float | Bool | Str | Slice(_) | Array(_) | Chan(_) | Struct(_)) => true,
+        (Map(k1, v1), Map(k2, v2)) => {
+            (k1 != k2 && **k1 != Unknown && **k2 != Unknown)
+                || (v1 != v2 && **v1 != Unknown && **v2 != Unknown)
+        }
+
+        // Chan target: cannot convert from Int, Float, Bool, Str, Slice, Array, Map, Struct.
+        // Converting between channels requires matching element types.
+        (Chan(_), Int | Float | Bool | Str | Slice(_) | Array(_) | Map(_, _) | Struct(_)) => true,
+        (Chan(a), Chan(b)) => a != b && **a != Unknown && **b != Unknown,
 
         // Pointer targets and arguments: Go only converts between pointers.
+        // Direct pointer-to-pointer conversions require identical base types
+        // (Go spec §Conversions).
         // A pointer cannot convert to or from any non-pointer type; the one
         // exception is an interface target (`any(p)`), handled above.
-        (Pointer(_), Pointer(_)) => false,
+        (Pointer(a), Pointer(b)) => {
+            if matches!(**a, Unknown | Struct(None)) || matches!(**b, Unknown | Struct(None)) {
+                false
+            } else {
+                a != b
+            }
+        }
         (Pointer(_), Interface) => false,
         (Pointer(_), _) | (_, Pointer(_)) => true,
 
@@ -588,7 +638,10 @@ impl<'a> Collector<'a> {
         };
         let want = self.kind_of_named(&elem, 0);
         let got = self.kind_of_expr(&args[0].value);
-        if kinds_conflict(&want, &got) {
+        let int_to_float_conflict = want == OpKind::Float
+            && got == OpKind::Int
+            && !self.is_untyped_int_const(&args[0].value);
+        if kinds_conflict(&want, &got) || int_to_float_conflict {
             self.emit_e1002(
                 args[0].value.span(),
                 format!(
@@ -987,7 +1040,10 @@ impl<'a> Collector<'a> {
             let want = self.kind_of_ty(t, 0);
             if l.values.len() == 1 && l.names.len() == 1 {
                 let vk = self.kind_of_expr(&l.values[0]);
-                if kinds_conflict(&want, &vk) {
+                let int_float_conflict = want == OpKind::Float
+                    && vk == OpKind::Int
+                    && !self.is_untyped_int_const(&l.values[0]);
+                if kinds_conflict(&want, &vk) || int_float_conflict {
                     self.emit_e1002(
                         l.span,
                         format!(
@@ -1003,7 +1059,10 @@ impl<'a> Collector<'a> {
             } else if l.values.len() > 1 && l.values.len() == l.names.len() {
                 for (name, v) in l.names.iter().zip(l.values.iter()) {
                     let vk = self.kind_of_expr(v);
-                    if kinds_conflict(&want, &vk) {
+                    let int_float_conflict = want == OpKind::Float
+                        && vk == OpKind::Int
+                        && !self.is_untyped_int_const(v);
+                    if kinds_conflict(&want, &vk) || int_float_conflict {
                         self.emit_e1002(
                             l.span,
                             format!(
@@ -1264,16 +1323,23 @@ impl<'a> Collector<'a> {
             Stmt::Managed { body, .. } => self.block_scoped(body),
             Stmt::Match { subject, arms, .. } => {
                 self.expr(subject);
+                let subject_kind = self.kind_of_expr(subject);
                 for arm in arms {
                     self.push_scope();
-                    if let MatchPattern::Path { segments, binding } = &arm.pattern {
-                        if let Some(root) = segments.first() {
-                            self.mention(root);
+                    match &arm.pattern {
+                        MatchPattern::Path { segments, binding } => {
+                            if let Some(root) = segments.first() {
+                                self.mention(root);
+                            }
+                            if let Some(b) = binding {
+                                self.define_elidable(b, subject.span());
+                                self.bind_kind(b, OpKind::Unknown);
+                            }
                         }
-                        if let Some(b) = binding {
-                            self.define_elidable(b, subject.span());
-                            self.bind_kind(b, OpKind::Unknown);
+                        MatchPattern::Lit(lit) => {
+                            self.check_match_lit_pattern(&subject_kind, lit, subject.span());
                         }
+                        MatchPattern::Wildcard => {}
                     }
                     if let Some(g) = &arm.guard {
                         self.expr(g);
@@ -2542,6 +2608,9 @@ impl<'a> Collector<'a> {
         fields: &[FieldInit],
         span: Span,
     ) {
+        for f in fields {
+            self.check_single_value_position(&f.value, "a struct literal field", false);
+        }
         let Some(t) = ty else { return };
         let sk = self.kind_of_ty(t, 0);
         let Some(full_name) = self.struct_name(&sk) else {
@@ -2585,6 +2654,9 @@ impl<'a> Collector<'a> {
                     "a struct literal may only name fields the struct declares",
                 ),
                 Some((_, fty)) => {
+                    if self.non_single_value_count(&f.value).is_some() {
+                        continue;
+                    }
                     let want = self.kind_of_ty_with_subst(fty, &subst, 0);
                     let got = self.kind_of_expr(&f.value);
                     let is_untyped_int_to_float = want == OpKind::Float
@@ -3235,6 +3307,35 @@ impl<'a> Collector<'a> {
             ),
             "the deferred call is checked like any other call: one argument per declared parameter",
         );
+    }
+
+    fn check_match_lit_pattern(&mut self, subject_kind: &OpKind, lit: &LitKind, span: Span) {
+        let pat_kind = match lit {
+            LitKind::Int(_) | LitKind::Char(_) => OpKind::Int,
+            LitKind::Float(_) => OpKind::Float,
+            LitKind::Bool(_) => OpKind::Bool,
+            LitKind::Str(_) | LitKind::RawStr(_) => OpKind::Str,
+            LitKind::Nil => OpKind::Unknown,
+        };
+        if kinds_conflict(subject_kind, &pat_kind) {
+            let lit_str = match lit {
+                LitKind::Int(s) | LitKind::Float(s) | LitKind::Str(s) | LitKind::RawStr(s) => s.as_str(),
+                LitKind::Bool(true) => "true",
+                LitKind::Bool(false) => "false",
+                LitKind::Char(_) => "char",
+                LitKind::Nil => "nil",
+            };
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use match pattern `{}` (type `{}`) on subject of type `{}` — Go refuses `invalid case ... in switch on ... (mismatched types)` (HYB-E1002)",
+                    lit_str,
+                    pat_kind.label(),
+                    subject_kind.label(),
+                ),
+                "ensure match arm patterns match the subject expression's type",
+            );
+        }
     }
 
     /// Family A (#425): `if cond` and `for cond` require a boolean condition.
@@ -4263,6 +4364,9 @@ impl<'a> Collector<'a> {
     }
 
     fn check_array_lit_items(&mut self, elem_ty: &TypeExpr, items: &[Expr]) {
+        for item in items {
+            self.check_single_value_position(item, "an array literal element", false);
+        }
         let resolved_ty = self.ck.resolve_type_alias(elem_ty);
         let expected = self.kind_of_ty(&resolved_ty, 0);
         if expected == OpKind::Unknown {
@@ -4271,6 +4375,9 @@ impl<'a> Collector<'a> {
         for item in items {
             let bare = unwrap_parens(item);
             if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
+                continue;
+            }
+            if self.non_single_value_count(item).is_some() {
                 continue;
             }
             if let Expr::SliceLit {
@@ -4301,13 +4408,15 @@ impl<'a> Collector<'a> {
                 }
             }
             let ik = self.kind_of_expr(item);
-            if ik == OpKind::Unknown || ik == expected {
+            if ik == OpKind::Unknown || ik == expected || expected == OpKind::Interface {
                 continue;
             }
-            if expected == OpKind::Float
+            let is_untyped_int_to_float = expected == OpKind::Float
                 && ik == OpKind::Int
-                && crate::const_overflow::const_int_value(item).is_some()
-            {
+                && self.is_untyped_int_const(item);
+            let conflict = (expected == OpKind::Float && ik == OpKind::Int && !is_untyped_int_to_float)
+                || kinds_conflict(&expected, &ik);
+            if !conflict {
                 continue;
             }
             self.emit_e1002(
@@ -4324,6 +4433,9 @@ impl<'a> Collector<'a> {
     }
 
     fn check_slice_lit_items(&mut self, elem_ty: &TypeExpr, items: &[Expr]) {
+        for item in items {
+            self.check_single_value_position(item, "a slice literal element", false);
+        }
         let resolved_ty = self.ck.resolve_type_alias(elem_ty);
         let expected = self.kind_of_ty(&resolved_ty, 0);
         if expected == OpKind::Unknown {
@@ -4332,6 +4444,9 @@ impl<'a> Collector<'a> {
         for item in items {
             let bare = unwrap_parens(item);
             if matches!(bare, Expr::Lit { kind: LitKind::Nil, .. }) {
+                continue;
+            }
+            if self.non_single_value_count(item).is_some() {
                 continue;
             }
             if let Expr::SliceLit {
@@ -4471,12 +4586,16 @@ impl<'a> Collector<'a> {
         val_ty: &TypeExpr,
         entries: &[(Expr, Expr)],
     ) {
+        for (k, v) in entries {
+            self.check_single_value_position(k, "a map key", false);
+            self.check_single_value_position(v, "a map value", false);
+        }
         let resolved_key = self.ck.resolve_type_alias(key_ty);
         let exp_key = self.kind_of_ty(&resolved_key, 0);
         let resolved_val = self.ck.resolve_type_alias(val_ty);
         let exp_val = self.kind_of_ty(&resolved_val, 0);
         for (k, v) in entries {
-            if exp_key != OpKind::Unknown && exp_key != OpKind::Interface {
+            if exp_key != OpKind::Unknown && exp_key != OpKind::Interface && self.non_single_value_count(k).is_none() {
                 let kk = self.kind_of_expr(k);
                 let is_untyped_int_to_float = exp_key == OpKind::Float
                     && kk == OpKind::Int
@@ -4499,7 +4618,7 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
-            if exp_val != OpKind::Unknown && exp_val != OpKind::Interface {
+            if exp_val != OpKind::Unknown && exp_val != OpKind::Interface && self.non_single_value_count(v).is_none() {
                 let bare_v = unwrap_parens(v);
                 if matches!(bare_v, Expr::Lit { kind: LitKind::Nil, .. }) {
                     continue;
@@ -4941,6 +5060,25 @@ impl<'a> Collector<'a> {
     /// (`builtins.rs`) to resolved binding shapes.
     fn check_builtin_operand_kinds(&mut self, name: &str, args: &[CallArg], span: Span) {
         match name {
+            "make" => {
+                for arg in args.iter().skip(1) {
+                    if matches!(unwrap_parens(&arg.value), Expr::Lit { .. }) {
+                        continue;
+                    }
+                    let ak = self.kind_of_expr(&arg.value);
+                    if ak != OpKind::Unknown && ak != OpKind::Int {
+                        self.emit_e1002(
+                            arg.value.span(),
+                            format!(
+                                "non-integer size argument `{}` (type `{}`) in `make` — Go refuses `cannot use ... as int value in make` (HYB-E1002)",
+                                arg.value.render(),
+                                ak.label()
+                            ),
+                            "size arguments in `make` (len, cap, channel buffer size) must be integer types",
+                        );
+                    }
+                }
+            }
             "len" => {
                 if args.len() != 1 {
                     return; // arity handled by builtins.rs
@@ -5037,7 +5175,10 @@ impl<'a> Collector<'a> {
                         if let Some(elem) = self.set_elem_of_expr(map_arg) {
                             let want = self.kind_of_named(&elem, 0);
                             let got = self.kind_of_expr(key_arg);
-                            if kinds_conflict(&want, &got) {
+                            let int_to_float_conflict = want == OpKind::Float
+                                && got == OpKind::Int
+                                && !self.is_untyped_int_const(key_arg);
+                            if kinds_conflict(&want, &got) || int_to_float_conflict {
                                 self.emit_e2005(
                                     span,
                                     format!(
@@ -5148,7 +5289,7 @@ impl<'a> Collector<'a> {
 
                 match (&dk, &sk) {
                     (OpKind::Slice(dst_elem), OpKind::Slice(src_elem)) => {
-                        if kinds_conflict(dst_elem, src_elem) {
+                        if copy_element_kinds_conflict(dst_elem, src_elem) {
                             self.emit_e1002(
                                 span,
                                 format!(
@@ -5191,6 +5332,53 @@ impl<'a> Collector<'a> {
                         ),
                         "`clear` requires a slice or map operand",
                     );
+                }
+            }
+            "min" | "max" => {
+                let mut first_arg: Option<(&Expr, OpKind)> = None;
+                for arg in args {
+                    let k = self.kind_of_expr(&arg.value);
+                    if matches!(k, OpKind::Unknown | OpKind::Void) {
+                        continue;
+                    }
+                    let is_ordered = matches!(k, OpKind::Int | OpKind::Float | OpKind::Str);
+                    if !is_ordered {
+                        self.emit_e2005(
+                            span,
+                            format!(
+                                "invalid argument `{}` (type `{}`) for `{name}`: type has no order (HYB-E2005)",
+                                arg.value.render(),
+                                k.label()
+                            ),
+                            "the arguments to `min` and `max` must have ordered type (integers, floats, or strings)",
+                        );
+                        return;
+                    }
+                    if let Some((prev_arg, prev_k)) = &first_arg {
+                        let is_compatible = if *prev_k == k {
+                            true
+                        } else if *prev_k == OpKind::Float && k == OpKind::Int {
+                            self.is_untyped_int_const(&arg.value)
+                        } else if *prev_k == OpKind::Int && k == OpKind::Float {
+                            self.is_untyped_int_const(prev_arg)
+                        } else {
+                            false
+                        };
+                        if !is_compatible {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "mismatched types `{}` and `{}` in `{name}` (HYB-E1002)",
+                                    prev_k.label(),
+                                    k.label()
+                                ),
+                                "all arguments to `min` and `max` must have matching ordered types",
+                            );
+                            return;
+                        }
+                    } else {
+                        first_arg = Some((&arg.value, k));
+                    }
                 }
             }
             _ => {}

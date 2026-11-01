@@ -662,6 +662,7 @@ impl<'a> Checker<'a> {
             .chain(iter_st.scopes.iter().flat_map(|s| s.iter()))
             .any(|(name, b)| {
                 b.moved.is_some()
+                    || b.slot_loan
                     || self.non_owned_origin_of(iter_st, name).is_some()
                     || iter_st.aliases.contains_key(name)
                     || !iter_st.share_group(name).is_empty()
@@ -754,6 +755,9 @@ impl<'a> Checker<'a> {
             let mut uses = Vec::new();
             crate::walk::own_uses_with_results(stmt, &replay_st.named_results, &mut uses);
             self.check_uses(&replay_st, &uses);
+            self.check_addr_of_loan(&replay_st, &uses);
+            self.check_slot_loan_rebind(&replay_st, stmt);
+            self.check_stmt_addr_of_loan_projections(&replay_st, stmt, false);
 
             match stmt {
                 hy_syntax::Stmt::Local(l) => {
@@ -890,7 +894,7 @@ impl<'a> Checker<'a> {
 
         let new_diags = self.diags.split_off(diags_len_before);
         for d in new_diags {
-            if d.code == "HYB-E3003" || d.code == "HYB-E3004" {
+            if d.code == "HYB-E3003" || d.code == "HYB-E3004" || d.code == "HYB-E3104" {
                 if !self
                     .diags
                     .iter()

@@ -312,7 +312,7 @@ fn build_tables(ck: &mut Checker<'_>) {
                 ck.check_expr_builtin_args(&c.value);
                 let b = ck.const_binding(c);
                 ck.consts.insert(c.name.clone(), b);
-                ck.check_const_init_is_constant(&c.name, &c.value, None);
+                ck.check_const_init_is_constant(&c.name, c.ty.as_ref(), &c.value, None);
             }
             Decl::Struct(s) => {
                 for f in &s.fields {

@@ -190,6 +190,28 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         }
+                        if pkg == "serde_json" && method == "set" {
+                            if let Some(val_arg) = cr.args.get(2) {
+                                if let Some(val_root) = val_arg.value.root_ident() {
+                                    let active_handle = self
+                                        .lookup_binding(st, val_root)
+                                        .map(|b| b.shape.is_handle() && b.moved.is_none())
+                                        .unwrap_or(false);
+                                    if active_handle {
+                                        let rspan =
+                                            root_ident_span(&val_arg.value).unwrap_or(val_arg.span);
+                                        self.mark_move(
+                                            st,
+                                            val_root,
+                                            cr.span,
+                                            format!("the consuming call `{}`", cr.callee.render()),
+                                            MoveKind::Consumed,
+                                        );
+                                        stmt_consumes.push((rspan, cr.span));
+                                    }
+                                }
+                            }
+                        }
                     }
                     CallMode::Consume => {
                         for a in cr.args {
@@ -297,6 +319,37 @@ impl<'a> Checker<'a> {
                     }
                     CallMode::Mutate => {
                         self.check_a2_conflict(st, cr, &root, idx);
+                        // A7 / O13: `v.set(key, value_handle)` moves `value_handle`'s
+                        // payload into `v` (`hy_json_set` frees the value slot and
+                        // zeroes its handle ID). Check A2 conflicts on `value_handle`
+                        // and mark it consumed.
+                        if (tname == "serde_json.value" || tname == "serde_json.view")
+                            && method == "set"
+                        {
+                            if let Some(val_arg) = cr.args.get(1) {
+                                if let Some(val_root) = val_arg.value.root_ident() {
+                                    let active_handle = self
+                                        .lookup_binding(st, val_root)
+                                        .map(|b| b.shape.is_handle() && b.moved.is_none())
+                                        .unwrap_or(false);
+                                    if active_handle {
+                                        if val_root != root {
+                                            self.check_a2_conflict(st, cr, val_root, idx);
+                                        }
+                                        let rspan =
+                                            root_ident_span(&val_arg.value).unwrap_or(val_arg.span);
+                                        self.mark_move(
+                                            st,
+                                            val_root,
+                                            cr.span,
+                                            format!("the consuming call `{}`", cr.callee.render()),
+                                            MoveKind::Consumed,
+                                        );
+                                        stmt_consumes.push((rspan, cr.span));
+                                    }
+                                }
+                            }
+                        }
                     }
                     CallMode::Consume => {
                         // A7: own-transfer INTO the API — receiver moved-from
@@ -553,7 +606,7 @@ impl<'a> Checker<'a> {
     /// overwritten by, or overwrites, the loan's store-back. `owner` is the
     /// binding being (re)loaned, whose own earlier loan does not conflict.
     #[allow(clippy::too_many_arguments)]
-    fn emit_o8_alias_if_live(
+    pub(crate) fn emit_o8_alias_if_live(
         &mut self,
         st: &FnState,
         path: &str,
@@ -1501,7 +1554,7 @@ impl<'a> Checker<'a> {
         // Issue #205: reject non-constant `const` initializers (emitter keeps Go `const`).
         if matches!(l.kind, LocalKind::Const) {
             for (name, value) in l.names.iter().zip(l.values.iter()) {
-                self.check_const_init_is_constant(name, value, Some(st));
+                self.check_const_init_is_constant(name, l.ty.as_ref(), value, Some(st));
             }
         }
         if l.values.is_empty() {
@@ -1548,7 +1601,10 @@ impl<'a> Checker<'a> {
                 reads_self: bool,
                 shadowed_origin: Option<String>,
                 prior_alias: Option<String>,
+                prior_children: Vec<String>,
                 prior_shares: Vec<String>,
+                prior_shadow_links: HashSet<(String, usize)>,
+                outer_depth: Option<usize>,
             }
             let resolved: Vec<MultiDefInfo> = l
                 .names
@@ -1587,6 +1643,20 @@ impl<'a> Checker<'a> {
                     } else {
                         None
                     };
+                    let prior_children: Vec<String> = if reads_self {
+                        st.aliases
+                            .iter()
+                            .filter_map(|(k, v)| {
+                                if v == name && k != name {
+                                    Some(k.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     let prior_shares: Vec<String> = if reads_self {
                         st.may_share
                             .get(name)
@@ -1595,6 +1665,17 @@ impl<'a> Checker<'a> {
                     } else {
                         Vec::new()
                     };
+                    let prior_shadow_links = if reads_self {
+                        st.shadow_links.get(name).cloned().unwrap_or_default()
+                    } else {
+                        HashSet::new()
+                    };
+                    let outer_depth =
+                        if st.scopes.last().is_some_and(|top| !top.contains_key(name)) {
+                            st.lookup_depth(name)
+                        } else {
+                            None
+                        };
                     MultiDefInfo {
                         name: name.clone(),
                         shape,
@@ -1602,7 +1683,10 @@ impl<'a> Checker<'a> {
                         reads_self,
                         shadowed_origin,
                         prior_alias,
+                        prior_children,
                         prior_shares,
+                        prior_shadow_links,
+                        outer_depth,
                     }
                 })
                 .collect();
@@ -1617,8 +1701,25 @@ impl<'a> Checker<'a> {
                     self.extend_call_loans_to_view(st, &l.values[0], &info.name, idx);
                 }
                 if info.reads_self {
+                    if !info.prior_shadow_links.is_empty() {
+                        st.shadow_links
+                            .entry(info.name.clone())
+                            .or_default()
+                            .extend(info.prior_shadow_links);
+                    }
+                    if let Some(depth) = info.outer_depth {
+                        st.shadow_links
+                            .entry(info.name.clone())
+                            .or_default()
+                            .insert((info.name.clone(), depth));
+                    }
                     if let Some(pa) = info.prior_alias {
                         st.aliases.insert(info.name.clone(), pa);
+                    }
+                    for child in info.prior_children {
+                        if child != info.name {
+                            st.aliases.insert(child, info.name.clone());
+                        }
                     }
                     for peer in info.prior_shares {
                         st.share_edge(&info.name, &peer);
@@ -1751,14 +1852,27 @@ impl<'a> Checker<'a> {
                 // `x := move y` — y is moved; x takes ownership (no alias);
                 // non-ident moves (`x := move s.data`) trigger HYB-E3004 (O5.4).
                 let moved_non_owned = self.moved_non_owned_origin_in_expr(&pre_st, value);
+                let rhs_slot_loan = match unwrap_parens(value) {
+                    Expr::Ident { name: src, .. } => {
+                        self.lookup_binding(&pre_st, src).is_some_and(|b| b.slot_loan)
+                    }
+                    Expr::Move { operand, .. } => match unwrap_parens(operand) {
+                        Expr::Ident { name: src, .. } => {
+                            self.lookup_binding(&pre_st, src).is_some_and(|b| b.slot_loan)
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                };
                 if move_operand_ident(value).is_some()
                     || matches!(unwrap_parens(value), Expr::Move { .. })
                 {
                     self.define_binding(st, name, shape, ty, immutable, managed, is_let);
-                    if let Some(origin) = moved_non_owned {
-                        if let Some(b) = st.env_lookup_mut(name) {
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        if let Some(origin) = moved_non_owned {
                             b.non_owned_origin = Some(origin);
                         }
+                        b.slot_loan |= rhs_slot_loan;
                     }
                     self.record_move_const_and_a3_loans(st, name, value, idx);
                     continue;
@@ -1831,6 +1945,11 @@ impl<'a> Checker<'a> {
                     None
                 };
                 self.define_binding(st, name, shape, ty, immutable, managed, is_let);
+                if rhs_slot_loan {
+                    if let Some(b) = st.env_lookup_mut(name) {
+                        b.slot_loan = true;
+                    }
+                }
                 if let Some(origin) = &moved_non_owned {
                     if let Some(b) = st.env_lookup_mut(name) {
                         if b.non_owned_origin.is_none() {
@@ -2854,6 +2973,7 @@ impl<'a> Checker<'a> {
             Expr::Ident { name, .. } => self.lookup_binding(st, name).is_some(),
             Expr::Field { base, name, .. } => {
                 !matches!(crate::model::unwrap_parens(base), Expr::Ident { name: p, .. } if self.lookup_binding(st, p).is_none() && self.known_package(p))
+                    && receiver_type_name(&self.shape_of_expr(st, base)).is_none()
                     && (!matches!(name.as_str(), "insert" | "contains" | "remove" | "len" | "pop")
                         || self.method_decls.iter().any(|((_, m), _)| m == name))
             }
@@ -5527,6 +5647,11 @@ impl<'a> Checker<'a> {
         } else {
             None
         };
+        let prev_slot_loan = if same_scope_redecl {
+            self.lookup_binding(st, name).is_some_and(|b| b.slot_loan)
+        } else {
+            false
+        };
         let closure_peers: Vec<String> = if same_scope_redecl && !matches!(shape, TypeShape::Closure) {
             st.may_share
                 .get(name)
@@ -5573,7 +5698,7 @@ impl<'a> Checker<'a> {
                 managed_taint: managed, // O6.2: born inside `managed {}`
                 moved: prev_moved,
                 non_owned_origin,
-                slot_loan: false,
+                slot_loan: prev_slot_loan,
             },
         );
     }
@@ -5649,6 +5774,40 @@ impl<'a> Checker<'a> {
             }
         }
 
+        let reads_self = self.shape_may_share(&shape)
+            && (self.value_reads_storage_of(st, subject, name) || roots.iter().any(|r| r == name));
+        let prior_children: Vec<String> = if reads_self {
+            st.aliases
+                .iter()
+                .filter_map(|(k, v)| {
+                    if v == name && k != name {
+                        Some(k.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let prior_shadow_links: HashSet<(String, usize)> = if reads_self {
+            let mut links = st.shadow_links.get(name).cloned().unwrap_or_default();
+            for r in &roots {
+                if let Some(rl) = st.shadow_links.get(r) {
+                    links.extend(rl.iter().cloned());
+                }
+            }
+            links
+        } else {
+            HashSet::new()
+        };
+        let outer_depth =
+            if reads_self && st.scopes.last().is_some_and(|top| !top.contains_key(name)) {
+                st.lookup_depth(name)
+            } else {
+                None
+            };
+
         let self_shadows_const = pre_const_root.as_deref() == Some(name);
         self.define_binding(
             st,
@@ -5659,6 +5818,26 @@ impl<'a> Checker<'a> {
             managed || pre_tainted,
             false,
         );
+
+        if reads_self {
+            if !prior_shadow_links.is_empty() {
+                st.shadow_links
+                    .entry(name.to_string())
+                    .or_default()
+                    .extend(prior_shadow_links);
+            }
+            if let Some(depth) = outer_depth {
+                st.shadow_links
+                    .entry(name.to_string())
+                    .or_default()
+                    .insert((name.to_string(), depth));
+            }
+            for child in prior_children {
+                if child != name {
+                    st.aliases.insert(child, name.to_string());
+                }
+            }
+        }
 
         self.record_may_share(st, name, subject);
         self.record_alias(st, name, subject);
@@ -7010,7 +7189,8 @@ impl<'a> Checker<'a> {
                     .copied()
                 {
                     if let Some(r) = &decl.receiver {
-                        let ptr_recv = matches!(r.ty, hy_syntax::TypeExpr::Pointer { .. });
+                        let ptr_recv =
+                            r.is_pointer || matches!(r.ty, hy_syntax::TypeExpr::Pointer { .. });
                         let recv_const = if ptr_recv {
                             base.root_ident()
                                 .filter(|root| !declared.contains(*root))

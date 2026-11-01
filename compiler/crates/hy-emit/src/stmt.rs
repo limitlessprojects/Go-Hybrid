@@ -279,6 +279,11 @@ impl Emitter {
                                     .map(|n| n.as_str())
                                     .collect()
                             };
+                            for n in names {
+                                if !bound.contains(&n.as_str()) {
+                                    self.local_vars.remove(n);
+                                }
+                            }
                             wrap = Self::case_body_redefines_binding(&arm.body.stmts, &bound);
                         }
                         SelectArmKind::Send { chan, value, .. } => {
@@ -600,7 +605,7 @@ impl Emitter {
         }
     }
 
-    fn expr_has_call_or_recv(e: &Expr) -> bool {
+    pub(crate) fn expr_has_call_or_recv(e: &Expr) -> bool {
         match e {
             Expr::Call { .. } | Expr::Receive { .. } | Expr::Try { .. } => true,
             Expr::Binary { lhs, rhs, .. } => {
@@ -1232,12 +1237,14 @@ impl Emitter {
                 _ => false,
             },
             Expr::Field { base, name, .. } => {
-                if let Expr::Ident { name: vn, .. } = base.as_ref() {
-                    if let Some(sn) = self.var_struct.get(vn) {
-                        if let Some(fields) = self.struct_fields.get(sn) {
-                            if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
-                                return fty.starts_with("set[") || fty == "set";
-                            }
+                // Recursive since #1553: `o.sub.seen` is a set field of a
+                // nested struct, not just `o.seen`. The single-hop read
+                // made `len(o.sub.seen)` / `delete(o.sub.seen, k)` fall
+                // through to raw Go builtins on the `set[T]` wrapper.
+                if let Some(sn) = self.user_struct_name_of(base.as_ref()) {
+                    if let Some(fields) = self.struct_fields.get(sn) {
+                        if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
+                            return fty.starts_with("set[") || fty == "set";
                         }
                     }
                 }
@@ -1909,6 +1916,7 @@ impl Emitter {
                 // `for _ in a..b` (differential corpus 16/17/18): Go has no
                 // blank := variable — a fresh temp carries the count. The
                 // semantics are identical: the variable is never read.
+                let var_in_scope = self.local_vars.contains(var);
                 let v = if var == "_" {
                     self.next_temp("hyBlank")
                 } else {
@@ -1935,7 +1943,9 @@ impl Emitter {
                         "for {}, {} := {}, {} <= {}; {}; {}++ {{",
                         v, cont, lo_once, lo_once, hi_once, cont, v
                     )
-                } else if !Self::expr_mentions_ident(hi, &v) && !Self::expr_has_call_or_recv(hi) {
+                } else if (!Self::expr_mentions_ident(hi, &v) || !var_in_scope)
+                    && !Self::expr_has_call_or_recv(hi)
+                {
                     format!("for {} := {}; {} < {}; {}++ {{", v, lo_t, v, hi_t, v)
                 } else {
                     let hi_once = self.next_temp("hyHi");
@@ -1960,12 +1970,14 @@ impl Emitter {
                         if self.is_set_expr(expr) {
                             self.shadow_local_names(vars);
                             if !read {
+                                self.local_vars.remove(&vars[0]);
                                 format!("for range {}.m {{", e)
                             } else {
                                 format!("for {} := range {}.m {{", vars[0], e)
                             }
                         } else if !read {
                             self.shadow_local_names(vars);
+                            self.local_vars.remove(&vars[0]);
                             format!("for range {} {{", e)
                         } else {
                             // Hybrid's single-var iterate binds the VALUE.
@@ -2022,11 +2034,13 @@ impl Emitter {
                         let a = if crate::rangebind::body_reads(body, &vars[0]) {
                             vars[0].clone()
                         } else {
+                            self.local_vars.remove(&vars[0]);
                             "_".to_string()
                         };
                         let c = if crate::rangebind::body_reads(body, &vars[1]) {
                             vars[1].clone()
                         } else {
+                            self.local_vars.remove(&vars[1]);
                             "_".to_string()
                         };
                         if a == "_" && c == "_" {
@@ -2346,7 +2360,16 @@ impl Emitter {
             let matched = self.next_temp("hyMatched");
             self.push(&format!("{} := false", matched));
             let mut exhausted = false;
+            let mut seen_unguarded_some = false;
+            let mut seen_unguarded_none = false;
+            let mut emitted_arms: Vec<&MatchArm> = Vec::new();
             for (kind, arm) in &classified {
+                if (matches!(kind, ArmKind::Some(_)) && seen_unguarded_some)
+                    || (matches!(kind, ArmKind::NoneArm) && seen_unguarded_none)
+                {
+                    continue;
+                }
+                emitted_arms.push(*arm);
                 let (cond, bind) = match kind {
                     ArmKind::Some(b) => (format!("!{} && {}.ok", matched, temp), Some(b.as_str())),
                     ArmKind::NoneArm => (format!("!{} && !{}.ok", matched, temp), None),
@@ -2365,16 +2388,26 @@ impl Emitter {
                         self.push(&format!("if {} {{", gt));
                         self.indent += 1;
                         self.push(&format!("{} = true", matched));
-                        if let Some(b) = bind.filter(|b| *b != "_" && !greads && crate::rangebind::body_reads(&arm.body, b)) {
-                            self.push(&format!("{} := {}.val", b, temp));
+                        let breads = bind.is_some_and(|b| b != "_" && !greads && crate::rangebind::body_reads(&arm.body, b));
+                        if let Some(b) = bind {
+                            if breads {
+                                self.push(&format!("{} := {}.val", b, temp));
+                            } else if !greads {
+                                self.local_vars.remove(b);
+                            }
                         }
                         self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                         self.indent -= 1;
                         self.push("}");
                     } else {
                         self.push(&format!("{} = true", matched));
-                        if let Some(b) = bind.filter(|b| *b != "_" && crate::rangebind::body_reads(&arm.body, b)) {
-                            self.push(&format!("{} := {}.val", b, temp));
+                        let breads = bind.is_some_and(|b| b != "_" && crate::rangebind::body_reads(&arm.body, b));
+                        if let Some(b) = bind {
+                            if breads {
+                                self.push(&format!("{} := {}.val", b, temp));
+                            } else {
+                                self.local_vars.remove(b);
+                            }
                         }
                         self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                     }
@@ -2384,7 +2417,20 @@ impl Emitter {
                 self.indent -= 1;
                 self.push("}");
                 res?;
-                if matches!(kind, ArmKind::Wildcard) && arm.guard.is_none() { exhausted = true; break; }
+                if arm.guard.is_none() {
+                    match kind {
+                        ArmKind::Wildcard => {
+                            exhausted = true;
+                            break;
+                        }
+                        ArmKind::Some(_) => seen_unguarded_some = true,
+                        ArmKind::NoneArm => seen_unguarded_none = true,
+                    }
+                    if seen_unguarded_some && seen_unguarded_none {
+                        exhausted = true;
+                        break;
+                    }
+                }
             }
             if !exhausted {
                 if let Some(inherited) = self.branch_inherit.clone() {
@@ -2395,8 +2441,8 @@ impl Emitter {
                     self.push("}");
                 }
             }
-            let covers_all = exhausted || (has_unguarded_some && classified.iter().any(|(k, a)| matches!(k, ArmKind::NoneArm) && a.guard.is_none()));
-            if covers_all && classified.iter().all(|(_, a)| matches!(a.body.stmts.last(), Some(Stmt::Return { .. }))) {
+            let covers_all = exhausted || (seen_unguarded_some && seen_unguarded_none);
+            if covers_all && emitted_arms.iter().all(|a| matches!(a.body.stmts.last(), Some(Stmt::Return { .. }))) {
                 self.push("panic(\"unreachable\")");
             }
         } else if simple_unguarded_chain {
@@ -2426,11 +2472,11 @@ impl Emitter {
                             let gt = self.emit_expr(g, 0)?;
                             self.push(&format!("if {} {{", gt));
                             self.indent += 1;
-                            if *binding != "_"
-                                && prebound_guard_var.as_deref() != Some(binding.as_str())
-                                && crate::rangebind::body_reads(&arm.body, binding)
-                            {
+                            let prebound = prebound_guard_var.as_deref() == Some(binding.as_str());
+                            if *binding != "_" && !prebound && crate::rangebind::body_reads(&arm.body, binding) {
                                 self.push(&format!("{} := {}.val", binding, temp));
+                            } else if !prebound {
+                                self.local_vars.remove(*binding);
                             }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                             self.indent -= 1;
@@ -2442,11 +2488,11 @@ impl Emitter {
                                 self.push("} else {");
                                 self.indent += 1;
                             }
-                            if *binding != "_"
-                                && prebound_guard_var.as_deref() != Some(binding.as_str())
-                                && crate::rangebind::body_reads(&arm.body, binding)
-                            {
+                            let prebound = prebound_guard_var.as_deref() == Some(binding.as_str());
+                            if *binding != "_" && !prebound && crate::rangebind::body_reads(&arm.body, binding) {
                                 self.push(&format!("{} := {}.val", binding, temp));
+                            } else if !prebound {
+                                self.local_vars.remove(*binding);
                             }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                             if chain_opened {
@@ -2514,6 +2560,8 @@ impl Emitter {
                                 && crate::rangebind::body_reads(&arm.body, binding)
                             {
                                 self.push(&format!("{} := {}.val", binding, temp));
+                            } else if !guard_reads {
+                                self.local_vars.remove(*binding);
                             }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                             self.indent -= 1;
@@ -2522,6 +2570,8 @@ impl Emitter {
                         None => {
                             if *binding != "_" && crate::rangebind::body_reads(&arm.body, binding) {
                                 self.push(&format!("{} := {}.val", binding, temp));
+                            } else {
+                                self.local_vars.remove(*binding);
                             }
                             self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                         }
@@ -2539,6 +2589,13 @@ impl Emitter {
                     self.push("} else {");
                     self.emit_block_body(&arm.body.stmts)?;
                     self.push("}");
+                    let all_return = reachable_some_arms
+                        .iter()
+                        .all(|(_, a)| matches!(a.body.stmts.last(), Some(Stmt::Return { .. })))
+                        && matches!(arm.body.stmts.last(), Some(Stmt::Return { .. }));
+                    if all_return {
+                        self.push("panic(\"unreachable\")");
+                    }
                 }
                 None => {
                     if let Some(inherited) = self.branch_inherit.clone() {
@@ -2586,6 +2643,8 @@ impl Emitter {
                         && crate::rangebind::body_reads(&arm.body, binding)
                     {
                         self.push(&format!("{} := {}.val", binding, temp));
+                    } else if !guard_reads {
+                        self.local_vars.remove(*binding);
                     }
                     self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                     self.indent -= 1;
@@ -2625,6 +2684,16 @@ impl Emitter {
                 self.emit_arm_stmts_with_loans(&arm.body.stmts)?;
                 self.indent -= 1;
                 self.push("}");
+                let all_return = reachable_some_arms
+                    .iter()
+                    .all(|(_, a)| matches!(a.body.stmts.last(), Some(Stmt::Return { .. })))
+                    && none_arm.is_none_or(|a| {
+                        matches!(a.body.stmts.last(), Some(Stmt::Return { .. }))
+                    })
+                    && matches!(arm.body.stmts.last(), Some(Stmt::Return { .. }));
+                if all_return {
+                    self.push("panic(\"unreachable\")");
+                }
             } else if let Some(inherited) = self.branch_inherit.clone() {
                 self.push(&format!("if !{} {{", matched_temp));
                 self.indent += 1;
