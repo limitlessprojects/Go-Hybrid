@@ -91,7 +91,7 @@ def check(root):
     links = 0
     refs = 0
     if not claims_file.is_file():
-        return {"ok": False, "rows": 0, "links": 0,
+        return {"ok": False, "rows": 0, "links": 0, "refs": 0,
                 "issues": [{"row": 0, "kind": "missing-claims-file", "target": str(claims_file)}]}
     text = claims_file.read_text(encoding="utf-8", errors="replace")
     for row_number, evidence in table_rows(text):
@@ -148,6 +148,8 @@ def check(root):
             refs += 1
             if corpus_dir.is_dir() and not list(corpus_dir.glob("%02d-*.hy" % int(number))):
                 issues.append({"row": row_number, "kind": "missing-corpus-number", "target": number})
+    if rows == 0:
+        issues.append({"row": 0, "kind": "empty-claims-table", "target": str(claims_file)})
     return {"ok": not issues, "rows": rows, "links": links, "refs": refs, "issues": issues}
 
 
