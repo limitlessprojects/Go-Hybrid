@@ -148,6 +148,8 @@ def check(root):
             refs += 1
             if corpus_dir.is_dir() and not list(corpus_dir.glob("%02d-*.hy" % int(number))):
                 issues.append({"row": row_number, "kind": "missing-corpus-number", "target": number})
+    if rows == 0:
+        issues.append({"row": 0, "kind": "no-claims-rows", "target": str(claims_file)})
     return {"ok": not issues, "rows": rows, "links": links, "refs": refs, "issues": issues}
 
 

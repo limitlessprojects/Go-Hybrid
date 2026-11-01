@@ -94,6 +94,15 @@ class CheckClaimsLinksTest(unittest.TestCase):
         kinds = [i["kind"] for i in report["issues"]]
         self.assertIn("missing-corpus-number", kinds)
 
+    def test_empty_claims_table_fails_closed(self):
+        (self.root / "GUARANTEES.md").write_text(
+            "# GUARANTEES\n\n## The claims table\n\nNo rows.\n", encoding="utf-8")
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 1)
+        report = json.loads(result.stdout)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["issues"][0]["kind"], "no-claims-rows")
+
     def test_missing_claims_file_is_reported(self):
         (self.root / "GUARANTEES.md").unlink()
         result = self.run_tool()
