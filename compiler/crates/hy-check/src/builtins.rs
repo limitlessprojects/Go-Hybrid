@@ -414,6 +414,15 @@ impl<'a> Checker<'a> {
                         span,
                         "`min` requires at least 1 argument, found 0 (HYB-E2005)".to_string(),
                     );
+                    return;
+                }
+                for arg in args {
+                    if is_disallowed_min_max_operand(&arg.value) {
+                        self.emit_builtin(
+                            span,
+                            "`min` operand cannot be untyped `nil` (HYB-E2005)".to_string(),
+                        );
+                    }
                 }
             }
             "max" => {
@@ -422,6 +431,15 @@ impl<'a> Checker<'a> {
                         span,
                         "`max` requires at least 1 argument, found 0 (HYB-E2005)".to_string(),
                     );
+                    return;
+                }
+                for arg in args {
+                    if is_disallowed_min_max_operand(&arg.value) {
+                        self.emit_builtin(
+                            span,
+                            "`max` operand cannot be untyped `nil` (HYB-E2005)".to_string(),
+                        );
+                    }
                 }
             }
             "real" => {
@@ -432,6 +450,13 @@ impl<'a> Checker<'a> {
                             "`real` requires exactly 1 complex argument, found {} (HYB-E2005)",
                             args.len()
                         ),
+                    );
+                    return;
+                }
+                if is_disallowed_real_imag_operand(&args[0].value) {
+                    self.emit_builtin(
+                        span,
+                        "`real` requires a complex argument — string, boolean, and untyped nil are invalid (HYB-E2005)".to_string(),
                     );
                 }
             }
@@ -444,6 +469,13 @@ impl<'a> Checker<'a> {
                             args.len()
                         ),
                     );
+                    return;
+                }
+                if is_disallowed_real_imag_operand(&args[0].value) {
+                    self.emit_builtin(
+                        span,
+                        "`imag` requires a complex argument — string, boolean, and untyped nil are invalid (HYB-E2005)".to_string(),
+                    );
                 }
             }
             "complex" => {
@@ -455,6 +487,15 @@ impl<'a> Checker<'a> {
                             args.len()
                         ),
                     );
+                    return;
+                }
+                for arg in args {
+                    if is_disallowed_complex_operand(&arg.value) {
+                        self.emit_builtin(
+                            span,
+                            "`complex` requires numeric arguments — string, boolean, and untyped nil are invalid (HYB-E2005)".to_string(),
+                        );
+                    }
                 }
             }
             _ => {}
@@ -1079,3 +1120,31 @@ fn is_string_literal(e: &Expr) -> bool {
         }
     )
 }
+
+fn is_disallowed_real_imag_operand(e: &Expr) -> bool {
+    match unwrap_parens(e) {
+        Expr::Lit { kind, .. } => matches!(
+            kind,
+            LitKind::Str(_) | LitKind::RawStr(_) | LitKind::Bool(_) | LitKind::Nil
+        ),
+        _ => false,
+    }
+}
+
+fn is_disallowed_complex_operand(e: &Expr) -> bool {
+    match unwrap_parens(e) {
+        Expr::Lit { kind, .. } => matches!(
+            kind,
+            LitKind::Str(_) | LitKind::RawStr(_) | LitKind::Bool(_) | LitKind::Nil
+        ),
+        _ => false,
+    }
+}
+
+fn is_disallowed_min_max_operand(e: &Expr) -> bool {
+    match unwrap_parens(e) {
+        Expr::Lit { kind, .. } => matches!(kind, LitKind::Nil),
+        _ => false,
+    }
+}
+
