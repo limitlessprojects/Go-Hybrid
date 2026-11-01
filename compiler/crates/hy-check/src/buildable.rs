@@ -221,6 +221,7 @@ fn canonical_numeric_name(name: &str) -> Option<&'static str> {
 
 /// #2771 — `[3]int` yes; `[]int` (slice), `[N]int` (non-constant length), and
 /// named types no — so only genuinely sized arrays are compared.
+#[allow(dead_code)]
 fn is_sized_array_spelling(s: &str) -> bool {
     let t = s.trim();
     if !t.starts_with('[') {
@@ -231,6 +232,84 @@ fn is_sized_array_spelling(s: &str) -> bool {
     };
     let head = &t[1..close];
     !head.is_empty() && head.chars().all(|c| c.is_ascii_digit())
+}
+
+/// #2875 — true if `s` spells a composite type in Hybrid/Go:
+/// slice (`[]T`), sized array (`[N]T`), pointer (`*T`), map (`map[K]V`), channel (`chan T`),
+/// option (`option[T]`), or set (`set[T]`).
+fn is_composite_type_spelling(s: &str) -> bool {
+    let t = s.trim();
+    t.starts_with('*')
+        || t.starts_with('[')
+        || t.starts_with("map[")
+}
+
+/// #2875 — normalize a composite or scalar type spelling so equivalent numeric
+/// aliases (`i64` ≡ `int64`, `f32` ≡ `float32`, `byte` ≡ `uint8`) match canonical Go names.
+fn canonical_type_name(s: &str) -> String {
+    let s = s.trim();
+    if let Some(rest) = s.strip_prefix('*') {
+        return format!("*{}", canonical_type_name(rest));
+    }
+    if let Some(rest) = s.strip_prefix("[]") {
+        return format!("[]{}", canonical_type_name(rest));
+    }
+    if s.starts_with('[') {
+        if let Some(end) = s.find(']') {
+            let len_part = &s[1..end];
+            let rest = &s[end + 1..];
+            return format!("[{}]{}", len_part.trim(), canonical_type_name(rest));
+        }
+    }
+    if let Some(rest) = s.strip_prefix("map[") {
+        let mut depth = 1;
+        let mut split_idx = None;
+        for (i, c) in rest.char_indices() {
+            if c == '[' {
+                depth += 1;
+            } else if c == ']' {
+                depth -= 1;
+                if depth == 0 {
+                    split_idx = Some(i);
+                    break;
+                }
+            }
+        }
+        if let Some(i) = split_idx {
+            let key = &rest[..i];
+            let val = &rest[i + 1..];
+            return format!(
+                "map[{}]{}",
+                canonical_type_name(key),
+                canonical_type_name(val)
+            );
+        }
+    }
+    if let Some(rest) = s.strip_prefix("<-chan ") {
+        return format!("<-chan {}", canonical_type_name(rest));
+    }
+    if let Some(rest) = s.strip_prefix("chan<- ") {
+        return format!("chan<- {}", canonical_type_name(rest));
+    }
+    if let Some(rest) = s.strip_prefix("chan ") {
+        return format!("chan {}", canonical_type_name(rest));
+    }
+    if let Some(rest) = s.strip_prefix("option[") {
+        if let Some(end) = rest.rfind(']') {
+            let inner = &rest[..end];
+            return format!("option[{}]", canonical_type_name(inner));
+        }
+    }
+    if let Some(rest) = s.strip_prefix("set[") {
+        if let Some(end) = rest.rfind(']') {
+            let inner = &rest[..end];
+            return format!("set[{}]", canonical_type_name(inner));
+        }
+    }
+    if let Some(canon) = canonical_numeric_name(s) {
+        return canon.to_string();
+    }
+    s.to_string()
 }
 
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
@@ -536,6 +615,9 @@ struct Collector<'a> {
     /// signature (`None` = not a predeclared numeric spelling). Swapped
     /// together with `fn_results`.
     fn_result_scalars: Vec<Option<&'static str>>,
+    /// #2875 — exact declared type names of each result of the enclosing signature.
+    /// Swapped together with `fn_results`.
+    fn_result_type_names: Vec<Option<String>>,
     /// Lexical nesting depth within loops (`for` / `loop`).
     loop_depth: usize,
     /// Lexical nesting depth within `select` statements.
@@ -574,6 +656,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             fn_results_error_tail: false,
             scalar_scopes: Vec::new(),
             fn_result_scalars: Vec::new(),
+            fn_result_type_names: Vec::new(),
             loop_depth: 0,
             select_depth: 0,
             defines: Vec::new(),
@@ -861,30 +944,127 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// #2771 — the declared Go spelling of a value whose type carries detail
-    /// that `OpKind` drops, notably an array's length (`[3]int` vs `[4]int`).
-    /// Only identifiers bound with an explicit type name are known; everything
-    /// else (literals, conversions, calls) fails open.
+    /// #2771 / #2875 — the declared Go spelling of a value whose type carries detail
+    /// that `OpKind` drops, notably composite types (`[]i64`, `*i64`, `map[string]i64`, `[3]int`).
     fn typed_value_type_name(&self, e: &Expr) -> Option<String> {
         match unwrap_parens(e) {
-            Expr::Ident { name, .. } => self.lookup_type_name(name),
+            Expr::Ident { name, .. } => {
+                if let Some(t) = self.lookup_type_name(name) {
+                    Some(t)
+                } else if let Some(s) = self.lookup_scalar(name) {
+                    Some(s.to_string())
+                } else {
+                    None
+                }
+            }
+            Expr::AddrOf { operand, .. } => {
+                self.typed_value_type_name(operand).map(|t| format!("*{}", t))
+            }
+            Expr::Unary {
+                op: UnOp::Addr,
+                operand,
+                ..
+            } => self.typed_value_type_name(operand).map(|t| format!("*{}", t)),
+            Expr::SliceLit { elem, items, .. } => {
+                if let Some((len, inner_elem, arr_ty)) = e.as_array_lit() {
+                    if len.is_none() {
+                        Some(format!("[{}]{}", items.len(), inner_elem.render()))
+                    } else {
+                        Some(arr_ty.render())
+                    }
+                } else if let Some(t) = elem {
+                    Some(format!("[]{}", t.render()))
+                } else {
+                    None
+                }
+            }
+            Expr::MapLit { key, value, .. } => {
+                Some(format!("map[{}]{}", key.render(), value.render()))
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            return Some(first.value.render());
+                        }
+                    } else if name == "new" {
+                        if let Some(first) = args.first() {
+                            return Some(format!("*{}", first.value.render()));
+                        }
+                    } else if let Some(rs) = self.call_result_type_names(callee, args) {
+                        if rs.len() == 1 {
+                            return rs[0].clone();
+                        }
+                    }
+                }
+                None
+            }
             _ => None,
         }
     }
 
-    /// #2771 — the declared Go spelling of a simple local assignment target.
+    /// #2771 / #2875 — the declared Go spelling of a simple local assignment target.
     fn place_type_name(&self, p: &Place) -> Option<String> {
         match &p.kind {
-            PlaceKind::Ident(n) => self.lookup_type_name(n),
+            PlaceKind::Ident(n) => {
+                if let Some(t) = self.lookup_type_name(n) {
+                    Some(t)
+                } else if let Some(s) = self.lookup_scalar(n) {
+                    Some(s.to_string())
+                } else {
+                    None
+                }
+            }
+            PlaceKind::AddrOf { base } => {
+                self.place_type_name(base).map(|t| format!("*{}", t))
+            }
             _ => None,
         }
     }
 
-    /// #2771 — two KNOWN and DIFFERENT sized-array spellings. Slices, named
-    /// types and unparsed lengths fail open so aliases never false-reject.
+    /// #2875 — exact result type names of a call whose callee is provably known.
+    fn call_result_type_names(
+        &self,
+        callee: &Expr,
+        _args: &[CallArg],
+    ) -> Option<Vec<Option<String>>> {
+        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+            return None;
+        };
+        if self
+            .scopes
+            .iter()
+            .any(|layer| layer.contains_key(name.as_str()))
+        {
+            return None;
+        }
+        if let Some(fd) = self.ck.fns.get(name.as_str()) {
+            if fd.receiver.is_some() || !fd.type_params.is_empty() {
+                return None;
+            }
+            return Some(fd.results.iter().map(|r| Some(r.ty.render())).collect());
+        }
+        None
+    }
+
+    /// #2875 — two known composite types whose normalized type names differ
+    /// (e.g. `[]i64` vs `[]int`, `[2]i64` vs `[2]int`, `map[string]i64` vs `map[string]int`,
+    /// `*i64` vs `*int`, or array length mismatch `[3]int` vs `[4]int`).
+    fn composite_type_names_conflict(&self, want: Option<&str>, got: Option<&str>) -> bool {
+        let (Some(w), Some(g)) = (want, got) else {
+            return false;
+        };
+        let w = w.trim();
+        let g = g.trim();
+        if !is_composite_type_spelling(w) || !is_composite_type_spelling(g) {
+            return false;
+        }
+        canonical_type_name(w) != canonical_type_name(g)
+    }
+
+    /// #2771 / #2875 — backward compatibility wrapper.
     fn sized_array_names_differ(&self, a: Option<&str>, b: Option<&str>) -> bool {
-        matches!((a, b), (Some(x), Some(y))
-            if x != y && is_sized_array_spelling(x) && is_sized_array_spelling(y))
+        self.composite_type_names_conflict(a, b)
     }
     /// #1031 — the exact predeclared numeric spelling of a type expression.
     /// A user-declared struct/enum/alias of that name is not the predeclared
@@ -1355,6 +1535,9 @@ impl<'a> Collector<'a> {
         let result_scalars: Vec<Option<&'static str>> =
             f.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
         let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
+        let result_type_names: Vec<Option<String>> =
+            f.results.iter().map(|r| Some(r.ty.render())).collect();
+        let outer_type_names = std::mem::replace(&mut self.fn_result_type_names, result_type_names);
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
@@ -1371,6 +1554,7 @@ impl<'a> Collector<'a> {
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
         self.fn_result_scalars = outer_scalars;
+        self.fn_result_type_names = outer_type_names;
         self.fn_type_params = outer_tp;
         self.pop_scope();
     }
@@ -1544,7 +1728,9 @@ impl<'a> Collector<'a> {
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
-                if let Some(elem) = self.slice_element_type_name(val) {
+                if let Some(tname) = self.typed_value_type_name(val) {
+                    self.bind_type_name(name, tname);
+                } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
                 }
             }
@@ -2340,6 +2526,9 @@ impl<'a> Collector<'a> {
                 let result_scalars: Vec<Option<&'static str>> =
                     results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
                 let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
+                let result_type_names: Vec<Option<String>> =
+                    results.iter().map(|r| Some(r.ty.render())).collect();
+                let outer_type_names = std::mem::replace(&mut self.fn_result_type_names, result_type_names);
                 let outer = std::mem::replace(&mut self.fn_results, result_kinds);
                 let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
                 let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
@@ -2352,6 +2541,7 @@ impl<'a> Collector<'a> {
                 self.fn_results_all_named = outer_named;
                 self.fn_results_error_tail = outer_err;
                 self.fn_result_scalars = outer_scalars;
+                self.fn_result_type_names = outer_type_names;
                 self.pop_scope();
             }
             Expr::Paren { inner, .. } => self.expr(inner),
@@ -4027,11 +4217,14 @@ impl<'a> Collector<'a> {
             if let Expr::Call { callee, args, .. } = unwrap_parens(&values[0]) {
                 if let Some(res) = self.call_result_kinds(callee, args) {
                     let res_scalars = self.call_result_scalars(callee, args);
+                    let res_types = self.call_result_type_names(callee, args);
                     if res.len() == want.len() {
                         for (i, (r, w)) in res.iter().zip(want.iter()).enumerate() {
                             if !self.report_return_conflict(&values[0], r, w, values[0].span()) {
                                 let got_s = res_scalars.as_ref().and_then(|rs| rs.get(i).copied().flatten());
                                 self.report_numeric_return_mismatch(got_s, r, i, values[0].span());
+                                let got_t = res_types.as_ref().and_then(|ts| ts.get(i).as_ref().and_then(|x| x.as_deref()));
+                                self.report_composite_return_mismatch_with_type(got_t, i, values[0].span());
                             }
                         }
                         return;
@@ -4044,6 +4237,8 @@ impl<'a> Collector<'a> {
                             if !self.report_return_conflict(&values[0], r, w, values[0].span()) {
                                 let got_s = res_scalars.as_ref().and_then(|rs| rs.get(i).copied().flatten());
                                 self.report_numeric_return_mismatch(got_s, r, i, values[0].span());
+                                let got_t = res_types.as_ref().and_then(|ts| ts.get(i).as_ref().and_then(|x| x.as_deref()));
+                                self.report_composite_return_mismatch_with_type(got_t, i, values[0].span());
                             }
                         }
                         return;
@@ -4094,6 +4289,7 @@ impl<'a> Collector<'a> {
                     if !self.report_return_conflict(v, &got, w, v.span()) {
                         let got_s = self.typed_value_scalar(v);
                         self.report_numeric_return_mismatch(got_s, &got, i, v.span());
+                        self.report_composite_return_mismatch(v, i, v.span());
                     }
                 }
                 return;
@@ -4125,6 +4321,7 @@ impl<'a> Collector<'a> {
             if !self.report_return_conflict(v, &got, w, v.span()) {
                 let got_s = self.typed_value_scalar(v);
                 self.report_numeric_return_mismatch(got_s, &got, i, v.span());
+                self.report_composite_return_mismatch(v, i, v.span());
             }
         }
     }
@@ -4162,6 +4359,43 @@ impl<'a> Collector<'a> {
             ),
             "Go has no implicit conversion between typed numeric values; write an explicit conversion (`float64(n)`) when a conversion is intended",
         );
+    }
+
+    /// #2875 — a composite value returned into a result of a different element
+    /// or key/value type (`[]i64` -> `[]int`, `map[string]i64` -> `map[string]int`,
+    /// `*i64` -> `*int`).
+    fn report_composite_return_mismatch_with_type(
+        &mut self,
+        got_type: Option<&str>,
+        idx: usize,
+        span: Span,
+    ) {
+        let Some(want) = self.fn_result_type_names.get(idx).and_then(|o| o.as_deref()) else {
+            return;
+        };
+        let Some(got) = got_type else {
+            return;
+        };
+        if !self.composite_type_names_conflict(Some(want), Some(got)) {
+            return;
+        }
+        self.emit_e1002(
+            span,
+            format!(
+                "cannot return a value of type `{got}` from a function declaring `{want}` — Go refuses `cannot use ... (variable of type {got}) as {want} value in return statement` (HYB-E1002)"
+            ),
+            "a returned value must be assignable to its declared result type; write an explicit conversion when a conversion is intended",
+        );
+    }
+
+    fn report_composite_return_mismatch(
+        &mut self,
+        val: &Expr,
+        idx: usize,
+        span: Span,
+    ) {
+        let got_type = self.typed_value_type_name(val);
+        self.report_composite_return_mismatch_with_type(got_type.as_deref(), idx, span);
     }
 
     fn report_return_conflict(&mut self, val: &Expr, got: &OpKind, want: &OpKind, span: Span) -> bool {
@@ -4969,7 +5203,11 @@ impl<'a> Collector<'a> {
                             (self.place_scalar(t), self.typed_value_scalar(v)),
                             (Some(tp), Some(vp)) if tp != vp
                         );
-                        if conflict || scalar_mismatch {
+                        let composite_mismatch = self.composite_type_names_conflict(
+                            self.place_type_name(t).as_deref(),
+                            self.typed_value_type_name(v).as_deref(),
+                        );
+                        if conflict || scalar_mismatch || composite_mismatch {
                             self.emit_e1002(
                                 v.span(),
                                 format!(
@@ -6663,7 +6901,7 @@ impl<'a> Collector<'a> {
                     } else {
                         first_arg = Some((&arg.value, k));
                     }
-
+                    // #2875 / #2892: concrete numeric width mismatch across typed operands (`int` vs `int64`, `float32` vs `float64`).
                     if let Some(s) = self.typed_value_scalar(&arg.value) {
                         if let Some((_prev_arg, prev_s)) = first_typed_scalar {
                             if prev_s != s {
