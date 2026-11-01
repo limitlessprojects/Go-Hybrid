@@ -89,13 +89,18 @@ fn push_nested_closure<'a>(
 }
 
 fn mark_nested_overwritten(st: &FnState, name: &str, nested: &mut [NestedClosure<'_>]) {
-    if let Some(top) = st.scopes.last() {
-        if top.contains_key(name) {
-            let depth = st.scopes.len() - 1;
-            for nc in nested.iter_mut() {
-                if depth < nc.saved_scopes.len() && nc.saved_scopes[depth].contains_key(name) {
-                    nc.overwritten.insert((depth, name.to_string()));
-                }
+    if !st.scopes.is_empty() {
+        let depth = st.scopes.len() - 1;
+        for nc in nested.iter_mut() {
+            let is_same_block_redecl = depth < nc.saved_scopes.len()
+                && nc.saved_scopes[depth].contains_key(name)
+                && !nc.overwritten.contains(&(depth, name.to_string()));
+            if is_same_block_redecl {
+                nc.saved_aliases.remove(name);
+            } else if st.env.contains_key(name)
+                || nc.saved_scopes.iter().any(|s| s.contains_key(name))
+            {
+                nc.overwritten.insert((depth, name.to_string()));
             }
         }
     }
@@ -125,7 +130,7 @@ fn sync_nested_moves(st: &FnState, nested: &mut [NestedClosure<'_>]) {
         }
         for (k, v) in &st.aliases {
             if !is_overwritten_in_nc(st, nc, k) && !is_overwritten_in_nc(st, nc, v) {
-                nc.saved_aliases.entry(k.clone()).or_insert_with(|| v.clone());
+                nc.saved_aliases.insert(k.clone(), v.clone());
             }
         }
         for (k, vs) in &st.may_share {
@@ -191,6 +196,16 @@ fn sync_nested_moves(st: &FnState, nested: &mut [NestedClosure<'_>]) {
 fn pop_scope_and_sync(st: &mut FnState, nested: &mut [NestedClosure<'_>]) {
     sync_nested_moves(st, nested);
     st.scope_pop();
+    let popped_depth = st.scopes.len();
+    for nc in nested.iter_mut() {
+        nc.overwritten.retain(|(d, _)| *d < popped_depth || *d < nc.saved_scopes.len());
+        if popped_depth < nc.saved_scopes.len() {
+            let keys: Vec<String> = nc.saved_scopes[popped_depth].keys().cloned().collect();
+            for k in keys {
+                nc.overwritten.insert((popped_depth, k));
+            }
+        }
+    }
     sync_nested_moves(st, nested);
 }
 
@@ -1050,14 +1065,14 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                 let mut loop_stmts: Vec<(&Stmt, usize)> =
                     Vec::with_capacity(flat_body.stmts.len() + 1);
                 loop_stmts.push((stmt, 0));
-                for (s, idx) in flat_body.stmts {
-                    loop_stmts.push((s, idx + 1));
+                for (s, idx) in &flat_body.stmts {
+                    loop_stmts.push((*s, *idx + 1));
                 }
                 let loop_events: std::collections::HashMap<usize, Vec<crate::walk::ScopeEvent>> =
                     flat_body
                         .events
-                        .into_iter()
-                        .map(|(k, v)| (k + 1, v))
+                        .iter()
+                        .map(|(k, v)| (k + 1, v.clone()))
                         .collect();
                 let mut reported_backedge = std::collections::HashSet::new();
                 ck.check_loop_backedge(
@@ -1068,6 +1083,7 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
                     body,
                     &pre_moved,
                     &mut reported_backedge,
+                    &|idx| idx > 0 && flat_body.in_managed(idx - 1),
                 );
             }
             pop_scope_and_sync(st, nested);
@@ -1225,6 +1241,15 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                         if let Some(path) = walk::addr_of_index_base_path(val) {
                             let binding = name.clone();
                             let key = walk::addr_of_index_slot_key(val);
+                            ck.emit_o8_alias_if_live(
+                                st,
+                                &path,
+                                key.as_deref(),
+                                Some(&binding),
+                                val.span(),
+                                idx,
+                                "a second slot loan",
+                            );
                             let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
                             st.loans.push(Loan {
                                 target: LoanTarget::MapSlot {
@@ -1241,6 +1266,33 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                             ck.extend_map_slot_loan_to_alias(st, name, val, idx);
                         }
                     }
+                } else if l.values.len() == 1 && l.names.len() == 2 {
+                    let val = &l.values[0];
+                    if let Some(path) = walk::addr_of_index_base_path(val) {
+                        let binding = l.names[0].clone();
+                        let key = walk::addr_of_index_slot_key(val);
+                        ck.emit_o8_alias_if_live(
+                            st,
+                            &path,
+                            key.as_deref(),
+                            Some(&binding),
+                            val.span(),
+                            idx,
+                            "a second slot loan",
+                        );
+                        let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
+                        st.loans.push(Loan {
+                            target: LoanTarget::MapSlot {
+                                binding: binding.clone(),
+                                path,
+                                key,
+                            },
+                            created: idx,
+                            last,
+                            span: val.span(),
+                            desc: format!("`{} := {}`", l.names.join(", "), val.render()),
+                        });
+                    }
                 }
             }
             Stmt::Assign {
@@ -1255,6 +1307,15 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                             if let Some(path) = walk::addr_of_index_base_path(v) {
                                 let binding = name.clone();
                                 let key = walk::addr_of_index_slot_key(v);
+                                ck.emit_o8_alias_if_live(
+                                    st,
+                                    &path,
+                                    key.as_deref(),
+                                    Some(&binding),
+                                    v.span(),
+                                    idx,
+                                    "a second slot loan",
+                                );
                                 let last =
                                     st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
                                 st.loans.push(Loan {
@@ -1273,11 +1334,59 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
                             }
                         }
                     }
+                } else if *op == hy_syntax::AssignOp::Assign
+                    && values.len() == 1
+                    && targets.len() == 2
+                {
+                    let v = &values[0];
+                    if let hy_syntax::PlaceKind::Ident(name) = &targets[0].kind {
+                        if let Some(path) = walk::addr_of_index_base_path(v) {
+                            let binding = name.clone();
+                            let key = walk::addr_of_index_slot_key(v);
+                            ck.emit_o8_alias_if_live(
+                                st,
+                                &path,
+                                key.as_deref(),
+                                Some(&binding),
+                                v.span(),
+                                idx,
+                                "a second slot loan",
+                            );
+                            let last = st.last_use.get(&binding).copied().unwrap_or(idx).max(idx);
+                            st.loans.push(Loan {
+                                target: LoanTarget::MapSlot {
+                                    binding: binding.clone(),
+                                    path,
+                                    key,
+                                },
+                                created: idx,
+                                last,
+                                span: v.span(),
+                                desc: format!("`{} = {}`", binding, v.render()),
+                            });
+                        }
+                    }
                 }
                 for t in targets {
-                    if matches!(t.kind, hy_syntax::PlaceKind::Index { .. }) {
+                    if let Some((path, key)) = walk::place_field_store_slot(t) {
+                        ck.emit_o8_alias_if_live(
+                            st,
+                            &path,
+                            key.as_deref(),
+                            None,
+                            t.span,
+                            idx,
+                            "a field store",
+                        );
+                    } else if matches!(t.kind, hy_syntax::PlaceKind::Index { .. }) {
                         if let Some(path) = walk::place_path(t) {
                             ck.emit_a3_if_live_pub(st, &path, t.span, idx, "insert");
+                        }
+                    } else if *op == hy_syntax::AssignOp::Assign {
+                        if let hy_syntax::PlaceKind::Ident(name) = &t.kind {
+                            ck.emit_a3_if_live_pub(st, name, t.span, idx, "rebind");
+                        } else if let Some(path) = walk::place_path(t) {
+                            ck.emit_a3_if_live_pub(st, &path, t.span, idx, "rebind");
                         }
                     }
                 }
@@ -1933,13 +2042,103 @@ fn stmt_moves_watched_binding(
         }
         Stmt::Select { arms, .. } => {
             for arm in arms {
-                if let SelectArmKind::Send { chan, value, .. } = &arm.kind {
-                    let desc = format!(
-                        "the select move-send `{} <- {}`",
-                        chan.render(),
-                        value.render()
-                    );
-                    if let Some(mv) = check_expr(value, desc) {
+                match &arm.kind {
+                    SelectArmKind::Send {
+                        chan,
+                        value,
+                        is_move,
+                    } => {
+                        let cdesc = format!("the select-send target `{}`", chan.render());
+                        if let Some(mv) = check_expr(chan, cdesc) {
+                            return Some(mv);
+                        }
+                        let desc = format!(
+                            "the select move-send `{} <- {}`",
+                            chan.render(),
+                            if *is_move && !matches!(value, Expr::Move { .. }) {
+                                format!("move {}", value.render())
+                            } else {
+                                value.render()
+                            }
+                        );
+                        if *is_move {
+                            if let Expr::Ident { name, .. } = crate::model::unwrap_parens(value) {
+                                if watch.contains(name) {
+                                    return Some(crate::model::MoveInfo {
+                                        span: chan.span().to(value.span()),
+                                        kind: crate::model::MoveKind::Moved,
+                                        desc,
+                                        moved_name: name.to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        if let Some(mv) = check_expr(value, desc) {
+                            return Some(mv);
+                        }
+                    }
+                    SelectArmKind::Recv { chan, .. } => {
+                        let cdesc = format!("the select-recv `{}`", chan.render());
+                        if let Some(mv) = check_expr(chan, cdesc) {
+                            return Some(mv);
+                        }
+                    }
+                    SelectArmKind::Default => {}
+                }
+            }
+        }
+        Stmt::Expr { expr, .. } => {
+            let desc = format!("the expression `{}`", expr.render());
+            if let Some(mv) = check_expr(expr, desc) {
+                return Some(mv);
+            }
+        }
+        Stmt::Defer { call, .. } => {
+            let desc = format!("the deferred call `defer {}`", call.render());
+            if let Some(mv) = check_expr(call, desc) {
+                return Some(mv);
+            }
+        }
+        Stmt::If { cond, .. } => {
+            let desc = format!("the condition `{}`", cond.render());
+            if let Some(mv) = check_expr(cond, desc) {
+                return Some(mv);
+            }
+        }
+        Stmt::For { kind, .. } => match kind {
+            hy_syntax::ForKind::Iterate { expr, .. } => {
+                let desc = format!("the loop header `{}`", expr.render());
+                if let Some(mv) = check_expr(expr, desc) {
+                    return Some(mv);
+                }
+            }
+            hy_syntax::ForKind::Range { lo, hi, .. } => {
+                let d_lo = format!("the range bound `{}`", lo.render());
+                if let Some(mv) = check_expr(lo, d_lo) {
+                    return Some(mv);
+                }
+                let d_hi = format!("the range bound `{}`", hi.render());
+                if let Some(mv) = check_expr(hi, d_hi) {
+                    return Some(mv);
+                }
+            }
+            hy_syntax::ForKind::While { cond } => {
+                let desc = format!("the loop condition `{}`", cond.render());
+                if let Some(mv) = check_expr(cond, desc) {
+                    return Some(mv);
+                }
+            }
+            hy_syntax::ForKind::Infinite => {}
+        },
+        Stmt::Match { subject, arms, .. } => {
+            let desc = format!("the match subject `{}`", subject.render());
+            if let Some(mv) = check_expr(subject, desc) {
+                return Some(mv);
+            }
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    let gdesc = format!("the match guard `{}`", g.render());
+                    if let Some(mv) = check_expr(g, gdesc) {
                         return Some(mv);
                     }
                 }

@@ -314,7 +314,18 @@ def run_author(issue_no: int, out: pathlib.Path, max_rounds: int,
             tr(trace, "gate-ineffective", round=rnd)
             revert_tree()
             continue
-        if expected and expected not in outp:
+        # hyb check uses 1 for a checked rejection and 2 for invocation/I/O
+        # failures. Signals and other process failures are not a verdict,
+        # even if a diagnostic was printed before the checker failed.
+        if code != 1:
+            feedback = (f"checker failed (exit {code}); expected rejection exit 1:\n"
+                        f"{outp[-800:]}")
+            tr(trace, "gate-checker-failed", round=rnd, exit=code)
+            revert_tree()
+            continue
+        if expected and not re.search(
+            rf"(?<![\w-]){re.escape(expected)}(?![\w-])", outp
+        ):
             feedback = (f"repro rejected but without the expected code {expected}; "
                         f"diagnostics tail:\n{outp[-800:]}")
             tr(trace, "gate-wrong-code", round=rnd, expected=expected)

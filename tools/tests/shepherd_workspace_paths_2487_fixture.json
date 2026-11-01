@@ -1,0 +1,1 @@
+{"issue": 2487, "workspaces": ["compiler/Cargo.toml", "runtime/rust/hyrt/Cargo.toml"]}

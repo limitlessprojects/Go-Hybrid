@@ -107,6 +107,10 @@ const SET_PRELUDE: &str = concat!(
     "}\n",
 );
 
+/// N5 for `make([]T, n[, c])` (zeroinit.rs): every slot up to the capacity
+/// gets an allocated zero value, so a reslice inside the capacity meets N5 values too.
+const N5_MAKE_PRELUDE: &str = "// ---- Hybrid prelude: N5 slice allocation (auto-generated; do not edit) ----\nfunc hy_n5_make[t any](zero func() t, n int, c ...int) []t {\n\tcapacity := n\n\tif len(c) > 0 {\n\t\tcapacity = c[0]\n\t}\n\ts := make([]t, capacity)\n\tfor i := range s {\n\t\ts[i] = zero()\n\t}\n\treturn s[:n]\n}\n";
+
 const POP_PRELUDE: &str = concat!(
     "// ---- Hybrid prelude: slice pop (auto-generated; do not edit) ----\n",
     "func hy_pop[t any](s *[]t) t {\n",
@@ -199,11 +203,79 @@ pub fn emit_go_package(
 /// call prefix — the emitter only emits `<root>.` for KNOWN crates, so the
 /// scan is exact, never heuristic.
 pub fn used_binding_roots(go_src: &str) -> Vec<&'static str> {
+    // Issue #1616: a plain-Go string (`"jsonbinding.Parse"`) is user data,
+    // not a call. Mask literals and comments before the substring scan so
+    // only code positions can select the Rust/cgo bridge.
+    let code = mask_go_noncode(go_src);
     shapes::RUST_CRATES
         .iter()
-        .filter(|c| go_src.contains(&format!("{}.", c.binding_root)))
+        .filter(|c| code.contains(&format!("{}.", c.binding_root)))
         .map(|c| c.binding_root)
         .collect()
+}
+
+/// Replace Go string/rune literals and comments with blanks, preserving
+/// newlines. Not a parser: just enough to keep data out of identifier scans.
+fn mask_go_noncode(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut chars = src.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' | '\'' => {
+                out.push(' ');
+                while let Some(n) = chars.next() {
+                    if n == '\\' {
+                        chars.next();
+                        out.push(' ');
+                    } else if n == c {
+                        break;
+                    } else if n == '\n' {
+                        // Unterminated (invalid Go) — keep scanning sanely.
+                        out.push('\n');
+                        break;
+                    } else {
+                        out.push(' ');
+                    }
+                }
+                out.push(' ');
+            }
+            '`' => {
+                out.push(' ');
+                while let Some(n) = chars.next() {
+                    if n == '`' {
+                        break;
+                    }
+                    out.push(if n == '\n' { '\n' } else { ' ' });
+                }
+                out.push(' ');
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                out.push(' ');
+                while let Some(n) = chars.next() {
+                    if n == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                out.push(' ');
+                let mut prev = '\0';
+                for n in chars.by_ref() {
+                    if prev == '*' && n == '/' {
+                        break;
+                    }
+                    if n == '\n' {
+                        out.push('\n');
+                    }
+                    prev = n;
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -298,7 +370,11 @@ fn go_initialism(seg: &str) -> Option<&'static str> {
         "rfc1123z" => "RFC1123Z",
         "rfc3339" => "RFC3339",
         "rhs" => "RHS",
+        "rlock" => "RLock",
         "rpc" => "RPC",
+        "runlock" => "RUnlock",
+        "rw" => "RW",
+        "rwmutex" => "RWMutex",
         "sha1" => "SHA1",
         "sha256" => "SHA256",
         "sha384" => "SHA384",
@@ -349,6 +425,20 @@ pub(crate) fn to_go_name(name: &str) -> String {
 /// The base NAMED type of a TypeExpr, if any (`*atomic.int64` →
 /// "atomic.int64", `env` → "env", `map[string]int` → None). Batch I's
 /// receiver tables key on this.
+/// (Go value-result count, ends in `error`) for a declared result list: a
+/// trailing `error` is the error slot, not a value (#726).
+pub(crate) fn result_shape(results: &[FnResult]) -> (usize, bool) {
+    let err = matches!(
+        results.last(),
+        Some(FnResult {
+            ty: TypeExpr::Named { name, .. },
+            ..
+        }) if name == "error"
+    );
+    let n = if err { results.len() - 1 } else { results.len() };
+    (n, err)
+}
+
 pub(crate) fn base_ty_name(t: &TypeExpr) -> Option<String> {
     match t {
         TypeExpr::Named { name, .. } => Some(name.clone()),
@@ -518,6 +608,10 @@ pub struct Emitter {
     /// The current (non-main) fn's per-result RETURN texts when its results
     /// end in `error` — E3 propagates via `return <zeros…, err>`.
     cur_fn_error_returns: Option<Vec<String>>,
+    /// Names assigned inside any closure literal of the current fn (#2386):
+    /// a call can run such a closure inside an O8 slot-loan window, so any
+    /// slot loan keyed by one of these names snapshots its key into `hyKeyN`.
+    closure_written: BTreeSet<String>,
     /// Per-fn result shapes, collected eagerly (Batch I): name →
     /// (n_results, ends_in_error, first_result's binding kind, per-param
     /// pointer-base types). Drives the `?` hoist arity (13:
@@ -526,6 +620,9 @@ pub struct Emitter {
     /// normalizes like any rust-call — and the pointer-param auto-address
     /// at call sites (09: `scale_then_register(e, …)` with `e *env`).
     fn_shapes: BTreeMap<String, FnShape>,
+    /// Result shapes of closures bound by name in the current fn
+    /// (`f := fn() error { … }`), so `f()?` knows its Go result count.
+    closure_shapes: BTreeMap<String, (usize, bool)>,
     /// User-struct field types (Batch I): struct → (field, declared hy type
     /// name — dotted for shape-known fields, "" otherwise). Receiver typing
     /// for `stats.mu.lock()` (18).
@@ -582,7 +679,9 @@ impl Emitter {
             binding_prefix: "hybrid.program".to_string(),
             export_pub: false,
             cur_fn_error_returns: None,
+            closure_written: BTreeSet::new(),
             fn_shapes: BTreeMap::new(),
+            closure_shapes: BTreeMap::new(),
             struct_fields: BTreeMap::new(),
             var_struct: BTreeMap::new(),
             var_ty: BTreeMap::new(),
@@ -737,7 +836,12 @@ impl Emitter {
                         _ => None,
                     })
                     .collect::<Vec<_>>();
-                (f.name.clone(), (f.results.len(), err, kind, ptr_params))
+                // E3: a trailing error result is the error slot, not a value.
+                // `fn step() error` has ONE Go result; counting it as a value
+                // made the ? hoister emit `hyT0, hyErr1 := step()` against a
+                // `func ... error` (assignment mismatch, accepted-then-fails-go-build).
+                let value_count = if err { f.results.len() - 1 } else { f.results.len() };
+                (f.name.clone(), (value_count, err, kind, ptr_params))
             })
             .collect();
 
@@ -848,7 +952,8 @@ impl Emitter {
             || body.contains(".contains(")
             || body.contains(".insert(");
         let needs_pop = body.contains("hy_pop(");
-        if needs_option || needs_set || needs_pop {
+        let needs_n5_make = body.contains("hy_n5_make(");
+        if needs_option || needs_set || needs_pop || needs_n5_make {
             out.push('\n');
             if needs_option {
                 out.push_str(OPTION_PRELUDE);
@@ -860,6 +965,10 @@ impl Emitter {
             }
             if needs_pop {
                 out.push_str(POP_PRELUDE);
+                out.push('\n');
+            }
+            if needs_n5_make {
+                out.push_str(N5_MAKE_PRELUDE);
                 out.push('\n');
             }
         }
@@ -985,8 +1094,13 @@ impl Emitter {
                 }
             }
             TypeExpr::Pointer { to, .. } => Self::collect_comparable_in_ty(to, param_names, out),
+            TypeExpr::Array { len, elem, .. } => {
+                if let Some(l) = len {
+                    Self::collect_comparable_in_expr(l, param_names, out);
+                }
+                Self::collect_comparable_in_ty(elem, param_names, out);
+            }
             TypeExpr::Slice { elem, .. }
-            | TypeExpr::Array { elem, .. }
             | TypeExpr::Chan { elem, .. }
             | TypeExpr::Option { elem, .. } => {
                 Self::collect_comparable_in_ty(elem, param_names, out);
@@ -1028,7 +1142,17 @@ impl Emitter {
                     Self::collect_comparable_in_expr(v, param_names, out);
                 }
             }
-            Stmt::Assign { values, .. } | Stmt::Return { values, .. } => {
+            Stmt::Assign {
+                targets, values, ..
+            } => {
+                for t in targets {
+                    Self::collect_comparable_in_place(t, param_names, out);
+                }
+                for v in values {
+                    Self::collect_comparable_in_expr(v, param_names, out);
+                }
+            }
+            Stmt::Return { values, .. } => {
                 for v in values {
                     Self::collect_comparable_in_expr(v, param_names, out);
                 }
@@ -1092,10 +1216,37 @@ impl Emitter {
             }
             Stmt::Select { arms, .. } => {
                 for a in arms {
+                    match &a.kind {
+                        SelectArmKind::Recv { chan, .. } => {
+                            Self::collect_comparable_in_expr(chan, param_names, out);
+                        }
+                        SelectArmKind::Send { chan, value, .. } => {
+                            Self::collect_comparable_in_expr(chan, param_names, out);
+                            Self::collect_comparable_in_expr(value, param_names, out);
+                        }
+                        SelectArmKind::Default => {}
+                    }
                     Self::collect_comparable_in_block(&a.body, param_names, out);
                 }
             }
             Stmt::Break { .. } | Stmt::Continue { .. } => {}
+        }
+    }
+
+    fn collect_comparable_in_place(
+        p: &Place,
+        param_names: &BTreeSet<String>,
+        out: &mut BTreeSet<String>,
+    ) {
+        match &p.kind {
+            PlaceKind::Ident(_) => {}
+            PlaceKind::Index { base, index } => {
+                Self::collect_comparable_in_place(base, param_names, out);
+                Self::collect_comparable_in_expr(index, param_names, out);
+            }
+            PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
+                Self::collect_comparable_in_place(base, param_names, out);
+            }
         }
     }
 
@@ -1202,6 +1353,7 @@ impl Emitter {
     fn emit_fn(&mut self, f: &FnDecl) -> Result<(), EmitError> {
         self.bindings.clear();
         self.var_struct.clear();
+        self.closure_shapes.clear();
         self.var_ty.clear();
         self.pointer_vars.clear();
         self.local_vars.clear();
@@ -1250,6 +1402,10 @@ impl Emitter {
         // E3 in an error-result fn (package mode, example 09): the
         // propagation tail returns the zero results + the error.
         self.cur_fn_error_returns = None;
+        self.closure_written.clear();
+        if let Some(body) = &f.body {
+            Self::collect_closure_writes_block(body, false, &mut self.closure_written);
+        }
         if !is_main && !f.results.is_empty() && !main_needs_wrapper {
             let last_is_err = matches!(
                 &f.results.last().unwrap().ty,
@@ -1664,7 +1820,7 @@ impl Emitter {
                             || self.block_has_try(&a.body)
                     })
             }
-            Stmt::Select { arms, .. } => arms.iter().any(|a| self.block_has_try(&a.body)),
+            Stmt::Select { arms, .. } => arms.iter().any(|a| match &a.kind { SelectArmKind::Recv { chan, .. } => self.expr_has_try(chan), SelectArmKind::Send { chan, value, .. } => self.expr_has_try(chan) || self.expr_has_try(value), SelectArmKind::Default => false } || self.block_has_try(&a.body)),
             Stmt::Break { .. } | Stmt::Continue { .. } => false,
         }
     }
