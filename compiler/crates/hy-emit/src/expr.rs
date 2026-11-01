@@ -1027,7 +1027,7 @@ impl Emitter {
         // own method-receiver auto-address precedent, pinned by the
         // pre-registered corpus).
         let mut ptr_params: Vec<bool> = Vec::new();
-        if let Expr::Ident { name, .. } = callee {
+        if let Expr::Ident { name, .. } = Self::unwrap_parens(callee) {
             let (fn_head, _) = split_type_args(name);
             if let Some((_, _, _, params)) = self.fn_shapes.get(fn_head) {
                 ptr_params = params.iter().map(|p| p.is_some()).collect();
@@ -1036,13 +1036,20 @@ impl Emitter {
         let c = self.emit_expr(callee, ATOM)?;
         let mut parts = Vec::new();
         for (i, a) in args.iter().enumerate() {
-            let t = self.emit_call_arg(a)?;
+            // `touch((b))` is addressable Hybrid, but emitting `&(b)` is
+            // illegal Go ("cannot take the address of (b)") and the pointer
+            // probe below would miss the parenthesized binding entirely
+            // (#1989 cause 5).
+            let av = Self::unwrap_parens(&a.value);
+            let inner = self.emit_expr(av, 0)?;
+            let t = if a.spread {
+                format!("{}...", inner)
+            } else {
+                inner
+            };
             let wants_ptr = ptr_params.get(i).copied().unwrap_or(false);
-            let already_ptr = self.expr_is_pointer(&a.value);
-            let addressable = matches!(
-                a.value,
-                Expr::Ident { .. } | Expr::Field { .. } | Expr::Index { .. }
-            );
+            let already_ptr = self.expr_is_pointer(av);
+            let addressable = matches!(av, Expr::Ident { .. } | Expr::Field { .. } | Expr::Index { .. });
             if wants_ptr && !already_ptr && addressable {
                 parts.push(format!("&{}", t));
             } else {
