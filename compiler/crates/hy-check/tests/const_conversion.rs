@@ -201,6 +201,14 @@ fn closure_bodies_are_checked_deep() {
 }
 
 #[test]
+fn constant_to_array_conversions_reject() {
+    rejects_with_e6006("fn main() { x := [4]byte(\"text\") _ = x }");
+    rejects_with_e6006("fn main() { x := [4]int(nil) _ = x }");
+    rejects_with_e6006("fn main() { x := [4]int(123) _ = x }");
+    rejects_with_e6006("fn main() { x := [4]int(true) _ = x }");
+}
+
+#[test]
 fn controls_untouched() {
     // E6002 ascription path unchanged; user calls / methods never fire
     // E6006.
