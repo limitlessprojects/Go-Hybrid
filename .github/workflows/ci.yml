@@ -58,6 +58,7 @@ jobs:
           python3 -m unittest discover -s tools -p test_package_release.py -v
           python3 -m unittest discover -s tools -p test_corpus_harness.py -v
           python3 -m unittest discover -s tools -p test_extract_offsets.py -v
+          python3 -m unittest discover -s tools -p test_spike4_analysis.py -v
           # Suites that had drifted out of this list: a merged regression test
           # nothing invokes cannot fail the build. Registered here and pinned
           # by the guard below so the drift cannot come back silently.
