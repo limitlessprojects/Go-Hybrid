@@ -2643,8 +2643,8 @@ impl<'a> Collector<'a> {
             //   * the last result is `error` — the emitter's E3 zero-fill
             //     turns `return v` into `return v, nil` (corpus 13).
             // Anything else is a genuine arity error.
-            let short_ok = nv < nw
-                && ((nv == 0 && self.fn_results_all_named) || self.fn_results_error_tail);
+            let short_ok = (nv == 0 && self.fn_results_all_named)
+                || (nv > 0 && nv + 1 == nw && self.fn_results_error_tail);
             if short_ok {
                 for (v, w) in values.iter().zip(want.iter()) {
                     let got = self.kind_of_expr(v);
