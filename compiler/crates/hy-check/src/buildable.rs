@@ -1953,7 +1953,27 @@ impl<'a> Collector<'a> {
                 let base_expr = place_as_expr(base);
                 self.check_index_kind(&base.render(), base_expr.as_ref(), &bk, index, &ik, p.span);
             }
-            PlaceKind::Field { base, .. } => self.place_read(base),
+            PlaceKind::Field { base, name } => {
+                let bk = self.kind_of_place(base);
+                let has_field = self.struct_field_kind(&bk, name).is_some();
+                if !has_field {
+                    if is_fully_resolved(&bk) && matches!(bk, OpKind::Struct(_) | OpKind::Pointer(_)) {
+                        self.emit_e1002(
+                            p.span,
+                            format!(
+                                "`{}` has no field or method `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                                base.render(),
+                                name,
+                                bk.label(),
+                                base.render(),
+                                name
+                            ),
+                            "declare the field on the struct, or select something that exists",
+                        );
+                    }
+                }
+                self.place_read(base);
+            }
             PlaceKind::AddrOf { base } => self.place_read(base),
         }
     }
@@ -2048,6 +2068,37 @@ impl<'a> Collector<'a> {
                         ),
                         "an `any` value must be asserted to a concrete type before its fields can be read",
                     );
+                }
+                let bk = self.kind_of_expr(base);
+                let has_method = self
+                    .struct_base_name(&bk)
+                    .is_some_and(|sn| self.ck.method_decls.contains_key(&(sn, name.clone())));
+                let has_field = self.struct_field_kind(&bk, name).is_some();
+                if !has_method && !has_field {
+                    if is_fully_resolved(&bk) && matches!(bk, OpKind::Struct(_) | OpKind::Pointer(_)) {
+                        let is_enum_or_type = match unwrap_parens(base) {
+                            Expr::Ident { name: id, .. } => {
+                                self.ck.enums.contains_key(id)
+                                    || self.ck.structs.contains_key(id)
+                                    || self.ck.struct_type_params.contains_key(Checker::base_named_type_str(id))
+                            }
+                            _ => false,
+                        };
+                        if !is_enum_or_type {
+                            self.emit_e1002(
+                                *span,
+                                format!(
+                                    "`{}` has no field or method `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                                    base.render(),
+                                    name,
+                                    bk.label(),
+                                    base.render(),
+                                    name
+                                ),
+                                "declare the field on the struct, or select something that exists",
+                            );
+                        }
+                    }
                 }
                 // #778: a Field BASE is a QUALIFIER position, not a value
                 // position, so the type-name check must not fire on it. Two
