@@ -517,9 +517,10 @@ def cmd_probe(args):
             print("  claimed: %s" % rule["claimed"])
             print("  probe:\n```\n%s```\n" % rule["probe"])
         else:
+            last_err = ((r.stderr or "").strip().splitlines() or ["rejected"])[-1][:80]
             print("probe-ok: %s — toolchain still rejects; premise holds (%s)"
-                  % (rule["id"], (r.stderr or "").strip().splitlines()[-1][:80]))
-    if not findings and not any(re.search(r["pattern"], ln) for ln in lines):
+                  % (rule["id"], last_err))
+    if not findings and not any(re.search(p["pattern"], ln) for p in PROBES for ln in lines):
         print("no premise patterns matched in diff")
     step_summary("W6 stale-premise probe: %d finding(s)" % findings)
 
