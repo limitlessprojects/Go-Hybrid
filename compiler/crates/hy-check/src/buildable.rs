@@ -5182,6 +5182,9 @@ impl<'a> Collector<'a> {
         ik: &OpKind,
         span: Span,
     ) {
+        if let Some(base) = base_expr {
+            self.check_single_value_position(base, "an index operand", /*binding_position=*/ false);
+        }
         let indexable = matches!(
             bk,
             OpKind::Unknown
@@ -5331,6 +5334,7 @@ impl<'a> Collector<'a> {
         hi: Option<&Expr>,
         span: Span,
     ) {
+        self.check_single_value_position(base, "a slice operand", /*binding_position=*/ false);
         let sliceable = matches!(
             bk,
             OpKind::Unknown | OpKind::Slice(_) | OpKind::Array(_) | OpKind::Str
