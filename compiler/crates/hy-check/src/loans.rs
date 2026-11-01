@@ -123,6 +123,19 @@ fn root_ident_span(expr: &Expr) -> Option<Span> {
     }
 }
 
+/// `for ... in` header facts captured before any loop variable is bound
+/// (#797 / #811). See [`Checker::iterate_roots`].
+pub(crate) struct IterateRoots {
+    /// Root idents reached through the header expression.
+    roots: Vec<String>,
+    /// Outer bindings whose storage the yielded elements are part of.
+    share_peers: Vec<String>,
+    /// Resolved alias root of the first reference-bearing collection root.
+    alias_root: Option<String>,
+    /// `const` root of the collection, if the header reads one.
+    const_root: Option<String>,
+}
+
 impl<'a> Checker<'a> {
     fn resolve_call(&self, st: &FnState, cr: &CallRef) -> Resolved {
         match cr.callee {
@@ -6369,6 +6382,157 @@ impl<'a> Checker<'a> {
             }
             if b.non_owned_origin.is_none() {
                 b.non_owned_origin = pre_origin;
+            }
+        }
+    }
+
+    /// Pre-binding facts about the collection of a `for ... in` header.
+    ///
+    /// Issues #797 / #811: these must be captured ONCE, before any loop
+    /// variable is bound. `for a, b in a` shadows the collection root with the
+    /// FIRST variable, and after that the header expression no longer resolves
+    /// to the collection at all — it resolves to the freshly-bound loop
+    /// variable. Reading the header expression again per variable (the old
+    /// behaviour) therefore attributed the loop variable's sharing to itself
+    /// instead of to the outer collection, and the real edge was discarded
+    /// when the loop scope was popped.
+    pub(crate) fn iterate_roots(&self, st: &FnState, expr: &Expr) -> IterateRoots {
+        let mut roots = Vec::new();
+        collect_ref_roots(expr, &mut roots);
+        self.collect_callee_const_return_roots(st, expr, &mut roots, 0);
+        let mut share_peers: Vec<String> = Vec::new();
+        let mut alias_root: Option<String> = None;
+        for r in &roots {
+            if self.binding_may_share(st, r)
+                || self.expr_slices_addressable_array(st, expr, r)
+                || !st.share_group(r).is_empty()
+            {
+                share_peers.push(r.clone());
+                share_peers.extend(st.share_group(r));
+            }
+            if alias_root.is_none()
+                && self
+                    .lookup_binding(st, r)
+                    .map(|b| self.shape_may_share(&b.shape))
+                    .unwrap_or(false)
+            {
+                alias_root = Some(crate::freeze::resolve_alias(st, r));
+            }
+        }
+        let const_root = roots.iter().find_map(|r| {
+            let p = Place {
+                kind: PlaceKind::Ident(r.clone()),
+                span: expr.span(),
+            };
+            self.const_write_root(st, &p)
+        });
+        IterateRoots {
+            roots,
+            share_peers,
+            alias_root,
+            const_root,
+        }
+    }
+
+    /// Bind one `for ... in` loop variable so that it inherits the sharing and
+    /// `const` relationships of the collection it walks (#797 / #811).
+    ///
+    /// Mirrors [`Self::bind_match_arm`]: the origins are read from `pre`
+    /// (captured before any loop variable existed), the `const` root is passed
+    /// to `define_binding` as `immutable` so writes through a const-shadowing
+    /// loop variable are HYB-E3006, and the share edges are re-established
+    /// against the pre-header peers rather than against the freshly-bound
+    /// variable the header expression now resolves to.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bind_iterate_var(
+        &self,
+        st: &mut FnState,
+        name: &str,
+        shape: TypeShape,
+        expr: &Expr,
+        pre: &IterateRoots,
+        loop_vars: &[String],
+        is_chan: bool,
+        managed: bool,
+    ) {
+        let is_ref = shape.is_reference_alias();
+        let may_share = self.shape_may_share(&shape);
+        // Does this loop variable shadow the collection root itself?
+        let shadows_root = pre.roots.iter().any(|r| r == name);
+        let outer_depth = st.lookup_depth(name);
+        let self_shadows_const = pre.const_root.as_deref() == Some(name);
+        self.define_binding(
+            st,
+            name,
+            shape,
+            None,
+            self_shadows_const,
+            managed,
+            false,
+        );
+        if is_chan {
+            // A value received from a channel is a copy.
+            return;
+        }
+        if may_share && !shadows_root {
+            // The header still resolves to the collection here; keep the
+            // existing expression-driven sharing for non-shadowing variables.
+            self.record_may_share(st, name, expr);
+        }
+        if may_share {
+            for peer in &pre.share_peers {
+                if peer == name {
+                    continue;
+                }
+                if loop_vars.iter().any(|v| v == peer) {
+                    // This peer is a collection root that another loop
+                    // variable shadows, so the NAME now denotes that loop
+                    // variable rather than the outer binding. A direct edge
+                    // here would join two unrelated storages; the alias chain
+                    // installed below already maps this variable back onto the
+                    // shadowed outer binding at scope pop.
+                    continue;
+                }
+                st.share_edge(name, peer);
+            }
+        }
+        if let Some(ar) = &pre.alias_root {
+            if is_ref {
+                st.aliases
+                    .entry(name.to_string())
+                    .or_insert_with(|| ar.clone());
+            }
+        }
+        if shadows_root {
+            // The name now denotes the loop variable, but the storage it walks
+            // belongs to the shadowed outer collection. The self-link is what
+            // `scope_pop` needs to map the dying loop variable back onto that
+            // outer binding, and the shadow link makes the pop restore the edge.
+            st.aliases
+                .entry(name.to_string())
+                .or_insert_with(|| name.to_string());
+            if let Some(d) = outer_depth {
+                st.shadow_links
+                    .entry(name.to_string())
+                    .or_default()
+                    .insert((name.to_string(), d));
+            }
+        }
+        if let Some(croot) = &pre.const_root {
+            if croot != name {
+                st.share_edge(name, croot);
+                st.aliases
+                    .entry(name.to_string())
+                    .or_insert_with(|| croot.to_string());
+            }
+        }
+        if let Some(b) = st.env_lookup_mut(name) {
+            if b.non_owned_origin.is_none() {
+                b.non_owned_origin = Some(format!(
+                    "range variable `{}` iterating `{}` (the collection still holds the element)",
+                    name,
+                    expr.render()
+                ));
             }
         }
     }
