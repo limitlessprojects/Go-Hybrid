@@ -13,7 +13,7 @@ use crate::const_overflow::{const_int_fold_with, ConstFold};
 use crate::model::{unwrap_parens, Checker, FnState};
 use hy_diag::{Diagnostic, Span};
 use hy_syntax::{ChanDir, Expr, ForKind, LitKind, Place, PlaceKind, SelectArmKind, Stmt, UnOp};
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 impl<'a> Checker<'a> {
     /// Pass-B entry: HYB-E2001 on `defer` + HYB-E2005 on builtin calls.
@@ -653,51 +653,25 @@ impl<'a> Checker<'a> {
     ///
     /// Closed-world rule (SPEC-LANGUAGE §8.5 C9): no curated Go API database is
     /// consulted. The site fires when BOTH hold:
-    ///   1. the callee is `<pkg>.<fn>` and `<pkg>` is an imported package, and
-    ///   2. an argument is a `fn(...) { ... }` literal whose body writes a
-    ///      binding that is not declared inside that literal (a capture).
+    ///   1. the callee is `<pkg>.<fn>` (`<pkg>` imported) or a method on a
+    ///      foreign opaque/handle receiver from an imported package, and
+    ///   2. an argument is a `fn(...) { ... }` literal (or named/aliased
+    ///      closure binding) whose body writes or mutates a captured binding.
     /// A site inside `managed(...)` is the declared escape hatch and is allowed.
-    fn check_escape_site(&mut self, st: &FnState, callee: &Expr, args: &[hy_syntax::CallArg], span: Span) {
-        if self.in_managed() {
+    fn check_escape_site(
+        &mut self,
+        st: &FnState,
+        callee: &Expr,
+        args: &[hy_syntax::CallArg],
+        span: Span,
+    ) {
+        if self.in_managed() || !self.is_foreign_escape_callee(st, callee) {
             return;
         }
-        let is_foreign = match unwrap_parens(callee) {
-            Expr::Field { base, .. } => match unwrap_parens(base) {
-                Expr::Ident { name, .. } => self.packages.contains(name.as_str()),
-                _ => false,
-            },
-            _ => false,
-        };
-        if !is_foreign {
-            return;
-        }
-        let mut captured: Option<String> = None;
-        for a in args {
-            match unwrap_parens(&a.value) {
-                Expr::FnLit { params, body, .. } => {
-                    if let Some(name) = closure_writes_captured(params, body) {
-                        captured = Some(name);
-                        break;
-                    }
-                }
-                // #2724: a NAMED closure binding (`cb := fn() { ... }`) escapes
-                // exactly like an inline literal, but the old loop only looked at
-                // `Expr::FnLit` arguments and skipped it. `FnState.closure_defs`
-                // records every local closure's body, so resolve the binding and
-                // run the same capture test on it. An alias whose own define was
-                // recorded resolves the same way.
-                Expr::Ident { name, .. } => {
-                    if let Some((params, _results, body)) = st.closure_defs.get(name) {
-                        if let Some(n) = closure_writes_captured(params, body) {
-                            captured = Some(n);
-                            break;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        let Some(name) = captured else {
+        let Some(name) = args
+            .iter()
+            .find_map(|a| self.arg_closure_captured_write(st, &a.value))
+        else {
             return;
         };
         self.diags.push(
@@ -718,232 +692,265 @@ impl<'a> Checker<'a> {
         );
     }
 
+    fn is_foreign_escape_callee(&self, st: &FnState, callee: &Expr) -> bool {
+        let Expr::Field { base, .. } = unwrap_parens(callee) else {
+            return false;
+        };
+        let base = unwrap_parens(base);
+        if let Expr::Ident { name, .. } = base {
+            if self.lookup_binding(st, name).is_none() && self.packages.contains(name.as_str()) {
+                return true;
+            }
+        }
+        let mut recv = self.shape_of_expr(st, base);
+        while let crate::model::TypeShape::Pointer(inner) = recv {
+            recv = *inner;
+        }
+        if let crate::model::TypeShape::ForeignOpaque(ty)
+        | crate::model::TypeShape::OwnHandle(ty)
+        | crate::model::TypeShape::BorrowHandle(ty) = recv
+        {
+            return self.packages.contains(ty.split('.').next().unwrap_or(""));
+        }
+        false
+    }
+
+    fn arg_closure_captured_write(&self, st: &FnState, arg: &Expr) -> Option<String> {
+        match unwrap_parens(arg) {
+            Expr::FnLit {
+                params,
+                results,
+                body,
+                ..
+            } => self.closure_writes_captured(st, params, results, body),
+            // #2724: a NAMED closure binding (`cb := fn() { ... }`) or alias
+            // (`cb2 := cb`) escapes just like an inline `Expr::FnLit`. Resolve
+            // the binding through `FnState.closure_defs` / `resolve_alias` and
+            // run the same capture-mutation walk on its body.
+            Expr::Ident { name, .. } => {
+                let resolved = crate::freeze::resolve_alias(st, name);
+                if let Some((params, results, body)) = st
+                    .closure_defs
+                    .get(name.as_str())
+                    .or_else(|| st.closure_defs.get(&resolved))
+                {
+                    if let Some(hit) = self.closure_writes_captured(st, params, results, body) {
+                        return Some(hit);
+                    }
+                }
+                st.closure_mutates
+                    .get(name.as_str())
+                    .or_else(|| st.closure_mutates.get(&resolved))
+                    .and_then(|roots| roots.iter().min().cloned())
+            }
+            _ => None,
+        }
+    }
+
     /// Is this call lexically inside a `managed(...)` block? `managed` is the
     /// declared escape hatch, so an escape site there is permitted.
     fn in_managed(&self) -> bool {
         self.managed_depth > 0
     }
-}
 
-/// W-016 M3 — does this closure body write a binding it captures?
-///
-/// Returns the first captured name written (a place root that is not bound
-/// inside the closure). Bindings declared by the closure's own parameters or
-/// by any local/`:=`/loop/match/select binder in its body are NOT captures.
-fn closure_writes_captured(
-    params: &[hy_syntax::Param],
-    body: &hy_syntax::Block,
-) -> Option<String> {
-    let mut locals: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
-    collect_block_binders(body, &mut locals);
-    let mut hit: Option<String> = None;
-    walk_block_writes(body, &locals, &mut hit);
-    hit
-}
+    fn closure_writes_captured(
+        &self,
+        st: &FnState,
+        params: &[hy_syntax::Param],
+        results: &[hy_syntax::FnResult],
+        body: &hy_syntax::Block,
+    ) -> Option<String> {
+        type ScopeMap = HashMap<String, Option<(String, bool)>>;
+        let mut init: ScopeMap = params.iter().map(|p| (p.name.clone(), None)).collect();
+        init.extend(results.iter().filter_map(|r| r.name.clone().map(|n| (n, None))));
+        let mut scopes = vec![init];
 
-/// Collect every name the closure body binds, so a write to one of them is not
-/// treated as a capture. Nested closure bodies are not descended into (their
-/// own binders belong to them; a write there is caught when *that* literal is
-/// itself an argument at a foreign call).
-fn collect_block_binders(body: &hy_syntax::Block, out: &mut HashSet<String>) {
-    for stmt in &body.stmts {
-        match stmt {
-            Stmt::Local(l) => {
-                for n in &l.names {
-                    out.insert(n.clone());
+        let classify = |val: Option<&Expr>, sc: &ScopeMap| -> Option<(String, bool)> {
+            let e = unwrap_parens(val?);
+            let (inner, is_addr) = match crate::model::as_addr_of(e) {
+                Some(op) => (unwrap_parens(op), true),
+                None => (e, false),
+            };
+            let r = inner.root_ident()?;
+            if r == "_" {
+                return None;
+            }
+            if let Some(entry) = sc.get(r) {
+                let (cap, was_ptr) = entry.as_ref()?;
+                return Some((cap.clone(), is_addr || *was_ptr));
+            }
+            let is_ptr = is_addr
+                || matches!(e, Expr::Ident { .. })
+                    && matches!(self.shape_of_expr(st, e), crate::model::TypeShape::Pointer(_));
+            Some((r.to_string(), is_ptr))
+        };
+
+        let flat = crate::walk::flatten(body);
+        for (stmt, idx) in &flat.stmts {
+            if let Some(evs) = flat.events.get(idx) {
+                for ev in evs {
+                    match ev {
+                        crate::walk::ScopeEvent::Push => {
+                            scopes.push(scopes.last().cloned().unwrap_or_default());
+                        }
+                        crate::walk::ScopeEvent::Pop if scopes.len() > 1 => {
+                            scopes.pop();
+                        }
+                        crate::walk::ScopeEvent::SelectRecv { names, .. } => {
+                            for n in *names {
+                                scopes.last_mut().unwrap().insert(n.clone(), None);
+                            }
+                        }
+                        crate::walk::ScopeEvent::MatchBind { name, subject } => {
+                            let info = classify(Some(subject), scopes.last().unwrap());
+                            scopes.last_mut().unwrap().insert((*name).to_string(), info);
+                        }
+                        _ => {}
+                    }
                 }
             }
-            Stmt::If {
-                init,
-                then,
-                otherwise,
-                ..
-            } => {
-                if let Some(i) = init {
-                    collect_stmt_binders(i, out);
-                }
-                collect_block_binders(then, out);
-                if let Some(o) = otherwise {
-                    collect_stmt_binders(o, out);
+            let sc = scopes.last().unwrap();
+            let mut calls = Vec::new();
+            crate::walk::own_calls(stmt, &mut calls);
+            for cr in calls {
+                if let Some(hit) = self.call_mutates_captured(st, cr.callee, cr.args, sc) {
+                    return Some(hit);
                 }
             }
-            Stmt::For { kind, body, .. } => {
-                match kind {
+            match stmt {
+                Stmt::Local(l) => {
+                    for (i, n) in l.names.iter().enumerate() {
+                        let info = classify(
+                            l.values.get(i).or_else(|| l.values.first()),
+                            scopes.last().unwrap(),
+                        );
+                        scopes.last_mut().unwrap().insert(n.clone(), info);
+                    }
+                }
+                Stmt::Assign {
+                    targets,
+                    op,
+                    values,
+                    ..
+                } => {
+                    for (i, t) in targets.iter().enumerate() {
+                        let Some(root) = place_root(t) else {
+                            continue;
+                        };
+                        let Some(alias) = scopes.last().unwrap().get(root).cloned() else {
+                            return Some(root.to_string());
+                        };
+                        match &t.kind {
+                            PlaceKind::Ident(name) if matches!(op, hy_syntax::AssignOp::Assign) => {
+                                let info = classify(
+                                    values.get(i).or_else(|| values.first()),
+                                    scopes.last().unwrap(),
+                                );
+                                scopes.last_mut().unwrap().insert(name.clone(), info);
+                            }
+                            PlaceKind::Index { .. } => {
+                                if let Some((c, _)) = alias {
+                                    return Some(c);
+                                }
+                            }
+                            PlaceKind::Field { .. } | PlaceKind::AddrOf { .. } => {
+                                if let Some((c, true)) = alias {
+                                    return Some(c);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Stmt::For { kind, .. } => match kind {
                     ForKind::Range { var, .. } => {
-                        out.insert(var.clone());
+                        scopes.last_mut().unwrap().insert(var.clone(), None);
                     }
                     ForKind::Iterate { vars, .. } => {
                         for v in vars {
-                            out.insert(v.clone());
+                            scopes.last_mut().unwrap().insert(v.clone(), None);
                         }
                     }
                     ForKind::While { .. } | ForKind::Infinite => {}
-                }
-                collect_block_binders(body, out);
+                },
+                _ => {}
             }
-            Stmt::Match { arms, .. } => {
-                for arm in arms {
-                    if let hy_syntax::MatchPattern::Path {
-                        binding: Some(b), ..
-                    } = &arm.pattern
+        }
+        None
+    }
+
+    fn call_mutates_captured(
+        &self,
+        st: &FnState,
+        callee: &Expr,
+        args: &[hy_syntax::CallArg],
+        sc: &HashMap<String, Option<(String, bool)>>,
+    ) -> Option<String> {
+        let ref_of = |e: &Expr| -> Option<String> {
+            let r = unwrap_parens(e).root_ident()?;
+            if r == "_" {
+                return None;
+            }
+            match sc.get(r) {
+                Some(Some((c, _))) => Some(c.clone()),
+                Some(None) => None,
+                None => Some(r.to_string()),
+            }
+        };
+        match unwrap_parens(callee) {
+            Expr::Ident { name, .. }
+                if !sc.contains_key(name.as_str())
+                    && !self.fns.contains_key(name.as_str())
+                    && matches!(name.as_str(), "delete" | "clear" | "copy") =>
+            {
+                return args.first().and_then(|a| ref_of(&a.value));
+            }
+            Expr::Field { base, name, .. } => {
+                let base = unwrap_parens(base);
+                if let Expr::Ident { name: pkg, .. } = base {
+                    if !sc.contains_key(pkg.as_str())
+                        && self.lookup_binding(st, pkg).is_none()
+                        && (self.packages.contains(pkg.as_str()) || self.known_package(pkg))
                     {
-                        out.insert(b.clone());
-                    }
-                    collect_block_binders(&arm.body, out);
-                }
-            }
-            Stmt::Select { arms, .. } => {
-                for arm in arms {
-                    if let SelectArmKind::Recv { names, .. } = &arm.kind {
-                        for n in names {
-                            out.insert(n.clone());
+                        if matches!(
+                            crate::foreign::package_mode(pkg, name),
+                            crate::foreign::CallMode::Mutate | crate::foreign::CallMode::Consume
+                        ) {
+                            return args.first().and_then(|a| ref_of(&a.value));
                         }
-                    }
-                    collect_block_binders(&arm.body, out);
-                }
-            }
-            Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
-                collect_block_binders(body, out);
-            }
-            Stmt::Assign { .. }
-            | Stmt::Expr { .. }
-            | Stmt::Send { .. }
-            | Stmt::Return { .. }
-            | Stmt::Task { .. }
-            | Stmt::Defer { .. }
-            | Stmt::Break { .. }
-            | Stmt::Continue { .. } => {}
-        }
-    }
-}
-
-fn collect_stmt_binders(stmt: &Stmt, out: &mut HashSet<String>) {
-    if let Stmt::Local(l) = stmt {
-        for n in &l.names {
-            out.insert(n.clone());
-        }
-    }
-}
-
-/// Writes are `Stmt::Assign` (the compound `x++` form included). Any place root
-/// that is not a closure-local is a capture write.
-fn walk_block_writes(body: &hy_syntax::Block, locals: &HashSet<String>, hit: &mut Option<String>) {
-    if hit.is_some() {
-        return;
-    }
-    for stmt in &body.stmts {
-        walk_stmt_writes(stmt, locals, hit);
-        if hit.is_some() {
-            return;
-        }
-    }
-}
-
-fn walk_stmt_writes(stmt: &Stmt, locals: &HashSet<String>, hit: &mut Option<String>) {
-    match stmt {
-        Stmt::Assign { targets, .. } => {
-            for t in targets {
-                if let Some(root) = place_root(t) {
-                    if !locals.contains(root) {
-                        *hit = Some(root.to_string());
-                        return;
+                        if let Some(idx) = crate::foreign::package_mutated_arg(pkg, name) {
+                            return args.get(idx).and_then(|a| ref_of(&a.value));
+                        }
+                        return None;
                     }
                 }
-            }
-        }
-        Stmt::If {
-            init,
-            then,
-            otherwise,
-            ..
-        } => {
-            if let Some(i) = init {
-                walk_stmt_writes(i, locals, hit);
-            }
-            walk_block_writes(then, locals, hit);
-            if let Some(o) = otherwise {
-                walk_stmt_writes(o, locals, hit);
-            }
-        }
-        Stmt::For { body, .. } => walk_block_writes(body, locals, hit),
-        Stmt::Match { arms, .. } => {
-            for arm in arms {
-                walk_block_writes(&arm.body, locals, hit);
-                if hit.is_some() {
-                    return;
+                if matches!(
+                    name.as_str(),
+                    "insert"
+                        | "remove"
+                        | "pop"
+                        | "set"
+                        | "push_string"
+                        | "array_push_string"
+                        | "write"
+                        | "finish"
+                ) {
+                    return ref_of(base);
                 }
             }
+            _ => {}
         }
-        Stmt::Select { arms, .. } => {
-            for arm in arms {
-                walk_block_writes(&arm.body, locals, hit);
-                if hit.is_some() {
-                    return;
-                }
-            }
-        }
-        Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
-            walk_block_writes(body, locals, hit)
-        }
-        // #2724: a builtin that mutates a captured container IN PLACE
-        // (`delete(m, k)`, `clear(m)`, `copy(dst, src)`) is an escape write even
-        // though it is not a `Stmt::Assign`. The old walker saw only assignment
-        // place roots, so a closure whose body was only `delete(m, "k")` looked
-        // inert and escaped.
-        Stmt::Expr { expr, .. } => {
-            if let Some(root) = builtin_mutation_root(expr) {
-                if !locals.contains(root) {
-                    *hit = Some(root.to_string());
-                }
-            }
-        }
-        Stmt::Local(_)
-        | Stmt::Send { .. }
-        | Stmt::Return { .. }
-        | Stmt::Task { .. }
-        | Stmt::Defer { .. }
-        | Stmt::Break { .. }
-        | Stmt::Continue { .. } => {}
+        None
     }
 }
 
 /// The root identifier of an assignment target (`m["k"]` -> `m`, `h.f` -> `h`).
 fn place_root(place: &Place) -> Option<&str> {
-    // `Place::root()` walks Index/Field/AddrOf down to the root binding name.
     let root = place.root();
-    if root.is_empty() {
+    if root.is_empty() || root == "_" {
         None
     } else {
         Some(root)
-    }
-}
-
-/// The root binding a builtin call mutates IN PLACE, if any — `delete(m, k)`
-/// and `clear(m)` mutate their first argument; `copy(dst, src)` writes into
-/// `dst` (its first argument). `#2724`.
-fn builtin_mutation_root(e: &Expr) -> Option<&str> {
-    let Expr::Call { callee, args, .. } = unwrap_parens(e) else {
-        return None;
-    };
-    let Expr::Ident { name, .. } = unwrap_parens(callee) else {
-        return None;
-    };
-    if !matches!(name.as_str(), "delete" | "clear" | "copy") {
-        return None;
-    }
-    args.first().and_then(|a| expr_root(&a.value))
-}
-
-/// The root identifier of a value expression (`m["k"]` -> `m`, `p.f` -> `p`,
-/// `&m` -> `m`). `#2724`.
-fn expr_root(e: &Expr) -> Option<&str> {
-    match unwrap_parens(e) {
-        Expr::Ident { name, .. } => Some(name),
-        Expr::Index { base, .. } | Expr::Field { base, .. } | Expr::Slice { base, .. } => {
-            expr_root(base)
-        }
-        Expr::AddrOf { operand, .. } => expr_root(operand),
-        _ => None,
     }
 }
 
