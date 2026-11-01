@@ -2521,7 +2521,10 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            let int_float_conflict = want == OpKind::Float
+                && got == OpKind::Int
+                && !self.is_untyped_int_const(&a.value);
+            if kinds_conflict(&want, &got) || int_float_conflict {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -2561,7 +2564,10 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            let int_float_conflict = want == OpKind::Float
+                && got == OpKind::Int
+                && !self.is_untyped_int_const(&a.value);
+            if kinds_conflict(&want, &got) || int_float_conflict {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -4134,6 +4140,33 @@ impl<'a> Collector<'a> {
     /// selection on a pointer or addressable struct.
     /// Non-addressable: map index (`m[k]`), function/method call result
     /// (`make_t()`), and struct literal (`T{}`).
+    fn is_untyped_int_const(&self, expr: &Expr) -> bool {
+        match unwrap_parens(expr) {
+            Expr::Lit {
+                kind: LitKind::Int(_) | LitKind::Char(_),
+                ..
+            } => true,
+            Expr::Ident { name, .. } => {
+                if let Some(k) = self.file_consts.get(name) {
+                    return *k == OpKind::Int;
+                }
+                for layer in self.scopes.iter().rev() {
+                    if let Some(Some(id)) = layer.get(name) {
+                        return matches!(self.defines[*id].kind, LocalKind::Const);
+                    }
+                }
+                false
+            }
+            Expr::Unary { op, operand, .. } => {
+                matches!(op, UnOp::Neg) && self.is_untyped_int_const(operand)
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.is_untyped_int_const(lhs) && self.is_untyped_int_const(rhs)
+            }
+            _ => false,
+        }
+    }
+
     fn is_addressable_value_receiver(&self, e: &Expr) -> bool {
         match unwrap_parens(e) {
             Expr::Ident { .. } => true,
