@@ -5026,7 +5026,7 @@ impl<'a> Collector<'a> {
             Expr::SliceLit { .. } | Expr::Call { .. } => true,
             Expr::Index { base, .. } => match self.kind_of_expr(base) {
                 OpKind::Map(_, _) => true,
-                OpKind::Array(_) => self.array_operand_unaddressable(base),
+                OpKind::Array(_, _) => self.array_operand_unaddressable(base),
                 _ => false,
             },
             Expr::Field { base, .. } => match self.kind_of_expr(base) {
@@ -5071,7 +5071,7 @@ impl<'a> Collector<'a> {
         // `m["a"][:2]` (map of arrays) passed `hyb check` and failed `go
         // build` (`cannot slice unaddressable value`). Slices, strings and
         // pointers to arrays are unaffected.
-        if matches!(bk, OpKind::Array(_)) && self.array_operand_unaddressable(base) {
+        if matches!(bk, OpKind::Array(_, _)) && self.array_operand_unaddressable(base) {
             self.emit_e1002(
                 span,
                 format!(
