@@ -630,7 +630,29 @@ impl<'a> Checker<'a> {
             ..
         } = callee
         {
-            if items.is_empty() && callee.as_array_lit().is_none() {
+            if items.is_empty() {
+                if let Some((_, _elem, arr_ty)) = callee.as_array_lit() {
+                    if let Some(c) = conv_const(arg) {
+                        self.emit_const_conversion_error(
+                            span,
+                            format!(
+                                "a {} constant cannot be converted to array type `{}` (HYB-E6006)",
+                                c.kind_name(),
+                                arr_ty.render()
+                            ),
+                            vec![
+                                format!(
+                                    "why: Go has no constant-to-array conversion; `{}({})` fails to build (`cannot convert ... to type {}`), so an accepted Hybrid program would emit unbuildable Go",
+                                    arr_ty.render(),
+                                    arg.render(),
+                                    arr_ty.render()
+                                ),
+                                "fix: use a slice operand or initialize the array with an array composite literal".to_string(),
+                            ],
+                        );
+                    }
+                    return;
+                }
                 self.check_slice_conversion(t, arg, span);
                 return;
             }
