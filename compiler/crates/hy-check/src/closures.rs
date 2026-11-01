@@ -2323,6 +2323,35 @@ fn main() {
         assert_eq!(codes(src), vec!["HYB-E3003", "HYB-E3003"]);
     }
 
+    /// Issue #2315: a declaration AFTER the closure literal that shadows the
+    /// captured name must not replace the binding the closure actually
+    /// captured. The deferred check runs at block exit, so it used to see the
+    /// shadowing `int` and call the escaping map sendable.
+    #[test]
+    fn reject_post_closure_shadowing_hides_escaping_non_sendable_capture() {
+        let src = r#"fn worker(m map[string]int, done chan<- bool) {
+    m["worker"] = 1
+    done <- true
+}
+
+fn main() {
+    m := map[string]int{"init": 0}
+    done := make(chan bool, 1)
+    if true {
+        f := fn() {
+            task worker(m, done)
+        }
+        f()
+        m := 1
+        _ = m
+    }
+    m["main"] = 2
+    <-done
+}
+"#;
+        assert_eq!(codes(src), vec!["HYB-E3001"]);
+    }
+
     #[test]
     fn reject_deferred_closure_literal_capturing_binding_moved_later() {
         let src = r#"import "fmt"

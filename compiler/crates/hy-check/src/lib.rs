@@ -556,10 +556,29 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
         let mut fnlits = Vec::new();
         walk::own_fnlits(stmt, &mut fnlits);
         if !fnlits.is_empty() {
-            if let Some(top) = st.fnlit_scopes.last_mut() {
-                for fl in fnlits {
+            // Record which names were visible WHERE the closure literal sits.
+            // `scope_pop` snapshots the environment at block exit; without this
+            // set, a `m := 1` shadowing the captured `m` later in the same
+            // block overwrote the captured binding, so a task escaping a
+            // non-sendable map looked sendable (issue #2315). The set is per
+            // scope depth so a later declaration in a scope that did not hold
+            // the name at capture time cannot leak in, while moves of a
+            // binding that WAS visible propagate as before.
+            let visible: Vec<std::collections::HashSet<String>> = st
+                .scopes
+                .iter()
+                .map(|s| s.keys().cloned().collect())
+                .collect();
+            let positions: Vec<(usize, usize)> = fnlits
+                .iter()
+                .map(|fl| {
                     let sp = fl.span();
-                    top.push((sp.start.line as usize, sp.start.col as usize));
+                    (sp.start.line as usize, sp.start.col as usize)
+                })
+                .collect();
+            for pos in positions {
+                if let Some(top) = st.fnlit_scopes.last_mut() {
+                    top.push((pos, visible.clone()));
                 }
             }
         }

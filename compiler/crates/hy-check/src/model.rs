@@ -264,8 +264,13 @@ pub(crate) struct FnState {
         ),
     >,
     /// Per-scope list of `FnLit` start `(line, col)` positions declared in
-    /// that scope (used to snapshot block state right before `scope_pop`).
-    pub fnlit_scopes: Vec<Vec<(usize, usize)>>,
+    /// that scope, each with the names visible in every scope layer at the
+    /// moment the literal was seen (used to snapshot block state right before
+    /// `scope_pop`). The name set keeps a declaration that shadows a captured
+    /// binding later in the block from replacing it in the deferred check
+    /// (issue #2315), while a move of a binding that WAS visible still
+    /// propagates.
+    pub fnlit_scopes: Vec<Vec<((usize, usize), Vec<std::collections::HashSet<String>>)>>,
     /// #111 form 4: a local closure binding -> the base paths its body may
     /// MUTATE (map insert/delete targets, transitively via calls it makes).
     /// Captured roots only (the closure's own params are excluded — they
@@ -323,15 +328,23 @@ impl FnState {
     pub(crate) fn scope_pop(&mut self) {
         if let Some(fnlits) = self.fnlit_scopes.pop() {
             if !fnlits.is_empty() {
-                let mut snap_env = self.env.clone();
-                for layer in &self.scopes {
-                    for (k, v) in layer {
-                        snap_env.insert(k.clone(), v.clone());
-                    }
-                }
                 let snap_aliases = self.aliases.clone();
                 let snap_share = self.may_share.clone();
-                for pos in fnlits {
+                for (pos, visible) in fnlits {
+                    let mut snap_env = self.env.clone();
+                    for (depth, layer) in self.scopes.iter().enumerate() {
+                        // Only overlay names that existed in this layer when the
+                        // literal was seen. A declaration added later (shadowing
+                        // a captured outer binding) must not replace the binding
+                        // the closure actually captured; a move on a binding that
+                        // was already visible still propagates (issue #2315).
+                        let allowed = visible.get(depth);
+                        for (k, v) in layer {
+                            if allowed.map(|s| s.contains(k)).unwrap_or(true) {
+                                snap_env.insert(k.clone(), v.clone());
+                            }
+                        }
+                    }
                     self.closure_scoped_envs.entry(pos).or_insert_with(|| {
                         (snap_env.clone(), snap_aliases.clone(), snap_share.clone())
                     });
