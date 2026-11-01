@@ -2748,6 +2748,29 @@ impl<'a> Collector<'a> {
             if extra.spread {
                 continue;
             }
+            if Checker::is_nil_literal(&extra.value) {
+                let is_nilable = matches!(
+                    elem,
+                    OpKind::Unknown
+                        | OpKind::Pointer(_)
+                        | OpKind::Slice(_)
+                        | OpKind::Map(_, _)
+                        | OpKind::Chan(_)
+                        | OpKind::Interface
+                        | OpKind::Fn(_, _)
+                );
+                if !is_nilable {
+                    self.emit_e1002(
+                        extra.value.span(),
+                        format!(
+                            "cannot use `nil` as `{}` value in argument to append (HYB-E1002)",
+                            elem.label()
+                        ),
+                        "only pointer, slice, map, channel, function, and interface types can be nil",
+                    );
+                    continue;
+                }
+            }
             let got = self.kind_of_expr(&extra.value);
             if kinds_conflict(&elem, &got) {
                 self.emit_e1002(
@@ -4336,6 +4359,14 @@ impl<'a> Collector<'a> {
                     return;
                 }
                 let slice_arg = &args[0].value;
+                if Checker::is_nil_literal(slice_arg) {
+                    self.emit_e2005(
+                        slice_arg.span(),
+                        "first argument to `append` must be a slice; have untyped nil (HYB-E2005)".to_string(),
+                        "the first argument to `append(xs, ...)` must be a slice (`[]T`), not untyped `nil`",
+                    );
+                    return;
+                }
                 let sk = self.kind_of_expr(slice_arg);
                 if !matches!(sk, OpKind::Unknown | OpKind::Slice(_)) {
                     self.emit_e2005(
