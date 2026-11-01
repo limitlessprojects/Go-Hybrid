@@ -1,0 +1,126 @@
+{
+  "fixtures": [
+    {
+      "fixture": "f1_signature_drift",
+      "expected": "HYB-E7001",
+      "codes": [
+        "HYB-E7001",
+        "HYB-E7002"
+      ],
+      "rejected": true,
+      "detail": [
+        {
+          "code": "HYB-E7001",
+          "symbol": "hy_json_array_get",
+          "why": "extern declares 3 params, artifact DWARF says 2"
+        },
+        {
+          "code": "HYB-E7001",
+          "symbol": "hyrt_abi_word",
+          "why": "jsonbinding/broker.go: Cross1 passes 1 args, artifact says 0"
+        },
+        {
+          "code": "HYB-E7001",
+          "symbol": "hy_json_array_get",
+          "why": "jsonbinding/json.go: CrossDeep3 passes 3 args, artifact says 2"
+        }
+      ]
+    },
+    {
+      "fixture": "f2_recursion_as_small",
+      "expected": "HYB-E7002",
+      "codes": [
+        "HYB-E7001",
+        "HYB-E7002"
+      ],
+      "rejected": true,
+      "detail": [
+        {
+          "code": "HYB-E7002",
+          "symbol": "hy_json_array_len",
+          "why": "binding routes through SMALL (guard 1024 B); artifact class DEEP (64 B over resolvable frames, forced by: recursion, indirect-dispatch, missing-frame x5, external-callee x4)"
+        },
+        {
+          "code": "HYB-E7002",
+          "symbol": "hy_json_array_push_string",
+          "why": "binding routes through SMALL (guard 1024 B); artifact class DEEP (128 B over resolvable frames, forced by: recursion, indirect-dispatch, missing-frame x19, external-callee x6)"
+        },
+        {
+          "code": "HYB-E7002",
+          "symbol": "hy_json_get_int",
+          "why": "binding routes through SMALL (guard 1024 B); artifact class DEEP (752 B over resolvable frames, forced by: recursion, indirect-dispatch, missing-frame x12, external-callee x4)"
+        }
+      ]
+    },
+    {
+      "fixture": "f3_retained_borrow",
+      "expected": "HYB-E7003",
+      "codes": [
+        "HYB-E7003"
+      ],
+      "rejected": true,
+      "detail": [
+        {
+          "subset_verdict": {
+            "may_retain_ptr": true,
+            "may_callback": false,
+            "blocking": false
+          }
+        }
+      ]
+    },
+    {
+      "fixture": "f4_callback_edge",
+      "expected": "HYB-E7004",
+      "codes": [
+        "HYB-E7001",
+        "HYB-E7002",
+        "HYB-E7004"
+      ],
+      "rejected": true,
+      "detail": [
+        {
+          "code": "HYB-E7004",
+          "symbol": "hy_json_array_get",
+          "why": "contract claims may_callback=false, artifact closure contains an indirect call"
+        }
+      ]
+    },
+    {
+      "fixture": "f5_blocking_beneath_nonblocking",
+      "expected": "HYB-E7005",
+      "codes": [
+        "HYB-E7001",
+        "HYB-E7002",
+        "HYB-E7005"
+      ],
+      "rejected": true,
+      "detail": [
+        {
+          "code": "HYB-E7005",
+          "symbol": "hy_json_array_get",
+          "why": "contract claims non-blocking, closure reaches ['_RNvMNtNtNtNtCsgHYyB3hU8Ec_3std3sys4sync5mutex5futexNtB2_5Mutex4wake']"
+        }
+      ]
+    },
+    {
+      "fixture": "f6_hash_mismatch",
+      "expected": "HYB-E7006",
+      "codes": [
+        "HYB-E7001",
+        "HYB-E7002",
+        "HYB-E7006"
+      ],
+      "rejected": true,
+      "detail": [
+        {
+          "code": "HYB-E7006",
+          "symbol": "*",
+          "why": "embedded digest does not match the regenerated contract \u2014 binding is stale for this binary"
+        }
+      ]
+    }
+  ],
+  "passed": 6,
+  "total": 6
+}
