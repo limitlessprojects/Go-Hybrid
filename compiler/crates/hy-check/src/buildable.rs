@@ -4063,6 +4063,15 @@ impl<'a> Collector<'a> {
                         }
                         return;
                     }
+                    if want.len() == 1 && res.len() >= 2 {
+                        if let Expr::Field { base, .. } = unwrap_parens(callee) {
+                            if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                                if self.lookup_kind(pkg).is_none() && self.is_package_name(pkg) {
+                                    return;
+                                }
+                            }
+                        }
+                    }
                     let (nr, nw) = (res.len(), want.len());
                     let msg = match (nw, nr) {
                         (0, _) => format!(
@@ -4207,6 +4216,15 @@ impl<'a> Collector<'a> {
         let Some(n) = self.multi_value_arg_count(args) else {
             return;
         };
+        if let Expr::Call { callee: inner, .. } = unwrap_parens(&args[0].value) {
+            if let Expr::Field { base, .. } = unwrap_parens(inner) {
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none() && self.is_package_name(pkg) {
+                        return;
+                    }
+                }
+            }
+        }
         let Expr::Ident { name, .. } = unwrap_parens(callee) else {
             return;
         };
