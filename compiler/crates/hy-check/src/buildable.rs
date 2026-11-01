@@ -1483,6 +1483,31 @@ impl<'a> Collector<'a> {
                         );
                     }
                 }
+            } else if l.values.len() == 1 && l.names.len() > 1 {
+                let mvk = self.multi_value_kinds(&l.values[0]);
+                if mvk.len() == l.names.len() {
+                    for (name, vk) in l.names.iter().zip(mvk.iter()) {
+                        if want == OpKind::Unknown || *vk == OpKind::Unknown || want == OpKind::Interface {
+                            continue;
+                        }
+                        let conflict = (want == OpKind::Float && *vk == OpKind::Int)
+                            || (want == OpKind::Int && *vk == OpKind::Float)
+                            || kinds_conflict(&want, vk);
+                        if conflict {
+                            self.emit_e1002(
+                                l.span,
+                                format!(
+                                    "cannot initialize `{}` (type `{}`) with a value of type `{}` — Go refuses `cannot use ... as {} value in variable declaration` (HYB-E1002)",
+                                    name,
+                                    want.label(),
+                                    vk.label(),
+                                    want.label()
+                                ),
+                                "the declared type is fixed; write an explicit conversion when a conversion is intended",
+                            );
+                        }
+                    }
+                }
             }
         }
         // Composed resolution (pr-430 x landed pr-475): #475's track_read
@@ -1567,8 +1592,11 @@ impl<'a> Collector<'a> {
         if let Some(ty) = &l.ty {
             return vec![self.kind_of_ty(ty, 0); n];
         }
-        if n == 2 && l.values.len() == 1 {
-            return self.multi_value_kinds(&l.values[0]);
+        if n >= 2 && l.values.len() == 1 {
+            let mvk = self.multi_value_kinds(&l.values[0]);
+            if mvk.len() == n {
+                return mvk;
+            }
         }
         if n == l.values.len() {
             return l.values.iter().map(|v| self.kind_of_expr(v)).collect();
@@ -1581,6 +1609,7 @@ impl<'a> Collector<'a> {
             Expr::Move { operand, .. } => self.multi_value_kinds(operand),
             Expr::Index { base, .. } => match self.kind_of_expr(base) {
                 OpKind::Map(_, v) => vec![*v, OpKind::Bool],
+                OpKind::Slice(_) | OpKind::Array(_) | OpKind::Str => vec![OpKind::Unknown],
                 _ => vec![OpKind::Unknown, OpKind::Bool],
             },
             Expr::Receive { chan, .. } => match self.kind_of_expr(chan) {
@@ -1590,7 +1619,20 @@ impl<'a> Collector<'a> {
             Expr::Call { callee, args, .. } => {
                 if let Some(res) = self.call_result_kinds(callee, args) {
                     if res.len() >= 2 {
-                        return vec![res[0].clone(), res[1].clone()];
+                        return res;
+                    }
+                }
+                vec![OpKind::Unknown, OpKind::Unknown]
+            }
+            Expr::Try { operand, .. } => {
+                if let Expr::Call { callee, args, .. } = unwrap_parens(operand) {
+                    if let Some(mut res) = self.call_result_kinds(callee, args) {
+                        if res.len() >= 2 {
+                            res.pop();
+                            if res.len() >= 2 {
+                                return res;
+                            }
+                        }
                     }
                 }
                 vec![OpKind::Unknown, OpKind::Unknown]
@@ -3104,6 +3146,19 @@ impl<'a> Collector<'a> {
                     }
                 }
                 let head = Checker::base_named_type_str(name);
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none() {
+                        let full = format!("{pkg}.{head}");
+                        if let Some(decl) = self.ck.fns.get(full.as_str()) {
+                            return Some(
+                                decl.results
+                                    .iter()
+                                    .map(|r| self.kind_of_ty(&r.ty, 0))
+                                    .collect(),
+                            );
+                        }
+                    }
+                }
                 if let Some(sname) = self.struct_base_name(&bk) {
                     if let Some(m) = self.ck.method_decls.get(&(sname, head.to_string())) {
                         return Some(
@@ -4926,11 +4981,8 @@ impl<'a> Collector<'a> {
                         }
                     }
                 } else if targets.len() > 1 && values.len() == 1 {
-                    // One provably-single value bound to several targets —
-                    // go build refuses with `assignment mismatch`. Call,
-                    // receive, and index sources are owned by the
-                    // source-count rules.
-                    if is_definitely_single_value(&values[0]) {
+                    let val = &values[0];
+                    if is_definitely_single_value(val) {
                         self.emit_e1002(
                             span,
                             format!(
@@ -4939,6 +4991,35 @@ impl<'a> Collector<'a> {
                             ),
                             "bind one name per value, or use a source that yields one value per target",
                         );
+                    } else {
+                        let multi_kinds = self.multi_value_kinds(val);
+                        if multi_kinds.len() == targets.len() {
+                            for (t, vk) in targets.iter().zip(multi_kinds.iter()) {
+                                if matches!(&t.kind, PlaceKind::Ident(name) if name == "_") {
+                                    continue;
+                                }
+                                let tpk = self.kind_of_place(t);
+                                if tpk == OpKind::Unknown || *vk == OpKind::Unknown || tpk == OpKind::Interface {
+                                    continue;
+                                }
+                                let conflict = (tpk == OpKind::Float && *vk == OpKind::Int)
+                                    || (tpk == OpKind::Int && *vk == OpKind::Float)
+                                    || kinds_conflict(&tpk, vk);
+                                if conflict {
+                                    self.emit_e1002(
+                                        t.span,
+                                        format!(
+                                            "cannot assign a value of type `{}` to `{}` (type `{}`) in multi-value assignment — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
+                                            vk.label(),
+                                            t.render(),
+                                            tpk.label(),
+                                            tpk.label()
+                                        ),
+                                        "each target's declared type is fixed; the assigned multi-value results must match target types",
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
             }
