@@ -827,7 +827,7 @@ impl<'a> Collector<'a> {
                             base.render(),
                             name
                         ),
-                        format!("`{}.{}` takes no arguments", base.render(), name),
+                        "method takes no arguments",
                     );
                 }
             }
@@ -850,10 +850,7 @@ impl<'a> Collector<'a> {
                     self.emit_e1002(
                         span,
                         msg,
-                        format!(
-                            "`{}.or` expects exactly 1 default argument matching the payload type",
-                            base.render()
-                        ),
+"argument to `option.or` must match the option payload type",
                     );
                 } else {
                     let want = (**elem).clone();
