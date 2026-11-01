@@ -41,6 +41,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 UTC = lambda: datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -158,8 +159,20 @@ def main():
         summary["ok"] = bool(summary["steps"]) and all(s["exit"] == 0 for s in summary["steps"])
         summary["finished"] = UTC()
         path = os.path.join(results_dir, "summary.json")
-        with open(path, "w") as f:
-            json.dump(summary, f, indent=2)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                    dir=results_dir, prefix=".summary-", delete=False) as f:
+                temporary = f.name
+                json.dump(summary, f, indent=2)
+            os.replace(temporary, path)
+            temporary = None
+        except OSError as error:
+            print("failed to publish summary.json: {}".format(error), file=sys.stderr)
+            sys.exit(1)
+        finally:
+            if temporary is not None:
+                os.unlink(temporary)
         print("\n=== summary.json written to {} (ok={}) ===".format(path, summary["ok"]), flush=True)
         # exit non-zero if any step failed, so CI surfaces it
         sys.exit(0 if summary["ok"] else 1)
