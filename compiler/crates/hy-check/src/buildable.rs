@@ -797,6 +797,39 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #2915: `opt.or(default)` on an `option[T]` needs `default` of type `T`.
+    fn check_option_method_arg(&mut self, callee: &Expr, args: &[CallArg]) {
+        let Expr::Field { base, name, .. } = unwrap_parens(callee) else {
+            return;
+        };
+        if name != "or" || args.len() != 1 {
+            return;
+        }
+        let bk = self.kind_of_expr(base);
+        let OpKind::Option(elem) = bk else {
+            return;
+        };
+        let want = *elem;
+        let got = self.kind_of_expr(&args[0].value);
+        let int_to_float_conflict = want == OpKind::Float
+            && got == OpKind::Int
+            && !self.is_untyped_int_const(&args[0].value);
+        if kinds_conflict(&want, &got) || int_to_float_conflict {
+            self.emit_e1002(
+                args[0].value.span(),
+                format!(
+                    "cannot use `{}` (type `{}`) as `{}` value in argument to `{}.or` on `option[{}]` (HYB-E1002)",
+                    args[0].value.render(),
+                    got.label(),
+                    want.label(),
+                    base.render(),
+                    want.label()
+                ),
+                "argument to `option.or` must match the option payload type",
+            );
+        }
+    }
+
     /// #1031 — record the exact numeric type of a binding that `bind_kind`
     /// just made in the current scope.
     fn set_scalar(&mut self, name: &str, scalar: Option<&'static str>) {
@@ -1794,7 +1827,17 @@ impl<'a> Collector<'a> {
                             }
                             if let Some(b) = binding {
                                 self.define_elidable(b, subject.span());
-                                self.bind_kind(b, OpKind::Unknown);
+                                // #2915: payload binding `some(v)` inherits the element type of `option[T]`.
+                                let bind_k = if segments.first().map(|s| s.as_str()) == Some("some") {
+                                    if let OpKind::Option(elem) = &subject_kind {
+                                        (**elem).clone()
+                                    } else {
+                                        OpKind::Unknown
+                                    }
+                                } else {
+                                    OpKind::Unknown
+                                };
+                                self.bind_kind(b, bind_k);
                             }
                         }
                         MatchPattern::Lit(lit) => {
@@ -2190,6 +2233,7 @@ impl<'a> Collector<'a> {
                 }
                 self.check_call_operands(callee, args, *span);
                 self.check_set_method_arg(callee, args);
+                self.check_option_method_arg(callee, args);
             }
             Expr::StructLit { ty, fields, span } => {
                 if let Some(t) = ty {
