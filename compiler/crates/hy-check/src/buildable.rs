@@ -333,6 +333,11 @@ fn conversion_kinds_conflict(target: &OpKind, arg: &OpKind) -> bool {
         (Interface, _) => false,
         (a, b) if a == b => false,
 
+        // Distinct named structs are separate nominal types: `B(a)` for an `A`
+        // value is not a Go conversion, even when the field lists match
+        // (#1879). Struct(None) is handled fail-open above.
+        (Struct(Some(a)), Struct(Some(b))) => a != b,
+
         // Struct targets: Go forbids converting non-structs to structs.
         (Struct(_), other) if !matches!(other, Unknown | Struct(_)) => true,
 
