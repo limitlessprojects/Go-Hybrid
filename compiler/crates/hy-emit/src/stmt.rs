@@ -652,6 +652,16 @@ impl Emitter {
         }
     }
 
+    pub(crate) fn stmt_has_slot_loan(s: &Stmt) -> bool {
+        match s {
+            Stmt::Local(l) => l.values.iter().any(|v| Self::as_slot_loan_operand(v).is_some()),
+            Stmt::Assign { values, .. } => {
+                values.iter().any(|v| Self::as_slot_loan_operand(v).is_some())
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn place_has_hoistable_try(p: &Place) -> bool {
         match &p.kind {
             PlaceKind::Ident(_) => false,
@@ -1661,23 +1671,27 @@ impl Emitter {
         then: &Block,
         otherwise: Option<&Stmt>,
     ) -> Result<(), EmitError> {
-        // When `if <init>; <cond>` has a `?` in either `<init>` or `<cond>`,
-        // lower to a scoped block `{ <init>; <hoist(cond)>; if <cond> { … } }`
-        // so bindings introduced by `<init>` are in scope for `<cond>`'s
-        // hoisted statements and remain scoped to the if/else construct.
+        // When `if <init>; <cond>` has an O8 slot loan (`&m[k]`, `&s.field`) or a `?`
+        // in either `<init>` or `<cond>`, lower to a scoped block `{ <init>; if <cond> { … } }`
+        // so that slot loans are lowered through `emit_stmts_with_loans_inner` with key
+        // snapshots, branch-inherit handoff into branches, and proper store-backs.
         if let Some(i) = init {
-            if Self::stmt_has_hoistable_try(i) || Self::expr_has_hoistable_try(cond) {
+            if Self::stmt_has_slot_loan(i)
+                || Self::stmt_has_hoistable_try(i)
+                || Self::expr_has_hoistable_try(cond)
+            {
                 self.push("{");
-                self.loan_frames.push(Vec::new());
-                self.indent += 1;
-                self.emit_stmt(i)?;
-                self.hoist_tries_expr(cond)?;
-                self.emit_if_at(None, cond, then, otherwise, true)?;
-                let frame = self.loan_frames.pop().unwrap_or_default();
-                for (_, store) in frame {
-                    self.push(&store);
-                }
-                self.indent -= 1;
+                let desugared = [
+                    i.clone(),
+                    Stmt::If {
+                        init: None,
+                        cond: cond.clone(),
+                        then: then.clone(),
+                        otherwise: otherwise.map(|o| Box::new(o.clone())),
+                        span: then.span,
+                    },
+                ];
+                self.emit_block_body(&desugared)?;
                 self.push("}");
                 return Ok(());
             }
@@ -1752,18 +1766,32 @@ impl Emitter {
                 cond,
                 then,
                 otherwise,
-                ..
+                span,
             }) => {
                 if init
                     .as_deref()
-                    .map(Self::stmt_has_hoistable_try)
+                    .map(|i| Self::stmt_has_slot_loan(i) || Self::stmt_has_hoistable_try(i))
                     .unwrap_or(false)
                     || Self::expr_has_hoistable_try(cond)
                 {
                     self.push("} else {");
-                    self.indent += 1;
-                    self.emit_if(init.as_deref(), cond, then, otherwise.as_deref())?;
-                    self.indent -= 1;
+                    if let Some(i) = init.as_deref() {
+                        let desugared = [
+                            i.clone(),
+                            Stmt::If {
+                                init: None,
+                                cond: cond.clone(),
+                                then: then.clone(),
+                                otherwise: otherwise.clone(),
+                                span: *span,
+                            },
+                        ];
+                        self.emit_block_body(&desugared)?;
+                    } else {
+                        self.indent += 1;
+                        self.emit_if(None, cond, then, otherwise.as_deref())?;
+                        self.indent -= 1;
+                    }
                     self.push("}");
                 } else {
                     self.push_raw("} else ");
