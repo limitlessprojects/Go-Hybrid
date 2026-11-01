@@ -365,6 +365,8 @@ struct Collector<'a> {
     scopes: Vec<HashMap<String, Option<usize>>>,
     /// Parallel lexical scope stack tracking resolved operand kinds (#425).
     kind_scopes: Vec<HashMap<String, OpKind>>,
+    /// Parallel lexical scope stack tracking declared concrete type names.
+    type_name_scopes: Vec<HashMap<String, String>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
     /// Result kinds of the function whose body is currently being walked
@@ -401,6 +403,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             ck,
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
+            type_name_scopes: Vec::new(),
             file_consts: HashMap::new(),
             fn_results: Vec::new(),
             fn_results_all_named: false,
@@ -458,11 +461,46 @@ impl<'a> Collector<'a> {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.kind_scopes.push(HashMap::new());
+        self.type_name_scopes.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.kind_scopes.pop();
+        self.type_name_scopes.pop();
+    }
+
+    fn bind_type_name(&mut self, name: &str, type_name: String) {
+        if name != "_" {
+            if let Some(top) = self.type_name_scopes.last_mut() {
+                top.insert(name.to_string(), type_name);
+            }
+        }
+    }
+
+    fn lookup_type_name(&self, name: &str) -> Option<String> {
+        for layer in self.type_name_scopes.iter().rev() {
+            if let Some(t) = layer.get(name) {
+                return Some(t.clone());
+            }
+        }
+        None
+    }
+
+    fn slice_element_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => {
+                if let Some(tname) = self.lookup_type_name(name) {
+                    if let Some(elem) = tname.strip_prefix("[]") {
+                        return Some(elem.to_string());
+                    }
+                }
+                None
+            }
+            Expr::SliceLit { elem: Some(t), .. } => Some(t.render()),
+            _ => None,
+        }
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -745,6 +783,7 @@ impl<'a> Collector<'a> {
             self.exempt(&p.name);
             let pk = self.kind_of_ty(&p.ty, 0);
             self.bind_kind(&p.name, pk);
+            self.bind_type_name(&p.name, p.ty.render());
         }
         for r in &f.results {
             if let Some(rname) = &r.name {
@@ -854,6 +893,10 @@ impl<'a> Collector<'a> {
         // A typed declaration must accept its initializers — Go refuses
         // `cannot use ... as ... value in variable declaration`.
         if let Some(t) = &l.ty {
+            let tname = t.render();
+            for name in &l.names {
+                self.bind_type_name(name, tname.clone());
+            }
             let want = self.kind_of_ty(t, 0);
             if l.values.len() == 1 && l.names.len() == 1 {
                 let vk = self.kind_of_expr(&l.values[0]);
@@ -1488,6 +1531,7 @@ impl<'a> Collector<'a> {
                     self.exempt(&p.name);
                     let pk = self.kind_of_ty(&p.ty, 0);
                     self.bind_kind(&p.name, pk);
+                    self.bind_type_name(&p.name, p.ty.render());
                 }
                 for r in results {
                     if let Some(rname) = &r.name {
@@ -4386,25 +4430,45 @@ impl<'a> Collector<'a> {
 
                 match (&dk, &sk) {
                     (OpKind::Slice(dst_elem), OpKind::Slice(src_elem)) => {
-                        if kinds_conflict(dst_elem, src_elem) {
+                        let dst_elem_ty = self.slice_element_type_name(dst_arg);
+                        let src_elem_ty = self.slice_element_type_name(src_arg);
+                        let ty_mismatch = match (&dst_elem_ty, &src_elem_ty) {
+                            (Some(d), Some(s)) => d != s,
+                            _ => false,
+                        };
+                        let kind_mismatch = dst_elem != src_elem
+                            && !matches!(**dst_elem, OpKind::Unknown)
+                            && !matches!(**src_elem, OpKind::Unknown);
+                        if kinds_conflict(dst_elem, src_elem) || kind_mismatch || ty_mismatch {
+                            let (d_label, s_label) = match (dst_elem_ty, src_elem_ty) {
+                                (Some(d), Some(s)) => (format!("[]{}", d), format!("[]{}", s)),
+                                _ => (format!("[]{}", dst_elem.label()), format!("[]{}", src_elem.label())),
+                            };
                             self.emit_e1002(
                                 span,
                                 format!(
                                     "arguments to `copy` have different element types: `{}` and `{}` (HYB-E1002)",
-                                    dst_elem.label(),
-                                    src_elem.label()
+                                    d_label,
+                                    s_label
                                 ),
                                 "arguments to `copy` must have identical element types",
                             );
                         }
                     }
                     (OpKind::Slice(dst_elem), OpKind::Str) => {
-                        if !matches!(**dst_elem, OpKind::Unknown | OpKind::Int) {
+                        let dst_elem_ty = self.slice_element_type_name(dst_arg);
+                        let non_int = !matches!(**dst_elem, OpKind::Unknown | OpKind::Int);
+                        let non_byte_int = dst_elem_ty
+                            .as_deref()
+                            .is_some_and(|t| !matches!(t, "byte" | "uint8" | "u8"));
+
+                        if non_int || non_byte_int {
+                            let elem_name = dst_elem_ty.unwrap_or_else(|| dst_elem.label().to_string());
                             self.emit_e1002(
                                 span,
                                 format!(
                                     "cannot copy string into slice with element type `{}` (HYB-E1002)",
-                                    dst_elem.label()
+                                    elem_name
                                 ),
                                 "copying from a string requires a byte slice destination (`[]byte`)",
                             );
