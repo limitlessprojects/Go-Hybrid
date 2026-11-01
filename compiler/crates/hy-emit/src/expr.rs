@@ -192,7 +192,9 @@ impl Emitter {
                 Ok(format!("{}[{}]", b, i))
             }
 
-            Expr::Slice { base, lo, hi, .. } => {
+            Expr::Slice {
+                base, lo, hi, max, ..
+            } => {
                 let b = self.emit_expr(base, ATOM)?;
                 let lo_t = match lo {
                     Some(x) => self.emit_expr(x, 0)?,
@@ -202,7 +204,23 @@ impl Emitter {
                     Some(x) => self.emit_expr(x, 0)?,
                     None => String::new(),
                 };
-                Ok(format!("{}[{}:{}]", b, lo_t, hi_t))
+                match max {
+                    Some(x) => {
+                        let m = self.emit_expr(x, 0)?;
+                        if hi.is_none() {
+                            // `a[lo::max]`: Go requires a middle index once a max
+                            // is present. Fill it with `len`, and keep both the
+                            // fill and the max inside the base's capacity so a
+                            // slightly-over max does not panic at run time.
+                            let m_eff = format!("min(cap({}), {})", b, m);
+                            let hi_eff = format!("min(len({}), {})", b, m_eff);
+                            Ok(format!("{}[{}:{}:{}]", b, lo_t, hi_eff, m_eff))
+                        } else {
+                            Ok(format!("{}[{}:{}:{}]", b, lo_t, hi_t, m))
+                        }
+                    }
+                    None => Ok(format!("{}[{}:{}]", b, lo_t, hi_t)),
+                }
             }
 
             Expr::Field { base, name, .. } => {

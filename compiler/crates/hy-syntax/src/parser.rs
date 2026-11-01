@@ -2254,10 +2254,21 @@ impl Parser {
                         Some(Box::new(self.parse_expr(lit)?))
                     };
                     if self.eat_punct(":") || self.eat_punct("..") {
-                        let hi = if self.at_punct("]") {
+                        let hi = if self.at_punct("]") || self.at_punct(":") {
                             None
                         } else {
                             Some(Box::new(self.parse_expr(lit)?))
+                        };
+                        // Three-index (full) slice: `a[lo:hi:max]` caps the
+                        // result, Go's `a[lo:hi:max]`.
+                        let max = if self.eat_punct(":") || self.eat_punct("..") {
+                            if self.at_punct("]") {
+                                None
+                            } else {
+                                Some(Box::new(self.parse_expr(lit)?))
+                            }
+                        } else {
+                            None
                         };
                         self.expect_punct("]")?;
                         let span = self.span_to_prev(e.span().start);
@@ -2265,6 +2276,7 @@ impl Parser {
                             base: Box::new(e),
                             lo,
                             hi,
+                            max,
                             span,
                         };
                     } else {
