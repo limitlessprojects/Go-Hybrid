@@ -1041,8 +1041,49 @@ impl<'a> Checker<'a> {
                     self.check_type_expr_with_state(st, r);
                 }
             }
-            TypeExpr::Named { .. } => {}
+            TypeExpr::Named { name, span } => {
+                self.check_type_shadowed_by_value(st, name, *span)
+            }
         }
+    }
+
+    /// A type-use whose name is shadowed by a function-local *value* binding:
+    /// Go resolves the name to the variable, so the emitted program fails
+    /// `go build` with `X (local variable) is not a type` (issue #3029,
+    /// GUARANTEES row 13 BUILDABLE). `st.env` holds the define / parameter /
+    /// receiver / loop bindings currently in scope at this point.
+    fn check_type_shadowed_by_value(&mut self, st: Option<&FnState>, name: &str, span: Span) {
+        let Some(st) = st else { return };
+        // Generic type parameters name types, not values; and a name that is
+        // not a type in the unshadowed program is someone else's diagnostic.
+        if st.type_params.contains(name) || !self.names_a_type(name) {
+            return;
+        }
+        if st.env_lookup(name).is_none() {
+            return;
+        }
+        let msg = format!(
+            "`{name}` is a local value here, so this type use would read the variable and `go build` would fail with `{name} (local variable) is not a type` (HYB-E1002)"
+        );
+        self.diags.push(
+            Diagnostic::error("HYB-E1002", self.path.clone(), span, msg).with_notes(vec![
+                format!(
+                    "why: a function-local binding named `{name}` shadows the type of the same name for the rest of its scope, but the emitter writes the type name unchanged — Go resolves it to the value and rejects the program (GUARANTEES row 13 BUILDABLE, issue #3029)"
+                ),
+                format!(
+                    "fix: rename the local value (or move the type use before the binding), so `{name}` still names the type at this point"
+                ),
+            ]),
+        );
+    }
+
+    /// Does `name` name a type in the unshadowed program? A predeclared
+    /// primitive/interface (`int`, `string`, `bool`, `byte`, `any`, `error`,
+    /// …), a declared struct, or a declared type alias.
+    fn names_a_type(&self, name: &str) -> bool {
+        is_primitive_receiver(name)
+            || self.structs.contains_key(name)
+            || self.type_aliases.contains_key(name)
     }
 
     pub(crate) fn eval_array_len_const(&self, len: &Expr) -> Option<usize> {
