@@ -3163,6 +3163,19 @@ impl<'a> Collector<'a> {
                     }
                 }
                 let head = Checker::base_named_type_str(name);
+                if let Expr::Ident { name: pkg, .. } = unwrap_parens(base) {
+                    if self.lookup_kind(pkg).is_none() {
+                        let full = format!("{pkg}.{head}");
+                        if let Some(decl) = self.ck.fns.get(full.as_str()) {
+                            return Some(
+                                decl.results
+                                    .iter()
+                                    .map(|r| self.kind_of_ty(&r.ty, 0))
+                                    .collect(),
+                            );
+                        }
+                    }
+                }
                 if let Some(sname) = self.struct_base_name(&bk) {
                     if let Some(m) = self.ck.method_decls.get(&(sname, head.to_string())) {
                         return Some(
@@ -4985,19 +4998,111 @@ impl<'a> Collector<'a> {
                         }
                     }
                 } else if targets.len() > 1 && values.len() == 1 {
-                    // One provably-single value bound to several targets —
-                    // go build refuses with `assignment mismatch`. Call,
-                    // receive, and index sources are owned by the
-                    // source-count rules.
-                    if is_definitely_single_value(&values[0]) {
-                        self.emit_e1002(
-                            span,
-                            format!(
-                                "assignment mismatch: {} variables but the value yields exactly 1 (HYB-E1002)",
-                                targets.len()
-                            ),
-                            "bind one name per value, or use a source that yields one value per target",
-                        );
+                    let val = &values[0];
+                    let bare_val = unwrap_parens(val);
+                    match bare_val {
+                        Expr::Call { callee, args, .. } => {
+                            if let Some(res_kinds) = self.call_result_kinds(callee, args) {
+                                if res_kinds.len() == targets.len() {
+                                    for (t, rk) in targets.iter().zip(res_kinds.iter()) {
+                                        let tpk = self.kind_of_place(t);
+                                        if kinds_conflict(&tpk, rk) {
+                                            self.emit_e1002(
+                                                val.span(),
+                                                format!(
+                                                    "cannot assign a value of type `{}` to `{}` (type `{}`) in multi-value assignment — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
+                                                    rk.label(),
+                                                    t.render(),
+                                                    tpk.label(),
+                                                    tpk.label()
+                                                ),
+                                                "each target's declared type is fixed; the assigned multi-value results must match target types",
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Expr::Index { base, .. } => {
+                            let bk = self.kind_of_expr(base);
+                            if let OpKind::Map(_k_ty, v_ty) = bk {
+                                if targets.len() == 2 {
+                                    let tpk0 = self.kind_of_place(&targets[0]);
+                                    if kinds_conflict(&tpk0, &v_ty) {
+                                        self.emit_e1002(
+                                            val.span(),
+                                            format!(
+                                                "cannot assign map value of type `{}` to `{}` (type `{}`) in comma-ok assignment — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
+                                                v_ty.label(),
+                                                targets[0].render(),
+                                                tpk0.label(),
+                                                tpk0.label()
+                                            ),
+                                            "the first target in a comma-ok map lookup must match the map's value type",
+                                        );
+                                    }
+                                    let tpk1 = self.kind_of_place(&targets[1]);
+                                    if kinds_conflict(&tpk1, &OpKind::Bool) {
+                                        self.emit_e1002(
+                                            val.span(),
+                                            format!(
+                                                "cannot assign boolean `ok` to `{}` (type `{}`) in comma-ok assignment — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
+                                                targets[1].render(),
+                                                tpk1.label(),
+                                                tpk1.label()
+                                            ),
+                                            "the second target in a comma-ok map lookup must be a boolean (`bool`)",
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Expr::Receive { chan, .. } => {
+                            let ck = self.kind_of_expr(chan);
+                            if let OpKind::Chan(elem_ty) = ck {
+                                if targets.len() == 2 {
+                                    let tpk0 = self.kind_of_place(&targets[0]);
+                                    if kinds_conflict(&tpk0, &elem_ty) {
+                                        self.emit_e1002(
+                                            val.span(),
+                                            format!(
+                                                "cannot assign channel value of type `{}` to `{}` (type `{}`) in comma-ok receive — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
+                                                elem_ty.label(),
+                                                targets[0].render(),
+                                                tpk0.label(),
+                                                tpk0.label()
+                                            ),
+                                            "the first target in a comma-ok channel receive must match the channel's element type",
+                                        );
+                                    }
+                                    let tpk1 = self.kind_of_place(&targets[1]);
+                                    if kinds_conflict(&tpk1, &OpKind::Bool) {
+                                        self.emit_e1002(
+                                            val.span(),
+                                            format!(
+                                                "cannot assign boolean `ok` to `{}` (type `{}`) in comma-ok receive — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
+                                                targets[1].render(),
+                                                tpk1.label(),
+                                                tpk1.label()
+                                            ),
+                                            "the second target in a comma-ok channel receive must be a boolean (`bool`)",
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            if is_definitely_single_value(val) {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "assignment mismatch: {} variables but the value yields exactly 1 (HYB-E1002)",
+                                        targets.len()
+                                    ),
+                                    "bind one name per value, or use a source that yields one value per target",
+                                );
+                            }
+                        }
                     }
                 }
             }
