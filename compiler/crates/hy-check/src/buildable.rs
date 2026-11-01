@@ -801,6 +801,20 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #2771 — fixed-size array length of a simple local place.
+    fn place_array_len(&self, p: &Place, use_pos: hy_diag::Pos) -> Option<i128> {
+        match &p.kind {
+            PlaceKind::Ident(n) => {
+                let expr = Expr::Ident {
+                    name: n.clone(),
+                    span: p.span,
+                };
+                self.eval_const_array_len_at(&expr, use_pos)
+            }
+            _ => None,
+        }
+    }
+
     /// #1031 — the exact predeclared numeric spelling of a type expression.
     /// A user-declared struct/enum/alias of that name is not the predeclared
     /// type, so it fails open.
@@ -1377,7 +1391,11 @@ impl<'a> Collector<'a> {
                     (self.scalar_of_ty(t), self.typed_value_scalar(&l.values[0])),
                     (Some(w), Some(v)) if w != v
                 );
-                if kinds_conflict(&want, &vk) || int_float_conflict || scalar_mismatch {
+                // #2771: `var c [4]int = a` where `a` is `[3]int`.
+                let want_len = self.ck.array_len_of_ty(t);
+                let got_len = self.eval_const_array_len_at(&l.values[0], l.values[0].span().start);
+                let array_len_mismatch = matches!((want_len, got_len), (Some(w), Some(g)) if w != g);
+                if kinds_conflict(&want, &vk) || int_float_conflict || scalar_mismatch || array_len_mismatch {
                     self.emit_e1002(
                         l.span,
                         format!(
@@ -1401,7 +1419,11 @@ impl<'a> Collector<'a> {
                         (self.scalar_of_ty(t), self.typed_value_scalar(v)),
                         (Some(w), Some(g)) if w != g
                     );
-                    if kinds_conflict(&want, &vk) || int_float_conflict || scalar_mismatch {
+                    // #2771: multi-value declaration array length mismatch.
+                    let want_len = self.ck.array_len_of_ty(t);
+                    let got_len = self.eval_const_array_len_at(v, v.span().start);
+                    let array_len_mismatch = matches!((want_len, got_len), (Some(w), Some(g)) if w != g);
+                    if kinds_conflict(&want, &vk) || int_float_conflict || scalar_mismatch || array_len_mismatch {
                         self.emit_e1002(
                             l.span,
                             format!(
@@ -3647,7 +3669,11 @@ impl<'a> Collector<'a> {
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
                 (Some(w), Some(g)) if w != g
             );
-            if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch {
+            // #2771: argument array length mismatch.
+            let want_len = self.ck.array_len_of_ty(&p.ty);
+            let got_len = self.eval_const_array_len_at(&a.value, a.value.span().start);
+            let array_len_mismatch = matches!((want_len, got_len), (Some(w), Some(g)) if w != g);
+            if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch || array_len_mismatch {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -3695,7 +3721,11 @@ impl<'a> Collector<'a> {
                 (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
                 (Some(w), Some(g)) if w != g
             );
-            if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch {
+            // #2771: method argument array length mismatch.
+            let want_len = self.ck.array_len_of_ty(&p.ty);
+            let got_len = self.eval_const_array_len_at(&a.value, a.value.span().start);
+            let array_len_mismatch = matches!((want_len, got_len), (Some(w), Some(g)) if w != g);
+            if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch || array_len_mismatch {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -4382,7 +4412,10 @@ impl<'a> Collector<'a> {
                         || (lk == OpKind::Int
                             && rk == OpKind::Float
                             && !self.is_untyped_int_const(lhs));
-                    if equality_kinds_conflict(&lk, &rk) || int_float_conflict || self.scalar_conflict(lhs, rhs) {
+                    let lhs_len = self.eval_const_array_len_at(lhs, lhs.span().start);
+                    let rhs_len = self.eval_const_array_len_at(rhs, rhs.span().start);
+                    let array_len_mismatch = matches!((lhs_len, rhs_len), (Some(l), Some(r)) if l != r);
+                    if equality_kinds_conflict(&lk, &rk) || int_float_conflict || self.scalar_conflict(lhs, rhs) || array_len_mismatch {
                         self.emit_e1002(
                             span,
                             format!(
@@ -4605,7 +4638,11 @@ impl<'a> Collector<'a> {
                         (self.place_scalar(target), self.typed_value_scalar(&values[0])),
                         (Some(t), Some(v)) if t != v
                     );
-                    if !is_loan_shape && (conflict || scalar_mismatch) {
+                    // #2771: assignment array length mismatch.
+                    let target_len = self.place_array_len(target, span.start);
+                    let val_len = self.eval_const_array_len_at(&values[0], values[0].span().start);
+                    let array_len_mismatch = matches!((target_len, val_len), (Some(t), Some(v)) if t != v);
+                    if !is_loan_shape && (conflict || scalar_mismatch || array_len_mismatch) {
                         self.emit_e1002(
                             span,
                             format!(
@@ -4652,7 +4689,11 @@ impl<'a> Collector<'a> {
                             (self.place_scalar(t), self.typed_value_scalar(v)),
                             (Some(tp), Some(vp)) if tp != vp
                         );
-                        if conflict || scalar_mismatch {
+                        // #2771: parallel assignment array length mismatch.
+                        let target_len = self.place_array_len(t, t.span.start);
+                        let val_len = self.eval_const_array_len_at(v, v.span().start);
+                        let array_len_mismatch = matches!((target_len, val_len), (Some(tl), Some(vl)) if tl != vl);
+                        if conflict || scalar_mismatch || array_len_mismatch {
                             self.emit_e1002(
                                 v.span(),
                                 format!(
