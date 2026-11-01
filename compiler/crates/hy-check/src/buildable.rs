@@ -1528,6 +1528,11 @@ impl<'a> Collector<'a> {
         // set (Define|Let|Var|Const) drives which locals get unused-read
         // tracking; #430's operand-kind inference runs for EVERY name so
         // `kind_of_expr` resolves binding-shaped operands (issue #425).
+        let pre_scope_names: HashSet<String> = self
+            .scopes
+            .last()
+            .map(|top| top.keys().cloned().collect())
+            .unwrap_or_default();
         let kinds = self.infer_local_kinds(l);
         let scalars = self.infer_local_scalars(l);
         let set_elems: Vec<Option<String>> = (0..l.names.len())
@@ -1549,8 +1554,8 @@ impl<'a> Collector<'a> {
                 }
             }
         }
-        for (((name, kind), scalar), set_elem) in
-            l.names.iter().zip(kinds).zip(scalars).zip(set_elems)
+        for (idx, (((name, kind), scalar), set_elem)) in
+            l.names.iter().zip(kinds).zip(scalars).zip(set_elems).enumerate()
         {
             // #1031: a same-scope `:=` re-define keeps the EXISTING variable
             // (and its type) in Go, so only a fresh binding takes the
@@ -1559,7 +1564,15 @@ impl<'a> Collector<'a> {
                 .scalar_scopes
                 .last()
                 .is_some_and(|top| top.contains_key(name.as_str()));
-            self.bind_kind(name, kind);
+            let existing_kind = self
+                .kind_scopes
+                .last()
+                .and_then(|ks| ks.get(name.as_str()))
+                .cloned();
+            let same_scope_redefine = short_define && pre_scope_names.contains(name.as_str());
+            if !same_scope_redefine || existing_kind.as_ref().is_none_or(|ek| *ek == OpKind::Unknown) {
+                self.bind_kind(name, kind.clone());
+            }
             if fresh || l.ty.is_some() {
                 self.set_scalar(name, scalar);
             }
@@ -1580,11 +1593,37 @@ impl<'a> Collector<'a> {
                 self.emit_let_reassign_error(name, l.span);
                 continue;
             }
+            if same_scope_redefine {
+                // Same-scope re-define: Go keeps the existing variable and its
+                // declared type, so a conflicting initializer fails `go build`
+                // with `cannot use ... as ... value in assignment`.
+                let is_slot_loan = l.values.len() == l.names.len()
+                    && l.values
+                        .get(idx)
+                        .and_then(as_addr_of)
+                        .is_some_and(|o| matches!(o, Expr::Index { .. } | Expr::Field { .. }));
+                if let Some(ek) = &existing_kind {
+                    if !is_slot_loan && kinds_conflict(ek, &kind) {
+                        self.emit_e1002(
+                            l.span,
+                            format!(
+                                "cannot assign a value of type `{}` to `{}` (type `{}`) in short declaration — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
+                                kind.label(),
+                                name,
+                                ek.label(),
+                                ek.label()
+                            ),
+                            "a variable already declared in the same scope keeps its declared type in `:=`",
+                        );
+                    }
+                }
+                continue;
+            }
             let Some(top) = self.scopes.last_mut() else {
                 continue;
             };
             if top.contains_key(name.as_str()) {
-                // Same-scope re-define: Go keeps the existing variable.
+                // Repeated name in the same `:=` (already reported above).
                 continue;
             }
             let id = self.defines.len();
@@ -1606,8 +1645,10 @@ impl<'a> Collector<'a> {
         if let Some(ty) = &l.ty {
             return vec![self.kind_of_ty(ty, 0); n];
         }
-        if n == 2 && l.values.len() == 1 {
-            return self.multi_value_kinds(&l.values[0]);
+        if n >= 2 && l.values.len() == 1 {
+            let mut mv = self.multi_value_kinds(&l.values[0]);
+            mv.resize(n, OpKind::Unknown);
+            return mv;
         }
         if n == l.values.len() {
             return l.values.iter().map(|v| self.kind_of_expr(v)).collect();
@@ -1618,9 +1659,21 @@ impl<'a> Collector<'a> {
     fn multi_value_kinds(&self, e: &Expr) -> Vec<OpKind> {
         match unwrap_parens(e) {
             Expr::Move { operand, .. } => self.multi_value_kinds(operand),
+            Expr::Try { operand, .. } => match unwrap_parens(operand) {
+                Expr::Call { callee, args, .. } => {
+                    if let Some(res) = self.call_result_kinds(callee, args) {
+                        if res.len() >= 3 {
+                            return res[..res.len() - 1].to_vec();
+                        }
+                    }
+                    vec![OpKind::Unknown, OpKind::Unknown]
+                }
+                _ => vec![OpKind::Unknown, OpKind::Unknown],
+            },
             Expr::Index { base, .. } => match self.kind_of_expr(base) {
                 OpKind::Map(_, v) => vec![*v, OpKind::Bool],
-                _ => vec![OpKind::Unknown, OpKind::Bool],
+                OpKind::Unknown => vec![OpKind::Unknown, OpKind::Bool],
+                _ => vec![OpKind::Unknown, OpKind::Unknown],
             },
             Expr::Receive { chan, .. } => match self.kind_of_expr(chan) {
                 OpKind::Chan(elem) => vec![*elem, OpKind::Bool],
@@ -1629,7 +1682,7 @@ impl<'a> Collector<'a> {
             Expr::Call { callee, args, .. } => {
                 if let Some(res) = self.call_result_kinds(callee, args) {
                     if res.len() >= 2 {
-                        return vec![res[0].clone(), res[1].clone()];
+                        return res;
                     }
                 }
                 vec![OpKind::Unknown, OpKind::Unknown]
@@ -3871,6 +3924,9 @@ impl<'a> Collector<'a> {
         if !m.type_params.is_empty() {
             return;
         }
+        if self.multi_value_arg_count(args).is_some() {
+            return;
+        }
         let (want, got) = (m.params.len(), args.len());
         if want == got {
             return;
@@ -3913,7 +3969,26 @@ impl<'a> Collector<'a> {
         if !f.type_params.is_empty() {
             return;
         }
-        if self.multi_value_arg_count(args).is_some() {
+        if let Some(n) = self.multi_value_arg_count(args) {
+            if f.params.len() == n {
+                let got_kinds = self.multi_value_kinds(&args[0].value);
+                for (p, got) in f.params.iter().zip(got_kinds.iter()) {
+                    let want = self.kind_of_ty(&p.ty, 0);
+                    if kinds_conflict(&want, got) {
+                        self.emit_e1002(
+                            args[0].value.span(),
+                            format!(
+                                "cannot use `{}` result of type `{}` as `{}` value in argument to `{}` — Go refuses mismatched argument types (HYB-E1002)",
+                                args[0].value.render(),
+                                got.label(),
+                                want.label(),
+                                name
+                            ),
+                            "argument types must match declared parameter types",
+                        );
+                    }
+                }
+            }
             return;
         }
         if f.params.len() != args.len() {
@@ -3969,7 +4044,27 @@ impl<'a> Collector<'a> {
         if !m.type_params.is_empty() {
             return;
         }
-        if self.multi_value_arg_count(args).is_some() {
+        if let Some(n) = self.multi_value_arg_count(args) {
+            if m.params.len() == n {
+                let got_kinds = self.multi_value_kinds(&args[0].value);
+                for (p, got) in m.params.iter().zip(got_kinds.iter()) {
+                    let want = self.kind_of_ty(&p.ty, 0);
+                    if kinds_conflict(&want, got) {
+                        self.emit_e1002(
+                            args[0].value.span(),
+                            format!(
+                                "cannot use `{}` result of type `{}` as `{}` value in argument to `{}.{}` — Go refuses mismatched argument types (HYB-E1002)",
+                                args[0].value.render(),
+                                got.label(),
+                                want.label(),
+                                sn,
+                                name
+                            ),
+                            "argument types must match declared parameter types",
+                        );
+                    }
+                }
+            }
             return;
         }
         if m.params.len() != args.len() {
@@ -4193,29 +4288,67 @@ impl<'a> Collector<'a> {
         let Some(n) = self.multi_value_arg_count(args) else {
             return;
         };
-        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
-            return;
-        };
-        let head = Checker::base_named_type_str(name);
-        let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
-            return;
-        };
-        let want = f.params.len();
-        if want == n {
-            return;
+        match unwrap_parens(callee) {
+            Expr::Ident { name, .. } => {
+                if self.lookup_kind(name).is_some() {
+                    return;
+                }
+                let head = Checker::base_named_type_str(name);
+                let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
+                    return;
+                };
+                if !f.type_params.is_empty() {
+                    return;
+                }
+                let want = f.params.len();
+                if want == n {
+                    return;
+                }
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "`{}` takes {want} argument{} but its argument list expands to {n} value{} — Go refuses `{} arguments in call to {}` (HYB-E1002)",
+                        name,
+                        if want == 1 { "" } else { "s" },
+                        if n == 1 { "" } else { "s" },
+                        if n < want { "not enough" } else { "too many" },
+                        name
+                    ),
+                    "a multi-value call expands to one argument per result; the callee must accept exactly that many",
+                );
+            }
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let Some(sn) = self.struct_base_name(&bk) else {
+                    return;
+                };
+                let Some(m) = self.ck.method_decls.get(&(sn.clone(), name.to_string())) else {
+                    return;
+                };
+                if !m.type_params.is_empty() {
+                    return;
+                }
+                let want = m.params.len();
+                if want == n {
+                    return;
+                }
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "method `{}` on `{}` takes {want} argument{} but its argument list expands to {n} value{} — Go refuses `{} arguments in call to {}.{}` (HYB-E1002)",
+                        name,
+                        sn,
+                        if want == 1 { "" } else { "s" },
+                        if n == 1 { "" } else { "s" },
+                        if n < want { "not enough" } else { "too many" },
+                        sn,
+                        name
+                    ),
+                    "a multi-value call expands to one argument per result; the method must accept exactly that many",
+                );
+            }
+            _ => {}
         }
-        self.emit_e1002(
-            span,
-            format!(
-                "`{}` takes {want} argument{} but its argument list expands to {n} value{} — Go refuses `{} arguments in call to {}` (HYB-E1002)",
-                name,
-                if want == 1 { "" } else { "s" },
-                if n == 1 { "" } else { "s" },
-                if n < want { "not enough" } else { "too many" },
-                name
-            ),
-            "a multi-value call expands to one argument per result; the callee must accept exactly that many",
-        );
     }
 
     /// #682 U5 — `append`'s appended values must be assignable to the slice's
@@ -4998,6 +5131,26 @@ impl<'a> Collector<'a> {
                             ),
                             "bind one name per value, or use a source that yields one value per target",
                         );
+                    } else {
+                        let got_kinds = self.multi_value_kinds(&values[0]);
+                        if got_kinds.len() == targets.len() {
+                            for (t, vk) in targets.iter().zip(got_kinds.iter()) {
+                                let tpk = self.kind_of_place(t);
+                                if kinds_conflict(&tpk, vk) {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "cannot assign a value of type `{}` to `{}` (type `{}`) in multi-value assignment — Go refuses `cannot use ... as {} value in assignment` (HYB-E1002)",
+                                            vk.label(),
+                                            t.render(),
+                                            tpk.label(),
+                                            tpk.label()
+                                        ),
+                                        "each target's declared type is fixed; write an explicit conversion when a conversion is intended",
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
             }
