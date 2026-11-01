@@ -211,6 +211,16 @@ impl Emitter {
                 // same access (issue #618). A non-primary base keeps its
                 // parentheses — `(*p).f` and `(a + b).f` need them.
                 let base = Self::selector_base(base);
+                if let Expr::Ident { name: root, .. } = base {
+                    if !self.is_unshadowed_pkg_root(root) && !self.bindings.contains_key(root) {
+                        let (head, type_args) = split_type_args(name);
+                        let full = format!("{}.{}", root, head);
+                        if self.assoc_fns.contains(&full) {
+                            let ta = type_args.map(|ta| self.translate_type_args_suffix(ta)).unwrap_or_default();
+                            return Ok(format!("{}_{}{}", root, head, ta));
+                        }
+                    }
+                }
                 let b = self.emit_expr(base, ATOM)?;
                 // Package-qualified members register the import.
                 if let Expr::Ident { name: root, .. } = base {
@@ -853,33 +863,6 @@ impl Emitter {
             }
         }
 
-        // --- associated-fn calls: `lru_cache.new[string, int](2)` →
-        //     `lru_cache_new[string, int](2)` (Go has no dotted idents) ---
-        if let Expr::Field { base, name, .. } = callee {
-            if let Expr::Ident { name: root, .. } = Self::unwrap_parens(base.as_ref()) {
-                if !self.is_unshadowed_pkg_root(root) && !self.bindings.contains_key(root) {
-                    let (head, type_args) = split_type_args(name);
-                    let full = format!("{}.{}", root, head);
-                    if self.assoc_fns.contains(&full) {
-                        let translated_ta = type_args
-                            .map(|ta| self.translate_type_args_suffix(ta))
-                            .unwrap_or_default();
-                        let mut parts = Vec::new();
-                        for a in args {
-                            parts.push(self.emit_call_arg(a)?);
-                        }
-                        return Ok(format!(
-                            "{}_{}{}({})",
-                            root,
-                            head,
-                            translated_ta,
-                            parts.join(", ")
-                        ));
-                    }
-                }
-            }
-        }
-
         let mut bare_callee = callee;
         while let Expr::Paren { inner, .. } = bare_callee {
             bare_callee = inner;
@@ -959,11 +942,19 @@ impl Emitter {
         // own method-receiver auto-address precedent, pinned by the
         // pre-registered corpus).
         let mut ptr_params: Vec<bool> = Vec::new();
-        if let Expr::Ident { name, .. } = callee {
-            let (fn_head, _) = split_type_args(name);
-            if let Some((_, _, _, params)) = self.fn_shapes.get(fn_head) {
-                ptr_params = params.iter().map(|p| p.is_some()).collect();
-            }
+        let fn_key = match Self::unwrap_parens(callee) {
+            Expr::Ident { name, .. } => Some(split_type_args(name).0.to_string()),
+            Expr::Field { base, name, .. } => match Self::unwrap_parens(base) {
+                Expr::Ident { name: root, .. } if !self.is_unshadowed_pkg_root(root) && !self.bindings.contains_key(root) => {
+                    let full = format!("{}.{}", root, split_type_args(name).0);
+                    self.assoc_fns.contains(&full).then_some(full)
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((_, _, _, params)) = fn_key.as_deref().and_then(|k| self.fn_shapes.get(k)) {
+            ptr_params = params.iter().map(|p| p.is_some()).collect();
         }
         let c = self.emit_expr(callee, ATOM)?;
         let mut parts = Vec::new();
