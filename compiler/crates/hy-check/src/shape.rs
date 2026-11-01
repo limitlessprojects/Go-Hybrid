@@ -1166,6 +1166,18 @@ impl<'a> Checker<'a> {
 
         match target {
             MatchTarget::Option => {
+                // A trailing unguarded `_` covers every remaining case,
+                // including a `some` arm whose guard can fail. Without this
+                // short-circuit the loop below skips guarded arms and then
+                // never credits the wildcard (it only marks `has_none` once
+                // `has_some` is already true), so
+                // `some(v) if g: … _: …` was rejected as non-exhaustive.
+                let has_trailing_wildcard = arms.last().is_some_and(|a| {
+                    matches!(a.pattern, MatchPattern::Wildcard) && a.guard.is_none()
+                });
+                if has_trailing_wildcard {
+                    return;
+                }
                 let mut has_some = false;
                 let mut has_none = false;
                 for arm in arms {
@@ -2168,6 +2180,56 @@ mod tests {
              }",
         );
         assert_eq!(r.verdict, Verdict::Accept, "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn guarded_some_arm_with_trailing_wildcard_is_exhaustive() {
+        // A guarded `some` arm can fail, and a trailing `_` catches that. The
+        // emitter has lowered this shape since #210; the checker skipped
+        // guarded arms and then never credited the wildcard (it only sets
+        // `has_none` once `has_some` is true), so `hyb check` rejected a
+        // program `hyb build` could already emit.
+        let accept = check(
+            "fn main() {\n\
+               opt := some(3)\n\
+               match opt {\n\
+                 some(v) if v > 10: fmt.println(\"big\")\n\
+                 _: fmt.println(\"fallback\")\n\
+               }\n\
+             }",
+        );
+        assert_eq!(accept.verdict, Verdict::Accept, "{:?}", accept.diagnostics);
+
+        // `none` plus a trailing `_` is exhaustive too: the `_` covers `some`.
+        let accept_none = check(
+            "fn main() {\n\
+               opt := some(3)\n\
+               match opt {\n\
+                 none: fmt.println(\"none\")\n\
+                 _: fmt.println(\"other\")\n\
+               }\n\
+             }",
+        );
+        assert_eq!(
+            accept_none.verdict,
+            Verdict::Accept,
+            "{:?}",
+            accept_none.diagnostics
+        );
+
+        // A guarded `some` with only `none` stays non-exhaustive: the guard
+        // can fail and nothing else covers `some`.
+        let reject = check(
+            "fn main() {\n\
+               opt := some(3)\n\
+               match opt {\n\
+                 some(v) if v > 10: fmt.println(\"big\")\n\
+                 none: fmt.println(\"none\")\n\
+               }\n\
+             }",
+        );
+        assert_eq!(reject.verdict, Verdict::Reject, "{:?}", reject.diagnostics);
+        assert_eq!(reject.diagnostics[0].code, "HYB-E5001");
     }
 
     #[test]
