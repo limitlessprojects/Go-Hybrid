@@ -1200,6 +1200,9 @@ impl Emitter {
 
     fn binding_kind_of(&self, e: &Expr) -> BindingKind {
         let e = Self::peel_parens(e);
+        if matches!(e, Expr::MapLit { .. }) {
+            return BindingKind::Map;
+        }
         if let Expr::StructLit { ty: Some(t), .. } = e {
             if let Some(kind) = self.binding_kind_of_ty(t) {
                 return kind;
@@ -1248,22 +1251,67 @@ impl Emitter {
             }
         }
         // make(chan …) → Chan (single-var range emits the value directly).
-        // Only classify as Chan if the first argument is a channel type.
-        // make([]T, n) (SliceLit) and make(map[K]V) (MapLit) must remain Plain
-        // so single-var range binds elements/keys rather than channel values.
+        // make(map[K]V) → Map (single-var range emits the key per LX13).
+        // make([]T, n) (SliceLit) must remain Plain so single-var range binds elements.
         if matches!(call, Expr::Ident { name, .. } if name == "make") {
             if let Some(first) = args.first() {
+                let first_val = Self::peel_parens(&first.value);
                 if let Expr::StructLit {
                     ty: Some(TypeExpr::Chan { .. }),
                     ..
-                } = &first.value
+                } = first_val
                 {
                     return BindingKind::Chan;
+                }
+                if let Expr::MapLit { .. } = first_val {
+                    return BindingKind::Map;
+                }
+                if let Expr::StructLit {
+                    ty: Some(TypeExpr::Map { .. }),
+                    ..
+                } = first_val
+                {
+                    return BindingKind::Map;
+                }
+                if let Expr::StructLit {
+                    ty: Some(TypeExpr::Named { name, .. }),
+                    ..
+                } = first_val
+                {
+                    if name.starts_with("map[") {
+                        return BindingKind::Map;
+                    }
                 }
             }
             return BindingKind::Plain;
         }
         BindingKind::Plain
+    }
+
+    /// Whether an expression evaluates to a map (`map[K]V`). Single-var map
+    /// ranges in Go iterate over keys (`for k := range m`) per SPEC-LANGUAGE LX13.
+    pub(crate) fn is_map_expr(&self, e: &Expr) -> bool {
+        let e = Self::peel_parens(e);
+        match e {
+            Expr::Ident { name, .. } => {
+                matches!(self.bindings.get(name), Some(BindingKind::Map))
+            }
+            Expr::MapLit { .. } => true,
+            Expr::Field { base, name, .. } => {
+                if let Some(sn) = self.user_struct_name_of(base.as_ref()) {
+                    if let Some(fields) = self.struct_fields.get(sn) {
+                        if let Some((_, fty)) = fields.iter().find(|(f, _)| f == name) {
+                            return fty.starts_with("map[");
+                        }
+                    }
+                }
+                false
+            }
+            Expr::Call { .. } | Expr::Try { .. } => {
+                self.binding_kind_of(e) == BindingKind::Map
+            }
+            _ => false,
+        }
     }
 
     /// Whether an expression evaluates to a channel type (param, typed local,
@@ -2084,12 +2132,14 @@ impl Emitter {
                             self.local_vars.remove(&vars[0]);
                             format!("for range {} {{", e)
                         } else {
-                            // Hybrid's single-var iterate binds the VALUE.
-                            // Go's single-var range binds the index (slices/
-                            // maps) or the value (channels) — hence the Chan
-                            // hint check.
+                            // Hybrid's single-var iterate binds the VALUE for
+                            // slices, arrays, strings, and the KEY for maps
+                            // (SPEC-LANGUAGE.md LX13). Go's single-var range
+                            // binds the index (slices) or the key (maps) or the
+                            // value (channels).
                             let over_chan = self.is_channel_expr(expr);
-                            if over_chan {
+                            let over_map = self.is_map_expr(expr);
+                            if over_chan || over_map {
                                 self.shadow_local_names(vars);
                                 format!("for {} := range {} {{", vars[0], e)
                             } else {

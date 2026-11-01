@@ -302,10 +302,12 @@ pub enum BindingKind {
     /// `os.Stdout.Write(b)`.
     Bytes,
     /// Bound to a channel (param type or `make(chan …)`) — single-var
-    /// `for v in ch` ranges the VALUE directly; slices/maps need `_, v`.
+    /// `for v in ch` ranges the VALUE directly; slices need `_, v`.
     Chan,
     /// Bound to a set (`set[T]`) — `len(s)` / `delete(s, v)` / `for v in s`.
     Set,
+    /// Bound to a map (`map[K]V`) — single-var `for k in m` ranges KEYS (LX13).
+    Map,
     /// Our own struct / plain value — members emit verbatim.
     Plain,
 }
@@ -1679,6 +1681,8 @@ impl Emitter {
                 self.bindings.insert(p.name.clone(), kind);
             } else if matches!(self.resolve_type_alias(&p.ty), TypeExpr::Chan { .. }) {
                 self.bindings.insert(p.name.clone(), BindingKind::Chan);
+            } else if matches!(self.resolve_type_alias(&p.ty), TypeExpr::Map { .. }) {
+                self.bindings.insert(p.name.clone(), BindingKind::Map);
             }
             if self.is_pointer_ty(&p.ty) {
                 self.pointer_vars.insert(p.name.clone());
@@ -1733,6 +1737,9 @@ impl Emitter {
         if matches!(t, TypeExpr::Chan { .. }) {
             return Some(BindingKind::Chan);
         }
+        if matches!(t, TypeExpr::Map { .. }) {
+            return Some(BindingKind::Map);
+        }
         let name = match t {
             TypeExpr::Named { name, .. } => name.as_str(),
             TypeExpr::Pointer { to, .. } => return self.binding_kind_of_ty(to),
@@ -1740,6 +1747,9 @@ impl Emitter {
         };
         if name.starts_with("set[") || name == "set" {
             return Some(BindingKind::Set);
+        }
+        if name.starts_with("map[") {
+            return Some(BindingKind::Map);
         }
         if name.is_empty() || !name.contains('.') {
             return None;

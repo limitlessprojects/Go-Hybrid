@@ -1203,26 +1203,46 @@ fn single_var_iterate_over_make_slice_variable_binds_element() {
 }
 
 #[test]
-fn single_var_iterate_over_map_variable_does_not_lower_as_channel() {
+fn single_var_iterate_over_map_variable_lowers_as_keys_per_lx13() {
     let go = emit("fn f() {\n    m := map[string]int{}\n    for k in m {\n        _ = k\n    }\n}\n");
     assert!(
-        go.contains("for _, k := range m {"),
-        "map variable must not be lowered as channel:\n{}",
+        go.contains("for k := range m {"),
+        "map variable single-var range must lower as keys:\n{}",
         go
     );
     assert!(
-        !go.contains("for k := range m {"),
-        "map variable single-var range must not be lowered as channel range:\n{}",
+        !go.contains("for _, k := range m {"),
+        "map variable single-var range must not lower as values:\n{}",
         go
     );
 }
 
 #[test]
-fn single_var_iterate_over_make_map_literal_does_not_lower_as_channel() {
+fn single_var_iterate_over_make_map_literal_lowers_as_keys_per_lx13() {
     let go = emit("fn f() {\n    m := make(map[string]int{})\n    for k in m {\n        _ = k\n    }\n}\n");
     assert!(
-        go.contains("for _, k := range m {"),
-        "make(map) variable must not be lowered as channel:\n{}",
+        go.contains("for k := range m {"),
+        "make(map) variable single-var range must lower as keys:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("for _, k := range m {"),
+        "make(map) variable single-var range must not lower as values:\n{}",
+        go
+    );
+}
+
+#[test]
+fn single_var_map_iteration_repro2_lowers_as_range_keys() {
+    let go = emit("fn main() {\n    m := map[string]int{\"a\": 1}\n    for k in m {\n        var s string = k\n        fmt.println(s)\n    }\n}\n");
+    assert!(
+        go.contains("for k := range m {"),
+        "repro2 must lower as for k := range m {{, got:\n{}",
+        go
+    );
+    assert!(
+        !go.contains("for _, k := range m {"),
+        "repro2 must not lower as for _, k := range m {{, got:\n{}",
         go
     );
 }
