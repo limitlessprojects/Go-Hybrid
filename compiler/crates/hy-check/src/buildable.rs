@@ -175,6 +175,41 @@ fn kinds_conflict(want: &OpKind, got: &OpKind) -> bool {
     }
 }
 
+/// #1031 — the exact Go spelling of a predeclared numeric type, after the
+/// emitter's SPEC→Go primitive mapping (`shapes::go_primitive_name`) and Go's
+/// own identities (`byte` = `uint8`, `rune` = `int32`).
+///
+/// `OpKind` collapses every integer width into `Int` and both float widths
+/// into `Float`, and `kinds_conflict` must allow `(Float, Int)` because an
+/// untyped int constant is assignable to a float result. A TYPED numeric
+/// value falls through exactly that gap: `n := 3; return n` from
+/// `fn f() float64`, or an `int` param returned from `fn f() int64`, passes
+/// the kind check and then fails `go build` with `cannot use n (variable of
+/// type int) as float64 value in return statement`. This name lets the return
+/// check compare exact types when — and only when — both sides are provably
+/// typed.
+///
+/// `None` for anything that is not a predeclared numeric spelling, and for
+/// `usize`/`isize`/`char`, which have no fixed Go spelling (fail-open).
+fn canonical_numeric_name(name: &str) -> Option<&'static str> {
+    Some(match name.trim() {
+        "int" => "int",
+        "int8" | "i8" => "int8",
+        "int16" | "i16" => "int16",
+        "int32" | "i32" | "rune" => "int32",
+        "int64" | "i64" => "int64",
+        "uint" => "uint",
+        "uint8" | "u8" | "byte" => "uint8",
+        "uint16" | "u16" => "uint16",
+        "uint32" | "u32" => "uint32",
+        "uint64" | "u64" => "uint64",
+        "uintptr" => "uintptr",
+        "float32" | "f32" => "float32",
+        "float64" | "f64" => "float64",
+        _ => return None,
+    })
+}
+
 /// Is `e` provably a single-value expression (the #905/#903 binding-count
 /// class)?
 ///
@@ -434,6 +469,12 @@ struct Collector<'a> {
     /// `kind_scopes`. `set[T]` has no OpKind (it lowers to a prelude
     /// struct), so without this its element type was never checked (#2474).
     set_elem_scopes: Vec<HashMap<String, Option<String>>>,
+    /// One layer per open scope, tracking `for ... in` element bindings
+    /// whose kind is copy-semantics storage (`struct`/`array`). The emitter
+    /// lowers them to Go's `for _, x := range xs`, so writes through the
+    /// binding mutate the per-iteration copy and the collection never sees
+    /// them — hy-check rejects those writes instead (#1480).
+    copy_var_scopes: Vec<HashSet<String>>,
     /// File-level `const` kinds (#425).
     file_consts: HashMap<String, OpKind>,
     file_untyped_consts: HashSet<String>,
@@ -456,6 +497,16 @@ struct Collector<'a> {
     /// (`return v` in a `(value, error)` fn emits `return v, nil`, the E3
     /// sugar; corpus 13).
     fn_results_error_tail: bool,
+    /// #1031 — parallel scope stack: the exact predeclared numeric type of a
+    /// binding when it is provably TYPED (a typed param/result/declaration, or
+    /// a `:=` whose initializer gives it Go's default type). Every binding
+    /// site goes through `bind_kind`, which records `None` first, so an
+    /// unclassified inner binding never inherits an outer binding's type.
+    scalar_scopes: Vec<HashMap<String, Option<&'static str>>>,
+    /// #1031 — exact predeclared numeric type of each result of the enclosing
+    /// signature (`None` = not a predeclared numeric spelling). Swapped
+    /// together with `fn_results`.
+    fn_result_scalars: Vec<Option<&'static str>>,
     /// Lexical nesting depth within loops (`for` / `loop`).
     loop_depth: usize,
     /// Lexical nesting depth within `select` statements.
@@ -484,12 +535,15 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             scopes: Vec::new(),
             kind_scopes: Vec::new(),
             set_elem_scopes: Vec::new(),
+            copy_var_scopes: Vec::new(),
             file_consts: HashMap::new(),
             file_untyped_consts: HashSet::new(),
             fn_results: Vec::new(),
             fn_type_params: HashSet::new(),
             fn_results_all_named: false,
             fn_results_error_tail: false,
+            scalar_scopes: Vec::new(),
+            fn_result_scalars: Vec::new(),
             loop_depth: 0,
             select_depth: 0,
             defines: Vec::new(),
@@ -547,13 +601,17 @@ impl<'a> Collector<'a> {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.kind_scopes.push(HashMap::new());
+        self.scalar_scopes.push(HashMap::new());
         self.set_elem_scopes.push(HashMap::new());
+        self.copy_var_scopes.push(HashSet::new());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.kind_scopes.pop();
+        self.scalar_scopes.pop();
         self.set_elem_scopes.pop();
+        self.copy_var_scopes.pop();
     }
 
     /// A name that shadows checked defines but is not itself checked.
@@ -569,6 +627,11 @@ impl<'a> Collector<'a> {
         if name != "_" {
             if let Some(top) = self.kind_scopes.last_mut() {
                 top.insert(name.to_string(), kind);
+            }
+            // #1031: every binding shadows an outer exact numeric type until
+            // `set_scalar` proves otherwise.
+            if let Some(top) = self.scalar_scopes.last_mut() {
+                top.insert(name.to_string(), None);
             }
             // Every (re)binding shadows an outer set binding; callers that
             // know the new binding is a set record it via bind_set_elem.
@@ -656,6 +719,175 @@ impl<'a> Collector<'a> {
                 "a set's insert/contains/remove take a value of the set's element type",
             );
         }
+    }
+
+    /// #1031 — record the exact numeric type of a binding that `bind_kind`
+    /// just made in the current scope.
+    fn set_scalar(&mut self, name: &str, scalar: Option<&'static str>) {
+        if name != "_" {
+            if let Some(top) = self.scalar_scopes.last_mut() {
+                top.insert(name.to_string(), scalar);
+            }
+        }
+    }
+
+    /// #1031 — the exact numeric type of a binding, if provably typed. A name
+    /// that is not a binding (e.g. a file-level const, which may be untyped)
+    /// stays `None`.
+    fn lookup_scalar(&self, name: &str) -> Option<&'static str> {
+        for layer in self.scalar_scopes.iter().rev() {
+            if let Some(s) = layer.get(name) {
+                return *s;
+            }
+        }
+        None
+    }
+
+    /// #1031 — the exact predeclared numeric spelling of a type expression.
+    /// A user-declared struct/enum/alias of that name is not the predeclared
+    /// type, so it fails open.
+    fn scalar_of_ty(&self, ty: &TypeExpr) -> Option<&'static str> {
+        let TypeExpr::Named { name, .. } = ty else {
+            return None;
+        };
+        if self.ck.structs.contains_key(name.as_str())
+            || self.ck.enums.contains_key(name.as_str())
+            || self.ck.type_aliases.contains_key(name.as_str())
+        {
+            return None;
+        }
+        canonical_numeric_name(name)
+    }
+
+    /// #1031 — exact result types of a call whose callee is provably known:
+    /// a non-generic top-level function, or a predeclared numeric conversion
+    /// `T(x)`. A local binding of the callee name shadows both (fail-open).
+    fn call_result_scalars(
+        &self,
+        callee: &Expr,
+        args: &[CallArg],
+    ) -> Option<Vec<Option<&'static str>>> {
+        let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+            return None;
+        };
+        if self
+            .scopes
+            .iter()
+            .any(|layer| layer.contains_key(name.as_str()))
+        {
+            return None;
+        }
+        if let Some(fd) = self.ck.fns.get(name.as_str()) {
+            if fd.receiver.is_some() || !fd.type_params.is_empty() {
+                return None;
+            }
+            return Some(fd.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect());
+        }
+        if args.len() == 1
+            && !self.ck.structs.contains_key(name.as_str())
+            && !self.ck.enums.contains_key(name.as_str())
+            && !self.ck.type_aliases.contains_key(name.as_str())
+        {
+            if let Some(s) = canonical_numeric_name(name) {
+                return Some(vec![Some(s)]);
+            }
+        }
+        None
+    }
+
+    /// #1031 — the exact numeric type of a value that is provably TYPED.
+    /// Literals are untyped constants (assignable to any numeric type), so
+    /// they are deliberately `None` here.
+    fn typed_value_scalar(&self, e: &Expr) -> Option<&'static str> {
+        match unwrap_parens(e) {
+            Expr::Ident { name, .. } => self.lookup_scalar(name),
+            // Typed arithmetic keeps its operand type: in any program that
+            // builds, both operands share one type or one is an untyped
+            // constant, so the typed side names the result type. A shift's
+            // result takes the type of its left operand alone.
+            Expr::Binary { op, lhs, rhs, .. } => match op {
+                BinOp::Add
+                | BinOp::Sub
+                | BinOp::Mul
+                | BinOp::Div
+                | BinOp::Mod
+                | BinOp::BitOr
+                | BinOp::BitXor
+                | BinOp::BitAnd => self
+                    .typed_value_scalar(lhs)
+                    .or_else(|| self.typed_value_scalar(rhs)),
+                BinOp::Shl | BinOp::Shr => self.typed_value_scalar(lhs),
+                _ => None,
+            },
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => self.typed_value_scalar(operand),
+            Expr::Call { callee, args, .. } => match self.call_result_scalars(callee, args) {
+                Some(rs) if rs.len() == 1 => rs[0],
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// #1031 — the type a `x := v` / `var x = v` binding takes from its
+    /// initializer: Go's default type for an untyped numeric literal (`int`,
+    /// `float64`), or the initializer's own type when it is typed.
+    fn initializer_scalar(&self, e: &Expr) -> Option<&'static str> {
+        match unwrap_parens(e) {
+            Expr::Lit {
+                kind: LitKind::Int(_),
+                ..
+            } => Some("int"),
+            Expr::Lit {
+                kind: LitKind::Float(_),
+                ..
+            } => Some("float64"),
+            Expr::Unary {
+                op: UnOp::Neg,
+                operand,
+                ..
+            } => match unwrap_parens(operand) {
+                Expr::Lit {
+                    kind: LitKind::Int(_),
+                    ..
+                } => Some("int"),
+                Expr::Lit {
+                    kind: LitKind::Float(_),
+                    ..
+                } => Some("float64"),
+                _ => self.typed_value_scalar(operand),
+            },
+            other => self.typed_value_scalar(other),
+        }
+    }
+
+    /// #1031 — exact numeric types for the names of a local declaration.
+    fn infer_local_scalars(&self, l: &LocalDecl) -> Vec<Option<&'static str>> {
+        let n = l.names.len();
+        if let Some(ty) = &l.ty {
+            return vec![self.scalar_of_ty(ty); n];
+        }
+        // An untyped `const c = 3` stays an untyped constant: assignable to
+        // any numeric result, so it must not be pinned to `int`.
+        if l.kind == LocalKind::Const {
+            return vec![None; n];
+        }
+        if n == l.values.len() {
+            return l.values.iter().map(|v| self.initializer_scalar(v)).collect();
+        }
+        if n >= 2 && l.values.len() == 1 {
+            if let Expr::Call { callee, args, .. } = unwrap_parens(&l.values[0]) {
+                if let Some(rs) = self.call_result_scalars(callee, args) {
+                    if rs.len() == n {
+                        return rs;
+                    }
+                }
+            }
+        }
+        vec![None; n]
     }
 
     fn lookup_kind(&self, name: &str) -> Option<OpKind> {
@@ -922,6 +1154,8 @@ impl<'a> Collector<'a> {
             self.exempt(&p.name);
             let pk = self.kind_of_ty(&p.ty, 0);
             self.bind_kind(&p.name, pk);
+            let ps = self.scalar_of_ty(&p.ty);
+            self.set_scalar(&p.name, ps);
             self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
         }
         for r in &f.results {
@@ -929,6 +1163,8 @@ impl<'a> Collector<'a> {
                 self.exempt(rname);
                 let rk = self.kind_of_ty(&r.ty, 0);
                 self.bind_kind(rname, rk);
+                let rs = self.scalar_of_ty(&r.ty);
+                self.set_scalar(rname, rs);
             }
         }
         for r in &f.results {
@@ -936,6 +1172,9 @@ impl<'a> Collector<'a> {
                 self.exempt(name);
             }
         }
+        let result_scalars: Vec<Option<&'static str>> =
+            f.results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+        let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
@@ -951,6 +1190,7 @@ impl<'a> Collector<'a> {
         self.fn_results = outer;
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
+        self.fn_result_scalars = outer_scalars;
         self.fn_type_params = outer_tp;
         self.pop_scope();
     }
@@ -1083,6 +1323,7 @@ impl<'a> Collector<'a> {
         // tracking; #430's operand-kind inference runs for EVERY name so
         // `kind_of_expr` resolves binding-shaped operands (issue #425).
         let kinds = self.infer_local_kinds(l);
+        let scalars = self.infer_local_scalars(l);
         let set_elems: Vec<Option<String>> = (0..l.names.len())
             .map(|i| match (&l.ty, l.values.len() == l.names.len()) {
                 (Some(t), _) => Self::set_elem_of_ty(t),
@@ -1090,8 +1331,20 @@ impl<'a> Collector<'a> {
                 _ => None,
             })
             .collect();
-        for ((name, kind), set_elem) in l.names.iter().zip(kinds).zip(set_elems) {
+        for (((name, kind), scalar), set_elem) in
+            l.names.iter().zip(kinds).zip(scalars).zip(set_elems)
+        {
+            // #1031: a same-scope `:=` re-define keeps the EXISTING variable
+            // (and its type) in Go, so only a fresh binding takes the
+            // initializer's type; a re-define becomes unknown (fail-open).
+            let fresh = !self
+                .scalar_scopes
+                .last()
+                .is_some_and(|top| top.contains_key(name.as_str()));
             self.bind_kind(name, kind);
+            if fresh || l.ty.is_some() {
+                self.set_scalar(name, scalar);
+            }
             self.bind_set_elem(name, set_elem);
             if !track_read {
                 self.exempt(name);
@@ -1268,6 +1521,19 @@ impl<'a> Collector<'a> {
                         // reject as unused (PR #536).
                         for (v, k) in vars.iter().zip(iter_kinds) {
                             self.define_elidable(v, *span);
+                            // #1480: a struct/array element binding is a
+                            // per-iteration copy at emission (`for _, x :=
+                            // range xs`), so every write through it is
+                            // silently dropped. Record the binding so the
+                            // write places and the pointer-receiver call
+                            // below reject instead of certifying the pass.
+                            if v != "_"
+                                && matches!(k, OpKind::Struct(_) | OpKind::Array(_))
+                            {
+                                if let Some(top) = self.copy_var_scopes.last_mut() {
+                                    top.insert(v.clone());
+                                }
+                            }
                             self.bind_kind(v, k);
                         }
                     }
@@ -1469,12 +1735,69 @@ impl<'a> Collector<'a> {
                         "strings in Go are immutable; string elements cannot be assigned or updated",
                     );
                 }
+                self.check_range_copy_write(p);
                 self.place_read(p);
             }
             PlaceKind::Field { .. } | PlaceKind::AddrOf { .. } => {
+                self.check_range_copy_write(p);
                 self.place_read(p);
             }
         }
+    }
+
+    /// #1480: is `name` a `for ... in` binding over copy-semantics storage?
+    fn is_copy_semantic_range_var(&self, name: &str) -> bool {
+        self.copy_var_scopes
+            .iter()
+            .rev()
+            .any(|layer| layer.contains(name))
+    }
+
+    /// #1480: root name of a write place that provably lands in a
+    /// per-iteration range-element copy. The base chain is walked down to
+    /// the root; every step must stay inside copy-semantics storage:
+    /// * stepping through a pointer field or an unknown kind redirects into
+    ///   (or may redirect into) shared storage — fail open, no diagnostic;
+    /// * `slice`/`map`/`string` element writes reach the shared collection
+    ///   and stay legal; an `array` element of the copy is itself a copy.
+    fn copy_place_root(&self, p: &Place) -> Option<String> {
+        match &p.kind {
+            PlaceKind::Ident(n) => {
+                if self.is_copy_semantic_range_var(n) {
+                    Some(n.clone())
+                } else {
+                    None
+                }
+            }
+            PlaceKind::Field { base, .. } => match self.kind_of_place(base) {
+                OpKind::Unknown | OpKind::Pointer(_) => None,
+                _ => self.copy_place_root(base),
+            },
+            PlaceKind::Index { base, .. } => match self.kind_of_place(base) {
+                OpKind::Unknown | OpKind::Pointer(_) | OpKind::Slice(_) | OpKind::Map(..) => None,
+                OpKind::Str => None,
+                _ => self.copy_place_root(base),
+            },
+            PlaceKind::AddrOf { .. } => None,
+        }
+    }
+
+    /// #1480: `x.f = v`, `x.f += v`, `x[i] = v` … where `x` is a
+    /// struct/array element of a `for x in xs` loop are silently dropped at
+    /// runtime (the binding is a per-iteration copy). The pass must not
+    /// certify them.
+    fn check_range_copy_write(&mut self, p: &Place) {
+        let Some(root) = self.copy_place_root(p) else {
+            return;
+        };
+        self.emit_e1002(
+            p.span,
+            format!(
+                "cannot mutate `{}` through range element `{root}` — `{root}` is a per-iteration copy of the element, so the write is silently dropped (HYB-E1002)",
+                p.render()
+            ),
+            "assign through the collection instead: `for i in 0..len(xs) { xs[i].… }`, or iterate a slice of pointers and mutate through the pointer",
+        );
     }
 
     fn emit_let_reassign_error(&mut self, name: &str, span: Span) {
@@ -1522,6 +1845,19 @@ impl<'a> Collector<'a> {
     fn expr(&mut self, e: &Expr) {
         match e {
             Expr::Ident { name, span } => {
+                // #2710: the blank identifier `_` discards a value; it is not
+                // itself a value. Go refuses to read it (`cannot use _ as value
+                // or type`). This arm is only reached for VALUE positions —
+                // assignment/declaration targets go through `place`/`local`,
+                // which never route the target identifier through `expr`, so
+                // `_ = v` and `x, _ := f()` stay legal.
+                if name == "_" {
+                    self.emit_e1002(
+                        *span,
+                        "cannot use `_` as a value — Go refuses `cannot use _ as value or type` (HYB-E1002)".to_string(),
+                        "the blank identifier `_` may only appear on the left-hand side of an assignment or declaration, to discard a value",
+                    );
+                }
                 self.read(name);
                 // #778: a value position, so a type name here cannot build.
                 self.check_type_name_in_value_position(name, *span);
@@ -1723,6 +2059,8 @@ impl<'a> Collector<'a> {
                     self.exempt(&p.name);
                     let pk = self.kind_of_ty(&p.ty, 0);
                     self.bind_kind(&p.name, pk);
+                    let ps = self.scalar_of_ty(&p.ty);
+                    self.set_scalar(&p.name, ps);
                     self.bind_set_elem(&p.name, Self::set_elem_of_ty(&p.ty));
                 }
                 for r in results {
@@ -1730,6 +2068,8 @@ impl<'a> Collector<'a> {
                         self.exempt(rname);
                         let rk = self.kind_of_ty(&r.ty, 0);
                         self.bind_kind(rname, rk);
+                        let rs = self.scalar_of_ty(&r.ty);
+                        self.set_scalar(rname, rs);
                     }
                 }
                 for r in results {
@@ -1747,6 +2087,9 @@ impl<'a> Collector<'a> {
                     results.last().map(|r| &r.ty),
                     Some(TypeExpr::Named { name, .. }) if name == "error"
                 );
+                let result_scalars: Vec<Option<&'static str>> =
+                    results.iter().map(|r| self.scalar_of_ty(&r.ty)).collect();
+                let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
                 let outer = std::mem::replace(&mut self.fn_results, result_kinds);
                 let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
                 let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
@@ -1758,6 +2101,7 @@ impl<'a> Collector<'a> {
                 self.fn_results = outer;
                 self.fn_results_all_named = outer_named;
                 self.fn_results_error_tail = outer_err;
+                self.fn_result_scalars = outer_scalars;
                 self.pop_scope();
             }
             Expr::Paren { inner, .. } => self.expr(inner),
@@ -2889,6 +3233,21 @@ impl<'a> Collector<'a> {
         let Some(f) = self.ck.fns.get(name).or_else(|| self.ck.fns.get(head)) else {
             return;
         };
+        // #2701: Hybrid declares no variadic parameters (`parse_params` never
+        // accepts `...T`), so a spread argument on a user function is never
+        // buildable — Go refuses `cannot use ... in call to non-variadic <f>`.
+        // The `...` spread form is only legal on the variadic built-in `append`.
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in call to non-variadic `{}` — Go refuses `cannot use ... in call to non-variadic {}` (HYB-E1002)",
+                    name, name
+                ),
+                "`...` (variadic spread) is only allowed on the variadic built-in `append`; Hybrid declares no variadic parameters",
+            );
+            return;
+        }
         // Generic instantiations (`id[int](x)`) carry type arguments the
         // parameter list does not describe; leave them to the type checker.
         if !f.type_params.is_empty() {
@@ -2951,6 +3310,19 @@ impl<'a> Collector<'a> {
         let Some(m) = self.ck.method_decls.get(&(sn.clone(), name.to_string())) else {
             return;
         };
+        // #2701: a method is never variadic in Hybrid, so a spread argument is
+        // never buildable — Go refuses `cannot use ... in call to non-variadic`.
+        if args.iter().any(|a| a.spread) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in call to non-variadic method `{}.{}` — Go refuses `cannot use ... in call to non-variadic {}.{}` (HYB-E1002)",
+                    sn, name, sn, name
+                ),
+                "`...` (variadic spread) is only allowed on the variadic built-in `append`; methods are never variadic",
+            );
+            return;
+        }
         if !m.type_params.is_empty() {
             return;
         }
@@ -3085,9 +3457,13 @@ impl<'a> Collector<'a> {
         if values.len() == 1 {
             if let Expr::Call { callee, args, .. } = unwrap_parens(&values[0]) {
                 if let Some(res) = self.call_result_kinds(callee, args) {
+                    let res_scalars = self.call_result_scalars(callee, args);
                     if res.len() == want.len() {
-                        for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(&values[0], r, w, values[0].span());
+                        for (i, (r, w)) in res.iter().zip(want.iter()).enumerate() {
+                            if !self.report_return_conflict(&values[0], r, w, values[0].span()) {
+                                let got_s = res_scalars.as_ref().and_then(|rs| rs.get(i).copied().flatten());
+                                self.report_numeric_return_mismatch(got_s, r, i, values[0].span());
+                            }
                         }
                         return;
                     }
@@ -3095,8 +3471,11 @@ impl<'a> Collector<'a> {
                         && self.fn_results_error_tail
                         && res.len() + 1 == want.len()
                     {
-                        for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(&values[0], r, w, values[0].span());
+                        for (i, (r, w)) in res.iter().zip(want.iter()).enumerate() {
+                            if !self.report_return_conflict(&values[0], r, w, values[0].span()) {
+                                let got_s = res_scalars.as_ref().and_then(|rs| rs.get(i).copied().flatten());
+                                self.report_numeric_return_mismatch(got_s, r, i, values[0].span());
+                            }
                         }
                         return;
                     }
@@ -3141,9 +3520,12 @@ impl<'a> Collector<'a> {
             let short_ok = nv < nw
                 && ((nv == 0 && self.fn_results_all_named) || self.fn_results_error_tail);
             if short_ok {
-                for (v, w) in values.iter().zip(want.iter()) {
+                for (i, (v, w)) in values.iter().zip(want.iter()).enumerate() {
                     let got = self.kind_of_expr(v);
-                    self.report_return_conflict(v, &got, w, v.span());
+                    if !self.report_return_conflict(v, &got, w, v.span()) {
+                        let got_s = self.typed_value_scalar(v);
+                        self.report_numeric_return_mismatch(got_s, &got, i, v.span());
+                    }
                 }
                 return;
             }
@@ -3169,20 +3551,58 @@ impl<'a> Collector<'a> {
             );
             return;
         }
-        for (v, w) in values.iter().zip(want.iter()) {
+        for (i, (v, w)) in values.iter().zip(want.iter()).enumerate() {
             let got = self.kind_of_expr(v);
-            self.report_return_conflict(v, &got, w, v.span());
+            if !self.report_return_conflict(v, &got, w, v.span()) {
+                let got_s = self.typed_value_scalar(v);
+                self.report_numeric_return_mismatch(got_s, &got, i, v.span());
+            }
         }
     }
 
-    fn report_return_conflict(&mut self, val: &Expr, got: &OpKind, want: &OpKind, span: Span) {
+    /// #1031 — a TYPED numeric value returned into a result of a different
+    /// numeric type (`int` → `float64`, `int` → `int64`, `float32` →
+    /// `float64`, ...). `kinds_conflict` cannot see these: `OpKind` collapses
+    /// the widths, and `(Float, Int)` must stay legal for untyped constants.
+    /// Go has no implicit numeric conversion for typed values, so the emitted
+    /// `return` fails `go build`. Fires only when both exact types are known
+    /// and the kind check has not already reported this value.
+    fn report_numeric_return_mismatch(
+        &mut self,
+        got: Option<&'static str>,
+        got_kind: &OpKind,
+        idx: usize,
+        span: Span,
+    ) {
+        let Some(got) = got else { return };
+        let Some(want) = self.fn_result_scalars.get(idx).copied().flatten() else {
+            return;
+        };
+        if got == want {
+            return;
+        }
+        if let Some(want_kind) = self.fn_results.get(idx) {
+            if kinds_conflict(want_kind, got_kind) {
+                return;
+            }
+        }
+        self.emit_e1002(
+            span,
+            format!(
+                "cannot return a value of type `{got}` from a function declaring `{want}` — Go refuses `cannot use ... (variable of type {got}) as {want} value in return statement` (HYB-E1002)"
+            ),
+            "Go has no implicit conversion between typed numeric values; write an explicit conversion (`float64(n)`) when a conversion is intended",
+        );
+    }
+
+    fn report_return_conflict(&mut self, val: &Expr, got: &OpKind, want: &OpKind, span: Span) -> bool {
         let is_untyped_int_to_float = *want == OpKind::Float
             && *got == OpKind::Int
             && self.is_untyped_int_const(val);
         let conflict = (*want == OpKind::Float && *got == OpKind::Int && !is_untyped_int_to_float)
             || kinds_conflict(want, got);
         if !conflict {
-            return;
+            return false;
         }
         self.emit_e1002(
             span,
@@ -3194,6 +3614,7 @@ impl<'a> Collector<'a> {
             ),
             "a returned value must be assignable to its declared result type; write an explicit conversion when a conversion is intended",
         );
+        true
     }
 
     /// #682 U7 — a lone multi-value call as the whole argument list is legal
@@ -3572,7 +3993,20 @@ impl<'a> Collector<'a> {
                         "untyped nil cannot be compared with untyped nil",
                     );
                 } else if !lhs_is_nil && !rhs_is_nil {
-                    if equality_kinds_conflict(&lk, &rk) {
+                    // #2719: a typed integer and a typed float are different
+                    // types, so Go refuses `a == b` (`mismatched types int and
+                    // float64`). An untyped numeric constant adapts to the other
+                    // operand (`int_var == 1.0` / `float_var == 1` build), so the
+                    // conflict needs the side that must convert to be a genuine
+                    // non-constant value. Mirrors the arithmetic and ordered-
+                    // comparison arms above.
+                    let int_float_conflict = (lk == OpKind::Float
+                        && rk == OpKind::Int
+                        && !self.is_untyped_int_const(rhs))
+                        || (lk == OpKind::Int
+                            && rk == OpKind::Float
+                            && !self.is_untyped_int_const(lhs));
+                    if equality_kinds_conflict(&lk, &rk) || int_float_conflict {
                         self.emit_e1002(
                             span,
                             format!(
@@ -4979,6 +5413,25 @@ impl<'a> Collector<'a> {
                         ),
                         "assign the value to a local variable first (`v := ...; v.method()`), store `*T` pointers, or declare a value receiver `(self T)`",
                     );
+                } else if ptr_recv {
+                    // #1480 Form C: a range-element copy IS addressable (Go
+                    // emits `(&x).Bump()` on the per-iteration local), so the
+                    // non-addressable rule above cannot catch it — the call
+                    // builds and the mutation is silently dropped instead.
+                    if let Expr::Ident { name: var, .. } = unwrap_parens(base) {
+                        if self.is_copy_semantic_range_var(var) {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "cannot call pointer-receiver method `{}` on range element `{}` — `{}` is a per-iteration copy, so the mutation is silently dropped (HYB-E1002)",
+                                    name,
+                                    base.render(),
+                                    base.render()
+                                ),
+                                "call it through the collection index instead: `for i in 0..len(xs) { xs[i].method() }`, or iterate a slice of pointers and call through the pointer",
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -5059,6 +5512,25 @@ impl<'a> Collector<'a> {
     /// Family E1–E5 (#425): extend `HYB-E2005` (`BUILTIN-ARGS`) from literals
     /// (`builtins.rs`) to resolved binding shapes.
     fn check_builtin_operand_kinds(&mut self, name: &str, args: &[CallArg], span: Span) {
+        // #2701: among the built-ins only `append` is variadic; every other
+        // built-in rejects the `...` spread form (`invalid use of ... with
+        // built-in <name>`). `append` is handled in its own arm below, where a
+        // spread argument is legal.
+        if matches!(
+            name,
+            "len" | "cap" | "close" | "delete" | "min" | "max" | "clear" | "copy"
+        ) && args.iter().any(|a| a.spread)
+        {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot use `...` in call to non-variadic built-in `{}` — Go refuses `invalid use of ... with built-in {}` (HYB-E1002)",
+                    name, name
+                ),
+                "`...` (variadic spread) is only allowed on the variadic built-in `append`",
+            );
+            return;
+        }
         match name {
             "make" => {
                 for arg in args.iter().skip(1) {

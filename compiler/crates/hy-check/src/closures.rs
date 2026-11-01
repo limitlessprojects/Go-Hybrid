@@ -229,6 +229,7 @@ fn check_one_closure(
         env,
         aliases: st.aliases.clone(),
         may_share: st.may_share.clone(),
+        type_params: st.type_params.clone(),
         ..FnState::default()
     };
     for (k, b) in cst.env.iter_mut() {

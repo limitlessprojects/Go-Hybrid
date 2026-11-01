@@ -66,6 +66,7 @@ mod walk;
 mod builtins;
 mod range_iter;
 mod recv;
+mod try_context;
 
 use hy_diag::{Diagnostic, ManagedBlockAudit, ManagedReport, Severity};
 
@@ -121,6 +122,10 @@ pub fn check_file(file: &File) -> CheckResult {
     // composite element slot is HYB-E1002 here, not an `emitter (MVP-0):
     // not yet supported` refusal at `hyb build`.
     ck.check_elided_struct_literals();
+
+    // E4 (HYB-E2011): `?` lands only in an error-result fn/closure, `main`,
+    // or an E11 handler closure — lexical, like `return`.
+    try_context::check_try_contexts(&mut ck, file);
 
     let fns: Vec<&FnDecl> = file.fns().collect();
     for f in fns {
@@ -309,7 +314,8 @@ fn build_tables(ck: &mut Checker<'_>) {
                 }
                 ck.check_expr_emit_guard(&FnState::default(), &c.value);
                 ck.check_composite_nils(&FnState::default(), &c.value);
-                ck.check_expr_builtin_args(&c.value);
+                ck.check_expr_builtin_args(&FnState::default(), &c.value);
+                ck.check_const_multi_value(&c.value);
                 let b = ck.const_binding(c);
                 ck.consts.insert(c.name.clone(), b);
                 ck.check_const_init_is_constant(&c.name, c.ty.as_ref(), &c.value, None);
@@ -355,9 +361,15 @@ fn check_fn(ck: &mut Checker<'_>, f: &FnDecl) {
     // first segments stay exempt (resolve.rs Field arm).
     ck.check_fn_undefined_names(f);
 
-    // environment seed: receiver + params
+    // environment seed: receiver + params + active generic type parameters
     let mut st = FnState::default();
+    for tp in &f.type_params {
+        st.type_params.insert(tp.name.clone());
+    }
     if let Some(r) = &f.receiver {
+        for rtp in ck.receiver_type_params(&r.ty) {
+            st.type_params.insert(rtp);
+        }
         let base_shape = ck.shape_of_type(&r.ty);
         let (shape, ty) = if r.is_pointer {
             (
@@ -1917,14 +1929,16 @@ mod tests {
     #[test]
     fn a7_borrow_by_default_and_return_transfer_accept() {
         // 12-shape: two borrow calls then a mutate — windows non-lexical.
+        // `count` declares an `error` result exactly like corpus 12's
+        // count_active: its `?` sites need one to land in (E4, HYB-E2011).
         let r = check(
             "import \"rust/serde_json\"\n\
-             fn count(doc serde_json.value) int {\n\
+             fn count(doc serde_json.value) (int, error) {\n\
                n := 0\n\
                for u in doc.array(\"users\")? {\n\
                  n += u.int(\"logins\")?\n\
                }\n\
-               return n\n\
+               return n, nil\n\
              }\n\
              fn main() {\n\
                doc := serde_json.parse(`{}`)?\n\
@@ -2118,16 +2132,18 @@ mod tests {
     fn a7_own_transfer_at_return_accepts() {
         // 13-shape: `return v` transfers the own handle OUT; the caller
         // mutates the returned handle — the transfer made it the caller's.
+        // `summary` declares an `error` result exactly like corpus 13: its
+        // `?` sites need one to land in (E4, HYB-E2011).
         let r = check(
             "import \"rust/serde_json\"\n\
-             fn summary(doc serde_json.value) serde_json.value {\n\
+             fn summary(doc serde_json.value) (serde_json.value, error) {\n\
                v := serde_json.new_object()\n\
                for u in doc.array(\"users\")? {\n\
                  if u.int(\"logins\")? > 0 {\n\
                    v.set(\"active\", 1)\n\
                  }\n\
                }\n\
-               return v\n\
+               return v, nil\n\
              }\n\
              fn main() {\n\
                doc := serde_json.parse(`{}`)?\n\

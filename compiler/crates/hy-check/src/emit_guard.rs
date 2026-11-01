@@ -1195,7 +1195,8 @@ impl<'a> Checker<'a> {
         // value position. `check_type_ref_array_lens` already walks every
         // TypeRef, so running the builtin-argument check here covers struct
         // fields, aliases, local annotations, literals and conversions.
-        self.check_expr_builtin_args(len);
+        let empty_st = crate::model::FnState::default();
+        self.check_expr_builtin_args(st.unwrap_or(&empty_st), len);
         // 1) A constant integer expression: must be non-negative.
         let direct_or_folded = const_int_value(len).or_else(|| {
             if matches!(unwrap_parens(len), Expr::Ident { .. }) {
@@ -1371,8 +1372,73 @@ impl<'a> Checker<'a> {
                 ]),
             );
         }
-        // 4) Anything else (calls, `pkg.CONST`, arithmetic over idents) —
-        // fail open: those can be legal constant expressions in Go.
+        // 4) `len`/`cap` over an operand that can never be an array. Go folds
+        // `len(s)`/`cap(s)` to a constant only when `s` is an array or a
+        // pointer to an array (and `len(s)` when `s` is a string *constant*),
+        // so a channel, slice, map, struct, or a string/primitive *variable*
+        // operand is never a constant array length — the fail-open below must
+        // not cover it (issue #1133).
+        if let Some((builtin, operand, kind)) = self.nonconst_len_cap_operand(st, len) {
+            let msg = format!(
+                "array length `{}` is not a constant — `{}({})` over a {} is not a constant expression in Go (`invalid array length {}`), so the emitted module would not build (HYB-E6004)",
+                len.render(),
+                builtin,
+                operand,
+                kind,
+                len.render()
+            );
+            self.diags.push(
+                Diagnostic::error("HYB-E6004", self.path.clone(), span, msg).with_notes(vec![
+                    "why: Go's array length must be a constant, and `len`/`cap` are constant only over an array, a pointer to an array, or a string constant (issue #1133)".to_string(),
+                    "fix: use a literal or `const` length, or declare a slice (`[]T`) for a dynamic size".to_string(),
+                ]),
+            );
+            return;
+        }
+        // 5) Anything else (calls, `pkg.CONST`, arithmetic over idents) —
+        // fail open: those can still be legal constant expressions in Go.
+    }
+
+    /// Return the first `(builtin, operand, kind)` inside an array-length
+    /// expression whose `len`/`cap` operand is a local binding that Go can
+    /// never fold to a constant — only arrays and pointers to arrays (and
+    /// string constants for `len`) qualify. `Unknown` shapes and non-local
+    /// bindings stay fail-open: the checker cannot prove those, and a
+    /// package-level array operand would still be legal (issue #1133).
+    fn nonconst_len_cap_operand(
+        &self,
+        st: Option<&FnState>,
+        expr: &Expr,
+    ) -> Option<(&'static str, String, &'static str)> {
+        let st = st?;
+        let mut calls = Vec::new();
+        collect_len_cap_calls(expr, &mut calls);
+        for (builtin, arg) in calls {
+            let Expr::Ident { name, .. } = unwrap_parens(arg) else {
+                continue; // calls/selectors/literals: no proof, keep fail-open
+            };
+            if name.is_empty() {
+                continue;
+            }
+            let Some(b) = st.env_lookup(name) else {
+                continue; // not a local binding: cannot prove, keep fail-open
+            };
+            let kind = match &b.shape {
+                TypeShape::Array(_) => continue,
+                TypeShape::Pointer(inner) if matches!(**inner, TypeShape::Array(_)) => continue,
+                TypeShape::Chan(_) => "channel",
+                TypeShape::Slice(_) => "slice",
+                TypeShape::Map(_, _) => "map",
+                TypeShape::Str => "string variable",
+                TypeShape::Primitive => "primitive value",
+                TypeShape::Struct(_) => "struct value",
+                TypeShape::Closure => "function value",
+                TypeShape::Atomic => "atomic value",
+                _ => continue, // Unknown / handles: keep fail-open
+            };
+            return Some((builtin, name.clone(), kind));
+        }
+        None
     }
 
     fn file_const_is_valid_array_len(&self, name: &str, depth: usize) -> bool {
@@ -2596,6 +2662,40 @@ fn is_non_int_primitive_type(ty: &TypeExpr) -> bool {
                     | "any"
             )
     )
+}
+
+/// Collect every `len(x)` / `cap(x)` call inside an array-length expression,
+/// descending through parentheses, unary/binary operators (so `cap(ch)-1` is
+/// caught), address-of, and nested calls (issue #1133).
+fn collect_len_cap_calls<'a>(expr: &'a Expr, out: &mut Vec<(&'static str, &'a Expr)>) {
+    match unwrap_parens(expr) {
+        Expr::Call { callee, args, .. } => {
+            if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                let builtin = match name.as_str() {
+                    "len" => Some("len"),
+                    "cap" => Some("cap"),
+                    _ => None,
+                };
+                if let Some(b) = builtin {
+                    if args.len() == 1 {
+                        out.push((b, &args[0].value));
+                    }
+                }
+            }
+            collect_len_cap_calls(callee, out);
+            for a in args {
+                collect_len_cap_calls(&a.value, out);
+            }
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_len_cap_calls(lhs, out);
+            collect_len_cap_calls(rhs, out);
+        }
+        Expr::Unary { operand, .. } | Expr::AddrOf { operand, .. } => {
+            collect_len_cap_calls(operand, out)
+        }
+        _ => {}
+    }
 }
 
 fn is_non_int_array_len_syntax(expr: &Expr) -> bool {

@@ -101,6 +101,19 @@ class CheckClaimsLinksTest(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertEqual(report["issues"][0]["kind"], "missing-claims-file")
 
+    def test_empty_or_unrecognized_table_fails_closed(self):
+        for text in ("", "# GUARANTEES\n", CLAIMS.replace(
+                "## The claims table", "## The evidence table"),
+                "## The claims table\n\n| # | Surface | Evidence |\n"):
+            with self.subTest(text=text):
+                (self.root / "GUARANTEES.md").write_text(text, encoding="utf-8")
+                result = self.run_tool()
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                report = json.loads(result.stdout)
+                self.assertFalse(report["ok"])
+                self.assertEqual(report["rows"], 0)
+                self.assertIn("no-claims-rows", [i["kind"] for i in report["issues"]])
+
 
 if __name__ == "__main__":
     unittest.main()

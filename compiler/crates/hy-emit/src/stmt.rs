@@ -347,6 +347,12 @@ impl Emitter {
         match l.kind {
             LocalKind::Var => {
                 let ty = l.ty.as_ref().map(|t| self.type_text(t));
+                let is_ptr_ty = l.ty.as_ref().map_or(true, |t| self.is_pointer_ty(t));
+                let alias = l
+                    .values
+                    .first()
+                    .and_then(|v| self.slot_loan_alias_rhs(v))
+                    .filter(|_| is_ptr_ty);
                 match (&ty, l.values.first()) {
                     // N5: a zero map (or a struct carrying one) allocates
                     // at its declaration (zeroinit.rs, issue #645).
@@ -359,12 +365,18 @@ impl Emitter {
                     },
                     (Some(t), Some(v)) => {
                         self.hoist_tries_expr(v)?;
-                        let e = self.emit_expr(v, 0)?;
+                        let mut e = self.emit_expr(v, 0)?;
+                        if matches!(alias, Some((_, true))) {
+                            e = format!("&{}", e);
+                        }
                         self.push(&format!("var {} {} = {}", l.names.join(", "), t, e));
                     }
                     (None, Some(v)) => {
                         self.hoist_tries_expr(v)?;
-                        let e = self.emit_expr(v, 0)?;
+                        let mut e = self.emit_expr(v, 0)?;
+                        if matches!(alias, Some((_, true))) {
+                            e = format!("&{}", e);
+                        }
                         self.push(&format!("var {} = {}", l.names.join(", "), e));
                     }
                     (None, None) => {
@@ -374,10 +386,21 @@ impl Emitter {
                     }
                 }
                 self.hint_from_values(&l.names, &l.values);
+                if let Some((loan_root, _)) = alias {
+                    for n in &l.names {
+                        if n != "_" {
+                            self.pointer_vars.insert(n.clone());
+                            self.loan_aliases
+                                .entry(loan_root.clone())
+                                .or_default()
+                                .insert(n.clone());
+                        }
+                    }
+                }
                 // Typed var decls carry receiver knowledge (Batch I):
                 // `var hits atomic.int64` → shape-known, not a pointer.
                 if let Some(t) = &l.ty {
-                    if matches!(t, TypeExpr::Pointer { .. }) {
+                    if self.is_pointer_ty(t) {
                         for n in &l.names {
                             if n != "_" {
                                 self.pointer_vars.insert(n.clone());
@@ -462,13 +485,20 @@ impl Emitter {
         {
             let mut val_texts = Vec::with_capacity(l.values.len());
             let mut new_loans = Vec::new();
+            let mut new_aliases = Vec::new();
             for (name, v) in l.names.iter().zip(l.values.iter()) {
                 if let Some(operand) = Self::as_slot_loan_operand(v) {
                     let (read_place, write_place) =
-                        self.emit_slot_loan_place(operand, name, rest)?;
+                        self.emit_slot_loan_place(operand, name, &l.names, rest)?;
                     val_texts.push(read_place);
                     if name != "_" {
                         new_loans.push((name.clone(), format!("{} = {}", write_place, name)));
+                    }
+                } else if let Some((loan_root, is_val_loan)) = self.slot_loan_alias_rhs(v) {
+                    let e = self.emit_expr(v, 0)?;
+                    val_texts.push(if is_val_loan { format!("&{}", e) } else { e });
+                    if name != "_" {
+                        new_aliases.push((name.clone(), loan_root));
                     }
                 } else {
                     val_texts.push(self.emit_expr(v, 0)?);
@@ -491,6 +521,13 @@ impl Emitter {
                     self.pointer_vars.insert(name.clone());
                 }
             }
+            for (alias_name, loan_root) in new_aliases {
+                self.pointer_vars.insert(alias_name.clone());
+                self.loan_aliases
+                    .entry(loan_root)
+                    .or_default()
+                    .insert(alias_name);
+            }
             self.push(&format!(
                 "{} := {}",
                 l.names.join(", "),
@@ -502,11 +539,26 @@ impl Emitter {
             return Ok(());
         }
 
-        let values = l
-            .values
-            .iter()
-            .map(|v| self.emit_expr(v, 0))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut values = Vec::with_capacity(l.values.len());
+        let mut new_aliases = Vec::new();
+        for (idx, v) in l.values.iter().enumerate() {
+            let alias = if l.names.len() == l.values.len() {
+                self.slot_loan_alias_rhs(v)
+            } else {
+                None
+            };
+            let e = self.emit_expr(v, 0)?;
+            if let Some((loan_root, is_val_loan)) = alias {
+                values.push(if is_val_loan { format!("&{}", e) } else { e });
+                if let Some(name) = l.names.get(idx) {
+                    if name != "_" {
+                        new_aliases.push((name.clone(), loan_root));
+                    }
+                }
+            } else {
+                values.push(e);
+            }
+        }
         for name in &l.names {
             if name != "_" {
                 self.flush_loan_for_name(name);
@@ -518,6 +570,13 @@ impl Emitter {
         // (Batch I): `stats := pool_stats{}` — field chains type through
         // struct_fields (18's `stats.mu.lock()`).
         self.hint_from_values(&l.names, &l.values);
+        for (alias_name, loan_root) in new_aliases {
+            self.pointer_vars.insert(alias_name.clone());
+            self.loan_aliases
+                .entry(loan_root)
+                .or_default()
+                .insert(alias_name);
+        }
         Ok(())
     }
 
@@ -1331,10 +1390,11 @@ impl Emitter {
             }
             let mut rhs_texts = Vec::with_capacity(values.len());
             let mut new_loans = Vec::new();
+            let mut new_aliases = Vec::new();
             for (name, v) in names.iter().zip(values.iter()) {
                 if let Some(operand) = Self::as_slot_loan_operand(v) {
                     let (read_place, write_place) =
-                        self.emit_slot_loan_place(operand, name, rest)?;
+                        self.emit_slot_loan_place(operand, name, &names, rest)?;
                     if self.pointer_vars.contains(name) {
                         // A pointer-typed target (`var x *T`, a `*T` param,
                         // `x := &T{}`) keeps its Go type: point it at a copy
@@ -1349,9 +1409,23 @@ impl Emitter {
                             new_loans.push((name.clone(), format!("{} = {}", write_place, name)));
                         }
                     }
+                } else if let Some((loan_root, is_val_loan)) = self.slot_loan_alias_rhs(v) {
+                    let e = self.emit_expr(v, 0)?;
+                    let take_addr = is_val_loan && self.pointer_vars.contains(name);
+                    rhs_texts.push(if take_addr { format!("&{}", e) } else { e });
+                    if name != "_" && (!is_val_loan || self.pointer_vars.contains(name)) {
+                        new_aliases.push((name.clone(), loan_root));
+                    }
                 } else {
                     rhs_texts.push(self.emit_expr(v, 0)?);
                 }
+            }
+            for (alias_name, loan_root) in new_aliases {
+                self.pointer_vars.insert(alias_name.clone());
+                self.loan_aliases
+                    .entry(loan_root)
+                    .or_default()
+                    .insert(alias_name);
             }
             self.push(&format!("{} = {}", names.join(", "), rhs_texts.join(", ")));
             if let Some(frame) = self.loan_frames.last_mut() {
@@ -1359,11 +1433,37 @@ impl Emitter {
             }
             return Ok(());
         }
+        let mut alias_assigns: Vec<Option<(String, bool)>> = Vec::new();
         if targets.len() == values.len() && op == AssignOp::Assign {
-            let ptr_flags: Vec<bool> = values.iter().map(|v| self.expr_is_pointer(v)).collect();
-            for (t, is_ptr) in targets.iter().zip(ptr_flags) {
+            alias_assigns = targets
+                .iter()
+                .zip(values.iter())
+                .map(|(t, v)| match (&t.kind, self.slot_loan_alias_rhs(v)) {
+                    (PlaceKind::Ident(name), Some((root, is_val_loan)))
+                        if !is_val_loan || self.pointer_vars.contains(name) =>
+                    {
+                        Some((root, is_val_loan))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let ptr_flags: Vec<bool> = values
+                .iter()
+                .enumerate()
+                .map(|(i, v)| alias_assigns[i].is_some() || self.expr_is_pointer(v))
+                .collect();
+            for ((t, is_ptr), alias) in targets.iter().zip(ptr_flags).zip(alias_assigns.iter()) {
                 if let PlaceKind::Ident(name) = &t.kind {
                     if name != "_" {
+                        for aliases in self.loan_aliases.values_mut() {
+                            aliases.remove(name);
+                        }
+                        if let Some((loan_root, _)) = alias {
+                            self.loan_aliases
+                                .entry(loan_root.clone())
+                                .or_default()
+                                .insert(name.clone());
+                        }
                         if is_ptr {
                             self.pointer_vars.insert(name.clone());
                         } else {
@@ -1415,10 +1515,15 @@ impl Emitter {
             .iter()
             .map(|t| self.emit_place(t))
             .collect::<Result<Vec<_>, _>>()?;
-        let vs = values
-            .iter()
-            .map(|v| self.emit_expr(v, 0))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut vs = Vec::with_capacity(values.len());
+        for (idx, v) in values.iter().enumerate() {
+            let e = self.emit_expr(v, 0)?;
+            if matches!(alias_assigns.get(idx), Some(Some((_, true)))) {
+                vs.push(format!("&{}", e));
+            } else {
+                vs.push(e);
+            }
+        }
         self.push(&format!("{} {} {}", ts.join(", "), op_text, vs.join(", ")));
         Ok(())
     }
@@ -1694,7 +1799,7 @@ impl Emitter {
                     .collect::<Result<Vec<_>, _>>()?;
                 self.hint_from_values(&l.names, &l.values);
                 if let Some(t) = &l.ty {
-                    if matches!(t, TypeExpr::Pointer { .. }) {
+                    if self.is_pointer_ty(t) {
                         for n in &l.names {
                             if n != "_" {
                                 self.pointer_vars.insert(n.clone());
@@ -2732,6 +2837,37 @@ impl Emitter {
         }
     }
 
+    /// Returns `Some((loan_root, is_value_loan_ident))` when `expr` is an
+    /// identifier (or parenthesized/`move` identifier) naming an active O8 slot
+    /// loan in `self.loan_frames` or an active local alias of one.
+    fn slot_loan_alias_rhs(&self, mut expr: &Expr) -> Option<(String, bool)> {
+        loop {
+            match expr {
+                Expr::Paren { inner, .. } | Expr::Move { operand: inner, .. } => expr = inner,
+                _ => break,
+            }
+        }
+        let Expr::Ident { name, .. } = expr else {
+            return None;
+        };
+        let is_active_loan = |loan_name: &str| {
+            !loan_name.is_empty()
+                && self
+                    .loan_frames
+                    .iter()
+                    .any(|frame| frame.iter().any(|(n, _)| n == loan_name))
+        };
+        if is_active_loan(name) {
+            return Some((name.clone(), !self.pointer_vars.contains(name)));
+        }
+        for (loan_root, aliases) in &self.loan_aliases {
+            if aliases.contains(name) && is_active_loan(loan_root) {
+                return Some((loan_root.clone(), false));
+            }
+        }
+        None
+    }
+
     /// Emits the read-place and store-back-place for an O8 slot loan `&operand`
     /// bound to `loan_var`, snapshotting the index expression into a fresh
     /// `hyKeyN` temporary when the index is non-trivial or is mutated before
@@ -2740,6 +2876,7 @@ impl Emitter {
         &mut self,
         operand: &Expr,
         loan_var: &str,
+        same_stmt_targets: &[String],
         rest: &[Stmt],
     ) -> Result<(String, String), EmitError> {
         if let Expr::Index { base, index, .. } = operand {
@@ -2747,6 +2884,7 @@ impl Emitter {
                 Expr::Lit { .. } => false,
                 Expr::Ident { name, .. } => {
                     name == loan_var
+                        || same_stmt_targets.iter().any(|t| t == name)
                         || self.closure_written.contains(name)
                         || rest.iter().any(|s| Self::stmt_modifies_ident(s, name))
                 }
@@ -2775,6 +2913,10 @@ impl Emitter {
     /// Flushes and removes any active slot-loan entries for `target_name` in
     /// the current loan frame (used before rebinding `target_name = &...`).
     fn flush_loan_for_name(&mut self, target_name: &str) {
+        self.loan_aliases.remove(target_name);
+        for aliases in self.loan_aliases.values_mut() {
+            aliases.remove(target_name);
+        }
         let mut to_flush = Vec::new();
         if let Some(frame) = self.loan_frames.last_mut() {
             let mut i = 0;
@@ -2810,14 +2952,21 @@ impl Emitter {
         if let Some(frame) = self.loan_frames.last_mut() {
             let mut i = 0;
             while i < frame.len() {
-                if !frame[i].0.is_empty() && !Self::remaining_stmts_use_loan(stmts, &frame[i].0) {
+                if !frame[i].0.is_empty()
+                    && !Self::remaining_stmts_use_loan_with_aliases(
+                        &self.loan_aliases,
+                        stmts,
+                        &frame[i].0,
+                    )
+                {
                     unused.push(frame.remove(i));
                 } else {
                     i += 1;
                 }
             }
         }
-        for (_, store) in unused {
+        for (name, store) in unused {
+            self.loan_aliases.remove(&name);
             self.push(&store);
         }
         for (idx, st) in stmts.iter().enumerate() {
@@ -2839,10 +2988,24 @@ impl Emitter {
                         let (name, place) = &frame[i];
                         let root = Self::place_root(place);
                         if !name.is_empty()
-                            && !Self::remaining_stmts_use_loan(rest, name)
-                            && Self::stmt_has_boundary_using(st, name, root)
+                            && !Self::remaining_stmts_use_loan_with_aliases(
+                                &self.loan_aliases,
+                                rest,
+                                name,
+                            )
+                            && Self::stmt_has_boundary_using_with_aliases(
+                                &self.loan_aliases,
+                                st,
+                                name,
+                                root,
+                            )
                         {
-                            if Self::stmt_must_pre_flush_loan(st, name, root) {
+                            if Self::stmt_must_pre_flush_loan_with_aliases(
+                                &self.loan_aliases,
+                                st,
+                                name,
+                                root,
+                            ) {
                                 pre_flush.push(frame.remove(i));
                             } else {
                                 handoff.push(frame.remove(i));
@@ -2853,7 +3016,8 @@ impl Emitter {
                     }
                 }
             }
-            for (_, store) in pre_flush {
+            for (name, store) in pre_flush {
+                self.loan_aliases.remove(&name);
                 self.push(&store);
             }
             let saved_inherit = if handoff.is_empty() {
@@ -2882,7 +3046,11 @@ impl Emitter {
                 if let Some(frame) = self.loan_frames.last_mut() {
                     let mut i = 0;
                     while i < frame.len() {
-                        if !Self::remaining_stmts_use_loan(rest, &frame[i].0) {
+                        if !Self::remaining_stmts_use_loan_with_aliases(
+                            &self.loan_aliases,
+                            rest,
+                            &frame[i].0,
+                        ) {
                             early_flush.push(frame.remove(i));
                         } else {
                             i += 1;
@@ -2891,6 +3059,7 @@ impl Emitter {
                 }
                 for (name, store) in early_flush {
                     if !name.is_empty() {
+                        self.loan_aliases.remove(&name);
                         self.push(&store);
                     }
                 }
@@ -2900,11 +3069,51 @@ impl Emitter {
         if !stmts.iter().any(Self::stmt_terminates) {
             for (name, store) in frame {
                 if !name.is_empty() {
+                    self.loan_aliases.remove(&name);
                     self.push(&store);
                 }
             }
         }
         Ok(())
+    }
+
+    fn remaining_stmts_use_loan_with_aliases(
+        loan_aliases: &std::collections::BTreeMap<String, BTreeSet<String>>,
+        stmts: &[Stmt],
+        name: &str,
+    ) -> bool {
+        Self::remaining_stmts_use_loan(stmts, name)
+            || loan_aliases
+                .get(name)
+                .is_some_and(|aliases| aliases.iter().any(|a| Self::remaining_stmts_use_loan(stmts, a)))
+    }
+
+    fn stmt_has_boundary_using_with_aliases(
+        loan_aliases: &std::collections::BTreeMap<String, BTreeSet<String>>,
+        st: &Stmt,
+        name: &str,
+        root: &str,
+    ) -> bool {
+        Self::stmt_has_boundary_using(st, name, root)
+            || loan_aliases.get(name).is_some_and(|aliases| {
+                aliases
+                    .iter()
+                    .any(|a| Self::stmt_has_boundary_using(st, a, root))
+            })
+    }
+
+    fn stmt_must_pre_flush_loan_with_aliases(
+        loan_aliases: &std::collections::BTreeMap<String, BTreeSet<String>>,
+        st: &Stmt,
+        name: &str,
+        root: &str,
+    ) -> bool {
+        Self::stmt_must_pre_flush_loan(st, name, root)
+            || loan_aliases.get(name).is_some_and(|aliases| {
+                aliases
+                    .iter()
+                    .any(|a| Self::stmt_must_pre_flush_loan(st, a, root))
+            })
     }
 
     /// Leading identifier of a rendered loan place (`m["a"]` -> `m`, `h.m[k]` -> `h`).

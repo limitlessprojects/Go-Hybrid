@@ -26,7 +26,7 @@ impl<'a> Checker<'a> {
         for sc in &st.scopes {
             self.zd_defined.extend(sc.keys().cloned());
         }
-        self.check_stmt_builtin_args_inner(stmt, /*deep=*/ false);
+        self.check_stmt_builtin_args_inner(st, stmt, /*deep=*/ false);
         self.zd_defined.clear();
     }
 
@@ -56,27 +56,27 @@ impl<'a> Checker<'a> {
         );
     }
 
-    fn check_stmt_builtin_args_inner(&mut self, stmt: &Stmt, deep: bool) {
+    fn check_stmt_builtin_args_inner(&mut self, st: &FnState, stmt: &Stmt, deep: bool) {
         match stmt {
             Stmt::Local(l) => {
                 for v in &l.values {
-                    self.check_expr_builtin_args(v);
+                    self.check_expr_builtin_args(st, v);
                 }
             }
             Stmt::Assign {
                 targets, values, ..
             } => {
                 for t in targets {
-                    self.check_place_builtin_args(t);
+                    self.check_place_builtin_args(st, t);
                 }
                 for v in values {
-                    self.check_expr_builtin_args(v);
+                    self.check_expr_builtin_args(st, v);
                 }
             }
-            Stmt::Expr { expr, .. } => self.check_expr_builtin_args(expr),
+            Stmt::Expr { expr, .. } => self.check_expr_builtin_args(st, expr),
             Stmt::Send { chan, value, .. } => {
-                self.check_expr_builtin_args(chan);
-                self.check_expr_builtin_args(value);
+                self.check_expr_builtin_args(st, chan);
+                self.check_expr_builtin_args(st, value);
             }
             Stmt::If {
                 init,
@@ -87,44 +87,44 @@ impl<'a> Checker<'a> {
             } => {
                 if deep {
                     if let Some(init) = init {
-                        self.check_stmt_builtin_args_inner(init, true);
+                        self.check_stmt_builtin_args_inner(st, init, true);
                     }
                 }
-                self.check_expr_builtin_args(cond);
+                self.check_expr_builtin_args(st, cond);
                 if deep {
                     for s in &then.stmts {
-                        self.check_stmt_builtin_args_inner(s, true);
+                        self.check_stmt_builtin_args_inner(st, s, true);
                     }
                     if let Some(other) = otherwise {
-                        self.check_stmt_builtin_args_inner(other, true);
+                        self.check_stmt_builtin_args_inner(st, other, true);
                     }
                 }
             }
             Stmt::For { kind, body, .. } => {
                 match kind {
-                    ForKind::While { cond } => self.check_expr_builtin_args(cond),
+                    ForKind::While { cond } => self.check_expr_builtin_args(st, cond),
                     ForKind::Range { lo, hi, .. } => {
-                        self.check_expr_builtin_args(lo);
-                        self.check_expr_builtin_args(hi);
+                        self.check_expr_builtin_args(st, lo);
+                        self.check_expr_builtin_args(st, hi);
                     }
-                    ForKind::Iterate { expr, .. } => self.check_expr_builtin_args(expr),
+                    ForKind::Iterate { expr, .. } => self.check_expr_builtin_args(st, expr),
                     ForKind::Infinite => {}
                 }
                 if deep {
                     for s in &body.stmts {
-                        self.check_stmt_builtin_args_inner(s, true);
+                        self.check_stmt_builtin_args_inner(st, s, true);
                     }
                 }
             }
             Stmt::Return { values, .. } => {
                 for v in values {
-                    self.check_expr_builtin_args(v);
+                    self.check_expr_builtin_args(st, v);
                 }
             }
             Stmt::Task { callee, args, .. } => {
-                self.check_expr_builtin_args(callee);
+                self.check_expr_builtin_args(st, callee);
                 for a in args {
-                    self.check_expr_builtin_args(&a.value);
+                    self.check_expr_builtin_args(st, &a.value);
                 }
             }
             Stmt::Managed { body, .. } => {
@@ -133,30 +133,30 @@ impl<'a> Checker<'a> {
                     // declared hatch — raise the depth so HYB-E3013 stays quiet.
                     self.managed_depth += 1;
                     for s in &body.stmts {
-                        self.check_stmt_builtin_args_inner(s, true);
+                        self.check_stmt_builtin_args_inner(st, s, true);
                     }
                     self.managed_depth -= 1;
                 }
             }
             Stmt::Match { subject, arms, .. } => {
-                self.check_expr_builtin_args(subject);
+                self.check_expr_builtin_args(st, subject);
                 for arm in arms {
                     if let Some(g) = &arm.guard {
-                        self.check_expr_builtin_args(g);
+                        self.check_expr_builtin_args(st, g);
                     }
                     if deep {
                         for s in &arm.body.stmts {
-                            self.check_stmt_builtin_args_inner(s, true);
+                            self.check_stmt_builtin_args_inner(st, s, true);
                         }
                     }
                 }
             }
-            Stmt::Defer { call, .. } => self.check_expr_builtin_args(call),
+            Stmt::Defer { call, .. } => self.check_expr_builtin_args(st, call),
             Stmt::Break { .. } | Stmt::Continue { .. } => {}
             Stmt::Block { block, .. } => {
                 if deep {
                     for s in &block.stmts {
-                        self.check_stmt_builtin_args_inner(s, true);
+                        self.check_stmt_builtin_args_inner(st, s, true);
                     }
                 }
             }
@@ -164,15 +164,15 @@ impl<'a> Checker<'a> {
                 for arm in arms {
                     match &arm.kind {
                         SelectArmKind::Send { chan, value, .. } => {
-                            self.check_expr_builtin_args(chan);
-                            self.check_expr_builtin_args(value);
+                            self.check_expr_builtin_args(st, chan);
+                            self.check_expr_builtin_args(st, value);
                         }
-                        SelectArmKind::Recv { chan, .. } => self.check_expr_builtin_args(chan),
+                        SelectArmKind::Recv { chan, .. } => self.check_expr_builtin_args(st, chan),
                         SelectArmKind::Default => {}
                     }
                     if deep {
                         for s in &arm.body.stmts {
-                            self.check_stmt_builtin_args_inner(s, true);
+                            self.check_stmt_builtin_args_inner(st, s, true);
                         }
                     }
                 }
@@ -180,23 +180,23 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_place_builtin_args(&mut self, place: &Place) {
+    fn check_place_builtin_args(&mut self, st: &FnState, place: &Place) {
         match &place.kind {
             PlaceKind::Index { base, index } => {
-                self.check_place_builtin_args(base);
-                self.check_expr_builtin_args(index);
+                self.check_place_builtin_args(st, base);
+                self.check_expr_builtin_args(st, index);
             }
             PlaceKind::Field { base, .. } | PlaceKind::AddrOf { base } => {
-                self.check_place_builtin_args(base);
+                self.check_place_builtin_args(st, base);
             }
             PlaceKind::Ident(_) => {}
         }
     }
 
-    pub(crate) fn check_expr_builtin_args(&mut self, expr: &Expr) {
+    pub(crate) fn check_expr_builtin_args(&mut self, st: &FnState, expr: &Expr) {
         match expr {
             Expr::Call { callee, args, span } => {
-                self.check_expr_builtin_args(callee);
+                self.check_expr_builtin_args(st, callee);
                 let is_type_arg_builtin = matches!(
                     unwrap_parens(callee),
                     Expr::Ident { name, .. }
@@ -206,7 +206,7 @@ impl<'a> Checker<'a> {
                     if is_type_arg_builtin && i == 0 {
                         continue;
                     }
-                    self.check_expr_builtin_args(&a.value);
+                    self.check_expr_builtin_args(st, &a.value);
                 }
                 if let Expr::Ident { name, .. } = unwrap_parens(callee) {
                     self.check_builtin_call(name, args, *span);
@@ -214,32 +214,32 @@ impl<'a> Checker<'a> {
                 // W-016 M3: a closure that writes a captured binding and is
                 // passed to a foreign Go call is the A5 escape perimeter
                 // (HYB-E3013, SPEC §8.5 C9).
-                self.check_escape_site(callee, args, *span);
+                self.check_escape_site(st, callee, args, *span);
             }
             Expr::Binary { lhs, rhs, .. } => {
-                self.check_expr_builtin_args(lhs);
-                self.check_expr_builtin_args(rhs);
+                self.check_expr_builtin_args(st, lhs);
+                self.check_expr_builtin_args(st, rhs);
             }
             Expr::Unary { operand, .. }
             | Expr::AddrOf { operand, .. }
             | Expr::Move { operand, .. }
             | Expr::Try { operand, .. }
-            | Expr::Paren { inner: operand, .. } => self.check_expr_builtin_args(operand),
-            Expr::Receive { chan, .. } => self.check_expr_builtin_args(chan),
+            | Expr::Paren { inner: operand, .. } => self.check_expr_builtin_args(st, operand),
+            Expr::Receive { chan, .. } => self.check_expr_builtin_args(st, chan),
             Expr::Index { base, index, .. } => {
-                self.check_expr_builtin_args(base);
-                self.check_expr_builtin_args(index);
+                self.check_expr_builtin_args(st, base);
+                self.check_expr_builtin_args(st, index);
             }
             Expr::Slice { base, lo, hi, .. } => {
-                self.check_expr_builtin_args(base);
+                self.check_expr_builtin_args(st, base);
                 if let Some(lo) = lo {
-                    self.check_expr_builtin_args(lo);
+                    self.check_expr_builtin_args(st, lo);
                 }
                 if let Some(hi) = hi {
-                    self.check_expr_builtin_args(hi);
+                    self.check_expr_builtin_args(st, hi);
                 }
             }
-            Expr::Field { base, .. } => self.check_expr_builtin_args(base),
+            Expr::Field { base, .. } => self.check_expr_builtin_args(st, base),
             Expr::StructLit { ty, fields, span } => {
                 if let Some(t @ hy_syntax::TypeExpr::Chan { .. }) = ty {
                     let ty_str = t.render();
@@ -251,31 +251,31 @@ impl<'a> Checker<'a> {
                     );
                 }
                 for f in fields {
-                    self.check_expr_builtin_args(&f.value);
+                    self.check_expr_builtin_args(st, &f.value);
                 }
             }
             Expr::SliceLit { items, .. } => {
                 for it in items {
-                    self.check_expr_builtin_args(it);
+                    self.check_expr_builtin_args(st, it);
                 }
             }
             Expr::MapLit { entries, .. } => {
                 for (k, v) in entries {
-                    self.check_expr_builtin_args(k);
-                    self.check_expr_builtin_args(v);
+                    self.check_expr_builtin_args(st, k);
+                    self.check_expr_builtin_args(st, v);
                 }
             }
             Expr::Interp { parts, .. } => {
                 for p in parts {
                     if let hy_syntax::InterpPart::Expr(e) = p {
-                        self.check_expr_builtin_args(e);
+                        self.check_expr_builtin_args(st, e);
                     }
                 }
             }
             Expr::FnLit { params, body, .. } => {
                 self.push_closure_bound(params, body);
                 for stmt in &body.stmts {
-                    self.check_stmt_builtin_args_inner(stmt, /*deep=*/ true);
+                    self.check_stmt_builtin_args_inner(st, stmt, /*deep=*/ true);
                 }
                 self.pop_closure_bound();
             }
@@ -657,7 +657,7 @@ impl<'a> Checker<'a> {
     ///   2. an argument is a `fn(...) { ... }` literal whose body writes a
     ///      binding that is not declared inside that literal (a capture).
     /// A site inside `managed(...)` is the declared escape hatch and is allowed.
-    fn check_escape_site(&mut self, callee: &Expr, args: &[hy_syntax::CallArg], span: Span) {
+    fn check_escape_site(&mut self, st: &FnState, callee: &Expr, args: &[hy_syntax::CallArg], span: Span) {
         if self.in_managed() {
             return;
         }
@@ -673,11 +673,28 @@ impl<'a> Checker<'a> {
         }
         let mut captured: Option<String> = None;
         for a in args {
-            if let Expr::FnLit { params, body, .. } = unwrap_parens(&a.value) {
-                if let Some(name) = closure_writes_captured(params, body) {
-                    captured = Some(name);
-                    break;
+            match unwrap_parens(&a.value) {
+                Expr::FnLit { params, body, .. } => {
+                    if let Some(name) = closure_writes_captured(params, body) {
+                        captured = Some(name);
+                        break;
+                    }
                 }
+                // #2724: a NAMED closure binding (`cb := fn() { ... }`) escapes
+                // exactly like an inline literal, but the old loop only looked at
+                // `Expr::FnLit` arguments and skipped it. `FnState.closure_defs`
+                // records every local closure's body, so resolve the binding and
+                // run the same capture test on it. An alias whose own define was
+                // recorded resolves the same way.
+                Expr::Ident { name, .. } => {
+                    if let Some((params, _results, body)) = st.closure_defs.get(name) {
+                        if let Some(n) = closure_writes_captured(params, body) {
+                            captured = Some(n);
+                            break;
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         let Some(name) = captured else {
@@ -868,8 +885,19 @@ fn walk_stmt_writes(stmt: &Stmt, locals: &HashSet<String>, hit: &mut Option<Stri
         Stmt::Managed { body, .. } | Stmt::Block { block: body, .. } => {
             walk_block_writes(body, locals, hit)
         }
+        // #2724: a builtin that mutates a captured container IN PLACE
+        // (`delete(m, k)`, `clear(m)`, `copy(dst, src)`) is an escape write even
+        // though it is not a `Stmt::Assign`. The old walker saw only assignment
+        // place roots, so a closure whose body was only `delete(m, "k")` looked
+        // inert and escaped.
+        Stmt::Expr { expr, .. } => {
+            if let Some(root) = builtin_mutation_root(expr) {
+                if !locals.contains(root) {
+                    *hit = Some(root.to_string());
+                }
+            }
+        }
         Stmt::Local(_)
-        | Stmt::Expr { .. }
         | Stmt::Send { .. }
         | Stmt::Return { .. }
         | Stmt::Task { .. }
@@ -887,6 +915,35 @@ fn place_root(place: &Place) -> Option<&str> {
         None
     } else {
         Some(root)
+    }
+}
+
+/// The root binding a builtin call mutates IN PLACE, if any — `delete(m, k)`
+/// and `clear(m)` mutate their first argument; `copy(dst, src)` writes into
+/// `dst` (its first argument). `#2724`.
+fn builtin_mutation_root(e: &Expr) -> Option<&str> {
+    let Expr::Call { callee, args, .. } = unwrap_parens(e) else {
+        return None;
+    };
+    let Expr::Ident { name, .. } = unwrap_parens(callee) else {
+        return None;
+    };
+    if !matches!(name.as_str(), "delete" | "clear" | "copy") {
+        return None;
+    }
+    args.first().and_then(|a| expr_root(&a.value))
+}
+
+/// The root identifier of a value expression (`m["k"]` -> `m`, `p.f` -> `p`,
+/// `&m` -> `m`). `#2724`.
+fn expr_root(e: &Expr) -> Option<&str> {
+    match unwrap_parens(e) {
+        Expr::Ident { name, .. } => Some(name),
+        Expr::Index { base, .. } | Expr::Field { base, .. } | Expr::Slice { base, .. } => {
+            expr_root(base)
+        }
+        Expr::AddrOf { operand, .. } => expr_root(operand),
+        _ => None,
     }
 }
 
