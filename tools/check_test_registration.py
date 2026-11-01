@@ -69,6 +69,15 @@ def python_commands(workflow_text):
             # -p flag must never become another unittest discovery pattern.
             end = next((i for i, token in enumerate(tokens)
                         if token and all(c in ";&|<>()" for c in token)), len(tokens))
+            # Issue #2880: an OR-list (`||`), pipeline (`|`), or background
+            # operator (`&`) masks a non-zero exit status under `set -e`
+            # (without `pipefail`), so a failing test suite would not fail CI.
+            if any(
+                token and all(c in ";&|<>()" for c in token)
+                and ("|" in token or "&" in token.replace("&&", ""))
+                for token in tokens[end:]
+            ):
+                continue
             arguments = tokens[1:end]
             while arguments:
                 option = arguments[0]
