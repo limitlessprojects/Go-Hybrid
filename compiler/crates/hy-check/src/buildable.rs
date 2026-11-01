@@ -856,9 +856,99 @@ impl<'a> Collector<'a> {
     /// #1031 — the exact numeric type of a value that is provably TYPED.
     /// Literals are untyped constants (assignable to any numeric type), so
     /// they are deliberately `None` here.
+    fn expr_type_name(&self, e: &Expr) -> Option<String> {
+        let bare = unwrap_parens(e);
+        match bare {
+            Expr::Ident { name, .. } => self.lookup_type_name(name),
+            Expr::SliceLit { elem: Some(t), .. } => {
+                if let Some((_, _, array_ty)) = bare.as_array_lit() {
+                    Some(array_ty.render())
+                } else {
+                    Some(format!("[]{}", t.render()))
+                }
+            }
+            Expr::MapLit { key, value, .. } => {
+                Some(format!("map[{}]{}", key.render(), value.render()))
+            }
+            Expr::StructLit { ty: Some(t), .. } => Some(t.render()),
+            Expr::Lit {
+                kind: LitKind::Str(_),
+                ..
+            } => Some("string".to_string()),
+            Expr::Slice { base, .. } => self.expr_type_name(base),
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                let full_name = self.struct_name(&bk)?;
+                let base_name = Checker::base_named_type_str(&full_name);
+                let fields = self.ck.structs.get(base_name)?;
+                fields
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, ty)| ty.render())
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident { name, .. } = unwrap_parens(callee) {
+                    if name == "make" {
+                        if let Some(first) = args.first() {
+                            return self.expr_type_name(&first.value);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn index_scalar(&self, base: &Expr) -> Option<&'static str> {
+        if let Some(tname) = self.expr_type_name(base) {
+            let mut t = tname.trim();
+            if let Some(rest) = t.strip_prefix('*') {
+                t = rest.trim();
+            }
+            if let Some(elem) = t.strip_prefix("[]") {
+                return canonical_numeric_name(elem.trim());
+            }
+            if t.starts_with('[') {
+                if let Some(close) = t.find(']') {
+                    let elem = &t[close + 1..];
+                    return canonical_numeric_name(elem.trim());
+                }
+            }
+            if let Some(rest) = t.strip_prefix("map[") {
+                if let Some(close) = rest.find(']') {
+                    let val_ty = &rest[close + 1..];
+                    return canonical_numeric_name(val_ty.trim());
+                }
+            }
+            if t == "string" {
+                return Some("uint8");
+            }
+        }
+        if self.kind_of_expr(base) == OpKind::Str {
+            return Some("uint8");
+        }
+        None
+    }
+
+    fn struct_field_scalar(&self, k: &OpKind, field: &str) -> Option<&'static str> {
+        let full_name = self.struct_name(k)?;
+        let base_name = Checker::base_named_type_str(&full_name);
+        let fields = self.ck.structs.get(base_name)?;
+        fields
+            .iter()
+            .find(|(n, _)| n == field)
+            .and_then(|(_, ty)| self.scalar_of_ty(ty))
+    }
+
     fn typed_value_scalar(&self, e: &Expr) -> Option<&'static str> {
         match unwrap_parens(e) {
             Expr::Ident { name, .. } => self.lookup_scalar(name),
+            Expr::Index { base, .. } => self.index_scalar(base),
+            Expr::Field { base, name, .. } => {
+                let bk = self.kind_of_expr(base);
+                self.struct_field_scalar(&bk, name)
+            }
             // Typed arithmetic keeps its operand type: in any program that
             // builds, both operands share one type or one is an untyped
             // constant, so the typed side names the result type. A shift's
@@ -1437,7 +1527,9 @@ impl<'a> Collector<'a> {
             }
         } else if l.values.len() == l.names.len() {
             for (name, val) in l.names.iter().zip(&l.values) {
-                if let Some(elem) = self.slice_element_type_name(val) {
+                if let Some(tname) = self.expr_type_name(val) {
+                    self.bind_type_name(name, tname);
+                } else if let Some(elem) = self.slice_element_type_name(val) {
                     self.bind_type_name(name, format!("[]{}", elem));
                 }
             }
