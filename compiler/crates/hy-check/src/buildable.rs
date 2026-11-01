@@ -723,7 +723,7 @@ impl<'a> Collector<'a> {
                 None
             }
             Expr::SliceLit { elem: Some(t), .. } => Some(t.render()),
-            Expr::MapLit { value, .. } => value.as_ref().map(|t| t.render()),
+            Expr::MapLit { value, .. } => Some(value.render()),
             _ => self.slice_element_type_name(e),
         }
     }
@@ -866,11 +866,7 @@ impl<'a> Collector<'a> {
                     self.emit_e1002(
                         span,
                         msg,
-                        format!(
-                            "`{}.{}` expects exactly 1 argument matching the set element type",
-                            base.render(),
-                            name
-                        ),
+                        "a set's insert/contains/remove take a value of the set's element type",
                     );
                 } else {
                     let want = self.kind_of_named(&elem, 0);
@@ -905,7 +901,7 @@ impl<'a> Collector<'a> {
                             args.len(),
                             base.render()
                         ),
-                        format!("`{}.len` takes no arguments", base.render()),
+                        "len on a set takes no arguments",
                     );
                 }
             }
