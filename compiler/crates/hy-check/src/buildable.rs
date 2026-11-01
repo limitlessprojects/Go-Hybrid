@@ -6307,7 +6307,8 @@ impl<'a> Collector<'a> {
             | OpKind::Str
             | OpKind::Array(_)
             | OpKind::Map(_, _)
-            | OpKind::Chan(_) => {
+            | OpKind::Chan(_)
+            | OpKind::Struct(_) => {
                 self.emit_e1002(
                     span,
                     format!(
@@ -6316,6 +6317,17 @@ impl<'a> Collector<'a> {
                         bk.label()
                     ),
                     "`.pop()` is a slice operation (`[]T`); fixed-size arrays, maps, channels, and primitives do not support `.pop()`",
+                );
+            }
+            OpKind::Pointer(inner) if !matches!(**inner, OpKind::Slice(_)) => {
+                self.emit_e1002(
+                    span,
+                    format!(
+                        "cannot call `.pop()` on `{}` (type `{}`) — `.pop()` is only defined on slices `[]T` (HYB-E1002)",
+                        base.render(),
+                        bk.label()
+                    ),
+                    "`.pop()` is a slice operation (`[]T`); pointers to non-slice types do not support `.pop()`",
                 );
             }
             _ => {}
@@ -7194,6 +7206,27 @@ fn main() {
             "unexpected diagnostics: {:?}",
             r.diagnostics
         );
+    }
+
+    #[test]
+    fn rejects_pop_on_struct_and_pointer_without_pop_method_1979() {
+        for src in [
+            "struct counter { val int }\nfn main() {\n    c := counter{val: 10}\n    c.pop()\n    fmt.println(c.val)\n}\n",
+            "struct counter { val int }\nfn main() {\n    p := &counter{val: 10}\n    p.pop()\n    fmt.println(p.val)\n}\n",
+        ] {
+            let r = check(src);
+            assert_eq!(r.verdict, Verdict::Reject, "expected reject for:\n{src}");
+            assert!(
+                error_codes(&r).contains(&"HYB-E1002".to_string()),
+                "expected HYB-E1002, got {:?} for:\n{src}",
+                error_codes(&r)
+            );
+        }
+
+        // Struct that actually implements pop() method must be accepted
+        let valid_src = "struct stack { val int }\nfn (s *stack) pop() int { return s.val }\nfn main() {\n    st := &stack{val: 5}\n    fmt.println(st.pop())\n}\n";
+        let r = check(valid_src);
+        assert_eq!(r.verdict, Verdict::Accept, "expected accept for:\n{valid_src}");
     }
 }
 
