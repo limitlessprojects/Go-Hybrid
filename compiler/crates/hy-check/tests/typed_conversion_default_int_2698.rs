@@ -59,9 +59,12 @@ fn typed_u64_conversion_above_int_max_is_accepted() {
 }
 
 #[test]
-fn word_sized_uint_conversion_above_int_max_is_accepted() {
-    accepts("uint(18446744073709551615)");
-    accepts("uintptr(18446744073709551615)");
+fn word_sized_conversion_keeps_the_default_int_guard() {
+    // The emitter does not fold `uint`/`uintptr`/`int` conversions, and
+    // HYB-E6006 only sees literal operands, so this guard must keep stopping
+    // a constant expression that would not build (`constant -1 overflows uint`).
+    rejects_e6002("uint(0 - 1)");
+    rejects_e6002("uintptr(0 - 1)");
 }
 
 #[test]

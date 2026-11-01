@@ -332,9 +332,17 @@ impl<'a> Checker<'a> {
         // result of negation / binary operations (#725). Without this,
         // `x := u64(1 << 63)` and `x := u64(1) << 63` (both build in Go)
         // were rejected as overflowing `int` (issue #2698).
+        //
+        // Word-sized targets (`int`/`uint`/`uintptr`) are deliberately NOT
+        // skipped: the emitter's X4 fold (`hy_emit::constconv::width_of`)
+        // does not rewrite them, and HYB-E6006 only sees literal operands,
+        // so the default-int fold is still the guard that stops e.g.
+        // `x := uint(0 - 1)` from reaching `go build`.
         if let Some(st) = st {
-            if self.fixed_width_int_ty_of(st, value).is_some() {
-                return;
+            if let Some((ty, _, _)) = self.fixed_width_int_ty_of(st, value) {
+                if !matches!(ty.as_str(), "int" | "isize" | "uint" | "usize" | "uintptr") {
+                    return;
+                }
             }
         }
         let (lo, hi) = target_int_range();
