@@ -443,8 +443,11 @@ def cmd_verify_assert(args):
         print("ASSERT-FAIL: ls-remote failed: %s" % (r.stderr or "")[-200:])
         sys.exit(1)
     main_sha = r.stdout.split()[0]
-    subprocess.run(["git", "-C", repo, "fetch", "-q", "origin", "main"],
-                   capture_output=True, timeout=120)
+    fetched = subprocess.run(["git", "-C", repo, "fetch", "-q", "origin", "main"],
+                             capture_output=True, text=True, timeout=120)
+    if fetched.returncode != 0:
+        print("ASSERT-FAIL: fetch failed: %s" % (fetched.stderr or "")[-200:])
+        sys.exit(1)
     r2 = subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor",
                          args.head, "FETCH_HEAD"], capture_output=True)
     if r2.returncode == 0:

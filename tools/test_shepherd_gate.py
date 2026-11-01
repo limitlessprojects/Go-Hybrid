@@ -117,5 +117,35 @@ class ProbeParser(unittest.TestCase):
         self.assertFalse(any("removed line" in ln for ln in added))
 
 
+class WorkflowWorkspacePaths(unittest.TestCase):
+    """Shepherd workflows run from repo root, while Cargo workspaces live under
+    compiler/ and runtime/rust/hyrt/ and Go runtime packages live under
+    runtime/go (assembled as module hybrid.program, no root go.mod) (#2487)."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def test_shepherd_setup_caches_actual_workspaces(self):
+        src = (self.ROOT / ".github" / "actions" / "shepherd-setup" / "action.yml").read_text(encoding="utf-8")
+        self.assertIn("compiler/target", src)
+        self.assertIn("runtime/rust/hyrt/target", src)
+        self.assertIn("compiler/Cargo.lock", src)
+        self.assertIn("runtime/rust/hyrt/Cargo.lock", src)
+
+    def test_shepherd_preflight_targets_compiler_and_synthesized_go_module(self):
+        src = (self.ROOT / ".github" / "workflows" / "shepherd-preflight.yml").read_text(encoding="utf-8")
+        self.assertIn("--manifest-path compiler/Cargo.toml -p hyb", src)
+        self.assertIn("--manifest-path runtime/rust/hyrt/Cargo.toml", src)
+        self.assertIn("module hybrid.program", src)
+        self.assertNotIn("if go build ./... ; then", src)
+        self.assertNotIn("if cargo build -p hyb --quiet ; then", src)
+
+    def test_shepherd_verify_passes_manifest_and_hyb_bin(self):
+        src = (self.ROOT / ".github" / "workflows" / "shepherd-verify.yml").read_text(encoding="utf-8")
+        self.assertIn("cargo test --manifest-path compiler/Cargo.toml --workspace", src)
+        self.assertIn("cargo build --manifest-path compiler/Cargo.toml -p hyb", src)
+        self.assertIn("tools/corpus_harness.py --bin compiler/target/debug/hyb", src)
+        self.assertIn("tools/differential_loop.py --bin compiler/target/debug/hyb", src)
+
+
 if __name__ == "__main__":
     unittest.main()
