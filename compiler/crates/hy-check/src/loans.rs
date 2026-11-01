@@ -371,9 +371,6 @@ impl<'a> Checker<'a> {
                 // carries mutable GC storage, so the destination and source
                 // share it afterwards — a later `move` of either must freeze
                 // the other (O5.2). Primitive-element slices share nothing.
-                if name == "copy" {
-                    self.record_copy_may_share(st, cr);
-                }
                 if name == "delete" || name == "clear" {
                     // A3: map delete / clear is a map mutation
                     self.check_delete_conflict(st, cr, idx);
@@ -386,6 +383,11 @@ impl<'a> Checker<'a> {
                     self.check_delete_const(st, cr, &HashSet::new());
                 }
                 self.check_call_const_writes(st, cr, &HashSet::new());
+                if name == "copy" {
+                    self.record_copy_may_share(st, cr);
+                } else if name == "append" {
+                    self.record_append_may_share(st, cr);
+                }
                 self.record_callee_param_stores(st, cr);
                 if self.fns.contains_key(&name) {
                     // A3 #111: the callee may insert/delete through the
@@ -2843,6 +2845,127 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        self.propagate_store_borrows_and_slot_loans(st, &dst.value, &dst_roots, &src.value, &src_roots);
+    }
+
+    /// Record the may-share edge, non-owned origin, borrow-binding status, and
+    /// map-slot loan window extension when `append(dst, elem...)` writes into
+    /// `dst`'s backing array in place (spare capacity in `dst` or a bounded
+    /// reslice `s[:k]` / `s[a:b]`), even when the return value of `append` is
+    /// discarded (`_ = append(s[:1], m)`) or not rebound to `dst`.
+    pub(crate) fn record_append_may_share(&self, st: &mut FnState, cr: &CallRef) {
+        let Some(dst) = cr.args.first() else {
+            return;
+        };
+        if cr.args.len() < 2
+            || matches!(unwrap_parens(&dst.value), Expr::SliceLit { .. })
+            || self.append_dst_reallocates(st, &dst.value)
+        {
+            return;
+        }
+        let elem_shares = match self.shape_of_expr(st, unwrap_parens(&dst.value)) {
+            TypeShape::Slice(elem) => {
+                self.shape_may_share(&elem) || matches!(*elem, TypeShape::Unknown)
+            }
+            TypeShape::Unknown => true,
+            _ => false,
+        } || cr.args.iter().skip(1).any(|arg| {
+            let sh = self.shape_of_expr(st, unwrap_parens(&arg.value));
+            self.shape_may_share(&sh) || matches!(sh, TypeShape::Unknown)
+        });
+        if !elem_shares {
+            return;
+        }
+        let mut dst_roots = Vec::new();
+        collect_ref_roots(&dst.value, &mut dst_roots);
+        self.collect_callee_const_return_roots(st, &dst.value, &mut dst_roots, 0);
+        if dst_roots.is_empty() {
+            return;
+        }
+        for src in cr.args.iter().skip(1) {
+            let mut src_roots = Vec::new();
+            collect_ref_roots(&src.value, &mut src_roots);
+            self.collect_callee_const_return_roots(st, &src.value, &mut src_roots, 0);
+            for d in &dst_roots {
+                let dst_shares = self.binding_may_share(st, d)
+                    || self.expr_slices_addressable_array(st, &dst.value, d);
+                if !dst_shares {
+                    continue;
+                }
+                for s in &src_roots {
+                    if d != s
+                        && (self.binding_may_share(st, s)
+                            || self.lookup_binding(st, s).is_some_and(|b| b.immutable))
+                    {
+                        st.share_edge(d, s);
+                    }
+                }
+            }
+            if let Some(origin) = self.moved_non_owned_origin_in_expr(st, &src.value) {
+                let peer_origin = if origin.starts_with("a may-share peer of ") {
+                    origin
+                } else {
+                    format!("a may-share peer of {}", origin)
+                };
+                for d in &dst_roots {
+                    if self.binding_may_share(st, d)
+                        || self.expr_slices_addressable_array(st, &dst.value, d)
+                    {
+                        if let Some(db) = st.env_lookup_mut(d) {
+                            if db.non_owned_origin.is_none() {
+                                db.non_owned_origin = Some(peer_origin.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            self.propagate_store_borrows_and_slot_loans(
+                st,
+                &dst.value,
+                &dst_roots,
+                &src.value,
+                &src_roots,
+            );
+        }
+    }
+
+    fn propagate_store_borrows_and_slot_loans(
+        &self,
+        st: &mut FnState,
+        dst_expr: &Expr,
+        dst_roots: &[String],
+        src_expr: &Expr,
+        src_roots: &[String],
+    ) {
+        if !self.expr_carries_borrow(st, src_expr) {
+            return;
+        }
+        let mut addr_roots = Vec::new();
+        self.collect_borrowed_roots(st, src_expr, &mut addr_roots);
+        for d in dst_roots {
+            if !self.binding_may_share(st, d)
+                && !self.expr_slices_addressable_array(st, dst_expr, d)
+            {
+                continue;
+            }
+            st.borrow_bindings.insert(d.clone());
+            for broot in &addr_roots {
+                if broot != d {
+                    st.share_edge(d, broot);
+                }
+            }
+            let d_last = st.last_use.get(d).copied().unwrap_or(0);
+            for s in src_roots {
+                let resolved_s = crate::freeze::resolve_alias(st, s);
+                for loan in &mut st.loans {
+                    if let LoanTarget::MapSlot { binding, .. } = &loan.target {
+                        if binding == s || *binding == resolved_s {
+                            loan.last = loan.last.max(d_last);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Issue #455: interprocedural out-parameter / receiver store tracking.
@@ -3107,6 +3230,13 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+            }
+            if let (CalleeSlotSource::Arg(dst_expr), CalleeSlotSource::Arg(src_expr)) =
+                (dst_src, src_src)
+            {
+                self.propagate_store_borrows_and_slot_loans(
+                    st, dst_expr, &dst_roots, src_expr, &src_roots,
+                );
             }
         }
     }
@@ -3957,6 +4087,50 @@ impl<'a> Checker<'a> {
                             .entry(d_root.to_string())
                             .or_default()
                             .extend(src_slots);
+                    }
+                }
+                return;
+            }
+            if name == "append" {
+                let Some(dst) = cr.args.first() else {
+                    return;
+                };
+                if cr.args.len() < 2
+                    || matches!(crate::model::unwrap_parens(&dst.value), Expr::SliceLit { .. })
+                    || self.append_dst_reallocates(cst, &dst.value)
+                {
+                    return;
+                }
+                let elem_shares = match self.shape_of_expr(cst, crate::model::unwrap_parens(&dst.value)) {
+                    TypeShape::Slice(elem) => {
+                        self.shape_may_share(&elem) || matches!(*elem, TypeShape::Unknown)
+                    }
+                    TypeShape::Unknown => true,
+                    _ => false,
+                } || cr.args.iter().skip(1).any(|arg| {
+                    let sh = self.shape_of_expr(cst, crate::model::unwrap_parens(&arg.value));
+                    self.shape_may_share(&sh) || matches!(sh, TypeShape::Unknown)
+                });
+                if !elem_shares {
+                    return;
+                }
+                let dst_slots = Self::raw_expr_slot_origins(&dst.value, aliases);
+                for src in cr.args.iter().skip(1) {
+                    let src_slots = Self::raw_expr_slot_origins(&src.value, aliases);
+                    for d in &dst_slots {
+                        for s in &src_slots {
+                            if d != s {
+                                out.insert((*d, *s));
+                            }
+                        }
+                    }
+                    if let Some(d_root) = dst.value.root_ident() {
+                        if !param_names.contains(d_root) && !src_slots.is_empty() {
+                            aliases
+                                .entry(d_root.to_string())
+                                .or_default()
+                                .extend(src_slots);
+                        }
                     }
                 }
                 return;
@@ -5465,6 +5639,29 @@ impl<'a> Checker<'a> {
                         for dr in dst_roots {
                             if !src_o.is_empty() {
                                 origins.entry(dr).or_default().extend(src_o.iter().cloned());
+                            }
+                        }
+                    } else if name == "append" && cr.args.len() >= 2 {
+                        let dst = &cr.args[0].value;
+                        if !matches!(unwrap_parens(dst), Expr::SliceLit { .. })
+                            && !self.append_dst_reallocates(&cst, dst)
+                        {
+                            let mut src_o = HashSet::new();
+                            for arg in cr.args.iter().skip(1) {
+                                self.collect_sharing_origins_expr(
+                                    &cst,
+                                    &arg.value,
+                                    &origins,
+                                    &shadowed,
+                                    &mut src_o,
+                                );
+                            }
+                            if !src_o.is_empty() {
+                                let mut dst_roots = Vec::new();
+                                collect_ref_roots(dst, &mut dst_roots);
+                                for dr in dst_roots {
+                                    origins.entry(dr).or_default().extend(src_o.iter().cloned());
+                                }
                             }
                         }
                     }
@@ -7201,6 +7398,8 @@ impl<'a> Checker<'a> {
                     if let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) {
                         if name == "copy" {
                             self.record_copy_may_share(&mut cst, cr);
+                        } else if name == "append" {
+                            self.record_append_may_share(&mut cst, cr);
                         }
                     }
                     self.record_callee_param_stores(&mut cst, cr);
@@ -8307,6 +8506,26 @@ impl<'a> Checker<'a> {
                 if name == "copy" {
                     if cr.args.len() >= 2
                         && Self::expr_reaches_const_aliases(&cr.args[1].value, aliases)
+                    {
+                        if let Some(dst_root) =
+                            crate::model::unwrap_parens(&cr.args[0].value).root_ident()
+                        {
+                            aliases.insert(dst_root.to_string());
+                        }
+                    }
+                    return;
+                }
+                if name == "append" {
+                    if cr.args.len() >= 2
+                        && !matches!(
+                            crate::model::unwrap_parens(&cr.args[0].value),
+                            Expr::SliceLit { .. }
+                        )
+                        && cr
+                            .args
+                            .iter()
+                            .skip(1)
+                            .any(|a| Self::expr_reaches_const_aliases(&a.value, aliases))
                     {
                         if let Some(dst_root) =
                             crate::model::unwrap_parens(&cr.args[0].value).root_ident()

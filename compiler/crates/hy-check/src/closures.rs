@@ -480,6 +480,8 @@ fn check_stmt_boundaries<'a>(ck: &mut Checker<'_>, st: &mut FnState, stmt: &'a S
         if let Expr::Ident { name, .. } = crate::model::unwrap_parens(cr.callee) {
             if name == "copy" {
                 ck.record_copy_may_share(st, cr);
+            } else if name == "append" {
+                ck.record_append_may_share(st, cr);
             }
         }
         ck.record_callee_param_stores(st, cr);
