@@ -1,0 +1,9 @@
+name: fixture-and-list-accept
+jobs:
+  quick:
+    steps:
+      - name: Unmasked test invocations register
+        run: |
+          set -e
+          python3 -m unittest discover -s tools -p test_failing.py && echo ok
+          python3 tests/test_direct.py
