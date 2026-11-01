@@ -1040,6 +1040,51 @@ fn return_none_lowers_to_option_zero() {
 }
 
 #[test]
+fn none_lowers_in_declared_value_positions() {
+    // Issue #1297: `none` was lowered only in `return`. Every declared
+    // `option[T]` value position must lower to the option zero value too.
+    // 1: typed var initializer.
+    let var = emit("fn main() {\n    var o option[int] = none\n    fmt.println(o.is_none())\n}\n");
+    assert!(
+        var.contains("var o option[int] = option[int]{}"),
+        "typed var none:\n{}",
+        var
+    );
+
+    // 2: keyed struct-literal field.
+    let field = emit(
+        "struct wrap {\n    inner option[int]\n}\nfn main() {\n    w := wrap{inner: none}\n    fmt.println(w.inner.is_none())\n}\n",
+    );
+    assert!(
+        field.contains("inner: option[int]{}"),
+        "struct field none:\n{}",
+        field
+    );
+
+    // 3: assignment to a binding declared `option[T]`.
+    let assign = emit(
+        "fn main() {\n    var o option[int] = some(1)\n    o = none\n    fmt.println(o.is_none())\n}\n",
+    );
+    assert!(assign.contains("o = option[int]{}"), "assign none:\n{}", assign);
+
+    // A typed slice element slot lowers too.
+    let slice = emit("fn main() {\n    xs := []option[int]{none}\n    fmt.println(len(xs))\n}\n");
+    assert!(
+        slice.contains("[]option[int]{option[int]{}}"),
+        "slice elem none:\n{}",
+        slice
+    );
+}
+
+#[test]
+fn none_without_a_declared_target_stays_a_clean_error() {
+    // `x := none` has no declared type and `take(none)` no expected param
+    // type; neither may emit a silently wrong value.
+    assert!(emit_err("fn main() {\n    x := none\n    fmt.println(x.is_none())\n}\n")
+        .contains("`none` outside a return"));
+}
+
+#[test]
 fn slot_loan_copies_and_stores_back() {
     // O8's map-slot loan: Go cannot &m[k]; copy-read now + store-back at
     // the declaring block's end.

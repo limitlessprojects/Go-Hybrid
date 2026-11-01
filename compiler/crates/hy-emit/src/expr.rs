@@ -73,6 +73,15 @@ impl Emitter {
                 lit = inner;
             }
             match lit {
+                // `none` is only the option zero value, so it lowers against a
+                // known `option[T]` target: a typed var, assignment, struct
+                // field, slice/map element. Without a target it keeps the
+                // clean "outside a return" refusal.
+                Expr::Ident { name, .. }
+                    if name == "none" && matches!(exp, TypeExpr::Option { .. }) =>
+                {
+                    return Ok(self.zero_value(exp));
+                }
                 Expr::StructLit {
                     ty: None, fields, ..
                 } => {
@@ -508,7 +517,7 @@ impl Emitter {
         ty: &TypeExpr,
         fields: &[FieldInit],
     ) -> Result<String, EmitError> {
-        let body = self.field_inits(fields)?;
+        let body = self.field_inits(ty, fields)?;
         let extra = self.n5_missing_fields(ty, fields);
         if extra.is_empty() {
             return Ok(body);
@@ -521,10 +530,22 @@ impl Emitter {
         Ok(parts.join(", "))
     }
 
-    fn field_inits(&mut self, fields: &[FieldInit]) -> Result<String, EmitError> {
+    /// Declared type of `field` on the struct `ty`, when `ty` names a
+    /// non-generic user struct. Drives the expected type for a field value
+    /// (so a bare `none` in that slot lowers to the field's option zero).
+    fn struct_field_ty(&self, ty: &TypeExpr, field: &str) -> Option<TypeExpr> {
+        let TypeExpr::Named { name, .. } = ty else {
+            return None;
+        };
+        let decls = self.n5_structs.get(name)?;
+        decls.iter().find(|f| f.name == field).map(|f| f.ty.clone())
+    }
+
+    fn field_inits(&mut self, ty: &TypeExpr, fields: &[FieldInit]) -> Result<String, EmitError> {
         let mut parts = Vec::new();
         for f in fields {
-            let v = self.emit_expr(&f.value, 0)?;
+            let exp = self.struct_field_ty(ty, &f.name);
+            let v = self.emit_expr_exp(&f.value, 0, exp.as_ref())?;
             parts.push(format!("{}: {}", f.name, v));
         }
         Ok(parts.join(", "))
