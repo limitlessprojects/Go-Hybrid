@@ -60,6 +60,20 @@ fn reject_second_argument_mismatch() {
 }
 
 #[test]
+fn reject_grouped_param_names_mismatch() {
+    assert_reject(
+        "fn main() {\n    f := fn(a, b int) int { return a + b }\n    fmt.println(f(\"x\", 2))\n}\n",
+    );
+}
+
+#[test]
+fn accept_unnamed_multi_param_fn_type() {
+    assert_accept(
+        "fn run(g fn(int, string) int) int { return g(1, \"a\") }\nfn main() {\n    fmt.println(run(fn(x int, s string) int { return x + len(s) }))\n}\n",
+    );
+}
+
+#[test]
 fn accept_matching_closure_local_call() {
     assert_accept(
         "fn main() {\n    f := fn(x int, s string) int { return x + len(s) }\n    fmt.println(f(1, \"ab\"))\n}\n",

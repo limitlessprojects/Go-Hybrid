@@ -762,15 +762,46 @@ impl<'a> Collector<'a> {
         if generic {
             return None;
         }
-        match ty {
-            Some(TypeExpr::Fn { params, .. }) => return Some(params.clone()),
-            Some(_) => return None,
-            None => {}
+        let raw = match (ty, value.map(unwrap_parens)) {
+            (Some(TypeExpr::Fn { params, .. }), _) => params,
+            (Some(_), _) => return None,
+            (None, Some(Expr::FnLit { params, .. })) => params,
+            _ => return None,
+        };
+        Some(Self::normalize_fn_params(raw))
+    }
+
+    /// `parse_params` stores a parameter without a type as `Named("")`.
+    /// That covers two Go shapes: an unnamed signature `fn(int, string)`
+    /// (every entry untyped: the "names" ARE the types) and grouped names
+    /// `fn(a, b int)` (an untyped entry takes the next declared type).
+    fn normalize_fn_params(raw: &[Param]) -> Vec<Param> {
+        let untyped = |p: &Param| matches!(&p.ty, TypeExpr::Named { name, .. } if name.is_empty());
+        if raw.iter().all(untyped) {
+            return raw
+                .iter()
+                .map(|p| Param {
+                    name: String::new(),
+                    ty: TypeExpr::Named {
+                        name: p.name.clone(),
+                        span: p.span,
+                    },
+                    span: p.span,
+                })
+                .collect();
         }
-        match value.map(unwrap_parens) {
-            Some(Expr::FnLit { params, .. }) => Some(params.clone()),
-            _ => None,
+        let mut out = raw.to_vec();
+        let mut next: Option<TypeExpr> = None;
+        for p in out.iter_mut().rev() {
+            if untyped(p) {
+                if let Some(t) = &next {
+                    p.ty = t.clone();
+                }
+            } else {
+                next = Some(p.ty.clone());
+            }
         }
+        out
     }
 
     fn bind_set_elem(&mut self, name: &str, elem: Option<String>) {
