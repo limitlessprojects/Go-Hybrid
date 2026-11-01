@@ -792,6 +792,15 @@ impl<'a> Collector<'a> {
         None
     }
 
+    /// #2770 — the canonical numeric spelling of a simple local target, for the
+    /// assignment/argument scalar comparison. Non-ident places fail open.
+    fn place_scalar(&self, p: &Place) -> Option<&'static str> {
+        match &p.kind {
+            PlaceKind::Ident(n) => self.lookup_scalar(n),
+            _ => None,
+        }
+    }
+
     /// #1031 — the exact predeclared numeric spelling of a type expression.
     /// A user-declared struct/enum/alias of that name is not the predeclared
     /// type, so it fails open.
@@ -881,6 +890,19 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #2782 — two TYPED values whose canonical numeric types differ (`int`
+    /// vs `int64`, `float64` vs `float32`). The scalar helpers return `None`
+    /// for an untyped constant, so `x: 1` / `y: 3.14` stay assignable, and
+    /// `byte`/`uint8` (or `rune`/`int32`) share one canonical name so the
+    /// genuine aliases never conflict.
+    fn scalar_names_conflict(
+        &self,
+        want: Option<&'static str>,
+        got: Option<&'static str>,
+    ) -> bool {
+        matches!((want, got), (Some(w), Some(g)) if w != g)
+    }
+
     /// #1031 — the type a `x := v` / `var x = v` binding takes from its
     /// initializer: Go's default type for an untyped numeric literal (`int`,
     /// `float64`), or the initializer's own type when it is typed.
@@ -910,6 +932,19 @@ impl<'a> Collector<'a> {
                 _ => self.typed_value_scalar(operand),
             },
             other => self.typed_value_scalar(other),
+        }
+    }
+
+    /// #2770: two TYPED values of different canonical numeric types (e.g.
+    /// `float32` vs `float64`, `int` vs `int64`) are distinct Go types and
+    /// cannot combine, compare, or assign directly. `typed_value_scalar` is
+    /// `None` for an untyped constant, so `f + 1.5` / `i + 1` stay legal, and
+    /// `byte`/`uint8` (or `rune`/`int32`) share one canonical name so the
+    /// genuine aliases never conflict.
+    fn scalar_conflict(&self, a: &Expr, b: &Expr) -> bool {
+        match (self.typed_value_scalar(a), self.typed_value_scalar(b)) {
+            (Some(x), Some(y)) => x != y,
+            _ => false,
         }
     }
 
@@ -1334,7 +1369,12 @@ impl<'a> Collector<'a> {
                 let int_float_conflict = want == OpKind::Float
                     && vk == OpKind::Int
                     && !self.is_untyped_int_const(&l.values[0]);
-                if kinds_conflict(&want, &vk) || int_float_conflict {
+                // #2770: `var h float64 = f` where `f` is a `float32`.
+                let scalar_mismatch = matches!(
+                    (self.scalar_of_ty(t), self.typed_value_scalar(&l.values[0])),
+                    (Some(w), Some(v)) if w != v
+                );
+                if kinds_conflict(&want, &vk) || int_float_conflict || scalar_mismatch {
                     self.emit_e1002(
                         l.span,
                         format!(
@@ -1353,7 +1393,12 @@ impl<'a> Collector<'a> {
                     let int_float_conflict = want == OpKind::Float
                         && vk == OpKind::Int
                         && !self.is_untyped_int_const(v);
-                    if kinds_conflict(&want, &vk) || int_float_conflict {
+                    // #2770: concrete numeric type differing under one `OpKind`.
+                    let scalar_mismatch = matches!(
+                        (self.scalar_of_ty(t), self.typed_value_scalar(v)),
+                        (Some(w), Some(g)) if w != g
+                    );
+                    if kinds_conflict(&want, &vk) || int_float_conflict || scalar_mismatch {
                         self.emit_e1002(
                             l.span,
                             format!(
@@ -1607,7 +1652,17 @@ impl<'a> Collector<'a> {
                 self.pop_scope();
             }
             Stmt::Return { values, span } => {
-                for v in values {
+                for (i, v) in values.iter().enumerate() {
+                    // SPEC E3 zero-value return placeholder (`return _, err`):
+                    // in a function whose results end in `error`, `hy-emit`
+                    // lowers `_` in a return slot (`i < fn_results.len()`) to
+                    // the result type's zero value (`examples/09-go-imports-hybrid`).
+                    if self.fn_results_error_tail
+                        && i < self.fn_results.len()
+                        && matches!(v, Expr::Ident { name, .. } if name == "_")
+                    {
+                        continue;
+                    }
                     self.expr(v);
                 }
                 self.check_return(values, *span);
@@ -3112,8 +3167,15 @@ impl<'a> Collector<'a> {
                     let is_untyped_int_to_float = want == OpKind::Float
                         && got == OpKind::Int
                         && self.is_untyped_int_const(&f.value);
+                    // #2782: `want`/`got` both collapse to `Int`/`Float`, but
+                    // the field's own Go spelling may differ from the typed
+                    // initializer's (`int` into `int64`, `float64` into
+                    // `float32`) — Go refuses that in a struct literal.
+                    let scalar_mismatch =
+                        self.scalar_names_conflict(self.scalar_of_ty(fty), self.typed_value_scalar(&f.value));
                     let conflict = (want == OpKind::Float && got == OpKind::Int && !is_untyped_int_to_float)
-                        || kinds_conflict(&want, &got);
+                        || kinds_conflict(&want, &got)
+                        || scalar_mismatch;
                     if conflict {
                         self.emit_e1002(
                             f.value.span(),
@@ -3325,6 +3387,90 @@ impl<'a> Collector<'a> {
         );
     }
 
+    /// SPEC-LANGUAGE §4 G5 — call-site type inference follows Go's rules:
+    /// a type argument is inferred only from the argument types, so a type
+    /// parameter that appears in no parameter type (`fn mk[t any]() t`,
+    /// `fn conv[a any, b any](x a) b`) cannot be inferred from a bare call
+    /// `mk()` / `conv(1)`, whatever the result is assigned to. Go refuses the
+    /// emitted call with `in call to mk, cannot infer t`; the explicit form
+    /// `mk[int]()` (an `Expr::Index` callee) never reaches this check.
+    ///
+    /// Only the MVP constraints (`any`, `comparable`; G3) are handled: with
+    /// a core-type constraint Go could infer a parameter from another
+    /// parameter's constraint, so any other constraint skips the check.
+    fn check_uninferable_type_params(&mut self, name: &str, f: &FnDecl, span: Span) {
+        // An explicit instantiation reaches here folded to `mk[int]`.
+        if f.receiver.is_some() || name.contains('[') {
+            return;
+        }
+        if f.type_params.iter().any(|tp| {
+            !matches!(
+                tp.constraint.as_deref(),
+                None | Some("any") | Some("comparable")
+            )
+        }) {
+            return;
+        }
+        let mut mentioned: HashSet<String> = HashSet::new();
+        // `TypeExpr::render` folds fn types to `fn`, so walk the tree; a
+        // named type keeps its type arguments in the name (`box[t]`).
+        fn collect(ty: &TypeExpr, out: &mut HashSet<String>) {
+            match ty {
+                TypeExpr::Named { name, .. } => {
+                    for tok in name.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+                        if !tok.is_empty() {
+                            out.insert(tok.to_string());
+                        }
+                    }
+                }
+                TypeExpr::Pointer { to: e, .. }
+                | TypeExpr::Slice { elem: e, .. }
+                | TypeExpr::Array { elem: e, .. }
+                | TypeExpr::Chan { elem: e, .. }
+                | TypeExpr::Option { elem: e, .. } => collect(e, out),
+                TypeExpr::Map { key, value, .. } => {
+                    collect(key, out);
+                    collect(value, out);
+                }
+                TypeExpr::Fn {
+                    params, results, ..
+                } => {
+                    for p in params {
+                        collect(&p.ty, out);
+                    }
+                    for r in results {
+                        collect(r, out);
+                    }
+                }
+            }
+        }
+        for p in &f.params {
+            collect(&p.ty, &mut mentioned);
+        }
+        let missing: Vec<&str> = f
+            .type_params
+            .iter()
+            .map(|tp| tp.name.as_str())
+            .filter(|n| !mentioned.contains(*n))
+            .collect();
+        let Some(first) = missing.first() else {
+            return;
+        };
+        let list = missing
+            .iter()
+            .map(|n| format!("`{}`", n))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.emit_e1002(
+            span,
+            format!(
+                "cannot infer type parameter {} of `{}`: it appears in no parameter type — Go refuses `in call to {}, cannot infer {}` (HYB-E1002)",
+                list, name, name, first
+            ),
+            "instantiate explicitly (`f[int](...)`): Go infers type arguments only from argument types (SPEC-LANGUAGE §4 G5), never from the result or the assignment target",
+        );
+    }
+
     /// #577 C9 — a call to a top-level `fn` must pass exactly as many
     /// arguments as the declaration has parameters. Go refuses the emitted
     /// call otherwise (`not enough arguments` / `too many arguments`), so an
@@ -3357,6 +3503,7 @@ impl<'a> Collector<'a> {
         // Generic instantiations (`id[int](x)`) carry type arguments the
         // parameter list does not describe; leave them to the type checker.
         if !f.type_params.is_empty() {
+            self.check_uninferable_type_params(name, f, span);
             return;
         }
         // A lone multi-value call IS the whole argument list and expands to one
@@ -3491,7 +3638,13 @@ impl<'a> Collector<'a> {
             let int_to_float_conflict = want == OpKind::Float
                 && got == OpKind::Int
                 && !self.is_untyped_int_const(&a.value);
-            if kinds_conflict(&want, &got) || int_to_float_conflict {
+            // #2770: both sides share `OpKind::Float`/`Int` but differ in the
+            // concrete type (`float32` vs `float64`, `int` vs `int64`).
+            let scalar_mismatch = matches!(
+                (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
+                (Some(w), Some(g)) if w != g
+            );
+            if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -3534,7 +3687,12 @@ impl<'a> Collector<'a> {
             let int_to_float_conflict = want == OpKind::Float
                 && got == OpKind::Int
                 && !self.is_untyped_int_const(&a.value);
-            if kinds_conflict(&want, &got) || int_to_float_conflict {
+            // #2770: concrete numeric type differing under one `OpKind`.
+            let scalar_mismatch = matches!(
+                (self.scalar_of_ty(&p.ty), self.typed_value_scalar(&a.value)),
+                (Some(w), Some(g)) if w != g
+            );
+            if kinds_conflict(&want, &got) || int_to_float_conflict || scalar_mismatch {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -3761,6 +3919,17 @@ impl<'a> Collector<'a> {
     ///
     /// Fail-open: an `Unknown` first argument or an `Unknown` element kind
     /// carries no claim, so only a proven mismatch is reported.
+    /// #2796 — the destination element type of `append`'s first argument,
+    /// canonicalised to its Go numeric name (`i64` → `int64`, `f32` →
+    /// `float32`, `byte` → `uint8`) so it can be compared against
+    /// `typed_value_scalar`. `None` when the spelling is not a predeclared
+    /// numeric type, so user types and unknown shapes fail open.
+    fn append_dest_scalar(&self, first: &Expr) -> Option<&'static str> {
+        self.slice_element_type_name(first)
+            .as_deref()
+            .and_then(canonical_numeric_name)
+    }
+
     fn check_append_elements(&mut self, args: &[CallArg]) {
         let Some(first) = args.first() else { return };
         let elem = match self.kind_of_expr(&first.value) {
@@ -3856,14 +4025,35 @@ impl<'a> Collector<'a> {
             let int_to_float_conflict = elem == OpKind::Float
                 && got == OpKind::Int
                 && !self.is_untyped_int_const(&extra.value);
-            if kinds_conflict(&elem, &got) || int_to_float_conflict {
+            // #2796: `OpKind` collapses every integer width into `Int` and
+            // both float widths into `Float`, so a TYPED element of another
+            // concrete numeric type (`int` into `[]int64`, `float32` into
+            // `[]float64`) passed here and failed `go build` (`cannot use y
+            // (variable of type int) as int64 value in argument to append`).
+            let dst_elem_ty = self.slice_element_type_name(&first.value);
+            let dst_scalar = self.append_dest_scalar(&first.value);
+            let got_scalar = self.typed_value_scalar(&extra.value);
+            let scalar_mismatch = matches!((dst_scalar, got_scalar), (Some(d), Some(g)) if d != g);
+            if kinds_conflict(&elem, &got) || int_to_float_conflict || scalar_mismatch {
+                let dst_label = match dst_elem_ty.as_deref() {
+                    Some(d) => format!("[]{}", d),
+                    None => self.kind_of_expr(&first.value).label().to_string(),
+                };
+                let got_label = match got_scalar {
+                    Some(s) => s.to_string(),
+                    None => got.label().to_string(),
+                };
+                let elem_label = match dst_scalar {
+                    Some(d) => d.to_string(),
+                    None => elem.label().to_string(),
+                };
                 self.emit_e1002(
                     extra.value.span(),
                     format!(
                         "cannot append a value of type `{}` to a `{}` — Go refuses `cannot use ... as {} value in argument to append` (HYB-E1002)",
-                        got.label(),
-                        self.kind_of_expr(&first.value).label(),
-                        elem.label()
+                        got_label,
+                        dst_label,
+                        elem_label
                     ),
                     "the appended values must be assignable to the slice's element type",
                 );
@@ -4189,7 +4379,7 @@ impl<'a> Collector<'a> {
                         || (lk == OpKind::Int
                             && rk == OpKind::Float
                             && !self.is_untyped_int_const(lhs));
-                    if equality_kinds_conflict(&lk, &rk) || int_float_conflict {
+                    if equality_kinds_conflict(&lk, &rk) || int_float_conflict || self.scalar_conflict(lhs, rhs) {
                         self.emit_e1002(
                             span,
                             format!(
@@ -4260,7 +4450,7 @@ impl<'a> Collector<'a> {
                     && lk.is_numeric() != rk.is_numeric();
                 let int_float_conflict = (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs))
                     || (lk == OpKind::Int && rk == OpKind::Float && !self.is_untyped_int_const(lhs));
-                if !l_ok || !r_ok || mismatch || int_float_conflict {
+                if !l_ok || !r_ok || mismatch || int_float_conflict || self.scalar_conflict(lhs, rhs) {
                     self.emit_e1002(
                         span,
                         format!(
@@ -4283,7 +4473,7 @@ impl<'a> Collector<'a> {
                     && lk.is_numeric() != rk.is_numeric();
                 let int_float_conflict = (lk == OpKind::Float && rk == OpKind::Int && !self.is_untyped_int_const(rhs))
                     || (lk == OpKind::Int && rk == OpKind::Float && !self.is_untyped_int_const(lhs));
-                if !l_ok || !r_ok || mismatch || int_float_conflict {
+                if !l_ok || !r_ok || mismatch || int_float_conflict || self.scalar_conflict(lhs, rhs) {
                     self.emit_e1002(
                         span,
                         format!(
@@ -4308,6 +4498,7 @@ impl<'a> Collector<'a> {
                 if !matches!(lk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || !matches!(rk, OpKind::Unknown | OpKind::Int | OpKind::Float)
                     || int_float_conflict
+                    || self.scalar_conflict(lhs, rhs)
                 {
                     self.emit_e1002(
                         span,
@@ -4404,7 +4595,12 @@ impl<'a> Collector<'a> {
                         && self.is_untyped_int_const(&values[0]);
                     let conflict = (tk == OpKind::Float && vk == OpKind::Int && !is_untyped_int_to_float)
                         || kinds_conflict(&tk, &vk);
-                    if !is_loan_shape && conflict {
+                    // #2770: `g = f` between a `float64` and a `float32` local.
+                    let scalar_mismatch = matches!(
+                        (self.place_scalar(target), self.typed_value_scalar(&values[0])),
+                        (Some(t), Some(v)) if t != v
+                    );
+                    if !is_loan_shape && (conflict || scalar_mismatch) {
                         self.emit_e1002(
                             span,
                             format!(
@@ -4763,6 +4959,26 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// #2789: whether an array-typed operand is NOT addressable in Go:
+    /// a composite literal, a call or conversion result, a map index
+    /// expression, or an element/field of such a value. Variables, slice
+    /// elements and anything reached through a pointer are addressable.
+    fn array_operand_unaddressable(&self, e: &Expr) -> bool {
+        match unwrap_parens(e) {
+            Expr::SliceLit { .. } | Expr::Call { .. } => true,
+            Expr::Index { base, .. } => match self.kind_of_expr(base) {
+                OpKind::Map(_, _) => true,
+                OpKind::Array(_) => self.array_operand_unaddressable(base),
+                _ => false,
+            },
+            Expr::Field { base, .. } => match self.kind_of_expr(base) {
+                OpKind::Struct(_) => self.array_operand_unaddressable(base),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     /// Family C2 (#425, #708): `base[lo:hi]` requires a slice, array, or string,
     /// and constant bounds on constant strings must satisfy `0 <= lo <= hi <= len(base)`.
     fn check_slice_kind(
@@ -4789,6 +5005,22 @@ impl<'a> Collector<'a> {
                     bk.label()
                 ),
                 "only slices, arrays, and strings support `x[lo:hi]` slicing",
+            );
+            return;
+        }
+        // #2789: Go spec, Slice expressions — "If the sliced operand is an
+        // array, it must be addressable." `[3]int{..}[0:2]`, `arr()[1:]` and
+        // `m["a"][:2]` (map of arrays) passed `hyb check` and failed `go
+        // build` (`cannot slice unaddressable value`). Slices, strings and
+        // pointers to arrays are unaffected.
+        if matches!(bk, OpKind::Array(_)) && self.array_operand_unaddressable(base) {
+            self.emit_e1002(
+                span,
+                format!(
+                    "cannot slice unaddressable array value `{}` — Go refuses `cannot slice unaddressable value` (HYB-E1002)",
+                    base.render()
+                ),
+                "only an addressable array can be sliced: bind the array to a variable first (`a := ...; a[lo:hi]`)",
             );
             return;
         }
@@ -5470,21 +5702,24 @@ impl<'a> Collector<'a> {
                             }
                         }
                     }
-                } else if name == "pop" {
+                } else if name == "pop" && !has_method {
                     self.check_slice_pop_operands(base, &bk, args, span);
                     // `pop` is also a built-in slice operation, so this branch
                     // is entered before the missing-member check below. A
-                    // struct or pointer only has `.pop()` if it declares the
-                    // method; without one Go refuses the call with
+                    // struct, pointer, or interface only has `.pop()` if it
+                    // declares the method; without one Go refuses the call with
                     // "<base>.pop undefined (type ... has no field or method pop)".
-                    if !has_method && matches!(bk, OpKind::Struct(_) | OpKind::Pointer(_)) {
+                    if matches!(
+                        bk,
+                        OpKind::Struct(_) | OpKind::Pointer(_) | OpKind::Interface
+                    ) {
                         self.emit_e1002(
                             span,
                             format!(
                                 "`{}` has no field or method `pop` (HYB-E1002)",
                                 base.render()
                             ),
-                            "a struct or pointer supports `.pop()` only when it declares a `pop` method; `pop` is a built-in only on slices",
+                            "a struct, pointer, or interface supports `.pop()` only when it declares a `pop` method; `pop` is a built-in only on slices",
                         );
                     }
                 } else if !has_method {
@@ -5500,8 +5735,10 @@ impl<'a> Collector<'a> {
                     // invisible to the kind model rather than absent. A foreign
                     // generic is the common case; `LOWERED_METHOD_INTRINSICS`
                     // covers the other one, a name `hy-emit` lowers to a
-                    // prelude call rather than a Go method.
-                    if is_fully_resolved(&bk) && !LOWERED_METHOD_INTRINSICS.contains(&name.as_str())
+                    // prelude call rather than a Go method (only on slices).
+                    let is_lowered = matches!(bk, OpKind::Slice(_))
+                        && LOWERED_METHOD_INTRINSICS.contains(&name.as_str());
+                    if is_fully_resolved(&bk) && !is_lowered
                     {
                         self.emit_e1002(
                             span,

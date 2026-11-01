@@ -1240,6 +1240,24 @@ fn check_closure_slot_loans(ck: &mut Checker<'_>, st: &mut FnState, body: &Block
     let saved_loans = std::mem::take(&mut st.loans);
     for (stmt, idx) in &flat.stmts {
         let idx = *idx;
+        if let Stmt::Break { label: Some(_), span, .. }
+        | Stmt::Continue { label: Some(_), span, .. } = stmt
+        {
+            if !flat.in_infinite_loop(idx) {
+                ck.diags.push(
+                    hy_diag::Diagnostic::error(
+                        "HYB-E3010",
+                        ck.path.clone(),
+                        *span,
+                        "`break loop` / `continue loop` with no enclosing loop — the label has no target here (HYB-E3010)",
+                    )
+                    .with_notes(vec![
+                        "the `loop` label binds to the nearest enclosing `loop` statement (LX14); labels do not cross function or closure boundaries".to_string(),
+                        "remove the `loop` label (plain `break`/`continue` targets the innermost loop), or move this statement inside a loop".to_string(),
+                    ]),
+                );
+            }
+        }
         let mut calls = Vec::new();
         walk::own_calls(stmt, &mut calls);
         for cr in calls {
