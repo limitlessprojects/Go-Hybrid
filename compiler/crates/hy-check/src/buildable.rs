@@ -381,6 +381,7 @@ struct Collector<'a> {
     /// the state outside any body, so `Stmt::Return` can only ever see it
     /// while a body is open. `FnLit` bodies swap it like `fn_decl` does.
     fn_results: Vec<OpKind>,
+    fn_result_scalars: Vec<Option<&'static str>>,
     /// Whether every result of the enclosing signature is named, so Go's
     /// naked `return` is legal (corpus 63).
     fn_results_all_named: bool,
@@ -417,6 +418,7 @@ pub(crate) fn check_buildable(ck: &mut Checker<'_>) {
             file_consts: HashMap::new(),
             file_const_scalars: HashMap::new(),
             fn_results: Vec::new(),
+            fn_result_scalars: Vec::new(),
             fn_results_all_named: false,
             fn_results_error_tail: false,
             loop_depth: 0,
@@ -1021,7 +1023,13 @@ impl<'a> Collector<'a> {
                 self.exempt(name);
             }
         }
+        let result_scalars: Vec<Option<&'static str>> = f
+            .results
+            .iter()
+            .map(|r| self.scalar_of_ty(&r.ty))
+            .collect();
         let outer = std::mem::replace(&mut self.fn_results, result_kinds);
+        let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
         let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
         let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
         let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
@@ -1030,6 +1038,7 @@ impl<'a> Collector<'a> {
         self.loop_depth = outer_loop;
         self.select_depth = outer_select;
         self.fn_results = outer;
+        self.fn_result_scalars = outer_scalars;
         self.fn_results_all_named = outer_named;
         self.fn_results_error_tail = outer_err;
         self.pop_scope();
@@ -1823,7 +1832,12 @@ impl<'a> Collector<'a> {
                     results.last().map(|r| &r.ty),
                     Some(TypeExpr::Named { name, .. }) if name == "error"
                 );
+                let result_scalars: Vec<Option<&'static str>> = results
+                    .iter()
+                    .map(|r| self.scalar_of_ty(&r.ty))
+                    .collect();
                 let outer = std::mem::replace(&mut self.fn_results, result_kinds);
+                let outer_scalars = std::mem::replace(&mut self.fn_result_scalars, result_scalars);
                 let outer_named = std::mem::replace(&mut self.fn_results_all_named, all_named);
                 let outer_err = std::mem::replace(&mut self.fn_results_error_tail, error_tail);
                 let outer_loop = std::mem::replace(&mut self.loop_depth, 0);
@@ -1832,6 +1846,7 @@ impl<'a> Collector<'a> {
                 self.loop_depth = outer_loop;
                 self.select_depth = outer_select;
                 self.fn_results = outer;
+                self.fn_result_scalars = outer_scalars;
                 self.fn_results_all_named = outer_named;
                 self.fn_results_error_tail = outer_err;
                 self.pop_scope();
@@ -2888,7 +2903,11 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            let scalar_mismatch = match (self.scalar_of_ty(&p.ty), self.expr_scalar_type(&a.value)) {
+                (Some(w_sc), Some(g_sc)) => w_sc != g_sc,
+                _ => false,
+            };
+            if kinds_conflict(&want, &got) || scalar_mismatch {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -2928,7 +2947,11 @@ impl<'a> Collector<'a> {
                     continue;
                 }
             }
-            if kinds_conflict(&want, &got) {
+            let scalar_mismatch = match (self.scalar_of_ty(&p.ty), self.expr_scalar_type(&a.value)) {
+                (Some(w_sc), Some(g_sc)) => w_sc != g_sc,
+                _ => false,
+            };
+            if kinds_conflict(&want, &got) || scalar_mismatch {
                 self.emit_e1002(
                     a.value.span(),
                     format!(
@@ -2950,6 +2973,7 @@ impl<'a> Collector<'a> {
     /// Go refuses the emitted statement otherwise (Row 13).
     fn check_return(&mut self, values: &[Expr], span: Span) {
         let want = self.fn_results.clone();
+        let want_scalars = self.fn_result_scalars.clone();
         // Go's multi-value rule: `return f()` where `f`'s results line up
         // exactly with the enclosing signature. The single call is the whole
         // value list, so compare its results positionally instead of
@@ -2958,8 +2982,8 @@ impl<'a> Collector<'a> {
             if let Expr::Call { callee, args, .. } = unwrap_parens(&values[0]) {
                 if let Some(res) = self.call_result_kinds(callee, args) {
                     if res.len() == want.len() {
-                        for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(r, w, values[0].span());
+                        for ((r, w), w_sc) in res.iter().zip(want.iter()).zip(want_scalars.iter()) {
+                            self.report_return_conflict(r, w, *w_sc, None, values[0].span());
                         }
                         return;
                     }
@@ -2967,8 +2991,8 @@ impl<'a> Collector<'a> {
                         && self.fn_results_error_tail
                         && res.len() + 1 == want.len()
                     {
-                        for (r, w) in res.iter().zip(want.iter()) {
-                            self.report_return_conflict(r, w, values[0].span());
+                        for ((r, w), w_sc) in res.iter().zip(want.iter()).zip(want_scalars.iter()) {
+                            self.report_return_conflict(r, w, *w_sc, None, values[0].span());
                         }
                         return;
                     }
@@ -3013,9 +3037,10 @@ impl<'a> Collector<'a> {
             let short_ok = nv < nw
                 && ((nv == 0 && self.fn_results_all_named) || self.fn_results_error_tail);
             if short_ok {
-                for (v, w) in values.iter().zip(want.iter()) {
+                for ((v, w), w_sc) in values.iter().zip(want.iter()).zip(want_scalars.iter()) {
                     let got = self.kind_of_expr(v);
-                    self.report_return_conflict(&got, w, v.span());
+                    let g_sc = self.expr_scalar_type(v);
+                    self.report_return_conflict(&got, w, *w_sc, g_sc, v.span());
                 }
                 return;
             }
@@ -3041,14 +3066,26 @@ impl<'a> Collector<'a> {
             );
             return;
         }
-        for (v, w) in values.iter().zip(want.iter()) {
+        for ((v, w), w_sc) in values.iter().zip(want.iter()).zip(want_scalars.iter()) {
             let got = self.kind_of_expr(v);
-            self.report_return_conflict(&got, w, v.span());
+            let g_sc = self.expr_scalar_type(v);
+            self.report_return_conflict(&got, w, *w_sc, g_sc, v.span());
         }
     }
 
-    fn report_return_conflict(&mut self, got: &OpKind, want: &OpKind, span: Span) {
-        if !kinds_conflict(want, got) {
+    fn report_return_conflict(
+        &mut self,
+        got: &OpKind,
+        want: &OpKind,
+        want_sc: Option<&'static str>,
+        got_sc: Option<&'static str>,
+        span: Span,
+    ) {
+        let scalar_conflict = match (want_sc, got_sc) {
+            (Some(w), Some(g)) => w != g,
+            _ => false,
+        };
+        if !kinds_conflict(want, got) && !scalar_conflict {
             return;
         }
         self.emit_e1002(
