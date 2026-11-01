@@ -5221,6 +5221,25 @@ impl<'a> Collector<'a> {
                     );
                 }
             }
+            "make" => {
+                for a in args.iter().skip(1) {
+                    if builtins_already_flags_make_size(&a.value) {
+                        continue;
+                    }
+                    let ak = self.kind_of_expr(&a.value);
+                    if !matches!(ak, OpKind::Unknown | OpKind::Int) {
+                        self.emit_e1002(
+                            a.value.span(),
+                            format!(
+                                "non-integer size argument `{}` (type `{}`) in `make` — Go refuses `cannot use ... as int value in make` (HYB-E1002)",
+                                a.value.render(),
+                                ak.label()
+                            ),
+                            "size arguments in `make` (len, cap, channel buffer size) must be integer types",
+                        );
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -5289,6 +5308,18 @@ impl<'a> Collector<'a> {
 
 fn span_expr_label(lhs: &Expr, op: &str, rhs: &Expr) -> String {
     format!("{} {} {}", lhs.render(), op, rhs.render())
+}
+
+fn builtins_already_flags_make_size(e: &Expr) -> bool {
+    match unwrap_parens(e) {
+        Expr::Lit { .. } => true,
+        Expr::Unary {
+            op: UnOp::Neg,
+            operand,
+            ..
+        } => matches!(unwrap_parens(operand), Expr::Lit { .. }),
+        _ => false,
+    }
 }
 
 fn builtins_already_flags_close(e: &Expr) -> bool {
