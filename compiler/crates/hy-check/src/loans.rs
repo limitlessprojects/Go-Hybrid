@@ -3621,14 +3621,24 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-                self.walk_block_param_stores(
-                    body,
-                    &mut body_cst,
-                    &mut body_aliases,
-                    param_names,
-                    depth,
-                    out,
-                );
+                // A loop body can publish an alias only after its first
+                // iteration (for example, `tmp = src` at the tail). Replay
+                // until the alias state reaches a fixed point so stores on
+                // the next iteration are included in the summary.
+                for _ in 0..8 {
+                    let before = body_aliases.clone();
+                    self.walk_block_param_stores(
+                        body,
+                        &mut body_cst,
+                        &mut body_aliases,
+                        param_names,
+                        depth,
+                        out,
+                    );
+                    if body_aliases == before {
+                        break;
+                    }
+                }
                 for (k, v) in body_aliases {
                     if aliases.contains_key(&k) {
                         aliases.entry(k).or_default().extend(v);
