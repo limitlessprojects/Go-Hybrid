@@ -379,7 +379,7 @@ impl<'a> Checker<'a> {
                     );
                     return;
                 }
-                if is_value_literal(&args[0].value) {
+                if is_value_literal(&args[0].value) || is_composite_literal(&args[0].value) {
                     self.emit_builtin(
                         span,
                         "`new` takes a type — not a value literal (HYB-E2005)".to_string(),
@@ -433,6 +433,13 @@ impl<'a> Checker<'a> {
                             args.len()
                         ),
                     );
+                    return;
+                }
+                if is_non_numeric_or_composite_literal(&args[0].value) {
+                    self.emit_builtin(
+                        span,
+                        "`real` requires a complex value — not a string, bool, nil, or composite literal (HYB-E2005)".to_string(),
+                    );
                 }
             }
             "imag" => {
@@ -444,6 +451,13 @@ impl<'a> Checker<'a> {
                             args.len()
                         ),
                     );
+                    return;
+                }
+                if is_non_numeric_or_composite_literal(&args[0].value) {
+                    self.emit_builtin(
+                        span,
+                        "`imag` requires a complex value — not a string, bool, nil, or composite literal (HYB-E2005)".to_string(),
+                    );
                 }
             }
             "complex" => {
@@ -454,6 +468,15 @@ impl<'a> Checker<'a> {
                             "`complex` requires exactly 2 arguments (real, imag), found {} (HYB-E2005)",
                             args.len()
                         ),
+                    );
+                    return;
+                }
+                if is_non_numeric_or_composite_literal(&args[0].value)
+                    || is_non_numeric_or_composite_literal(&args[1].value)
+                {
+                    self.emit_builtin(
+                        span,
+                        "`complex` requires floating-point operands — not string, bool, nil, or composite literals (HYB-E2005)".to_string(),
                     );
                 }
             }
@@ -1014,4 +1037,23 @@ fn is_string_literal(e: &Expr) -> bool {
             ..
         }
     )
+}
+
+fn is_composite_literal(e: &Expr) -> bool {
+    matches!(
+        unwrap_parens(e),
+        Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. }
+    )
+}
+
+fn is_non_numeric_or_composite_literal(e: &Expr) -> bool {
+    let unwrapped = unwrap_parens(e);
+    match unwrapped {
+        Expr::Lit { kind, .. } => matches!(
+            kind,
+            LitKind::Str(_) | LitKind::RawStr(_) | LitKind::Bool(_) | LitKind::Nil
+        ),
+        Expr::SliceLit { .. } | Expr::MapLit { .. } | Expr::StructLit { .. } => true,
+        _ => false,
+    }
 }
