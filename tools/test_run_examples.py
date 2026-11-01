@@ -5,6 +5,7 @@ or network are used. These tests exercise the runner, not the compiler.
 """
 
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -121,6 +122,30 @@ class ExampleExitTests(unittest.TestCase):
 
     def test_timing_example_compares_only_stdout(self):
         self.check_streams([EXAMPLE])
+
+
+class UnsupportedExampleTests(unittest.TestCase):
+    def test_unsupported_program_cannot_report_all_pass(self):
+        # A new example can compile successfully but have no runtime oracle.
+        # Copy the runner into a fixture repo rather than change real examples.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "tools").mkdir()
+            runner = root / "tools/run_examples.sh"
+            shutil.copy2(ROOT / "tools/run_examples.sh", runner)
+            example = root / "examples/11-new-example"
+            example.mkdir(parents=True)
+            (example / "program.hy").write_text("fn main() {}\n", encoding="utf-8")
+            builder = root / "hyb"
+            builder.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            builder.chmod(0o755)
+            result = subprocess.run(
+                ["bash", str(runner), "11-new-example"],
+                env={**os.environ, "HYB_BIN": str(builder)},
+                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("unsupported acceptance example", result.stdout)
+        self.assertNotIn("examples: ALL PASS", result.stdout)
 
 
 class StandardExampleExitTests(unittest.TestCase):
