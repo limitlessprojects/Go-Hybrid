@@ -6089,35 +6089,78 @@ impl<'a> Collector<'a> {
                         );
                     }
                 } else if !has_method {
-                    // #682 U2/U3: neither a declared method nor a field exists
-                    // on the base. Go refuses the call with `<base>.<name>
-                    // undefined (type <T> has no field or method <name>)`.
-                    //
-                    // Fail-open on anything unresolved: an `Unknown` base means
-                    // the checker could not classify it, a `Struct(None)` has no
-                    // name to look the method up under, and a partially
-                    // unresolved shape (notably `Pointer(Unknown)` for a foreign
-                    // generic like `*atomic.int64`) means the members are
-                    // invisible to the kind model rather than absent. A foreign
-                    // generic is the common case; `LOWERED_METHOD_INTRINSICS`
-                    // covers the other one, a name `hy-emit` lowers to a
-                    // prelude call rather than a Go method (only on slices).
-                    let is_lowered = matches!(bk, OpKind::Slice(_))
-                        && LOWERED_METHOD_INTRINSICS.contains(&name.as_str());
-                    if is_fully_resolved(&bk) && !is_lowered
-                    {
+                    if let OpKind::Option(_) = &bk {
+                        match name.as_str() {
+                            "unwrap" | "is_some" | "is_none" => {
+                                if !args.is_empty() {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "method `{name}` on `{}` takes 0 arguments but is called with {} (HYB-E1002)",
+                                            bk.label(),
+                                            args.len()
+                                        ),
+                                        "call this method with no arguments",
+                                    );
+                                }
+                            }
+                            "or" => {
+                                if args.len() != 1 {
+                                    self.emit_e1002(
+                                        span,
+                                        format!(
+                                            "method `or` on `{}` takes 1 argument but is called with {} (HYB-E1002)",
+                                            bk.label(),
+                                            args.len()
+                                        ),
+                                        "call `or` with one fallback argument: `o.or(default)`",
+                                    );
+                                }
+                            }
+                            _ => {
+                                self.emit_e1002(
+                                    span,
+                                    format!(
+                                        "`{}` has no field or method `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                                        base.render(),
+                                        name,
+                                        bk.label(),
+                                        base.render(),
+                                        name
+                                    ),
+                                    "option types only support `unwrap()`, `is_some()`, `is_none()`, and `or(...)`",
+                                );
+                            }
+                        }
+                    } else if matches!(bk, OpKind::Fn(..)) {
                         self.emit_e1002(
                             span,
                             format!(
-                                "`{}` has no field or method `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                                "`{}` has no field or method `{}` (type `fn`) — Go refuses `{}.{} undefined` (HYB-E1002)",
                                 base.render(),
                                 name,
-                                bk.label(),
                                 base.render(),
                                 name
                             ),
-                            "declare the method on that type, or call something that exists",
+                            "function values do not have fields or methods",
                         );
+                    } else {
+                        let is_lowered = matches!(bk, OpKind::Slice(_))
+                            && LOWERED_METHOD_INTRINSICS.contains(&name.as_str());
+                        if is_fully_resolved(&bk) && !is_lowered {
+                            self.emit_e1002(
+                                span,
+                                format!(
+                                    "`{}` has no field or method `{}` (type `{}`) — Go refuses `{}.{} undefined` (HYB-E1002)",
+                                    base.render(),
+                                    name,
+                                    bk.label(),
+                                    base.render(),
+                                    name
+                                ),
+                                "declare the method on that type, or call something that exists",
+                            );
+                        }
                     }
                 }
                 if has_method {
@@ -6306,7 +6349,9 @@ impl<'a> Collector<'a> {
             | OpKind::Str
             | OpKind::Array(_)
             | OpKind::Map(_, _)
-            | OpKind::Chan(_) => {
+            | OpKind::Chan(_)
+            | OpKind::Option(_)
+            | OpKind::Fn(..) => {
                 self.emit_e1002(
                     span,
                     format!(
