@@ -2007,7 +2007,13 @@ impl<'a> Collector<'a> {
             }
             Expr::Move { operand, .. } => self.expr(operand),
             Expr::Try { operand, .. } => self.expr(operand),
-            Expr::Receive { chan, .. } => self.expr(chan),
+            Expr::Receive { chan, .. } => {
+                // `<-two_chans()` — the operand must be exactly one channel;
+                // the shape walk takes the first result and would otherwise
+                // accept a multi-value call (#1860).
+                self.expr(chan);
+                self.check_single_value_position(chan, "a receive operand", /*binding_position=*/ false);
+            }
             Expr::Index {
                 base, index, span, ..
             } => {
